@@ -1,5 +1,5 @@
 #pragma once
-// agentty::persistence::SharedFile — the one critical section for a file two
+// agentty::persistence::with_shared_file — the one critical section for a file two
 // agentty instances both read-modify-write.
 //
 // THE POLICY, AND WHY IT IS AGENTTY'S AND NOT JAAL'S
@@ -30,46 +30,59 @@
 //     property rather than a surprise. Replacing the mutex with a file lock
 //     would not have fixed the race, it would have widened it.
 //
-// So a SharedFile takes the process-wide mutex AND the cross-process lock,
-// in that order, for its whole lifetime. Lock ordering is trivially safe
-// because there is exactly one of these held at a time — never nest them.
+// So with_shared_file takes the process-wide lane (a guarded) AND the
+// cross-process lock, in that order, for the body. Lock ordering is trivially
+// safe because there is exactly one of these held at a time, and the lane's
+// captureless body cannot reach a second one.
 //
 // DEGRADE, DO NOT FAIL
 //
 // Acquisition can fail for reasons the user cannot act on: a read-only HOME,
 // a filesystem without lock support, an exhausted descriptor table. When it
-// does we log ONCE per file and proceed holding the mutex alone — i.e. we
+// does we log ONCE per file and proceed holding the lane alone — i.e. we
 // fall back to exactly the old behaviour. A lost update in a picker cache is
 // a bad day; refusing to save the user's conversation because a lock file
-// could not be created is a worse one. `cross_process()` reports which
+// could not be created is a worse one. `Held::cross_process` reports which
 // guarantee the caller actually got, for a diagnostic that does not lie.
 
 #include <filesystem>
-#include <mutex>
 #include <optional>
+#include <string>
+#include <utility>
 
 #include <maya/runtime.hpp>
 
 namespace agentty::persistence {
 
-class SharedFile {
-  public:
-    /// Enter the critical section for `target`, blocking until it is ours.
-    /// `local` is the process-wide mutex for that same file; the caller owns
-    /// it (one static per file) because a mutex keyed off the path would
-    /// need its own lock to look up.
-    SharedFile(std::mutex& local, const std::filesystem::path& target);
+/// The in-process half, one per shared file: a static the caller owns (one
+/// keyed off the path would need its own lock to look up). Only
+/// with_shared_file can enter it.
+struct FileLane {};
+using Lane = maya::guarded<FileLane>;
 
-    SharedFile(const SharedFile&)            = delete;
-    SharedFile& operator=(const SharedFile&) = delete;
-
+/// What the body of with_shared_file sees.
+struct Held {
     /// Did we get the cross-process guarantee, or only the in-process one?
     /// False means another instance can still interleave with us.
-    [[nodiscard]] bool cross_process() const noexcept { return cross_.has_value(); }
-
-  private:
-    std::unique_lock<std::mutex>                     local_;
-    std::optional<maya::platform::native_file_lock>  cross_;
+    bool cross_process = false;
 };
+
+namespace detail {
+/// Take the cross-process lock for `target`, or nullopt (logged once per
+/// file) when the filesystem cannot lock.
+std::optional<maya::platform::native_file_lock> acquire_cross(const std::string& target);
+}  // namespace detail
+
+/// Enter the critical section for `target`, both locks, in-process first,
+/// run `body(Held, args...)`, and leave. body is captureless and args are
+/// moved in, the same rules as guarded<T>::with, since that is what it is.
+template <class F, class... Args>
+auto with_shared_file(Lane& lane, const std::filesystem::path& target, F body, Args... args) {
+    (void)body;
+    return lane.with([](FileLane&, std::string t, Args... a) {
+        const auto cross = detail::acquire_cross(t);
+        return F{}(Held{cross.has_value()}, std::move(a)...);
+    }, target.string(), std::move(args)...);
+}
 
 }  // namespace agentty::persistence

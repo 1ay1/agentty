@@ -116,7 +116,7 @@ bool write_json_atomic(const fs::path& target, const std::string& content) {
 // A mutex cannot fix this -- the writers are separate PROCESSES. The lock has
 // to live in the filesystem, and that primitive is jaal's
 // (maya::platform::native_file_lock) rather than a third hand-rolled copy of
-// it here. persistence::SharedFile pairs it with a process-wide mutex,
+// it here. persistence::with_shared_file pairs it with a process-wide lane,
 // because the two races are different and each lock closes only one of them:
 // see include/agentty/io/shared_file.hpp.
 //
@@ -134,8 +134,8 @@ bool write_json_atomic(const fs::path& target, const std::string& content) {
 // Advisory, and deliberately best-effort: if the lock cannot be taken we log
 // and proceed with the plain write. Losing an update is bad, but refusing to
 // save the user's settings because a lock file was unavailable is worse.
-std::mutex& settings_mu() {
-    static std::mutex m;
+persistence::Lane& settings_mu() {
+    static persistence::Lane m;
     return m;
 }
 
@@ -1257,18 +1257,20 @@ fs::path thread_index_path() { return threads_dir() / "index.json"; }
 // other process, and two agentty windows is the normal way to use this
 // program. A file lock alone closes only the cross-process half: POSIX
 // record locks belong to the process, so our own two threads both walk
-// through it (jaal's file_lock conformance check 13). persistence::SharedFile
+// through it (jaal's file_lock conformance check 13). with_shared_file
 // takes both; see include/agentty/io/shared_file.hpp for why neither is
 // sufficient. Contention is nil: these are startup + per-save.
-std::mutex& thread_index_mu() {
-    static std::mutex m;
+persistence::Lane& thread_index_mu() {
+    static persistence::Lane m;
     return m;
 }
 
 // The critical section for index.json. Every read_thread_index_locked /
-// write_thread_index_locked pair must sit inside ONE of these.
-[[nodiscard]] persistence::SharedFile lock_thread_index() {
-    return persistence::SharedFile{thread_index_mu(), thread_index_path()};
+// write_thread_index_locked pair runs inside ONE of these: body(Held, args...).
+template <class F, class... Args>
+auto with_thread_index(F body, Args... args) {
+    return persistence::with_shared_file(thread_index_mu(), thread_index_path(),
+                                          body, std::move(args)...);
 }
 
 struct IndexEntry {
@@ -1333,7 +1335,7 @@ long long file_size_bytes(const fs::path& p) {
     return static_cast<long long>(s);
 }
 
-// Raw index read. PRECONDITION: caller holds lock_thread_index(). The
+// Raw index read. PRECONDITION: called inside with_thread_index(). The
 // read and the matching write must sit inside ONE critical section or
 // the lost-update race described above reopens.
 std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
@@ -1379,7 +1381,7 @@ std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
     return out;
 }
 
-// Raw index write. PRECONDITION: caller holds lock_thread_index().
+// Raw index write. PRECONDITION: called inside with_thread_index().
 void write_thread_index_locked(const std::unordered_map<std::string, IndexEntry>& idx) {
     json threads = json::object();
     for (const auto& [id, e] : idx) {
@@ -1428,8 +1430,6 @@ void reindex_thread(const Thread& t) {
     // whole update is atomic with respect to delete_thread().
     const long long mt = file_mtime_secs(file);
     const long long sz = file_size_bytes(file);
-    const auto guard = lock_thread_index();
-    auto idx = read_thread_index_locked();
     IndexEntry ie;
     ie.title      = t.title;
     ie.created_at = std::chrono::duration_cast<std::chrono::seconds>(
@@ -1438,8 +1438,11 @@ void reindex_thread(const Thread& t) {
                         t.updated_at.time_since_epoch()).count();
     ie.mtime      = mt;
     ie.size       = sz;
-    idx[t.id.value] = std::move(ie);
-    write_thread_index_locked(idx);
+    with_thread_index([](persistence::Held, std::string id, IndexEntry e) {
+        auto idx = read_thread_index_locked();
+        idx[id] = std::move(e);
+        write_thread_index_locked(idx);
+    }, t.id.value, std::move(ie));
 }
 
 } // namespace
@@ -1458,7 +1461,9 @@ std::vector<Thread> load_all_threads() {
     // the bottom are one read-modify-write, and a save landing in the
     // middle — from this process OR another instance — must not have its
     // entry clobbered by our `fresh` snapshot.
-    const auto guard = lock_thread_index();
+    out = with_thread_index([](persistence::Held) {
+    std::vector<Thread> out;
+    std::error_code ec;
     auto index = read_thread_index_locked();
     std::unordered_map<std::string, IndexEntry> fresh;
     fresh.reserve(index.size() + 8);
@@ -1542,6 +1547,8 @@ std::vector<Thread> load_all_threads() {
     // the refreshed index for the next warm startup.
     if (fresh.size() != index.size()) index_dirty = true;
     if (index_dirty) write_thread_index_locked(fresh);
+    return out;
+    });
 
     std::sort(out.begin(), out.end(), [](const Thread& a, const Thread& b){
         return a.updated_at > b.updated_at;
@@ -2432,9 +2439,10 @@ void delete_thread(const ThreadId& id) {
     // lock: a concurrent reindex_thread() on the AsyncWriter worker, or
     // in another agentty instance, would otherwise resurrect this id
     // from its stale copy.
-    const auto guard = lock_thread_index();
-    auto idx = read_thread_index_locked();
-    if (idx.erase(id.value) > 0) write_thread_index_locked(idx);
+    with_thread_index([](persistence::Held, std::string key) {
+        auto idx = read_thread_index_locked();
+        if (idx.erase(key) > 0) write_thread_index_locked(idx);
+    }, id.value);
 }
 
 // The raw JSON this process last LOADED from disk.
@@ -2768,6 +2776,10 @@ std::function<void()>& settings_write_observer() {
     return obs;
 }
 
+namespace {
+void save_settings_locked(persistence::Held held, const store::Settings& s);
+}
+
 void save_settings(const store::Settings& s) {
     // Held for the WHOLE read-modify-write, not just the write. Two instances
     // each serialise their own full in-memory record, so without this the
@@ -2776,8 +2788,19 @@ void save_settings(const store::Settings& s) {
     //
     // Taken BEFORE the json is built so the document we emit cannot be
     // composed from state that another process invalidates while we work.
-    const persistence::SharedFile lock{settings_mu(), settings_path()};
-    if (!lock.cross_process())
+    persistence::with_shared_file(settings_mu(), settings_path(),
+        [](persistence::Held h, store::Settings v) { save_settings_locked(h, v); }, s);
+
+    // Tell anyone caching settings that the file moved under them, after
+    // the lock is released. See on_settings_written() in persistence.hpp for
+    // why this is here and not in each of the four callers that bypass the
+    // seam.
+    if (auto& obs = settings_write_observer(); obs) obs();
+}
+
+namespace {
+void save_settings_locked(persistence::Held held, const store::Settings& s) {
+    if (!held.cross_process)
         AGT_LOG(Persist, Warn, "settings.save",
                 "result=unlocked reason=lock_unavailable (concurrent writes may be lost)");
 
@@ -3084,12 +3107,8 @@ void save_settings(const store::Settings& s) {
         // re-asserting it over newer values from other instances.
         loaded_baseline().with([](json& b, json v) { b = std::move(v); }, j);
     }
-
-    // Tell anyone caching settings that the file moved under them. See
-    // on_settings_written() in persistence.hpp for why this is here and not
-    // in each of the four callers that bypass the seam.
-    if (auto& obs = settings_write_observer(); obs) obs();
 }
+} // namespace
 
 void on_settings_written(std::function<void()> observer) {
     settings_write_observer() = std::move(observer);

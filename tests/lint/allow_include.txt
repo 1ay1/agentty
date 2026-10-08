@@ -15,12 +15,6 @@
 agentty/util/ranked_lock.hpp: mutex thread_local
 # snapshot: publish-once, read-many across threads.
 agentty/util/snapshot.hpp: mutex atomic
-# shared_file: the cross-process critical section. The mutex IS the subject —
-# it closes the in-process half of a race that the file lock provably cannot
-# (jaal's file_lock conformance check 13). The caller passes the mutex in
-# because one static per guarded file is the only way to key it without
-# needing a lock to look the lock up.
-agentty/io/shared_file.hpp: mutex
 agentty/util/logx.hpp: atomic
 
 # ── The turn's cancel token ──────────────────────────────────────────────

@@ -38,7 +38,7 @@
 #endif
 
 namespace fs = std::filesystem;
-using agentty::persistence::SharedFile;
+namespace sf = agentty::persistence;
 
 namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static int g_fail = 0;
@@ -48,8 +48,8 @@ static int g_fail = 0;
         else         { std::printf("  ok:   %s\n", msg); }                     \
     } while (0)
 
-std::mutex& test_mu() {
-    static std::mutex m;
+sf::Lane& test_mu() {
+    static sf::Lane m;
     return m;
 }
 
@@ -75,23 +75,20 @@ int main() {
     // The lock must be real, not a silently-degraded no-op. A tmpfs/ext4
     // /tmp supports locks, so a false here means the policy layer failed to
     // reach jaal at all — which is the wiring bug this test exists to catch.
-    {
-        const SharedFile guard{test_mu(), target};
-        CHECK(guard.cross_process(),
-              "SharedFile took the cross-process lock (jaal is wired in)");
-    }
+    CHECK(sf::with_shared_file(test_mu(), target, [](sf::Held h) { return h.cross_process; }),
+          "with_shared_file took the cross-process lock (jaal is wired in)");
 
     // The lock lives on the SIDECAR, never on the target. This is the whole
     // correctness argument: agentty writes these files by renaming a new
     // inode over the target, so a lock held on the target would guard a file
     // that is no longer the file.
     {
-        const SharedFile guard{test_mu(), target};
-        (void)guard;
-        CHECK(fs::exists(fs::path(target.string() + ".lock")),
-              "the lock is held on <target>.lock");
-        CHECK(!fs::exists(target),
-              "locking does not create or touch the target itself");
+        const auto [sidecar, touched] = sf::with_shared_file(test_mu(), target,
+            [](sf::Held, std::string t) {
+                return std::pair{fs::exists(fs::path(t + ".lock")), fs::exists(fs::path(t))};
+            }, target.string());
+        CHECK(sidecar, "the lock is held on <target>.lock");
+        CHECK(!touched, "locking does not create or touch the target itself");
     }
 
 #if HAVE_FORK
@@ -110,40 +107,45 @@ int main() {
     // contends rather than sharing our hold. The child uses its own mutex
     // because our copy of test_mu() is inherited LOCKED.
     {
-        constexpr auto kHold = std::chrono::milliseconds{400};
-        int pipefd[2] = {-1, -1};
-        if (::pipe(pipefd) != 0) {
+        // The whole parent side runs inside the critical section: fork,
+        // hold for kHold, then leave, and read the child's verdict after.
+        const auto child_waited = sf::with_shared_file(test_mu(), target,
+            [](sf::Held, std::string t) -> long long {
+                constexpr auto kHold = std::chrono::milliseconds{400};
+                int pipefd[2] = {-1, -1};
+                if (::pipe(pipefd) != 0) return -2;
+                const pid_t pid = ::fork();
+                if (pid == 0) {
+                    ::close(pipefd[0]);
+                    const auto t0 = std::chrono::steady_clock::now();
+                    // Our copy of the lane is inherited locked; the child
+                    // needs its own.
+                    static sf::Lane child_lane;
+                    sf::with_shared_file(child_lane, fs::path{t}, [](sf::Held) {});
+                    long long v = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0).count();
+                    (void)!::write(pipefd[1], &v, sizeof(v));
+                    ::close(pipefd[1]);
+                    ::_exit(0);
+                }
+                ::close(pipefd[1]);
+                ::usleep(static_cast<unsigned>(kHold.count()) * 1000u);
+                // Leaving the body releases; the child reads after. Hand the
+                // pipe and pid out so the verdict is read unlocked.
+                return (static_cast<long long>(pid) << 20) | pipefd[0];
+            }, target.string());
+        if (child_waited == -2) {
             CHECK(false, "pipe for the child's verdict");
         } else {
-            auto guard = std::make_optional<SharedFile>(test_mu(), target);
-            const pid_t pid = ::fork();
-            if (pid == 0) {
-                ::close(pipefd[0]);
-                const auto t0 = std::chrono::steady_clock::now();
-                std::mutex child_mu;
-                { const SharedFile g{child_mu, target}; (void)g; }
-                const auto waited =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - t0).count();
-                long long v = waited;
-                (void)!::write(pipefd[1], &v, sizeof(v));
-                ::close(pipefd[1]);
-                ::_exit(0);
-            }
-            ::close(pipefd[1]);
-            ::usleep(static_cast<unsigned>(kHold.count()) * 1000u);
-            guard.reset();  // release here
-
-            long long child_waited = -1;
-            (void)!::read(pipefd[0], &child_waited, sizeof(child_waited));
-            ::close(pipefd[0]);
+            const int rd = static_cast<int>(child_waited & 0xFFFFF);
+            const pid_t pid = static_cast<pid_t>(child_waited >> 20);
+            long long waited = -1;
+            (void)!::read(rd, &waited, sizeof(waited));
+            ::close(rd);
             int status = 0;
             while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-
-            std::printf("  info: child waited %lld ms (parent held ~%lld ms)\n",
-                        child_waited, static_cast<long long>(kHold.count()));
-            CHECK(child_waited >= kHold.count() / 2,
-                  "a second PROCESS blocked until we released");
+            std::printf("  info: child waited %lld ms (parent held ~400 ms)\n", waited);
+            CHECK(waited >= 200, "a second PROCESS blocked until we released");
         }
     }
 #else
