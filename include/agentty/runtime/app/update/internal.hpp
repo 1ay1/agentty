@@ -516,6 +516,10 @@ Cmd  login_update         (Model& m, msg::LoginMsg          lm);
 Cmd  diff_review_update   (Model& m, msg::DiffReviewMsg     dm);
 Cmd  smart_mode_update    (Model& m, msg::SmartModeMsg      sm);
 Cmd  plugin_edit_update   (Model& m, msg::PluginEditMsg     pm);
+// The edit pane's half of a PluginEdited reply (its writes are cmd::
+// edit_plugin effects). settings_list owns the leaf and routes EditPane
+// replies here. Defined in plugin_edit.cpp.
+Cmd  plugin_edit_result   (Model& m, PluginEdited e);
 Cmd  appearance_update    (Model& m, msg::AppearanceMsg     am);
 Cmd  sandbox_update       (Model& m, msg::SandboxMsg        sm);
 Cmd  meta_update          (Model& m, msg::MetaMsg           mm);

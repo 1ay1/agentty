@@ -2505,6 +2505,63 @@ Cmd apply_rag_settings(store::RagConfig cfg) {
         std::move(cfg));
 }
 
+Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
+                tools::plugin::ServerSpec spec) {
+    // task, not task_isolated: one small file rewrite, bounded, so a warm
+    // pooled worker is right. The body is captureless (jaal's task contract);
+    // everything rides as an argument.
+    //
+    // The path crosses as a std::string: jaal's Sendable check knows
+    // std::string owns its bytes, and has no entry for filesystem::path. The
+    // worker rebuilds the path, which is the same value either way.
+    return Cmd::task(
+        [](jaal::Sink<Msg> out, std::stop_token, std::string path_str,
+           PluginEdited r, tools::plugin::ServerSpec spec) {
+            const std::filesystem::path path{path_str};
+            namespace pl = tools::plugin;
+            using K = PluginEdited::Kind;
+            auto record = [&r](pl::EditResult res) {
+                r.ok             = (res == pl::EditResult::Ok);
+                r.already_exists = (res == pl::EditResult::AlreadyExists);
+                r.parse_error    = (res == pl::EditResult::ParseError);
+            };
+            try {
+                switch (r.kind) {
+                case K::SetServerDisabled:
+                    record(pl::set_server_disabled(path, r.server, r.flag));
+                    break;
+                case K::SetToolEnabled:
+                    record(pl::set_tool_enabled(path, r.server, r.tool, r.flag));
+                    // A tool's enabled state is baked into the cached MCP
+                    // catalog, so the cache must drop it — here, on the
+                    // worker, right after the write it depends on, rather
+                    // than as a second global poke from the reducer.
+                    if (r.ok) tools::invalidate_mcp_catalog();
+                    break;
+                case K::Approve:
+                    r.ok = pl::approve_server(path, r.server);
+                    break;
+                case K::Remove:
+                    record(pl::remove_server(path, r.server));
+                    break;
+                case K::Add:
+                    record(pl::add_server(path, spec, /*force=*/false));
+                    break;
+                case K::Update:
+                    record(pl::update_server(path, spec));
+                    break;
+                }
+            } catch (...) {
+                // An edit that throws reports as a failed write: the reducer
+                // shows its "could not write" path instead of hanging on a
+                // reply that never comes.
+                r.ok = false;
+            }
+            out.send(Msg{std::move(r)});
+        },
+        path.string(), std::move(reply), std::move(spec));
+}
+
 Cmd prewarm_provider() {
     provider::PrewarmTarget t = provider::prewarm_target(provider::active());
     if (!t.should_warm()) return Cmd::none();   // no effect to describe

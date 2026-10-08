@@ -997,6 +997,42 @@ struct SettingsListPaste      { std::string text; }; // bracketed paste into the
 // the panel is a pure function of the Model (no plugin_model() at render
 // time). Mirrors the ThreadsLoaded{vec} pattern.
 struct PluginsUpdated         { mcp::PluginModel model; };
+
+// The result of a write to an mcp.json, reported back to the reducer that
+// asked for it.
+//
+// Reducers used to call tools::plugin::*() directly and branch on the return
+// value — a file read, a JSON rewrite and an atomic rename, all inside
+// update. Now a reducer returns cmd::edit_plugin(op), the write happens on a
+// worker, and this Msg carries the outcome back. Everything the reducer used
+// to do after a successful write (reload the plugin model, toast, close the
+// pane) happens when this arrives.
+//
+// `op` is echoed, not reconstructed, so the reply carries exactly what was
+// asked — the server name, the tool, the direction of a toggle — even if the
+// pane has since moved on.
+struct PluginEdited {
+    enum class Kind : std::uint8_t {
+        SetServerDisabled, SetToolEnabled, Approve, Remove, Add, Update,
+    };
+    enum class From : std::uint8_t { SettingsList, EditPane };
+    Kind        kind{};
+    From        from{};
+    std::string server;
+    std::string tool;          // SetToolEnabled only
+    bool        flag = false;  // SetServerDisabled: disabled; SetToolEnabled: enabled
+    bool        exit_commit = false;  // EditPane save: a field-exit, pane stays open
+    // Which config the edit pane was editing (project mcp.json vs the user
+    // one). Echoed so the reply can reopen the pane on the SAME scope, rather
+    // than reading it off whatever pane happens to be open when it lands.
+    bool        project = false;
+    // The outcome. `ok` folds approve_server's bool and EditResult::Ok into one
+    // answer; `already_exists` and `parse_error` are kept because the edit pane
+    // shows them inline on specific rows.
+    bool        ok = false;
+    bool        already_exists = false;
+    bool        parse_error    = false;
+};
 struct SettingsListBackspace  {};
 struct SettingsListSubmitInput{};              // Enter in add-mode → create
 struct SettingsListCancelInput{};              // Esc in add-mode → back to list
@@ -1255,8 +1291,8 @@ using SettingsListMsg = std::variant<
     OpenSettingsList, CloseSettingsList, SettingsListMove,
     SettingsListActivate, SettingsListAddStart, SettingsListRemove,
     SettingsListEditOpen,
-    SettingsListChar, SettingsListPaste, PluginsUpdated, SettingsListBackspace,
-    SettingsListSubmitInput, SettingsListCancelInput>;
+    SettingsListChar, SettingsListPaste, PluginsUpdated, PluginEdited,
+    SettingsListBackspace, SettingsListSubmitInput, SettingsListCancelInput>;
 
 using ForkMsg = std::variant<
     OpenFork, CloseFork, ForkMove, ForkThread>;

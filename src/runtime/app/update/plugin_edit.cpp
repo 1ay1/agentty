@@ -242,35 +242,31 @@ Cmd plugin_edit_update(Model& m, msg::PluginEditMsg pm) {
             }
 
             // ── live toggles (detail mode) ────────────────────────────
+            // Each write is an effect (cmd::edit_plugin). Its outcome comes
+            // back as PluginEdited and is handled in plugin_edit_result().
             if (applied.changed && !o->server.empty()) {
                 const fs::path path = config_target(*o, m);
                 if (row_id == pf::kEnabled) {
                     const bool on = toggle_of(o->form, pf::kEnabled);
-                    auto r = tools::plugin::set_server_disabled(
-                        path, o->server, !on);
-                    if (r == tools::plugin::EditResult::Ok) {
-                        return Cmd::batch(
-                            
-                                cmdf::load_plugins_async(/*reconnect=*/true),
-                                set_status_toast(m, on ? "enabled" : "disabled"));
-                    }
-                    return set_status_toast(m, "could not write mcp.json");
+                    return cmdf::edit_plugin(path, PluginEdited{
+                        .kind   = PluginEdited::Kind::SetServerDisabled,
+                        .from   = PluginEdited::From::EditPane,
+                        .server = o->server,
+                        .flag   = !on,
+                        .project = o->project,
+                    });
                 }
                 if (row_id.starts_with(pf::kToolPrefix)) {
                     const std::string bare =
                         row_id.substr(std::string_view{pf::kToolPrefix}.size());
-                    const bool on = toggle_of(o->form, row_id.c_str());
-                    auto r = tools::plugin::set_tool_enabled(
-                        path, o->server, bare, on);
-                    if (r == tools::plugin::EditResult::Ok) {
-                        tools::invalidate_mcp_catalog();
-                        return Cmd::batch(
-                            
-                                cmdf::load_plugins_async(/*reconnect=*/false),
-                                set_status_toast(m, (on ? "enabled '" : "disabled '")
-                                                    + bare + "'"));
-                    }
-                    return set_status_toast(m, "could not toggle '" + bare + "'");
+                    return cmdf::edit_plugin(path, PluginEdited{
+                        .kind   = PluginEdited::Kind::SetToolEnabled,
+                        .from   = PluginEdited::From::EditPane,
+                        .server = o->server,
+                        .tool   = bare,
+                        .flag   = toggle_of(o->form, row_id.c_str()),
+                        .project = o->project,
+                    });
                 }
                 // Any other change (url text etc.) is save-owned; fall out.
             }
@@ -290,17 +286,12 @@ Cmd plugin_edit_update(Model& m, msg::PluginEditMsg pm) {
 
             // ── action rows ───────────────────────────────────────────
             if (row_id == pf::kApprove && !o->server.empty()) {
-                const fs::path path = config_target(*o, m);
-                if (tools::plugin::approve_server(path, o->server)) {
-                    return Cmd::batch(
-                        cmdf::load_plugins_async(/*reconnect=*/true),
-                        set_status_toast(m, "approved '" + o->server + "'"),
-                        // Reopen once the reload lands so the pane reflects
-                        // the post-approval state (trusted → connecting).
-                        Cmd::after(std::chrono::milliseconds{50},
-                            Msg{OpenPluginEdit{o->server, o->project}}));
-                }
-                return set_status_toast(m, "approve failed");
+                return cmdf::edit_plugin(config_target(*o, m), PluginEdited{
+                    .kind   = PluginEdited::Kind::Approve,
+                    .from   = PluginEdited::From::EditPane,
+                    .server = o->server,
+                    .project = o->project,
+                });
             }
 
             if (row_id == pf::kRemove && !o->server.empty() && !want_save) {
@@ -310,16 +301,12 @@ Cmd plugin_edit_update(Model& m, msg::PluginEditMsg pm) {
                     o->form.note_replaces_grammar = true;
                     return Cmd::none();
                 }
-                const fs::path path = config_target(*o, m);
-                const std::string name = o->server;
-                auto r = tools::plugin::remove_server(path, name);
-                if (r == tools::plugin::EditResult::Ok) {
-                    ascend(m);
-                    return Cmd::batch(
-                        cmdf::load_plugins_async(/*reconnect=*/true),
-                        set_status_toast(m, "removed '" + name + "'"));
-                }
-                return set_status_toast(m, "remove failed");
+                return cmdf::edit_plugin(config_target(*o, m), PluginEdited{
+                    .kind   = PluginEdited::Kind::Remove,
+                    .from   = PluginEdited::From::EditPane,
+                    .server = o->server,
+                    .project = o->project,
+                });
             }
 
             if (want_save) {
@@ -328,41 +315,112 @@ Cmd plugin_edit_update(Model& m, msg::PluginEditMsg pm) {
                 tools::plugin::ServerSpec spec;
                 if (!spec_from_form(o->form, kind, o->server, spec))
                     return Cmd::none();   // inline errors set
-
-                const fs::path path = config_target(*o, m);
                 const bool add = o->server.empty();
-                auto r = add
-                    ? tools::plugin::add_server(path, spec, /*force=*/false)
-                    : tools::plugin::update_server(path, spec);
-                if (r == tools::plugin::EditResult::AlreadyExists) {
-                    if (auto* fld = o->form.find(pf::kName))
-                        fld->error = "'" + spec.name + "' already exists";
-                    return Cmd::none();
-                }
-                if (r != tools::plugin::EditResult::Ok) {
-                    o->form.note = "write failed — is the file valid JSON?";
-                    return Cmd::none();
-                }
-                o->form.dirty = false;   // committed — the footer drops "unsaved"
-                if (exit_commit) {
-                    // Field-exit commit: written + applied, pane stays open.
-                    // The catalog reload runs so the new value is live
-                    // immediately (same as the toggle path).
-                    return Cmd::batch(
-                        cmdf::load_plugins_async(/*reconnect=*/true),
-                        set_status_toast(m, "saved '" + spec.name + "'"));
-                }
-                const std::string toast = (add ? "added '" : "saved '")
-                    + spec.name + "'";
-                ascend(m);
-                return Cmd::batch(
-                    cmdf::load_plugins_async(/*reconnect=*/true),
-                    set_status_toast(m, toast));
+                // `server` names the entry the reply is about: the new name
+                // for an add, the existing one for an update.
+                PluginEdited req{
+                    .kind        = add ? PluginEdited::Kind::Add
+                                       : PluginEdited::Kind::Update,
+                    .from        = PluginEdited::From::EditPane,
+                    .server      = spec.name,
+                    .exit_commit = exit_commit,
+                    .project     = o->project,
+                };
+                return cmdf::edit_plugin(config_target(*o, m), std::move(req),
+                                         std::move(spec));
             }
 
             return Cmd::none();
         },
     }, pm);
+}
+
+// The outcome of a write the edit pane requested (cmd::edit_plugin), routed
+// here by settings_list's PluginEdited arm. Everything that used to follow
+// each write inline: reload the plugin model, toast, close or keep the pane,
+// and the two inline field errors an add/update can produce.
+//
+// THE PANE MAY HAVE MOVED ON. The reply lands one message after the request,
+// and by then the user may have closed the pane or opened it on another
+// server. So anything that touches the pane first checks it is still open on
+// the server this reply is about; a stale reply still reloads the plugin
+// model and toasts (the write DID happen), it just doesn't edit a form that
+// is no longer the one it came from.
+Cmd plugin_edit_result(Model& m, PluginEdited e) {
+    using K = PluginEdited::Kind;
+    auto* o = m.ui.panel.get<pn::PluginEdit>();
+    // Same pane, same entry. For an add the pane was open on server "" and
+    // the reply names the new server, so an add matches an open add-form.
+    const bool same_pane = o && o->project == e.project
+        && (o->server == e.server || (e.kind == K::Add && o->server.empty()));
+
+    if (!e.ok) {
+        switch (e.kind) {
+        case K::SetServerDisabled:
+            return set_status_toast(m, "could not write mcp.json");
+        case K::SetToolEnabled:
+            return set_status_toast(m, "could not toggle '" + e.tool + "'");
+        case K::Approve:
+            return set_status_toast(m, "approve failed");
+        case K::Remove:
+            return set_status_toast(m, "remove failed");
+        case K::Add:
+        case K::Update:
+            if (same_pane) {
+                if (e.already_exists) {
+                    if (auto* fld = o->form.find(pf::kName))
+                        fld->error = "'" + e.server + "' already exists";
+                } else {
+                    o->form.note = "write failed — is the file valid JSON?";
+                }
+                return Cmd::none();
+            }
+            return set_status_toast(m, "could not save '" + e.server + "'");
+        }
+        return Cmd::none();
+    }
+
+    switch (e.kind) {
+    case K::SetServerDisabled:
+        return Cmd::batch(cmdf::load_plugins_async(/*reconnect=*/true),
+                          set_status_toast(m, e.flag ? "disabled" : "enabled"));
+    case K::SetToolEnabled:
+        // The catalog was invalidated on the worker, beside the write.
+        return Cmd::batch(cmdf::load_plugins_async(/*reconnect=*/false),
+                          set_status_toast(m, (e.flag ? "enabled '" : "disabled '")
+                                              + e.tool + "'"));
+    case K::Approve:
+        return Cmd::batch(
+            cmdf::load_plugins_async(/*reconnect=*/true),
+            set_status_toast(m, "approved '" + e.server + "'"),
+            // Reopen once the reload lands so the pane reflects the
+            // post-approval state (trusted → connecting). Only if the user is
+            // still looking at it — reopening a pane they closed would yank
+            // them back to it.
+            same_pane ? Cmd::after(std::chrono::milliseconds{50},
+                                   Msg{OpenPluginEdit{e.server, e.project}})
+                      : Cmd::none());
+    case K::Remove:
+        if (same_pane) ascend(m);
+        return Cmd::batch(cmdf::load_plugins_async(/*reconnect=*/true),
+                          set_status_toast(m, "removed '" + e.server + "'"));
+    case K::Add:
+    case K::Update: {
+        if (same_pane) o->form.dirty = false;   // committed: footer drops "unsaved"
+        if (e.exit_commit) {
+            // Field-exit commit: written + applied, pane stays open. The
+            // catalog reload runs so the new value is live immediately.
+            return Cmd::batch(cmdf::load_plugins_async(/*reconnect=*/true),
+                              set_status_toast(m, "saved '" + e.server + "'"));
+        }
+        if (same_pane) ascend(m);
+        return Cmd::batch(
+            cmdf::load_plugins_async(/*reconnect=*/true),
+            set_status_toast(m, (e.kind == K::Add ? "added '" : "saved '")
+                                + e.server + "'"));
+    }
+    }
+    return Cmd::none();
 }
 
 } // namespace agentty::app::detail

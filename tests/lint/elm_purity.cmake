@@ -43,7 +43,11 @@ endif()
 # name → regex. Each one is a way a reducer reaches outside the Model.
 set(ban_clock       "(steady_clock|system_clock|high_resolution_clock)::now[ \t]*\\(")
 set(ban_env         "(std::)?(getenv|setenv|unsetenv|secure_getenv)[ \t]*\\(")
-set(ban_fileio      "std::(if|of|f)stream|fs::(remove|rename|create_director|copy|exists|is_regular_file|file_size|last_write_time|directory_iterator)|std::filesystem::")
+# fileio: an operation that touches the disk. NOT the bare `std::filesystem::`
+# prefix: `std::filesystem::path` is a value type (string manipulation, no
+# syscall), and flagging it reported a reducer composing a path as IO. Only
+# the functions that actually read or write the filesystem count.
+set(ban_fileio      "std::(if|of|f)stream|(fs|std::filesystem)::(remove|rename|create_director|copy|exists|is_regular_file|is_directory|file_size|last_write_time|directory_iterator|recursive_directory_iterator|status|read_symlink|canonical|weakly_canonical|temp_directory_path|current_path|space|equivalent)\\b")
 set(ban_subprocess  "run_command|::system[ \t]*\\(|popen[ \t]*\\(")
 set(ban_net         "prewarm_active_provider|http::default_client|dial_new")
 set(ban_global      "provider::select[ \t]*\\(|tools::(subagent::set_|skills::(reset_activations|note_activated)|invalidate_mcp_catalog|plugin::(set_|remove_|approve_|add_|update_)|util::allow_read_root)")

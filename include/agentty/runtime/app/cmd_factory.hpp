@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -18,6 +19,7 @@
 #include "agentty/runtime/msg.hpp"
 #include "agentty/io/http.hpp"   // http::CancelTokenPtr (run_tool)
 #include "agentty/provider/selection.hpp"  // provider::Selection (fetch_models)
+#include "agentty/tool/plugin.hpp"         // plugin::ServerSpec (edit_plugin)
 
 namespace agentty::app::cmd {
 
@@ -331,5 +333,19 @@ struct LoopBreak {
 // later moment, after a fast second switch may have already changed it.
 // Dispatches nothing.
 [[nodiscard]] Cmd prewarm_provider();
+
+// Write one change to an mcp.json, off the UI thread, and report back.
+//
+// The write is a read + JSON rewrite + atomic rename, so a reducer must not
+// do it. It returns this instead; the worker performs the matching
+// tools::plugin::*() call and dispatches PluginEdited with the outcome, and
+// the reducer's handler for PluginEdited does what used to follow the call
+// inline (reload the plugin model, toast, close the pane, show a field
+// error). `reply` is the request echoed back with the outcome filled in, so
+// the handler acts on exactly what was asked even if the pane moved on.
+//
+// `spec` is consulted only for Add / Update.
+[[nodiscard]] Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
+                              tools::plugin::ServerSpec spec = {});
 
 } // namespace agentty::app::cmd

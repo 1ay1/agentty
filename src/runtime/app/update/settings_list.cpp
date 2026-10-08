@@ -272,24 +272,19 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                     // Enabling spawns + handshakes; disabling drops the
                     // connection. Either way it changes the live process set,
                     // so reconnect=true, off the UI thread.
-                    auto path = edit_target(row);
-                    const bool want_disabled = row.on;   // on → turn off
-                    auto r = tools::plugin::set_server_disabled(
-                        path, row.arg, want_disabled);
-                    Cmd cmd;
-                    if (r == tools::plugin::EditResult::Ok) {
-                        m.ui.plugins_loading = true;
-                        cmd = Cmd::batch(
-                            cmdf::load_plugins_async(/*reconnect=*/true),
-                            set_status_toast(m,
-                                (want_disabled ? "disabled plugin '"
-                                               : "enabled plugin '")
-                                + row.arg + "'"));
-                    } else {
-                        cmd = set_status_toast(m,
-                                  "could not toggle '" + row.arg + "'");
-                    }
-                    return cmd;
+                    //
+                    // The write is an effect (cmd::edit_plugin); its outcome
+                    // arrives as PluginEdited, handled below. plugins_loading
+                    // goes up NOW, at the request, so the guard above ignores
+                    // a second Enter while the write is in flight instead of
+                    // racing it with a stale intent.
+                    m.ui.plugins_loading = true;
+                    return cmdf::edit_plugin(edit_target(row), PluginEdited{
+                        .kind   = PluginEdited::Kind::SetServerDisabled,
+                        .from   = PluginEdited::From::SettingsList,
+                        .server = row.arg,
+                        .flag   = row.on,   // on → turn off
+                    });
                 }
                 case se::Action::ToggleTool: {
                     if (m.ui.plugins_loading)
@@ -305,37 +300,22 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                     // Enable/disable one tool of a plugin: persist to
                     // mcp.json's tools.exclude, then invalidate the wire
                     // catalog so it re-projects with the new filter. NO
-                    // server re-spawn, NO background thread — the server
-                    // stays connected and project_tools re-reads the live
-                    // exclude. This is synchronous + race-free (the earlier
+                    // server re-spawn — the server stays connected and
+                    // project_tools re-reads the live exclude (the earlier
                     // reload-on-toggle re-spawned the server and hung on
                     // rapid disable→re-enable).
-                    auto path = edit_target(row);
-                    const bool want_enabled = !row.on;   // toggle
-                    auto r = tools::plugin::set_tool_enabled(
-                        path, row.arg, row.arg2, want_enabled);
-                    Cmd cmd;
-                    if (r == tools::plugin::EditResult::Ok) {
-                        tools::invalidate_mcp_catalog();
-                        // No respawn (only the exclude filter changed), but
-                        // the Model snapshot must reflect the new enabled set
-                        // — re-snapshot the live pool (reconnect=false).
-                        cmd = Cmd::batch(
-                            cmdf::load_plugins_async(/*reconnect=*/false),
-                            set_status_toast(m,
-                                (want_enabled ? "enabled tool '" : "disabled tool '")
-                                + row.arg2 + "' on " + row.arg));
-                    } else {
-                        cmd = set_status_toast(m,
-                            "could not toggle '" + row.arg2 + "'");
-                    }
-                    // Keep the cursor on the same row after the list rebuilds.
-                    if (auto* oo = m.ui.panel.get<pn::SettingsList>()) {
-                        const int n = static_cast<int>(
-                            se::items_for(m, oo->concern).size());
-                        oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
-                    }
-                    return cmd;
+                    //
+                    // The write and the catalog invalidation it requires both
+                    // happen on the worker (cmd::edit_plugin); PluginEdited
+                    // brings the result back.
+                    m.ui.plugins_loading = true;
+                    return cmdf::edit_plugin(edit_target(row), PluginEdited{
+                        .kind   = PluginEdited::Kind::SetToolEnabled,
+                        .from   = PluginEdited::From::SettingsList,
+                        .server = row.arg,
+                        .tool   = row.arg2,
+                        .flag   = !row.on,   // toggle
+                    });
                 }
                 case se::Action::ApprovePlugin: {
                     // Enter on an untrusted project server = a deliberate
@@ -346,20 +326,12 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                     // spawns; a later-added server stays pending.
                     if (m.ui.plugins_loading)
                         return Cmd::none();
-                    const bool ok = tools::plugin::approve_server(
-                        edit_target(row), row.arg);
-                    Cmd cmd;
-                    if (ok) {
-                        m.ui.plugins_loading = true;
-                        cmd = Cmd::batch(
-                            cmdf::load_plugins_async(/*reconnect=*/true),
-                            set_status_toast(m,
-                                "trusted project config — connecting…"));
-                    } else {
-                        cmd = set_status_toast(m,
-                            "could not record approval (no project mcp.json?)");
-                    }
-                    return cmd;
+                    m.ui.plugins_loading = true;
+                    return cmdf::edit_plugin(edit_target(row), PluginEdited{
+                        .kind   = PluginEdited::Kind::Approve,
+                        .from   = PluginEdited::From::SettingsList,
+                        .server = row.arg,
+                    });
                 }
                 case se::Action::ApproveHooks:
                     // Consent MUST be a deliberate terminal action — the
@@ -404,22 +376,70 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
             }
             o->confirm_remove.clear();
 
-            auto path = edit_target(row);
-            auto r = tools::plugin::remove_server(path, row.arg);
-            Cmd cmd;
-            if (r == tools::plugin::EditResult::Ok) {
-                m.ui.plugins_loading = true;
-                cmd = Cmd::batch(
-                    cmdf::load_plugins_async(/*reconnect=*/true),
-                    set_status_toast(m, "removed plugin '" + row.arg + "'"));
-            } else {
-                cmd = set_status_toast(m, "could not remove '" + row.arg + "'");
+            m.ui.plugins_loading = true;
+            return cmdf::edit_plugin(edit_target(row), PluginEdited{
+                .kind   = PluginEdited::Kind::Remove,
+                .from   = PluginEdited::From::SettingsList,
+                .server = row.arg,
+            });
+        },
+        // The outcome of a write requested from this list (cmd::edit_plugin).
+        // Everything that used to follow the write inline lives here now:
+        // reload the plugin model, toast, keep the cursor in range. An edit
+        // requested from the EDIT PANE is that reducer's to handle.
+        [&](PluginEdited& e) -> Cmd {
+            // A leaf belongs to exactly one domain, so this list owns every
+            // PluginEdited — including the ones the edit pane asked for. Those
+            // are routed to the edit pane's handler explicitly, rather than
+            // giving the reply two owners.
+            if (e.from == PluginEdited::From::EditPane)
+                return plugin_edit_result(m, std::move(e));
+            using K = PluginEdited::Kind;
+            if (!e.ok) {
+                m.ui.plugins_loading = false;   // nothing is reconnecting
+                switch (e.kind) {
+                case K::Approve:
+                    return set_status_toast(m,
+                        "could not record approval (no project mcp.json?)");
+                case K::Remove:
+                    return set_status_toast(m, "could not remove '" + e.server + "'");
+                case K::SetToolEnabled:
+                    return set_status_toast(m, "could not toggle '" + e.tool + "'");
+                default:
+                    return set_status_toast(m, "could not toggle '" + e.server + "'");
+                }
             }
+            // A tool toggle only changed the exclude filter: no respawn, but
+            // the snapshot must reflect the new enabled set, so re-snapshot
+            // the live pool (reconnect=false). Every server-level change does
+            // reconnect, since it changes which processes run.
+            const bool reconnect = (e.kind != K::SetToolEnabled);
+            std::string toast;
+            switch (e.kind) {
+            case K::SetServerDisabled:
+                toast = (e.flag ? "disabled plugin '" : "enabled plugin '")
+                      + e.server + "'";
+                break;
+            case K::SetToolEnabled:
+                toast = (e.flag ? "enabled tool '" : "disabled tool '")
+                      + e.tool + "' on " + e.server;
+                break;
+            case K::Approve:
+                toast = "trusted project config — connecting…";
+                break;
+            case K::Remove:
+                toast = "removed plugin '" + e.server + "'";
+                break;
+            default: break;
+            }
+            // Keep the cursor on a real row after the list rebuilds (a
+            // removal shortens it).
             if (auto* oo = m.ui.panel.get<pn::SettingsList>()) {
                 const int n = static_cast<int>(se::items_for(m, oo->concern).size());
                 oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
             }
-            return cmd;
+            return Cmd::batch(cmdf::load_plugins_async(reconnect),
+                              set_status_toast(m, std::move(toast)));
         },
         [&](SettingsListEditOpen& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();

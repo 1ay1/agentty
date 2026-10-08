@@ -15,12 +15,10 @@
 # make every interval zero — and the result never reaches the Model, so a
 # replay is unaffected. Each site says so in a comment.
 update/composer.cpp: auth fileio
-update/fork.cpp: fileio global
+update/fork.cpp: global
 update/login.cpp: auth
 update/models.cpp: auth
-update/plugin_edit.cpp: global
 update/providers.cpp: auth
-update/settings_list.cpp: fileio global
 update/stream.cpp: auth
 update/submit.cpp: auth clock global
 update/thread_list.cpp: clock global
