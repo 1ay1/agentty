@@ -897,6 +897,12 @@ add_test(NAME layering
          COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}
                  -P ${CMAKE_SOURCE_DIR}/tests/lint/layering.cmake)
 set_tests_properties(layering PROPERTIES LABELS static)
+# The submodules own no runtime: no threads, no background work of their own.
+# Each library's ban-list allowlist lives in its own tree.
+add_test(NAME submodule_runtime
+         COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}
+                 -P ${CMAKE_SOURCE_DIR}/tests/lint/submodule_runtime.cmake)
+set_tests_properties(submodule_runtime PROPERTIES LABELS static)
 
 add_test(NAME elm_purity
          COMMAND ${CMAKE_COMMAND}

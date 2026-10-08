@@ -13,7 +13,6 @@
 
 #include "agentty/tool/util/protocol_runtime.hpp"
 
-#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -32,25 +31,23 @@ namespace agentty::tools::util {
 
 namespace {
 
-// One job: a single isolated task on a pool of its own.
+// One job: a single isolated task on a pool of its own, entered in a
+// stop_group so its natural end can be waited for without stopping it.
 class PoolJob {
   public:
     explicit PoolJob(std::function<void(std::stop_token)> body) {
+        auto m = done_.join();   // always admitted: the group is new
         pool_.post_isolated(
-            [b = std::move(body), d = done_](std::stop_token st) mutable {
-                // Set on every exit, a throw included (the pool reports it).
-                struct Done {
-                    std::shared_ptr<std::atomic<bool>> d;
-                    ~Done() { d->store(true, std::memory_order_release); d->notify_all(); }
-                } done{d};
+            [b = std::move(body), m = std::make_shared<decltype(m)>(std::move(m))](
+                std::stop_token st) mutable {
                 b(st);
+                m->reset();      // leave the group
             });
     }
     ~PoolJob() { stop(); }
-    // Wait for the body to return on its own. shutdown() would request stop
-    // first, so wait on a flag the body sets instead, then reap the pool.
+    // Wait for the body to return on its own, then reap the pool.
     void wait() noexcept {
-        done_->wait(false, std::memory_order_acquire);
+        done_.wait();
         stop();
     }
     void stop() noexcept { (void)pool_.shutdown(maya::pool::no_deadline); }
@@ -59,9 +56,8 @@ class PoolJob {
     }
 
   private:
-    std::shared_ptr<std::atomic<bool>> done_ =
-        std::make_shared<std::atomic<bool>>(false);
-    maya::pool pool_{/*max_workers=*/1};
+    maya::stop_group done_;
+    maya::pool       pool_{/*max_workers=*/1};
 };
 
 void scope_for(std::size_t n, const std::function<void(std::size_t)>& fn) {
