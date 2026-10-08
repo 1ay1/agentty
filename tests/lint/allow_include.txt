@@ -29,7 +29,6 @@ agentty/provider/error_class.hpp: thread_local
 # ── Caches and registries below the loop ─────────────────────────────────
 agentty/domain/catalog.hpp: mutex atomic
 agentty/domain/lazy_bytes.hpp: atomic
-agentty/domain/ui_live.hpp: mutex
 agentty/domain/ui_theme.hpp: atomic
 # const_cast on a std::variant alternative accessor, not on shared state.
 agentty/domain/smart_mode.hpp: const_cast

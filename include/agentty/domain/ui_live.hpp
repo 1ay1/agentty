@@ -33,8 +33,7 @@
 // they do not care WHICH frame's prefs they see, only that it is one of
 // them.
 
-#include <mutex>
-#include <shared_mutex>
+#include <maya/runtime.hpp>
 
 #include "agentty/domain/ui_prefs.hpp"
 
@@ -42,17 +41,12 @@ namespace agentty::ui_prefs {
 
 namespace detail {
 // Prefs holds a std::string (the theme name), so it is not trivially
-// copyable and cannot live in a std::atomic. A mutex + a value is the
-// honest implementation: the lock is uncontended in practice (published
-// once per frame on the render thread, read on the same thread) and a
-// shared_mutex's read side is a relaxed atomic increment, which is the
-// same order of cost the atomic would have been.
-inline std::shared_mutex& slot_mutex() noexcept {
-    static std::shared_mutex mu;
-    return mu;
-}
-inline Prefs& slot() noexcept {
-    static Prefs s{};
+// copyable and cannot live in a std::atomic. A guarded value is the honest
+// implementation: uncontended in practice (published once per frame on the
+// render thread, read on the same thread), and its read side is a shared
+// lock, the same order of cost an atomic would have been.
+inline maya::guarded<Prefs>& slot() noexcept {
+    static maya::guarded<Prefs> s;
     return s;
 }
 }  // namespace detail
@@ -60,16 +54,14 @@ inline Prefs& slot() noexcept {
 // Make `p` the prefs every consumer sees from now on. Called once per frame
 // by view(), before any Element is built.
 inline void publish(const Prefs& p) {
-    std::unique_lock lk{detail::slot_mutex()};
-    detail::slot() = p;
+    detail::slot().with([](Prefs& s, Prefs next) { s = std::move(next); }, p);
 }
 
 // The prefs in force. Defaults until the first publish(), so a consumer
 // that runs before the first frame (a test, a background prewarm) gets the
 // documented defaults rather than garbage.
 [[nodiscard]] inline Prefs current() {
-    std::shared_lock lk{detail::slot_mutex()};
-    return detail::slot();
+    return detail::slot().read([](const Prefs& s) { return s; });
 }
 
 // ── Convenience readers ──────────────────────────────────────────────────
