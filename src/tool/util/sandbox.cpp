@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>   // shared_ptr — the config snapshot
+
+#include <maya/runtime.hpp>
 #include <string>
 #include <vector>
 
@@ -90,13 +92,13 @@ std::atomic<Backend> g_backend{Backend::None};
 // it. The sandbox is judged by reading what it promises, so it trades
 // immediacy for a property nothing else here needs.
 //
-// Still a shared_ptr-to-const behind an atomic rather than a plain global:
-// written once but READ from tool worker threads and the UI thread at the
-// same time, and this is how a reader gets a coherent view without a lock.
+// Still a published shared_ptr-to-const rather than a plain global: written
+// once but READ from tool worker threads and the UI thread at the same time,
+// and this is how a reader gets a coherent view without a lock.
 //
 // Defaults reproduce today's behaviour, so a user who never opens the pane
 // gets exactly the sandbox they already had.
-std::shared_ptr<const sandbox_cfg::Config> g_cfg{};
+maya::published<const sandbox_cfg::Config> g_cfg;
 
 // Has the policy been sealed? Set by the first set_config() call.
 //
@@ -741,15 +743,14 @@ void set_config(const sandbox_cfg::Config& cfg) {
 
     // First call: publish the one snapshot this process will ever use.
     //
-    // Still an immutable snapshot behind an atomic pointer rather than a
-    // plain global. The seal means it is written once, but it is READ from
+    // Still an immutable published snapshot rather than a plain global. The seal means it is written once, but it is READ from
     // tool worker threads while the UI thread reads it too, and
     // shared_ptr-to-const is how a reader gets a coherent view without a
     // lock. (It also kept a real use-after-free out of the tree back when
     // this was republishable: Config holds three vectors, and assigning one
     // under a concurrent reader is a freed-buffer walk.)
     auto next = std::make_shared<const sandbox_cfg::Config>(cfg);
-    std::atomic_store_explicit(&g_cfg, std::move(next), std::memory_order_release);
+    g_cfg.publish(std::move(next));
 
     // The policy carries the ENGINE, so sealing it seals the backend too.
     //
@@ -765,13 +766,12 @@ void reset_config_for_test() noexcept {
     // concurrent reader never sees "unsealed but still holding the old
     // policy" -- which is the one state that would let a second set_config
     // land while a reader is mid-snapshot.
-    std::atomic_store_explicit(&g_cfg, std::shared_ptr<const sandbox_cfg::Config>{},
-                               std::memory_order_release);
+    (void)g_cfg.take();
     g_cfg_sealed.store(false, std::memory_order_release);
 }
 
 std::shared_ptr<const sandbox_cfg::Config> config_snapshot() noexcept {
-    auto snap = std::atomic_load_explicit(&g_cfg, std::memory_order_acquire);
+    auto snap = g_cfg.current();
     // Never hand back null, so callers can dereference without checking. A
     // default config is the correct answer before anyone has set one: it is
     // exactly the posture the bwrap argv has always built.
