@@ -886,6 +886,24 @@ if(EXISTS ${_BANLIST})
                          PROPERTIES LABELS "static")
 endif()
 
+# ── Elm purity ────────────────────────────────────────────────────
+# update() is a pure function of (Model, Msg): no IO, no clock, no env, no
+# process-global writes from a reducer. tests/lint/elm_allowlist.txt is the
+# remaining debt; the strict check rejects anything new, the tight check
+# rejects an exemption that is no longer needed, so the list only shrinks.
+add_test(NAME elm_purity
+         COMMAND ${CMAKE_COMMAND}
+                 -DROOT=${CMAKE_SOURCE_DIR}/src/runtime/app
+                 -DALLOW=${CMAKE_SOURCE_DIR}/tests/lint/elm_allowlist.txt
+                 -P ${CMAKE_SOURCE_DIR}/tests/lint/elm_purity.cmake)
+add_test(NAME elm_purity_tight
+         COMMAND ${CMAKE_COMMAND}
+                 -DROOT=${CMAKE_SOURCE_DIR}/src/runtime/app
+                 -DALLOW=${CMAKE_SOURCE_DIR}/tests/lint/elm_allowlist.txt
+                 -DTIGHT=1
+                 -P ${CMAKE_SOURCE_DIR}/tests/lint/elm_purity.cmake)
+set_tests_properties(elm_purity elm_purity_tight PROPERTIES LABELS "static")
+
 # ── util layering ─────────────────────────────────────────────────
 # Two `util` namespaces exist (tools::util = the tool boundary, util = app-wide
 # plumbing) and the ONE-WAY dependency is what keeps the collision tolerable.

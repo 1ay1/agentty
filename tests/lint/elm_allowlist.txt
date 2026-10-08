@@ -1,0 +1,24 @@
+# tests/lint/elm_allowlist.txt — reducers that still reach outside the Model.
+#
+# This is the Elm DEBT LIST, not a list of exceptions. Every line is a file
+# under src/runtime/app/ whose reducer still does something update() should
+# only describe. elm_purity.cmake fails on any violation NOT listed here, and
+# elm_purity_tight fails on any listed name that is no longer used — so the
+# list can only shrink. When it is empty, agentty is pure Elm.
+#
+# Format: `path: name name ...` with names from elm_purity.cmake
+#   clock env fileio subprocess net global auth static thread
+update/code_blocks.cpp: clock subprocess
+update/composer.cpp: auth clock env fileio
+update/fork.cpp: clock fileio global
+update/frozen.cpp: env
+update/login.cpp: auth clock
+update/meta.cpp: clock env global
+update/models.cpp: auth global
+update/plugin_edit.cpp: global
+update/providers.cpp: auth
+update/settings_list.cpp: fileio global
+update/stream.cpp: auth clock env
+update/submit.cpp: auth clock global
+update/thread_list.cpp: clock global
+update/tool.cpp: clock
