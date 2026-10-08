@@ -40,6 +40,7 @@
 #include "agentty/util/user_root.hpp"
 #include "agentty/util/background.hpp"
 
+#include <maya/runtime.hpp>
 #include <mcp/cap/cap.hpp>
 
 #include <atomic>
@@ -50,7 +51,6 @@
 #include <fstream>
 #include <future>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -84,13 +84,18 @@ struct ConnectionPool {
     // External capabilities are always namespaced. Conditional namespacing
     // makes a tool's wire identity change when another server is enabled and
     // cannot detect collisions with agentty's native catalog.
+    //
+    // Threading: a pool is BUILT by one mcp_tools() call and only then
+    // published (current_pool). `policies` and `connect_errors` are written
+    // during the build and never after, so readers of a published pool need
+    // no lock for them. The registry guards itself (mcp::cap::Registry
+    // locks its provider list), and `generation` is an atomic counter.
     ::mcp::cap::Registry registry{true};
-    std::mutex           mu;          // guards list/resource/prompt projection
     std::atomic<unsigned long> generation{0};   // bumps on any *_list_changed
     std::unordered_map<std::string, ServerPolicy> policies;
     // Why a configured server did NOT connect this session (empty entry =
-    // connected fine). Populated by mcp_tools() during the connect loop so
-    // plugin_model() can show the user "connected" vs "failed: <reason>".
+    // connected fine). Filled during the build so plugin_model() can show
+    // the user "connected" vs "failed: <reason>".
     std::unordered_map<std::string, std::string> connect_errors;
 };
 
@@ -121,8 +126,14 @@ namespace {
 // ── process-wide pool ─────────────────────────────────────────────────────
 // mcp_tools() stores the pool here so the resource/prompt/live accessors can
 // reach the same connections without threading a handle through every caller.
-std::mutex&  g_pool_mu()  { static std::mutex m;            return m; }
-PoolHandle&  g_pool_ref() { static PoolHandle p; return p; }
+// The live pool: built whole, then published. Readers on any thread take
+// the current handle and keep it alive for their call; a rebuild publishes
+// a new pool without freeing the old one under them. ConnectionPool is safe
+// to share once published (see its threading note).
+maya::published<ConnectionPool>& g_pool() {
+    static maya::published<ConnectionPool> p;
+    return p;
+}
 
 // Serializes the ENTIRE connect-and-swap in mcp_tools(). Two independent
 // callers reach mcp_tools() — connect_initial_mcp() (first catalog access,
@@ -132,14 +143,15 @@ PoolHandle&  g_pool_ref() { static PoolHandle p; return p; }
 // connected" printed 4×), and a late/concurrent build could mutate a pool a
 // reader (plugin_model) is iterating — a data race that SIGSEGVs with no
 // abort message. One coarse mutex around the whole build makes connect+swap
-// strictly sequential; readers still use current_pool()+pool->mu and are
-// unaffected. Connects are rare (startup / explicit toggles), so serializing
+// strictly sequential; readers take current_pool() and are unaffected. Connects are rare (startup / explicit toggles), so serializing
 // them costs nothing on the hot path.
-std::mutex&  g_connect_mu() { static std::mutex m; return m; }
+maya::guarded<bool>& g_connecting() {
+    static maya::guarded<bool> c;
+    return c;
+}
 
 PoolHandle current_pool() {
-    std::lock_guard<std::mutex> lk(g_pool_mu());
-    return g_pool_ref();
+    return g_pool().current();
 }
 
 std::chrono::milliseconds call_timeout() {
@@ -679,7 +691,6 @@ tools::ToolDef make_read_resource_tool(PoolHandle pool) {
         const bool want_list  = uri.empty() || (args.is_object() && args.value("list", false));
         try {
             if (want_list) {
-                std::lock_guard<std::mutex> lk(pool->mu);
                 auto res = pool->registry.resources();
                 auto tpls = pool->registry.resource_templates();
                 if (res.empty() && tpls.empty())
@@ -703,7 +714,6 @@ tools::ToolDef make_read_resource_tool(PoolHandle pool) {
             std::string err;
             bool ok;
             {
-                std::lock_guard<std::mutex> lk(pool->mu);
                 ok = pool->registry.read_resource(uri, contents, err);
             }
             if (!ok)
@@ -792,7 +802,6 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
         const bool want_list   = name.empty() || (args.is_object() && args.value("list", false));
         try {
             if (want_list) {
-                std::lock_guard<std::mutex> lk(pool->mu);
                 auto prompts = pool->registry.prompts();
                 if (prompts.empty())
                     return tools::ToolOutput{"(no prompts advertised)", std::nullopt};
@@ -823,7 +832,6 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
             std::string err;
             bool ok;
             {
-                std::lock_guard<std::mutex> lk(pool->mu);
                 auto route = resolve_prompt_route(pool->registry, name);
                 if (!route)
                     return std::unexpected(tools::ToolError::not_found(
@@ -880,7 +888,7 @@ live_exclude_map() {
     return m;
 }
 
-// Caller must hold pool->mu (it reads pool->policies).
+// Reads pool->policies, which is fixed once the pool is published.
 [[nodiscard]] bool tool_enabled(
     const PoolHandle& pool, std::string_view exposed,
     const std::unordered_map<std::string, std::unordered_set<std::string>>& live_excl) {
@@ -937,7 +945,6 @@ tools::ToolDef make_search_tools_tool(PoolHandle pool) {
         const auto live_excl = live_exclude_map();
         std::vector<::mcp::Tool> visible;
         {
-            std::lock_guard<std::mutex> lk(pool->mu);
             for (auto& t : pool->registry.tools())
                 if (tool_enabled(pool, t.name, live_excl))
                     visible.push_back(std::move(t));
@@ -1015,7 +1022,6 @@ tools::ToolDef make_call_tool(PoolHandle pool) {
         // otherwise mcp_call is a documented way around it.
         {
             const auto live_excl = live_exclude_map();
-            std::lock_guard<std::mutex> lk(pool->mu);
             if (!tool_enabled(pool, *route, live_excl))
                 return std::unexpected(tools::ToolError::denied(
                     "MCP tool '" + name + "' is disabled. Enable it in the "
@@ -1176,7 +1182,6 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
         live_exclude_map();
 
     {
-        std::lock_guard<std::mutex> lk(pool->mu);
         for (auto& t : pool->registry.tools()) {
             const auto origin = mcp_origin_id(t.name);
             if (!tool_enabled(pool, t.name, live_excl)) continue;
@@ -1290,9 +1295,25 @@ std::vector<ServerLaunch> configured_servers_for_delegation() {
     return out;
 }
 
+namespace {
+std::vector<tools::ToolDef> build_pool(PoolHandle& out_pool);
+}
+
 std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     // Serialize the whole connect+swap — no two builds ever run at once.
-    std::lock_guard<std::mutex> connect_lk(g_connect_mu());
+    // The handle crosses as a pointer-free value: build into a local, then
+    // hand it back.
+    // build_pool publishes the pool itself, so out_pool reads it back.
+    auto defs = g_connecting().with([](bool&) {
+        PoolHandle built;
+        return build_pool(built);
+    });
+    out_pool = current_pool();
+    return defs;
+}
+
+namespace {
+std::vector<tools::ToolDef> build_pool(PoolHandle& out_pool) {
     std::vector<tools::ToolDef> out;
 
     // ONE ladder. This used to resolve a single winning file while
@@ -1499,12 +1520,11 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     // report the failures. The pool is installed below unconditionally.
 
     out_pool = pool;                       // keep providers alive (caller)
-    {
-        std::lock_guard<std::mutex> lk(g_pool_mu());
-        g_pool_ref() = pool;               // process-wide handle for accessors
-    }
+    // process-wide handle for accessors
+    g_pool().publish(pool);
     return project_tools(pool);
 }
+}  // namespace
 
 // ── live / dynamic accessors ──────────────────────────────────────────────
 
@@ -1529,7 +1549,6 @@ std::vector<std::string> mcp_server_tools(const std::string& server) {
     std::vector<std::string> out;
     auto pool = current_pool();
     if (!pool) return out;
-    std::lock_guard<std::mutex> lk(pool->mu);
     for (const auto& t : pool->registry.tools()) {
         if (mcp_origin_id(t.name) == server)
             out.push_back(mcp_bare_name(t.name));
@@ -1552,7 +1571,6 @@ PluginModel plugin_model() {
     std::unordered_map<std::string, std::vector<LiveTool>> live;
     std::unordered_map<std::string, std::string> errors;
     if (auto pool = current_pool()) {
-        std::lock_guard<std::mutex> lk(pool->mu);
         for (const auto& t : pool->registry.tools()) {
             const std::string origin = mcp_origin_id(t.name);
             LiveTool lt;
@@ -1581,29 +1599,35 @@ PluginModel plugin_model() {
         std::string command;
         std::vector<std::pair<std::string, std::string>> tools;  // (bare, desc)
     };
-    static std::mutex s_seen_mu;
-    static std::unordered_map<std::string, SeenEntry> s_seen;
-    {
-        std::lock_guard<std::mutex> lk(s_seen_mu);
-        // Prune: drop cache for any server not in the current config, and
-        // evict a same-name entry whose command changed (identity reuse).
-        for (auto it = s_seen.begin(); it != s_seen.end();) {
-            auto cit = cfg.find(it->first);
-            if (cit == cfg.end()
-                || cit->second.command != it->second.command)
-                it = s_seen.erase(it);
-            else
-                ++it;
-        }
-        // Record what each live server currently advertises, under its command.
-        for (const auto& [srv, tools] : live) {
-            auto& ent = s_seen[srv];
-            if (auto cit = cfg.find(srv); cit != cfg.end())
-                ent.command = cit->second.command;
-            ent.tools.clear();
-            for (const auto& lt : tools) ent.tools.emplace_back(lt.bare, lt.desc);
-        }
+    using SeenMap = std::unordered_map<std::string, SeenEntry>;
+    static maya::guarded<SeenMap> s_seen;
+    // What the cache needs from config and the live pool, as plain values:
+    // each configured server's command, and what each live server advertises.
+    std::unordered_map<std::string, std::string> commands;
+    for (const auto& [name, cs] : cfg) commands.emplace(name, cs.command);
+    SeenMap advertised;
+    for (const auto& [srv, tools] : live) {
+        auto& ent = advertised[srv];
+        if (auto cit = cfg.find(srv); cit != cfg.end()) ent.command = cit->second.command;
+        for (const auto& lt : tools) ent.tools.emplace_back(lt.bare, lt.desc);
     }
+    // Prune entries for servers no longer configured (or whose command
+    // changed: identity reuse), then record what live servers advertise.
+    // Returns a snapshot for the fallback below, so no lock is held there.
+    const SeenMap seen = s_seen.with(
+        [](SeenMap& m, std::unordered_map<std::string, std::string> cmds,
+           SeenMap adv) {
+            for (auto it = m.begin(); it != m.end();) {
+                auto cit = cmds.find(it->first);
+                if (cit == cmds.end() || cit->second != it->second.command)
+                    it = m.erase(it);
+                else
+                    ++it;
+            }
+            for (auto& [srv, ent] : adv) m[srv] = std::move(ent);
+            return m;
+        },
+        std::move(commands), std::move(advertised));
 
     // Build one ServerState per configured server, unifying config + live.
     // Per-server trust (the RCE gate): a workspace-local config's stdio
@@ -1717,8 +1741,7 @@ PluginModel plugin_model() {
             // moment you disable the plugin — the exact inconsistency where a
             // just-disabled server lost its tools while a start-disabled one
             // or an individually-excluded set kept them.
-            std::lock_guard<std::mutex> lk(s_seen_mu);
-            if (auto sit = s_seen.find(name); sit != s_seen.end()) {
+            if (auto sit = seen.find(name); sit != seen.end()) {
                 for (const auto& [bare, desc] : sit->second.tools) {
                     ToolState ts;
                     ts.name        = bare;
@@ -1804,7 +1827,6 @@ std::size_t mcp_reload() {
     if (auto p = current_pool()) {
         unsigned long g = p->generation.load(std::memory_order_relaxed);
         if (g == 0) p->generation.store(1, std::memory_order_relaxed);
-        std::lock_guard<std::mutex> lk(p->mu);
         return p->registry.provider_count();
     }
     return 0;
@@ -1814,7 +1836,6 @@ std::vector<ResourceInfo> mcp_resources() {
     auto pool = current_pool();
     if (!pool) return {};
     std::vector<ResourceInfo> out;
-    std::lock_guard<std::mutex> lk(pool->mu);
     for (const auto& r : pool->registry.resources()) {
         ResourceInfo ri;
         ri.uri         = r.uri;
@@ -1832,7 +1853,6 @@ std::optional<std::string> mcp_read_resource(const std::string& uri, std::string
     if (!pool) { err = "MCP not configured"; return std::nullopt; }
     std::vector<::mcp::ResourceContents> contents;
     {
-        std::lock_guard<std::mutex> lk(pool->mu);
         if (!pool->registry.read_resource(uri, contents, err)) return std::nullopt;
     }
     std::string out;
@@ -1856,7 +1876,6 @@ std::vector<PromptInfo> mcp_prompts() {
     auto pool = current_pool();
     if (!pool) return {};
     std::vector<PromptInfo> out;
-    std::lock_guard<std::mutex> lk(pool->mu);
     for (const auto& p : pool->registry.prompts()) {
         PromptInfo pi;
         pi.name        = canonical_mcp_name(p.name);
@@ -1882,7 +1901,6 @@ std::optional<std::string> mcp_get_prompt(
     if (!pool) { err = "MCP not configured"; return std::nullopt; }
     ::mcp::GetPromptResult res;
     {
-        std::lock_guard<std::mutex> lk(pool->mu);
         auto route = resolve_prompt_route(pool->registry, name);
         if (!route) { err = "prompt is missing or ambiguous: '" + name + "'"; return std::nullopt; }
         if (!pool->registry.get_prompt(*route, args, res, err)) return std::nullopt;
@@ -1902,11 +1920,7 @@ void release_servers() noexcept {
     //      own SIGTERM→SIGKILL deadline.
     // Swap the handle out under the lock, then let the Registry destructor
     // run OUTSIDE the lock (it terminates each child).
-    PoolHandle drained;
-    {
-        std::lock_guard<std::mutex> lk(g_pool_mu());
-        drained.swap(g_pool_ref());
-    }
+    PoolHandle drained = g_pool().take();
     // `drained` drops here: Registry → providers → ChildProcess teardown.
 }
 

@@ -12,6 +12,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agentty/util/sendable.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/tool/effects.hpp"
 
@@ -305,3 +306,9 @@ namespace cancellation {
 }
 
 } // namespace agentty::tools
+
+// ToolDef is plain data plus `execute`, a std::function jaal can't see
+// inside. The closures it holds capture shared handles (a provider, the MCP
+// pool) that synchronise themselves, or nothing at all; none borrows from
+// the place it was built. So a ToolDef can be copied to another thread.
+MAYA_SENDABLE(agentty::tools::ToolDef);

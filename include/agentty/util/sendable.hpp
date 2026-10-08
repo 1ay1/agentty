@@ -14,8 +14,20 @@
 
 #include <maya/runtime.hpp>
 
+#include <nlohmann/json.hpp>
+
 #include "agentty/domain/id.hpp"
 #include "agentty/tool/effects.hpp"
+
+// nlohmann::json owns its whole tree by value (a variant over string, array,
+// object, number, bool, null — every branch an owning container). jaal can't
+// walk it because the payload is behind a private union, not because there
+// is anything borrowed in there. Tool arguments and results are json, so
+// they cross to worker threads constantly.
+//
+// Sendable, not Frozen: a json is freely mutable through a non-const
+// reference, and nothing here pretends otherwise.
+MAYA_SENDABLE(nlohmann::json);
 
 // Id<Tag> is a strong newtype around ONE std::string, by value, no views and
 // no pointers. jaal can't look inside only because it has user-declared

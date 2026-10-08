@@ -488,15 +488,19 @@ int main() {
 
     // ── J. Parent cancellation trips the active provider request token. ──
     {
-        auto cancelled = std::make_shared<std::atomic<bool>>(false);
+        // Published as a token, the way the tool runner publishes it
+        // (cmd_factory's cancellation::Scope). The stream reacts to a token
+        // the instant it trips; a bare probe is only checked between turns.
+        auto parent = std::make_shared<std::stop_source>();
         auto request_cancelled = std::make_shared<std::atomic<bool>>(false);
-        tools::cancellation::set([cancelled] { return cancelled->load(); });
-        install_scripted_stream([cancelled, request_cancelled](
+        tools::cancellation::Scope parent_scope{
+            std::vector<std::stop_token>{parent->get_token()}};
+        install_scripted_stream([parent, request_cancelled](
                                     int, const provider::Request& req,
                                     const provider::EventSink& sink) {
             check(static_cast<bool>(req.cancel),
                   "J: active subagent request has a cancellation token");
-            cancelled->store(true);
+            parent->request_stop();
             const auto until = std::chrono::steady_clock::now()
                              + std::chrono::milliseconds(500);
             while (std::chrono::steady_clock::now() < until
@@ -506,7 +510,6 @@ int main() {
             emit_error(sink, "cancelled");
         });
         auto out = run_task("cancel active stream");
-        tools::cancellation::clear();
         check(request_cancelled->load() && out.is_error,
               "J: parent cancellation reaches provider and stops the task");
     }

@@ -46,7 +46,7 @@ int main() {
     check(block.find("risky") == std::string::npos,
           "unapproved effectful skill is NOT advertised");
 
-    const auto* risky = find("risky");
+    const auto risky = find("risky");
     if (!risky) {
         std::printf("FAIL risky skill did not load at all\n");
         return 1;
@@ -60,7 +60,7 @@ int main() {
           "refusal tells the model what the user should run");
 
     // A prose skill still activates normally.
-    const auto* prose = find("prose");
+    const auto prose = find("prose");
     check(prose && activation_payload(*prose).find("Short sentences")
                    != std::string::npos,
           "prose skill activates unchanged");

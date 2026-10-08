@@ -59,15 +59,6 @@
 MAYA_SENDABLE(agentty::LazyBytes);
 MAYA_SENDABLE(agentty::ImageContent);
 
-// nlohmann::json owns its whole tree by value (a variant over string, array,
-// object, number, bool, null — every branch an owning container). jaal can't
-// walk it because the payload is behind a private union, not because there
-// is anything borrowed in there. Tool arguments and results are json, so
-// they cross to worker threads constantly.
-//
-// Sendable, not Frozen: a json is freely mutable through a non-const
-// reference, and nothing here pretends otherwise.
-MAYA_SENDABLE(nlohmann::json);
 
 // http::CancelToken is a shared mutable object, and Sendable refuses
 // shared_ptr by default for exactly that reason. This is the case the rule

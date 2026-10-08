@@ -184,7 +184,9 @@ provider/openai/responses_site.cpp: thread_local
 # bridge: the MCP connects moved to pool.submit_isolated, whose future does
 # not join in its destructor — so the detached orphan-waiter that existed only
 # to absorb that stall is gone too, along with the shared_future it needed.
-mcp/bridge.cpp: mutex atomic
+# The pool is published whole (maya::published) and the seen-tools cache is
+# maya::guarded; `atomic` is the pool's list-changed generation counter.
+mcp/bridge.cpp: atomic
 # http_server: the POST workers moved to util::WorkerGroup, so the thread,
 # the condition variable, the inflight counter and the detach are gone. The
 # mutex guards the session id / protocol version / cancel token; the atomic
