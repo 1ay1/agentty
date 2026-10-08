@@ -109,7 +109,6 @@ tool/plugin.cpp: mutex atomic
 # same per-worker seam as progress.cpp. It REPLACED a process-global
 # activation set, which drifted from the transcript (wrong after /compact).
 tool/skills.cpp: atomic thread_local
-tool/memory_store.cpp: mutex
 tool/progress.cpp: thread_local
 # The subagent run registry. A subagent runs on a Cmd::task_isolated thread
 # and holds provider objects by reference off main's stack, so teardown has to
