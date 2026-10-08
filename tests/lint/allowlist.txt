@@ -191,7 +191,7 @@ rag/adapter.cpp: mutex atomic
 # ── Process-wide plumbing ────────────────────────────────────────────────
 # The teardown registry IS what joins the workers above.
 util/teardown.cpp: mutex
-util/logx.cpp: mutex atomic
+util/logx.cpp: atomic
 
 # ── The runtime ──────────────────────────────────────────────────────────
 # next_tool_exec_seq(): a static atomic counter minted per dispatch, echoed by

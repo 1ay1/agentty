@@ -12,10 +12,11 @@
 #include <cstring>
 #include <ctime>
 #include <functional>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+
+#include <maya/runtime.hpp>
 
 #if defined(_WIN32)
   #include <io.h>
@@ -63,10 +64,15 @@ std::string g_path;                  // resolved path for log_file()
 // Mid-run rotation: bytes written since open. Startup-only rotation is not
 // enough for the dev workflow (trace-by-default + long-lived sessions):
 // a week of wire chunks would grow one file unbounded. Checked with a
-// relaxed add per write; the actual rotation is serialized by g_rotate_mu
-// and re-checked under the lock, so concurrent writers rotate exactly once.
+// relaxed add per write; the actual rotation runs inside rotation().with
+// and re-checks there, so concurrent writers rotate exactly once.
 std::atomic<std::int64_t> g_bytes{0};
-std::mutex g_rotate_mu;
+// Leaked: a late log line during static teardown must not hit a dead lock.
+struct Rotation {};
+maya::guarded<Rotation>& rotation() {
+    static auto* r = new maya::guarded<Rotation>;
+    return *r;
+}
 constexpr std::int64_t kRotateBytesDefault = 32ll * 1024 * 1024;
 
 }  // namespace
@@ -424,15 +430,20 @@ void open_sink(const char* path) noexcept {
 // Rotate the live sink once it exceeds the rotation threshold: rename to
 // .old (the previous .old is dropped) and reopen fresh. Called from emit()
 // on the writer that crosses the threshold; safe for concurrent writers — the
-// mutex serializes, the re-check under the lock makes it idempotent, and
+// lock serializes, the re-check under it makes it idempotent, and
 // writers racing the swap at worst land a line in the pre-rotation file
 // (O_APPEND keeps every write intact either way). Not async-signal-safe;
 // never called from the crash path.
+void rotate_locked(Rotation&, std::int64_t limit) noexcept;
+
 void rotate_if_needed() noexcept {
     const std::int64_t limit =
         detail::g_rotate_bytes.load(std::memory_order_relaxed);
     if (g_bytes.load(std::memory_order_relaxed) <= limit) return;
-    std::lock_guard<std::mutex> lk(g_rotate_mu);
+    rotation().with([](Rotation& r, std::int64_t lim) { rotate_locked(r, lim); }, limit);
+}
+
+void rotate_locked(Rotation&, std::int64_t limit) noexcept {
     if (g_bytes.load(std::memory_order_relaxed) <= limit) return;
     if (g_fd.load(std::memory_order_relaxed) < 0 || g_path.empty()) return;
     const std::string old = g_path + ".old";

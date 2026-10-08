@@ -525,6 +525,9 @@ add_executable(race_harness_test EXCLUDE_FROM_ALL
     tests/race_harness_test.cpp src/util/teardown.cpp
     src/util/logx.cpp src/util/dbglog.cpp)
 target_include_directories(race_harness_test PRIVATE include)
+# logx.cpp uses maya::guarded for its rotation lock: headers only.
+target_include_directories(race_harness_test PRIVATE
+    $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
 add_test(NAME race_harness_test COMMAND race_harness_test)
 set_tests_properties(race_harness_test PROPERTIES TIMEOUT 120 LABELS "sanitizer;race")
 
@@ -539,6 +542,9 @@ add_executable(real_subsystem_race_test EXCLUDE_FROM_ALL
     tests/real_subsystem_race_test.cpp src/util/teardown.cpp
     src/util/logx.cpp src/util/dbglog.cpp)
 target_include_directories(real_subsystem_race_test PRIVATE include)
+# logx.cpp uses maya::guarded for its rotation lock: headers only.
+target_include_directories(real_subsystem_race_test PRIVATE
+    $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
 add_test(NAME real_subsystem_race_test COMMAND real_subsystem_race_test)
 set_tests_properties(real_subsystem_race_test PROPERTIES TIMEOUT 120 LABELS "sanitizer;race")
 
@@ -561,7 +567,8 @@ add_executable(persistence_race_test_narrow EXCLUDE_FROM_ALL
     src/io/persistence.cpp src/io/blob_store.cpp src/io/thread_log.cpp
     src/runtime/settings_registry.cpp src/tool/util/utf8.cpp
     src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp
-    src/util/user_root.cpp src/util/base64.cpp src/util/teardown.cpp)
+    src/util/user_root.cpp src/util/base64.cpp src/util/teardown.cpp
+    src/io/shared_file.cpp)
 target_include_directories(persistence_race_test_narrow PRIVATE include)
 # The runtime's headers: user_root.cpp uses maya::guarded for its warn-once set
 # (the concurrency banlist forbids a raw std::mutex). Header-only here, so the
@@ -569,8 +576,9 @@ target_include_directories(persistence_race_test_narrow PRIVATE include)
 # exists to keep the TSan lane at ~11 TUs instead of 375.
 target_include_directories(persistence_race_test_narrow PRIVATE
     $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
+# jaal::jaal for SharedFile's cross-process lock (platform file_lock).
 target_link_libraries(persistence_race_test_narrow PRIVATE
-    nlohmann_json::nlohmann_json simdjson::simdjson Threads::Threads)
+    nlohmann_json::nlohmann_json simdjson::simdjson Threads::Threads jaal::jaal)
 target_compile_definitions(persistence_race_test_narrow PRIVATE
     AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
 add_test(NAME persistence_race_test_narrow COMMAND persistence_race_test_narrow)
@@ -647,6 +655,9 @@ agentty_test(logx_test MODE raw)
 add_executable(logx_test EXCLUDE_FROM_ALL
     tests/logx_test.cpp src/util/logx.cpp src/util/dbglog.cpp)
 target_include_directories(logx_test PRIVATE include)
+# logx.cpp uses maya::guarded for its rotation lock: headers only.
+target_include_directories(logx_test PRIVATE
+    $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
 add_test(NAME logx_test COMMAND logx_test)
 set_tests_properties(logx_test PROPERTIES TIMEOUT 30)
 
@@ -682,6 +693,9 @@ foreach(_logx_t logx_redaction_test logx_format_test logx_lifecycle_test)
     # fatal "no such file" on a test that links nothing json-related.
     target_link_libraries(${_logx_t} PRIVATE
         doctest::doctest maya::maya nlohmann_json::nlohmann_json)
+    # logx.cpp uses maya::guarded for its rotation lock: headers only.
+    target_include_directories(${_logx_t} PRIVATE
+        $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
     # AGENTTY_HOME, not the retired AGENTTY_LOG_FILE: the destination is
     # `--log-file` now, and these binaries are doctest mains that never see
     # agentty's argv parser. Pointing the user root at the build dir makes
@@ -707,6 +721,9 @@ target_include_directories(logx_rotation_test PRIVATE include tests)
 # Same transitive nlohmann include as the logx block above (agtest.hpp).
 target_link_libraries(logx_rotation_test PRIVATE
     doctest::doctest maya::maya nlohmann_json::nlohmann_json)
+# logx.cpp uses maya::guarded for its rotation lock: headers only.
+target_include_directories(logx_rotation_test PRIVATE
+    $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
 add_test(NAME logx_rotation_test COMMAND logx_rotation_test)
 set_tests_properties(logx_rotation_test PROPERTIES TIMEOUT 30
     ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_HOME=${CMAKE_CURRENT_BINARY_DIR}/logx_rotation_test.home")
