@@ -65,6 +65,13 @@ Cmd update(Model& m, msg::MetaMsg         mm);
 // still reproducible. See update.cpp.
 inline constexpr std::chrono::steady_clock::time_point kTestEpoch{
     std::chrono::hours{24}};   // nonzero, so "never set" (time_point{}) stays distinguishable
+
+// Runs after every fold, at the dispatch seam: derive the state worker threads
+// read from the Model, and when it moved since it was last published, append
+// the effect that publishes it to `c`. Reducers never publish — see
+// Model::published_subagent. Pure: reads the Model, updates its record of
+// what was published, returns a Cmd. Defined in update.cpp.
+[[nodiscard]] Cmd publish_derived(Model& m, Cmd c);
 [[nodiscard]] std::pair<Model, Cmd> update(Model m, Msg msg);
 [[nodiscard]] std::pair<Model, Cmd> update(Model m, Msg msg,
                                            std::chrono::steady_clock::time_point now);

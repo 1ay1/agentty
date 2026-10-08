@@ -74,7 +74,8 @@ struct AgenttyApp {
 #define AGENTTY_FWD_UPDATE(DomainMsg)                                    \
     static Cmd update(Model& m, msg::DomainMsg d, Clock::time_point now) { \
         m.now = now;   /* the fold's time: see Model::now */             \
-        return ::agentty::app::update(m, std::move(d));                  \
+        auto c = ::agentty::app::update(m, std::move(d));                \
+        return ::agentty::app::publish_derived(m, std::move(c));          \
     }
 
     AGENTTY_FWD_UPDATE(ComposerMsg)

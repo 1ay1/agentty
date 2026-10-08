@@ -25,6 +25,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/store_fx.hpp"
+#include "agentty/tool/subagent.hpp"            // PublishSubagent's target
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/workspace/files.hpp"      // request_prewarm_cancel
 #include "agentty/workspace/checkpoint.hpp" // cancel_repo_info_prewarm
@@ -70,6 +71,19 @@ struct Host : maya::terminal_host<P> {
     // is nothing here borrowing from a Model that has since moved on.
     void handle(SaveThread e)   { persistence::save_thread(e.thread); }
     void handle(DeleteThread e) { persistence::delete_thread(e.id); }
+
+    // Publish the subagent router's view (see store_fx.hpp PublishSubagent).
+    // A mutex-guarded copy into the registry — microseconds — so it runs here
+    // on the loop thread, before the next fold. That ordering is the point:
+    // a `task` tool dispatched by a LATER message always sees the view the
+    // Model had when it was dispatched, never a stale one.
+    void handle(PublishSubagent e) {
+        namespace sa = tools::subagent;
+        sa::set_model(std::move(e.model));
+        sa::set_provider(std::move(e.provider));
+        sa::set_smart(std::move(e.smart));
+        sa::set_candidates(std::move(e.candidates));
+    }
 
     // Teardown, and the ONE thing that has to happen before jaal's pool
     // spends its shutdown grace.

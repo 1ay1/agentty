@@ -736,6 +736,30 @@ struct Model {
     std::chrono::system_clock::time_point wall_epoch{};
     std::chrono::steady_clock::time_point steady_epoch{};
 
+    // The subagent router's view of this Model, as LAST PUBLISHED to the
+    // runtime's subagent registry (tool/subagent.cpp).
+    //
+    // The subagent loop runs on worker threads and reads its config from a
+    // registry, not the Model, so the registry has to track four Model
+    // fields. Reducers used to push each one with tools::subagent::set_*()
+    // — eleven calls across four files, written from inside update, and
+    // correct only as long as every reducer that changed one of those fields
+    // remembered to make the matching call.
+    //
+    // Now no reducer publishes. The dispatch seam (update.cpp,
+    // publish_subagent_if_changed) derives the view from the Model after
+    // every fold, compares it with this snapshot, and returns
+    // cmd::publish_subagent only when it moved. Forgetting is impossible
+    // because syncing is not a step anyone performs.
+    struct SubagentView {
+        std::string             model;
+        std::string             provider;
+        smart::RoleConfig       smart;
+        std::vector<ModelInfo>  candidates;
+        [[nodiscard]] bool operator==(const SubagentView&) const = default;
+    };
+    SubagentView published_subagent;
+
     // The process's launch environment, read ONCE by init() and never again.
     //
     // Elm has no getenv: a reducer that reads the environment is a function

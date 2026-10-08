@@ -17,8 +17,7 @@
 update/composer.cpp: auth fileio
 update/fork.cpp: fileio global
 update/login.cpp: auth
-update/meta.cpp: global
-update/models.cpp: auth global
+update/models.cpp: auth
 update/plugin_edit.cpp: global
 update/providers.cpp: auth
 update/settings_list.cpp: fileio global

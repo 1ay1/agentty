@@ -1080,9 +1080,9 @@ void ascend(Model& m) {
     auto smart_save = save_record(m);
 
     // 3. The subagent router's copy. `task` runs on a worker with no Model, so
-    //    it genuinely needs its own snapshot; this is the push that keeps it
-    //    from routing on a policy the user already changed.
-    tools::subagent::set_smart(m.d.smart);
+    //    it needs its own snapshot — but no reducer pushes it any more. The
+    //    dispatch seam (update.cpp, publish_derived) sees m.d.smart change
+    //    and publishes it after this fold.
     return smart_save;
 }
 

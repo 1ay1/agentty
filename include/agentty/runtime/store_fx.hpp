@@ -27,11 +27,14 @@
 // the two genuine reads that remain are documented where they are.
 
 #include <string>
+#include <vector>
 
 #include <jaal/jaal.hpp>
 
+#include "agentty/domain/catalog.hpp"        // ModelInfo
 #include "agentty/domain/conversation.hpp"   // Thread
 #include "agentty/domain/id.hpp"             // ThreadId
+#include "agentty/domain/smart_mode.hpp"     // smart::RoleConfig
 #include "agentty/store/store.hpp"           // store::Settings
 
 namespace agentty {
@@ -61,5 +64,22 @@ using write_file = jaal::pure_fx<WriteFile, "write_file">;
 /// runtime/app/update/internal.hpp for why there is exactly one write path.
 struct SaveSettings { store::Settings settings; };
 using save_settings = jaal::pure_fx<SaveSettings, "save_settings">;
+
+/// Publish the subagent router's view of the Model to the registry the
+/// worker threads read (tool/subagent.cpp).
+///
+/// The registry is a mirror of four Model fields. Reducers used to write it
+/// directly with tools::subagent::set_*(), which made them impure and made
+/// keeping it in sync something every reducer had to remember. Now the
+/// dispatch seam returns this effect, and only when the view changed, so the
+/// host runs it once per change. Carried by value for the same reason as
+/// SaveThread: it runs after the reducer returns.
+struct PublishSubagent {
+    std::string             model;
+    std::string             provider;
+    smart::RoleConfig       smart;
+    std::vector<ModelInfo>  candidates;
+};
+using publish_subagent = jaal::pure_fx<PublishSubagent, "publish_subagent">;
 
 }  // namespace agentty

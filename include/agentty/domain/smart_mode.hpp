@@ -142,6 +142,12 @@ struct SlotOverride {
     // Empty means "unknown provenance" (a settings.json written before this
     // field existed) and is honoured everywhere, preserving old behaviour.
     std::string             provider;
+
+    // Structural equality. The subagent publisher (app/subscribe.cpp) keys on
+    // the config it pushes, and must republish exactly when a field the
+    // router reads changes — a hash could collide and silently keep a stale
+    // router running, which equality cannot.
+    [[nodiscard]] bool operator==(const SlotOverride&) const = default;
 };
 
 struct RoleConfig {
@@ -286,6 +292,10 @@ struct RoleConfig {
         return const_cast<SlotOverride&>(
             static_cast<const RoleConfig&>(*this).slot(r));
     }
+
+    // Structural equality, for the same reason as SlotOverride's: the
+    // subagent publisher republishes exactly when this changes.
+    [[nodiscard]] bool operator==(const RoleConfig&) const = default;
 };
 
 // Resolve the numeric routing policy: an env override wins, else the persisted

@@ -762,12 +762,9 @@ void refresh_record(Model& m) {
     s.smart = m.d.smart;
     if (keep_enabled) s.smart.enabled = was_enabled;
     auto save = save_record(m);
-    // Keep the subagent role-router (Layer 3b) in step with any Smart Mode
-    // change the user just made in the overlay.
-    tools::subagent::set_smart(m.d.smart);
-    // …and the provider those pins are scoped to, so a worker resolves the
-    // same slot the main turn would.
-    tools::subagent::set_provider(active_provider_id());
+    // The subagent role-router (Layer 3b) and the provider its pins are scoped
+    // to follow from the Model; the dispatch seam publishes them after this
+    // fold (update.cpp, publish_derived).
     return save;
 }
 
@@ -819,7 +816,6 @@ commit_provider_switch(Model& m, std::string_view spec,
     if (!next.empty()) {
         m.d.model_id    = ModelId{next};
         m.s.context_max = resolved_context_max(m, detail::active_provider_id());
-        tools::subagent::set_model(m.d.model_id.value);
     } else {
         // No model resolvable for the new backend yet (ChatGPT catalog not
         // reached, Ollama, …). CLEAR the model id — carrying the OUTGOING
@@ -828,7 +824,6 @@ commit_provider_switch(Model& m, std::string_view spec,
         // wrote `codex → claude-opus-*`). An empty id is skipped by
         // persist_settings and ModelsLoaded auto-selects the first available.
         m.d.model_id = ModelId{""};
-        tools::subagent::set_model("");
     }
 
     // (4) Re-clamp the reasoning-effort tier to what the (possibly new)

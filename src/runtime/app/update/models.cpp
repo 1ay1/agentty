@@ -457,7 +457,6 @@ Cmd switch_to_model_ref(Model& m, const ModelRef& ref, bool record = true) {
             m.d.effort = clamp_effort(m.d.effort,
                                       resolved_caps(m.d.model_id.value,
                                                     ref.provider_id));
-        tools::subagent::set_model(m.d.model_id.value);
         auto save = persist_settings(m);
         auto mru  = record ? record_recent(m, ref.provider_id, ref.model_id)
                            : Cmd::none();
@@ -1126,14 +1125,13 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                                         settings);
                 m.d.available_models.push_back(std::move(mi));
             }
-            // Refresh the subagent router's candidate pool so read-only roles
-            // route to the cheapest capable model THIS provider offers. Done
-            // on every load (startup, provider switch, refetch) so routing
-            // never uses a stale provider's list.
-            tools::subagent::set_candidates(m.d.available_models);
-            // Keep the subagent role-router in sync with Smart Mode (Layer 3b).
-            tools::subagent::set_smart(m.d.smart);
-            tools::subagent::set_provider(active_provider_id());
+            // The subagent router's candidate pool, Smart Mode policy and
+            // provider follow from m.d.available_models / m.d.smart and the
+            // active provider: the dispatch seam publishes them after this
+            // fold (update.cpp, publish_derived), so read-only roles route
+            // to the cheapest capable model THIS provider offers without a
+            // reducer remembering to push them.
+            //
             // If the active model isn't offered by this provider (e.g. just
             // switched to Ollama with no recall, or a stale saved id), fall
             // back to the first available model so the user is never pointed
@@ -1158,7 +1156,6 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 if (!m.d.model_id.value.empty())
                     m.d.effort = clamp_effort(
                         m.d.effort, resolved_caps(m.d.model_id.value));
-                tools::subagent::set_model(m.d.model_id.value);
                 proven_save = Cmd::batch(std::move(proven_save),
                                          persist_settings(m));
             }

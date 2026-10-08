@@ -111,7 +111,48 @@ std::pair<Model, Cmd> update(Model m, Msg msg,
         [&](msg::MetaMsg mm)         { return detail::meta_update         (m, std::move(mm)); },
     }, msg);
 
+    // Same post-fold step the live seam runs (program.hpp), so a test sees the
+    // publish effects the app would emit.
+    cmd = publish_derived(m, std::move(cmd));
     return {std::move(m), std::move(cmd)};
+}
+
+// ── Model-derived state the world reads ────────────────────────────────────────────────
+//
+// The subagent router runs on worker threads and reads a registry, so the
+// registry has to track four Model fields. This is the ONE place that keeps
+// it in step: derive the view the Model implies, and publish only when it
+// differs from what was last published.
+//
+// Pure in the Elm sense: it reads the Model, records what it published there
+// (so the comparison is against Model state, not a hidden static), and
+// RETURNS the effect. The host performs it (host.hpp handle(PublishSubagent)).
+//
+// Equality, not a hash, decides "changed": a collision would silently keep a
+// stale router running, and equality can't be wrong in that direction — the
+// same reasoning as jaal's subs_key (D38).
+Cmd publish_derived(Model& m, Cmd c) {
+    // Compare IN PLACE against the Model, field by field. This runs after
+    // every fold, keystrokes included, and the candidate list can be hundreds
+    // of models: building a view first would copy that vector on every
+    // keystroke just to find out nothing changed. Copies happen only on the
+    // rare fold that actually moved one of these fields.
+    auto& pub = m.published_subagent;
+    const std::string provider = detail::active_provider_id();
+    if (pub.model == m.d.model_id.value && pub.provider == provider
+        && pub.smart == m.d.smart && pub.candidates == m.d.available_models)
+        return c;
+
+    pub.model      = m.d.model_id.value;
+    pub.provider   = provider;
+    pub.smart      = m.d.smart;
+    pub.candidates = m.d.available_models;
+    auto effect = Cmd(PublishSubagent{
+        .model = pub.model, .provider = pub.provider,
+        .smart = pub.smart, .candidates = pub.candidates,
+    });
+    return c.is_none() ? std::move(effect)
+                       : Cmd::batch(std::move(c), std::move(effect));
 }
 
 namespace {

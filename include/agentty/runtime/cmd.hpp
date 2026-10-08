@@ -199,7 +199,11 @@ using Cmd = jaal::Cmd<Msg,
     save_thread,
     delete_thread,
     write_file,
-    save_settings
+    save_settings,
+    // ── agentty's own: publishing Model-derived state to worker threads ──
+    // Returned by the dispatch seam, never by a reducer — see Model::
+    // published_subagent for why syncing isn't a step a reducer performs.
+    publish_subagent
 >;
 
 /// Every event source an agentty subscription may name.
