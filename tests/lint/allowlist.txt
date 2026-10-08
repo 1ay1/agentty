@@ -165,12 +165,11 @@ workspace/files.cpp: atomic
 workspace/checkpoint.cpp: mutex atomic
 
 # ── Providers: transports and their shared state ─────────────────────────
-provider/selection.cpp: mutex
 provider/chatgpt/codex_oauth.cpp: mutex
 provider/chatgpt/provider.cpp: mutex
 provider/chatgpt/responses.cpp: thread_local
-provider/copilot/copilot_oauth.cpp: mutex atomic
-provider/copilot/provider.cpp: mutex thread_local
+provider/copilot/copilot_oauth.cpp: atomic
+provider/copilot/provider.cpp: thread_local
 provider/kimi/kimi_oauth.cpp: mutex atomic
 provider/kimi/provider.cpp: mutex
 provider/openai/responses_site.cpp: thread_local

@@ -20,7 +20,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <set>
 #include <thread>
 
@@ -40,6 +39,8 @@
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/logx.hpp"
+
+#include <maya/runtime.hpp>
 
 #ifndef _WIN32
 #  include <sys/stat.h>   // chmod
@@ -137,7 +138,15 @@ HttpResult request(http::HttpMethod method, std::string_view host,
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────
-std::mutex& store_mutex() { static std::mutex m; return m; }
+// The creds file. Every read and read-modify-write runs inside store().with,
+// so two threads never interleave on it. It also holds the signed_in()
+// cache, keyed on the file's (mtime, size).
+struct CredsFile {
+    bool           signed_in  = false;
+    long long      mtime      = 0;
+    std::uintmax_t size       = static_cast<std::uintmax_t>(-1);
+};
+maya::guarded<CredsFile>& store() { static maya::guarded<CredsFile> f; return f; }
 
 struct Stored {
     GithubToken github;
@@ -353,25 +362,28 @@ parse_token_envelope(std::string_view json_body, std::int64_t now_ms) {
 fs::path credentials_path() { return creds_path(); }
 
 std::optional<GithubToken> load_github_token() {
-    std::scoped_lock lk(store_mutex());
-    auto s = load_unlocked();
-    if (!s) return std::nullopt;
-    return s->github;
+    return store().with([](CredsFile&) -> std::optional<GithubToken> {
+        auto s = load_unlocked();
+        if (!s) return std::nullopt;
+        return s->github;
+    });
 }
 
 bool save_github_token(const GithubToken& gh) {
-    std::scoped_lock lk(store_mutex());
-    Stored s;
-    if (auto cur = load_unlocked()) s = *cur;
-    s.github = gh;
-    s.proxy = {};   // a new sign-in invalidates any cached proxy token
-    return save_unlocked(s);
+    return store().with([](CredsFile&, GithubToken g) {
+        Stored s;
+        if (auto cur = load_unlocked()) s = *cur;
+        s.github = std::move(g);
+        s.proxy = {};   // a new sign-in invalidates any cached proxy token
+        return save_unlocked(s);
+    }, gh);
 }
 
 bool clear_credentials() {
-    std::scoped_lock lk(store_mutex());
-    std::error_code ec;
-    return fs::remove(creds_path(), ec) || !ec;
+    return store().with([](CredsFile&) {
+        std::error_code ec;
+        return fs::remove(creds_path(), ec) || !ec;
+    });
 }
 
 bool signed_in() {
@@ -380,34 +392,33 @@ bool signed_in() {
     // work per frame while the picker is open. Cache the boolean keyed on
     // the file's (mtime, size): a stat is ~1µs and invalidates correctly on
     // sign-in, sign-out, and cross-process credential changes alike.
-    std::scoped_lock lk(store_mutex());
-    static bool cached = false;
-    static std::filesystem::file_time_type cached_mtime{};
-    static std::uintmax_t cached_size = static_cast<std::uintmax_t>(-1);
-    std::error_code ec;
-    const auto p = creds_path();
-    const auto mtime = fs::last_write_time(p, ec);
-    const auto size  = ec ? 0 : fs::file_size(p, ec);
-    if (ec) {   // missing/unreadable → signed out; remember that cheaply
-        cached = false;
-        cached_mtime = {};
-        cached_size = static_cast<std::uintmax_t>(-1);
-        return false;
-    }
-    if (mtime != cached_mtime || size != cached_size) {
-        auto s = load_unlocked();
-        cached = s && !s->github.access_token.empty();
-        cached_mtime = mtime;
-        cached_size  = size;
-    }
-    return cached;
+    return store().with([](CredsFile& c) {
+        std::error_code ec;
+        const auto p = creds_path();
+        const auto t = fs::last_write_time(p, ec);
+        const auto size = ec ? 0 : fs::file_size(p, ec);
+        if (ec) {   // missing/unreadable → signed out; remember that cheaply
+            c = {};
+            return false;
+        }
+        const long long mtime = static_cast<long long>(t.time_since_epoch().count());
+        if (mtime != c.mtime || size != c.size) {
+            auto s = load_unlocked();
+            c.signed_in = s && !s->github.access_token.empty();
+            c.mtime = mtime;
+            c.size  = size;
+        }
+        return c.signed_in;
+    });
 }
 
 void invalidate_cached_token() { g_force_refresh.store(true); }
 
 // ── Per-account model-support learning ─────────────────────────────────
 namespace {
-std::mutex& support_mu() { static std::mutex m; return m; }
+// The support file; its read-modify-writes run inside support_file().with.
+struct SupportFile {};
+maya::guarded<SupportFile>& support_file() { static maya::guarded<SupportFile> f; return f; }
 // cache/, NOT credentials/.
 //
 // This is refetchable learning state -- which models this account was told it
@@ -472,26 +483,30 @@ void save_support(const SupportSets& s) {
 
 void note_unsupported_model(const std::string& model_id) {
     if (model_id.empty()) return;
-    std::scoped_lock lk(support_mu());
-    auto s = load_support();
-    s.supported.erase(model_id);
-    if (s.unsupported.insert(model_id).second) save_support(s);
+    support_file().with([](SupportFile&, std::string id) {
+        auto s = load_support();
+        s.supported.erase(id);
+        if (s.unsupported.insert(id).second) save_support(s);
+    }, model_id);
 }
 bool is_unsupported_model(const std::string& model_id) {
-    std::scoped_lock lk(support_mu());
-    return load_support().unsupported.count(model_id) > 0;
+    return support_file().with([](SupportFile&, std::string id) {
+        return load_support().unsupported.count(id) > 0;
+    }, model_id);
 }
 void note_supported_model(const std::string& model_id) {
     if (model_id.empty()) return;
-    std::scoped_lock lk(support_mu());
-    auto s = load_support();
-    bool changed = s.unsupported.erase(model_id) > 0;
-    changed |= s.supported.insert(model_id).second;
-    if (changed) save_support(s);
+    support_file().with([](SupportFile&, std::string id) {
+        auto s = load_support();
+        bool changed = s.unsupported.erase(id) > 0;
+        changed |= s.supported.insert(id).second;
+        if (changed) save_support(s);
+    }, model_id);
 }
 bool is_supported_model(const std::string& model_id) {
-    std::scoped_lock lk(support_mu());
-    return load_support().supported.count(model_id) > 0;
+    return support_file().with([](SupportFile&, std::string id) {
+        return load_support().supported.count(id) > 0;
+    }, model_id);
 }
 
 std::expected<GithubToken, OAuthError>
@@ -515,16 +530,21 @@ login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled) {
     return *tok;
 }
 
-std::optional<CopilotToken> fresh_token() {
-    // Serialize refreshes without holding store_mutex during the network call.
-    static std::mutex refresh_mu;
-    std::scoped_lock refresh_lk(refresh_mu);
+namespace {
+std::optional<CopilotToken> fresh_token_locked();
+}
 
-    std::optional<Stored> loaded;
-    {
-        std::scoped_lock lk(store_mutex());
-        loaded = load_unlocked();
-    }
+std::optional<CopilotToken> fresh_token() {
+    // One refresh at a time. The store is only held for the file IO, never
+    // across the network call. Lock order is always refresh, then store.
+    struct RefreshLane {};
+    static maya::guarded<RefreshLane> one_at_a_time;
+    return one_at_a_time.with([](RefreshLane&) { return fresh_token_locked(); });
+}
+
+namespace {
+std::optional<CopilotToken> fresh_token_locked() {
+    auto loaded = store().with([](CredsFile&) { return load_unlocked(); });
     if (!loaded || loaded->github.access_token.empty()) return std::nullopt;
 
     const bool force = g_force_refresh.exchange(false);
@@ -536,9 +556,8 @@ std::optional<CopilotToken> fresh_token() {
     // re-read the peer's freshly-saved token.
     auth::CrossProcessFileLock xlock(creds_path());
     if (xlock.held() && !force) {
-        std::scoped_lock lk(store_mutex());
-        if (auto disk = load_unlocked();
-            disk && disk->proxy.valid()
+        auto disk = store().with([](CredsFile&) { return load_unlocked(); });
+        if (disk && disk->proxy.valid()
             && !disk->proxy.expired(/*skew_ms=*/5 * 60 * 1000)) {
             return disk->proxy;   // a peer refreshed while we waited
         }
@@ -547,24 +566,23 @@ std::optional<CopilotToken> fresh_token() {
     auto exchanged = exchange(loaded->github);
     if (!exchanged) return std::nullopt;
 
-    std::scoped_lock lk(store_mutex());
-    Stored s = *loaded;
-    if (auto cur = load_unlocked()) s.github = cur->github;   // adopt newest ghu_
-    s.proxy = *exchanged;
-    save_unlocked(s);
+    store().with([](CredsFile&, Stored s) {
+        if (auto cur = load_unlocked()) s.github = cur->github;   // adopt newest ghu_
+        (void)save_unlocked(s);
+    }, Stored{loaded->github, *exchanged});
     return *exchanged;
 }
+} // namespace
 
 Entitlement account_entitlement() {
     // Short in-process cache: the picker may call this repeatedly while open.
-    static std::mutex mu;
-    static Entitlement cached;
-    static std::int64_t fetched_at = 0;
-    {
-        std::scoped_lock lk(mu);
-        if (cached.known && now_ms_impl() - fetched_at < 5 * 60 * 1000)
-            return cached;
-    }
+    struct Cached { Entitlement e; std::int64_t fetched_at = 0; };
+    static maya::guarded<Cached> cache;
+    if (auto hit = cache.read([](const Cached& c) -> std::optional<Entitlement> {
+            if (c.e.known && now_ms_impl() - c.fetched_at < 5 * 60 * 1000) return c.e;
+            return std::nullopt;
+        }))
+        return *hit;
     Entitlement e;   // known=false by default → permissive fallback
     auto gh = load_github_token();
     if (!gh) return e;
@@ -599,9 +617,10 @@ Entitlement account_entitlement() {
         e.known = true;
     } catch (...) { return Entitlement{}; }
 
-    std::scoped_lock lk(mu);
-    cached = e;
-    fetched_at = now_ms_impl();
+    cache.with([](Cached& c, Entitlement fresh) {
+        c.e = std::move(fresh);
+        c.fetched_at = now_ms_impl();
+    }, e);
     return e;
 }
 
@@ -626,19 +645,28 @@ std::int64_t jwt_exp_ms(const std::string& jwt) {
     return 0;
 }
 
-std::mutex& auto_mu() { static std::mutex m; return m; }
-AutoSession& auto_cache() { static AutoSession s; return s; }
+// The Auto session cache and its failure backoff. auto_session() holds this
+// across its network call on purpose, so concurrent turns share one probe.
+// Lock order: auto, then fresh_token's refresh lane, then the creds store.
+struct AutoState {
+    AutoSession  cache;
+    std::int64_t failed_until_ms = 0;   // 0 = no backoff armed
+};
+maya::guarded<AutoState>& auto_state() { static maya::guarded<AutoState> s; return s; }
+
+std::optional<AutoSession> auto_session_locked(AutoState& st);
 } // namespace
 
-// Guarded by auto_mu(), like auto_cache(). 0 = no backoff armed.
-std::int64_t& auto_failed_until_ms() { static std::int64_t v = 0; return v; }
-
 std::optional<AutoSession> auto_session() {
-    std::scoped_lock lk(auto_mu());
-    if (auto_cache().valid()) return auto_cache();
+    return auto_state().with([](AutoState& st) { return auto_session_locked(st); });
+}
+
+namespace {
+std::optional<AutoSession> auto_session_locked(AutoState& st) {
+    if (st.cache.valid()) return st.cache;
 
     // NEGATIVE CACHE. Everything below is blocking network I/O held under
-    // auto_mu(), and a FAILED attempt used to cache nothing — so an account
+    // the auto lock, and a FAILED attempt used to cache nothing — so an account
     // that can't open an Auto session (no entitlement, org policy, a flaky
     // 5xx) re-dialled /models/session on EVERY turn, and every turn paid a
     // full TLS handshake + round-trip before the first token. That is the
@@ -650,11 +678,11 @@ std::optional<AutoSession> auto_session() {
     // waits out a blip recovers without restarting. invalidate_auto_session()
     // clears it, so an explicit account switch or a 401 retry re-probes at once.
     const auto now = CopilotToken::now_ms();
-    if (now < auto_failed_until_ms()) return std::nullopt;
+    if (now < st.failed_until_ms) return std::nullopt;
     constexpr std::int64_t kBackoffMs = 60'000;
     // Any early return below is a failure; arm the backoff up front so no
     // path can forget it.
-    auto_failed_until_ms() = now + kBackoffMs;
+    st.failed_until_ms = now + kBackoffMs;
 
     auto tok = fresh_token();
     if (!tok || !tok->chat_enabled) {
@@ -703,22 +731,20 @@ std::optional<AutoSession> auto_session() {
             return std::nullopt;
         }
         s.expires_at_ms = jwt_exp_ms(s.session_token);
-        auto_cache() = s;
-        auto_failed_until_ms() = 0;   // succeeded — disarm the backoff
+        st.cache = s;
+        st.failed_until_ms = 0;   // succeeded — disarm the backoff
         return s;
     } catch (const std::exception& e) {
         AGT_LOG(Auth, Warn, "copilot.auto_session.parse", "err={}", e.what());
         return std::nullopt;
     } catch (...) { return std::nullopt; }
 }
+} // namespace
 
 void invalidate_auto_session() {
-    std::scoped_lock lk(auto_mu());
-    auto_cache() = AutoSession{};
-    // Also clear the negative cache: an explicit invalidation (account switch,
-    // 401 retry) is a statement that the world changed, so re-probe at once
-    // rather than serving a stale "this account can't" for another minute.
-    auto_failed_until_ms() = 0;
+    // Also clears the negative cache: an explicit invalidation (account
+    // switch, 401 retry) means the world changed, so re-probe at once.
+    auto_state().with([](AutoState& st) { st = {}; });
 }
 
 } // namespace agentty::provider::copilot

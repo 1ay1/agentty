@@ -83,22 +83,7 @@ MAYA_SENDABLE(agentty::ImageContent);
 // Opting in the pointer, not the token: the shared_ptr is what crosses.
 MAYA_SENDABLE(agentty::http::CancelTokenPtr);
 
-// provider::Selection carries `const ProviderPreset* row`, and Sendable
-// refuses raw pointers — "may point at memory another thread frees" — which
-// is the right default. Here it can't: the pointer only ever aims into
-// `kProviders`, an `inline constexpr std::array` in registry.hpp, so the
-// target has static storage duration and outlives every thread. The type's
-// own comment already made that promise ("static storage, never dangles");
-// this is where jaal is told.
-//
-// The pointer is why Selection exists in this shape: identity and endpoint
-// are orthogonal, and re-deriving identity from `openai_endpoint.label` broke
-// custom hosts, because pointing a provider at a custom base URL overwrites
-// the label. Carrying the row makes identity a value.
-//
-// Not Frozen — nothing needs it to be, and the endpoint strings are mutable
-// through a non-const Selection.
-MAYA_SENDABLE(agentty::provider::Selection);
+// provider::Selection is opted in next to its definition (selection.hpp).
 
 // ── the message tree, as jaal routes it ───────────────────────────────
 // Msg is a variant of 23 DOMAIN variants, not 231 leaves — agentty grouped

@@ -11,7 +11,6 @@
 #include "agentty/domain/bundled_catalog.hpp"
 
 #include <algorithm>
-#include <mutex>
 #include <set>
 #include <string>
 
@@ -23,6 +22,8 @@
 #include "agentty/provider/responses/responses.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
+
+#include <maya/runtime.hpp>
 
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"
@@ -62,8 +63,8 @@ std::vector<std::pair<std::string, std::string>> copilot_headers() {
     };
 }
 
-std::vector<ModelInfo>& models_cache() { static std::vector<ModelInfo> c; return c; }
-std::mutex& models_mu() { static std::mutex m; return m; }
+using Models = std::vector<ModelInfo>;
+maya::guarded<Models>& models_cache() { static maya::guarded<Models> c; return c; }
 
 } // namespace
 
@@ -133,18 +134,6 @@ bool auto_chat_compatible(const std::string& id) {
     return false;
 }
 
-// Models we have OBSERVED to reject /chat/completions. Learned, not baked:
-// a 400 unsupported_api_for_model on the chat path records the model here so
-// the next turn goes straight to /responses.
-std::mutex& responses_only_mu() { static std::mutex m; return m; }
-std::set<std::string>& responses_only_set() {
-    static std::set<std::string> s;
-    return s;
-}
-[[nodiscard]] bool is_responses_only(const std::string& model) {
-    std::scoped_lock lk(responses_only_mu());
-    return responses_only_set().count(model) > 0;
-}
 
 // Which concrete model will the Auto session stream?
 //
@@ -435,10 +424,8 @@ static std::vector<ModelInfo> bundled_models() {
 }
 
 std::vector<ModelInfo> list_models() {
-    {
-        std::lock_guard<std::mutex> lk(models_mu());
-        if (!models_cache().empty()) return models_cache();
-    }
+    if (auto hit = models_cache().read([](const Models& c) { return c; }); !hit.empty())
+        return hit;
     auto tok = fresh_token();
     if (!tok || !tok->chat_enabled) {
         // The "no models / only stale models" report: the live catalog was
@@ -637,8 +624,7 @@ std::vector<ModelInfo> list_models() {
     out.reserve(rows.size());
     for (auto& r : rows) out.push_back(std::move(r.info));
 
-    std::lock_guard<std::mutex> lk(models_mu());
-    models_cache() = out;
+    models_cache().with([](Models& c, Models fresh) { c = std::move(fresh); }, out);
     return out;
 }
 
@@ -651,8 +637,6 @@ std::string default_model() {
     return ms.empty() ? std::string{"gpt-4o"} : ms.front().id.value;
 }
 
-// Drop the cached catalog so the next list_models() re-ranks with freshly
-// learned support (called after a turn records a 400/200 outcome).
 // ── Dialect selection (public; see provider.hpp for the measured table) ──
 bool prefers_responses_dialect(const std::string& model) {
     // Copilot no longer owns this answer. It was the FIRST mixed-dialect host,
@@ -663,16 +647,14 @@ bool prefers_responses_dialect(const std::string& model) {
     // row shipped, just hidden in a function instead of a field.
     //
     // The shared predicate knows the model families; what remains genuinely
-    // Copilot-specific is the RUNTIME fact that this account's chat endpoint
-    // rejected a model (learned from a live 400), so that is OR-ed on top.
+    // Copilot-specific is the families its chat endpoint rejects, OR-ed on top.
     if (chat_dialect_unsupported(model)) return true;
     return dialect_for("copilot", model) == Dialect::Responses;
 }
 
 bool chat_dialect_unsupported(const std::string& model) {
-    // Learned at runtime (a 400 unsupported_api_for_model on the chat path)
-    // OR known by family: mai-code-* has never accepted /chat/completions.
-    return is_responses_only(model) || !auto_chat_compatible(model);
+    // Known by family: mai-code-* has never accepted /chat/completions.
+    return !auto_chat_compatible(model);
 }
 
 std::string pick_auto_model_for_test(
@@ -686,8 +668,7 @@ std::string pick_auto_model_for_test(
 }
 
 void invalidate_model_cache() {
-    std::lock_guard<std::mutex> lk(models_mu());
-    models_cache().clear();
+    models_cache().with([](Models& c) { c.clear(); });
 }
 
 } // namespace agentty::provider::copilot

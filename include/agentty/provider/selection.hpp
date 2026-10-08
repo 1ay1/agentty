@@ -23,6 +23,8 @@
 #include "agentty/provider/openai/endpoint.hpp"
 #include "agentty/provider/registry.hpp"
 
+#include <maya/runtime.hpp>
+
 namespace agentty::provider {
 
 // `Kind` lives in registry.hpp (the single source of truth for backend
@@ -280,3 +282,7 @@ void prewarm_active_provider();
 }
 
 } // namespace agentty::provider
+
+// Selection is plain data plus `row`, which only ever points into the
+// constexpr kProviders table (static, immutable). Safe to copy across threads.
+MAYA_SENDABLE(agentty::provider::Selection);

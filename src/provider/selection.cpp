@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cstdlib>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,21 +21,22 @@
 #include "agentty/runtime/fuzzy.hpp"
 #include "agentty/io/http.hpp"
 
+#include <maya/runtime.hpp>
+
 namespace agentty::provider {
 
 namespace {
-Selection  g_active{};
-std::mutex g_active_mu;   // guards g_active across the UI/worker thread split
+// Read by the UI thread and by workers.
+maya::guarded<Selection>& g_active() { static maya::guarded<Selection> s; return s; }
 
-std::string g_auth_header;         // --auth-header override, "" = Bearer
-std::mutex  g_auth_header_mu;      // same UI/worker split as g_active
+// --auth-header override, "" = Bearer.
+maya::guarded<std::string>& g_auth_header() { static maya::guarded<std::string> h; return h; }
 
-// Persist-on-success: the CLI custom-host spec awaiting proof (empty =
-// none). Written once at startup (main thread, pre-UI), consumed on the
-// UI thread by the ModelsLoaded reducer — the mutex covers the overlap.
-std::string g_unproven_spec;
-std::string g_unproven_model;
-std::mutex  g_unproven_mu;
+// Persist-on-success: the CLI custom-host spec awaiting proof (empty spec =
+// none). Written once at startup, consumed on the UI thread by the
+// ModelsLoaded reducer.
+struct Unproven { std::string spec; std::string model; };
+maya::guarded<Unproven>& g_unproven() { static maya::guarded<Unproven> u; return u; }
 
 std::string env_or_empty(std::string_view name) {
     if (name.empty()) return {};
@@ -59,31 +59,30 @@ std::vector<ModelInfo> bundled_models_for(std::string_view label) {
 } // namespace
 
 void set_unproven_spec(std::string spec, std::string model_recall) {
-    std::lock_guard<std::mutex> lk(g_unproven_mu);
-    g_unproven_spec  = std::move(spec);
-    g_unproven_model = std::move(model_recall);
+    g_unproven().with([](Unproven& u, std::string sp, std::string m) {
+        u.spec  = std::move(sp);
+        u.model = std::move(m);
+    }, std::move(spec), std::move(model_recall));
 }
 
 std::optional<std::pair<std::string, std::string>>
 take_unproven_spec(std::string_view spec_now) {
-    std::lock_guard<std::mutex> lk(g_unproven_mu);
-    if (g_unproven_spec.empty() || g_unproven_spec != spec_now)
-        return std::nullopt;
-    auto out = std::make_pair(std::move(g_unproven_spec),
-                              std::move(g_unproven_model));
-    g_unproven_spec.clear();
-    g_unproven_model.clear();
-    return out;
+    return g_unproven().with([](Unproven& u, std::string now)
+            -> std::optional<std::pair<std::string, std::string>> {
+        if (u.spec.empty() || u.spec != now) return std::nullopt;
+        auto out = std::make_pair(std::move(u.spec), std::move(u.model));
+        u = {};
+        return out;
+    }, std::string{spec_now});
 }
 
 void set_custom_auth_header(std::string name) {
-    std::lock_guard lk(g_auth_header_mu);
-    g_auth_header = std::move(name);
+    g_auth_header().with([](std::string& h, std::string n) { h = std::move(n); },
+                         std::move(name));
 }
 
 std::string custom_auth_header() {
-    std::lock_guard lk(g_auth_header_mu);
-    return g_auth_header;
+    return g_auth_header().read([](const std::string& h) { return h; });
 }
 
 Selection parse_selection(std::string_view spec) {
@@ -231,13 +230,12 @@ void select(Selection s) {
                       : std::string{"-"},
             s.kind == Kind::ExternalAcp ? s.acp_agent_id : std::string{"-"});
 
-    std::lock_guard lk(g_active_mu);
-    g_active = std::move(s);
+    g_active().with([](Selection& a, Selection next) { a = std::move(next); }, std::move(s));
 }
 
 Selection active() {
-    std::lock_guard lk(g_active_mu);
-    return g_active;   // snapshot copy — see header for the race it closes
+    // Snapshot copy; see header for the race it closes.
+    return g_active().read([](const Selection& a) { return a; });
 }
 
 std::string Selection::catalog_id() const {
