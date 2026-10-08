@@ -41,23 +41,8 @@
 // any guarded value can include. The ones below need heavier headers, so
 // they live with the Msg tree that carries them.
 
-// ImageContent owns its bytes (LazyBytes) and a shared base64 cell, and
-// LazyBytes owns a content-addressed Source plus the bytes it resolves to.
-// Moving either to another thread is safe: every lazily-filled slot is
-// written exactly once under std::call_once and read through an acquire load
-// after, so a thread either runs the fill or waits for it and then sees the
-// finished bytes. (That discipline is not incidental — jaal's Sendable found
-// a real race in LazyBytes on its first run against this code, 19 TSan
-// reports to zero, and it is D7's worked example. The fix is what makes
-// these opt-ins honest rather than silencers.)
-//
-// Sendable, NOT Frozen. Frozen means nothing reachable through a const T can
-// change, and here the memoised bytes and the memoised base64 both can,
-// behind const accessors. That is D8's distinction exactly — safe to MOVE to
-// one other thread, not safe to SHARE between two — so these say Sendable
-// only, and maya::shared<ImageContent> stays correctly impossible.
-MAYA_SENDABLE(agentty::LazyBytes);
-MAYA_SENDABLE(agentty::ImageContent);
+// LazyBytes and ImageContent are opted in next to ImageContent
+// (domain/conversation.hpp), so the io layer can queue them too.
 
 
 // http::CancelToken is a shared mutable object, and Sendable refuses

@@ -22,6 +22,7 @@
 #include "agentty/domain/smart_mode.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/util/base64.hpp"
+#include "agentty/util/sendable.hpp"
 
 namespace agentty {
 
@@ -1136,3 +1137,21 @@ struct PendingPermission {
 };
 
 } // namespace agentty
+
+// ImageContent owns its bytes (LazyBytes) and a shared base64 cell, and
+// LazyBytes owns a content-addressed Source plus the bytes it resolves to.
+// Moving either to another thread is safe: every lazily-filled slot is
+// written exactly once under std::call_once and read through an acquire load
+// after, so a thread either runs the fill or waits for it and then sees the
+// finished bytes. (That discipline is not incidental — jaal's Sendable found
+// a real race in LazyBytes on its first run against this code, 19 TSan
+// reports to zero, and it is D7's worked example. The fix is what makes
+// these opt-ins honest rather than silencers.)
+//
+// Sendable, NOT Frozen. Frozen means nothing reachable through a const T can
+// change, and here the memoised bytes and the memoised base64 both can,
+// behind const accessors. That is D8's distinction exactly — safe to MOVE to
+// one other thread, not safe to SHARE between two — so these say Sendable
+// only, and maya::shared<ImageContent> stays correctly impossible.
+MAYA_SENDABLE(agentty::LazyBytes);
+MAYA_SENDABLE(agentty::ImageContent);

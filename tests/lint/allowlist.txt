@@ -76,12 +76,10 @@ io/tls.cpp: const_cast
 # ── Persistence and credentials ──────────────────────────────────────────
 # Not reducer code: these run on a worker a task already put them on, or on
 # CLI paths with no loop at all.
-# persistence: two kinds of mutex remain, both deliberate.
-#   * AsyncWriter's queue lock + condition_variable: the drain worker (a
-#     util::WorkerGroup job) sleeps on the cv until a save is queued.
-#   * settings_mu / thread_index_mu: the in-process half of SharedFile, which
-#     pairs each with a cross-process file lock (io/shared_file.hpp).
-# The settings baseline and the id generator are maya::guarded.
+# persistence: settings_mu / thread_index_mu are the in-process half of
+# SharedFile, which pairs each with a cross-process file lock
+# (io/shared_file.hpp). The async writer, the settings baseline and the id
+# generator are maya::guarded.
 io/persistence.cpp: mutex
 # The cross-process critical section. The mutex IS the point: it closes the
 # in-process half of the race that the file lock cannot (jaal's file_lock

@@ -8,7 +8,6 @@
 
 #include "agentty/util/sendable.hpp"   // maya::guarded + the json opt-in
 #include <atomic>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -2091,19 +2090,35 @@ static bool save_tail_sync(const SaveJob& job) {
 // because the reducer's Quit handler issues a final save_thread()
 // before maya returns; we wait for the queue to drain inside
 // flush_and_stop() which `main` calls right after maya::run returns.
-struct AsyncWriter {
-    std::mutex                               mu;
-    std::condition_variable                  cv;
+// Everything the reducer and the drain worker share. Plain data, so it lives
+// in a guarded; the worker sleeps on it with wait_with.
+struct WriterState {
     std::unordered_map<std::string, SaveJob> pending;
-    // Per-thread knowledge of the log, owned under `mu`. The reducer reads
-    // it to build a tail-only job; the worker writes it after a verified
-    // save. Dropped on delete, and on any failure.
+    // Per-thread knowledge of the log. The reducer reads it to build a
+    // tail-only job; the worker writes it after a verified save. Dropped on
+    // delete, and on any failure.
     std::unordered_map<std::string, LogState> known;
-    bool                                     stopping = false;
-    bool                                     started  = false;
-    // The drain worker: a jaal-backed group, joined with no deadline on
-    // stop so every queued save lands. Recreated if saves arrive again.
-    std::unique_ptr<util::WorkerGroup>       worker;
+    // Last (title, updated_at) written to index.json per thread.
+    std::unordered_map<std::string, std::string> indexed;
+    std::string in_flight;
+    bool        stopping = false;
+    bool        started  = false;
+};
+
+maya::guarded<WriterState>& async_writer_state() {
+    static maya::guarded<WriterState> s;
+    return s;
+}
+
+struct AsyncWriter {
+    maya::guarded<WriterState>& st = async_writer_state();
+
+    // The drain worker: a jaal-backed group, joined with no deadline on stop
+    // so every queued save lands. Recreated if saves arrive again. Its own
+    // lock, taken before `st` and never inside it, so stop() can wait for
+    // run() (which only takes `st`) without a cycle.
+    struct Worker { std::optional<util::WorkerGroup> group; };
+    maya::guarded<Worker> worker;
 
     // Build the job on the CALLER's thread, copying only what changed.
     // Fingerprinting is one pass of hashing with no allocation or I/O —
@@ -2115,18 +2130,22 @@ struct AsyncWriter {
         for (const auto& m : t.messages)
             if (!m.smart_routing) fps.push_back(message_fingerprint(m));
 
-        std::lock_guard<std::mutex> lk(mu);
-        const std::string& key = t.id.value;
-
         // Diff against what is CONFIRMED on disk. If a save for this thread
         // is queued or mid-write, its outcome isn't known yet: a tail built
         // on top of it would be wrong if it fails. That case is rare (saves
         // are one per round, a tail write takes milliseconds), so just send
         // the whole thread then — exactly the old behaviour.
-        const std::vector<std::uint64_t>* base = nullptr;
-        const bool busy = pending.contains(key) || in_flight_ == key;
-        if (!busy)
-            if (auto k = known.find(key); k != known.end()) base = &k->second.fps;
+        //
+        // The base is copied out and the job built unlocked; the decision
+        // is re-checked when the job lands, below.
+        const std::string key = t.id.value;
+        auto base = st.read([](const WriterState& s, std::string k)
+                                -> std::optional<std::vector<std::uint64_t>> {
+            if (s.pending.contains(k) || s.in_flight == k) return std::nullopt;
+            auto it = s.known.find(k);
+            if (it == s.known.end()) return std::nullopt;
+            return it->second.fps;
+        }, key);
 
         SaveJob job;
         // HEADER ONLY. `job.meta = t; job.meta.messages.clear();` deep-copied
@@ -2155,120 +2174,78 @@ struct AsyncWriter {
                 if (i++ >= from) job.tail.push_back(m);
             }
         }
-        pending.insert_or_assign(key, std::move(job));
-        if (!started) start_locked();
-        cv.notify_one();
+
+        // A tail job is only valid against the base it was diffed on. If
+        // that moved while we built it (a save landed, or one got queued),
+        // send the whole thread instead. Rare: saves are once per round.
+        const auto start = st.with([](WriterState& s, std::string k, SaveJob j,
+                                      std::optional<std::vector<std::uint64_t>> b) {
+            if (!j.full) {
+                auto it = s.known.find(k);
+                const bool still = !s.pending.contains(k) && s.in_flight != k
+                                && it != s.known.end() && b && it->second.fps == *b;
+                if (!still) return std::optional<bool>{};   // rebuild as full
+            }
+            s.pending.insert_or_assign(k, std::move(j));
+            if (s.started) return std::optional<bool>{false};
+            s.started = true;
+            return std::optional<bool>{true};
+        }, key, std::move(job), std::move(base));
+        if (!start) {
+            // Raced a landing save: redo as a full job.
+            SaveJob full;
+            full.meta.id                = t.id;
+            full.meta.title             = t.title;
+            full.meta.forked_from       = t.forked_from;
+            full.meta.rag_mode_override = t.rag_mode_override;
+            full.meta.created_at        = t.created_at;
+            full.meta.updated_at        = t.updated_at;
+            full.meta.compactions       = t.compactions;
+            full.fps  = std::move(fps);
+            full.full = t;
+            const bool s2 = st.with([](WriterState& s, std::string k, SaveJob j) {
+                s.pending.insert_or_assign(k, std::move(j));
+                if (s.started) return false;
+                s.started = true;
+                return true;
+            }, key, std::move(full));
+            if (s2) start_worker();
+            return;
+        }
+        if (*start) start_worker();
     }
 
     void forget(const std::string& key) {
-        std::lock_guard<std::mutex> lk(mu);
-        known.erase(key);
+        st.with([](WriterState& s, std::string k) { s.known.erase(k); }, key);
     }
 
     void flush_and_stop() {
-        std::unique_ptr<util::WorkerGroup> to_join;
-        {
-            std::lock_guard<std::mutex> lk(mu);
-            stopping = true;
-            // Hand the worker out under the lock so a concurrent enqueue()
-            // can't observe a half-stopped state, and join outside the lock.
-            // run() drains every queued save before it sees `stopping` and
-            // exits, so nothing enqueued before this call is dropped.
-            started = false;
-            to_join = std::move(worker);
-        }
-        cv.notify_one();
-        if (to_join) to_join->stop();
+        // Take the worker under its own lock, mark stopping (which wakes
+        // run()), and join outside both. run() drains every queued save
+        // before it sees `stopping` and exits, so nothing enqueued before
+        // this call is dropped.
+        // Lock order: worker, then st. stop() waits for run(), which only
+        // takes st, so holding the worker lock across it is safe.
+        worker.with([](Worker& w) {
+            async_writer_state().with([](WriterState& s) { s.stopping = true; s.started = false; });
+            if (w.group) w.group->stop();
+            w.group.reset();
+        });
     }
 
     ~AsyncWriter() { flush_and_stop(); }
 
 private:
-    void start_locked() {
-        started = true;
-        worker = std::make_unique<util::WorkerGroup>("persistence.async_writer");
-        worker->post([this] { run(); });
+    void start_worker() {
+        worker.with([](Worker& w) {
+            w.group.emplace("persistence.async_writer");
+            w.group->post([] { run(); });
+        });
     }
 
-    void run() {
-        for (;;) {
-            SaveJob next;
-            std::string key;
-            {
-                std::unique_lock<std::mutex> lk(mu);
-                cv.wait(lk, [this] { return !pending.empty() || stopping; });
-                // Drain-then-stop: even when `stopping` is set we keep
-                // popping until `pending` is empty, so the final
-                // snapshot the Quit reducer enqueued always lands.
-                if (pending.empty()) {
-                    if (stopping) return;
-                    continue;
-                }
-                auto it = pending.begin();
-                key  = it->first;
-                next = std::move(it->second);
-                pending.erase(it);
-                // Marks the key busy so enqueue() won't build a tail on an
-                // outcome it can't see yet. `known` is only set after the
-                // write is verified, below.
-                in_flight_ = key;
-            }
-            // Run outside the lock so concurrent enqueue() calls don't
-            // block on the (potentially slow) fsync.
-            bool ok = false;
-            try {
-                if (!next.full) {
-                    ok = save_tail_sync(next);
-                    if (!ok) {
-                        // The tail write failed partway. The head before
-                        // `from` is the confirmed, verified state (no other
-                        // job for this key can have run in between), so
-                        // rebuild the whole thread from it and do a full
-                        // write, which also repairs whatever the tail left.
-                        if (auto log = ThreadLog::open(next.meta.id);
-                            log && log->size() >= next.from) {
-                            Thread t = next.meta;
-                            t.messages = log->range(0, next.from);
-                            if (t.messages.size() == next.from) {
-                                for (auto& m : next.tail) t.messages.push_back(std::move(m));
-                                ok = save_thread_sync(t);
-                            }
-                        }
-                        // The head is gone too (log emptied or replaced
-                        // behind our back). This job only carries the
-                        // tail, so it can't be written whole. Dropping
-                        // `known` below makes the NEXT save full, which
-                        // heals it; the reducer saves every round and on
-                        // quit, so the gap is one round at most.
-                        if (!ok)
-                            AGT_LOG(Persist, Error, "thread.save",
-                                    "tail save failed and log head unreadable "
-                                    "id={} from={} — next save will be full",
-                                    next.meta.id.value, next.from);
-                    }
-                } else {
-                    ok = save_thread_sync(*next.full);
-                }
-                // The picker index only needs refreshing when what it
-                // shows changes (title, timestamps) or at the first save.
-                // It is a read-modify-write of one JSON file covering every
-                // thread, so doing it every round was pure waste.
-                if (ok && !next.full) maybe_reindex(next.meta);
-            }
-            catch (const std::exception& e) {
-                // best-effort, same policy as the sync path
-                util::dbglog("persistence.async_save", e.what());
-            }
-            catch (...) { util::dbglog("persistence.async_save", "non-std exception"); }
+    struct Next { std::string key; SaveJob job; };
 
-            std::lock_guard<std::mutex> lk(mu);
-            in_flight_.clear();
-            if (!ok) known.erase(key);
-            else     known[key].fps = std::move(next.fps);
-            if (ok && next.full) indexed_[key] = index_key(next.full->title,
-                                                            next.full->updated_at);
-        }
-    }
+    static void run();
 
     // Title + updated_at, the fields the picker index holds. updated_at is
     // second-resolution on disk, so compare at that grain.
@@ -2279,25 +2256,103 @@ private:
                 up.time_since_epoch()).count());
     }
 
-    void maybe_reindex(const Thread& meta) {
-        const std::string k = index_key(meta.title, meta.updated_at);
-        {
-            std::lock_guard<std::mutex> lk(mu);
-            auto it = indexed_.find(meta.id.value);
-            if (it != indexed_.end() && it->second == k) return;
-            indexed_[meta.id.value] = k;
-        }
-        reindex_thread(meta);
-    }
-
-    std::string in_flight_;
-    // Last (title, updated_at) written to index.json per thread.
-    std::unordered_map<std::string, std::string> indexed_;
+    static void maybe_reindex(const Thread& meta);
 };
 
 static AsyncWriter& async_writer() {
     static AsyncWriter w;
     return w;
+}
+
+void AsyncWriter::maybe_reindex(const Thread& meta) {
+    const bool changed = async_writer().st.with(
+        [](WriterState& s, std::string id, std::string k) {
+            auto it = s.indexed.find(id);
+            if (it != s.indexed.end() && it->second == k) return false;
+            s.indexed[id] = k;
+            return true;
+        }, meta.id.value, index_key(meta.title, meta.updated_at));
+    if (changed) reindex_thread(meta);
+}
+
+void AsyncWriter::run() {
+    auto& st = async_writer().st;
+    for (;;) {
+        // Drain-then-stop: even when `stopping` is set we keep popping until
+        // `pending` is empty, so the final snapshot the Quit reducer enqueued
+        // always lands. Marking the key in flight in the same step keeps
+        // enqueue() from building a tail on an outcome it can't see yet.
+        auto taken = st.wait_with(
+            [](const WriterState& s) { return !s.pending.empty() || s.stopping; },
+            [](WriterState& s) -> std::optional<Next> {
+                if (s.pending.empty()) return std::nullopt;
+                auto it = s.pending.begin();
+                Next n{it->first, std::move(it->second)};
+                s.pending.erase(it);
+                s.in_flight = n.key;
+                return n;
+            });
+        if (!taken) return;
+        auto& key  = taken->key;
+        auto& next = taken->job;
+
+        // Run outside the lock so concurrent enqueue() calls don't block on
+        // the (potentially slow) fsync.
+        bool ok = false;
+        try {
+            if (!next.full) {
+                ok = save_tail_sync(next);
+                if (!ok) {
+                    // The tail write failed partway. The head before `from`
+                    // is the confirmed, verified state (no other job for this
+                    // key can have run in between), so rebuild the whole
+                    // thread from it and do a full write, which also repairs
+                    // whatever the tail left.
+                    if (auto log = ThreadLog::open(next.meta.id);
+                        log && log->size() >= next.from) {
+                        Thread t = next.meta;
+                        t.messages = log->range(0, next.from);
+                        if (t.messages.size() == next.from) {
+                            for (auto& m : next.tail) t.messages.push_back(std::move(m));
+                            ok = save_thread_sync(t);
+                        }
+                    }
+                    // The head is gone too (log emptied or replaced behind
+                    // our back). This job only carries the tail, so it can't
+                    // be written whole. Dropping `known` below makes the NEXT
+                    // save full, which heals it; the reducer saves every
+                    // round and on quit, so the gap is one round at most.
+                    if (!ok)
+                        AGT_LOG(Persist, Error, "thread.save",
+                                "tail save failed and log head unreadable "
+                                "id={} from={} — next save will be full",
+                                next.meta.id.value, next.from);
+                }
+            } else {
+                ok = save_thread_sync(*next.full);
+            }
+            // The picker index only needs refreshing when what it shows
+            // changes (title, timestamps) or at the first save. It is a
+            // read-modify-write of one JSON file covering every thread, so
+            // doing it every round was pure waste.
+            if (ok && !next.full) maybe_reindex(next.meta);
+        }
+        catch (const std::exception& e) {
+            // best-effort, same policy as the sync path
+            util::dbglog("persistence.async_save", e.what());
+        }
+        catch (...) { util::dbglog("persistence.async_save", "non-std exception"); }
+
+        std::optional<std::string> idx;
+        if (ok && next.full) idx = index_key(next.full->title, next.full->updated_at);
+        st.with([](WriterState& s, std::string k, bool good,
+                   std::vector<std::uint64_t> fps, std::optional<std::string> ik) {
+            s.in_flight.clear();
+            if (!good) s.known.erase(k);
+            else       s.known[k].fps = std::move(fps);
+            if (ik) s.indexed[k] = std::move(*ik);
+        }, key, ok, std::move(next.fps), std::move(idx));
+    }
 }
 
 void save_thread(const Thread& t) {
