@@ -4,7 +4,7 @@
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/registry.hpp"
 
-#include <mutex>
+#include <maya/runtime.hpp>
 #include <stdexcept>
 #include <variant>
 
@@ -12,10 +12,17 @@ namespace agentty::app {
 
 namespace {
 Deps* g_deps = nullptr;
-// Guards Deps::auth across the UI/worker thread split (same reason
-// provider::g_active has its lock): update_auth / switch_provider
-// move-assign on the UI thread while worker tasks (fetch_models) read.
-std::mutex g_auth_mu;
+// The live auth header. Written by the host's InstallAuth effect on the loop
+// thread, read by workers (subagents, the catalog fetch), so it is a
+// guarded value: a copy goes out, nothing reaches it unlocked.
+maya::guarded<auth::AuthHeader>& g_auth() {
+    static maya::guarded<auth::AuthHeader> a;
+    return a;
+}
+}
+
+auth::AuthHeader live_auth() {
+    return g_auth().read([](const auth::AuthHeader& a) { return a; });
 }
 
 const Deps& deps() {
@@ -25,6 +32,8 @@ const Deps& deps() {
 
 void install_deps(Deps d) {
     static Deps storage;
+    g_auth().with([](auth::AuthHeader& a, auth::AuthHeader v) { a = std::move(v); },
+                  d.auth);
     storage = std::move(d);
     g_deps = &storage;
 }
@@ -50,8 +59,7 @@ auth::AuthHeader auth_snapshot(const provider::Selection& sel) {
         return resolved;
     // Empty resolve (oauth_native / local) — fall back to the cached header the
     // login/switch flow installed (used by those providers' transports).
-    std::lock_guard lk(g_auth_mu);
-    return g_deps ? g_deps->auth : auth::AuthHeader{};
+    return live_auth();
 }
 
 // Off the loop (a worker with no Model): resolve against the PUBLISHED copy of
@@ -61,25 +69,9 @@ auth::AuthHeader auth_snapshot() {
 }
 
 void update_auth(auth::AuthHeader auth) {
-    if (!g_deps) return;
-    {
-        std::lock_guard lk(g_auth_mu);
-        g_deps->auth = std::move(auth);
-    }
-    tools::subagent::set_auth(g_deps->auth);
-}
-
-void switch_provider(auth::AuthHeader auth) {
-    // The active provider lives in the Model (Domain::selection); the dispatch
-    // seam publishes it to provider::active() after the fold that changed it.
-    // All this seam does is re-point Deps::auth at the new backend's
-    // credentials so the next request authenticates correctly.
-    if (!g_deps) return;
-    {
-        std::lock_guard lk(g_auth_mu);
-        g_deps->auth = std::move(auth);
-    }
-    tools::subagent::set_auth(g_deps->auth);
+    g_auth().with([](auth::AuthHeader& a, auth::AuthHeader v) { a = std::move(v); },
+                  auth);
+    tools::subagent::set_auth(std::move(auth));
 }
 
 } // namespace agentty::app

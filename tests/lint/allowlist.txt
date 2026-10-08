@@ -164,14 +164,12 @@ workspace/files.cpp: mutex atomic
 workspace/checkpoint.cpp: mutex atomic
 
 # ── Providers: transports and their shared state ─────────────────────────
-provider/prompt.cpp: mutex
 provider/selection.cpp: mutex
 # external_acp_backend: the prompt getter moved to a maya::scope nursery, so
 # the raw worker and its hand-written JoinGuard are gone. The mutex guards the
 # connection map.
 provider/external_acp_backend.cpp: mutex
 provider/acp_provider_adapter.cpp: mutex
-provider/dialect.cpp: mutex
 provider/chatgpt/codex_oauth.cpp: mutex
 provider/chatgpt/provider.cpp: mutex
 provider/chatgpt/responses.cpp: thread_local
@@ -206,10 +204,6 @@ util/teardown.cpp: mutex
 util/logx.cpp: mutex atomic
 
 # ── The runtime ──────────────────────────────────────────────────────────
-# deps.cpp holds the installed seam behind a mutex: it is written once at
-# startup and read from workers (auth_snapshot), which is the one thing a
-# plain global could get wrong.
-runtime/app/deps.cpp: mutex
 # next_tool_exec_seq(): a static atomic counter minted per dispatch, echoed by
 # the worker so the reducer can drop stale results from a superseded turn.
 runtime/app/cmd_factory.cpp: atomic

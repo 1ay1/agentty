@@ -1194,7 +1194,7 @@ TEST_CASE("provider picker: ^D on the ACTIVE provider zeroes live auth") {
     apply_fx(c3);
     CHECK(g_settings.provider_keys.count("openrouter") == 0);
     // The live header was zeroed — the next turn cannot reuse the dead key.
-    CHECK(agentty::auth::is_empty(app::deps().auth));
+    CHECK(agentty::auth::is_empty(app::live_auth()));
 }
 
 // Enter on an ACCOUNT-CAPABLE provider that is already active opens its

@@ -15,10 +15,10 @@
 #include "agentty/domain/sandbox_config.hpp"  // NetMode
 #include "agentty/util/dbglog.hpp"
 
+#include <maya/runtime.hpp>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -58,41 +58,41 @@ namespace {
 // so there's effectively one writer in practice — but the mutex
 // removes "in practice" from the contract.
 [[nodiscard]] std::string read_memory_cached(const std::filesystem::path& p) {
+    // Keyed on plain values (path string, mtime ticks) so they cross into
+    // guarded<T> as Sendable arguments.
     struct Entry {
-        std::filesystem::file_time_type mtime{};
-        std::string                     content;
+        std::int64_t mtime = 0;
+        std::string  content;
     };
-    static std::unordered_map<std::string, Entry> cache;
-    static std::mutex                              mu;
+    using Cache = std::unordered_map<std::string, Entry>;
+    static maya::guarded<Cache> cache;
 
-    const std::string key = p.string();
-    std::error_code   ec;
-    auto              now_mtime = std::filesystem::last_write_time(p, ec);
+    std::string     key = p.string();
+    std::error_code ec;
+    const auto      mt = std::filesystem::last_write_time(p, ec);
 
     if (ec) {
         // File missing / unreadable — drop any previous cache entry so
-        // a re-creation later is observed (the next call will re-stat
-        // and miss into the read path).
-        std::lock_guard lk(mu);
-        cache.erase(key);
+        // a re-creation later is observed.
+        cache.with([](Cache& c, std::string k) { c.erase(k); }, std::move(key));
         return {};
     }
+    const std::int64_t now_mtime = mt.time_since_epoch().count();
 
-    {
-        std::lock_guard lk(mu);
-        auto it = cache.find(key);
-        if (it != cache.end() && it->second.mtime == now_mtime) {
-            return it->second.content;
-        }
-    }
+    if (auto hit = cache.read(
+            [](const Cache& c, std::string k, std::int64_t m) -> std::optional<std::string> {
+                auto it = c.find(k);
+                if (it != c.end() && it->second.mtime == m) return it->second.content;
+                return std::nullopt;
+            },
+            key, now_mtime))
+        return *hit;
 
     // Cache miss or stale — read outside the lock so a slow NFS read
     // doesn't block other paths' cache hits.
     std::string body = read_optional_memory(p);
-    {
-        std::lock_guard lk(mu);
-        cache[key] = Entry{now_mtime, body};
-    }
+    cache.with([](Cache& c, std::string k, Entry e) { c[std::move(k)] = std::move(e); },
+               std::move(key), Entry{now_mtime, body});
     return body;
 }
 

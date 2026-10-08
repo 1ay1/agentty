@@ -2,9 +2,9 @@
 
 #include "agentty/provider/dialect.hpp"
 
+#include <maya/runtime.hpp>
 #include <algorithm>
 #include <cctype>
-#include <mutex>
 #include <set>
 #include <string>
 #include <utility>
@@ -57,12 +57,25 @@ namespace {
 // ── Learned rejections ───────────────────────────────────────────────────
 using Key = std::pair<std::string, std::string>;   // (provider, model)
 
-std::mutex& obs_mu() { static std::mutex m; return m; }
-std::set<Key>& rejected_responses() { static std::set<Key> s; return s; }
-std::set<Key>& rejected_chat()      { static std::set<Key> s; return s; }
+// What each (provider, model) has rejected, learned at runtime.
+struct Observations {
+    std::set<Key> rejected_responses;
+    std::set<Key> rejected_chat;
+};
+maya::guarded<Observations>& observations() {
+    static maya::guarded<Observations> o;
+    return o;
+}
 
-[[nodiscard]] bool contains(std::set<Key>& s, std::string_view p, std::string_view m) {
-    return s.count(Key{std::string{p}, std::string{m}}) > 0;
+// Which of the two the host has rejected for this pair, as plain bools.
+struct Rejected { bool responses = false; bool chat = false; };
+[[nodiscard]] Rejected rejected_for(std::string_view p, std::string_view m) {
+    return observations().read(
+        [](const Observations& o, Key k) {
+            return Rejected{o.rejected_responses.count(k) > 0,
+                            o.rejected_chat.count(k) > 0};
+        },
+        Key{std::string{p}, std::string{m}});
 }
 
 } // namespace
@@ -145,15 +158,14 @@ Dialect dialect_for(std::string_view provider_id, std::string_view model) noexce
 
     // Runtime evidence outranks the prior in BOTH directions.
     {
-        std::scoped_lock lk(obs_mu());
-        if (contains(rejected_responses(), provider_id, model)) {
+        const Rejected r = rejected_for(provider_id, model);
+        if (r.responses) {
             // The host told us no. Honour it even for a "required" model:
             // a failing turn on chat is strictly better than a certain 404,
             // and the user gets an error from the model rather than from us.
             return Dialect::Chat;
         }
-        if (contains(rejected_chat(), provider_id, model))
-            return Dialect::Responses;
+        if (r.chat) return Dialect::Responses;
     }
 
     if (required) return Dialect::Responses;
@@ -242,10 +254,13 @@ void note_dialect_rejected(std::string_view provider_id,
                            std::string_view model, Dialect rejected) noexcept {
     if (model.empty()) return;
     try {
-        std::scoped_lock lk(obs_mu());
-        auto& set = rejected == Dialect::Responses ? rejected_responses()
-                                                   : rejected_chat();
-        set.insert(Key{std::string{provider_id}, std::string{model}});
+        observations().with(
+            [](Observations& o, Key k, bool responses) {
+                (responses ? o.rejected_responses : o.rejected_chat)
+                    .insert(std::move(k));
+            },
+            Key{std::string{provider_id}, std::string{model}},
+            rejected == Dialect::Responses);
     } catch (...) {
         return;   // an allocation failure here must never break a turn.
     }
@@ -255,9 +270,7 @@ void note_dialect_rejected(std::string_view provider_id,
 }
 
 void reset_dialect_observations() noexcept {
-    std::scoped_lock lk(obs_mu());
-    rejected_responses().clear();
-    rejected_chat().clear();
+    observations().with([](Observations& o) { o = Observations{}; });
 }
 
 } // namespace agentty::provider

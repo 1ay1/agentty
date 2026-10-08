@@ -64,11 +64,8 @@ struct Deps {
     // small, user-initiated write, so it runs synchronously in the reducer.
     std::function<void(const std::string&, const std::string&)> write_file;
 
-    // ── Auth context (swapped live by update_auth / switch_provider) ─────
-    // UI-THREAD readers may use this field directly (all writers run on the
-    // UI thread, inside reducers). A WORKER thread must go through
-    // auth_snapshot() instead — a bare read here races the UI thread's
-    // move-assign during a live provider switch / login (torn std::string).
+    // The auth header to start with. install_deps() moves it into the live
+    // store below; read it with live_auth(), replace it with update_auth().
     auth::AuthHeader auth;
 };
 
@@ -96,21 +93,11 @@ void install_deps(Deps d);
 [[nodiscard]] auth::AuthHeader auth_snapshot(const provider::Selection& sel);
 [[nodiscard]] auth::AuthHeader auth_snapshot();
 
-// Live-replace just the auth context after install. Used by the in-app
-// login modal: when the user finishes signing in, the reducer dispatches
-// a Cmd that calls this so the next stream pick up the new bearer
-// without restarting the process. Safe to call from the UI thread —
-// streams in flight cache the header at request-build time.
+// The live auth header: installed by install_deps(), replaced by the host's
+// InstallAuth effect. Safe from any thread (a maya::guarded value); a copy
+// comes out, so a stream holds its own header for its whole life.
+[[nodiscard]] auth::AuthHeader live_auth();
 void update_auth(auth::AuthHeader auth);
-
-// Live-switch the active provider after install. The provider picker
-// dispatches a Cmd that calls this when the user selects a new backend:
-// it installs the new `provider::Selection` (process-global) AND swaps
-// `Deps::auth` to that provider's resolved credentials, so the next
-// stream targets the new backend with the right key. The stream seam
-// itself dispatches on `provider::active()` at call time, so no
-// std::function needs replacing here. Safe to call from the UI thread.
-void switch_provider(auth::AuthHeader auth);
 
 // Convenience: bind a Provider + Store satisfying the concepts.
 template <provider::Provider P, store::Store S>

@@ -322,7 +322,7 @@ std::pair<Model, Cmd> init() {
     // interaction is "oh, it found my key → Enter", not an Anthropic
     // sign-in they never wanted. Plain first-runs (no creds anywhere)
     // keep the classic Anthropic modal — the majority path is unchanged.
-    if (auth::is_empty(deps().auth)
+    if (auth::is_empty(live_auth())
         && m.d.selection.kind == provider::Kind::Anthropic) {
         bool cred_elsewhere = false;
         for (const auto& p : provider::providers()) {
