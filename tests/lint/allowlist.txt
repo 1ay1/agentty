@@ -102,7 +102,12 @@ tool/registry.cpp: mutex atomic
 # status caches.
 tool/mcp_tools_backends.cpp: mutex atomic
 tool/plugin.cpp: mutex atomic
-tool/skills.cpp: mutex atomic
+# skills: mutex/atomic guard the discovery cache. thread_local is the `skill`
+# tool's per-call view of which skills are active (skills::active::Scope) —
+# set by the dispatch from the visible transcript, cleared at scope exit, the
+# same per-worker seam as progress.cpp. It REPLACED a process-global
+# activation set, which drifted from the transcript (wrong after /compact).
+tool/skills.cpp: mutex atomic thread_local
 tool/memory_store.cpp: mutex
 tool/hooks.cpp: mutex
 tool/progress.cpp: thread_local

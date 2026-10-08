@@ -123,7 +123,12 @@ void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling);
                                       // Fingerprint of the definition consent
                                       // was given for; re-checked immediately
                                       // before execute. 0 skips the check.
-                                      std::uint64_t approved_def_hash = 0);
+                                      std::uint64_t approved_def_hash = 0,
+                                      // Skills whose bodies the model can
+                                      // already see, from
+                                      // skills::active_in(visible_text(thread)).
+                                      // The `skill` tool reads it to dedupe.
+                                      std::vector<std::string> active_skills = {});
 
 // Inspect the latest assistant turn and either fire off pending tool calls,
 // request permission, or kick the follow-up stream once tool results are in.

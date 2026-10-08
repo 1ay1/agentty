@@ -299,7 +299,12 @@ Cmd submit_message(Model& m) {
                 ? std::string{}
                 : std::string{user.text.substr(sp + 1)};
             std::string expanded;
-            if (tools::skills::note_activated(sk->name)) {
+            // "Already active" is derived from what the model can see, not
+            // from a session set: after /compact the old body is summarised
+            // away and the skill must be loaded again, which a stored set
+            // got wrong (tools/skills.hpp, "derived from the transcript").
+            if (!tools::skills::is_active_in(sk->name,
+                                             ::agentty::visible_text(m.d.current))) {
                 expanded  = tools::skills::activation_payload(*sk);
                 expanded += "\n\nFollow the skill instructions above";
                 expanded += rest.empty() ? "." : " for this task: " + rest;

@@ -810,29 +810,59 @@ std::string activation_payload(const Skill& s) {
 }
 
 namespace {
-struct Activations {
-    std::mutex mu;
-    std::vector<std::string> names;
-};
-[[nodiscard]] Activations& activations() {
-    static Activations a;
-    return a;
+// The tag activation_payload() emits around a body. Matching the exact
+// opening tag (with the name attribute and closing quote) means a skill
+// whose name is a prefix of another's ("review" vs "review-pr") can't be
+// mistaken for it.
+std::string body_tag_for(std::string_view name) {
+    std::string t = "<skill_content name=\"";
+    t.append(name);
+    t += "\">";
+    return t;
 }
+
+// What the skill tool's dispatch installed for this call. thread_local:
+// one tool runs per worker thread, and the value must not leak to the next.
+thread_local std::vector<std::string> g_active_for_call;
 } // namespace
 
-bool note_activated(std::string_view name) {
-    auto& a = activations();
-    std::lock_guard lk(a.mu);
-    for (const auto& n : a.names) if (n == name) return false;
-    a.names.emplace_back(name);
-    return true;
+bool is_active_in(std::string_view name,
+                  const std::vector<std::string_view>& visible) {
+    const std::string tag = body_tag_for(name);
+    for (auto text : visible)
+        if (text.find(tag) != std::string_view::npos) return true;
+    return false;
 }
 
-void reset_activations() {
-    auto& a = activations();
-    std::lock_guard lk(a.mu);
-    a.names.clear();
+std::vector<std::string>
+active_in(const std::vector<std::string_view>& visible) {
+    // Scan for the tag prefix and read the name out, rather than testing
+    // every installed skill against every message: the transcript is the
+    // smaller side once a session has many skills.
+    static constexpr std::string_view open = "<skill_content name=\"";
+    std::vector<std::string> out;
+    for (auto text : visible) {
+        for (std::size_t at = text.find(open); at != std::string_view::npos;
+             at = text.find(open, at + open.size())) {
+            const std::size_t b = at + open.size();
+            const std::size_t e = text.find('"', b);
+            if (e == std::string_view::npos) break;
+            std::string n{text.substr(b, e - b)};
+            if (std::find(out.begin(), out.end(), n) == out.end())
+                out.push_back(std::move(n));
+        }
+    }
+    return out;
 }
+
+namespace active {
+void set(std::vector<std::string> names) { g_active_for_call = std::move(names); }
+void clear() { g_active_for_call.clear(); }
+bool contains(std::string_view name) {
+    for (const auto& n : g_active_for_call) if (n == name) return true;
+    return false;
+}
+} // namespace active
 
 // ── Effects + trust ────────────────────────────────────────────────────────
 

@@ -1079,6 +1079,43 @@ struct Thread {
     return from_bytes + images * kTokensPerImage;
 }
 
+// The TEXT the model can currently see, as views into the Thread — no copy.
+//
+// The visibility rule is compaction's: the latest CompactionRecord drops
+// messages[0..up_to_index) and its summary stands in for them (a malformed
+// record falls back to the whole transcript, as the wire builder does). This
+// answers "is this string in what the model sees" — the derivation behind
+// skills::active_in — so it returns string_views of every visible message's
+// text and every tool result's output, never a deep copy.
+//
+// Lives here, beside Thread, because it is a fact about a Thread: the TUI's
+// tool dispatch and the ACP server both derive from it, and neither should
+// have to reach into the other's layer. Keep in step with the wire builder
+// (cmd_factory.cpp wire_messages_for_impl); the two state one rule.
+//
+// The views borrow from `t`; keep `t` alive and unmodified while using them.
+[[nodiscard]] inline std::vector<std::string_view> visible_text(const Thread& t) {
+    std::size_t from = 0;
+    std::vector<std::string_view> out;
+    if (!t.compactions.empty()) {
+        const auto& rec = t.compactions.back();
+        if (rec.up_to_index != 0 && rec.up_to_index <= t.messages.size()) {
+            from = rec.up_to_index;
+            out.push_back(rec.summary);
+        }
+    }
+    out.reserve(out.size() + (t.messages.size() - from) * 2);
+    for (std::size_t i = from; i < t.messages.size(); ++i) {
+        const auto& msg = t.messages[i];
+        if (!msg.text.empty()) out.push_back(msg.text);
+        // A skill body arrives as a TOOL RESULT (the `skill` tool's output),
+        // so tool outputs are part of what the model sees, not only text.
+        for (const auto& tc : msg.tool_calls)
+            if (const auto& o = tc.output(); !o.empty()) out.push_back(o);
+    }
+    return out;
+}
+
 // NOTE: the compaction-AWARE estimate lives in cmd_factory as
 // `cmd::estimate_wire_tokens(Thread)`. It scores the substituted wire view
 // (summary in place of the covered prefix) using the same bytes/3.5 +

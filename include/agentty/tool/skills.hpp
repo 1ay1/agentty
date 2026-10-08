@@ -151,15 +151,57 @@ struct Skill {
 // `skill` tool returns.
 [[nodiscard]] std::string activation_payload(const Skill& s);
 
-// ── Activation tracking (spec: deduplicate activations) ──────────────
+// ── Activation: derived from the transcript, not stored ──────────────
 // Once a skill body is in the conversation, re-injecting it doubles the
-// token cost for zero signal. `note_activated` returns true the FIRST
-// time a name is recorded (caller should return the full payload) and
-// false on repeats (caller returns a short already-active sentinel).
-// `reset_activations` clears the set — called on thread swap / new
-// thread / session load, where the old tool_results leave context.
-[[nodiscard]] bool note_activated(std::string_view name);
-void reset_activations();
+// token cost for zero signal, so a second load returns a short "already
+// active" sentinel instead.
+//
+// "Already active" means: a <skill_content name="X"> block is in a message
+// the model can still SEE. That is a fact about the transcript, so it is
+// computed from the transcript — never kept in a separate set.
+//
+// It used to be a process-global set (note_activated / reset_activations),
+// and a set that only approximates the transcript drifts from it:
+//   * after /compact the tool_result holding the body is summarised away,
+//     but the set still said "active", so the model was told the
+//     instructions were "in an earlier tool_result" that no longer existed
+//     and never got them back;
+//   * resuming a thread started the set empty, so a body still in plain
+//     view was injected a second time;
+//   * every thread switch, new thread and fork had to remember to call
+//     reset_activations(), from inside the reducer.
+// Deriving it removes all three: there is nothing to reset, and the answer
+// is whatever the model actually sees.
+//
+// `visible` is the wire-visible messages' text: what the model is sent
+// (the latest compaction applied). Callers build it from the Thread; the
+// skill TOOL, which runs on a worker with no Thread, receives the derived
+// set as part of its dispatch.
+[[nodiscard]] bool is_active_in(std::string_view name,
+                                const std::vector<std::string_view>& visible);
+
+// Every skill name with a body in `visible`, for a caller that needs the
+// whole set at once (the tool dispatch). Same rule as is_active_in.
+[[nodiscard]] std::vector<std::string>
+active_in(const std::vector<std::string_view>& visible);
+
+// The skill tool's view, published per dispatch. The tool runs on a worker
+// thread and cannot read the Thread, so the reducer derives the active set
+// when it dispatches the call and installs it here for that call only
+// (thread-local, scoped — the same seam as tools::progress / cancellation).
+// Not a cache and not cross-call state: a Scope sets it, its destructor
+// clears it, and outside a dispatch it is empty.
+namespace active {
+    void set(std::vector<std::string> names);
+    void clear();
+    [[nodiscard]] bool contains(std::string_view name);
+    struct Scope {
+        explicit Scope(std::vector<std::string> names) { set(std::move(names)); }
+        ~Scope() { clear(); }
+        Scope(const Scope&)            = delete;
+        Scope& operator=(const Scope&) = delete;
+    };
+}  // namespace active
 
 // ── Spec validation (the spec's `skills-ref validate` equivalent) ────
 // Lint one skill against the agentskills.io constraints. Loading stays

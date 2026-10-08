@@ -47,9 +47,6 @@ using maya::overload;
 // Returns the reset_inline Cmd so the caller can batch it with its own
 // commands (delete also kicks a thread-list refresh + a toast).
 [[nodiscard]] Cmd reset_to_fresh_thread(Model& m) {
-    // Skill activations belong to the departing thread's context; the new
-    // thread must be able to re-load any skill from scratch.
-    tools::skills::reset_activations();
     // Drop the whole render cache: every (tid,msg) entry belongs to the
     // thread we're leaving, whose messages will never freeze again (freeze
     // is the only per-entry drop, and it only runs on the CURRENT thread).
@@ -382,8 +379,6 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // and leave the current thread in place.
             m.s.thread_loading = false;
             if (e.thread.id.value.empty()) return Cmd::none();
-            // Old thread's skill activations leave context with it.
-            tools::skills::reset_activations();
             // Smart-Mode per-thread routing state belongs to the departing
             // thread too — same reset as reset_to_fresh_thread (momentum,
             // cascade bias, outcome-feedback signature). Without it the

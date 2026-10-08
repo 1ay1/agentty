@@ -196,7 +196,6 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             //    trivially cheap (nothing to re-emit). rehydrate_frozen on
             //    an ~empty thread is a no-op; reset_inline paints the clean
             //    composer.
-            tools::skills::reset_activations();
             m.ui.view_cache.clear();
             m.d.current = std::move(fork);
             Cmd save_fork = Cmd(SaveThread{m.d.current});

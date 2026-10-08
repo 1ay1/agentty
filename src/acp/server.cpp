@@ -1174,10 +1174,6 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
     Profile session_profile = profile_;
     {
         util::RankedLock lk(session_mtx_);
-        // Skill activations belong to the previous session's context. The
-        // tracker is process-wide, so this is best-effort under concurrent
-        // sessions — worst case a re-activation re-injects (token cost only).
-        tools::skills::reset_activations();
         ThreadId tid = persistence::new_id();
         sid = tid.value;
         Session s;
@@ -1221,8 +1217,6 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
     // the actionable message.
     if (sid.empty())
         throw a::RpcError(a::errc::InvalidParams, "session/load: missing sessionId");
-    // Loaded session = different context; allow skills to re-activate.
-    tools::skills::reset_activations();
 
     Thread thread;
     bool   from_memory = false;
@@ -2051,12 +2045,24 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         // the wait below wakes the instant either happens — it used to poll
         // the future every 50 ms.
         std::stop_source wake;
+        // The skills the model can already see, derived from this session's
+        // visible transcript under thread_mtx (the worker mutates messages),
+        // then handed to the job — the `skill` tool runs there and has no
+        // Thread. Only the skill tool reads it, so only it pays to derive.
+        std::vector<std::string> active_skills;
+        if (tc.name.value == "skill") {
+            util::RankedLock tlk(*sess.thread_mtx);
+            active_skills = tools::skills::active_in(
+                ::agentty::visible_text(sess.thread));
+        }
         auto fut = util::background_pool().submit_isolated(
-            [td, name = tc.name.value, args = tc.args, wake]() mutable {
+            [td, name = tc.name.value, args = tc.args, wake,
+             active_skills = std::move(active_skills)]() mutable {
                 struct Signal {
                     std::stop_source& s;
                     ~Signal() { s.request_stop(); }
                 } on_exit{wake};
+                tools::skills::active::Scope skills_scope{std::move(active_skills)};
                 return tool::DynamicDispatch::execute_with(td, name, args);
             });
         std::optional<std::stop_callback<std::function<void()>>> on_cancel;

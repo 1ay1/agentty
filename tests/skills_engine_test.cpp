@@ -4,7 +4,8 @@
 // (unquoted colons, name/dir mismatch, missing description), optional
 // fields (compatibility / allowed-tools / disable-model-invocation),
 // tier-3 resource enumeration, activation payload shape, activation
-// dedup + reset, catalog filtering, and the read-allowlist gate that
+// derived from the visible transcript (incl. the post-/compact case the old
+// stored set got wrong), catalog filtering, and the read-allowlist gate that
 // lets `read` fetch bundled resources outside the workspace while the
 // write gate stays strict.
 //
@@ -16,6 +17,7 @@
 
 #include "agtest.hpp"
 
+#include "agentty/domain/conversation.hpp"   // Thread, visible_text
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 
@@ -27,6 +29,13 @@
 
 namespace fs = std::filesystem;
 using namespace agentty::tools;
+using agentty::Message;
+using agentty::Role;
+using agentty::Thread;
+using agentty::ToolCallId;
+using agentty::ToolName;
+using agentty::ToolUse;
+using agentty::visible_text;
 
 
 
@@ -186,14 +195,77 @@ TEST_CASE("skills engine") {
         }
     }
 
-    // ── Stage 5: activation dedup + reset ────────────────────────
+    // ── Stage 5: activation is DERIVED from the visible transcript ───
+    //
+    // "Already active" used to be a process-global set (note_activated /
+    // reset_activations). It is now a function of what the model can see.
+    // Each check below is a case the stored set got wrong or needed a
+    // hand-placed reset() for.
     {
-        skills::reset_activations();
-        CHECK(skills::note_activated("alpha") == true);    // first load
-        CHECK(skills::note_activated("alpha") == false);   // dedup
-        CHECK(skills::note_activated("beta") == true);     // independent
-        skills::reset_activations();                       // thread swap
-        CHECK(skills::note_activated("alpha") == true);    // loadable again
+        const auto body = [](const char* n) {
+            return std::string{"<skill_content name=\""} + n + "\">\n...\n</skill_content>";
+        };
+        auto tool_result = [](std::string out) {
+            ToolUse tc;
+            tc.id     = ToolCallId{"call"};
+            tc.name   = ToolName{"skill"};
+            tc.status = ToolUse::Done{.output = std::move(out)};
+            Message a; a.role = Role::Assistant;
+            a.tool_calls.push_back(std::move(tc));
+            return a;
+        };
+
+        // Nothing loaded → nothing active. (No reset() needed first, because
+        // there is no state to reset.)
+        Thread t;
+        CHECK(!skills::is_active_in("alpha", visible_text(t)));
+
+        // A body in a TOOL RESULT is active — that is where the skill tool
+        // puts it, so tool outputs must be part of what is "visible".
+        t.messages.push_back(tool_result(body("alpha")));
+        CHECK(skills::is_active_in("alpha", visible_text(t)));
+        CHECK(!skills::is_active_in("beta", visible_text(t)));   // independent
+
+        // A prefix of another skill's name is NOT a match: the tag includes
+        // the closing quote, so "review" does not light up "review-pr".
+        t.messages.push_back(tool_result(body("review-pr")));
+        CHECK(skills::is_active_in("review-pr", visible_text(t)));
+        CHECK(!skills::is_active_in("review", visible_text(t)));
+
+        // active_in lists each active name once, from tool results and text.
+        {
+            Message u; u.role = Role::User; u.text = body("gamma");   // /gamma expanded
+            t.messages.push_back(std::move(u));
+            auto names = skills::active_in(visible_text(t));
+            CHECK(names.size() == 3);
+        }
+
+        // THE BUG THE STORED SET HAD. After /compact the tool_result holding
+        // "alpha" is summarised away. The old set still said "active", so the
+        // model was told the body was "in an earlier tool_result" that no
+        // longer existed and never got it back. Derived, it is NOT active.
+        {
+            Thread c = t;
+            Thread::CompactionRecord rec;
+            rec.up_to_index = 1;                // drops the alpha tool_result
+            rec.summary     = "the user loaded a skill earlier";
+            c.compactions.push_back(rec);
+            CHECK(!skills::is_active_in("alpha", visible_text(c)));
+            CHECK(skills::is_active_in("review-pr", visible_text(c)));   // still visible
+        }
+
+        // The other half: a thread whose body is still in view needs NO
+        // reset to be correct on resume, and does not get the body twice.
+        // (The old set started empty on resume and re-injected it.)
+        CHECK(skills::is_active_in("review-pr", visible_text(t)));
+
+        // The tool-side view: what the dispatch installs, scoped to one call.
+        {
+            skills::active::Scope s{skills::active_in(visible_text(t))};
+            CHECK(skills::active::contains("alpha"));
+            CHECK(!skills::active::contains("delta"));
+        }
+        CHECK(!skills::active::contains("alpha"));   // cleared at scope exit
     }
 
     // ── Stage 5b: spec lint ───────────────────────────────────

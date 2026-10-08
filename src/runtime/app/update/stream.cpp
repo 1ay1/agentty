@@ -35,6 +35,7 @@
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/spec.hpp"
+#include "agentty/tool/skills.hpp"   // active_in: derived "already active" set
 #include "agentty/tool/tool.hpp"   // DynamicDispatch::needs_permission (speculative dispatch)
 #include <maya/widget/markdown.hpp>
 #include "agentty/tool/util/partial_json.hpp"
@@ -1598,8 +1599,14 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                         auto cancel = active_ctx(m.s.phase)
                             ? active_ctx(m.s.phase)->cancel
                             : http::CancelTokenPtr{};
+                        std::vector<std::string> active_skills;
+                        if (tc2.name.value == "skill")
+                            active_skills = tools::skills::active_in(
+                                ::agentty::visible_text(m.d.current));
                         return cmd::run_tool(tc2.id, tc2.name, tc2.args,
-                                              std::move(cancel), seq);
+                                              std::move(cancel), seq,
+                                              /*approved_def_hash=*/0,
+                                              std::move(active_skills));
                     }
                 }
             }

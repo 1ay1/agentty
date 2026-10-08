@@ -32,6 +32,7 @@
 #endif
 #include "agentty/util/dbglog.hpp"
 #include "agentty/tool/registry.hpp"
+#include "agentty/tool/skills.hpp"   // active_in: derived "already active" set
 #include "agentty/tool/mcp_tools_backends.hpp"   // rag_apply_settings_now
 #include "agentty/mcp/client.hpp"   // plugin_model(), reload_mcp_plugins via registry
 #include "agentty/tool/hooks.hpp"
@@ -1486,7 +1487,8 @@ std::uint64_t next_tool_exec_seq() noexcept {
 
 Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                   http::CancelTokenPtr cancel, std::uint64_t exec_seq,
-                  std::uint64_t approved_def_hash) {
+                  std::uint64_t approved_def_hash,
+                  std::vector<std::string> active_skills) {
     // task_isolated, NOT task: a tool that wedges (e.g. read on a hung NFS
     // mount, bash on a process that won't unblock) must not consume a slot
     // in the shared BG worker pool. With Cmd::task the pool's max workers
@@ -1500,7 +1502,14 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
         [](jaal::Sink<Msg> sink, std::stop_token stop,
            ToolCallId id, ToolName name, nlohmann::json args,
            http::CancelTokenPtr cancel, std::uint64_t exec_seq,
-           std::uint64_t approved_def_hash) {
+           std::uint64_t approved_def_hash,
+           std::vector<std::string> active_skills) {
+            // The skills the model can already see, derived by the reducer
+            // from the visible transcript (::agentty::visible_text). The `skill`
+            // tool reads it to decide "already active"; it has no Thread of
+            // its own on this worker. Scoped to this call only.
+            agentty::tools::skills::active::Scope skills_scope{
+                std::move(active_skills)};
             // Every result this worker sends carries its exec_seq, so the
             // reducer can drop it if the call it was started for is gone.
             auto out = [exec_seq](ToolExecOutput o) {
@@ -1653,7 +1662,8 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
             }
         },
         std::move(id), std::move(tool_name), std::move(args),
-        std::move(cancel), exec_seq, approved_def_hash);
+        std::move(cancel), exec_seq, approved_def_hash,
+        std::move(active_skills));
 }
 
 namespace {
@@ -2063,9 +2073,15 @@ Cmd kick_pending_tools(Model& m) {
                 auto cancel = active_ctx(m.s.phase)
                     ? active_ctx(m.s.phase)->cancel
                     : http::CancelTokenPtr{};
+                // Only the `skill` tool reads the active set, so only it pays
+                // for deriving one (a scan of the visible transcript).
+                std::vector<std::string> active_skills;
+                if (tc.name.value == "skill")
+                    active_skills = tools::skills::active_in(::agentty::visible_text(m.d.current));
                 cmds.push_back(run_tool(tc.id, tc.name, tc.args,
                                         std::move(cancel), seq,
-                                        tc.approved_def_hash));
+                                        tc.approved_def_hash,
+                                        std::move(active_skills)));
 
                 // Tool wall-clock watchdog removed at user request.
                 // Tools now run for as long as their worker takes;

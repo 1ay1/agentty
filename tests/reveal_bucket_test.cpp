@@ -102,11 +102,22 @@ TEST_CASE("reveal bucket: ssh does NOT throttle the typewriter") {
 TEST_CASE("reveal bucket: the Tick still throttles for the wire") {
     // The other half of the contract, and why this is not a revert: the ssh
     // cadence work was right about BANDWIDTH, and that decision stays on the
-    // Tick subscription where it belongs. streaming_tick_period() is
-    // memoised per process, so assert the floor it is built from rather than
-    // trying to flip it mid-run.
-    const auto period = agentty::app::streaming_tick_period();
+    // Tick subscription where it belongs.
+    //
+    // streaming_tick_period used to be memoised per process from getenv, so
+    // this could only assert a floor. It is a pure function of the launch
+    // environment now (Model::Env), so the remote case is just an input.
+    //
+    // Sync support comes from the SAME place reveal_bucket_ms() reads it (the
+    // real terminal), so the two sides of the comparison below describe one
+    // terminal. Hardcoding it would compare a 33 ms tick against the 100 ms
+    // bucket of a terminal with no sync — a pair that can't exist.
+    const bool sync = maya::ansi::env_supports_synchronized_output();
+    agentty::Model::Env local;   local.synchronized_output  = sync;
+    agentty::Model::Env remote;  remote.synchronized_output = sync; remote.remote = true;
+    const auto period = agentty::app::streaming_tick_period(local);
     CHECK(period.count() >= 33);
+    CHECK(agentty::app::streaming_tick_period(remote).count() >= 80);   // the SSH floor
 
     // The tick may be SLOWER than the bucket (the bucket only decides
     // whether a wake yields a new hash). It must never be faster, which

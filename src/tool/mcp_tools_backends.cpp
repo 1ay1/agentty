@@ -298,7 +298,13 @@ public:
             else        err += " — no skills are installed in this workspace";
             return std::nullopt;
         }
-        if (!skills::note_activated(s->name)) {
+        // "Already active" comes from the set the dispatch derived from the
+        // visible transcript (skills::active::Scope, installed by run_tool)
+        // — this runs on a worker and has no Thread of its own. Derived, not
+        // remembered: a body /compact summarised away is not active, so the
+        // model gets it again instead of being pointed at a tool_result that
+        // is no longer there.
+        if (skills::active::contains(s->name)) {
             return "Skill '" + s->name + "' is already active in this "
                    "session — its instructions are in an earlier tool_result. "
                    "Refer to that instead of re-loading.";
