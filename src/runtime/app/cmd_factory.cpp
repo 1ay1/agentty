@@ -2176,7 +2176,7 @@ Cmd kick_pending_tools(Model& m) {
                 note.role = Role::Assistant;
                 note.text = std::move(brk->reason);
                 m.d.current.messages.push_back(std::move(note));
-                deps().save_thread(m.d.current);
+                cmds.push_back(Cmd(SaveThread{m.d.current}));
                 return Cmd::batch(std::move(cmds));
             }
 

@@ -101,12 +101,12 @@ std::pair<Model, Cmd> init() {
     // it was, and the active account is who it was last observed under.
     // Attributing it (rather than dropping it) preserves the user's learned
     // state across the upgrade; the next save drops the bool for good.
+    bool migrated_1m = false;
     if (settings.context_1m_blocked) {
         settings.context_1m_blocked = false;
-        if (detail::entitlement_record_blocked(
+        migrated_1m = detail::entitlement_record_blocked(
                 settings, m.d.auth, domain::entitlement::Fact::Context1M, "anthropic",
-                wire_model_id(settings.model_id.value)))
-            deps().save_settings(settings);
+                wire_model_id(settings.model_id.value));
     }
     // DISCOVERED entitlement: this account 400'd on the context-1m beta in a
     // prior session. Strip the seeded `[1m]` rows up front so the picker
@@ -296,6 +296,9 @@ std::pair<Model, Cmd> init() {
     // Deferred startup Cmds (declared early: the first-run branch below may
     // queue an OpenProviders dispatch).
     std::vector<Cmd> cmds;
+    // The 1M-entitlement migration above changed the record; save it as an
+    // effect like every other settings write.
+    if (migrated_1m) cmds.push_back(Cmd(SaveSettings{m.d.persisted}));
 
     // No credentials installed yet → main() invoked install() with an
     // empty header. Open the login modal so the user can authenticate
