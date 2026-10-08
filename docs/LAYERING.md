@@ -97,24 +97,43 @@ is what keeps the layering honest.
 
 ## How it's enforced
 
-- **layering lint** — fails on `<jaal/` or `jaal::` in agentty's `src/`,
-  `include/` or `tests/`, and on a build reference to jaal's path.
-- **concurrency ban-list** (jaal's `banlist.cmake`) — runs over agentty and
-  over each library submodule. In agentty, the allowlist names the few files
-  that ARE the implementation of a safe type and says why. In a library it
-  should be empty.
-- **elm purity lint** — reducers read only the Model and return effects.
+All are static ctest entries (label `static`), no build needed:
+
+- **layering** — fails on `<jaal/` or `jaal::` in agentty's `src/`,
+  `include/` or `tests/` (tests/lint/layering.cmake).
+- **submodule_runtime** — jaal's concurrency ban-list, TIGHT, over each
+  library's `src/` and `include/` against the library's own
+  `tests/lint/concurrency_allowlist.txt` (tests/lint/submodule_runtime.cmake).
+- **concurrency_banlist_src / _include** — the same ban-list over agentty.
+  The allowlist names the few files that ARE the implementation of a safe
+  type and says why.
+- **elm_purity** — reducers read only the Model and return effects.
+- maya's own `tests/seam.sh` — only `maya/host/` and `maya/runtime.hpp` may
+  depend on jaal, and maya starts no thread of its own.
+
+## The runtimes agentty installs
+
+`tools::util::install_protocol_runtimes()` (src/tool/util/protocol_runtime.cpp)
+runs right after argument parsing, before any subcommand:
+
+| library | interface             | agentty's implementation                      |
+|---------|-----------------------|-----------------------------------------------|
+| mcp-cpp | `mcp::Runtime`        | job = isolated task on a `maya::pool`;        |
+|         | `tools::Executor`     | `parallel_for` = `maya::scope`;               |
+| acp-cpp | `acp::Runtime`        | `sleep_for` = `maya::delay_for`               |
+| rag-cpp | `rag::util::Executor` | `maya::scope` (nests without deadlock)        |
+| maya    | `maya::exec`          | installed by `maya::run` on jaal              |
+
+Each library also ships a small standalone fallback (plain `std::jthread`,
+joined) for programs that install nothing. It is the one place that library
+names a thread, and agentty replaces it at startup.
 
 ## Where it stands
 
-The rule is the target. As of this writing:
-
-- agentty uses jaal directly in about 50 files. The move is mechanical
-  (`jaal::X` → `maya::X`) once maya's runtime header exists.
-- mcp-cpp, acp-cpp and rag-cpp still create threads and take locks
-  internally (mcp-cpp ~17 files, acp-cpp 4, rag-cpp 18). Each moves to the
-  declare-an-interface pattern one subsystem at a time; mcp-cpp's `exec` is
-  already done.
-- claybin has one `thread_local` in its Linux spawn path.
-
-Each step leaves the tree building, and the ban-list allowlists only shrink.
+- agentty → maya → jaal is strict: no jaal include or name in agentty.
+- maya starts no thread of its own.
+- mcp-cpp, acp-cpp, rag-cpp and claybin start no threads of their own. What
+  remains on their allowlists is the standalone fallback and locks/atomics
+  that protect a structure's own state (an engine's waiter table, a cache, a
+  work cursor) — they make a type safe to call from the host's threads and
+  run nothing.
