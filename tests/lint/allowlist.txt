@@ -102,7 +102,7 @@ airgap/airgap.cpp: const_cast
 # this file starts no thread of its own. Its caches are maya::guarded or
 # published; the atomics are two sequence counters.
 tool/mcp_tools_backends.cpp: atomic
-tool/plugin.cpp: mutex atomic
+tool/plugin.cpp: atomic
 # skills: mutex/atomic guard the discovery cache. thread_local is the `skill`
 # tool's per-call view of which skills are active (skills::active::Scope) —
 # set by the dispatch from the visible transcript, cleared at scope exit, the

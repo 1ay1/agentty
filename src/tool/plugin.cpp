@@ -9,6 +9,8 @@
 #include "agentty/config/inventory.hpp"   // kMcpApprovals — the one name
 #include "agentty/auth/auth.hpp"        // CrossProcessFileLock
 
+#include "agentty/util/sendable.hpp"  // json is Sendable
+
 #include <nlohmann/json.hpp>
 
 #include <atomic>
@@ -17,7 +19,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -36,45 +37,25 @@ namespace agentty::tools::plugin {
 
 namespace {
 
-// All config MUTATIONS (add/remove/toggle) serialize behind this mutex. Each
+// All config MUTATIONS (add/remove/toggle) serialize behind one lock. Each
 // mutator is a load→modify→store cycle, and the reducer fires them on
 // DETACHED worker threads (a "disable tool + disable server" pair, or rapid
 // toggles), so without serialization two loads race and the second store
 // clobbers the first's edit (classic lost update).
 //
-// The mutex covers THIS process. It is not enough on its own: two agentty
+// That lock covers THIS process. It is not enough on its own: two agentty
 // instances in one workspace -- a TUI and `agentty plugin add` in another
-// terminal, or two panes -- have separate mutexes and race exactly the same
+// terminal, or two panes -- have separate locks and race exactly the same
 // way. Measured before fixing: 20 of 20 concurrent `plugin add` pairs lost
 // one of the two servers.
 //
-// So a mutator takes BOTH: this mutex against our own threads, then
-// auth::CrossProcessFileLock against other agentty processes. See
-// locked_mutation() below.
-[[nodiscard]] std::mutex& mutation_mutex() {
-    static std::mutex m;
+// So a mutator takes BOTH: mutations().with against our own threads, then
+// auth::CrossProcessFileLock against other agentty processes. See mutate().
+struct Mutations {};
+[[nodiscard]] maya::guarded<Mutations>& mutations() {
+    static maya::guarded<Mutations> m;
     return m;
 }
-
-// Hold both locks for one load→modify→store cycle.
-//
-// Order is fixed (in-process first, then cross-process) and every mutator
-// takes them the same way, so two agentty processes cannot deadlock against
-// each other -- there is only ever one file lock held at a time per cycle.
-//
-// The file lock is BEST-EFFORT by design (see auth.hpp): on a filesystem
-// where it cannot be taken, held() is false and we proceed anyway. That is
-// no worse than before this existed, and store()'s unique-temp + atomic
-// rename still guarantees no torn file -- at worst one side's write wins
-// wholesale, which is the pre-existing behaviour against a hand editor.
-class LockedMutation {
-public:
-    explicit LockedMutation(const fs::path& target)
-        : guard_(mutation_mutex()), file_(target) {}
-private:
-    std::lock_guard<std::mutex>  guard_;
-    auth::CrossProcessFileLock   file_;
-};
 
 // Read an entry's `disabled` flag WITHOUT throwing on a malformed value. A
 // hand-edited `"disabled": "true"` (string, not bool) makes nlohmann's
@@ -270,15 +251,53 @@ bool approve_server(const fs::path& path, const std::string& name) {
     return scope::save_approvals(kMcpApprovalsLeaf, a);
 }
 
+namespace {
+// One load→edit→store cycle under both locks. `edit` gets the parsed doc
+// and returns nullopt to write it back, or a result to stop without writing.
+//
+// Order is fixed (in-process first, then cross-process) and every mutator
+// goes through here, so two agentty processes cannot deadlock against each
+// other -- there is only ever one file lock held at a time per cycle.
+//
+// The file lock is BEST-EFFORT by design (see auth.hpp): on a filesystem
+// where it cannot be taken, held() is false and we proceed anyway. store()'s
+// unique-temp + atomic rename still guarantees no torn file -- at worst one
+// side's write wins wholesale, as against a hand editor.
+enum class Need { Any, Existing };
+using Edit = std::optional<EditResult>;
+
+template <class F, class... Args>
+EditResult mutate(const fs::path& path, Need need, F edit, Args... args) {
+    (void)edit;   // captureless: called as F{} inside the lock
+    return mutations().with([](Mutations&, std::string p, Need n, Args... a) {
+        const fs::path target{p};
+        auth::CrossProcessFileLock file{target};
+        Loaded l = load(target);
+        if (n == Need::Existing && !l.existed) return EditResult::NotFound;
+        if (!l.ok) return EditResult::ParseError;
+        if (auto stop = F{}(l.doc, std::move(a)...)) return *stop;
+        return store(target, l.doc) ? EditResult::Ok : EditResult::IoError;
+    }, path.string(), need, std::move(args)...);
+}
+
+// The servers object (created if absent), and a named entry or null.
+json& servers_of(json& doc) {
+    const char* key = servers_key(doc);
+    if (!doc.contains(key) || !doc[key].is_object()) doc[key] = json::object();
+    return doc[key];
+}
+json* existing_entry(json& doc, const std::string& name) {
+    const char* key = servers_key(doc);
+    if (!doc.contains(key) || !doc[key].is_object() || !doc[key].contains(name))
+        return nullptr;
+    return &doc[key][name];
+}
+} // namespace
+
 EditResult add_server(const fs::path& path, const ServerSpec& spec,
                       bool force) {
-    LockedMutation lk{path};
-    Loaded l = load(path);
-    if (!l.ok) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object())
-        l.doc[key] = json::object();
-    auto& servers = l.doc[key];
+    return mutate(path, Need::Any, [](json& doc, ServerSpec spec, bool force) -> Edit {
+    auto& servers = servers_of(doc);
     if (servers.contains(spec.name) && !force)
         return EditResult::AlreadyExists;
     json entry;
@@ -301,38 +320,30 @@ EditResult add_server(const fs::path& path, const ServerSpec& spec,
     }
     // Overwrite-in-place (force) replaces the entry wholesale (documented).
     servers[spec.name] = std::move(entry);
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+    return std::nullopt;
+    }, spec, force);
 }
 
 EditResult add_server_raw(const fs::path& path, const std::string& name,
                           const json& entry, bool force) {
-    LockedMutation lk{path};
-    Loaded l = load(path);
-    if (!l.ok) return EditResult::ParseError;
+    return mutate(path, Need::Any, [](json& doc, std::string name, json entry, bool force) -> Edit {
     if (!entry.is_object()) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object())
-        l.doc[key] = json::object();
-    auto& servers = l.doc[key];
+    auto& servers = servers_of(doc);
     if (servers.contains(name) && !force)
         return EditResult::AlreadyExists;
     // Verbatim. Every key the source carried -- env, headers, timeoutMs,
     // tools.exclude -- survives, because the schema is the same one agentty
     // reads. Rebuilding the entry from a ServerSpec is what loses them.
-    servers[name] = entry;
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+    servers[name] = std::move(entry);
+    return std::nullopt;
+    }, name, entry, force);
 }
 
 EditResult update_server(const fs::path& path, const ServerSpec& spec) {
-    LockedMutation lk{path};
-    Loaded l = load(path);
-    if (!l.existed) return EditResult::NotFound;
-    if (!l.ok) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object()
-        || !l.doc[key].contains(spec.name))
-        return EditResult::NotFound;
-    json& entry = l.doc[key][spec.name];
+    return mutate(path, Need::Existing, [](json& doc, ServerSpec spec) -> Edit {
+    json* found = existing_entry(doc, spec.name);
+    if (!found) return EditResult::NotFound;
+    json& entry = *found;
     if (!entry.is_object()) entry = json::object();
 
     // Rewrite only what the spec owns; foreign keys (env, headers,
@@ -357,20 +368,16 @@ EditResult update_server(const fs::path& path, const ServerSpec& spec) {
         entry.erase("url");
         entry.erase("passthrough");
     }
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+    return std::nullopt;
+    }, spec);
 }
 
 EditResult remove_server(const fs::path& path, const std::string& name) {
-    LockedMutation lk{path};
-    Loaded l = load(path);
-    if (!l.existed) return EditResult::NotFound;
-    if (!l.ok) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object()
-        || !l.doc[key].contains(name))
-        return EditResult::NotFound;
-    l.doc[key].erase(name);
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+    return mutate(path, Need::Existing, [](json& doc, std::string name) -> Edit {
+        if (!existing_entry(doc, name)) return EditResult::NotFound;
+        doc[servers_key(doc)].erase(name);
+        return std::nullopt;
+    }, name);
 }
 
 std::vector<ServerSpec> list_servers(const fs::path& path) {
@@ -396,21 +403,14 @@ std::vector<ServerSpec> list_servers(const fs::path& path) {
 
 EditResult set_server_disabled(const fs::path& path, const std::string& name,
                               bool disabled) {
-    LockedMutation lk{path};
-    Loaded l = load(path);
-    if (!l.existed) return EditResult::NotFound;
-    if (!l.ok) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object()
-        || !l.doc[key].contains(name))
-        return EditResult::NotFound;
-    json& entry = l.doc[key][name];
-    if (!entry.is_object()) return EditResult::NotFound;
-    const bool cur = entry_disabled(entry);
-    if (cur == disabled) return EditResult::Ok;   // no-op-Ok
-    if (disabled) entry["disabled"] = true;
-    else          entry.erase("disabled");        // absent == enabled (clean)
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+    return mutate(path, Need::Existing, [](json& doc, std::string name, bool disabled) -> Edit {
+        json* entry = existing_entry(doc, name);
+        if (!entry || !entry->is_object()) return EditResult::NotFound;
+        if (entry_disabled(*entry) == disabled) return EditResult::Ok;   // no-op-Ok
+        if (disabled) (*entry)["disabled"] = true;
+        else          entry->erase("disabled");   // absent == enabled (clean)
+        return std::nullopt;
+    }, name, disabled);
 }
 
 bool is_server_disabled(const fs::path& path, const std::string& name) {
@@ -426,16 +426,11 @@ bool is_server_disabled(const fs::path& path, const std::string& name) {
 
 EditResult set_tool_enabled(const fs::path& path, const std::string& server,
                             const std::string& bare, bool enabled) {
-    LockedMutation lk{path};
-    Loaded l = load(path);
-    if (!l.existed) return EditResult::NotFound;
-    if (!l.ok) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object()
-        || !l.doc[key].contains(server))
-        return EditResult::NotFound;
-    json& entry = l.doc[key][server];
-    if (!entry.is_object()) return EditResult::NotFound;
+    return mutate(path, Need::Existing,
+                  [](json& doc, std::string server, std::string bare, bool enabled) -> Edit {
+    json* found = existing_entry(doc, server);
+    if (!found || !found->is_object()) return EditResult::NotFound;
+    json& entry = *found;
 
     // tools.exclude is the disabled set. Enabling removes from it;
     // disabling adds. Preserve any tools.include/pin the user set.
@@ -459,7 +454,8 @@ EditResult set_tool_enabled(const fs::path& path, const std::string& server,
     excl = std::move(rebuilt);
     if (excl.empty()) tools.erase("exclude");
     if (tools.empty()) entry.erase("tools");
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+    return std::nullopt;
+    }, server, bare, enabled);
 }
 
 bool is_tool_disabled(const fs::path& path, const std::string& server,
