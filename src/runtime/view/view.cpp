@@ -138,6 +138,9 @@ maya::Element view(const Model& m) {
         // here keeps them a pure projection of the Model — refreshed every
         // frame, written nowhere else.
         ui_prefs::publish(m.d.ui());
+        // Paths in tool cards are shown relative to these (Model::env,
+        // captured at launch), so the view never asks the OS for its cwd.
+        ui_prefs::publish_path_roots({m.env.cwd, m.env.home});
         // Motion::Off freezes maya's stepped animations at their source —
         // one gate under every spinner, blink and frame counter, including
         // widgets that do not know this setting exists. It also stops the

@@ -850,6 +850,12 @@ struct Model {
         bool        self_update_ok     = false;
         std::string self_update_reason;   // why not, when !self_update_ok
 
+        // Where paths are shown relative to: the launch cwd ("src/x.cpp")
+        // and the home dir ("~/notes"). Captured once so a tool card names a
+        // path the same way every frame without asking the OS.
+        std::string cwd;
+        std::string home;
+
         // The end-of-turn reveal glide (the design contract: end-of-turn is
         // a visible catch-up, never a paste) needs a DENSE frame cadence to
         // hold the live height steady mid-ramp, so it requires both signals

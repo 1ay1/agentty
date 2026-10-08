@@ -455,6 +455,7 @@ agentty_fold_test(theme_preview_cost_probe TIMEOUT 120 NO_TEST)
 # for that was the last of the per-test link cost the fold exists to remove.
 agentty_fold_test(agents_md_test  TIMEOUT 30)
 agentty_fold_test(checkpoint_test TIMEOUT 60)
+agentty_fold_test(settings_add_effect_test TIMEOUT 30)
 
 # Build the one binary: union of every folded test's extra objs/libs.
 agentty_finalize_fold(

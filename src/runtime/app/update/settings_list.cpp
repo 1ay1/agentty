@@ -527,23 +527,23 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
             o->input.clear();
             o->cursor = 0;
             if (line.empty()) return Cmd::none();   // empty = cancel
-
-            se::AddResult r = (concern == se::Category::Plugins)
-                ? se::add_plugin_from_line(line)
-                : se::create_starter(concern, line);
-
-            // Make it USABLE NOW, not after a restart. For Plugins the
-            // add already wrote mcp.json; reload the live pool OFF the UI
-            // thread (the connect handshake must never freeze the TUI —
-            // the bridge bounds it with a deadline). Commands are loaded
-            // fresh per use (create_starter invalidated the cache) and
-            // agents are scanned per task-tool call, so both are already
-            // live — no reload needed.
+            // The create writes disk (mcp.json, or a starter file), so it is
+            // an effect; SettingsAddDone below picks up its answer.
+            return cmdf::settings_add(concern, line);
+        },
+        [&](SettingsAddDone& d) -> Cmd {
+            std::string message = std::move(d.message);
+            // Make it USABLE NOW, not after a restart. For Plugins the add
+            // already wrote mcp.json; reload the live pool OFF the UI thread
+            // (the connect handshake must never freeze the TUI — the bridge
+            // bounds it with a deadline). Commands are loaded fresh per use
+            // (create_starter invalidated the cache) and agents are scanned
+            // per task-tool call, so both are already live.
             Cmd reload = Cmd::none();
-            if (r.ok && concern == se::Category::Plugins) {
+            if (d.ok && d.concern == se::Category::Plugins) {
                 m.ui.plugins_loading = true;
                 reload = cmdf::load_plugins_async(/*reconnect=*/true);
-                r.message += " — connecting…";
+                message += " — connecting…";
             }
             // Re-clamp the (possibly grown) list to the top of the new row.
             if (auto* oo = m.ui.panel.get<pn::SettingsList>()) {
@@ -551,9 +551,7 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                     static_cast<int>(se::items_for(m, oo->concern).size());
                 oo->index = std::clamp(oo->index, 0, std::max(0, cnt - 1));
             }
-            return Cmd::batch(
-                
-                    std::move(reload), set_status_toast(m, r.message));
+            return Cmd::batch(std::move(reload), set_status_toast(m, message));
         },
     }, sm);
 }

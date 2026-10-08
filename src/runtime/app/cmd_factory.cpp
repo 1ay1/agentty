@@ -36,6 +36,7 @@
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/skills.hpp"   // active_in: derived "already active" set
 #include "agentty/tool/mcp_tools_backends.hpp"   // rag_apply_settings_now
+#include "agentty/runtime/panel/settings/items.hpp"   // add_plugin_from_line / create_starter
 #include "agentty/mcp/client.hpp"   // plugin_model(), reload_mcp_plugins via registry
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/spec.hpp"
@@ -2530,6 +2531,16 @@ Cmd load_plugins_async(bool reconnect) {
             }
             out.send(Msg{PluginsUpdated{mcp::plugin_model()}});
         }, reconnect);
+}
+
+Cmd settings_add(settings::Category concern, std::string line) {
+    return Cmd::task(
+        [](maya::Sink<Msg> out, std::stop_token, settings::Category c, std::string l) {
+            const settings::AddResult r = (c == settings::Category::Plugins)
+                ? settings::add_plugin_from_line(l)
+                : settings::create_starter(c, l);
+            out.send(Msg{SettingsAddDone{c, r.ok, r.message}});
+        }, concern, std::move(line));
 }
 
 Cmd apply_rag_settings(store::RagConfig cfg) {

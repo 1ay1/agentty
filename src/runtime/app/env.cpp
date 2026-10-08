@@ -9,10 +9,12 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 
 #include <maya/terminal/ansi.hpp>
 
+#include "agentty/util/home_dir.hpp"
 #include "agentty/util/update.hpp"   // self_update_possible
 #include "agentty/runtime/view/helpers.hpp"      // max_context_tokens_from_env
 #include "agentty/runtime/view/host_escape.hpp"  // detect_integration
@@ -90,6 +92,12 @@ Model::Env read_launch_env() noexcept {
     e.reveal_decorate     = on_unless_off("AGENTTY_REVEAL_DECORATE");
     e.painted_caret       = set("AGENTTY_PAINTED_CARET");
     e.host_integration    = ui::host::detect_integration();
+    {
+        std::error_code ec;
+        const auto cwd = std::filesystem::current_path(ec);
+        if (!ec) e.cwd = cwd.string();
+        e.home = util::home_dir().string();
+    }
     // Only probe when it could matter: the probe writes a file next to our
     // binary, and an install that opted out of auto-update shouldn't touch
     // its directory at all.

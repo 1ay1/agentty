@@ -1070,6 +1070,13 @@ struct PluginEdited {
 struct SettingsListBackspace  {};
 struct SettingsListSubmitInput{};              // Enter in add-mode → create
 struct SettingsListCancelInput{};              // Esc in add-mode → back to list
+// The add-mode create (a plugin into mcp.json, or a starter command/agent
+// file) ran as an effect; this is its answer.
+struct SettingsAddDone {
+    settings::Category concern{};
+    bool               ok = false;
+    std::string        message;
+};
 
 // ── Fork picker ──────────────────────────────────────────────
 // Branch the current thread into a FRESH one (near-zero context) and choose
@@ -1337,7 +1344,8 @@ using SettingsListMsg = std::variant<
     SettingsListActivate, SettingsListAddStart, SettingsListRemove,
     SettingsListEditOpen,
     SettingsListChar, SettingsListPaste, PluginsUpdated, PluginEdited,
-    SettingsListBackspace, SettingsListSubmitInput, SettingsListCancelInput>;
+    SettingsListBackspace, SettingsListSubmitInput, SettingsListCancelInput,
+    SettingsAddDone>;
 
 using ForkMsg = std::variant<
     OpenFork, CloseFork, ForkMove, ForkThread, ForkTranscriptWritten>;

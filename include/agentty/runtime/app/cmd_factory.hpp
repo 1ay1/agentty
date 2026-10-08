@@ -326,6 +326,11 @@ struct LoopBreak {
 // snapshots the live pool. Mirrors load_threads_async.
 [[nodiscard]] Cmd load_plugins_async(bool reconnect);
 
+// The settings pane's add-mode create: a plugin line into the user mcp.json,
+// or a starter command/agent file. Writes the disk off the fold and answers
+// with SettingsAddDone.
+[[nodiscard]] Cmd settings_add(settings::Category concern, std::string line);
+
 // Parse a single thread's JSON off the UI thread. Dispatched from the
 // thread picker's Enter handler so the synchronous ~30ms-per-thread
 // parse doesn't land between the keypress and the next paint.

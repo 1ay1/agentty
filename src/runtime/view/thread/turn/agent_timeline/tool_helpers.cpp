@@ -11,7 +11,7 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/tool/subagent.hpp"   // subagent::agent_origin (provenance tag)
 #include "agentty/tool/util/utf8.hpp"
-#include "agentty/util/home_dir.hpp"
+#include "agentty/domain/ui_live.hpp"   // path_roots
 
 namespace agentty::ui {
 
@@ -156,20 +156,19 @@ namespace {
     return it != args.end() && it->is_boolean() ? it->get<bool>() : fallback;
 }
 
+// Relative to the launch cwd, else "~/" under home. The roots come from
+// Model::env via the per-frame publish (ui_live.hpp), never from the OS.
 std::string pretty_path(std::string p) {
     if (p.empty()) return p;
-    std::error_code ec;
-    auto cwd = std::filesystem::current_path(ec).string();
-    if (!ec && !cwd.empty() && p.size() > cwd.size()
+    const auto roots = agentty::ui_prefs::path_roots();
+    const std::string& cwd = roots.cwd;
+    if (!cwd.empty() && p.size() > cwd.size()
         && p.compare(0, cwd.size(), cwd) == 0 && p[cwd.size()] == '/')
         return p.substr(cwd.size() + 1);
-    if (const auto home = agentty::util::home_dir();
-        !home.empty()) {
-        const std::string h = home.string();
-        if (p.size() > h.size() && p.compare(0, h.size(), h) == 0
-            && p[h.size()] == '/')
-            return std::string{"~/"} + p.substr(h.size() + 1);
-    }
+    const std::string& h = roots.home;
+    if (!h.empty() && p.size() > h.size() && p.compare(0, h.size(), h) == 0
+        && p[h.size()] == '/')
+        return std::string{"~/"} + p.substr(h.size() + 1);
     return p;
 }
 

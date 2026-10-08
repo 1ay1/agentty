@@ -57,7 +57,11 @@ set(ban_thread      "std::j?thread([^_:]|$)|\\.detach\\(\\)|std::async[^_]")
 # tty: asking the terminal directly. The size arrives as a Msg
 # (TerminalResized, from maya's on_resize) and lives in Model::ui.
 set(ban_tty         "platform::(query_terminal_size|stdout_handle|stdin_handle)|isatty[ \t]*\\(|ioctl[ \t]*\\(")
-set(ban_names clock env fileio subprocess net global auth static thread tty)
+# diskhelper: helpers that LOOK like plain functions but write the disk,
+# found only by reading them. A name lint can't see through a call, so the
+# known ones are named here.
+set(ban_diskhelper  "(add_plugin_from_line|create_starter)[ \t]*\\(")
+set(ban_names clock env fileio subprocess net global auth static thread tty diskhelper)
 
 # Parse the allowlist: `path: name name ...`, `#` comments.
 file(STRINGS ${ALLOW} allow_lines)

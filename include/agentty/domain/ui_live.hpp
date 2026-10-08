@@ -124,4 +124,32 @@ inline void publish(const Prefs& p) {
     return viewport_rows(current().density);
 }
 
+// ── Path roots ──────────────────────────────────────────────────────────
+//
+// Where tool cards show paths relative to: the launch cwd and the home dir,
+// from Model::env. Same seam and same reason as the prefs: the reader
+// (pretty_path, under every tool card's header) is a free function many
+// layers below anything holding a Model, and the reducer's tool viewer calls
+// the same helper. view() publishes them each frame; read_launch_env
+// captured them once, so the view never asks the OS.
+struct PathRoots {
+    std::string cwd;
+    std::string home;
+};
+
+namespace detail {
+inline maya::guarded<PathRoots>& roots_slot() noexcept {
+    static maya::guarded<PathRoots> s;
+    return s;
+}
+}  // namespace detail
+
+inline void publish_path_roots(PathRoots r) {
+    detail::roots_slot().with([](PathRoots& s, PathRoots next) { s = std::move(next); },
+                              std::move(r));
+}
+[[nodiscard]] inline PathRoots path_roots() {
+    return detail::roots_slot().read([](const PathRoots& s) { return s; });
+}
+
 }  // namespace agentty::ui_prefs
