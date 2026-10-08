@@ -17,10 +17,10 @@
 #include "agentty/i18n/i18n.hpp"
 #include "agentty/i18n/plural.hpp"
 
+#include <maya/runtime.hpp>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <atomic>
 #include <array>
 #include <cctype>
 #include <unordered_map>
@@ -118,25 +118,20 @@ using CatalogPtr = std::shared_ptr<const Catalog>;
 //
 // A plain array of shared_ptr rather than a map: twenty slots, indexed by the
 // enum, no lookup and no allocation.
-std::array<std::atomic<CatalogPtr>, kLangCount>& store() {
-    static std::array<std::atomic<CatalogPtr>, kLangCount> s;
+std::array<maya::published<const Catalog>, kLangCount>& store() {
+    static std::array<maya::published<const Catalog>, kLangCount> s;
     return s;
 }
 
-// The ACTIVE catalog. One atomic pointer -- this is the whole live-switch
-// mechanism. Reading it is an acquire load; switching language is a release
-// store. The outgoing catalog stays alive through the shared_ptr until the
+// The ACTIVE catalog. One published slot -- this is the whole live-switch
+// mechanism. The outgoing catalog stays alive through the shared_ptr until the
 // last reader drops it, which is what makes a string_view handed out during
 // a frame safe even if the language changes mid-frame.
-std::atomic<CatalogPtr>& current() {
-    static std::atomic<CatalogPtr> c;
+maya::published<const Catalog>& active_catalog() {
+    static maya::published<const Catalog> c;
     return c;
 }
 
-std::atomic<Lang>& current_lang() {
-    static std::atomic<Lang> l{Lang::en};
-    return l;
-}
 
 // Lower-case ASCII only. Deliberately NOT std::tolower with a locale: under
 // a Turkish locale that maps 'I' to dotless 'ı', and a tag comparison that
@@ -235,12 +230,15 @@ bool parse_tag(std::string_view tag, Lang& out) noexcept {
     return false;
 }
 
-Lang active() noexcept { return current_lang().load(std::memory_order_acquire); }
+// The active catalog carries its language, so the two can never disagree.
+Lang active() noexcept {
+    const auto cat = active_catalog().current();
+    return cat ? cat->lang : Lang::en;
+}
 
 namespace {
 std::string_view fallback(std::string_view id) noexcept {
-    const auto en = store()[static_cast<std::size_t>(Lang::en)]
-                        .load(std::memory_order_acquire);
+    const auto en = store()[static_cast<std::size_t>(Lang::en)].current();
     if (!en) return id;
     const auto it = en->table.find(id);
     if (it == en->table.end()) return id;
@@ -251,15 +249,14 @@ std::string_view fallback(std::string_view id) noexcept {
 }  // namespace
 
 bool set_active(Lang l) {
-    auto cat = store()[static_cast<std::size_t>(l)].load(std::memory_order_acquire);
+    auto cat = store()[static_cast<std::size_t>(l)].current();
     if (!cat) return false;     // no catalog compiled in: keep what we have
-    current().store(cat, std::memory_order_release);
-    current_lang().store(l, std::memory_order_release);
+    active_catalog().publish(cat);
     return true;
 }
 
 std::string_view t(std::string_view id) noexcept {
-    const auto cat = current().load(std::memory_order_acquire);
+    const auto cat = active_catalog().current();
     if (!cat) return id;        // before load(): the id, never blank
     const auto it = cat->table.find(id);
     if (it == cat->table.end()) return fallback(id);
@@ -271,7 +268,7 @@ std::string_view t(std::string_view id) noexcept {
 }
 
 std::string_view tn(std::string_view id, long long n) noexcept {
-    const auto cat = current().load(std::memory_order_acquire);
+    const auto cat = active_catalog().current();
     if (!cat) return id;
     const auto it = cat->table.find(id);
     if (it == cat->table.end()) return fallback(id);
@@ -399,15 +396,15 @@ bool install_catalog(Lang l, std::string_view json_text) {
         cat->table.emplace(key, std::move(e));
     }
 
-    store()[static_cast<std::size_t>(l)].store(cat, std::memory_order_release);
+    store()[static_cast<std::size_t>(l)].publish(cat);
     // Installing the ACTIVE language republishes it, so a hot reload in a
     // debug build takes effect without a second call.
-    if (active() == l) current().store(cat, std::memory_order_release);
+    if (active() == l) active_catalog().publish(cat);
     return true;
 }
 
 std::vector<std::string> ids_of(Lang l) {
-    const auto cat = store()[static_cast<std::size_t>(l)].load(std::memory_order_acquire);
+    const auto cat = store()[static_cast<std::size_t>(l)].current();
     if (!cat) return {};
     std::vector<std::string> out;
     out.reserve(cat->table.size());
@@ -417,12 +414,11 @@ std::vector<std::string> ids_of(Lang l) {
 }
 
 double completeness(Lang l) {
-    const auto en = store()[static_cast<std::size_t>(Lang::en)]
-                        .load(std::memory_order_acquire);
+    const auto en = store()[static_cast<std::size_t>(Lang::en)].current();
     if (!en || en->table.empty()) return 0.0;
     if (l == Lang::en) return 1.0;
 
-    const auto cat = store()[static_cast<std::size_t>(l)].load(std::memory_order_acquire);
+    const auto cat = store()[static_cast<std::size_t>(l)].current();
     if (!cat) return 0.0;
 
     // Against en's id set, not against the catalog's own size: a translation
