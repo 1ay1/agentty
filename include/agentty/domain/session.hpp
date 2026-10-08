@@ -455,6 +455,14 @@ struct StreamState {
     // message re-price the whole prefix at fresh input rate after the cache
     // has lapsed. Zero until the first request of the session.
     std::chrono::steady_clock::time_point last_wire_at{};
+    // When the composer last asked for a provider prewarm, and last probed
+    // whether the OAuth token needs a proactive refresh. Throttles, so
+    // key-repeat can't spam dials or the token endpoint. They lived in
+    // function-local statics inside update until the Elm cleanup: state the
+    // reducer reads and writes belongs to the Model, or replay and a second
+    // app instance in one process (tests) silently share it.
+    std::chrono::steady_clock::time_point last_prewarm_at{};
+    std::chrono::steady_clock::time_point last_refresh_probe_at{};
     int tokens_in   = 0;
     int tokens_out  = 0;
     // Reasoning/thinking tokens the model spent on THIS turn's reply, as

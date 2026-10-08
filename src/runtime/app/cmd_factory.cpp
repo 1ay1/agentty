@@ -32,6 +32,7 @@
 #endif
 #include "agentty/util/dbglog.hpp"
 #include "agentty/tool/registry.hpp"
+#include "agentty/tool/mcp_tools_backends.hpp"   // rag_apply_settings_now
 #include "agentty/mcp/client.hpp"   // plugin_model(), reload_mcp_plugins via registry
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/spec.hpp"
@@ -1516,27 +1517,28 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                     sink.send(Msg{ToolExecProgress{id, std::string{snapshot},
                                               exec_seq}});
                 }};
-            // The probe answers YES on EITHER the turn's cancel token (user
-            // pressed escape) or jaal's stop_token (the app is shutting
-            // down). The second half used to be missing — this parameter was
-            // unnamed, so `request_stop()` at shutdown was silently dropped
-            // and a tool kept running.
+            // Cancelled on EITHER the turn's cancel token (user pressed
+            // escape) or jaal's stop_token (the app is shutting down). The
+            // second half used to be missing — this parameter was unnamed, so
+            // `request_stop()` at shutdown was silently dropped and a tool
+            // kept running.
             //
             // That is not just a slow exit, it is a use-after-free. These
-            // run on task_isolated threads, which jaal asks to stop but
-            // NEVER waits for (kernel/pool.hpp: "Isolated threads are asked
-            // to stop but never waited for"). A `task` subagent mid-stream
-            // therefore keeps calling cfg.stream(), which holds
-            // anthropic_provider / chatgpt_provider BY REFERENCE off main's
-            // stack — and main is unwinding. It only faults when a subagent
-            // happens to be streaming at quit, which is precisely when the
-            // user gives up on a long-running one and hits escape, so it
-            // reads as "subagents crash sometimes".
+            // run on task_isolated threads; a `task` subagent mid-stream
+            // keeps calling cfg.stream(), which holds anthropic_provider /
+            // chatgpt_provider BY REFERENCE off main's stack — and main is
+            // unwinding. It only faults when a subagent happens to be
+            // streaming at quit, which is precisely when the user gives up on
+            // a long-running one and hits escape, so it reads as "subagents
+            // crash sometimes".
+            //
+            // Published as TOKENS, not an opaque probe, so anything below
+            // that needs to react (the subagent stream's cancel) can attach a
+            // stop_callback instead of running a thread that polls this.
+            std::vector<std::stop_token> cancel_tokens{stop};
+            if (cancel) cancel_tokens.push_back(cancel->token());
             agentty::tools::cancellation::Scope cancellation_scope{
-                [cancel, stop] {
-                    return (cancel && cancel->is_cancelled())
-                        || stop.stop_requested();
-                }};
+                std::move(cancel_tokens)};
             try {
                 // ── pre_tool hooks (consent-gated, see hooks.hpp) ─────
                 // A blocking decision becomes the tool's error result: the
@@ -2485,6 +2487,38 @@ Cmd load_plugins_async(bool reconnect) {
             }
             out.send(Msg{PluginsUpdated{mcp::plugin_model()}});
         }, reconnect);
+}
+
+Cmd apply_rag_settings(store::RagConfig cfg) {
+    // Isolated: the embedder re-probe is a network dial that may never
+    // return, and must not occupy a shared worker. The stop_token is the
+    // kernel's, so app shutdown reaches it with no registration on our side.
+    return Cmd::task_isolated(
+        [](jaal::Sink<Msg>, std::stop_token st, store::RagConfig cfg) {
+            if (st.stop_requested()) return;
+            try {
+                tools::rag_apply_settings_now(cfg);
+            } catch (const std::exception& e) {
+                util::dbglog("rag.apply_settings", e.what());
+            } catch (...) {}
+        },
+        std::move(cfg));
+}
+
+Cmd prewarm_provider() {
+    provider::PrewarmTarget t = provider::prewarm_target(provider::active());
+    if (!t.should_warm()) return Cmd::none();   // no effect to describe
+    // Plain task, not isolated: prewarm() only POSTS the dial to the http
+    // client's own pool and returns, so this occupies a worker for
+    // microseconds. The dial's lifetime is the client's, joined by its own
+    // join_prewarm() at teardown.
+    return Cmd::task(
+        [](jaal::Sink<Msg>, std::stop_token st, provider::PrewarmTarget t) {
+            if (st.stop_requested()) return;
+            http::default_client().prewarm(t.host, t.port, t.override_host,
+                                           t.override_port);
+        },
+        std::move(t));
 }
 
 Cmd load_thread_async(ThreadId id) {

@@ -46,9 +46,12 @@ void install_host_backends(::mcp::tools::HostServices& svc);
 // Comma-separated list of the valid names, for that error message.
 [[nodiscard]] std::string known_agent_types();
 
-// Live-apply user RAG configuration (the RAG settings picker's commit path)
-// to the process-wide retriever. Rebuilds indexes lazily. Never throws.
-void rag_apply_settings(const store::RagConfig& cfg);
+// Apply user RAG configuration to the process-wide retriever, ON THE CALLING
+// THREAD. It probes the embedder (a network dial) and may block, so the TUI
+// never calls this directly: the reducer returns cmd::apply_rag_settings,
+// which runs this on a jaal worker. Scheduling is the caller's decision, not
+// this function's — that is what keeps update() free of effects. Never throws.
+void rag_apply_settings_now(const store::RagConfig& cfg);
 
 // Live dense-embedder status for the RAG picker's status row and
 // `agentty diagnostics`. When the embedder is unavailable, `reason` says why

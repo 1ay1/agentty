@@ -400,35 +400,14 @@ static ::agentty::rag::Retriever& shared_retriever() {
 
 } // namespace (anonymous)
 
-// Live-apply a RagConfig from the running app (the RAG settings picker's
-// commit path). Thread-safe; rebuilds indexes lazily on the next retrieve.
-void rag_apply_settings(const store::RagConfig& s) {
-    // NEVER BLOCKS. apply_config() takes the retriever's mutex, re-probes the
-    // embedder when the vector space changed (a network dial with a
-    // multi-second timeout) and cold-rebuilds three engines.
-    //
-    // This is called from REDUCERS — the UI thread, between two frames — so
-    // doing that work synchronously froze the render loop, animations
-    // included. Making every caller remember to wrap it in a Cmd is a rule
-    // that will be forgotten; making the function itself async is a property
-    // that cannot be.
-    //
-    // Off the caller's thread rather than queued on a shared worker: applying
-    // settings is idempotent and last-writer-wins, so a superseded apply doing
-    // redundant work is harmless, the retriever's own mutex serialises them,
-    // and the embedder re-probe is a network dial that may never return —
-    // which must not occupy a pooled worker.
-    //
-    // Through the owned background pool rather than a raw detached worker:
-    // the body is exception-isolated, gets a stop_token, and is WAITED FOR
-    // inside the shutdown grace instead of still running while the CRT tears
-    // down the statics it is touching (shared_retriever() is one of them).
-    // Fully qualified: inside agentty::tools, a bare `util::` resolves to
-    // agentty::tools::util.
-    ::agentty::util::run_isolated_detached("rag.apply_settings", [s] {
-        auto& r = shared_retriever();
-        r.apply_config(rag_config_from_settings(s, r.snapshot_config()));
-    });
+// Live-apply a RagConfig to the process-wide retriever. SYNCHRONOUS: it takes
+// the retriever's mutex, may re-probe the embedder (a network dial) and
+// cold-rebuilds the engines. Never call it from a reducer — the TUI reaches it
+// only through cmd::apply_rag_settings, which runs it as an effect on the
+// kernel's isolated pool, so update stays pure and the kernel owns the thread.
+void rag_apply_settings_now(const store::RagConfig& s) {
+    auto& r = shared_retriever();
+    r.apply_config(rag_config_from_settings(s, r.snapshot_config()));
 }
 
 RagEmbedStatus rag_embed_status() {
@@ -1379,37 +1358,30 @@ provider::StreamResult run_one_completion(Thread& thread,
     // wired (tests that install only auth+model).
     provider::StreamResult result;
     auto cancel = req.cancel;
-    auto parent_cancel = cancellation::current();
-    // Two sources can stop this stream:
+    // Every source that can stop this stream, as callbacks. Zero threads,
+    // zero wakeups, and each fires the instant its source asks rather than at
+    // the next tick of a poll.
     //
-    //   run_reg        this specific run was asked to stop by
-    //                  subagent::shutdown_running(), which then WAITS for it.
-    //                  That is what closes the crash window rather than just
-    //                  narrowing it: without something that waits, main() can
-    //                  unwind while this thread is still inside cfg.stream(),
-    //                  which holds the provider objects by reference.
-    //   parent_cancel  the user pressed escape, or the app is shutting down.
+    //   run_reg   this specific run was asked to stop by
+    //             subagent::shutdown_running(), which then WAITS for it.
+    //             That is what closes the crash window rather than just
+    //             narrowing it: without something that waits, main() can
+    //             unwind while this thread is still inside cfg.stream(),
+    //             which holds the provider objects by reference.
+    //   parent    the user pressed escape, or the app is shutting down —
+    //             whatever the enclosing tool run published.
     //
-    // run_reg is a real std::stop_token now (jaal::kernel::stop_group), so
-    // its half is a stop_callback: zero threads, zero wakeups, and it fires
-    // the instant shutdown asks rather than at the next 20 ms poll.
-    std::optional<std::stop_callback<std::function<void()>>> on_run_stop;
-    if (run_reg)
-        on_run_stop.emplace(run_reg->token(),
-                            std::function<void()>{[cancel] { cancel->cancel(); }});
-    // parent_cancel is a predicate (cancellation::current() returns a
-    // callable over the turn's state, not a token), so it still needs a
-    // watcher. It is the ONLY reason this thread exists now, and it exits the
-    // moment the stream is cancelled from either side.
-    std::jthread cancel_bridge;
-    if (parent_cancel) {
-        cancel_bridge = std::jthread([parent_cancel, cancel](std::stop_token st) {
-            while (!st.stop_requested() && !cancel->is_cancelled()) {
-                if (parent_cancel()) { cancel->cancel(); return; }
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            }
-        });
-    }
+    // This used to be a jthread polling both every 20 ms. A probe can only be
+    // polled; the tool layer publishes its cancellation as stop_tokens now,
+    // so there is nothing left to poll. If an enclosing caller ever installs
+    // a bare probe with no tokens behind it, that source is simply not
+    // watched mid-stream — the turn loop still checks it between turns.
+    using StopCb = std::stop_callback<std::function<void()>>;
+    std::vector<std::unique_ptr<StopCb>> stop_cbs;
+    const auto trip = std::function<void()>{[cancel] { cancel->cancel(); }};
+    if (run_reg) stop_cbs.push_back(std::make_unique<StopCb>(run_reg->token(), trip));
+    for (auto& t : cancellation::tokens())
+        stop_cbs.push_back(std::make_unique<StopCb>(std::move(t), trip));
     if (cancellation::requested()
         || (run_reg && run_reg->cancelled())) cancel->cancel();
     if (!route_provider.empty() && cfg.stream_to) {
@@ -1423,7 +1395,11 @@ provider::StreamResult run_one_completion(Thread& thread,
         provider::anthropic::AnthropicProvider p;
         result = p.stream(std::move(req), sink);
     }
-    cancel_bridge.request_stop();
+    // Deregister before anything else runs: the callbacks capture `cancel`,
+    // and a late stop must not trip it once the stream has already settled.
+    // stop_callback's destructor blocks until a callback already in flight on
+    // another thread has returned, so this is race-free by the standard.
+    stop_cbs.clear();
     pump(/*force=*/true);   // flush the throttled tail
 
     // A provider that answered 200, streamed some deltas, then emitted

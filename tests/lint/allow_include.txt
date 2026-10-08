@@ -24,10 +24,10 @@ agentty/io/shared_file.hpp: mutex
 agentty/util/logx.hpp: atomic
 
 # ── The turn's cancel token ──────────────────────────────────────────────
-# http::CancelToken is the one cancellation jaal cannot express: a reducer
-# tripping a specific in-flight request from a later step. See the Sendable
-# opt-in in runtime/cmd.hpp for why it stays the app's own.
-agentty/io/http.hpp: atomic
+# agentty/io/http.hpp has NO entry. http::CancelToken is still the app's own
+# (a reducer tripping a specific in-flight request from a later step — see the
+# Sendable opt-in in runtime/cmd.hpp), but it is a std::stop_source now, not
+# an atomic flag, so it can hand out a real stop_token and needs no exemption.
 # backoff_with_jitter(): per-thread mt19937 for retry jitter. The generator
 # holds no shared state; each caller thread gets its own seeded from
 # random_device. thread_local is what makes this branch-free at the call

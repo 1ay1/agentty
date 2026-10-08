@@ -13,6 +13,7 @@
 
 #include <maya/core/overload.hpp>
 
+#include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/panel/rag.hpp"
 #include "agentty/rag/embed_secret.hpp"
 #include "agentty/tool/mcp_tools_backends.hpp"
@@ -31,10 +32,11 @@ namespace {
 // Persist + live-apply the chosen mode. `proactive` is derived from the mode
 // (Off ⇒ no pre-turn injection; the First-turn gate is enforced in modal.cpp).
 //
-// Both halves are non-blocking BY CONSTRUCTION, not by care taken here:
-// `save_settings` is write-behind at the Deps seam, and `rag_apply_settings`
-// does its probe + rebuild on a worker. A reducer cannot stall a frame on
-// either even if it wanted to.
+// Both halves are EFFECTS, and both are returned, not performed: the save is
+// write-behind at the Deps seam, and the retriever re-sync is
+// cmd::apply_rag_settings, which the kernel runs on a worker. This function
+// only edits the Model and says what should happen next.
+//
 // Persist the retrieval mode.
 //
 // Edits the rag block in `m.d.persisted`, then saves through persist_settings
@@ -52,8 +54,7 @@ namespace {
     rag.proactive  = (mode != store::RagMode::Off);
     const auto applied = rag;   // persist_settings may rewrite the record
     auto save = persist_settings(m);
-    tools::rag_apply_settings(applied);
-    return save;
+    return Cmd::batch(std::move(save), cmd::apply_rag_settings(applied));
 }
 
 // Project an EmbedConfig onto the persisted settings shape. The API key is
@@ -410,11 +411,11 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             // Same reason as commit_mode: save through persist_settings so
             // the scattered Domain fields reach the record first.
             auto save = persist_settings(m);
-            tools::rag_apply_settings(m.d.persisted.rag);
 
             const std::string label = eb::describe(f->cfg);
             return Cmd::batch(
                 std::move(save),
+                cmd::apply_rag_settings(m.d.persisted.rag),
                 set_status_toast(m, "Embeddings: " + label + note,
                                  std::chrono::seconds{4}));
         },

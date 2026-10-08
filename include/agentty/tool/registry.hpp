@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <stop_token>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -283,8 +284,20 @@ namespace cancellation {
     [[nodiscard]] Probe current();
     [[nodiscard]] bool requested();
 
+    // The same cancellation as EVENTS. A probe can only be polled, so code
+    // that needs to react to a cancel — rather than check inside its own
+    // loop — had to run a thread that slept and rechecked it (the subagent
+    // stream's 20 ms bridge). When the scope was built from tokens, this
+    // hands them out so the caller can attach a std::stop_callback to each
+    // and wake instantly. Empty when the probe has no token behind it, in
+    // which case polling it is still the only option.
+    [[nodiscard]] std::vector<std::stop_token> tokens();
+
     struct Scope {
         explicit Scope(Probe probe) { set(std::move(probe)); }
+        // Preferred: cancellation is "any of these tokens". The probe is
+        // derived, so pollers see exactly what subscribers see.
+        explicit Scope(std::vector<std::stop_token> toks);
         ~Scope() { clear(); }
         Scope(const Scope&) = delete;
         Scope& operator=(const Scope&) = delete;

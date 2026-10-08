@@ -96,12 +96,11 @@ airgap/airgap.cpp: const_cast
 # thread_local is the sink the cmd runner captures — UI-thread only, and
 # documented there.
 tool/registry.cpp: mutex atomic
-# rag_apply_settings' detached worker moved to util/background.hpp (jaal's
-# pool), so `detach` is gone from this file. The `thread` that remains is a
-# std::jthread cancel bridge, which is OWNED and joins on destruction — the
-# dangerous spelling was the detached one. mutex/atomic guard the retriever
-# + status caches.
-tool/mcp_tools_backends.cpp: thread mutex atomic
+# rag apply is synchronous now (the TUI runs it through cmd::apply_rag_settings)
+# and the subagent stream's cancel bridge is stop_callbacks on real tokens, so
+# this file starts no thread of its own. mutex/atomic guard the retriever +
+# status caches.
+tool/mcp_tools_backends.cpp: mutex atomic
 tool/plugin.cpp: mutex atomic
 tool/skills.cpp: mutex atomic
 tool/memory_store.cpp: mutex
@@ -227,9 +226,9 @@ tool/util/exec.cpp: thread
 # next_tool_exec_seq(): a static atomic counter minted per dispatch, echoed by
 # the worker so the reducer can drop stale results from a superseded turn.
 runtime/app/cmd_factory.cpp: atomic
-# ACP dispatch fans a tool call out to std::async so a permission-request
-# round-trip can happen alongside; the shared_future is awaited before return.
-acp/server.cpp: async
+# acp/server.cpp has NO entry: its tool dispatch moved to pool.submit_isolated
+# and waits on a stop_token (delay_for) instead of the standard async helper
+# plus a 50 ms poll, so it uses none of the banned primitives.
 # The Windows code-block runner ticks a heartbeat title/line while a blocking
 # subprocess call runs. The helper is a jaal::scope() nursery spawn now, not a
 # bare std::thread with an unguarded join (same std::terminate-on-throw bug as

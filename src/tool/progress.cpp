@@ -14,7 +14,9 @@
 
 #include "agentty/tool/registry.hpp"
 
+#include <stop_token>
 #include <utility>
+#include <vector>
 
 namespace agentty::tools {
 namespace progress {
@@ -28,10 +30,25 @@ Sink current()                         { return g_sink; }
 } // namespace progress
 
 namespace cancellation {
-namespace { thread_local Probe g_probe; }
-void set(Probe probe) { g_probe = std::move(probe); }
-void clear() { g_probe = nullptr; }
+namespace {
+    thread_local Probe                        g_probe;
+    thread_local std::vector<std::stop_token> g_tokens;
+}
+void set(Probe probe) { g_probe = std::move(probe); g_tokens.clear(); }
+void clear() { g_probe = nullptr; g_tokens.clear(); }
 Probe current() { return g_probe; }
 bool requested() { return g_probe && g_probe(); }
+std::vector<std::stop_token> tokens() { return g_tokens; }
+
+Scope::Scope(std::vector<std::stop_token> toks) {
+    // The probe is DERIVED from the tokens, so a poller and a subscriber can
+    // never disagree about whether the run was cancelled.
+    set([toks] {
+        for (const auto& t : toks)
+            if (t.stop_requested()) return true;
+        return false;
+    });
+    g_tokens = std::move(toks);
+}
 } // namespace cancellation
 } // namespace agentty::tools

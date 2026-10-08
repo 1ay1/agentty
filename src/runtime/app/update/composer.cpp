@@ -526,21 +526,25 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
     // submit after any longer pause pays a cold TCP+TLS+H2 dial (~150-400
     // ms) on top of TTFT. Typing is the earliest reliable "a request is
     // coming" signal — fire an opportunistic prewarm on the FIRST composer
-    // event after the warm window lapsed. Throttled to one dial per idle
-    // TTL so key-repeat can't spawn dial threads; prewarm itself is
-    // tracked + cancel-safe and swallows errors.
+    // event after the warm window lapsed.
+    //
+    // The throttle lives in the MODEL (m.s.last_prewarm_at), not in a
+    // function-local static: a static is state update can see that the Model
+    // doesn't own, so replay and two app instances in one process would both
+    // get it wrong. Clock still read here — see the elm_purity lint for the
+    // plan to stamp `now` onto the Model per message.
+    Cmd prewarm = Cmd::none();
     {
-        static std::chrono::steady_clock::time_point last_warm{};
         const auto now = std::chrono::steady_clock::now();
         const bool wire_stale =
             m.s.last_wire_at.time_since_epoch().count() == 0
             || now - m.s.last_wire_at > std::chrono::seconds(85);
         const bool warm_throttled =
-            last_warm.time_since_epoch().count() != 0
-            && now - last_warm < std::chrono::seconds(85);
+            m.s.last_prewarm_at.time_since_epoch().count() != 0
+            && now - m.s.last_prewarm_at < std::chrono::seconds(85);
         if (wire_stale && !warm_throttled && !m.s.active()) {
-            last_warm = now;
-            provider::prewarm_active_provider();
+            m.s.last_prewarm_at = now;
+            prewarm = cmd::prewarm_provider();
         }
     }
     // ── Proactive OAuth refresh ────────────────────────────────
@@ -555,13 +559,12 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
     // throttled so key-repeat can't spam the token endpoint.
     Cmd proactive_refresh = Cmd::none();
     {
-        static std::chrono::steady_clock::time_point last_refresh_probe{};
         const auto now = std::chrono::steady_clock::now();
         const bool probe_throttled =
-            last_refresh_probe.time_since_epoch().count() != 0
-            && now - last_refresh_probe < std::chrono::seconds(30);
+            m.s.last_refresh_probe_at.time_since_epoch().count() != 0
+            && now - m.s.last_refresh_probe_at < std::chrono::seconds(30);
         if (!probe_throttled && !m.s.active() && !m.s.oauth_refresh_in_flight) {
-            last_refresh_probe = now;
+            m.s.last_refresh_probe_at = now;
             if (auto tok = auth::oauth_proactive_refresh_token()) {
                 m.s.oauth_refresh_in_flight = true;
                 proactive_refresh = cmd::refresh_oauth(std::move(*tok));
@@ -1505,12 +1508,13 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
         },
     }, cm);
 
-    // Fold in the proactive OAuth refresh (if armed above) without
-    // disturbing whatever Cmd the matched arm produced. none() short-
-    // circuits the common case to zero overhead.
-    if (!proactive_refresh.is_none())
-        return Cmd::batch(std::move(step), std::move(proactive_refresh));
-    return step;
+    // Fold in the opportunistic effects armed above (prewarm, proactive OAuth
+    // refresh) without disturbing whatever Cmd the matched arm produced.
+    // none() short-circuits the common case — almost every keystroke — to
+    // zero overhead.
+    if (prewarm.is_none() && proactive_refresh.is_none()) return step;
+    return Cmd::batch(std::move(step), std::move(prewarm),
+                      std::move(proactive_refresh));
 }
 
 } // namespace agentty::app::detail

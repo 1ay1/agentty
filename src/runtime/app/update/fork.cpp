@@ -203,17 +203,17 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             m.ui.panel.close<pn::ThreadList>();
             rehydrate_frozen(m);
             m.ui.needs_warmup_render = !m.ui.frozen.empty();
-            // The fork's first turn hits the network fresh — warm the socket
-            // now (idle TTL has usually evicted the launch-time prewarm)
-            // so it doesn't re-pay the handshake. Non-blocking.
-            provider::prewarm_active_provider();
 
             auto toast = set_status_toast(
                 m, std::string{"forked \xc2\xb7 fresh context · "} +
                        label_of(choice) +
                        " · prior transcript readable on demand",
                 std::chrono::seconds{5});
+            // The fork's first turn hits the network fresh, and the idle TTL
+            // has usually evicted the launch-time socket — so warm it, as an
+            // effect alongside the saves.
             return Cmd::batch(std::move(save_parent), std::move(save_fork),
+                              cmd::prewarm_provider(),
                               std::move(toast), cmd::reset_inline());
         },
     }, fm);

@@ -16,6 +16,9 @@
 #include <exception>
 #include <fstream>
 #include <future>
+#include <stop_token>
+
+#include <jaal/kernel/delay.hpp>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -1562,12 +1565,12 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     // deliver our outbound permission responses. The Responder resolves the
     // deferred session/prompt when the turn settles.
     //
-    // run_isolated_detached (util::isolated_thread) instead of a raw
-    // std::thread(...).detach(): the worker body is wrapped so NO exception
-    // — std or otherwise — can reach std::terminate and kill every other
-    // session. Terminate is structurally unreachable from here; the outer
-    // try/catch inside run_turn is now belt-and-suspenders, not the only line
-    // of defence. See RUST-CRITIQUE.md #3.
+    // run_isolated_detached (util/background.hpp) instead of a raw detached
+    // worker: the body is wrapped so NO exception — std or otherwise — can
+    // reach std::terminate and kill every other session, and the job is
+    // owned by the background pool, so teardown asks it to stop and waits.
+    // The outer try/catch inside run_turn is belt-and-suspenders, not the
+    // only line of defence. See RUST-CRITIQUE.md #3.
     util::run_isolated_detached("acp.turn_worker",
         [this, sid = std::move(sid), rid = std::move(req_id_dump),
          r = std::move(resp)]() mutable {
@@ -2032,61 +2035,58 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
         // (on the engine's reader thread) makes THIS turn loop return
         // promptly instead of blocking until a long bash/web_fetch finishes.
         // The tool itself isn't interruptible (its interface is synchronous),
-        // so on cancel we detach the future and drop its result — the same
-        // "discard the late output" contract the TUI path uses via its
-        // idempotent tool-output guard. `shared_future` so the lambda below
-        // can keep the running task alive after we stop waiting on it.
+        // so on cancel we drop its result — the same "discard the late
+        // output" contract the TUI path uses via its idempotent tool-output
+        // guard.
         //
-        // std::async(launch::async) throws std::system_error when the OS
-        // can't start a thread (fd/thread exhaustion). Fail only THIS tool
-        // in that case rather than aborting the whole turn.
-        std::shared_future<tool::ExecResult> fut;
-        try {
-            fut = std::async(std::launch::async,
-                [td, name = tc.name.value, args = tc.args]() {
-                    return tool::DynamicDispatch::execute_with(td, name, args);
-                }).share();
-        } catch (const std::exception& e) {
-            util::dbglog("acp.run_tools.async", e.what());
-            set_status(tc, ToolUse::Failed{{}, {}, std::string{"could not start tool: "} + e.what()});
-            a::ToolCallUpdate f;
-            f.toolCallId = a::ToolCallId{tc.id.value};
-            f.status     = a::Just(a::ToolCallStatus::Failed);
-            send_update(sess.id, a::SU_ToolCallUpdate{std::move(f)});
-            continue;
-        }
+        // pool.submit_isolated, not the standard async helper: that helper's
+        // future joins in its destructor, so abandoning a cancelled tool used
+        // to need a detached "tool_reaper" thread just to hold the future
+        // somewhere it could afford to block. The pool's future drops
+        // cleanly, and the job stays owned (waited for at teardown).
+        //
+        // `wake` is the one thing this loop waits on. Two sources stop it:
+        // the tool finishing (the job requests it on the way out) and the
+        // session's cancel (a stop_callback bridges it). Both are events, so
+        // the wait below wakes the instant either happens — it used to poll
+        // the future every 50 ms.
+        std::stop_source wake;
+        auto fut = util::background_pool().submit_isolated(
+            [td, name = tc.name.value, args = tc.args, wake]() mutable {
+                struct Signal {
+                    std::stop_source& s;
+                    ~Signal() { s.request_stop(); }
+                } on_exit{wake};
+                return tool::DynamicDispatch::execute_with(td, name, args);
+            });
+        std::optional<std::stop_callback<std::function<void()>>> on_cancel;
+        if (sess.cancel)
+            on_cancel.emplace(sess.cancel->token(),
+                              std::function<void()>{[wake]() mutable {
+                                  wake.request_stop();
+                              }});
 
-        bool tool_cancelled = false;
-        bool tool_timed_out = false;
         // Belt-and-suspenders wall-clock ceiling: a tool that hangs forever
         // (e.g. a stalled network read with no internal timeout) plus a
         // client that never sends session/cancel would otherwise pin this
         // worker — and the session/prompt future — permanently. On the
-        // deadline we fail the tool and move on; the future is detached below
-        // just like the cancel path so the runaway task cleans itself up.
+        // deadline we fail the tool and move on.
         constexpr auto kToolDeadline = std::chrono::minutes(10);
         const auto tool_start = std::chrono::steady_clock::now();
-        for (;;) {
-            if (fut.wait_for(std::chrono::milliseconds(50))
-                    == std::future_status::ready)
-                break;
-            if (sess.cancel && sess.cancel->is_cancelled()) {
-                tool_cancelled = true;
-                break;
-            }
-            if (std::chrono::steady_clock::now() - tool_start > kToolDeadline) {
-                tool_timed_out = true;
-                break;
-            }
-        }
+        const bool woke = jaal::kernel::delay_for(wake.get_token(), kToolDeadline);
+        on_cancel.reset();
+
+        // Finished beats cancelled: a tool that completed in the same instant
+        // the user cancelled has a real result, and reporting it is honest.
+        const bool finished =
+            fut.wait_for(std::chrono::seconds{0}) == std::future_status::ready;
+        const bool tool_cancelled =
+            !finished && woke && sess.cancel && sess.cancel->is_cancelled();
+        const bool tool_timed_out = !finished && !woke;
 
         if (tool_cancelled || tool_timed_out) {
-            // Detach: keep the shared_future alive on an isolated reaper so
-            // the worker can finish and clean up without us blocking on it.
-            // isolated so a throw in the abandoned task's cleanup can't
-            // terminate the process.
-            util::run_isolated_detached("acp.tool_reaper",
-                [fut]() mutable { fut.wait(); });
+            // Just drop the future. The job keeps running on the pool and is
+            // waited for at teardown; its late result is discarded.
             const char* why = tool_timed_out ? "timed out" : "cancelled";
             if (tool_timed_out) util::dbglog("acp.run_tools.timeout", tc.name.value);
             set_status(tc, ToolUse::Failed{{}, {}, why});
@@ -2102,7 +2102,21 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             continue;
         }
 
-        auto result = fut.get();
+        // A pool that is already stopping (process teardown) never runs the
+        // job and breaks the promise. Fail this tool rather than the turn.
+        std::optional<tool::ExecResult> got;
+        try {
+            got = fut.get();
+        } catch (const std::exception& e) {
+            util::dbglog("acp.run_tools.submit", e.what());
+            set_status(tc, ToolUse::Failed{{}, {}, std::string{"could not run tool: "} + e.what()});
+            a::ToolCallUpdate f;
+            f.toolCallId = a::ToolCallId{tc.id.value};
+            f.status     = a::Just(a::ToolCallStatus::Failed);
+            send_update(sess.id, a::SU_ToolCallUpdate{std::move(f)});
+            continue;
+        }
+        auto result = std::move(*got);
 
         a::ToolCallUpdate upd;
         upd.toolCallId = a::ToolCallId{tc.id.value};
@@ -2153,7 +2167,7 @@ bool AgentServer::run_tools(Session& sess, bool& out_cancelled) {
             // into Running, so executing_since() has nothing recorded to read
             // and ALWAYS returns its liveness fallback, card birth -- which
             // here includes the session/request_permission round trip to the
-            // client. tool_start is stamped above at the std::async that is
+            // client. tool_start is stamped above at the pool submit that is
             // this path's actual dispatch, and the timeout branch already
             // uses it. The two terminal paths now agree.
             set_status(tc, ToolUse::Done{{}, {}, result->text});

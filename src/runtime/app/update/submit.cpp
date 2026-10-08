@@ -780,13 +780,19 @@ commit_provider_switch(Model& m, std::string_view spec,
 
     // (2) Install the new selection (process-global; the stream seam reads
     //     active() at call time).
+    //
+    //     NOT YET ELM. This writes a process-global from inside update, and
+    //     the Model does not own the selection at all — every reader goes to
+    //     provider::active(). Moving it into the Model is the real fix and is
+    //     tracked by the elm_purity lint's allowlist; it is not a local edit.
     provider::select(provider::parse_selection(spec_s));
 
-    // (2b) Prewarm TLS/DNS to the NEWLY-active provider's host on a detached
-    //      thread, so the first turn after a live switch is as fast as a cold
-    //      start's prewarmed first turn. Uniform for Claude and ChatGPT/Codex;
-    //      a no-op for locals / ACP. Fire-and-forget.
-    provider::prewarm_active_provider();
+    // (2b) Prewarm TLS/DNS to the NEWLY-active provider's host, so the first
+    //      turn after a live switch is as fast as a cold start's. Returned as
+    //      an effect (batched below). cmd::prewarm_provider() resolves its
+    //      target NOW, synchronously, so it captures the selection installed
+    //      on the line above rather than whatever is active when it runs.
+    Cmd prewarm = cmd::prewarm_provider();
 
     Cmd recall_save = Cmd::none();
     {
@@ -900,7 +906,7 @@ commit_provider_switch(Model& m, std::string_view spec,
     auto toast = set_status_toast(m, std::move(toast_text),
                                   std::chrono::seconds{4});
     return Cmd::batch(std::move(recall_save), std::move(settings_save),
-                      std::move(toast), cmd::fetch_models(),
+                      std::move(prewarm), std::move(toast), cmd::fetch_models(),
                       std::move(refresh_cmd));
 }
 

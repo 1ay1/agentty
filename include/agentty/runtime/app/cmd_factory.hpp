@@ -314,4 +314,22 @@ struct LoopBreak {
 // `thread_loading` flag stuck.
 [[nodiscard]] Cmd load_thread_async(ThreadId id);
 
+// Re-sync the RAG retriever to `cfg` off the UI thread. An effect, so the
+// reducer RETURNS this rather than calling into the retriever itself: update()
+// stays a pure function of (Model, Msg), and the work runs where every other
+// background job runs — on jaal's pool, cancelled and waited for by the
+// kernel's own shutdown. Dispatches nothing; the retriever is its own state.
+[[nodiscard]] Cmd apply_rag_settings(store::RagConfig cfg);
+
+// Open a TLS connection to the active provider's host ahead of the first
+// request, so the user's first turn skips the handshake.
+//
+// An EFFECT, so a reducer returns this rather than dialling itself. The target
+// is resolved HERE, synchronously, from the selection the reducer just set —
+// prewarm_target() is pure — and only the dial runs on the worker. That split
+// matters: resolving on the worker would read the active provider at some
+// later moment, after a fast second switch may have already changed it.
+// Dispatches nothing.
+[[nodiscard]] Cmd prewarm_provider();
+
 } // namespace agentty::app::cmd

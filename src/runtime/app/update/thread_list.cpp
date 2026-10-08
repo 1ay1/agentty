@@ -85,21 +85,19 @@ using maya::overload;
     m.s.smart_turn_complexity  = smart::Complexity::Standard;
     m.s.smart_effort_bias      = 0;
     release_to_kernel();
-    // Re-warm the active provider's TLS socket. The launch-time prewarm in
-    // main() has usually aged out of the pool by now — a user reads a reply,
-    // composes, then hits ^N, and the 90 s idle TTL has evicted the warm
-    // connection. Without this the FIRST turn of every new thread re-pays
-    // the full DNS+TCP+TLS handshake (~150-300 ms) before its first SSE byte,
-    // which reads as a per-new-thread lag. Opening the socket now overlaps
-    // that cost with the user typing their first prompt. Non-blocking: spawns
-    // a tracked background dial and returns immediately; a no-op when the pool
-    // is already warm enough to serve the next request.
-    provider::prewarm_active_provider();
-    // Per maya's contract this is the ONE allowed wiring of reset_inline: an
-    // explicit, user-initiated content swap. `\x1b[3J` wipes saved-lines
-    // (including pre-agentty shell history), acceptable precisely because
-    // the user asked to switch threads. Do NOT extend it to per-turn paths.
-    return cmd::reset_inline();
+    // Re-warm the active provider's TLS socket. The launch-time prewarm has
+    // usually aged out of the pool by now — a user reads a reply, composes,
+    // then hits ^N, and the 90 s idle TTL has evicted the warm connection.
+    // Without this the FIRST turn of every new thread re-pays the full
+    // DNS+TCP+TLS handshake (~150-300 ms) before its first SSE byte. Returned
+    // as an effect, so the dial overlaps the user typing their first prompt.
+    //
+    // Per maya's contract reset_inline is the ONE allowed wiring of
+    // `\x1b[3J`: an explicit, user-initiated content swap. It wipes
+    // saved-lines (including pre-agentty shell history), acceptable precisely
+    // because the user asked to switch threads. Do NOT extend it to per-turn
+    // paths.
+    return Cmd::batch(cmd::prewarm_provider(), cmd::reset_inline());
 }
 
 Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
@@ -216,12 +214,12 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                     return Cmd::none();
                 }
                 m.s.thread_loading = true;
-                // Warm the socket now so the first turn in the thread the user
+                // Warm the socket so the first turn in the thread the user
                 // is switching INTO doesn't re-pay the handshake (the pool's
                 // idle TTL has usually evicted it during composer breathing
-                // room). Non-blocking; no-op if already warm.
-                provider::prewarm_active_provider();
-                cmd = cmd::load_thread_async(meta.id);
+                // room). Returned, not performed.
+                cmd = Cmd::batch(cmd::prewarm_provider(),
+                                 cmd::load_thread_async(meta.id));
             }
             m.ui.panel.close<pn::ThreadList>();
             return cmd;
@@ -340,8 +338,6 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             Cmd save = m.d.current.messages.empty()
                          ? Cmd::none() : Cmd(SaveThread{m.d.current});
             m.s.thread_loading = true;
-            // Warm the socket for the switched-into thread's first turn.
-            provider::prewarm_active_provider();
             // "thread k/N · title" — the positional readout that makes
             // repeated Alt+←/→ presses feel like flipping through a
             // deck rather than teleporting blind. Survives the swap
@@ -350,7 +346,10 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                 "thread " + std::to_string(target + 1) + "/"
                     + std::to_string(sz) + " \xc2\xb7 "
                     + (meta.title.empty() ? "(untitled)" : meta.title));
+            // The prewarm warms the socket for the switched-into thread's
+            // first turn.
             return Cmd::batch(std::move(save),
+                              cmd::prewarm_provider(),
                               cmd::load_thread_async(meta.id),
                               std::move(toast));
         },

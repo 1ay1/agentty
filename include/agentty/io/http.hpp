@@ -24,6 +24,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -37,14 +38,31 @@ namespace agentty::http {
 // boundary and between poll() waits, so a trip lands within a few ms on a
 // live connection and immediately on an idle one (the socket is shut down,
 // which wakes poll()).
+//
+// BACKED BY A std::stop_source, not a bare atomic flag. A flag can only be
+// POLLED, so anything that wanted to react to a cancel — rather than check
+// for one inside its own loop — had to grow a thread that slept and
+// rechecked. agentty had two: the ACP server's tool wait (50 ms) and the
+// subagent stream's parent-cancel bridge (20 ms). token() hands out a real
+// std::stop_token, so those become stop_callbacks and condition-variable
+// waits that wake the instant cancel() is called.
+//
+// The cost is nothing on the hot path. is_cancelled() is the same single
+// acquire load it was (stop_requested() is one atomic read in every
+// implementation), and the I/O loop keeps calling it exactly as before.
 class CancelToken {
 public:
-    void cancel() noexcept { flag_.store(true, std::memory_order_release); }
+    void cancel() noexcept { src_.request_stop(); }
     [[nodiscard]] bool is_cancelled() const noexcept {
-        return flag_.load(std::memory_order_acquire);
+        return src_.stop_requested();
+    }
+    /// The same signal as a std::stop_token: register a stop_callback on it,
+    /// or hand it to jaal::kernel::delay_for, instead of polling.
+    [[nodiscard]] std::stop_token token() const noexcept {
+        return src_.get_token();
     }
 private:
-    std::atomic<bool> flag_{false};
+    std::stop_source src_;
 };
 using CancelTokenPtr = std::shared_ptr<CancelToken>;
 
