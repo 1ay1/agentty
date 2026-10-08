@@ -27,6 +27,7 @@
 #include "agtest.hpp"
 
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
@@ -37,6 +38,9 @@ using std::chrono::seconds;
 
 namespace {
 
+
+// Every fold here runs at this fixed time; tool times are set relative to it.
+constexpr steady_clock::time_point kNow = app::kTestEpoch;
 
 // A model parked in ExecutingTool with one Running tool whose launch and
 // last-progress times we control. `progress_ago` < 0 means "no progress yet".
@@ -51,7 +55,7 @@ Model model_with_running_tool(seconds started_ago, seconds progress_ago) {
     tc.name = ToolName{"task"};
     tc.args = nlohmann::json{{"prompt", "exhaustive audit"}};
 
-    auto now = steady_clock::now();
+    const auto now = kNow;
     ToolUse::Running run;
     run.started_at = now - started_ago;
     if (progress_ago.count() >= 0) {
@@ -79,7 +83,7 @@ Model model_just_approved_after(seconds waited) {
     tc.name = ToolName{"shell"};
     tc.args = nlohmann::json{{"command", "make -j8"}};
 
-    const auto now = steady_clock::now();
+    const auto now = kNow;
     ToolUse::Running run;
     // The card was born when the model emitted the call — `waited` ago.
     run.started_at = now - waited;
@@ -107,6 +111,7 @@ bool tool_failed(const Model& m) {
 }
 
 Model tick(Model m) {
+    m.now = kNow;   // the fold's time
     auto [next, _] = ::agentty::app::detail::step(::agentty::app::detail::meta_update, std::move(m), msg::MetaMsg{Tick{}});
     return std::move(next);
 }
@@ -201,7 +206,7 @@ TEST_CASE("tool wedge liveness") {
         for (auto& msg : m.d.current.messages)
             for (auto& tc : msg.tool_calls)
                 if (auto* r = std::get_if<ToolUse::Running>(&tc.status))
-                    r->executing_since = steady_clock::now() - seconds{400};
+                    r->executing_since = kNow - seconds{400};
         m = tick(std::move(m));
         check(tool_failed(m),
               "F: silent for longer than the cap SINCE EXECUTION began is "

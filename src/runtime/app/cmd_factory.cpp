@@ -144,7 +144,7 @@ std::size_t dedup_releaked_salvage_calls(Model& m) {
         return false;
     };
     std::size_t mem_blocked = 0;
-    const auto now0 = std::chrono::steady_clock::now();
+    const auto now0 = m.now;
     for (auto& tc : msgs.back().tool_calls) {
         if (!tc.is_pending() && !tc.is_approved()) continue;
         if (!is_salvaged_call(tc.id)) continue;
@@ -160,7 +160,7 @@ std::size_t dedup_releaked_salvage_calls(Model& m) {
         return mem_blocked;
 
     std::size_t deduped = 0;
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = m.now;
     for (auto& tc : msgs.back().tool_calls) {
         if (!tc.is_pending() && !tc.is_approved()) continue;
         if (!is_salvaged_call(tc.id)) continue;   // only dedup salvaged leaks
@@ -825,7 +825,7 @@ Cmd launch_stream(Model& m) {
         // are both per-stream. StreamStarted still resets them too, which on
         // Anthropic just moves the origin forward by the connect time -- the
         // honest place for "provider started answering".
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = m.now;
         a->started                = now;
         a->last_event_at          = now;
         a->first_delta_at         = {};
@@ -2076,7 +2076,7 @@ Cmd kick_pending_tools(Model& m) {
                 // the wedge budget killed freshly-approved tools (issue #40).
                 const auto seq = next_tool_exec_seq();
                 tc.status = ToolUse::Running{tc.started_at(), {}, {},
-                                             std::chrono::steady_clock::now(),
+                                             m.now,
                                              seq};
                 auto cancel = active_ctx(m.s.phase)
                     ? active_ctx(m.s.phase)->cancel
@@ -2225,8 +2225,8 @@ Cmd kick_pending_tools(Model& m) {
             // a Tick land before the new sub-turn's StreamStarted resets
             // it, firing a spurious "stream stalled — no events for Ns".
             // The sub-turn is a fresh wire phase; start its clock now.
-            if (!reschedule_streaming(m.s.phase, [](phase::Active& c) {
-                    c.last_event_at = std::chrono::steady_clock::now();
+            if (!reschedule_streaming(m.s.phase, [&m](phase::Active& c) {
+                    c.last_event_at = m.now;
                     c.retry         = retry::Fresh{};
                 }))
                 return Cmd::batch(std::move(cmds));   // late arrival

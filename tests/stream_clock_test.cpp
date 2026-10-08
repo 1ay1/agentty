@@ -20,7 +20,6 @@
 // way an OpenAI-chat transport behaves, and assert ttft measures one stream.
 #include <chrono>
 #include <string>
-#include <thread>
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -51,12 +50,18 @@ void install_stub_deps() {
     });
 }
 
+// Every fold here runs at an explicit time, so ttft comes out exact. T0 is
+// when the stream under test launches.
+constexpr Clock::time_point T0 = app::kTestEpoch + std::chrono::hours{1};
+using std::chrono::milliseconds;
+
 // A model mid-turn: user message, an assistant placeholder, Streaming phase
-// with a ctx whose clock was started `ago` in the past -- standing in for a
+// with a ctx whose clock was started `ago` before T0 -- standing in for a
 // long earlier stretch of the same turn (a prior sub-turn, a tool, a retry
 // backoff) that the next stream must NOT inherit.
 Model streaming_since(Clock::duration ago) {
     Model m;
+    m.now = T0;
     m.d.current.id = ThreadId{"t-clock"};
     Message u;
     u.role = Role::User;
@@ -67,20 +72,20 @@ Model streaming_since(Clock::duration ago) {
     m.d.current.messages.push_back(std::move(a));
 
     phase::Active ctx;
-    ctx.started       = Clock::now() - ago;
+    ctx.started       = T0 - ago;
     ctx.last_event_at = ctx.started;
     m.s.phase = phase::Streaming{std::move(ctx)};
     return m;
 }
 
-Model step(Model m, msg::StreamMsg sm) {
-    return app::update(std::move(m), Msg{std::move(sm)}).first;
+Model step(Model m, msg::StreamMsg sm, Clock::time_point at) {
+    return app::update(std::move(m), Msg{std::move(sm)}, at).first;
 }
 
-// Seal the turn the way the real stream does: one delta, then finish.
-const Message::Telemetry& seal(Model& m) {
-    m = step(std::move(m), StreamTextDelta{"hello"});
-    m = step(std::move(m), StreamFinished{StopReason::EndTurn});
+// Seal the turn the way the real stream does: one delta at `at`, then finish.
+const Message::Telemetry& seal(Model& m, Clock::time_point at) {
+    m = step(std::move(m), StreamTextDelta{"hello"}, at);
+    m = step(std::move(m), StreamFinished{StopReason::EndTurn}, at);
     REQUIRE(m.d.current.messages.back().telemetry.has_value());
     return *m.d.current.messages.back().telemetry;
 }
@@ -94,17 +99,14 @@ TEST_CASE("stream clock: a relaunch restarts ttft, with no StreamStarted") {
     // retries, a prior sub-turn, a slow tool. An OpenAI-chat transport then
     // sends deltas WITHOUT a StreamStarted event.
     Model m = streaming_since(std::chrono::seconds{90});
-    (void)cmd::launch_stream(m);   // the relaunch: retry or post-tool
-    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    (void)cmd::launch_stream(m);   // the relaunch: retry or post-tool, at T0
 
-    const auto& t = seal(m);
-    // ttft is this stream's wait, a few ms -- not the 90 s the turn had
-    // already spent. Bounded generously so a slow CI box cannot flake it.
-    CHECK_MESSAGE(t.ttft_ms < 5'000,
+    const auto& t = seal(m, T0 + milliseconds{20});
+    // ttft is this stream's wait, not the 90 s the turn had already spent.
+    CHECK_MESSAGE(t.ttft_ms == 20,
                   "ttft must measure THIS stream, not the whole turn so far: "
                   "an OpenAI-chat transport never emits StreamStarted, so "
                   "launch_stream is the only thing that can restart the clock");
-    CHECK(t.ttft_ms >= 15);   // and it did measure the real gap
 }
 
 TEST_CASE("stream clock: without a relaunch the stale origin is what leaks") {
@@ -115,8 +117,8 @@ TEST_CASE("stream clock: without a relaunch the stale origin is what leaks") {
     // fix. If this ever stops reporting ~90 s, the clock is being restarted
     // somewhere new and the test above needs re-reading.
     Model m = streaming_since(std::chrono::seconds{90});
-    const auto& t = seal(m);
-    CHECK(t.ttft_ms >= 89'000);
+    const auto& t = seal(m, T0);
+    CHECK(t.ttft_ms == 90'000);
 }
 
 TEST_CASE("stream clock: StreamStarted still moves the origin forward") {
@@ -127,9 +129,8 @@ TEST_CASE("stream clock: StreamStarted still moves the origin forward") {
     // provider answers. ttft then excludes connect time, as it always did.
     Model m = streaming_since(std::chrono::seconds{90});
     (void)cmd::launch_stream(m);
-    std::this_thread::sleep_for(std::chrono::milliseconds{30});
-    m = step(std::move(m), StreamStarted{});
+    m = step(std::move(m), StreamStarted{}, T0 + milliseconds{30});
 
-    const auto& t = seal(m);
-    CHECK(t.ttft_ms < 25);   // the 30 ms before StreamStarted is excluded
+    const auto& t = seal(m, T0 + milliseconds{35});
+    CHECK(t.ttft_ms == 5);   // the 30 ms before StreamStarted is excluded
 }

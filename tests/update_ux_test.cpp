@@ -62,21 +62,20 @@ bool has(const std::string& hay, const char* needle) {
 
 TEST_CASE("update: finding a release starts the download without being asked") {
     install_stub_deps();
-    A::Model m;
+    // Whether we may replace the binary is read once at launch into m.env.
+    // Drive both answers rather than asking the live install.
+    for (const bool ok : {true, false}) {
+        A::Model m;
+        m.env.self_update_ok = ok;
 
-    auto [next, cmd] = D::step(::agentty::app::detail::meta_update, std::move(m),
-        A::msg::MetaMsg{A::UpdateCheckDone{true, "9.9.9",
-                                           "https://example/releases"}});
+        auto [next, cmd] = D::step(::agentty::app::detail::meta_update, std::move(m),
+            A::msg::MetaMsg{A::UpdateCheckDone{true, "9.9.9",
+                                               "https://example/releases"}});
 
-    CHECK(next.s.update_latest == "9.9.9");
-    // The whole point: no palette trip, no keystroke. Either the download
-    // is already running, or self_update_possible() refused this install
-    // (package manager / nix / Windows) and we correctly did nothing.
-    std::string why;
-    if (A::update::self_update_possible(why)) {
-        CHECK(next.s.update_in_flight);
-    } else {
-        CHECK(!next.s.update_in_flight);   // not ours to replace
+        CHECK(next.s.update_latest == "9.9.9");
+        // No palette trip, no keystroke when we can update; nothing touched
+        // when the install isn't ours (package manager / nix / Windows).
+        CHECK(next.s.update_in_flight == ok);
     }
 }
 

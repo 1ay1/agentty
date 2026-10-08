@@ -25,6 +25,7 @@
 #include "agentty/domain/smart_tuning.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/app/update.hpp"            // publish_derived
 #include "agentty/runtime/app/update/internal.hpp"   // apply_smart
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/panel/rag.hpp"
@@ -426,7 +427,10 @@ TEST_CASE("smart tuning: a config change reaches all three holders") {
         .set = true, .provider = "openai"};
 
     {
-        auto save = agentty::app::detail::apply_smart(m, cfg);
+        // Through the seam, like a real fold: apply_smart only changes the
+        // Model, publish_derived is what tells the router.
+        auto save = agentty::app::publish_derived(
+            m, agentty::app::detail::apply_smart(m, cfg));
         agtest::fx::Store store;
         store.settings = persisted;
         agtest::fx::run(save, store);

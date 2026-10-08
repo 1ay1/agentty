@@ -179,9 +179,12 @@ if(DEFINED VIEW_ROOT)
     file(GLOB_RECURSE vfiles RELATIVE ${VIEW_ROOT} ${VIEW_ROOT}/*.cpp ${VIEW_ROOT}/*.hpp)
     set(stale_reads "")
     foreach(f IN LISTS vfiles)
-        # The reducers and the two seam files are where `now` is current.
+        # The reducers and the seam files are where `now` is current.
+        # cmd_factory builds Cmds from inside the reducer that called it, so
+        # it is in the fold too (a task body it returns must not read m).
         if(f MATCHES "^runtime/app/update/" OR f STREQUAL "runtime/app/update.cpp"
-           OR f STREQUAL "runtime/app/init.cpp")
+           OR f STREQUAL "runtime/app/init.cpp"
+           OR f STREQUAL "runtime/app/cmd_factory.cpp")
             continue()
         endif()
         execute_process(

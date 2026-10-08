@@ -7,6 +7,7 @@
 #include "agtest.hpp"
 
 #include "agentty/io/http.hpp"
+#include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
@@ -15,6 +16,7 @@ namespace A = agentty;
 namespace D = agentty::app::detail;
 
 static A::Model apply(A::Model m, A::msg::StreamMsg event) {
+    m.now = agentty::app::kTestEpoch;   // the fold's time
     auto [next, cmd] = D::step(::agentty::app::detail::stream_update, std::move(m), std::move(event));
     (void)cmd;
     // `next` is a structured binding: no implicit move-on-return before C++23,
@@ -49,8 +51,8 @@ TEST_CASE("tool stream snapshot") {
     m.d.current.messages.push_back(std::move(assistant));
     A::phase::Active active;
     active.transient_retries = 3;
-    active.last_event_at = std::chrono::steady_clock::now()
-                         - std::chrono::seconds{119};
+    // apply() folds at kTestEpoch, so "now" for the reducer is that.
+    active.last_event_at = agentty::app::kTestEpoch - std::chrono::seconds{119};
     m.s.phase = A::phase::Streaming{std::move(active)};
 
     m = apply(std::move(m), A::StreamHeartbeat{.transport_only = true});
@@ -59,8 +61,8 @@ TEST_CASE("tool stream snapshot") {
           "transport heartbeat records proxy/socket activity");
     check(transport_ctx && transport_ctx->transient_retries == 3,
           "transport heartbeat does not erase retry history");
-    check(transport_ctx && std::chrono::steady_clock::now()
-              - transport_ctx->last_event_at < std::chrono::seconds{2},
+    check(transport_ctx
+              && transport_ctx->last_event_at == agentty::app::kTestEpoch,
           "transport heartbeat refreshes the stall clock");
 
     m = apply(std::move(m), A::StreamBufferedWait{});
