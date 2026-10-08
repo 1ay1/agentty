@@ -27,13 +27,11 @@ namespace agentty::ui::detail {
 // body_budget = term_rows − 15, floored at 3 (the proven-safe minimum at
 // 18-row terminals — exactly the config the oracle passes with).
 //
-// query_terminal_size (not available_height): tool bodies are built at
-// VIEW-BUILD time, before the render pass installs the sized
-// RenderContext — available_height() would return the 24-row default.
+// Tool bodies are built at VIEW-BUILD time, under the RenderContext view()
+// installs from the Model's terminal size, so available_height() is the real
+// height there (24 outside any view, the old no-tty fallback).
 int stream_body_budget() {
-    const auto sz = maya::platform::query_terminal_size(
-        maya::platform::stdout_handle());
-    const int rows = sz.height.value > 0 ? sz.height.value : 24;
+    const int rows = maya::available_height() > 0 ? maya::available_height() : 24;
     constexpr int kChromeBelowHeader = 15;
     return std::max(3, rows - kChromeBelowHeader);
 }

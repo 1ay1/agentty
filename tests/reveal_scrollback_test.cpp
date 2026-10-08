@@ -735,6 +735,10 @@ static void run_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"reveal"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -829,6 +833,10 @@ static void run_reasoning_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"reason"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1002,6 +1010,10 @@ static void run_prior_writecard_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealpw"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1093,6 +1105,10 @@ static void run_multiturn_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealmt"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1180,6 +1196,10 @@ static void run_submit_mid_reveal_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealsub"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1255,6 +1275,10 @@ static void run_codeblock_fold_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealcb"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1339,6 +1363,10 @@ static void run_toolgrow_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealtg"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1453,6 +1481,10 @@ static void run_trimstorm_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealts"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};

@@ -464,6 +464,10 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
 
     Rng rng(seed);
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"wirefuzz"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};

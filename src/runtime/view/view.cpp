@@ -161,24 +161,19 @@ maya::Element view(const Model& m) {
 
     // ── Terminal dimensions for the BUILD phase ──
     // maya's run loop calls P::view(model) BEFORE Runtime::render
-    // installs the sized RenderContext (the only guard site), so any
-    // available_height()/available_width() read during Element
-    // construction would see the 24x80 DEFAULT. Parent ctx wins (a
-    // nested render or a test harness driving simulated dims), else
-    // one cheap ioctl, else COLUMNS/LINES (tests, pipes).
+    // installs the sized RenderContext, so the view installs one itself.
+    // The size comes from the Model (TerminalResized, fed by the host), so
+    // a view is a function of the Model and nothing else: every panel and
+    // tool body below reads available_width()/available_height(), never
+    // the tty. A parent context still wins (a nested render, or a test
+    // harness driving simulated dims).
     int cols = 0, rows = 0;
-    if (maya::detail::render_ctx_) {
+    if (maya::have_render_context()) {
         cols = maya::available_width();
         rows = maya::available_height();
     } else {
-        const auto sz = maya::platform::query_terminal_size(
-            maya::platform::stdout_handle());
-        cols = sz.width.value;
-        rows = sz.height.value;
-        if (cols <= 0)
-            if (const char* e = std::getenv("COLUMNS")) cols = std::atoi(e);
-        if (rows <= 0)
-            if (const char* e = std::getenv("LINES"))   rows = std::atoi(e);
+        cols = m.ui.term_cols;
+        rows = m.ui.term_rows;
     }
     if (cols <= 0) cols = 80;
     if (rows <= 0) rows = 24;
