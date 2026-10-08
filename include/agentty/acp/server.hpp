@@ -194,8 +194,6 @@ private:
     void                  replay_history(const std::string& session_id,
                                          const Thread& thread);
 
-    const std::vector<provider::ToolSpec>& wire_tools();
-
     ::acp::FdTransport&       transport_;
     ::acp::ClientConnection   conn_;
     StreamFn                  stream_;
@@ -221,10 +219,6 @@ private:
         return negotiated_version_.load(std::memory_order_relaxed) >= 2;
     }
 
-    std::once_flag                  tools_once_;   // unused (kept for ABI sanity)
-    bool                            wire_tools_built_ = false;
-    unsigned long                   wire_tools_gen_   = 0;
-    std::vector<provider::ToolSpec> wire_tools_;
 
     // Rank 30 (kIndexRank): a LEAF lock over the on-disk session index; taken
     // alone, never nested with the session/thread hierarchy.

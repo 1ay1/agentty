@@ -953,24 +953,6 @@ std::shared_ptr<Session> AgentServer::find_session(const std::string& id) {
     return it == sessions_.end() ? nullptr : it->second;
 }
 
-const std::vector<provider::ToolSpec>& AgentServer::wire_tools() {
-    // Rebuild from tools::wire_tools() when the MCP tool set changed (a
-    // server emitted tools/list_changed). tools::mcp_generation() is O(1),
-    // so an unchanged set re-uses the cached vector; the rebuild only runs
-    // when MCP actually re-listed. The first call always builds.
-    const unsigned long g = tools::mcp_generation();
-    if (wire_tools_built_ && wire_tools_gen_ == g) return wire_tools_;  // unchanged
-    wire_tools_gen_   = g;
-    wire_tools_built_ = true;
-    wire_tools_.clear();
-    const auto& reg = tools::wire_tools();
-    wire_tools_.reserve(reg.size());
-    for (const auto& t : reg)
-        wire_tools_.push_back({t.name.value, t.description, t.input_schema,
-                               t.eager_input_streaming});
-    return wire_tools_;
-}
-
 void AgentServer::persist(const Session& sess) {
     // Snapshot the thread under the per-session mutex so a worker turn
     // mutating messages concurrently can't race save_thread's read. Copy
