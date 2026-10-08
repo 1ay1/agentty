@@ -1,7 +1,8 @@
 // agentty::mcp::serve_stdio — expose agentty's native tools OVER MCP.
 //
-// The inverse of bridge.cpp. We build a single mcp::Server over stdio and
-// register every tool in tools::registry() as an MCP tool. A registered tool's
+// The inverse of bridge.cpp. We build one mcp::Server (a table of what we
+// answer), register every tool in tools::registry() as an MCP tool, and serve
+// it over stdio on an rpc::Peer. A registered tool's
 // handler round-trips through tool::DynamicDispatch::execute(name, args) — the
 // SAME dispatch the agent loop uses — so output budgets, the empty-args guard,
 // and crash isolation all apply identically. The result (an ExecResult =
@@ -26,9 +27,16 @@
 
 #include <mcp/mcp.hpp>
 
+#include "agentty/rpc/peer.hpp"
+
 #include <cstdio>
 #include <iostream>
 #include <string>
+
+#if defined(_WIN32)
+#  include <fcntl.h>
+#  include <io.h>
+#endif
 
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"
@@ -98,9 +106,7 @@ using ::mcp::Json;
 } // namespace
 
 int serve_stdio() {
-    ::mcp::StdioTransport transport(std::cin, std::cout);
     ::mcp::Server server(
-        transport.sink(),
         ::mcp::Implementation{"agentty", AGENTTY_VERSION,
                               std::string("agentty native tools"),
                               ::mcp::Nothing, ::mcp::Nothing, ::mcp::Nothing});
@@ -117,7 +123,7 @@ int serve_stdio() {
     // Our tool catalog is static for the process lifetime (built once from
     // tools::registry()), so a modern client may cache the discover result for
     // an hour and skip re-enumerating on reconnect. The discover handler and
-    // per-request `_meta` reading are provided by mcp::Server out of the box.
+    // per-request `_meta` reading come with mcp::Server.
     server.set_discover_cache(::mcp::CacheHint{3'600'000, "public"});
 
     // Register every native tool. The handler routes through the very same
@@ -135,8 +141,20 @@ int serve_stdio() {
 
     std::fprintf(stderr, "agentty: MCP server ready on stdio (%zu tools)\n", n);
 
-    transport.start(server.engine());
-    transport.join();   // run until stdin closes
+    // Calls are answered on the reader, one at a time, in arrival order.
+    rpc::Dispatch d;
+    d.on_call         = [&server](const ::mcp::Call& c) { return std::optional<std::string>(server.handle(c)); };
+    d.on_notification = [&server](const ::mcp::Notification& n) { server.handle(n); };
+    std::cout.flush();
+#if defined(_WIN32)
+    // Text mode would turn every '\n' of the framing into "\r\n".
+    _setmode(_fileno(stdin),  _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+    rpc::Peer peer(rpc::fd_channel(0, 1), std::move(d), "mcp-serve");
+    peer.start();
+    peer.wait_closed();   // run until stdin closes
+    peer.stop();
     return 0;
 }
 

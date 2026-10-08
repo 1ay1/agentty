@@ -142,31 +142,30 @@ and the shape that replaces it.
 
 ### 4.1 Reading frames off a transport
 
-- **Today:** `StdioTransport` spawns a reader job that loops on `getline`
-  and calls `engine.feed_line` from that thread.
-- **Rule shape:** the library has no transport that reads. The engine
-  exposes `feed_line(bytes) -> Outcome` (and `feed_bytes` for unframed
-  streams with a `LineSplitter` value type that buffers partial lines). It is
-  called by whoever has the bytes.
-- **agentty:** owns the child process / socket / stdio, reads it on a maya
-  worker (or the poll reactor), and calls `feed_line` on the engine's owner
-  (§4.4).
+- **Was:** each library's `StdioTransport` spawned a reader job that looped
+  on `getline` and fed the engine from that thread. *(gone)*
+- **Rule shape:** the library has no transport that reads. The engine takes
+  `step(engine, Received{line})`, with `jsonrpc::LineSplitter` (a value
+  type) for unframed streams. It is called by whoever has the bytes.
+- **agentty:** `rpc::Peer`'s reader task reads the channel (a child's
+  stdio, our own fds, an HTTP transport presented as a pipe) and steps the
+  engine under its owner (§4.4).
 
 ### 4.2 Writing frames
 
-- **Today:** a `Transport` callback the engine calls, guarded by a write
-  mutex in the transport.
+- **Was:** a `Transport` callback the engine called, under a write mutex.
+  *(gone)*
 - **Rule shape:** the engine never writes. Every operation that produces
   output **returns it**: `Outcome { std::vector<std::string> out; ... }` (or
   appends into a caller-provided sink, synchronously). Ordering is the call
   order; there is nothing to lock.
-- **agentty:** writes `out` to the pipe/socket, in order, from the engine's
-  owner.
+- **agentty:** `rpc::Peer` queues frames in an ordered outbox; its writer
+  task drains it, so no lock is held across a write.
 
 ### 4.3 Request/response matching and timeouts
 
-- **Today:** `request_raw` returns a `std::future`; a waiter table under a
-  mutex; a deadline thread on a condition variable fails late waiters.
+- **Was:** `request_raw` returned a `std::future`; a waiter table under a
+  mutex; a deadline thread failed late waiters. *(gone)*
 - **Rule shape:** the engine is an Elm model (§5):
   - `request<M>(engine, params, deadline) -> {RequestId, Effects}` records a
     pending entry; `Effects.send` holds the frame to write.
@@ -176,27 +175,25 @@ and the shape that replaces it.
   - `step(engine, Tick{now})` fails every entry past its deadline.
     `next_deadline()` says when the next Tick is worth sending.
   - No futures. No promises. A completion is a value handed back.
-- **agentty:** keeps the continuation for each `RequestId` (a callback, a
-  maya promise or a coroutine handle — agentty's choice), arms a
-  `maya::delay_for` to `next_deadline()`, and steps a `Tick{now}` when it
-  fires.
+- **agentty:** `rpc::Peer` parks each completion by id, and the caller
+  waits for its own (`guarded::wait_with`). Its ticker sleeps to
+  `next_deadline()` on `maya::delay_for` and steps `Tick{now}`.
 
 ### 4.4 Thread safety of an engine/connection object
 
-- **Today:** `RpcEngine` and `ClientProvider` lock internally so any thread
-  may call them.
+- **Was:** `RpcEngine` and `ClientProvider` locked internally so any thread
+  could call them. *(gone)*
 - **Rule shape:** an engine is **single-owner**. Its methods are not
   thread-safe and say so. No member is atomic or locked.
-- **agentty:** gives each connection one owner: a `maya::guarded<Engine>`
-  for short calls, or a single maya worker that owns it and receives work as
-  messages (the "owner you send messages to" jaal recommends). Reader
-  threads never touch the engine directly; they post the line to the owner.
+- **agentty:** each connection's engine lives in one `maya::guarded` inside
+  its `rpc::Peer`; every step happens under it, and effects are performed
+  outside it.
 
 ### 4.5 Handlers, async replies, cancellation
 
-- **Today:** handlers registered on the engine run on the reader thread;
-  async handlers capture a `Responder` and reply later "from any thread";
-  cancellation watchers spawn polling jobs.
+- **Was:** handlers registered on the engine ran on the reader thread;
+  async handlers captured a `Responder`; cancellation watchers spawned
+  polling jobs. *(gone)*
 - **Rule shape:** the peer's requests come back as **values** in
   `Effects.calls` (`Call{Id, method, params}`); the engine runs no handler.
   Replying is `reply<M>(id, result) -> frame`, written by the owner whenever
@@ -206,9 +203,10 @@ and the shape that replaces it.
   A typed **dispatch table** (`Router<Ctx>`) is a pure helper:
   `router.handle(ctx, call) -> Maybe<frame>` runs synchronously on the
   caller's thread, Nothing for a deferred method.
-- **agentty:** decides which requests run inline and which go to a worker,
-  holds the `RpcId` until done, and owns any cancellation token (a real
-  `std::stop_token` from maya, never a library flag).
+- **agentty:** decides which requests run inline and which go to a worker
+  (`Peer::Deferred<M>` answers once, later), and owns every cancellation
+  token: `CallOptions::cancel` is a real `std::stop_token`, wired to a
+  `stop_callback`, never polled.
 
 ### 4.6 Data-parallel work (rag-cpp index build, batch embedding, search)
 
@@ -245,8 +243,10 @@ and the shape that replaces it.
 
 ### 4.8 Processes (mcp-cpp `tools/process.cpp`, stdio servers)
 
-- **Today:** mcp-cpp spawns server processes and runs shell tools itself,
-  with reader threads and output mutexes.
+- **Was:** mcp-cpp spawned server processes and ran shell tools itself, with
+  reader threads and output mutexes. Server processes are now agentty's
+  (`mcp::stdio_link`); `ChildProcess` remains in mcp-cpp as the portable
+  spawn primitive agentty calls.
 - **Rule shape:** a library describes the process (`ProcessSpec {argv, env,
   cwd, stdin}`) and parses its output (`parse_tool_output(bytes) ->
   Result`). It never starts one. Where a builtin tool's whole job is
@@ -259,8 +259,8 @@ and the shape that replaces it.
 
 ### 4.9 Coroutines
 
-- **Today:** `mcp::co`/`acp::co` `Task` types with an `await_jobs` registry
-  that spawns a job per awaited future.
+- **Was:** `mcp::co`/`acp::co` `Task` types with an `await_jobs` registry
+  that spawned a job per awaited future. *(deleted from both)*
 - **Rule shape:** coroutine *types* (a `Task<T>` promise type, awaitables
   that suspend on a library-defined event) may live in the shared core, but
   they never resume themselves on a thread the library chose. An awaitable
@@ -270,10 +270,9 @@ and the shape that replaces it.
 
 ## 5. One copy: the shared JSON-RPC core
 
-mcp-cpp and acp-cpp are two dialects over one transport model. Today each
-carries its own copy of the same headers (runtime.hpp identical;
-coro.hpp 2 lines apart; core, codec, rpc, stdio drifted copies). Under R7
-they become:
+mcp-cpp and acp-cpp are two dialects over one transport model. Each used to
+carry its own copy of the same headers (runtime.hpp identical; coro.hpp 2
+lines apart; core, codec, rpc, stdio drifted copies). Under R7 they became:
 
 ```
 jsonrpc-cpp   (its own repo, third_party/jsonrpc-cpp; header-only, C++23,
@@ -408,14 +407,22 @@ bumps the submodule pointer after each.
    the engine under one `maya::guarded`. Verified with
    `external_acp_backend_test` (in-memory, real subprocess, wedged agent)
    and an `agentty acp` stdio drive.
-3. **mcp-cpp on the core.** Same for the protocol side; then
-   `cap::ClientProvider`, `cap::registry`, `Guarded`, `scheduler`,
-   `stdio_server` lose their locks and jobs (single-owner, agentty drives).
-   Builtin tools: `process.cpp` goes through `HostServices::exec` only;
-   `fs_helpers`/`textproc`/`repomap` caches become caller-owned objects.
-   Verify: `mcp_bridge_test`, `mcp_http_test`, `mcp_reload_race`,
-   `plugin_disabled_tools_test`, `toolset_e2e_test`, `mcp-serve` tools/list +
-   calls, a real plugin round trip.
+3. **mcp-cpp on the core.**
+   - *(done)* The protocol: algebra and codecs from jsonrpc-cpp; every method
+     a type in `protocol.hpp`; `Server` and `ClientHandlers` as answer
+     tables; MRTR as `mrtr_retry()`; the scheduler takes a `Splitter`. The
+     rpc engine, transports, coroutines, Runtime hook, `Client`,
+     `ClientProvider`, `StdioServerProvider` and `Guarded` are deleted.
+     agentty's `mcp::Connection` (`src/mcp/connection.cpp`) is the client:
+     an `rpc::Peer` over a `Link` (stdio child or HTTP), cached lists, tool
+     calls with MRTR and event-driven cancel. `mcp-serve` runs `Server` on a
+     peer. Verified: mcp-cpp's 62 cases, `mcp_bridge_test`, `mcp_http_test`,
+     `mcp_reload_race_test`, `plugin_disabled_tools_test`,
+     `toolset_e2e_test`, `mcp-serve`, a hanging-tool cancel + reconnect
+     probe.
+   - Still to do: `cap::Registry` keeps its mutex; builtin tools still hold
+     locks/atomics for caches (`fs_helpers`, `textproc`, `repomap`) — these
+     become caller-owned objects.
 4. **rag-cpp.** `parallel.hpp`'s executor becomes the `Splitter` parameter;
    corpus/hnsw/bm25 build-then-freeze; caches and the plugin registry become
    caller-owned. Verify: `rag adapter`, `rag shutdown interrupts warm

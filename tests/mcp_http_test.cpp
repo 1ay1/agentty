@@ -6,7 +6,7 @@
 //
 // Proves the whole HTTP chain: URL parse → POST framing → Accept negotiation
 // → both application/json AND text/event-stream response handling → session-id
-// capture/replay → RpcEngine round-trip → ClientProvider tools/resources/
+// capture/replay → rpc::Peer round-trip → mcp::Connection tools/resources/
 // prompts → cap::Result.
 //
 // POSIX-only (raw sockets). SKIPS (exit 0) on Windows.

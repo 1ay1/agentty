@@ -1,7 +1,7 @@
 // mcp_bridge_test — end-to-end smoke for the agentty↔mcp-cpp capability
 // bridge. Spawns the mcp-cpp example MCP server (built into the submodule)
 // via a generated mcp.json, then drives agentty::mcp::mcp_tools() — proving
-// the whole chain: config parse → cap::StdioServerProvider spawn+handshake →
+// the whole chain: config parse → mcp::Connection spawn+handshake →
 // cap::Registry → synthesized ToolDef → execute() round-trips a tools/call.
 //
 // SKIPS (exit 0) when the example server binary isn't built, so the suite

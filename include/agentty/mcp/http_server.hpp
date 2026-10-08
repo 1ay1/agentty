@@ -3,9 +3,9 @@
 //
 // Builds a cap::CapabilityProvider backed by a remote MCP server reached over
 // the Streamable HTTP transport (a single endpoint URL that speaks JSON-RPC
-// over POST, with optional text/event-stream responses). It drives the same
-// mcp::Client / RpcEngine the stdio path uses, but over agentty's own HTTP/2
-// client (TLS, connection pool, cancellation) instead of a spawned process.
+// over POST, with optional text/event-stream responses). It is the same
+// mcp::Connection the stdio path uses, over agentty's own HTTP/2 client (TLS,
+// connection pool, cancellation) instead of a spawned process.
 //
 // PERF: like the stdio path, construction connects synchronously (bounded by a
 // handshake timeout) and is only invoked when an `http`/`url` server is named

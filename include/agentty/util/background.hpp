@@ -208,9 +208,9 @@ void run_isolated_detached(std::string_view where, Body body,
 // why the pool keeps its own state in a shared core. It is not safe for
 // something a THIRD party owns and is about to free.
 //
-// agentty's MCP HTTP transport is exactly that case: its POST workers feed
-// responses into an mcp::RpcEngine owned by the ClientProvider base class,
-// and the provider destroys that engine right after stop() returns. Making
+// agentty's MCP HTTP transport is exactly that case: its POST workers push
+// responses into the pipe its peer reads, and the connection drops the
+// transport right after stop() returns. Making
 // the worker co-own the transport does not help, because the dangling thing
 // is the ENGINE, which the transport cannot co-own. So "wait as long as it
 // takes" is a real requirement and not timidity.

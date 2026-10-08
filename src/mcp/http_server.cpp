@@ -14,12 +14,11 @@
 //     • Protocol version: after initialize we send MCP-Protocol-Version on
 //       every request, per the spec.
 //
-//   We drive the SAME mcp::RpcEngine the stdio path uses. The engine is
-//   transport-agnostic: request_raw() writes a frame through our sink and
-//   blocks on a promise that handle_response (fed by feed_line) fulfils. Our
-//   sink POSTs the frame on a worker thread and feeds every response frame from
-//   the HTTP reply back into the engine — so .get() on the engine's future
-//   resolves exactly as it does over stdio.
+//   To the rest of agentty this is a byte channel, like a child's stdio: the
+//   peer's writes become POSTs (on a worker, so the writer never blocks on the
+//   network), and every frame in a reply (plain JSON or SSE events) is pushed
+//   into an in-memory pipe the peer reads. The same mcp::Connection then runs
+//   the handshake, lists and calls over it.
 //
 //   This file lives in agentty (not mcp-cpp) because it builds on agentty's
 //   own HTTP/2 client (TLS, pooling, cancellation) rather than pulling a new
@@ -31,11 +30,12 @@
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
 
-#include <mcp/cap/client_provider.hpp>
-#include <mcp/cap/guarded.hpp>
 #include <maya/runtime.hpp>
-#include <mcp/client.hpp>
 #include <mcp/auth.hpp>
+#include <mcp/protocol.hpp>
+
+#include "agentty/mcp/connection.hpp"
+#include "agentty/rpc/peer.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -110,17 +110,19 @@ std::string header_value(const http::Headers& hh, std::string_view name) {
 }
 
 // ── HttpTransport ─────────────────────────────────────────────────────────
-// Owns the endpoint config + session id + the engine pointer. sink() POSTs
-// each outbound frame on a detached worker and feeds the response back into
-// the engine, so the engine's blocking .get() resolves normally.
+// Owns the endpoint config and session id. channel() is what the peer runs
+// on: write POSTs a frame on a worker, read drains the frames the replies
+// carried.
 class HttpTransport {
 public:
     HttpTransport(ParsedUrl url, std::vector<http::Header> extra_headers,
                   std::chrono::milliseconds timeout, std::string server_name = {})
         : url_(std::move(url)), extra_headers_(std::move(extra_headers)),
-          timeout_(timeout), server_name_(std::move(server_name)) {}
-
-    void bind(::mcp::RpcEngine* engine) { engine_ = engine; }
+          timeout_(timeout), server_name_(std::move(server_name)) {
+        auto [peer_end, ours] = rpc::channel_pair();
+        inbound_ = std::move(peer_end);
+        feed_    = std::move(ours);
+    }
 
     void set_protocol_version(std::string v) {
         session_.with([](Session& s, std::string pv) { s.protocol_version = std::move(pv); },
@@ -137,18 +139,30 @@ public:
         // alive_ is left as the plain liveness flag the provider reads.
         alive_.store(false, std::memory_order_release);
         cancel_->cancel();
-        // Hard barrier: when this returns no POST worker is running, so the
-        // caller may safely drop the engine our workers feed. That guarantee
-        // is WHY this is a WorkerGroup and not run_isolated_detached — the
-        // engine belongs to the ClientProvider base and is destroyed right
-        // after we return, and a bounded grace would let an abandoned worker
-        // write into it.
+        // Hard barrier: when this returns no POST worker is running, so
+        // nothing touches this transport after it is dropped.
         workers_.stop();
+        if (feed_.interrupt) feed_.interrupt();   // the peer's reader sees EOF
     }
 
-    // The Transport sink the engine writes through.
-    ::mcp::Transport sink() {
-        return [this](std::string_view frame) { dispatch(std::string{frame}); };
+    // The channel the peer runs on. Valid while this transport lives.
+    rpc::Channel channel() {
+        rpc::Channel ch;
+        ch.read      = inbound_.read;
+        ch.write     = [this](std::string_view bytes) {
+            // The peer writes whole lines; each is one JSON-RPC frame.
+            std::size_t start = 0;
+            while (start < bytes.size()) {
+                auto nl = bytes.find('\n', start);
+                auto line = bytes.substr(start, nl == std::string_view::npos ? std::string_view::npos : nl - start);
+                if (!line.empty()) dispatch(std::string{line});
+                if (nl == std::string_view::npos) break;
+                start = nl + 1;
+            }
+            return alive();
+        };
+        ch.interrupt = [this] { stop(); };
+        return ch;
     }
 
 private:
@@ -160,9 +174,8 @@ private:
 
     void dispatch(std::string frame) {
         if (!alive_.load(std::memory_order_acquire)) return;   // stopped
-        // POST off this thread: the caller IS the engine's request_raw, which
-        // blocks on the response promise the moment it returns. POSTing inline
-        // would mean nobody is left to feed the response.
+        // POST off this thread: it is the peer's writer, and a slow server
+        // must not hold up every other frame.
         //
         // The worker's accounting, admission and the shutdown barrier all
         // belong to the group (util/background.hpp). What used to be here —
@@ -185,7 +198,7 @@ private:
         util::dbglog("mcp.http_transport.worker", reason);
         try {
             const auto parsed = json::parse(frame);
-            if (!is_request(parsed) || !engine_) return;
+            if (!is_request(parsed)) return;
             json err = {
                 {"jsonrpc", "2.0"},
                 {"id", parsed.value("id", json(nullptr))},
@@ -331,7 +344,7 @@ private:
             // JSON-RPC error so the waiting future resolves instead of hanging
             // until the engine's deadline.
             alive_.store(false, std::memory_order_release);
-            if (expects_response && engine_) {
+            if (expects_response) {
                 json err = {
                     {"jsonrpc", "2.0"},
                     {"id", parsed.value("id", json(nullptr))},
@@ -348,7 +361,7 @@ private:
         } else if (!json_buf.empty()) {
             // Single JSON body — may be one message or a batch array.
             feed(json_buf);
-        } else if (expects_response && engine_) {
+        } else if (expects_response) {
             // 202 Accepted with empty body for a request is a protocol error,
             // but be defensive: resolve the future with an error.
             std::string msg;
@@ -416,18 +429,25 @@ private:
         if (!data.empty()) feed(data);
     }
 
+    // Hand one frame (a message or a batch) to the peer. It reads lines, so
+    // a pretty-printed body is compacted to one.
     void feed(const std::string& payload) {
-        if (!engine_) return;
-        try { engine_->feed_line(payload); }
-        catch (const std::exception& e) { util::dbglog("mcp.http_transport.feed", e.what()); }
-        catch (...) { util::dbglog("mcp.http_transport.feed", "non-std exception"); }
+        std::string line;
+        try { line = json::parse(payload).dump(); }
+        catch (...) {
+            util::dbglog("mcp.http_transport.feed", "unparseable frame");
+            return;
+        }
+        line.push_back('\n');
+        (void)feed_.write(line);
     }
 
     ParsedUrl                 url_;
     std::vector<http::Header> extra_headers_;
     std::chrono::milliseconds timeout_;
     std::string               server_name_;   // for oauth::bearer_for lookup
-    ::mcp::RpcEngine*         engine_ = nullptr;
+    rpc::Channel              inbound_;   // the peer's end: frames the replies carried
+    rpc::Channel              feed_;      // our end: where we push them
     struct Session { std::string id; std::string protocol_version; };
     maya::guarded<Session>    session_;
     std::atomic<bool>         alive_{true};
@@ -444,102 +464,6 @@ private:
     util::WorkerGroup         workers_{"mcp.http_transport.worker"};
 };
 
-// ── HttpServerProvider ─────────────────────────────────────────────────────
-class HttpServerProviderImpl final : public ::mcp::cap::ClientProvider {
-public:
-    HttpServerProviderImpl(std::string name, ParsedUrl url,
-                           std::vector<http::Header> headers,
-                           ::mcp::Implementation client_info,
-                           std::chrono::milliseconds handshake_timeout,
-                           std::chrono::milliseconds call_timeout,
-                           ::mcp::cap::ClientProvider::Integration integration)
-        : name_(std::move(name)), url_(std::move(url)), headers_(std::move(headers)),
-          client_info_(std::move(client_info)), handshake_timeout_(handshake_timeout),
-          call_timeout_(call_timeout), integration_(std::move(integration)) {
-        conn_.use([&](Conn& c) { start_(c); });
-    }
-
-    [[nodiscard]] ::mcp::cap::Result execute(const ::mcp::cap::Request& request) override {
-        // Reconnect runs entirely under the connection lock (Guarded::use);
-        // ~Guarded parks until it drains, so a quit-path destructor can
-        // never free the transport under a mid-handshake thread — the same
-        // structural guarantee as StdioServerProvider (field SIGSEGV class,
-        // crash report 2026-08-16; this class had the identical race).
-        if (auto err = conn_.use([&](Conn& c) -> std::string {
-                if (alive_(c) && !connection_poisoned()) return {};   // healthy
-                if (c.transport) c.transport->stop();
-                reset_client();
-                c.transport.reset();
-                try {
-                    start_(c);
-                    if (on_list_changed_) on_list_changed_();
-                } catch (const std::exception& error) {
-                    return std::string{"HTTP MCP reconnect failed: "} + error.what();
-                }
-                return {};
-            });
-            !err.empty())
-            return ::mcp::cap::Result::error(std::move(err));
-        return ClientProvider::execute(request);
-    }
-
-    ~HttpServerProviderImpl() override {
-        // ~Guarded would park anyway; stopping explicitly keeps the base's
-        // engine alive while the transport worker is stopped (safe order).
-        conn_.use([&](Conn& c) {
-            if (c.transport) c.transport->stop();
-            reset_client();
-            c.transport.reset();
-        });
-    }
-
-    [[nodiscard]] bool alive() const noexcept override {
-        try {
-            return conn_.use([&](const Conn& c) { return alive_(c); });
-        } catch (...) { return false; }
-    }
-
-protected:
-    void on_teardown() noexcept override {
-        // Reached from the base's connect() failure path, which only runs
-        // inside one of our use() calls — the recursive lock re-enters.
-        try {
-            conn_.use([&](Conn& c) { if (c.transport) c.transport->stop(); });
-        } catch (const std::exception& e) {
-            util::dbglog("mcp.http_server.teardown", e.what());
-        } catch (...) {
-            util::dbglog("mcp.http_server.teardown", "non-std exception");
-        }
-    }
-
-private:
-    struct Conn {
-        std::unique_ptr<HttpTransport> transport;
-    };
-
-    [[nodiscard]] static bool alive_(const Conn& c) noexcept {
-        return c.transport && c.transport->alive();
-    }
-
-    void start_(Conn& c) {
-        c.transport = std::make_unique<HttpTransport>(url_, headers_, call_timeout_, name_);
-        auto client = std::make_unique<::mcp::Client>(c.transport->sink());
-        c.transport->bind(&client->engine());
-        c.transport->set_protocol_version(std::string(::mcp::kProtocolVersion));
-        connect(name_, std::move(client), client_info_, handshake_timeout_,
-                call_timeout_, integration_);
-    }
-
-    std::string name_;
-    ParsedUrl url_;
-    std::vector<http::Header> headers_;
-    ::mcp::Implementation client_info_;
-    std::chrono::milliseconds handshake_timeout_;
-    std::chrono::milliseconds call_timeout_;
-    ::mcp::cap::ClientProvider::Integration integration_;
-    ::mcp::cap::Guarded<Conn> conn_;
-};
-
 } // namespace
 
 std::shared_ptr<::mcp::cap::CapabilityProvider>
@@ -550,19 +474,29 @@ make_http_provider(const std::string& name, const HttpConfig& cfg, std::string& 
     std::vector<http::Header> headers;
     for (const auto& [k, v] : cfg.headers) headers.push_back({k, v});
 
-    ::mcp::Implementation client_info{"agentty", AGENTTY_VERSION};
-    ::mcp::cap::ClientProvider::Integration integration;
+    ConnectionConfig cc;
+    cc.name              = name;
+    cc.client_info       = ::mcp::Implementation{"agentty", AGENTTY_VERSION};
+    cc.handshake_timeout = cfg.handshake_timeout;
+    cc.call_timeout      = cfg.call_timeout;
     if (!cfg.workspace_root.empty()) {
         std::string uri = "file://" + cfg.workspace_root;
 #ifdef _WIN32
         if (cfg.workspace_root.size() > 1 && cfg.workspace_root[1] == ':') uri = "file:///" + cfg.workspace_root;
 #endif
-        integration.roots.push_back(::mcp::Root{std::move(uri), std::string{"workspace"}, nlohmann::json::object()});
+        cc.roots.push_back(::mcp::Root{std::move(uri), std::string{"workspace"}, nlohmann::json::object()});
     }
+    Link link;
+    link.open = [url, headers, timeout = cfg.call_timeout, name]() -> Link::Opened {
+        auto t = std::make_shared<HttpTransport>(url, headers, timeout, name);
+        t->set_protocol_version(std::string(::mcp::kProtocolVersion));
+        return {t->channel(), t};
+    };
+    link.alive = [](const std::shared_ptr<void>& h) {
+        return h && static_cast<HttpTransport*>(h.get())->alive();
+    };
     try {
-        return std::make_shared<HttpServerProviderImpl>(
-            name, std::move(url), std::move(headers), std::move(client_info),
-            cfg.handshake_timeout, cfg.call_timeout, std::move(integration));
+        return std::make_shared<Connection>(std::move(cc), std::move(link));
     } catch (const std::exception& e) {
         err = std::string{"http MCP server '"} + name + "' failed: " + e.what();
     } catch (...) {

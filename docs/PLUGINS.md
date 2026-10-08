@@ -220,10 +220,7 @@ static std::string sh(const std::string& cmd) {
 }
 
 int main() {
-    StdioTransport transport(std::cin, std::cout);
-    Server server(transport.sink(),
-                  Implementation{"sysmon", "1.0.0",
-                                 std::string("System Monitor"),
+    Server server(Implementation{"sysmon", "1.0.0", std::string("System Monitor"),
                                  Nothing, Nothing, Nothing});
     server.set_capabilities(ServerCapabilities{
         .tools = ToolsCapability{false},
@@ -263,8 +260,15 @@ int main() {
         });
     }
 
-    transport.start(server.engine());
-    transport.join();   // serve until the host closes stdin
+    // Serve until the host closes stdin: a line in, the replies out.
+    Engine engine;
+    for (std::string line; std::getline(std::cin, line);) {
+        Effects fx = step(engine, Received{line});
+        for (auto& f : fx.send) std::cout << f << '\n';
+        for (auto& c : fx.calls) std::cout << server.handle(c) << '\n';
+        for (auto& n : fx.notifications) server.handle(n);
+        std::cout.flush();
+    }
     return 0;
 }
 ```

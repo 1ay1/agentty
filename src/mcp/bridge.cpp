@@ -21,13 +21,14 @@
 // Flow:
 //   mcp_tools()
 //     → resolve config (.agentty/mcp.json / $AGENTTY_MCP_CONFIG / ~)
-//     → for each server: cap::StdioServerProvider (connects synchronously)
+//     → for each server: an mcp::Connection over its stdio (connects synchronously)
 //     → cap::Registry fans them in + namespaces collisions
 //     → project registry tools/resources/prompts onto agentty ToolDefs
 //   The Registry (and its live server connections) live in a process-wide
 //   ConnectionPool kept alive by a shared_ptr the execute() closures capture.
 
 #include "agentty/mcp/client.hpp"
+#include "agentty/mcp/connection.hpp"
 #include "agentty/mcp/http_server.hpp"
 #include "agentty/scope/scope.hpp"
 #include "agentty/config/inventory.hpp"   // kMcpLayout — the one declaration
@@ -449,9 +450,10 @@ make_provider(const std::string& name, const json& spec) {
             return nullptr;
         }
     }
-    ::mcp::cap::StdioServerProvider::Config cfg;
-    cfg.name           = name;
-    cfg.spawn.command  = command;
+    ConnectionConfig cfg;
+    cfg.name = name;
+    ::mcp::cap::ChildProcess::Spawn spawn;
+    spawn.command = command;
     // Coerce non-string args/env elements instead of throwing: a single
     // numeric/bool element used to make `.get<std::string>()` throw
     // json::type_error and skip the WHOLE server. Strings pass through
@@ -461,10 +463,10 @@ make_provider(const std::string& name, const json& spec) {
         return v.is_string() ? v.get<std::string>() : v.dump();
     };
     if (spec.contains("args") && spec["args"].is_array())
-        for (const auto& a : spec["args"]) cfg.spawn.args.push_back(as_str(a));
+        for (const auto& a : spec["args"]) spawn.args.push_back(as_str(a));
     if (spec.contains("env") && spec["env"].is_object())
         for (auto it = spec["env"].begin(); it != spec["env"].end(); ++it)
-            cfg.spawn.env_kv.push_back(it.key() + "=" + as_str(it.value()));
+            spawn.env_kv.push_back(it.key() + "=" + as_str(it.value()));
     cfg.client_info  = ::mcp::Implementation{"agentty", AGENTTY_VERSION};
     cfg.call_timeout = call_timeout();
     if (const auto ms = spec.value("timeoutMs", 0L); ms > 0)
@@ -478,12 +480,12 @@ make_provider(const std::string& name, const json& spec) {
 #ifdef _WIN32
         if (root.size() > 1 && root[1] == ':') uri = "file:///" + root;
 #endif
-        cfg.integration.roots.push_back(
+        cfg.roots.push_back(
             ::mcp::Root{std::move(uri), std::string{"workspace"}, json::object()});
     }
 
     try {
-        return std::make_shared<::mcp::cap::StdioServerProvider>(std::move(cfg));
+        return std::make_shared<Connection>(std::move(cfg), stdio_link(std::move(spawn)));
     } catch (const std::exception& e) {
         std::fprintf(stderr, "mcp: server '%s' failed: %s\n", name.c_str(), e.what());
         return nullptr;

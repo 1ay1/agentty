@@ -139,11 +139,10 @@ TEST_CASE("mcp reload race") {
 
 // ── destroy-during-handshake ────────────────────────────────────────────────
 // Regression lock for the field SIGSEGV (crash report 2026-08-16): thread A
-// dropped the last ConnectionPool reference (→ ~StdioServerProvider →
-// teardown) while thread B was still INSIDE that provider's start_() →
-// connect() → RpcEngine::request handshake. Pre-fix, ~StdioServerProvider
-// did not take reconnect_mu_, so destruction proceeded concurrently with the
-// handshake and the engine was freed under the requesting thread's feet.
+// dropped the last ConnectionPool reference (→ provider teardown) while
+// thread B was still INSIDE that provider's connect handshake. Pre-fix the
+// destructor didn't wait for it, and the engine was freed under the
+// requesting thread's feet.
 // Post-fix the destructor serializes on reconnect_mu_ and parks until the
 // handshake resolves.
 //
