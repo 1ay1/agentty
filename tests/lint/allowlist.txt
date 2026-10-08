@@ -185,11 +185,9 @@ provider/openai/responses_site.cpp: thread_local
 # The pool is published whole (maya::published) and the seen-tools cache is
 # maya::guarded; `atomic` is the pool's list-changed generation counter.
 mcp/bridge.cpp: atomic
-# http_server: the POST workers moved to util::WorkerGroup, so the thread,
-# the condition variable, the inflight counter and the detach are gone. The
-# mutex guards the session id / protocol version / cancel token; the atomic
-# is the liveness flag the provider reads.
-mcp/http_server.cpp: mutex atomic
+# http_server: POST workers are a util::WorkerGroup and the session is
+# maya::guarded. The atomic is the liveness flag the provider reads.
+mcp/http_server.cpp: atomic
 mcp/oauth.cpp: atomic
 # rag/adapter: the warm worker is a util::WorkerGroup and the feedback store
 # is maya::guarded. The one mutex left is Retriever::Impl::mu, held across

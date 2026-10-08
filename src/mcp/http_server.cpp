@@ -33,6 +33,7 @@
 
 #include <mcp/cap/client_provider.hpp>
 #include <mcp/cap/guarded.hpp>
+#include <maya/runtime.hpp>
 #include <mcp/client.hpp>
 #include <mcp/auth.hpp>
 
@@ -40,7 +41,6 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -123,8 +123,8 @@ public:
     void bind(::mcp::RpcEngine* engine) { engine_ = engine; }
 
     void set_protocol_version(std::string v) {
-        std::lock_guard<std::mutex> lk(mu_);
-        protocol_version_ = std::move(v);
+        session_.with([](Session& s, std::string pv) { s.protocol_version = std::move(pv); },
+                      std::move(v));
     }
 
     [[nodiscard]] bool alive() const noexcept { return alive_.load(std::memory_order_acquire); }
@@ -136,10 +136,7 @@ public:
         // (and the reason alive_ used to have to flip under worker_mu_).
         // alive_ is left as the plain liveness flag the provider reads.
         alive_.store(false, std::memory_order_release);
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (cancel_) cancel_->cancel();
-        }
+        cancel_->cancel();
         // Hard barrier: when this returns no POST worker is running, so the
         // caller may safely drop the engine our workers feed. That guarantee
         // is WHY this is a WorkerGroup and not run_isolated_detached — the
@@ -231,9 +228,9 @@ private:
             }
         }
         {
-            std::lock_guard<std::mutex> lk(mu_);
-            if (!session_id_.empty())      req.headers.push_back({"mcp-session-id", session_id_});
-            if (!protocol_version_.empty()) req.headers.push_back({"mcp-protocol-version", protocol_version_});
+            const auto sess = session_.read([](const Session& s) { return s; });
+            if (!sess.id.empty())               req.headers.push_back({"mcp-session-id", sess.id});
+            if (!sess.protocol_version.empty()) req.headers.push_back({"mcp-protocol-version", sess.protocol_version});
         }
         for (const auto& h : extra_headers_) req.headers.push_back(h);
         // MCP 2026-07-28 authorization: if the user ran `agentty mcp-login` for
@@ -252,8 +249,7 @@ private:
                     req.headers.push_back({"authorization", *bearer});
         }
 
-        auto cancel = std::make_shared<http::CancelToken>();
-        { std::lock_guard<std::mutex> lk(mu_); cancel_ = cancel; }
+        auto cancel = cancel_;
 
         http::Timeouts tos;
         tos.connect = std::chrono::milliseconds(10'000);
@@ -276,13 +272,13 @@ private:
             // Capture a freshly-issued session id (only on initialize, but the
             // server may send it on any response — capture whenever present).
             if (auto sid = header_value(hh, "mcp-session-id"); !sid.empty()) {
-                std::lock_guard<std::mutex> lk(mu_);
-                if (session_id_.empty()) session_id_ = sid;
+                session_.with([](Session& s, std::string id) {
+                    if (s.id.empty()) s.id = std::move(id);
+                }, sid);
             }
             if (status == 404 || status == 410) {
                 // Session expired/unknown — drop it so the next call re-inits.
-                std::lock_guard<std::mutex> lk(mu_);
-                session_id_.clear();
+                session_.with([](Session& s) { s.id.clear(); });
             }
             if (status == 401) {
                 // MCP 2026-07-28 authorization (RFC 9728): the server is
@@ -432,16 +428,16 @@ private:
     std::chrono::milliseconds timeout_;
     std::string               server_name_;   // for oauth::bearer_for lookup
     ::mcp::RpcEngine*         engine_ = nullptr;
-    std::mutex                mu_;
-    std::string               session_id_;
-    std::string               protocol_version_;
+    struct Session { std::string id; std::string protocol_version; };
+    maya::guarded<Session>    session_;
     std::atomic<bool>         alive_{true};
     // MCP 2026-07-28 authorization: set when the last response was a 401, with
     // the parsed protected-resource-metadata URL from the WWW-Authenticate
     // challenge (empty if none). Read on the same worker after the stream ends.
     bool                      http_status_401_ = false;
     std::string               resource_metadata_url_;
-    http::CancelTokenPtr      cancel_;
+    // One token for the transport's life: stop() cancels every POST in flight.
+    const http::CancelTokenPtr cancel_ = std::make_shared<http::CancelToken>();
     // POST workers. The group owns their accounting, their admission after
     // stop(), and the shutdown barrier — see util/background.hpp for why this
     // one waits rather than abandoning.
