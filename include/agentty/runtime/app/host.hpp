@@ -85,6 +85,10 @@ struct Host : maya::terminal_host<P> {
         sa::set_candidates(std::move(e.candidates));
     }
 
+    // Publish the Model's active provider (see store_fx.hpp PublishSelection).
+    // The one writer of the process-global selection after launch.
+    void handle(PublishSelection e) { provider::select(std::move(e.selection)); }
+
     // Teardown, and the ONE thing that has to happen before jaal's pool
     // spends its shutdown grace.
     //

@@ -132,27 +132,47 @@ std::pair<Model, Cmd> update(Model m, Msg msg,
 // stale router running, and equality can't be wrong in that direction — the
 // same reasoning as jaal's subs_key (D38).
 Cmd publish_derived(Model& m, Cmd c) {
+    // The active provider. The Model owns it; code off the loop (the stream
+    // worker, ACP, main) reads a published copy in a process global. Same
+    // shape as the subagent view below: compare with what was last
+    // published, and when it moved, RETURN an effect the host performs.
+    // No write from here — this function only describes.
+    //
+    // Ordering is safe: jaal interprets a fold's Cmd on this thread right
+    // after update returns, so the publish lands before any later fold runs;
+    // and a Cmd from THIS fold that needs the provider (launch_stream,
+    // fetch_models) already captured m.d.selection by value.
+    Cmd sel_effect = Cmd::none();
+    if (!(m.published_selection == m.d.selection)) {
+        m.published_selection = m.d.selection;
+        sel_effect = Cmd(PublishSelection{m.d.selection});
+    }
+
     // Compare IN PLACE against the Model, field by field. This runs after
     // every fold, keystrokes included, and the candidate list can be hundreds
     // of models: building a view first would copy that vector on every
     // keystroke just to find out nothing changed. Copies happen only on the
     // rare fold that actually moved one of these fields.
     auto& pub = m.published_subagent;
-    const std::string provider = detail::active_provider_id();
-    if (pub.model == m.d.model_id.value && pub.provider == provider
-        && pub.smart == m.d.smart && pub.candidates == m.d.available_models)
-        return c;
+    const std::string provider = detail::active_provider_id(m);
+    Cmd sub_effect = Cmd::none();
+    if (!(pub.model == m.d.model_id.value && pub.provider == provider
+          && pub.smart == m.d.smart && pub.candidates == m.d.available_models)) {
+        pub.model      = m.d.model_id.value;
+        pub.provider   = provider;
+        pub.smart      = m.d.smart;
+        pub.candidates = m.d.available_models;
+        sub_effect = Cmd(PublishSubagent{
+            .model = pub.model, .provider = pub.provider,
+            .smart = pub.smart, .candidates = pub.candidates,
+        });
+    }
 
-    pub.model      = m.d.model_id.value;
-    pub.provider   = provider;
-    pub.smart      = m.d.smart;
-    pub.candidates = m.d.available_models;
-    auto effect = Cmd(PublishSubagent{
-        .model = pub.model, .provider = pub.provider,
-        .smart = pub.smart, .candidates = pub.candidates,
-    });
-    return c.is_none() ? std::move(effect)
-                       : Cmd::batch(std::move(c), std::move(effect));
+    // Nothing moved — the common case, every keystroke — costs no batch.
+    if (sel_effect.is_none() && sub_effect.is_none()) return c;
+    // The selection is published before the subagent view, so a worker that
+    // reads both sees them describe the same provider.
+    return Cmd::batch(std::move(c), std::move(sel_effect), std::move(sub_effect));
 }
 
 namespace {

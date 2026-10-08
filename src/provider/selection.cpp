@@ -240,6 +240,12 @@ Selection active() {
     return g_active;   // snapshot copy — see header for the race it closes
 }
 
+std::string Selection::catalog_id() const {
+    if (kind == Kind::OpenAI)      return openai_endpoint.label;
+    if (kind == Kind::ExternalAcp) return acp_agent_id;
+    return std::string{default_provider_id()};
+}
+
 std::string provider_display_name(const Selection& s) {
     if (s.kind == Kind::Anthropic) return "Anthropic";
     if (s.kind == Kind::ExternalAcp) {

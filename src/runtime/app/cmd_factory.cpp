@@ -25,6 +25,7 @@
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
+#include "agentty/provider/openai/transport.hpp"
 #include "agentty/util/logx.hpp"
 
 #if AGENTTY_MCP
@@ -685,7 +686,7 @@ TurnRouting resolve_turn_routing(const Model& m) {
     smart::RoleProfile prof =
         smart::resolve_role(role, m.d.model_id.value,
                             m.d.effort, m.d.available_models, m.d.smart,
-                            detail::active_provider_id());
+                            detail::active_provider_id(m));
 
     // Session cascade bias only. The per-workspace learned prior, the regret
     // denominator it needed and the plan-recall few-shot all went with the
@@ -900,7 +901,7 @@ Cmd launch_stream(Model& m) {
     // provider through the central credential layer (falling back to the
     // cache only for oauth_native/local, whose transports own their tokens),
     // so the wire credential can never drift from provider::active().
-    auth::AuthHeader auth  = auth_snapshot();
+    auth::AuthHeader auth  = auth_snapshot(m.d.selection);
     // Reasoning effort, resolved + clamped to this model's capability here on
     // the UI thread (where the live Model is readable). Empty = off; an
     // unsupported tier degrades (Xhigh/Max → high) instead of 400ing.
@@ -976,7 +977,7 @@ Cmd launch_stream(Model& m) {
     // compaction back up to the flagship).
     std::string compaction_model =
         smart::utility_model(model_id, m.d.available_models, m.d.smart,
-                             detail::active_provider_id());
+                             detail::active_provider_id(m));
     // The compaction model's own window, when the catalog knows it. On a
     // local router the summariser can be a different model loaded with a
     // BIGGER context than the main one, and the payload should use it.
@@ -1085,6 +1086,11 @@ Cmd launch_stream(Model& m) {
         int                 model_context_window;
         auth::AuthHeader    auth;
         http::CancelTokenPtr cancel;
+        // The provider this turn was launched against, from the MODEL — the
+        // same reason as org_blocks_vision. Reading the process global here,
+        // on the worker, meant a turn launched just before a provider switch
+        // could build its prompt for the provider the user had already left.
+        provider::Selection selection;
     };
 
     return Cmd::task(
@@ -1138,7 +1144,7 @@ Cmd launch_stream(Model& m) {
         // Prompt policy is shared by every entry point. Hosted Claude, Codex,
         // and OpenAI-compatible models receive the same complete agent/tool/RAG
         // instructions; only constrained local endpoints use a compact profile.
-        const auto sel_now = provider::active();
+        const auto sel_now = in.selection;
         req.system_prompt = provider::system_prompt_for(sel_now);
         // Layer 3a (orchestration): teach the Strategic model to keep the
         // thinking and DELEGATE mechanical work to subagents — the
@@ -1473,10 +1479,12 @@ Cmd launch_stream(Model& m) {
             .model_supports_vision   = model_supports_vision,
             .org_blocks_vision       = detail::entitlement_blocked(
                                            m.d.persisted,
-                                           domain::entitlement::Fact::VisionOrgPolicy),
+                                           domain::entitlement::Fact::VisionOrgPolicy,
+                                           detail::active_provider_id(m)),
             .model_context_window    = model_context_window,
             .auth                    = std::move(auth),
             .cancel                  = cancel,
+            .selection               = m.d.selection,
         });
 }
 
@@ -2294,13 +2302,13 @@ Cmd perform_self_update(std::string version) {
     }, std::move(version));
 }
 
-Cmd fetch_models() {
-    // Resolve HERE, on the UI thread, and hand the values to the body. This
-    // is the whole fix: the reads that used to happen on a worker
-    // (provider::active(), auth_snapshot(), active_provider_id()) happen on
-    // the thread that owns that state, so there is no race left to guard.
-    return fetch_models(provider::active(), auth_snapshot(),
-                        detail::active_provider_id());
+Cmd fetch_models(const Model& m) {
+    // Resolve HERE, on the UI thread, from the MODEL, and hand the values to
+    // the body. Reading the process global instead was the bug a switch could
+    // hit: the reducer changes m.d.selection, the global is only published
+    // after the fold, so this would have fetched the OLD provider's catalog.
+    return fetch_models(m.d.selection, auth_snapshot(m.d.selection),
+                        detail::active_provider_id(m));
 }
 
 Cmd fetch_models(provider::Selection sel, auth::AuthHeader auth,
@@ -2368,8 +2376,8 @@ Cmd fetch_models(provider::Selection sel, auth::AuthHeader auth,
         std::move(sel), std::move(auth), std::move(for_provider));
 }
 
-Cmd probe_model_window(std::string model_id) {
-    const auto& sel = provider::active();
+Cmd probe_model_window(const Model& m, std::string model_id) {
+    const auto& sel = m.d.selection;
     // Only a local OpenAI-compatible host has a window that can change under
     // us (a router swapping models). Ollama's native api isn't this route.
     if (model_id.empty() || sel.kind != provider::Kind::OpenAI
@@ -2390,10 +2398,10 @@ Cmd probe_model_window(std::string model_id) {
             out.send(Msg{ModelWindowProbed{for_provider, model_id, w}});
         },
         std::move(model_id), sel.openai_endpoint,
-        // Resolved on the UI thread, like every other input: the body used to
-        // call auth_snapshot() itself, which is a worker reading state the UI
-        // thread swaps on a provider switch.
-        auth_snapshot(), detail::active_provider_id());
+        // Resolved on the UI thread from the Model, like every other input:
+        // the body used to call auth_snapshot() itself, which is a worker
+        // reading state the UI thread swaps on a provider switch.
+        auth_snapshot(sel), detail::active_provider_id(m));
 }
 
 Cmd fetch_models_for(std::string spec) {
@@ -2578,8 +2586,8 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
         path.string(), std::move(reply), std::move(spec));
 }
 
-Cmd prewarm_provider() {
-    provider::PrewarmTarget t = provider::prewarm_target(provider::active());
+Cmd prewarm_provider(const Model& m) {
+    provider::PrewarmTarget t = provider::prewarm_target(m.d.selection);
     if (!t.should_warm()) return Cmd::none();   // no effect to describe
     // Plain task, not isolated: prewarm() only POSTS the dial to the http
     // client's own pool and returns, so this occupies a worker for

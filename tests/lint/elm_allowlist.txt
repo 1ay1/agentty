@@ -20,5 +20,5 @@ update/login.cpp: auth
 update/models.cpp: auth
 update/providers.cpp: auth
 update/stream.cpp: auth
-update/submit.cpp: auth clock global
+update/submit.cpp: auth clock
 update/thread_list.cpp: clock

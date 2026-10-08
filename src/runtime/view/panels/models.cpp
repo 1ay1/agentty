@@ -378,7 +378,7 @@ Element models_panel(const Model& m) {
 }
 
 // ── Provider picker helpers ──
-// (active_provider_id + reasoning_effort_footer live in pickers_common.hpp.)
+// (reasoning_effort_footer live in pickers_common.hpp.)
 
 
 } // namespace agentty::ui

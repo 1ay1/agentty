@@ -78,7 +78,7 @@ maya::Element model_badge_config(const Model& m) {
     // inverse_text was the obvious slot and the wrong one — under native it
     // is Default, the same colour as ordinary text, so the chip painted
     // normal foreground on a bright band (agentty #45).
-    const auto& active_sel = provider::active();
+    const auto& active_sel = m.d.selection;
     const std::string prov = provider::provider_display_name(active_sel);
     const Style prov_style = ui::chip_style(name.color).with_bold();
 

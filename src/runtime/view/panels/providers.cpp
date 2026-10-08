@@ -19,7 +19,7 @@ Element providers_panel(const Model& m) {
     cfg.scroll     = &m.ui.provider_picker_scroll;
     cfg.selected   = picker->index;
 
-    const std::string active_id = active_provider_id();
+    const std::string active_id = m.d.selection.catalog_id();
 
     auto env_has = [](std::string_view name) -> bool {
         if (name.empty()) return false;

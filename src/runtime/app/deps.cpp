@@ -29,19 +29,18 @@ void install_deps(Deps d) {
     g_deps = &storage;
 }
 
-auth::AuthHeader auth_snapshot() {
-    // Resolve from the CURRENTLY-ACTIVE provider through the central credential
-    // layer, so the credential can never drift from provider::active(). This is
+auth::AuthHeader auth_snapshot(const provider::Selection& sel) {
+    // Resolve from the given provider through the central credential layer,
+    // so the credential can never drift from the provider it is for. This is
     // the single source of truth for "what auth goes on the wire": if a switch
-    // changed the active provider/model but a code path forgot to reinstall the
-    // header, this still returns the RIGHT provider's credential (the class of
-    // bug behind Anthropic's OAuth token being sent to Mistral → 401).
+    // changed the active provider/model but a code path forgot to reinstall
+    // the header, this still returns the RIGHT provider's credential (the
+    // class of bug behind Anthropic's OAuth token being sent to Mistral → 401).
     //
     // Anthropic and hosted-key/custom-host providers resolve a real header
     // here; oauth_native (ChatGPT/Copilot/Kimi) and local resolve empty and
     // their transports supply the token — identical to update_auth's cache,
     // which we keep as a fast/fallback path for those.
-    const auto sel = provider::active();
     const std::string pid =
         sel.kind == provider::Kind::OpenAI ? sel.openai_endpoint.label
                                            : std::string{provider::default_provider_id()};
@@ -55,6 +54,12 @@ auth::AuthHeader auth_snapshot() {
     return g_deps ? g_deps->auth : auth::AuthHeader{};
 }
 
+// Off the loop (a worker with no Model): resolve against the PUBLISHED copy of
+// the selection, which the dispatch seam keeps equal to the Model's.
+auth::AuthHeader auth_snapshot() {
+    return auth_snapshot(provider::active());
+}
+
 void update_auth(auth::AuthHeader auth) {
     if (!g_deps) return;
     {
@@ -65,11 +70,10 @@ void update_auth(auth::AuthHeader auth) {
 }
 
 void switch_provider(auth::AuthHeader auth) {
-    // The active provider::Selection is process-global and is set by the
-    // reducer via provider::select() before this runs; the stream seam
-    // dispatches on provider::active() at call time. All this seam does is
-    // re-point Deps::auth at the new backend's credentials so the next
-    // request authenticates correctly.
+    // The active provider lives in the Model (Domain::selection); the dispatch
+    // seam publishes it to provider::active() after the fold that changed it.
+    // All this seam does is re-point Deps::auth at the new backend's
+    // credentials so the next request authenticates correctly.
     if (!g_deps) return;
     {
         std::lock_guard lk(g_auth_mu);

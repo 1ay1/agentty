@@ -35,6 +35,7 @@
 #include "agentty/domain/conversation.hpp"   // Thread
 #include "agentty/domain/id.hpp"             // ThreadId
 #include "agentty/domain/smart_mode.hpp"     // smart::RoleConfig
+#include "agentty/provider/selection.hpp"    // provider::Selection
 #include "agentty/store/store.hpp"           // store::Settings
 
 namespace agentty {
@@ -81,5 +82,15 @@ struct PublishSubagent {
     std::vector<ModelInfo>  candidates;
 };
 using publish_subagent = jaal::pure_fx<PublishSubagent, "publish_subagent">;
+
+/// Publish the Model's active provider to the process-global copy that code
+/// off the loop reads (provider::active(): the stream worker, ACP, main).
+///
+/// The Model owns the selection. Reducers used to call provider::select()
+/// directly, which wrote that global from inside update and left the Model
+/// not knowing its own provider. Now only the dispatch seam returns this,
+/// and only when the selection changed.
+struct PublishSelection { provider::Selection selection; };
+using publish_selection = jaal::pure_fx<PublishSelection, "publish_selection">;
 
 }  // namespace agentty

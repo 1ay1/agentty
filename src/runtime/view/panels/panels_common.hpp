@@ -207,15 +207,6 @@ inline constexpr int kPickerChromeRows = 7;
     return muted;
 }
 
-// Resolve the currently-active provider id so a picker can mark the active
-// row. Anthropic (the default) when kind==Anthropic, else the endpoint label
-// / ACP agent id. Shared by the provider picker and the Smart Mode overlay.
-[[nodiscard]] inline std::string active_provider_id() {
-    const auto& sel = provider::active();
-    if (sel.kind == provider::Kind::OpenAI) return sel.openai_endpoint.label;
-    if (sel.kind == provider::Kind::ExternalAcp) return sel.acp_agent_id;
-    return std::string{provider::default_provider_id()};
-}
 
 // A section is one labelled band of a grouped picker list. `hue` tints the
 // label; `count` (when > 0) renders dim + right-pinned so a band can carry a

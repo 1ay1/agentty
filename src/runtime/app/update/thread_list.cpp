@@ -94,7 +94,7 @@ using maya::overload;
     // saved-lines (including pre-agentty shell history), acceptable precisely
     // because the user asked to switch threads. Do NOT extend it to per-turn
     // paths.
-    return Cmd::batch(cmd::prewarm_provider(), cmd::reset_inline());
+    return Cmd::batch(cmd::prewarm_provider(m), cmd::reset_inline());
 }
 
 Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
@@ -215,7 +215,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                 // is switching INTO doesn't re-pay the handshake (the pool's
                 // idle TTL has usually evicted it during composer breathing
                 // room). Returned, not performed.
-                cmd = Cmd::batch(cmd::prewarm_provider(),
+                cmd = Cmd::batch(cmd::prewarm_provider(m),
                                  cmd::load_thread_async(meta.id));
             }
             m.ui.panel.close<pn::ThreadList>();
@@ -346,7 +346,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // The prewarm warms the socket for the switched-into thread's
             // first turn.
             return Cmd::batch(std::move(save),
-                              cmd::prewarm_provider(),
+                              cmd::prewarm_provider(m),
                               cmd::load_thread_async(meta.id),
                               std::move(toast));
         },

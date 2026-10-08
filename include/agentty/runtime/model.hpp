@@ -17,6 +17,7 @@
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/smart_mode.hpp"
+#include "agentty/provider/selection.hpp"   // Domain::selection
 #include "agentty/domain/conversation.hpp"
 #include "agentty/diff/diff.hpp"
 #include "agentty/domain/id.hpp"
@@ -307,6 +308,19 @@ struct Model {
 
         std::vector<ModelInfo> available_models;
         ModelId                model_id{std::string{"claude-opus-4-5"}};
+        // The active provider — WHICH backend this session talks to (Anthropic,
+        // an OpenAI-family endpoint, an ACP agent). The source of truth.
+        //
+        // This used to live only in a process global (provider::select /
+        // provider::active()), written from inside the switch reducer. The
+        // global stays, as the published copy that code OFF the loop reads —
+        // the stream worker, the ACP server, main — but it is now derived:
+        // the dispatch seam publishes this field to it after the fold that
+        // changed it (update.cpp, publish_derived). Reducers and the Cmd
+        // builders they call read the Model.
+        //
+        // Initialised by init() from what main() selected at launch.
+        provider::Selection    selection;
 
         // Fused cross-provider model picker (docs/design/unified-model-picker.md).
         // `provider_catalogs` is the MERGED, multi-provider catalog view built
@@ -759,6 +773,13 @@ struct Model {
         [[nodiscard]] bool operator==(const SubagentView&) const = default;
     };
     SubagentView published_subagent;
+
+    // The active provider as LAST PUBLISHED to the process global
+    // (provider::select). Same rule as published_subagent: the seam compares
+    // the Model's selection with this and returns a publish effect only on
+    // change. Kept on the Model, not read back from the global, so the
+    // comparison is against Model state and replays.
+    provider::Selection published_selection;
 
     // The process's launch environment, read ONCE by init() and never again.
     //

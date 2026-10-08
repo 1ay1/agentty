@@ -29,6 +29,7 @@
 #include <functional>
 #include <vector>
 
+#include "agentty/provider/selection.hpp"
 #include "agentty/runtime/cmd.hpp"
 #include "agentty/runtime/store_fx.hpp"
 #include "agentty/store/store.hpp"
@@ -79,7 +80,8 @@ struct Store {
     std::vector<std::pair<std::string, std::string>> written_files;
 };
 
-/// Perform the persistence effects in `c` against `s`.
+/// Perform the persistence effects in `c` against `s`, plus the provider
+/// publish (tests read provider::active() the way off-loop code does).
 ///
 /// This is what the HOST does in production (runtime/app/host.hpp); doing it
 /// here keeps a test that asserts on the store honest about the fact that a
@@ -95,6 +97,8 @@ inline void run(const agentty::Cmd& c, Store& s) {
             s.deleted_threads.push_back(e.id);
         else if constexpr (std::same_as<U, agentty::WriteFile>)
             s.written_files.emplace_back(e.path, e.contents);
+        else if constexpr (std::same_as<U, agentty::PublishSelection>)
+            agentty::provider::select(e.selection);
     });
 }
 

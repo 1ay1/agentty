@@ -72,7 +72,6 @@ using panel_detail::panel_viewport_h;
 using panel_detail::panel_terminal_cols;
 using panel_detail::panel_badge_max_cols;
 using panel_detail::tier_hue;
-using panel_detail::active_provider_id;
 using panel_detail::reasoning_effort_footer;
 using panel_detail::section_header;
 using panel_detail::SectionHeader;

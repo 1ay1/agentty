@@ -86,8 +86,14 @@ void install_deps(Deps d);
 // thread and the lock guards only the login flow's live replace.
 //
 // It resolves through provider::credentials rather than reading the cache
-// directly, so the credential can never drift from provider::active() —
+// directly, so the credential can never drift from the provider it is for —
 // the class of bug behind an Anthropic OAuth token being sent to Mistral.
+//
+// Inside a fold, pass the MODEL's selection (m.d.selection): the process
+// global is only published after the fold, so mid-switch it still names the
+// provider being left. The no-argument form is for code off the loop, which
+// has no Model and reads the published copy.
+[[nodiscard]] auth::AuthHeader auth_snapshot(const provider::Selection& sel);
 [[nodiscard]] auth::AuthHeader auth_snapshot();
 
 // Live-replace just the auth context after install. Used by the in-app

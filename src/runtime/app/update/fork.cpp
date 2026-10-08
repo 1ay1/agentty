@@ -212,7 +212,7 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             // has usually evicted the launch-time socket — so warm it, as an
             // effect alongside the saves.
             return Cmd::batch(std::move(save_parent), std::move(save_fork),
-                              cmd::prewarm_provider(),
+                              cmd::prewarm_provider(m),
                               std::move(toast), cmd::reset_inline());
         },
     }, fm);

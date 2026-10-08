@@ -221,10 +221,10 @@ struct LoopBreak {
                                           auth::AuthHeader   auth,
                                           std::string        for_provider);
 
-// The common case: fetch for whatever is active RIGHT NOW. Resolves the
-// arguments on the calling (UI) thread and forwards. Call this from a
+// The common case: fetch for the MODEL's active provider. Resolves the
+// arguments on the calling (UI) thread from `m` and forwards. Call this from a
 // reducer; the overload above is for a caller that already has them.
-[[nodiscard]] Cmd fetch_models();
+[[nodiscard]] Cmd fetch_models(const Model& m);
 
 // Fetch a SPECIFIC provider's catalog without switching to it (fused picker
 // fan-out). Dispatches FusedCatalogLoaded{spec, models, ok}.
@@ -233,7 +233,7 @@ struct LoopBreak {
 // Re-measure the live context window of `model_id` on the active provider
 // when it is a local OpenAI-compatible endpoint (llama.cpp router, LM Studio,
 // Ollama). Dispatches ModelWindowProbed. A no-op Cmd for hosted providers.
-[[nodiscard]] Cmd probe_model_window(std::string model_id);
+[[nodiscard]] Cmd probe_model_window(const Model& m, std::string model_id);
 
 // ── Self-update ─────────────────────────────────────────────
 // Background release check (24h-cached, never blocks a frame): dispatches
@@ -337,7 +337,7 @@ struct LoopBreak {
 // matters: resolving on the worker would read the active provider at some
 // later moment, after a fast second switch may have already changed it.
 // Dispatches nothing.
-[[nodiscard]] Cmd prewarm_provider();
+[[nodiscard]] Cmd prewarm_provider(const Model& m);
 
 // Write one change to an mcp.json, off the UI thread, and report back.
 //

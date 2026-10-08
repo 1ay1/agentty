@@ -543,7 +543,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             && now - m.s.last_prewarm_at < std::chrono::seconds(85);
         if (wire_stale && !warm_throttled && !m.s.active()) {
             m.s.last_prewarm_at = now;
-            prewarm = cmd::prewarm_provider();
+            prewarm = cmd::prewarm_provider(m);
         }
     }
     // ── Proactive OAuth refresh ────────────────────────────────

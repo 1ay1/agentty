@@ -1867,7 +1867,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             if (m.s.compacting) {
                 std::string cm = smart::utility_model(
                     ran_model, m.d.available_models, m.d.smart,
-                    active_provider_id());
+                    active_provider_id(m));
                 if (!cm.empty()) ran_model = std::move(cm);
             }
             auto cmd = finalize_turn(m, e.stop_reason);
@@ -1876,7 +1876,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             // ran, while it's still the resident one. Cheap: a no-op Cmd for
             // hosted providers, a couple of localhost GETs otherwise.
             cmd = Cmd::batch(std::move(cmd),
-                                        cmd::probe_model_window(std::move(ran_model)));
+                                        cmd::probe_model_window(m, std::move(ran_model)));
             // No force_redraw arming. The previous version armed
             // needs_force_redraw here so the next user input would
             // trigger maya's case-(B) soft redraw — meant to flush
@@ -2294,7 +2294,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // that may well be entitled.
                     (void)entitlement_record_blocked(
                         s, domain::entitlement::Fact::Context1M,
-                        wire_model_id(m.d.model_id.value));
+                        active_provider_id(m), wire_model_id(m.d.model_id.value));
                     s.model_id = m.d.model_id;
                     // Also strip `[1m]` from the per-provider recall so a
                     // later switch away-and-back to this provider doesn't
@@ -2302,7 +2302,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // 400 loop. Without this, provider_models[anthropic] keeps
                     // the 1M variant and the entitlement discovery repeats
                     // every session.
-                    s.provider_models[active_provider_id()] =
+                    s.provider_models[active_provider_id(m)] =
                         m.d.model_id.value;
                     ctx_save = save_record(m);
                 }
@@ -2371,7 +2371,8 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                             // ACCOUNT-wide, empty model_id. The model can
                             // see; this login may not.
                             remembered = detail::entitlement_record_blocked(
-                                s, domain::entitlement::Fact::VisionOrgPolicy);
+                                s, domain::entitlement::Fact::VisionOrgPolicy,
+                                active_provider_id(m));
                             break;
                         case provider::VisionRejection::ModelCapability:
                             // A property of the MODEL. Recorded on the
@@ -2457,7 +2458,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 // refresh — the refresh succeeds, update_auth() installs the
                 // Anthropic bearer as the cached header, and the retry ships
                 // it to the wrong host → an unbreakable 401 loop.
-                && provider::active().kind == provider::Kind::Anthropic) {
+                && m.d.selection.kind == provider::Kind::Anthropic) {
                 std::string refresh_token;
                 if (auto loaded = auth::load_credentials()) {
                     if (auto* o = std::get_if<auth::cred::OAuth>(&*loaded))

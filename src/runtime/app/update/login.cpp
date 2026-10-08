@@ -26,6 +26,7 @@
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
 #include "agentty/provider/auth_state.hpp"
+#include "agentty/provider/openai/transport.hpp"
 #include "agentty/auth/vault.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/util/logx.hpp"
@@ -358,7 +359,7 @@ Cmd sign_out(Model& m) {
     // credentials.json, an OAuth token file, a provider_keys entry) is the
     // vault's question — one descriptor per provider, no per-provider ladder
     // here (see auth/vault.hpp).
-    const auto& sel = provider::active();
+    const auto& sel = m.d.selection;
     const std::string pid = signout_provider_id(sel);
     std::string what = pid.empty() ? std::string{"credentials"}
                                    : provider::provider_display_name(sel);
@@ -507,7 +508,7 @@ Cmd open_accounts(Model& m, const std::string& provider_id = {}) {
     // the active one. Building from a parsed Selection means we DON'T have to
     // switch to the provider first — no model-picker pop — the account list
     // shows immediately for whatever row the user pressed Enter on.
-    const auto sel = provider_id.empty() ? provider::active()
+    const auto sel = provider_id.empty() ? m.d.selection
                                          : provider::parse_selection(provider_id);
     auto al = build_account_list(sel);
     if (al.provider.empty()) {
@@ -618,8 +619,8 @@ Cmd account_select(Model& m) {
     // pre-stashed so commit_provider_switch doesn't open the picker.
     {
         const std::string active_pid =
-            provider::active().kind == provider::Kind::OpenAI
-                ? provider::active().openai_endpoint.label
+            m.d.selection.kind == provider::Kind::OpenAI
+                ? m.d.selection.openai_endpoint.label
                 : std::string{provider::default_provider_id()};
         // The active provider's id, for non-OpenAI kinds, is the registry
         // default — compare ids, not names. (The old form special-cased
@@ -774,7 +775,7 @@ Cmd account_remove(Model& m) {
                      + std::chrono::seconds{4};
 
     // Rebuild the list in place and keep the cursor near the removed row.
-    auto rebuilt = build_account_list(provider::active());
+    auto rebuilt = build_account_list(m.d.selection);
     rebuilt.cursor = std::min(old_cursor,
                               static_cast<int>(rebuilt.rows.size()));
     m.ui.login = std::move(rebuilt);

@@ -20,7 +20,7 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"   // ModelInfo
-#include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/openai/endpoint.hpp"
 #include "agentty/provider/registry.hpp"
 
 namespace agentty::provider {
@@ -73,6 +73,20 @@ struct Selection {
     [[nodiscard]] bool is_copilot() const noexcept { return provider_id() == "copilot"; }
     [[nodiscard]] bool is_kimi()    const noexcept { return provider_id() == "kimi"; }
     [[nodiscard]] bool is_chatgpt() const noexcept { return provider_id() == "chatgpt"; }
+
+    // Structural equality. `row` compares by POINTER, which is exact: it
+    // always points into the static kProviders table, so two selections of
+    // the same registry row hold the same address. The dispatch seam uses
+    // this to publish the Model's selection to the process-global copy only
+    // when it actually changed.
+    [[nodiscard]] bool operator==(const Selection&) const = default;
+
+    // The catalog id this selection is filed under — the key every recents,
+    // fused-catalog and capability row uses: the OpenAI-family endpoint label,
+    // the ACP agent id, else the default (Anthropic) id. ONE definition: the
+    // reducers and the provider picker both ask it, so they cannot disagree
+    // about which row is "active".
+    [[nodiscard]] std::string catalog_id() const;
 };
 
 // Parse a provider spec into a Selection. Accepts:

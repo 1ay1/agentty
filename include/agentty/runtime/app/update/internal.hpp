@@ -158,7 +158,14 @@ void           reset_composer_draft(ComposerState& c);
 // Canonical id of the currently-active provider ("anthropic" for the
 // Claude path, else the OpenAI endpoint label — "openai" / "ollama" / …).
 // Used to key per-provider model recall in Settings::provider_models.
-std::string    active_provider_id();
+// The active provider's catalog id — the key every recents / fused-catalog /
+// capability row is filed under: Anthropic's default id, else the
+// OpenAI-family endpoint label, else the ACP agent id.
+//
+// A function of the MODEL's selection. It used to read the process global
+// (provider::active()), so a reducer asking "which provider" got whatever
+// the global said — which, mid-switch, could be the provider being left.
+std::string    active_provider_id(const Model& m);
 
 // ── Entitlement (ACCOUNT-scoped facts) ──────────────────────────────────
 //
@@ -169,17 +176,17 @@ std::string    active_provider_id();
 // for why this layer exists at all.
 //
 // `is_blocked` reads the keyed store for the CURRENTLY ACTIVE account of
-// `provider` (empty provider ⇒ the active provider). `record_blocked`
+// `provider` (pass active_provider_id(m) for the active one). `record_blocked`
 // learns a rejection and persists it; it returns true when the fact was
 // new, so callers can skip a redundant settings write.
 [[nodiscard]] bool entitlement_blocked(const store::Settings& s,
                                        domain::entitlement::Fact f,
-                                       std::string_view model_id = {},
-                                       std::string_view provider = {});
+                                       std::string_view provider,
+                                       std::string_view model_id = {});
 bool entitlement_record_blocked(store::Settings& s,
                                 domain::entitlement::Fact f,
-                                std::string_view model_id = {},
-                                std::string_view provider = {});
+                                std::string_view provider,
+                                std::string_view model_id = {});
 
 // Pick the model to make active when switching TO provider `spec`. Prefers
 // the model last used on that provider (Settings::provider_models), else a

@@ -12,6 +12,7 @@
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
+#include "agentty/provider/openai/transport.hpp"
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/checkpoint.hpp"
 #include "agentty/tool/registry.hpp"   // tools::registry (warm at startup)
@@ -53,6 +54,11 @@ std::pair<Model, Cmd> init() {
     m.steady_epoch = std::chrono::steady_clock::now();
     m.wall_epoch   = std::chrono::system_clock::now();
     m.now          = m.steady_epoch;
+    // The active provider. main() parsed the launch spec and installed it in
+    // the process global before handing the program to jaal; this is the one
+    // read of that global the Model makes. From here on the Model owns it and
+    // the seam publishes it back (update.cpp, publish_derived).
+    m.d.selection = provider::active();
     // Seed the composer idle-blink clock at launch so the 15 s
     // blink-stop countdown starts now, not on the first keystroke. A
     // freshly-opened, never-touched agentty is exactly the idle-CPU case
@@ -83,7 +89,7 @@ std::pair<Model, Cmd> init() {
     //
     // Cheap: a handful of bundled rows, once, at startup.
     for (auto& mi : m.d.available_models)
-        ui::bake_context_window(mi, detail::active_provider_id(), settings);
+        ui::bake_context_window(mi, detail::active_provider_id(m), settings);
     // ONE-TIME MIGRATION: the legacy account-blind `context_1m_blocked`
     // bool becomes a keyed fact for the CURRENTLY ACTIVE account. That is
     // the best available attribution — the bool never recorded whose block
@@ -93,8 +99,8 @@ std::pair<Model, Cmd> init() {
     if (settings.context_1m_blocked) {
         settings.context_1m_blocked = false;
         if (detail::entitlement_record_blocked(
-                settings, domain::entitlement::Fact::Context1M,
-                wire_model_id(settings.model_id.value), "anthropic"))
+                settings, domain::entitlement::Fact::Context1M, "anthropic",
+                wire_model_id(settings.model_id.value)))
             deps().save_settings(settings);
     }
     // DISCOVERED entitlement: this account 400'd on the context-1m beta in a
@@ -106,6 +112,7 @@ std::pair<Model, Cmd> init() {
             return mi.id.value.find("[1m]") != std::string::npos
                 && detail::entitlement_blocked(settings,
                                        domain::entitlement::Fact::Context1M,
+                                       detail::active_provider_id(m),
                                        wire_model_id(mi.id.value));
         });
     }
@@ -114,6 +121,7 @@ std::pair<Model, Cmd> init() {
     // the very first turn and dead-end again — strip the marker up front.
     if (settings.model_id.value.find("[1m]") != std::string::npos
         && detail::entitlement_blocked(settings, domain::entitlement::Fact::Context1M,
+                               detail::active_provider_id(m),
                                wire_model_id(settings.model_id.value)))
         settings.model_id = ModelId{wire_model_id(settings.model_id.value)};
 
@@ -139,7 +147,7 @@ std::pair<Model, Cmd> init() {
         // self-corrects via the eager fetch_models() round trip below,
         // so it keeps the saved id and lets ModelsLoaded validate it.
         const bool anthropic_active =
-            provider::active().kind == provider::Kind::Anthropic;
+            m.d.selection.kind == provider::Kind::Anthropic;
         bool honour = true;
         if (anthropic_active) {
             // Honour the saved id if it's a known seeded model OR any
@@ -227,7 +235,7 @@ std::pair<Model, Cmd> init() {
     // settings would be honoured under whatever provider happens to be active
     // at launch, which is exactly the cross-provider dispatch the scoping is
     // there to prevent.
-    tools::subagent::set_provider(detail::active_provider_id());
+    tools::subagent::set_provider(detail::active_provider_id(m));
     // Same reasoning for the candidate pool the auto-router ranks over: it is
     // otherwise only ever set from the ModelsLoaded arm, so a failed fetch
     // left workers ranking over an EMPTY list. Seed it with what we have now
@@ -306,7 +314,7 @@ std::pair<Model, Cmd> init() {
     // sign-in they never wanted. Plain first-runs (no creds anywhere)
     // keep the classic Anthropic modal — the majority path is unchanged.
     if (auth::is_empty(deps().auth)
-        && provider::active().kind == provider::Kind::Anthropic) {
+        && m.d.selection.kind == provider::Kind::Anthropic) {
         bool cred_elsewhere = false;
         for (const auto& p : provider::providers()) {
             // Skip the provider we already know is unauthed (the active one).
@@ -330,7 +338,7 @@ std::pair<Model, Cmd> init() {
     // the sign-in modal — exactly like Anthropic — rather than failing on the
     // first send. The modal's option 3 runs the native loopback OAuth.
     {
-        const auto& sel = provider::active();
+        const auto& sel = m.d.selection;
         const bool codex_active = sel.is_chatgpt();
         if (codex_active && !provider::chatgpt::responses_available())
             m.ui.login = ui::login::Picking{};
@@ -370,9 +378,9 @@ std::pair<Model, Cmd> init() {
     // BEFORE the user sends anything — the same validation the model
     // picker does, just not gated on the user opening it. Anthropic has
     // a trustworthy built-in seed list, so it skips this round trip.
-    if (provider::active().kind == provider::Kind::OpenAI) {
+    if (m.d.selection.kind == provider::Kind::OpenAI) {
         m.s.models_loading = true;
-        cmds.push_back(cmd::fetch_models());
+        cmds.push_back(cmd::fetch_models(m));
     }
 
     // Background OAuth refresh handoff. `auth::resolve()` parked a
@@ -481,7 +489,7 @@ std::pair<Model, Cmd> init() {
     // (join_prewarm at shutdown), so this is safe to fire unconditionally;
     // gate it on Anthropic being the active provider so we don't dial a host
     // the session will never talk to.
-    if (provider::active().kind == provider::Kind::Anthropic)
+    if (m.d.selection.kind == provider::Kind::Anthropic)
         cmds.push_back(Cmd::task_isolated(
             [](jaal::Sink<Msg>, std::stop_token) { auth::prewarm_anthropic(); }));
 
@@ -494,7 +502,7 @@ std::pair<Model, Cmd> init() {
     // submit finds a warm proxy token + Auto session instead of paying two
     // serial handshakes on the turn's critical path. Guarded to the copilot
     // provider; fresh_token()/auto_session() single-flight internally.
-    if (provider::active().is_copilot())
+    if (m.d.selection.is_copilot())
         cmds.push_back(Cmd::task_isolated(
             [](jaal::Sink<Msg>, std::stop_token) {
                 const auto t0 = std::chrono::steady_clock::now();

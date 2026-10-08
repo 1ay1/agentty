@@ -82,10 +82,15 @@ static void apply_fx(const Cmd& c) {
 // prevent (here it read as "no provider is authed", so the fused picker came
 // up empty).
 //
-// Call AFTER setting g_settings.
+// The active provider is seeded the same way: init() copies the launch
+// selection out of the global once, and from then on the Model owns it.
+//
+// Call AFTER setting g_settings and provider::select().
 [[nodiscard]] static Model seeded_model() {
     Model m;
     m.d.persisted = g_settings;
+    m.d.selection = provider::active();
+    m.published_selection = m.d.selection;
     return m;
 }
 

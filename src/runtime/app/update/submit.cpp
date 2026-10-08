@@ -84,7 +84,7 @@ Cmd submit_message(Model& m) {
     // TLS providers are exempt: their catalogs are advisory (aliases, dated
     // variants and gateway rewrites legitimately stream fine unlisted).
     {
-        const auto& sel = provider::active();
+        const auto& sel = m.d.selection;
         const bool local_openai = sel.kind == provider::Kind::OpenAI
                                && !sel.openai_endpoint.use_tls;
         if (local_openai && !m.d.available_models.empty()) {
@@ -596,13 +596,8 @@ Cmd submit_message(Model& m) {
     return cmd;
 }
 
-std::string active_provider_id() {
-    const auto& sel = provider::active();
-    if (sel.kind == provider::Kind::OpenAI)
-        return sel.openai_endpoint.label;
-    if (sel.kind == provider::Kind::ExternalAcp)
-        return sel.acp_agent_id;
-    return std::string{provider::default_provider_id()};
+std::string active_provider_id(const Model& m) {
+    return m.d.selection.catalog_id();
 }
 
 // ── Entitlement accessors (see internal.hpp / domain/entitlement.hpp) ────
@@ -612,8 +607,7 @@ std::string active_provider_id() {
 // the legacy account-blind bool this layer replaces.
 namespace {
 std::pair<std::string, std::string> entitlement_scope(std::string_view provider) {
-    std::string pid = provider.empty() ? active_provider_id()
-                                       : std::string{provider};
+    std::string pid{provider};
     // The registry's active label for this provider. Empty is legitimate and
     // means "the only account" — a single-account user keys under "", which
     // is why this needs no migration for the common case.
@@ -624,16 +618,16 @@ std::pair<std::string, std::string> entitlement_scope(std::string_view provider)
 
 bool entitlement_blocked(const store::Settings& s,
                          domain::entitlement::Fact f,
-                         std::string_view model_id,
-                         std::string_view provider) {
+                         std::string_view provider,
+                         std::string_view model_id) {
     const auto [pid, acct] = entitlement_scope(provider);
     return domain::entitlement::blocked(s.entitlements, f, pid, acct, model_id);
 }
 
 bool entitlement_record_blocked(store::Settings& s,
                                 domain::entitlement::Fact f,
-                                std::string_view model_id,
-                                std::string_view provider) {
+                                std::string_view provider,
+                                std::string_view model_id) {
     const auto [pid, acct] = entitlement_scope(provider);
     const bool is_new = domain::entitlement::record_blocked(
         s.entitlements, f, pid, acct, model_id);
@@ -736,7 +730,7 @@ void refresh_record(Model& m) {
     // This used to be written ONLY by the `--provider` CLI flag, which meant
     // switching provider in the picker persisted the per-provider model but
     // not the provider itself — every restart fell back to the default.
-    if (const std::string pid = active_provider_id(); !pid.empty())
+    if (const std::string pid = active_provider_id(m); !pid.empty())
         s.provider = pid;
     // MERGE favorites, don't rebuild: `favorite_models` is one GLOBAL list
     // spanning every provider, but m.d.available_models only holds the
@@ -756,7 +750,7 @@ void refresh_record(Model& m) {
     // Record this model as the active provider's last-used selection so a
     // later switch back to it restores exactly this model.
     if (!m.d.model_id.empty())
-        s.provider_models[active_provider_id()] = m.d.model_id.value;
+        s.provider_models[active_provider_id(m)] = m.d.model_id.value;
     s.effort = std::string{effort_to_wire_setting(m.d.effort)};
     // Smart Mode: the whole config, one assignment. While the
     // AGENTTY_SMART_MODE session pin is active the in-memory `enabled` flag is
@@ -780,26 +774,26 @@ commit_provider_switch(Model& m, std::string_view spec,
                        bool open_panel) {
     const std::string spec_s{spec};
 
-    // (1) File the OUTGOING model under its canonical provider id BEFORE
-    //     provider::select swaps active() out from under us, so a later
-    //     switch back restores exactly this model.
-    const std::string outgoing_id = active_provider_id();
+    // (1) File the OUTGOING model under its canonical provider id BEFORE the
+    //     selection changes below, so a later switch back restores exactly
+    //     this model.
+    const std::string outgoing_id = active_provider_id(m);
 
-    // (2) Install the new selection (process-global; the stream seam reads
-    //     active() at call time).
+    // (2) Change the active provider — in the MODEL, which owns it.
     //
-    //     NOT YET ELM. This writes a process-global from inside update, and
-    //     the Model does not own the selection at all — every reader goes to
-    //     provider::active(). Moving it into the Model is the real fix and is
-    //     tracked by the elm_purity lint's allowlist; it is not a local edit.
-    provider::select(provider::parse_selection(spec_s));
+    //     It used to be provider::select(), a process-global write from
+    //     inside update. The global still exists, for code off the loop (the
+    //     stream worker, ACP, main), but it is a published copy now: the
+    //     dispatch seam writes it after this fold (update.cpp,
+    //     publish_derived). Everything below in THIS fold — the prewarm
+    //     target, the model fetch, the credential, the toast — reads
+    //     m.d.selection, so it sees the new provider, not the one being left.
+    m.d.selection = provider::parse_selection(spec_s);
 
     // (2b) Prewarm TLS/DNS to the NEWLY-active provider's host, so the first
     //      turn after a live switch is as fast as a cold start's. Returned as
-    //      an effect (batched below). cmd::prewarm_provider() resolves its
-    //      target NOW, synchronously, so it captures the selection installed
-    //      on the line above rather than whatever is active when it runs.
-    Cmd prewarm = cmd::prewarm_provider();
+    //      an effect (batched below); it reads m.d.selection, set just above.
+    Cmd prewarm = cmd::prewarm_provider(m);
 
     Cmd recall_save = Cmd::none();
     {
@@ -820,7 +814,7 @@ commit_provider_switch(Model& m, std::string_view spec,
     if (next.empty()) next = model_for_provider(m.d.persisted, spec_s);
     if (!next.empty()) {
         m.d.model_id    = ModelId{next};
-        m.s.context_max = resolved_context_max(m, detail::active_provider_id());
+        m.s.context_max = resolved_context_max(m, detail::active_provider_id(m));
     } else {
         // No model resolvable for the new backend yet (ChatGPT catalog not
         // reached, Ollama, …). CLEAR the model id — carrying the OUTGOING
@@ -887,7 +881,7 @@ commit_provider_switch(Model& m, std::string_view spec,
     // choice already made. Skip it — the desired model installs on ModelsLoaded
     // — and give a "Switching to X…" toast instead.
     const bool have_desired = !desired_model.empty();
-    if (open_panel && provider::active().kind != provider::Kind::ExternalAcp
+    if (open_panel && m.d.selection.kind != provider::Kind::ExternalAcp
         && !have_desired)
         m.ui.panel.descend(pn::Models{{0, ""}});
 
@@ -901,7 +895,7 @@ commit_provider_switch(Model& m, std::string_view spec,
               + "  \xc2\xb7  " + std::string{label} + "\xe2\x80\xa6"
         : "provider \xe2\x86\x92 " + std::string{label};
     {
-        const auto& sel = provider::active();
+        const auto& sel = m.d.selection;
         if (!have_desired && sel.kind == provider::Kind::OpenAI
             && !sel.openai_endpoint.use_tls)
             toast_text += "  (" + sel.openai_endpoint.host + ":"
@@ -911,7 +905,7 @@ commit_provider_switch(Model& m, std::string_view spec,
     auto toast = set_status_toast(m, std::move(toast_text),
                                   std::chrono::seconds{4});
     return Cmd::batch(std::move(recall_save), std::move(settings_save),
-                      std::move(prewarm), std::move(toast), cmd::fetch_models(),
+                      std::move(prewarm), std::move(toast), cmd::fetch_models(m),
                       std::move(refresh_cmd));
 }
 

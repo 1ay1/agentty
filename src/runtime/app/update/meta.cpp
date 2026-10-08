@@ -54,7 +54,7 @@ form::Form build_smart_form(const Model& m, bool advanced) {
     auto slot = [&](smart::ModelRole role) {
         auto rp = smart::resolve_role(role, parent, m.d.effort,
                                       m.d.available_models, sm,
-                                      active_provider_id());
+                                      active_provider_id(m));
         std::string label = ui::pretty_model_label(rp.model);
         smart_form::SlotView v;
         v.label  = label.empty() ? rp.model : label;
@@ -621,7 +621,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             // the same grind over (another face of the local dead loop).
             // Match the transport's local idle allowance; Esc still cancels.
             const bool local_provider = [&] {
-                const auto& sel = provider::active();
+                const auto& sel = m.d.selection;
                 return sel.kind == provider::Kind::OpenAI
                     && !sel.openai_endpoint.use_tls;
             }();

@@ -100,7 +100,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             // Open at the row matching the currently-active provider. Fresh
             // rows with an empty query (so every provider is present to match).
             const auto fresh = ui::build_provider_rows(saved_custom_hosts, "");
-            const auto& sel = provider::active();
+            const auto& sel = m.d.selection;
             const std::string active_label =
                 sel.kind == provider::Kind::ExternalAcp ? sel.acp_agent_id
                 : sel.kind == provider::Kind::OpenAI    ? sel.openai_endpoint.label
@@ -240,7 +240,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             // must not reuse the erased key) and say what to do next; the
             // picker stays open so the user can pick another provider (or
             // re-enter this one to sign back in).
-            const bool was_active = (removed == active_provider_id());
+            const bool was_active = (removed == active_provider_id(m));
             if (was_active) app::update_auth(auth::AuthHeader{});
             // Rebuild the row list so a removed custom host is gone; clamp.
             const auto& s2 = m.d.persisted;
@@ -299,7 +299,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
                 // multiple saved keys, switchable like the OAuth providers —
                 // account_provider_id returns the spec for a custom OpenAI
                 // endpoint). Esc from that list steps back to this picker.
-                const auto& active = provider::active();
+                const auto& active = m.d.selection;
                 const bool is_active =
                     active.kind == provider::Kind::OpenAI
                     && active.openai_endpoint.label == spec;

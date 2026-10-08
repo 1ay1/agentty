@@ -134,7 +134,7 @@ void hydrate_recents(Model& m) {
     // Folded comparison: the active id being an alias spelling of a ring
     // entry must not append a visual duplicate.
     if (!m.d.model_id.value.empty()) {
-        const ModelRef active{active_provider_id(), m.d.model_id.value};
+        const ModelRef active{active_provider_id(m), m.d.model_id.value};
         const std::string folded = capkey::norm_row_id(active.model_id);
         bool present = false;
         for (const auto& r : m.d.recent_models)
@@ -176,7 +176,7 @@ void hydrate_recents(Model& m) {
 // whose list probe would otherwise block the UI thread for seconds).
 void refresh_fused_sources(Model& m) {
     const auto& settings = m.d.persisted;
-    const std::string active_pid = active_provider_id();
+    const std::string active_pid = active_provider_id(m);
 
     // Prune catalogs whose provider is no longer authed (e.g. signed out via
     // ^D while the picker is open). Without this a stale catalog lingers and
@@ -280,7 +280,7 @@ std::vector<FusedRow> fused_rows_for_model(const Model& m) {
     in.catalogs   = &m.d.provider_catalogs;
     in.offers     = &m.d.fused_offers;
     in.recents    = &m.d.recent_models;
-    in.active     = ModelRef{active_provider_id(), m.d.model_id.value};
+    in.active     = ModelRef{active_provider_id(m), m.d.model_id.value};
     in.recent_cap = kRecentCap;
     // The canonical, provider-uniform label so the fused rows read AND
     // match identically to the per-provider picker (ui::model_display_label).
@@ -288,7 +288,7 @@ std::vector<FusedRow> fused_rows_for_model(const Model& m) {
     // Smart Mode slot-assign pins a model that will be dispatched to the
     // ACTIVE provider, so only its models may appear. See the Select arm.
     if (auto* c = m.ui.panel.get<pn::Models>()) {
-        if (c->assign_slot) in.only_provider = active_provider_id();
+        if (c->assign_slot) in.only_provider = active_provider_id(m);
         in.query = c->query;
         // ^/ scope: restrict the list to one provider's models. Smart-assign
         // scoping (above) wins when both are set — the slot constraint is
@@ -447,7 +447,7 @@ auth::AuthHeader resolve_switch_auth(const std::string& spec) {
 // ^Tab ring-walk which must not reorder the MRU mid-cycle), and fires the
 // switch toast.
 Cmd switch_to_model_ref(Model& m, const ModelRef& ref, bool record = true) {
-    const std::string cur_pid = active_provider_id();
+    const std::string cur_pid = active_provider_id(m);
 
     if (ref.provider_id == cur_pid) {
         // Same provider — pure model change.
@@ -462,12 +462,12 @@ Cmd switch_to_model_ref(Model& m, const ModelRef& ref, bool record = true) {
                            : Cmd::none();
         auto toast = set_status_toast(m,
             ui::pretty_model_label(m.d.model_id.value) + " \xc2\xb7 "
-                + provider::provider_display_name(provider::active()),
+                + provider::provider_display_name(m.d.selection),
             std::chrono::seconds{3});
         // A local router may serve this model at a different size than the
         // catalog said (or say nothing until it's loaded). Re-check now; the
         // post-turn probe catches it once the first request loads it.
-        auto probe = cmd::probe_model_window(m.d.model_id.value);
+        auto probe = cmd::probe_model_window(m, m.d.model_id.value);
         return Cmd::batch(std::move(save), std::move(mru),
                           std::move(toast), std::move(probe));
     }
@@ -552,7 +552,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // deferred pass fires — here they keep showing their bundled seed.
             // Skip the active refetch if its catalog is still fresh (rapid
             // re-open), but always schedule the lazy wave for the others.
-            const std::string apid0 = active_provider_id();
+            const std::string apid0 = active_provider_id(m);
             bool active_fresh = false;
             for (const auto& cat : m.d.provider_catalogs)
                 if (cat.provider_id == apid0) {
@@ -561,7 +561,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                     break;
                 }
             std::vector<Cmd> boot;
-            if (!active_fresh) boot.push_back(cmd::fetch_models());
+            if (!active_fresh) boot.push_back(cmd::fetch_models(m));
             boot.push_back(Cmd::after(std::chrono::milliseconds{120},
                                                  Msg{FusedRefreshOthers{}}));
             return Cmd::batch(std::move(boot));
@@ -572,9 +572,9 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // manual escape hatch when the user wants the very latest now.
             if (!m.ui.panel.get<pn::Models>()) return Cmd::none();
             for (auto& c : m.d.provider_catalogs) c.loaded_at_ms = 0;
-            const std::string apid = active_provider_id();
+            const std::string apid = active_provider_id(m);
             std::vector<Cmd> boot;
-            boot.push_back(cmd::fetch_models());   // active now
+            boot.push_back(cmd::fetch_models(m));   // active now
             for (auto& c : m.d.provider_catalogs) {
                 if (c.provider_id == apid) continue;
                 c.state = ProviderCatalog::State::Loading;
@@ -593,7 +593,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // that's been Ready a while IS refetched, so the list stays current
             // instead of freezing after its first load. No-op if closed.
             if (!m.ui.panel.get<pn::Models>()) return Cmd::none();
-            const std::string active_pid = active_provider_id();
+            const std::string active_pid = active_provider_id(m);
             const std::int64_t t = now_ms();
             std::vector<Cmd> fetches;
             for (auto& c : m.d.provider_catalogs) {
@@ -829,7 +829,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 }
             };
 
-            const bool row_is_active = row_provider == active_provider_id();
+            const bool row_is_active = row_provider == active_provider_id(m);
             if (row_is_active) {
                 // SSOT for the active provider: the routing candidate pool
                 // and the status-bar gauge read this, so keep it in step.
@@ -942,7 +942,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             hydrate_recents(m);
             const auto& ring = m.d.recent_models;
             if (ring.size() < 2) return Cmd::none();  // nothing to cycle
-            const ModelRef active{active_provider_id(), m.d.model_id.value};
+            const ModelRef active{active_provider_id(m), m.d.model_id.value};
             const int n = static_cast<int>(ring.size());
             int cur = 0;
             for (int i = 0; i < n; ++i)
@@ -1016,7 +1016,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 // filtered to the active one, so they agree, but the row
                 // is the more direct truth.
                 slot.provider = row.provider_id.empty()
-                                  ? active_provider_id()
+                                  ? active_provider_id(m)
                                   : row.provider_id;
                 cfg.enabled = true;   // pinning a slot means "on"
 
@@ -1053,7 +1053,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // provider B and the picker offers models B cannot stream.
             // (Empty provider_id = legacy/synthetic dispatch — accept.)
             if (!e.provider_id.empty()
-                && e.provider_id != active_provider_id()) {
+                && e.provider_id != active_provider_id(m)) {
                 return Cmd::none();   // keep models_loading: the
                                              // newer fetch is still in flight
             }
@@ -1079,7 +1079,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // Presets persisted at parse time as always; this only fires
             // for raw host/URL specs, at most once per process.
             if (auto proven = provider::take_unproven_spec(
-                    active_provider_id())) {
+                    active_provider_id(m))) {
                 // provider_keys is vault-owned — re-read before adding a row.
                 refresh_record(m);
                 settings.provider = proven->first;
@@ -1103,7 +1103,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 // sign-out/account switch.
                 if (entitlement_blocked(
                         settings, domain::entitlement::Fact::Context1M,
-                        wire_model_id(mi.id.value))
+                        active_provider_id(m), wire_model_id(mi.id.value))
                     && mi.id.value.find("[1m]") != std::string::npos)
                     continue;
                 for (const auto& fav : settings.favorite_models)
@@ -1120,7 +1120,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 // number the user was trying to verify (sail3r, PR #39).
                 ui::bake_context_window(mi,
                                         e.provider_id.empty()
-                                            ? active_provider_id()
+                                            ? active_provider_id(m)
                                             : e.provider_id,
                                         settings);
                 m.d.available_models.push_back(std::move(mi));
@@ -1142,7 +1142,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 if (mi.id == m.d.model_id) { active_present = true; break; }
             if (!active_present && !m.d.available_models.empty()) {
                 m.d.model_id = m.d.available_models.front().id;
-                m.s.context_max = resolved_context_max(m, active_provider_id());
+                m.s.context_max = resolved_context_max(m, active_provider_id(m));
                 // The auto-selected model may not support the effort tier that
                 // rode over from the previous provider — clamp it so the picker
                 // chip and the wire agree (commit_provider_switch couldn't do
@@ -1166,7 +1166,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // through the resolver so a user override outranks the catalog:
             // a gateway that under-reports (or reports nothing) must not
             // overwrite what the user explicitly set.
-            m.s.context_max = resolved_context_max(m, active_provider_id());
+            m.s.context_max = resolved_context_max(m, active_provider_id(m));
             // If the FUSED picker is open, the active provider's catalog just
             // changed (available_models is its source), so its rows are stale
             // — rebuild them. rebuild_fused_rows re-mirrors available_models
@@ -1177,7 +1177,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 // The active provider's live catalog just completed — mark its
                 // catalog fresh so the TTL refresh doesn't immediately refetch
                 // it, then rebuild the open rows.
-                const std::string apid = active_provider_id();
+                const std::string apid = active_provider_id(m);
                 for (auto& cat : m.d.provider_catalogs)
                     if (cat.provider_id == apid) { cat.loaded_at_ms = now_ms(); break; }
                 rebuild_fused_rows(m);
@@ -1191,7 +1191,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
         [&](ModelWindowProbed& e) -> Cmd {
             // Stale (provider switched meanwhile) or nothing measured: keep
             // what we had. 0 just means the model wasn't resident yet.
-            if (e.window <= 0 || e.provider_id != active_provider_id())
+            if (e.window <= 0 || e.provider_id != active_provider_id(m))
                 return Cmd::none();
             bool changed = false;
             for (auto& mi : m.d.available_models)
