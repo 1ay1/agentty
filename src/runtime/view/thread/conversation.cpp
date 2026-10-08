@@ -13,6 +13,7 @@
 // a rebuild.
 
 #include "agentty/runtime/view/thread/conversation.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
 
 #include "agentty/util/logx.hpp"
 
@@ -189,7 +190,7 @@ void build_live_tail(const Model& m, int& running_turn,
                 if (const auto* a = active_ctx(m.s.phase)) {
                     ind.stream_bytes = a->live_delta_bytes;
                     if (a->first_delta_at.time_since_epoch().count() != 0) {
-                        auto now = std::chrono::steady_clock::now();
+                        auto now = maya::anim_now();
                         auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                          now - a->first_delta_at).count();
                         if (ts_ms >= 250) {
@@ -345,7 +346,7 @@ void build_queued_previews(const Model& m, int& running_turn,
                            std::vector<maya::Element>& out) {
     if (m.ui.composer.queued.empty()) return;
     out.reserve(out.size() + m.ui.composer.queued.size() * 2);
-    auto now = std::chrono::system_clock::now();
+    const auto now = m.wall_at(maya::anim_now());
     const std::size_t base_idx = m.d.current.messages.size();
     for (std::size_t qi = 0; qi < m.ui.composer.queued.size(); ++qi) {
         Message synthetic;

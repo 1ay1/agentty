@@ -755,8 +755,18 @@ struct Model {
     // system_clock read per call site gave each call its own instant and made
     // updated_at differ from the message time it was written beside.
     [[nodiscard]] std::chrono::system_clock::time_point wall_now() const noexcept {
+        return wall_at(now);
+    }
+    // Any steady instant on that same calendar timeline. A view passes the
+    // FRAME's time (maya::anim_now()) to get "now" as a date without reading
+    // the system clock itself; before init() set the epochs it falls back to
+    // the real wall clock.
+    [[nodiscard]] std::chrono::system_clock::time_point wall_at(
+            std::chrono::steady_clock::time_point t) const noexcept {
+        if (steady_epoch == std::chrono::steady_clock::time_point{})
+            return std::chrono::system_clock::now();
         return wall_epoch + std::chrono::duration_cast<
-                   std::chrono::system_clock::duration>(now - steady_epoch);
+                   std::chrono::system_clock::duration>(t - steady_epoch);
     }
     // The pair of readings wall_now() is anchored to. Set once, by init().
     std::chrono::system_clock::time_point wall_epoch{};

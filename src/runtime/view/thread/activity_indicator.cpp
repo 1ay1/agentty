@@ -1,4 +1,5 @@
 #include "agentty/runtime/view/thread/activity_indicator.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
 
 #include <algorithm>
 #include <cctype>
@@ -85,7 +86,7 @@ activity_indicator_config(const Model& m) {
     // just started (< 1s) to avoid "0.0s" flicker on the first frame.
     if (const auto* a = active_ctx(m.s.phase);
         a && a->started.time_since_epoch().count() != 0) {
-        auto now = std::chrono::steady_clock::now();
+        auto now = maya::anim_now();
         auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
                        now - a->started).count();
         if (ms >= 1000) {

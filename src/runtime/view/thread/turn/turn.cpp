@@ -524,7 +524,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
     const auto prof_t0 = ::agentty::logx::enabled(
                              ::agentty::logx::Channel::Perf,
                              ::agentty::logx::Level::Trace)
-                       ? std::chrono::steady_clock::now()
+                       ? std::chrono::steady_clock::now()   // stopwatch: perf log only
                        : std::chrono::steady_clock::time_point{};
 
     if (!already_settled_into_cache) {
@@ -1409,7 +1409,7 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
 
     if (prof_t0.time_since_epoch().count() != 0) {
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - prof_t0).count();
+            std::chrono::steady_clock::now() - prof_t0).count();   // stopwatch: perf log only
         // Real reveal cursor (the byte the typewriter has reached) and
         // the per-call jump in it — the number that shows a BURST. A
         // smooth glide moves the clip a few bytes per frame; a paste
@@ -1549,9 +1549,9 @@ SpeakerStyle speaker_style_for(Role role, const Model& m, const Message* msg) {
 // ago, roughly", and a turn that reads "4m 12s ago" invites arithmetic
 // nobody wanted to do. One unit, no decimals.
 [[nodiscard]] inline std::string relative_time(
-        std::chrono::system_clock::time_point ts) {
+        std::chrono::system_clock::time_point ts,
+        std::chrono::system_clock::time_point now) {
     if (ts.time_since_epoch().count() <= 0) return {};
-    const auto now = std::chrono::system_clock::now();
     auto s = std::chrono::duration_cast<std::chrono::seconds>(now - ts).count();
     // A stamp from the future is a clock skew, not a time to report; the
     // honest rendering of "negative ago" is the present.
@@ -1562,8 +1562,11 @@ SpeakerStyle speaker_style_for(Role role, const Model& m, const Message* msg) {
     return std::to_string(s / 86400) + "d ago";
 }
 
+// `now` is the frame's calendar time (Model::wall_at(anim_now())), so the
+// "4m ago" stamps are a function of the Model and the frame clock.
 std::string format_turn_meta(const Message& msg, int turn_num,
                              std::optional<float> elapsed_secs,
+                             std::chrono::system_clock::time_point now,
                              bool checkpoint = false) {
     // Timestamps, per the Appearance pref.
     //
@@ -1578,7 +1581,7 @@ std::string format_turn_meta(const Message& msg, int turn_num,
         case agentty::ui_prefs::Timestamps::Off:
             break;
         case agentty::ui_prefs::Timestamps::Relative:
-            meta = relative_time(msg.timestamp);
+            meta = relative_time(msg.timestamp, now);
             break;
         case agentty::ui_prefs::Timestamps::Absolute:
             meta = timestamp_hh_mm(msg.timestamp);
@@ -1851,7 +1854,7 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     // total rather than restarting or freezing at the first phase.
     const std::int64_t now_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+            maya::anim_now().time_since_epoch()).count();
     rs.set_elapsed_ms(msg.thinking_elapsed_ms(now_ms));
     return rs.build_with_body(std::move(body));
 }
@@ -1933,6 +1936,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                           msg.role == Role::Assistant
                               ? assistant_elapsed(msg, m)
                               : std::nullopt,
+                          m.wall_at(maya::anim_now()),
                           /*checkpoint=*/msg.role == Role::User
                               && msg.checkpoint_id.has_value());
     if (!meta_override.empty()) cfg.meta = std::string{meta_override};
@@ -2508,7 +2512,8 @@ maya::Turn::Config turn_config_for_assistant_run(
     cfg.meta         = format_turn_meta(head, turn_num,
                           head.role == Role::Assistant
                               ? assistant_elapsed(head, m)
-                              : std::nullopt);
+                              : std::nullopt,
+                          m.wall_at(maya::anim_now()));
     if (!style.role_label.empty())
         cfg.meta = style.role_label + "  \xc2\xb7  " + cfg.meta;
 

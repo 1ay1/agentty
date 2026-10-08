@@ -261,4 +261,44 @@ if(DEFINED VIEW_ROOT)
             "(maya::available_width/height), which comes from the Model.")
     endif()
     message(STATUS "elm_purity: view reads the terminal size from the Model")
+
+    # ...and its time from the frame clock (maya::anim_now, which tests can
+    # freeze and advance), with dates via Model::wall_at. A raw clock read
+    # in view code is allowed only as a perf stopwatch whose result goes to a
+    # log, never to pixels, and the line has to say so.
+    set(clock_reads "")
+    foreach(f IN LISTS vfiles)
+        if(NOT f MATCHES "^runtime/(view|panel)/")
+            continue()
+        endif()
+        execute_process(
+            COMMAND ${GREP_EXE} -nE "${ban_clock}" ${VIEW_ROOT}/${f}
+            OUTPUT_VARIABLE hits OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(NOT hits)
+            continue()
+        endif()
+        string(ASCII 1 _sc)
+        string(REPLACE ";" "${_sc}" hits "${hits}")
+        string(REGEX MATCHALL "[^\n]+" hl "${hits}")
+        foreach(h IN LISTS hl)
+            string(REPLACE "${_sc}" ";" h "${h}")
+            string(REGEX MATCH "^([0-9]+):(.*)$" _ "${h}")
+            set(lineno "${CMAKE_MATCH_1}")
+            set(c "${CMAKE_MATCH_2}")
+            if(c MATCHES "^[ \t]*//" OR c MATCHES "// stopwatch:")
+                continue()
+            endif()
+            string(STRIP "${c}" c)
+            list(APPEND clock_reads "${f}:${lineno}: ${c}")
+        endforeach()
+    endforeach()
+    if(clock_reads)
+        list(JOIN clock_reads "\n  " msg)
+        message(FATAL_ERROR
+            "view code reads a clock directly:\n  ${msg}\n\n"
+            "Use maya::anim_now() (and Model::wall_at for dates). A perf "
+            "stopwatch that only feeds a log may stay; mark the line "
+            "`// stopwatch: ...`.")
+    endif()
+    message(STATUS "elm_purity: view reads time from the frame clock")
 endif()

@@ -4,6 +4,7 @@
 // (widget render) can link against it without dragging widget headers.
 
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
 
 #include <chrono>
 #include <cstdint>
@@ -125,7 +126,7 @@ float tool_elapsed(const ToolUse& tc) {
     auto started = tc.started_at();
     if (started == zero) return 0.0f;
     auto finished = tc.finished_at();
-    auto end = finished == zero ? std::chrono::steady_clock::now() : finished;
+    auto end = finished == zero ? maya::anim_now() : finished;
     auto dt = end - started;
     return std::chrono::duration<float>(dt).count();
 }
