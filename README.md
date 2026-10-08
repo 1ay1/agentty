@@ -317,7 +317,7 @@ curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
 **From source** (needs a C++26 toolchain — GCC 14+ / recent Clang / MSVC)
 
 ```bash
-git clone --recursive git@github.com:1ay1/agentty.git
+git clone --recursive https://github.com/1ay1/agentty.git
 cd agentty && cmake -B build && cmake --build build -j
 ```
 
