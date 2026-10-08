@@ -162,3 +162,47 @@ if(TIGHT)
 endif()
 
 message(STATUS "elm_purity ok (${nfiles} reducer files)")
+
+# ── Model::now is the FOLD's time — stale anywhere a fold isn't running ─────
+#
+# The dispatch seam writes Model::now from jaal's step-time argument as the
+# first thing each fold does, so inside update/ it is always current. Outside,
+# it is the LAST fold's time: view() and subscribe() see a const Model that
+# may be seconds old, and a wall_now() derived from it is just as stale. A
+# reader there would get a plausible-looking wrong answer with no error.
+# So the only readers allowed are the reducers and the seam that writes it.
+if(DEFINED VIEW_ROOT)
+    file(GLOB_RECURSE vfiles RELATIVE ${VIEW_ROOT} ${VIEW_ROOT}/*.cpp ${VIEW_ROOT}/*.hpp)
+    set(stale_reads "")
+    foreach(f IN LISTS vfiles)
+        # The reducers and the two seam files are where `now` is current.
+        if(f MATCHES "^runtime/app/update/" OR f STREQUAL "runtime/app/update.cpp"
+           OR f STREQUAL "runtime/app/init.cpp")
+            continue()
+        endif()
+        execute_process(
+            COMMAND ${GREP_EXE} -nE "\\b(m|model|mdl)(\\.|->)(now\\b|wall_now\\()" ${VIEW_ROOT}/${f}
+            OUTPUT_VARIABLE hits OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(NOT hits)
+            continue()
+        endif()
+        string(REGEX MATCHALL "[^\n]+" hl "${hits}")
+        foreach(h IN LISTS hl)
+            string(REGEX MATCH "^([0-9]+):(.*)$" _ "${h}")
+            if(CMAKE_MATCH_2 MATCHES "^[ \t]*//")
+                continue()
+            endif()
+            string(STRIP "${CMAKE_MATCH_2}" c)
+            list(APPEND stale_reads "${f}:${CMAKE_MATCH_1}: ${c}")
+        endforeach()
+    endforeach()
+    if(stale_reads)
+        list(JOIN stale_reads "\n  " msg)
+        message(FATAL_ERROR
+            "Model::now read outside a fold (it is stale there):\n  ${msg}\n\n"
+            "A view or subscription that needs the current time must get it "
+            "from the runtime (an animation clock, a Tick), not from the last "
+            "fold's timestamp.")
+    endif()
+    message(STATUS "elm_purity: Model::now read only inside folds")
+endif()

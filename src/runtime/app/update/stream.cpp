@@ -158,7 +158,8 @@ bool live_tail_reveal_settled(const Model& m) {
 // try_parse_partial, get_string_any, missing_required_field + the alias
 // constants) live in update/stream_args.hpp.
 
-bool guard_truncated_tool_args(ToolUse& tc) {
+bool guard_truncated_tool_args(ToolUse& tc,
+                               std::chrono::steady_clock::time_point now) {
     auto missing = missing_required_field(tc.name.value, tc.args);
     if (missing.empty()) return false;
     // A required field is absent — before failing, try to recover a mixed
@@ -173,7 +174,7 @@ bool guard_truncated_tool_args(ToolUse& tc) {
         missing = missing_required_field(tc.name.value, tc.args);
         if (missing.empty()) return false;
     }
-    auto now = std::chrono::steady_clock::now();
+    // `now` is the fold's time, passed down by the reducer (see Model::now).
     // State what was OBSERVED, not a guess at why.
     //
     // This used to assert "the stream was truncated before the full tool
@@ -303,7 +304,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         Thread::CompactionRecord rec;
         rec.up_to_index = up_to;
         rec.summary     = std::move(summary);
-        rec.created_at  = std::chrono::system_clock::now();
+        rec.created_at  = m.wall_now();
         // What did this actually buy us? Measured on the WIRE payload, not
         // the transcript — the transcript is immutable, so before/after on
         // it are identical and every reclaim would read as zero.
@@ -327,7 +328,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
                     r.tokens_before, r.tokens_after,
                     r.reclaimed().value_or(-1));
         }
-        m.d.current.updated_at = std::chrono::system_clock::now();
+        m.d.current.updated_at = m.wall_now();
 
         // Do NOT rehydrate frozen. The currently-frozen prefix is
         // unchanged by compaction (the transcript is immutable — only
@@ -399,7 +400,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         // dwell that competed for attention with the next thing the
         // user actually wants to read.
         const bool queued_about_to_fire = !m.ui.composer.queued.empty();
-        auto now_ts = std::chrono::steady_clock::now();
+        auto now_ts = m.now;
         if (m.s.autocompact_disabled) {
             m.s.status        = "auto-compact disabled (rapid refill); use /compact manually";
             m.s.status_until  = now_ts + std::chrono::seconds{6};
@@ -465,7 +466,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
                 // Telemetry{} itself compiles on both compilers.
                 if (!last.telemetry) last.telemetry = Message::Telemetry{};
                 auto& t = *last.telemetry;
-                const auto now_st = std::chrono::steady_clock::now();
+                const auto now_st = m.now;
                 auto ms_between = [](auto from, auto to) -> std::uint32_t {
                     if (from.time_since_epoch().count() == 0) return 0;
                     if (to <= from) return 0;
@@ -661,7 +662,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
                             // Leave status Pending; the retry block
                             // below will see any_truncated and re-launch.
                         } else {
-                            auto now = std::chrono::steady_clock::now();
+                            auto now = m.now;
                             tc.status = ToolUse::Failed{
                             tc.started_at(), now,
                             std::string{"tool args never closed: "}
@@ -672,7 +673,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             }
             std::string{}.swap(tc.args_streaming);
             if (tc.is_pending()) {
-                if (guard_truncated_tool_args(tc)) any_truncated = true;
+                if (guard_truncated_tool_args(tc, m.now)) any_truncated = true;
                 // Mid-string cutoffs also participate in the
                 // transparent-retry loop — the wire died inside a
                 // string value, no salvage is safe, so the only path
@@ -724,7 +725,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             "the args parsed, the body is likely truncated. Retry with a "
             "smaller payload: prefer `edit` over `write` for long files, "
             "or split the change across multiple calls.";
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = m.now;
         for (auto& tc : m.d.current.messages.back().tool_calls) {
             if (tc.is_pending()) {
                 tc.status = ToolUse::Failed{
@@ -788,7 +789,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
     // kick_pending_tools would dispatch with empty args.
     if (!m.d.current.messages.empty()
         && m.d.current.messages.back().role == Role::Assistant) {
-        const auto now_ts = std::chrono::steady_clock::now();
+        const auto now_ts = m.now;
         for (auto& tc : m.d.current.messages.back().tool_calls) {
             if (tc.stream_mid_string_truncated && tc.is_pending()) {
                 tc.status = ToolUse::Failed{
@@ -1162,7 +1163,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
 
     return std::visit(overload{
         [&](StreamStarted) -> Cmd {
-            auto now = std::chrono::steady_clock::now();
+            auto now = m.now;
             // Stamp the last-request clock for the idle cache-lapse
             // pre-compaction trigger (StreamState::should_compact_on_idle).
             // NOT gated on !compacting: a compaction request re-warms the
@@ -1211,7 +1212,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             return Cmd::none();
         },
         [&](StreamTextDelta& e) -> Cmd {
-            auto now = std::chrono::steady_clock::now();
+            auto now = m.now;
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = now;
                 if (!e.text.empty()) {
@@ -1334,7 +1335,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             // reveal burst ("first char sticks, rest pops in with the tool")
             // never happens.
             if (auto* a = active_ctx(m.s.phase))
-                a->last_event_at = std::chrono::steady_clock::now();
+                a->last_event_at = m.now;
             // No placeholder to flag during compaction (summary is
             // off-transcript); harmless no-op there.
             if (!m.s.compacting
@@ -1345,7 +1346,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             return Cmd::none();
         },
         [&](StreamToolUseStart& e) -> Cmd {
-            auto now = std::chrono::steady_clock::now();
+            auto now = m.now;
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = now;
                 // A structured tool call is real model output — ends the
@@ -1387,7 +1388,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             return Cmd::none();
         },
         [&](StreamToolUseDelta& e) -> Cmd {
-            auto now = std::chrono::steady_clock::now();
+            auto now = m.now;
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = now;
                 if (!e.partial_json.empty()) {
@@ -1433,7 +1434,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             return Cmd::none();
         },
         [&](StreamToolUseSnapshot& e) -> Cmd {
-            auto now = std::chrono::steady_clock::now();
+            auto now = m.now;
             if (auto* a = active_ctx(m.s.phase)) {
                 a->last_event_at = now;
                 if (!e.json.empty()) {
@@ -1464,7 +1465,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
         },
         [&](StreamToolUseEnd& e) -> Cmd {
             if (auto* a = active_ctx(m.s.phase))
-                a->last_event_at = std::chrono::steady_clock::now();
+                a->last_event_at = m.now;
             if (auto* tcp = find_streaming_tool(e.id)) {
                 auto& tc = *tcp;
                 // Empty args_streaming is legitimate for argumentless tools;
@@ -1507,7 +1508,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                             tc.stream_mid_string_truncated = true;
                             std::string{}.swap(tc.args_streaming);
                         } else {
-                            auto now = std::chrono::steady_clock::now();
+                            auto now = m.now;
                             tc.status = ToolUse::Failed{
                                 tc.started_at(), now,
                                 std::string{"invalid tool arguments: "} + ex.what()
@@ -1582,7 +1583,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     const bool args_complete =
                         missing_required_field(tc2.name.value, tc2.args).empty();
                     if (read_only && !needs_perm && args_complete) {
-                        const auto now2 = std::chrono::steady_clock::now();
+                        const auto now2 = m.now;
                         // Auto-allowed, so the decision and the launch are the
                         // same instant -- but record the definition anyway so
                         // every dispatch verifies the same way.
@@ -1606,9 +1607,9 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
         },
         [&](StreamObservedToolResult& e) -> Cmd {
             if (auto* a = active_ctx(m.s.phase))
-                a->last_event_at = std::chrono::steady_clock::now();
+                a->last_event_at = m.now;
             if (auto* tc = find_streaming_tool(e.id)) {
-                const auto now = std::chrono::steady_clock::now();
+                const auto now = m.now;
                 std::string output = std::move(e.output);
                 if (output.empty())
                     output = e.failed ? "External agent tool failed."
@@ -1637,7 +1638,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 // long silent reasoning passes. Bump last_event_at and reset
                 // the retry budget exactly like the heartbeat path so a
                 // connect→think→stall sequence gets a fresh ladder.
-                a->last_event_at = std::chrono::steady_clock::now();
+                a->last_event_at = m.now;
                 a->transient_retries = 0;
             }
             // Captured for replay only — never rendered, and there's no
@@ -1681,7 +1682,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     if (msg.reasoning_started_ms == 0)
                         msg.reasoning_started_ms =
                             std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now().time_since_epoch())
+                                m.now.time_since_epoch())
                                 .count();
                 }
                 if (!e.signature.empty()) {
@@ -1699,7 +1700,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             // next request replays it in input[] (preserves chain-of-thought
             // across tool rounds under store:false). Wire-only, never shown.
             if (auto* a = active_ctx(m.s.phase))
-                a->last_event_at = std::chrono::steady_clock::now();
+                a->last_event_at = m.now;
             if (m.s.compacting) return Cmd::none();
             if (e.encrypted.empty()) return Cmd::none();
             if (!m.d.current.messages.empty()
@@ -1726,7 +1727,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
         },
         [&](StreamUsage& e) -> Cmd {
             if (auto* a = active_ctx(m.s.phase))
-                a->last_event_at = std::chrono::steady_clock::now();
+                a->last_event_at = m.now;
             // Suppress token writes during compaction. The compaction
             // stream's `input_tokens` reflects the SUMMARISATION request
             // (full prefix + the verbose summarisation prompt) and its
@@ -1833,7 +1834,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             // HTTP control traffic proves the path is open, not that the
             // upstream request made semantic progress.
             if (auto* a = active_ctx(m.s.phase)) {
-                a->last_event_at = std::chrono::steady_clock::now();
+                a->last_event_at = m.now;
                 if (e.transport_only) {
                     a->transport_activity = true;
                 } else {
@@ -1844,11 +1845,11 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
         },
         [&](StreamBufferedWait) -> Cmd {
             if (auto* a = active_ctx(m.s.phase)) {
-                a->last_event_at = std::chrono::steady_clock::now();
+                a->last_event_at = m.now;
                 a->transport_activity = true;
             }
             m.s.status = "network gateway is buffering output \xE2\x80\x94 waiting\xE2\x80\xA6";
-            m.s.status_until = std::chrono::steady_clock::now()
+            m.s.status_until = m.now
                              + std::chrono::seconds{20};
             return Cmd::none();
         },
@@ -1947,7 +1948,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 // Same budget-decay as the normal path: a compaction
                 // that failed long after the last failure starts fresh.
                 {
-                    auto cnow = std::chrono::steady_clock::now();
+                    auto cnow = m.now;
                     if (cctx
                         && cctx->last_failure_at.time_since_epoch().count() != 0
                         && cnow - cctx->last_failure_at >= provider::kRetryDecayWindow) {
@@ -1984,7 +1985,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // append the retry hint so the user knows the
                     // operation is still alive, not silently wedged.
                     m.s.status = "compacting — retrying in " + std::to_string(secs) + "s";
-                    m.s.status_until = std::chrono::steady_clock::now()
+                    m.s.status_until = m.now
                                      + delay + std::chrono::milliseconds{1500};
                     // Reset only the streamed bytes — keep `compacting`
                     // and `compaction_target_index` so launch_stream
@@ -1993,7 +1994,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     m.s.compaction_buffer.clear();
                     if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
                             c.transient_retries = prior + 1;
-                            c.last_failure_at   = std::chrono::steady_clock::now();
+                            c.last_failure_at   = m.now;
                             ++c.no_progress_failures;   // see the latch above
                             c.retry             = retry::Scheduled{};
                         }))
@@ -2082,7 +2083,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     ? "compaction cancelled"
                     : ("compaction failed: " + e.message
                        + " — retry with /compact");
-                auto now = std::chrono::steady_clock::now();
+                auto now = m.now;
                 auto ttl = std::chrono::seconds{
                     klass == provider::ErrorClass::Cancelled ? 3 : 8};
                 m.s.status_until = now + ttl;
@@ -2185,7 +2186,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             // a multi-hour session from accumulating sporadic blips into
             // a permanent terminal latch.
             {
-                auto now = std::chrono::steady_clock::now();
+                auto now = m.now;
                 if (err_ctx
                     && err_ctx->last_failure_at.time_since_epoch().count() != 0
                     && now - err_ctx->last_failure_at >= provider::kRetryDecayWindow) {
@@ -2237,7 +2238,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                             std::string_view{e.message}.substr(0, 256));
                     if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
                             c.transient_retries = prior_transient + 1;
-                            c.last_failure_at   = std::chrono::steady_clock::now();
+                            c.last_failure_at   = m.now;
                             c.retry             = retry::Scheduled{};
                         }))
                         return Cmd::none();
@@ -2305,7 +2306,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 });
                 if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
                         c.transient_retries = prior_transient + 1;
-                        c.last_failure_at   = std::chrono::steady_clock::now();
+                        c.last_failure_at   = m.now;
                         c.retry             = retry::Scheduled{};
                     }))
                     return ctx_save;
@@ -2394,7 +2395,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
 
                     if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
                             c.transient_retries = prior_transient + 1;
-                            c.last_failure_at   = std::chrono::steady_clock::now();
+                            c.last_failure_at   = m.now;
                             c.retry             = retry::Scheduled{};
                         }))
                         return vision_save;
@@ -2461,7 +2462,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // counters and the Scheduled retry sentinel.
                     if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
                             c.transient_retries = prior_transient + 1;
-                            c.last_failure_at   = std::chrono::steady_clock::now();
+                            c.last_failure_at   = m.now;
                             c.retry             = retry::Scheduled{};
                         }))
                         return Cmd::none();
@@ -2594,12 +2595,12 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                            + " — retrying in " + std::to_string(secs) + "s"
                            + " (attempt " + std::to_string(shown_attempt + 1)
                            + "/" + std::to_string(retry_cap) + ")…";
-                m.s.status_until = std::chrono::steady_clock::now()
+                m.s.status_until = m.now
                                  + delay + std::chrono::milliseconds{1500};
                 if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
                         c.transient_retries = attempt + 1;
                         if (mid_stream) c.mid_stream_failures = mid_prior + 1;
-                        c.last_failure_at   = std::chrono::steady_clock::now();
+                        c.last_failure_at   = m.now;
                         // Monotonic no-progress count — reset only by real
                         // model output (see StreamTextDelta / ToolUseStart).
                         ++c.no_progress_failures;
@@ -2716,7 +2717,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 }
                 for (auto& tc : last->tool_calls) {
                     if (tc.is_pending()) {
-                        auto now = std::chrono::steady_clock::now();
+                        auto now = m.now;
                         tc.status = ToolUse::Failed{
                             tc.started_at(), now, fail_msg};
                     }
@@ -2724,7 +2725,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 }
             }
             {
-                auto now = std::chrono::steady_clock::now();
+                auto now = m.now;
                 auto ttl = std::chrono::seconds{
                     klass == provider::ErrorClass::Cancelled ? 3 : 6};
                 m.s.status_until = now + ttl;
@@ -2770,7 +2771,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             }
 
             // Salvage partial assistant work and finalise in-flight tool calls.
-            auto now = std::chrono::steady_clock::now();
+            auto now = m.now;
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 auto& last = m.d.current.messages.back();

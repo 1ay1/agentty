@@ -73,7 +73,8 @@ inline constexpr int kSliceChunk = 8;
 
 // ── update_stream.cpp ────────────────────────────────────────────────────
 void update_stream_preview(ToolUse& tc);
-bool guard_truncated_tool_args(ToolUse& tc);
+bool guard_truncated_tool_args(ToolUse& tc,
+                               std::chrono::steady_clock::time_point now);
 nlohmann::json salvage_args(const ToolUse& tc);
 Cmd finalize_turn(Model& m, StopReason stop_reason = StopReason::Unspecified);
 

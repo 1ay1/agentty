@@ -8,16 +8,20 @@
 #
 # Format: `path: name name ...` with names from elm_purity.cmake
 #   clock env fileio subprocess net global auth static thread
-update/code_blocks.cpp: clock subprocess
-update/composer.cpp: auth clock fileio
-update/fork.cpp: clock fileio global
-update/login.cpp: auth clock
-update/meta.cpp: clock global
+# STOPWATCHES, not debt. The `clock` grants below are not reducers reading the
+# time: every reducer reads the fold's time from Model::now, which jaal hands
+# update(). These two time how long work INSIDE the reducer takes (a submit's
+# stages, a thread load) and log the interval. That needs two readings of a real clock — one fold instant would
+# make every interval zero — and the result never reaches the Model, so a
+# replay is unaffected. Each site says so in a comment.
+update/composer.cpp: auth fileio
+update/fork.cpp: fileio global
+update/login.cpp: auth
+update/meta.cpp: global
 update/models.cpp: auth global
 update/plugin_edit.cpp: global
 update/providers.cpp: auth
 update/settings_list.cpp: fileio global
-update/stream.cpp: auth clock
+update/stream.cpp: auth
 update/submit.cpp: auth clock global
 update/thread_list.cpp: clock global
-update/tool.cpp: clock

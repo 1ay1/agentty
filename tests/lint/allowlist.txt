@@ -235,7 +235,7 @@ runtime/app/cmd_factory.cpp: atomic
 # subprocess.cpp above), and it takes its own stop_token so Esc stops the
 # spinner through the task's cancellation instead of a second ad-hoc flag.
 # `atomic` remains for the "command finished" flag, which is not a cancel.
-runtime/app/update/code_blocks.cpp: atomic
+runtime/app/cmd_code_block_run.cpp: atomic
 
 # View-layer render caches: NO LONGER LISTED, and that is the interesting
 # part. They were four thread_locals (three LRU caches in agent_timeline.cpp,

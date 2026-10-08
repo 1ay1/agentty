@@ -35,6 +35,13 @@ struct AgenttyApp {
     using Cmd   = ::agentty::Cmd;
     using Sub   = ::agentty::Sub;
 
+    // The clock update() is handed. Declaring it makes jaal pass the step
+    // time as every update's third argument (jaal core/program.hpp, "time,
+    // as an argument"), so a reducer never reads std::chrono itself and a
+    // recorded run replays to the same model. The seam below copies it into
+    // Model::now, which is how it reaches the helpers.
+    using Clock = jaal::platform::steady_clock;
+
     // jaal's init is `Cmd init(Model&)` — it fills the model IN PLACE and
     // returns only the first Cmd (core/program.hpp, `has_init`).
     //
@@ -65,7 +72,8 @@ struct AgenttyApp {
     // honours a group when it finds one, so without these it correctly keeps
     // descending and asks for all 231 leaves instead.
 #define AGENTTY_FWD_UPDATE(DomainMsg)                                    \
-    static Cmd update(Model& m, msg::DomainMsg d) {                      \
+    static Cmd update(Model& m, msg::DomainMsg d, Clock::time_point now) { \
+        m.now = now;   /* the fold's time: see Model::now */             \
         return ::agentty::app::update(m, std::move(d));                  \
     }
 

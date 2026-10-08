@@ -894,6 +894,7 @@ endif()
 add_test(NAME elm_purity
          COMMAND ${CMAKE_COMMAND}
                  -DROOT=${CMAKE_SOURCE_DIR}/src/runtime/app
+                 -DVIEW_ROOT=${CMAKE_SOURCE_DIR}/src
                  -DALLOW=${CMAKE_SOURCE_DIR}/tests/lint/elm_allowlist.txt
                  -P ${CMAKE_SOURCE_DIR}/tests/lint/elm_purity.cmake)
 add_test(NAME elm_purity_tight

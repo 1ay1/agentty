@@ -39,6 +39,11 @@ Cmd submit_message(Model& m) {
     // Perf stamps: `AGENTTY_LOG=perf=debug` reveals where the first-turn
     // keystroke-to-stream latency goes (git spawn, slash/skill disk scan,
     // credential resolve, wire-tool build). Each stage logs its delta.
+    // A STOPWATCH, not the fold's time. It measures how long this reducer
+    // itself runs, so it needs two readings of a real clock; m.now is one
+    // instant for the whole fold and would make every interval zero. It only
+    // feeds a debug log line, never the Model, so it can't affect a replay.
+    // The elm_purity allowlist carries submit.cpp's `clock` grant for this.
     const auto t_submit0 = std::chrono::steady_clock::now();
     auto perf_stamp = [&](const char* stage) {
         const auto dt = std::chrono::duration<double, std::milli>(
@@ -65,7 +70,7 @@ Cmd submit_message(Model& m) {
         m.s.status = m.s.models_loading
             ? "loading models\xe2\x80\xa6 pick one (^/) before sending"
             : "no model selected \xe2\x80\x94 open the model picker (^/) first";
-        m.s.status_until = std::chrono::steady_clock::now()
+        m.s.status_until = m.now
                          + std::chrono::seconds{4};
         return Cmd::none();
     }
@@ -89,7 +94,7 @@ Cmd submit_message(Model& m) {
             if (!listed) {
                 m.s.status = "model '" + m.d.model_id.value
                            + "' isn't served by this host \xe2\x80\x94 pick one (^/)";
-                m.s.status_until = std::chrono::steady_clock::now()
+                m.s.status_until = m.now
                                  + std::chrono::seconds{5};
                 return Cmd::none();
             }
@@ -110,7 +115,7 @@ Cmd submit_message(Model& m) {
         m.s.status = "kept " + std::to_string(files)
                    + (files == 1 ? " edited file" : " edited files")
                    + " from last turn";
-        m.s.status_until = std::chrono::steady_clock::now()
+        m.s.status_until = m.now
                          + std::chrono::seconds{3};
         m.d.pending_changes.clear();
         // The changes are gone either way — an armed X two-press guard from
@@ -499,7 +504,7 @@ Cmd submit_message(Model& m) {
     placeholder.role = Role::Assistant;
     m.d.current.messages.push_back(std::move(placeholder));
 
-    m.d.current.updated_at = std::chrono::system_clock::now();
+    m.d.current.updated_at = m.wall_now();
 
     // Idle → Streaming. The fresh phase::Active replaces the prior
     // turn's context wholesale (Idle had none): zero retry counters,
@@ -511,7 +516,7 @@ Cmd submit_message(Model& m) {
     // banner) would change status_bar height by one row when
     // StreamStarted fires, producing a visible "new turn appears at
     // viewport bottom and then realigns" two-frame flicker.
-    auto now = std::chrono::steady_clock::now();
+    auto now = m.now;
     phase::Active ctx;
     ctx.started       = now;
     ctx.last_event_at = now;
@@ -913,7 +918,7 @@ commit_provider_switch(Model& m, std::string_view spec,
 Cmd set_status_toast(Model& m, std::string text,
                                 std::chrono::seconds ttl) {
     m.s.status = std::move(text);
-    auto now = std::chrono::steady_clock::now();
+    auto now = m.now;
     m.s.status_until = now + ttl;
     auto stamp = m.s.status_until;
     return Cmd::after(

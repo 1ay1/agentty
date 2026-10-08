@@ -534,7 +534,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
     // plan to stamp `now` onto the Model per message.
     Cmd prewarm = Cmd::none();
     {
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = m.now;
         const bool wire_stale =
             m.s.last_wire_at.time_since_epoch().count() == 0
             || now - m.s.last_wire_at > std::chrono::seconds(85);
@@ -558,7 +558,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
     // throttled so key-repeat can't spam the token endpoint.
     Cmd proactive_refresh = Cmd::none();
     {
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = m.now;
         const bool probe_throttled =
             m.s.last_refresh_probe_at.time_since_epoch().count() != 0
             && now - m.s.last_refresh_probe_at < std::chrono::seconds(30);

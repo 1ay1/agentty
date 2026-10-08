@@ -59,7 +59,7 @@ using maya::overload;
     m.d.current = Thread{};
     m.d.current.id = persistence::new_id();
     m.d.current.created_at = m.d.current.updated_at =
-        std::chrono::system_clock::now();
+        m.wall_now();
     clear_frozen(m);
     // Close every modal that framed the OLD thread: the picker we acted
     // from, plus the palette / code-block picker whose contents belonged to
@@ -394,6 +394,10 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // Timing probe for the synchronous portion of the load
             // (rehydrate + release_to_kernel) that still lives on the UI
             // thread. AGENTTY_LOG=perf=debug surfaces it.
+            //
+            // A STOPWATCH: it reads a real clock twice to time work inside
+            // this fold, which the fold's single instant (m.now) can't do.
+            // Log-only; never reaches the Model, so replay is unaffected.
             auto stamp = [](const char* tag, auto t0) {
                 auto dt = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();

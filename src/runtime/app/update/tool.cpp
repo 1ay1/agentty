@@ -322,7 +322,7 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         // Element in m.ui.frozen is immutable — visible as a
         // permanently-Running spinner in scrollback.
         if (tc.is_terminal()) return;
-        auto now = std::chrono::steady_clock::now();
+        auto now = m.now;
         if (result) {
             // Drift reminder. Shell begets shell: after a shell inspection
             // the next one is shell 81% of the time (22% after a native
@@ -404,7 +404,7 @@ void apply_tool_output(Model& m, const ToolCallId& id,
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason) {
     with_live_tool(m, id, [&](ToolUse& tc) {
-        auto now = std::chrono::steady_clock::now();
+        auto now = m.now;
         if (reason.empty()) {
             tc.status = ToolUse::Rejected{now};
         } else {
@@ -486,7 +486,7 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
                     // making progress, so the wedge net's cap restarts from
                     // here rather than from the (possibly many-minutes-ago)
                     // launch time.
-                    r->last_progress_at = std::chrono::steady_clock::now();
+                    r->last_progress_at = m.now;
                 }
             });
             // If the user is watching the Ctrl+O viewer, keep its Live row
@@ -500,7 +500,7 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
             bool flipped = false;
             with_live_tool(m, e.id, [&](ToolUse& tc) {
                 if (tc.is_terminal()) return;
-                auto now = std::chrono::steady_clock::now();
+                auto now = m.now;
                 const auto* sp = tools::spec::lookup(tc.name.value);
                 auto secs = sp ? sp->max_seconds : std::chrono::seconds{0};
                 std::string reason;
@@ -695,7 +695,7 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
             }
             m.s.status = name.value + ": always allowed (persists \xc2\xb7 "
                          "Shift+Tab profile cycle resets)";
-            m.s.status_until = std::chrono::steady_clock::now()
+            m.s.status_until = m.now
                              + std::chrono::seconds{4};
             with_live_tool(m, id, [&, shown = m.d.pending_permission->def_hash](ToolUse& tc) {
                 tc.status = ToolUse::Approved{tc.started_at()};

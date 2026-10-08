@@ -143,7 +143,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             m.s.compaction_target_index = m.d.current.messages.size();
             m.s.compaction_buffer.clear();
 
-            auto now = std::chrono::steady_clock::now();
+            auto now = m.now;
             phase::Active ctx;
             ctx.started       = now;
             ctx.last_event_at = now;
@@ -286,7 +286,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                           [&](const Thread::CompactionRecord& r) {
                               return r.up_to_index > cut;
                           });
-            m.d.current.updated_at = std::chrono::system_clock::now();
+            m.d.current.updated_at = m.wall_now();
             Cmd save_restored = Cmd(SaveThread{m.d.current});
 
             reset_composer_draft(m.ui.composer);
@@ -342,7 +342,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             return Cmd::none();
         },
         [&](Tick) -> Cmd {
-            auto now = std::chrono::steady_clock::now();
+            auto now = m.now;
             // Wall-clock gap since the previous Tick — kept for the
             // suspend-recovery rebase below (last_event_at += tick_gap).
             // NOTE: no animation dt is derived here any more. Every

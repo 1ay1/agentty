@@ -144,7 +144,7 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             fork.id = persistence::new_id();
             fork.forked_from = parent_id;
             fork.rag_mode_override = rag_mode_of(choice);
-            fork.created_at = fork.updated_at = std::chrono::system_clock::now();
+            fork.created_at = fork.updated_at = m.wall_now();
             fork.title = m.d.current.title.rfind("Fork: ", 0) == 0
                              ? m.d.current.title
                              : ("Fork: " + (m.d.current.title.empty()

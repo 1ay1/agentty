@@ -184,6 +184,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/init.cpp
     src/runtime/app/env.cpp
     src/runtime/app/cmd_factory.cpp
+    src/runtime/app/cmd_code_block_run.cpp
     src/runtime/app/wire_audit.cpp
     src/runtime/app/update.cpp
     src/runtime/app/update/composer.cpp

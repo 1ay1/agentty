@@ -37,14 +37,36 @@ using maya::overload;
 // unnecessary, and firing it on every first keystroke was actively
 // causing the scrollback-duplication symptom it was meant to prevent).
 
-// The pair-returning whole-Msg entry point.
+// The pair-returning whole-Msg entry point, for tests.
 //
 // jaal does NOT call this — it walks the Msg tree and calls the per-domain
-// `update(Model&, DomainMsg)` overloads below. This stays because ~40 tests
-// drive the reducer as `update(model, msg)` and reading the result as a
-// value is what makes them legible. It delegates, so there is still one
-// implementation per domain.
+// overloads through AgenttyApp, which stamps m.now from jaal's argument.
+// This stays because ~40 tests drive the reducer as `update(model, msg)`
+// and reading the result as a value is what makes them legible.
+//
+// `now` is the fold's time, exactly as jaal would hand it. A test that cares
+// about time passes it; one that doesn't gets kTestEpoch, a FIXED instant —
+// never the wall clock. That is the point: the old entry let every reducer
+// read std::chrono itself, so a test's outcome could depend on how long the
+// machine took to run it. Now a test is reproducible whether or not it names
+// a time, and advancing time is something a test does on purpose.
 std::pair<Model, Cmd> update(Model m, Msg msg) {
+    return update(std::move(m), std::move(msg), kTestEpoch);
+}
+
+std::pair<Model, Cmd> update(Model m, Msg msg,
+                             std::chrono::steady_clock::time_point now) {
+    m.now = now;   // the fold's time: see Model::now
+    // A Model a test built directly never ran init(), so it has no calendar
+    // anchor and wall_now() would report 1970. Anchor it to a fixed date the
+    // first time it folds — deterministic, so a test that checks updated_at
+    // gets the same answer every run, and a real date, so code that sorts or
+    // formats it behaves as it does in the app.
+    if (m.steady_epoch == std::chrono::steady_clock::time_point{}) {
+        m.steady_epoch = kTestEpoch;
+        m.wall_epoch   = std::chrono::system_clock::time_point{
+            std::chrono::seconds{1'767'225'600}};   // 2026-01-01T00:00:00Z
+    }
     // One-shot warmup flag: set by ThreadLoaded, consumed by maya's
     // run loop on the very next render(). Clear on every subsequent
     // reducer step so a later thread load sees a clean false→true

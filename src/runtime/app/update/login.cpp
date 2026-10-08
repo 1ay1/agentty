@@ -90,7 +90,7 @@ void install_and_close(Model& m, auth::Credentials creds,
 
     m.ui.login = login::Closed{};
     m.s.status = "logged in";
-    m.s.status_until = std::chrono::steady_clock::now()
+    m.s.status_until = m.now
                      + std::chrono::seconds{4};
 }
 
@@ -424,7 +424,7 @@ Cmd sign_out(Model& m) {
             m.s.status = "signed out of " + what + " \xe2\x80\x94 switched to "
                        + provider::provider_display_name(
                              provider::parse_selection(fallback));
-            m.s.status_until = std::chrono::steady_clock::now()
+            m.s.status_until = m.now
                              + std::chrono::seconds{5};
             auth::AuthHeader fb_auth = provider::credentials::resolve(fallback);
             return Cmd::batch(
@@ -439,7 +439,7 @@ Cmd sign_out(Model& m) {
     // Nothing else authed — drop the user straight into sign-in.
     m.ui.login = login::Picking{};
     m.s.status = "signed out of " + what + " \xe2\x80\x94 sign in to continue";
-    m.s.status_until = std::chrono::steady_clock::now()
+    m.s.status_until = m.now
                      + std::chrono::seconds{5};
     return key_save;
 }
@@ -687,7 +687,7 @@ Cmd account_select(Model& m) {
                ? "switched " + provider_label + " to " + label
                      + " \xE2\x80\x94 refreshing token\xE2\x80\xA6"
                : "switched " + provider_label + " to " + label;
-    m.s.status_until = std::chrono::steady_clock::now()
+    m.s.status_until = m.now
                      + std::chrono::seconds{4};
     return refresh_cmd;
 }
@@ -762,7 +762,7 @@ Cmd account_remove(Model& m) {
             empty.provider_label = provider_label;
             m.ui.login = std::move(empty);  // stays on "+ Add another account…"
             m.s.status = "removed the last " + provider_label + " account";
-            m.s.status_until = std::chrono::steady_clock::now()
+            m.s.status_until = m.now
                              + std::chrono::seconds{4};
             return Cmd::none();
         }
@@ -770,7 +770,7 @@ Cmd account_remove(Model& m) {
         m.s.status = "removed " + row.label;
     }
 
-    m.s.status_until = std::chrono::steady_clock::now()
+    m.s.status_until = m.now
                      + std::chrono::seconds{4};
 
     // Rebuild the list in place and keep the cursor near the removed row.
@@ -1179,7 +1179,7 @@ Cmd login_exchanged(Model& m, auth::TokenResult result) {
         return Cmd::none();
     }
     auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+        m.wall_now().time_since_epoch()).count();
     auto& tok = *result;
     install_and_close(m, auth::Credentials{auth::cred::OAuth{
         std::move(tok.access_token),
@@ -1223,7 +1223,7 @@ Cmd login_codex_done(Model& m, std::uint64_t attempt_id,
     // nor overwrite the active credential store.
     m.ui.login = login::Closed{};
     m.s.status = "signed in to ChatGPT";
-    m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
+    m.s.status_until = m.now + std::chrono::seconds{4};
     return commit_provider_switch(
                 m, "chatgpt",
                                   auth::AuthHeader{}, "ChatGPT");
@@ -1264,7 +1264,7 @@ Cmd login_device_done(Model& m, std::string provider, std::string provider_label
     // the first turn. Switch the active provider now.
     m.ui.login = login::Closed{};
     m.s.status = "signed in to " + provider_label;
-    m.s.status_until = std::chrono::steady_clock::now() + std::chrono::seconds{4};
+    m.s.status_until = m.now + std::chrono::seconds{4};
     return commit_provider_switch(
                 m, std::move(provider),
                                   auth::AuthHeader{}, std::move(provider_label));
@@ -1315,7 +1315,7 @@ Cmd token_refreshed(Model& m, auth::TokenResult result) {
         // Drop to Idle and finalise any in-flight tool calls so the
         // session is cleanly recoverable via the login modal.
         if (stream_parked) {
-            auto now = std::chrono::steady_clock::now();
+            auto now = m.now;
             if (!m.d.current.messages.empty()
                 && m.d.current.messages.back().role == Role::Assistant) {
                 auto& last = m.d.current.messages.back();

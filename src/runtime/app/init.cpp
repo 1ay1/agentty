@@ -45,6 +45,14 @@ std::pair<Model, Cmd> init() {
     // The launch environment, captured once. Every reducer reads m.env;
     // none calls getenv (enforced by the elm_purity lint).
     m.env = read_launch_env();
+    // Anchor the calendar to the steady clock, once. Every fold derives its
+    // wall time (Model::wall_now) from this pair and the step time jaal
+    // hands it, so no reducer reads system_clock. init() runs before the
+    // first fold, and is itself the one place allowed to read clocks: it is
+    // the program's input from the outside world, the same as reading env.
+    m.steady_epoch = std::chrono::steady_clock::now();
+    m.wall_epoch   = std::chrono::system_clock::now();
+    m.now          = m.steady_epoch;
     // Seed the composer idle-blink clock at launch so the 15 s
     // blink-stop countdown starts now, not on the first keystroke. A
     // freshly-opened, never-touched agentty is exactly the idle-CPU case

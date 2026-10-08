@@ -695,6 +695,47 @@ struct Model {
     StreamState s;
     UI          ui;
 
+    // The time of the message being folded. NOT a clock.
+    //
+    // jaal hands update() the step time as an argument (AgenttyApp declares
+    // a Clock — jaal core/program.hpp, "time, as an argument"). That argument
+    // is the contract, and it is what makes a recorded run replay to the same
+    // model. This field is how it reaches the ~300 helper calls below the
+    // dispatch seam without a `now` parameter on each: the seam writes it as
+    // the FIRST thing every fold does, from jaal's argument, so inside a fold
+    // it always holds the current step's time.
+    //
+    // Rules, and how each is enforced rather than hoped for:
+    //   * written ONLY by the dispatch seam (program.hpp AGENTTY_FWD_UPDATE,
+    //     and the test entry update(Model, Msg, now)). Nothing else stamps it.
+    //   * read only by reducers. view() and subscribe() see a const Model
+    //     whose `now` is the LAST fold's time, which is stale by definition;
+    //     the elm_purity lint rejects a read of it outside update/.
+    //   * reducers never read a clock instead — the lint's `clock` category.
+    //
+    // steady_clock, matching jaal's: a wall clock can run backwards.
+    std::chrono::steady_clock::time_point now{};
+
+    // The fold's CALENDAR time, for the few things that must be real dates:
+    // a thread's created_at/updated_at (persisted, and the picker sorts by
+    // them) and an OAuth expiry (compared against the provider's clock).
+    //
+    // A steady clock has no relation to the calendar, so this is a second
+    // input rather than a conversion of `now`. It is derived at the SAME seam
+    // from the same step: the wall clock is read once when the kernel starts
+    // (Model::wall_epoch / steady_epoch, set by init) and every fold places
+    // its steady `now` on that timeline. So one fold sees one instant in both
+    // clocks, and a recorded run replays to the same dates — a direct
+    // system_clock read per call site gave each call its own instant and made
+    // updated_at differ from the message time it was written beside.
+    [[nodiscard]] std::chrono::system_clock::time_point wall_now() const noexcept {
+        return wall_epoch + std::chrono::duration_cast<
+                   std::chrono::system_clock::duration>(now - steady_epoch);
+    }
+    // The pair of readings wall_now() is anchored to. Set once, by init().
+    std::chrono::system_clock::time_point wall_epoch{};
+    std::chrono::steady_clock::time_point steady_epoch{};
+
     // The process's launch environment, read ONCE by init() and never again.
     //
     // Elm has no getenv: a reducer that reads the environment is a function

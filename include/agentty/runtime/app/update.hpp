@@ -59,6 +59,14 @@ Cmd update(Model& m, msg::MetaMsg         mm);
 // The old entry point, still here while the domain reducers keep their
 // `Step`-returning bodies. The overloads above are thin wrappers over it;
 // once every reducer takes a Model& this goes away.
+// The whole-Msg entry point, for tests. Folds at `now`, the same way jaal
+// folds at the step time. The two-argument form folds at kTestEpoch, a FIXED
+// instant rather than the wall clock, so a test that never mentions time is
+// still reproducible. See update.cpp.
+inline constexpr std::chrono::steady_clock::time_point kTestEpoch{
+    std::chrono::hours{24}};   // nonzero, so "never set" (time_point{}) stays distinguishable
 [[nodiscard]] std::pair<Model, Cmd> update(Model m, Msg msg);
+[[nodiscard]] std::pair<Model, Cmd> update(Model m, Msg msg,
+                                           std::chrono::steady_clock::time_point now);
 
 } // namespace agentty::app
