@@ -1480,7 +1480,7 @@ Cmd launch_stream(Model& m) {
             .model_supports_tools    = model_supports_tools,
             .model_supports_vision   = model_supports_vision,
             .org_blocks_vision       = detail::entitlement_blocked(
-                                           m.d.persisted,
+                                           m.d.persisted, m.d.auth,
                                            domain::entitlement::Fact::VisionOrgPolicy,
                                            detail::active_provider_id(m)),
             .model_context_window    = model_context_window,

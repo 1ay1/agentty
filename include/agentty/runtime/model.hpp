@@ -32,6 +32,7 @@
 #include "agentty/runtime/panel/common.hpp"
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/store/store.hpp"          // store::Settings (the persisted record)
+#include "agentty/domain/auth_view.hpp"     // auth::AuthView
 
 namespace agentty {
 
@@ -321,6 +322,12 @@ struct Model {
         //
         // Initialised by init() from what main() selected at launch.
         provider::Selection    selection;
+
+        // Credentials outside the settings record: which stores hold a
+        // token, which env vars are set, the accounts registry. Loaded by the
+        // host (LoadAuthView → AuthViewLoaded) at launch and after every
+        // credential effect, so reducers and views never read them from disk.
+        auth::AuthView         auth;
 
         // Fused cross-provider model picker (docs/design/unified-model-picker.md).
         // `provider_catalogs` is the MERGED, multi-provider catalog view built

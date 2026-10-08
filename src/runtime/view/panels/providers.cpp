@@ -21,12 +21,6 @@ Element providers_panel(const Model& m) {
 
     const std::string active_id = m.d.selection.catalog_id();
 
-    auto env_has = [](std::string_view name) -> bool {
-        if (name.empty()) return false;
-        const char* v = std::getenv(std::string{name}.c_str());
-        return v && *v;
-    };
-
     // The one ordered, query-filtered row list — the SAME list the reducer
     // resolves a selection against (see build_provider_rows). The cursor is a
     // plain index into it; there is no offset math on either side.
@@ -62,30 +56,28 @@ Element providers_panel(const Model& m) {
         // signed_in() probes; vault::signed_in dispatches over the same
         // table, so a new OAuth provider gets its status row for free.
         if (p.token_in_transport) {
-            if (auth::vault::signed_in(std::string{p.id}))
+            if (provider::signed_in(p.id, m.d.persisted, m.d.auth))
                 return signed_badge(std::string{p.label} + " (signed in)");
             return {"\xe2\x9a\xa0 sign in with " + std::string{p.label}, warn};
         }
         if (p.is_local || p.auth == provider::AuthStyle::None)
             return {"\xe2\x97\x8f local", info};
         if (p.kind() == provider::Kind::Anthropic) {
-            // On-disk credential store is authoritative and independent of the
-            // currently-active provider (do NOT read deps().auth here).
-            if (auth::anthropic_signed_in())
+            // The credential store, not the live header (do NOT read
+            // deps().auth here), as loaded into the Model's AuthView.
+            if (m.d.auth.stored(p.id))
                 return {active ? "\xe2\x9c\x93 signed in \xc2\xb7 accounts" : "\xe2\x9c\x93 signed in", success};
             return {"\xe2\x9a\xa0 sign in", warn};
         }
         // Hosted API-key provider: distinguish a SAVED (pasted) key — which
         // ^D signs out — from an ENV key, which can't be removed in-app, so
         // the badge must not imply ^D will work on it.
-        switch (provider::auth_source(p, settings)) {
+        switch (provider::auth_source(p, settings, m.d.auth)) {
             case provider::AuthSource::Saved:
                 return {active ? "\xe2\x9c\x93 signed in \xc2\xb7 key"
                                : "\xe2\x9c\x93 key saved", success};
             case provider::AuthSource::Env: {
-                std::string ev;
-                for (auto e : p.auth_env) if (env_has(e)) { ev = e; break; }
-                return {"\xe2\x97\x8f key from " + ev, info};
+                return {"\xe2\x97\x8f key from " + m.d.auth.env_var(p.id), info};
             }
             case provider::AuthSource::Local:
                 return {"\xe2\x97\x8f local", info};

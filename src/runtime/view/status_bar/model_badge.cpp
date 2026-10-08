@@ -4,7 +4,7 @@
 
 #include <string>
 
-#include "agentty/auth/vault.hpp"
+#include "agentty/provider/auth_state.hpp"
 #include "agentty/domain/model_name.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
@@ -89,12 +89,10 @@ maya::Element model_badge_config(const Model& m) {
     // the status bar told confidently every launch: the next Enter would
     // 401 against a credential the user never provided.
     //
-    // Vault::signed_in is the uniform predicate (api-key store, OAuth
-    // state, custom-host settings slot, keyless locals -- the vault
-    // descriptor answers for all of them with one call) and it's cached
-    // on the credentials-file (mtime,size) so it's cheap per frame.
-    const bool authed =
-        auth::vault::signed_in(std::string{active_sel.provider_id()});
+    // Answered from the Model (the settings record + AuthView), so the
+    // view reads no credential files.
+    const bool authed = provider::signed_in(active_sel.provider_id(),
+                                            m.d.persisted, m.d.auth);
     if (!authed) {
         // Dimmed provider chip + a muted "-- sign in" where the model name
         // would be. No family hue (there IS no model), no update chip, no

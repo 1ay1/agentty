@@ -12,6 +12,7 @@
 // dir and disables the keystore so the credential + registry round-trips hit
 // sealed files, exactly like oauth_proactive_refresh_test.
 #include "agtest.hpp"
+#include "agtest_fx.hpp"
 
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -146,6 +147,7 @@ TEST_CASE("account switch refreshes a stale token") {
         m.ui.login = setup_two_accounts("B");
         auto [m2, cmd] = app::update(std::move(m),
                                      Msg{msg::LoginMsg{agentty::AccountSelect{}}});
+        agtest::fx::run_credentials(cmd);   // what the host does next
 
         CHECK(m2.s.oauth_refresh_in_flight,
               "switching to a long-idle account with an expired token kicks "
@@ -163,6 +165,7 @@ TEST_CASE("account switch refreshes a stale token") {
         m.ui.login = setup_two_accounts("A");
         auto [m2, cmd] = app::update(std::move(m),
                                      Msg{msg::LoginMsg{agentty::AccountSelect{}}});
+        agtest::fx::run_credentials(cmd);   // what the host does next
 
         CHECK(!m2.s.oauth_refresh_in_flight,
               "switching to an account whose token is still fresh does NOT "

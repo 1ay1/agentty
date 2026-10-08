@@ -115,4 +115,28 @@ struct SaveCredentials {
 };
 using save_credentials = jaal::pure_fx<SaveCredentials, "save_credentials">;
 
+/// Read the credential stores, env and accounts registry into an AuthView
+/// and answer AuthViewLoaded. Batched after any effect that changes them.
+struct LoadAuthView {};
+using load_auth_view = jaal::pure_fx<LoadAuthView, "load_auth_view">;
+
+/// The accounts registry, as effects. Each runs on the host, then the reducer
+/// batches a LoadAuthView so the Model sees the result.
+///   Activate  — copy the named slot into the provider's live store.
+///   Remove    — drop the slot (the registry promotes the next one).
+///   Register  — snapshot the live credential under `label`.
+///   AddKey    — save a pasted key as the active account (key providers).
+///   SignOut   — clear the provider's live store (vault::sign_out).
+///   ClearActive — clear the live store without touching the registry.
+struct AccountOp {
+    enum class Kind : unsigned char {
+        Activate, Remove, Register, AddKey, SignOut, ClearActive,
+    };
+    Kind        kind = Kind::Activate;
+    std::string provider;
+    std::string label;   // Activate / Remove / Register
+    std::string key;     // AddKey
+};
+using account_op = jaal::pure_fx<AccountOp, "account_op">;
+
 }  // namespace agentty

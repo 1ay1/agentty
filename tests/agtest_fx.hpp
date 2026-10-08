@@ -30,6 +30,9 @@
 #include <vector>
 
 #include "agentty/provider/selection.hpp"
+#include "agentty/auth/accounts.hpp"
+#include "agentty/auth/vault.hpp"
+#include "agentty/provider/credentials.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/cmd.hpp"
 #include "agentty/runtime/store_fx.hpp"
@@ -112,6 +115,30 @@ inline void run(const agentty::Cmd& c, Store& s) {
             sa::set_provider(e.provider);
             sa::set_smart(e.smart);
             sa::set_candidates(e.candidates);
+        }
+    });
+}
+
+/// Run the credential effects (AccountOp, SaveCredentials) against the real
+/// credential layer, the way the host does. For tests that point
+/// AGENTTY_HOME at a temp dir and assert on the stores afterwards.
+inline void run_credentials(const agentty::Cmd& c) {
+    namespace cr  = agentty::provider::credentials;
+    namespace acc = agentty::auth::accounts;
+    for_each(c, [&](const auto& e) {
+        using U = std::remove_cvref_t<decltype(e)>;
+        if constexpr (std::same_as<U, agentty::AccountOp>) {
+            using K = agentty::AccountOp::Kind;
+            switch (e.kind) {
+                case K::Activate:    (void)cr::activate(e.provider, e.label); break;
+                case K::Remove:      (void)cr::remove(e.provider, e.label); break;
+                case K::Register:    (void)acc::snapshot_active(e.provider, e.label); break;
+                case K::AddKey:      (void)cr::add_key(e.provider, e.key); break;
+                case K::SignOut:     agentty::auth::vault::sign_out(e.provider); break;
+                case K::ClearActive: cr::clear_active(e.provider); break;
+            }
+        } else if constexpr (std::same_as<U, agentty::SaveCredentials>) {
+            agentty::auth::save_credentials(e.creds);
         }
     });
 }

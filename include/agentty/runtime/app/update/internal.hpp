@@ -120,22 +120,11 @@ void sync_todo_state_from_args(Model& m, const nlohmann::json& args);
 // 20 separate ones.)
 [[nodiscard]] Cmd save_record(Model& m);
 
-// Re-seed `m.d.persisted` from the store before touching a field the Model
-// does NOT own.
-//
-// Most of Settings is the Model's: the record is authoritative and
-// save_record() hands it over. `provider_keys` is the exception. It is
-// written by the credential layer (credentials::add_key / clear_active,
-// vault::key_clear, account_switch) on paths that have no Deps, so they call
-// persistence::save_settings directly. Those writes land on disk and
-// invalidate the settings cache, but nothing can reach into a Model that is
-// sitting in the reducer loop — so the record's COPY of provider_keys goes
-// stale, and a whole-record save would write the stale copy back and drop a
-// key the user just added.
-//
-// So: refresh, then mutate, then save. Cheap (the cache serves it from
-// memory) and it is the only way a reducer can see a bypassing writer's work.
-void           refresh_record(Model& m);
+// `provider_keys` is also written by the credential layer on the host
+// (AccountOp: add_key, account activate/remove, clear_active). Every such
+// effect is batched with LoadAuthView, whose reply (AuthViewLoaded) copies
+// the vault's keys back into m.d.persisted, so the record never goes stale
+// and a whole-record save can't drop a key.
 
 // ── update/submit.cpp helpers ─────────────────────────────────────────────
 Cmd            submit_message(Model& m);
@@ -180,10 +169,12 @@ std::string    active_provider_id(const Model& m);
 // learns a rejection and persists it; it returns true when the fact was
 // new, so callers can skip a redundant settings write.
 [[nodiscard]] bool entitlement_blocked(const store::Settings& s,
+                                       const auth::AuthView& accounts,
                                        domain::entitlement::Fact f,
                                        std::string_view provider,
                                        std::string_view model_id = {});
 bool entitlement_record_blocked(store::Settings& s,
+                                const auth::AuthView& accounts,
                                 domain::entitlement::Fact f,
                                 std::string_view provider,
                                 std::string_view model_id = {});

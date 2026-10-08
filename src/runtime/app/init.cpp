@@ -75,6 +75,10 @@ std::pair<Model, Cmd> init() {
     m.d.available_models = seed_models();
 
     auto settings = deps().load_settings();
+    // Credential state outside the record (token files, env, accounts),
+    // read once here like the launch env; later changes arrive as
+    // AuthViewLoaded.
+    m.d.auth = provider::load_auth_view(settings);
 
     // Bake the seeded rows through the SAME ladder the refresh path uses.
     //
@@ -99,7 +103,7 @@ std::pair<Model, Cmd> init() {
     if (settings.context_1m_blocked) {
         settings.context_1m_blocked = false;
         if (detail::entitlement_record_blocked(
-                settings, domain::entitlement::Fact::Context1M, "anthropic",
+                settings, m.d.auth, domain::entitlement::Fact::Context1M, "anthropic",
                 wire_model_id(settings.model_id.value)))
             deps().save_settings(settings);
     }
@@ -110,7 +114,7 @@ std::pair<Model, Cmd> init() {
     if (!m.d.available_models.empty()) {
         std::erase_if(m.d.available_models, [&](const ModelInfo& mi) {
             return mi.id.value.find("[1m]") != std::string::npos
-                && detail::entitlement_blocked(settings,
+                && detail::entitlement_blocked(settings, m.d.auth,
                                        domain::entitlement::Fact::Context1M,
                                        detail::active_provider_id(m),
                                        wire_model_id(mi.id.value));
@@ -120,7 +124,8 @@ std::pair<Model, Cmd> init() {
     // prior session. A persisted `[1m]` model id would re-send the beta on
     // the very first turn and dead-end again — strip the marker up front.
     if (settings.model_id.value.find("[1m]") != std::string::npos
-        && detail::entitlement_blocked(settings, domain::entitlement::Fact::Context1M,
+        && detail::entitlement_blocked(settings, m.d.auth,
+                               domain::entitlement::Fact::Context1M,
                                detail::active_provider_id(m),
                                wire_model_id(settings.model_id.value)))
         settings.model_id = ModelId{wire_model_id(settings.model_id.value)};
@@ -319,7 +324,7 @@ std::pair<Model, Cmd> init() {
         for (const auto& p : provider::providers()) {
             // Skip the provider we already know is unauthed (the active one).
             if (p.id == provider::default_provider_id()) continue;
-            const auto src = provider::auth_source(p, settings);
+            const auto src = provider::auth_source(p, settings, m.d.auth);
             if (src == provider::AuthSource::Saved
                 || src == provider::AuthSource::Env) {
                 cred_elsewhere = true;

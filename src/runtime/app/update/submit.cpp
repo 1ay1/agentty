@@ -606,29 +606,32 @@ std::string active_provider_id(const Model& m) {
 // cannot key an account-scoped fact by provider alone — the exact defect of
 // the legacy account-blind bool this layer replaces.
 namespace {
-std::pair<std::string, std::string> entitlement_scope(std::string_view provider) {
+std::pair<std::string, std::string> entitlement_scope(
+    const auth::AuthView& accounts, std::string_view provider) {
     std::string pid{provider};
     // The registry's active label for this provider. Empty is legitimate and
     // means "the only account" — a single-account user keys under "", which
     // is why this needs no migration for the common case.
-    std::string acct = auth::accounts::active_label(pid);
+    std::string acct = accounts.active_account(pid);
     return {std::move(pid), std::move(acct)};
 }
 } // namespace
 
 bool entitlement_blocked(const store::Settings& s,
+                         const auth::AuthView& accounts,
                          domain::entitlement::Fact f,
                          std::string_view provider,
                          std::string_view model_id) {
-    const auto [pid, acct] = entitlement_scope(provider);
+    const auto [pid, acct] = entitlement_scope(accounts, provider);
     return domain::entitlement::blocked(s.entitlements, f, pid, acct, model_id);
 }
 
 bool entitlement_record_blocked(store::Settings& s,
+                                const auth::AuthView& accounts,
                                 domain::entitlement::Fact f,
                                 std::string_view provider,
                                 std::string_view model_id) {
-    const auto [pid, acct] = entitlement_scope(provider);
+    const auto [pid, acct] = entitlement_scope(accounts, provider);
     const bool is_new = domain::entitlement::record_blocked(
         s.entitlements, f, pid, acct, model_id);
     if (is_new)
@@ -708,14 +711,6 @@ void reset_composer_draft(ComposerState& c) {
 // declaration in update/internal.hpp.
 [[nodiscard]] Cmd save_record(Model& m) {
     return Cmd(SaveSettings{m.d.persisted});
-}
-
-void refresh_record(Model& m) {
-    // Only the vault-owned fields: everything else on the record is the
-    // Model's own and may hold edits this frame that the store has not seen.
-    // Copying the whole record back would undo them.
-    auto disk = deps().load_settings();
-    m.d.persisted.provider_keys = std::move(disk.provider_keys);
 }
 
 [[nodiscard]] Cmd persist_settings(Model& m) {

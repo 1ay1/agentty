@@ -28,6 +28,7 @@
 
 #include <chrono>
 #include <expected>
+#include <map>
 #include <optional>
 #include <string>
 #include <variant>
@@ -927,6 +928,13 @@ struct TokenRefreshed   { agentty::auth::TokenResult result; };
 // cmd::refresh_oauth_if_due looked and the token was not near expiry (or not
 // refreshable). Clears the in-flight flag the reducer set when it asked.
 struct OAuthRefreshNotDue {};
+// The host re-read credential state (see LoadAuthView). `provider_keys` is
+// the key vault as it now stands: account ops write it on the host side, so
+// the reply carries it back into m.d.persisted.
+struct AuthViewLoaded {
+    agentty::auth::AuthView view;
+    std::map<std::string, std::string> provider_keys;
+};
 
 // Proactive pre-turn retrieval landed off-thread. Proactive RAG runs on the
 // submit path under a small wall-clock hedge so Enter never freezes (see
@@ -1342,7 +1350,7 @@ using LoginMsg = std::variant<
     LoginCopyAuthUrl, LoginCopyCode, LoginOpenBrowserAgain,
     LoginExchanged, LoginOAuthMinted, CodexDeviceCodeReady, CodexLoginDone,
     DeviceCodeReady, DeviceLoginDone, TokenRefreshed, OAuthRefreshNotDue,
-    HostProbed>;
+    AuthViewLoaded, HostProbed>;
 
 using DiffReviewMsg = std::variant<
     OpenDiffReview, CloseDiffReview, DiffReviewMove, DiffReviewScroll,

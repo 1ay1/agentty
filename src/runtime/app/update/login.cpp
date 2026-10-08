@@ -211,8 +211,6 @@ Cmd host_probed(Model& m, HostProbed r) {
     // session — saved_custom_hosts() derives rows from provider_keys.
     Cmd save = Cmd::none();
     {
-        // provider_keys is vault-owned — re-read before adding the row.
-        refresh_record(m);
         if (m.d.persisted.provider_keys.find(spec)
                 == m.d.persisted.provider_keys.end()) {
             m.d.persisted.provider_keys[spec] = "";
@@ -330,11 +328,12 @@ Cmd sign_out(Model& m) {
     Cmd key_save = Cmd::none();
     if (!pid.empty()) {
         if (auth::vault::of(pid).kind == auth::vault::Kind::SettingsKey) {
-            refresh_record(m);
             if (m.d.persisted.provider_keys.erase(pid) > 0)
                 key_save = save_record(m);
         } else {
-            auth::vault::sign_out(pid);
+            key_save = Cmd::batch(
+                Cmd(AccountOp{.kind = AccountOp::Kind::SignOut, .provider = pid}),
+                Cmd(LoadAuthView{}));
         }
     }
 
@@ -370,7 +369,7 @@ Cmd sign_out(Model& m) {
             if (pid == just_left || pid.empty()) return false;
             const auto* p = provider::preset_for(pid);
             if (!p) return true;   // saved custom host (has a provider_keys entry)
-            const auto src = provider::auth_source(*p, settings);
+            const auto src = provider::auth_source(*p, settings, m.d.auth);
             return src == provider::AuthSource::Saved
                 || src == provider::AuthSource::Env;
         };
@@ -429,35 +428,40 @@ std::string account_provider_id(const provider::Selection& sel) {
     return {};   // no account switching for this provider (local/ACP)
 }
 
-// Build the AccountList state for the active provider, auto-registering the
-// current live login as "default" the first time so it appears as a row.
-login::AccountList build_account_list(const provider::Selection& sel) {
-    namespace acc = agentty::auth::accounts;
+// The account rows for `provider`, from the Model's AuthView. A live login
+// not yet in the registry (legacy single login) shows as one row under its
+// derived label; opening the list registers it (see open_accounts).
+login::AccountList build_account_list(const Model& m, std::string provider,
+                                      std::string provider_label) {
     login::AccountList al;
-    al.provider       = account_provider_id(sel);
-    al.provider_label = provider::provider_display_name(sel);
+    al.provider       = std::move(provider);
+    al.provider_label = std::move(provider_label);
     if (al.provider.empty()) return al;
-
-    auto saved = acc::list_for(al.provider);
-    if (saved.empty()) {
-        // Legacy single-login: capture whatever is signed in right now under
-        // a derived name so the user has a switchable, removable row.
-        std::string label = acc::derive_current_label(al.provider);
-        if (!label.empty() && acc::snapshot_active(al.provider, label))
-            saved = acc::list_for(al.provider);
+    const auto* pa = m.d.auth.find(al.provider);
+    if (!pa) return al;
+    std::vector<std::string> labels = pa->accounts;
+    std::string active = pa->active_account;
+    if (labels.empty() && !pa->unregistered_label.empty()) {
+        labels.push_back(pa->unregistered_label);
+        active = pa->unregistered_label;
     }
-    const std::string active = acc::active_label(al.provider);
-    for (auto& a : saved) {
+    for (auto& l : labels) {
         login::AccountRow row;
-        row.provider = a.provider;
-        row.label    = a.label;
-        row.active   = (a.label == active);
+        row.provider = al.provider;
+        row.label    = l;
+        row.active   = (l == active);
         al.rows.push_back(std::move(row));
     }
     // Land the cursor on the active row so "open, hit enter" is a no-op.
     for (int i = 0; i < static_cast<int>(al.rows.size()); ++i)
         if (al.rows[static_cast<std::size_t>(i)].active) { al.cursor = i; break; }
     return al;
+}
+
+login::AccountList build_account_list(const Model& m,
+                                      const provider::Selection& sel) {
+    return build_account_list(m, account_provider_id(sel),
+                              provider::provider_display_name(sel));
 }
 
 } // namespace
@@ -469,15 +473,25 @@ Cmd open_accounts(Model& m, const std::string& provider_id = {}) {
     // shows immediately for whatever row the user pressed Enter on.
     const auto sel = provider_id.empty() ? m.d.selection
                                          : provider::parse_selection(provider_id);
-    auto al = build_account_list(sel);
+    auto al = build_account_list(m, sel);
     if (al.provider.empty()) {
         // Provider has no switchable accounts — fall back to the normal
         // sign-in / add-key flow rather than showing an empty list.
         m.ui.login = login::Picking{};
         return Cmd::none();
     }
+    // A live login that isn't in the registry yet shows as a row already;
+    // register it so it can be switched to and removed like any other.
+    Cmd reg = Cmd::none();
+    if (const auto* pa = m.d.auth.find(al.provider);
+        pa && pa->accounts.empty() && !pa->unregistered_label.empty())
+        reg = Cmd::batch(
+            Cmd(AccountOp{.kind = AccountOp::Kind::Register,
+                          .provider = al.provider,
+                          .label = pa->unregistered_label}),
+            Cmd(LoadAuthView{}));
     m.ui.login = std::move(al);
-    return Cmd::none();
+    return reg;
 }
 
 Cmd account_move(Model& m, int delta) {
@@ -562,13 +576,14 @@ Cmd account_select(Model& m) {
         return Cmd::none();
     }
 
-    namespace acc = agentty::auth::accounts;
     const std::string provider = row.provider;
     const std::string label    = row.label;
-    if (!acc::activate(provider, label)) {
-        m.ui.login = login::Failed{"could not switch to \"" + label + "\""};
-        return Cmd::none();
-    }
+    // Copy the slot into the live store on the host, then re-read the view.
+    // Everything batched after these sees the switched store.
+    Cmd activate = Cmd::batch(
+        Cmd(AccountOp{.kind = AccountOp::Kind::Activate,
+                      .provider = provider, .label = label}),
+        Cmd(LoadAuthView{}));
 
     // If the chosen account belongs to a provider that ISN'T currently active
     // (Enter on a non-active provider row → its account list), selecting the
@@ -595,8 +610,10 @@ Cmd account_select(Model& m) {
                 m.d.persisted.provider_models.count(provider)
                     ? m.d.persisted.provider_models.at(provider)
                     : std::string{};
-            return commit_provider_switch(m, provider, plabel, recalled,
-                                          /*open_panel=*/false);
+            return Cmd::batch(
+                std::move(activate),
+                commit_provider_switch(m, provider, plabel, recalled,
+                                       /*open_panel=*/false));
         }
     }
     // Re-install the live auth header from the now-swapped active store.
@@ -643,7 +660,8 @@ Cmd account_select(Model& m) {
     m.s.status = "switched " + provider_label + " to " + label;
     m.s.status_until = m.now
                      + std::chrono::seconds{4};
-    return Cmd::batch(std::move(install), std::move(refresh_cmd));
+    return Cmd::batch(std::move(activate), std::move(install),
+                      std::move(refresh_cmd));
 }
 
 Cmd account_remove(Model& m) {
@@ -652,7 +670,6 @@ Cmd account_remove(Model& m) {
     const int add_row = static_cast<int>(al->rows.size());
     if (al->cursor >= add_row) return Cmd::none();   // add-new row: nothing to remove
 
-    namespace acc = agentty::auth::accounts;
     const auto row = al->rows[static_cast<std::size_t>(al->cursor)];
 
     // Destructive actions are deliberately two-step. A stray Backspace or
@@ -663,9 +680,10 @@ Cmd account_remove(Model& m) {
     }
 
     const bool was_active = row.active;
-    const int old_cursor = al->cursor;
     const std::string provider_label = al->provider_label;
-    acc::remove(row.provider, row.label);
+    al->confirm_remove.clear();
+    Cmd remove = Cmd(AccountOp{.kind = AccountOp::Kind::Remove,
+                               .provider = row.provider, .label = row.label});
 
     // Entitlement facts learned for THIS account can never be consulted
     // again — and a later re-login may land on a different subscription
@@ -680,48 +698,37 @@ Cmd account_remove(Model& m) {
         if (s.entitlements.size() != before) forget_save = save_record(m);
     }
 
-    // If we removed the account we're currently authed as, the newest
-    // remaining one (promoted to active by remove()) becomes live.
-    Cmd install = Cmd::none();
-    if (was_active) {
-        if (auto next = acc::get(row.provider, acc::active_label(row.provider))) {
-            acc::activate(row.provider, next->label);
-            // Re-install the live header for the promoted account. resolve()
-            // already covers each shape: Anthropic reads the shared store,
-            // transport-owned tokens resolve empty (clearing the cache), and
-            // a custom host reads the key activate() just promoted.
-            install = Cmd(InstallAuth{.provider = row.provider});
-            m.s.status = "removed " + row.label + " \xc2\xb7 switched to " + next->label;
-        } else {
-            // The registry is empty. Clear the underlying live credential too
-            // (file OR provider_keys[spec]) through the ONE central sign-out;
-            // otherwise build_account_list() would rediscover and silently
-            // resurrect the account the user just removed.
-            provider::credentials::clear_active(row.provider);
-            install = Cmd(InstallAuth{.provider = row.provider, .clear = true});
-
-            login::AccountList empty;
-            empty.provider = row.provider;
-            empty.provider_label = provider_label;
-            m.ui.login = std::move(empty);  // stays on "+ Add another account…"
-            m.s.status = "removed the last " + provider_label + " account";
-            m.s.status_until = m.now
-                             + std::chrono::seconds{4};
-            return Cmd::batch(std::move(forget_save), std::move(install));
-        }
+    // If we removed the account we're currently authed as, the registry
+    // promotes the newest remaining one; make it live. The Model's view says
+    // which that is (the same rule as accounts::remove: newest first).
+    std::vector<std::string> rest;
+    if (const auto* pa = m.d.auth.find(row.provider))
+        for (const auto& l : pa->accounts)
+            if (l != row.label) rest.push_back(l);
+    Cmd after = Cmd::none();
+    if (was_active && !rest.empty()) {
+        after = Cmd::batch(
+            Cmd(AccountOp{.kind = AccountOp::Kind::Activate,
+                          .provider = row.provider, .label = rest.front()}),
+            Cmd(InstallAuth{.provider = row.provider}));
+        m.s.status = "removed " + row.label + " \xc2\xb7 switched to " + rest.front();
+    } else if (was_active) {
+        // The registry is now empty. Clear the live credential too (file OR
+        // provider_keys[spec]); otherwise the account list would find it
+        // live again and resurrect the account the user just removed.
+        after = Cmd::batch(
+            Cmd(AccountOp{.kind = AccountOp::Kind::ClearActive,
+                          .provider = row.provider}),
+            Cmd(InstallAuth{.provider = row.provider, .clear = true}));
+        m.s.status = "removed the last " + provider_label + " account";
     } else {
         m.s.status = "removed " + row.label;
     }
-
     m.s.status_until = m.now
                      + std::chrono::seconds{4};
-
-    // Rebuild the list in place and keep the cursor near the removed row.
-    auto rebuilt = build_account_list(m.d.selection);
-    rebuilt.cursor = std::min(old_cursor,
-                              static_cast<int>(rebuilt.rows.size()));
-    m.ui.login = std::move(rebuilt);
-    return Cmd::batch(std::move(forget_save), std::move(install));
+    // The list stays open; AuthViewLoaded rebuilds its rows.
+    return Cmd::batch(std::move(remove), std::move(forget_save),
+                      std::move(after), Cmd(LoadAuthView{}));
 }
 
 Cmd login_pick_method(Model& m, char32_t key) {
@@ -995,20 +1002,20 @@ Cmd login_submit(Model& m) {
             // any prior key first, so it ADDS, not replaces), and mark the
             // provider active. add_key is the single implementation of the
             // "paste a key" flow, shared with credentials::.
-            provider::credentials::add_key(provider, key);
-            Cmd key_save = Cmd::none();
-            {
-                // add_key wrote the vault directly; pull its work into the
-                // record before saving, or this save would drop the key.
-                refresh_record(m);
-                m.d.persisted.provider = provider;
-                key_save = save_record(m);
-            }
+            // The key goes in the record now (the switch below and its
+            // save need it); AddKey does the registry snapshot on the host,
+            // and LoadAuthView brings the vault back as it then stands.
+            m.d.persisted.provider_keys[provider] = key;
+            m.d.persisted.provider = provider;
+            Cmd add = Cmd::batch(
+                Cmd(AccountOp{.kind = AccountOp::Kind::AddKey,
+                              .provider = provider, .key = key}),
+                Cmd(LoadAuthView{}));
             m.ui.login = login::Closed{};
             // Commit through the ONE shared switch path like every other entry;
             // commit_provider_switch opens the model picker for us.
             return Cmd::batch(
-                std::move(key_save),
+                std::move(add), save_record(m),
                 commit_provider_switch(m, provider, provider_label));
         }
 
@@ -1362,6 +1369,23 @@ Cmd login_update(Model& m, msg::LoginMsg lm) {
                 std::move(e.provider_label), e.attempt_id, std::move(e.error));
         },
         [&](TokenRefreshed& e)      -> Cmd { return token_refreshed(m, std::move(e.result)); },
+        [&](AuthViewLoaded& e)      -> Cmd {
+            m.d.auth = std::move(e.view);
+            // The vault is the host's; take its keys as they now stand.
+            m.d.persisted.provider_keys = std::move(e.provider_keys);
+            // An open account list reflects the registry; rebuild it in
+            // place, keeping the cursor near where it was.
+            if (auto* al = std::get_if<login::AccountList>(&m.ui.login)) {
+                const int cur = al->cursor;
+                auto rebuilt = build_account_list(m, al->provider,
+                                                  al->provider_label);
+                rebuilt.cursor = std::min(cur,
+                    static_cast<int>(rebuilt.rows.size()));
+                rebuilt.confirm_remove = std::move(al->confirm_remove);
+                m.ui.login = std::move(rebuilt);
+            }
+            return Cmd::none();
+        },
         [&](OAuthRefreshNotDue)     -> Cmd {
             m.s.oauth_refresh_in_flight = false;
             return Cmd::none();

@@ -24,6 +24,8 @@
 #include "agentty/auth/accounts.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/provider/credentials.hpp"
+#include "agentty/provider/auth_state.hpp"
+#include "agentty/auth/vault.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/store_fx.hpp"
@@ -93,10 +95,38 @@ struct Host : maya::terminal_host<P> {
 
     // Credentials (see store_fx.hpp). Small local reads/writes, run in order
     // on the loop thread so the next fold's stream launch sees them.
-    void handle(InstallAuth e) {
+    // Answers with a fresh AuthView: every credential change ends in an
+    // InstallAuth, so the Model's view follows it without each reducer
+    // having to remember a LoadAuthView.
+    std::optional<Msg> handle(InstallAuth e) {
         update_auth(e.clear ? auth::AuthHeader{}
                             : provider::credentials::resolve(e.provider));
+        return handle(LoadAuthView{});
     }
+    std::optional<Msg> handle(LoadAuthView) {
+        // Through the settings seam, so a key written by an AccountOp in
+        // this same batch is seen.
+        auto s = deps().load_settings();
+        auto view = provider::load_auth_view(s);
+        return Msg{msg::LoginMsg{AuthViewLoaded{
+            std::move(view), std::move(s.provider_keys)}}};
+    }
+
+    void handle(AccountOp e) {
+        namespace cr = provider::credentials;
+        using K = AccountOp::Kind;
+        switch (e.kind) {
+            case K::Activate:    (void)cr::activate(e.provider, e.label); break;
+            case K::Remove:      (void)cr::remove(e.provider, e.label); break;
+            case K::Register:
+                (void)auth::accounts::snapshot_active(e.provider, e.label);
+                break;
+            case K::AddKey:      (void)cr::add_key(e.provider, e.key); break;
+            case K::SignOut:     auth::vault::sign_out(e.provider); break;
+            case K::ClearActive: cr::clear_active(e.provider); break;
+        }
+    }
+
     void handle(SaveCredentials e) {
         auth::save_credentials(e.creds);
         namespace acc = auth::accounts;

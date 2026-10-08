@@ -15,6 +15,7 @@
 #include <string_view>
 
 #include "agentty/store/store.hpp"   // store::Settings
+#include "agentty/domain/auth_view.hpp" // auth::AuthView
 
 namespace agentty::provider {
 
@@ -45,5 +46,23 @@ enum class AuthSource {
 };
 [[nodiscard]] AuthSource auth_source(const ProviderDescriptor& p,
                                      const store::Settings& settings);
+
+// The same answers from the Model alone: `view` carries what lives outside
+// the settings record (credential stores, env, accounts), so these read no
+// files and no env. Reducers and views use these.
+[[nodiscard]] AuthSource auth_source(const ProviderDescriptor& p,
+                                     const store::Settings& settings,
+                                     const auth::AuthView& view);
+[[nodiscard]] bool provider_is_authed(std::string_view id,
+                                      const store::Settings& settings,
+                                      const auth::AuthView& view);
+// Is the active credential for `id` present (the vault's "signed in")? For a
+// key provider that means a non-empty saved key; for OAuth, a stored token.
+[[nodiscard]] bool signed_in(std::string_view id,
+                             const store::Settings& settings,
+                             const auth::AuthView& view);
+
+// Build the view from disk and env. Host side only.
+[[nodiscard]] auth::AuthView load_auth_view(const store::Settings& settings);
 
 } // namespace agentty::provider

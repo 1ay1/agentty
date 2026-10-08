@@ -1654,3 +1654,56 @@ TEST_CASE("OAuth login: the PKCE pair is minted by a Cmd, and a stale mint is dr
     CHECK(std::holds_alternative<ui::login::Closed>(m2.ui.login));
     CHECK(c2.is_none());
 }
+
+// The account list and its edits work off the Model's AuthView; the registry
+// writes are AccountOp effects and the view comes back as AuthViewLoaded.
+TEST_CASE("accounts: list from the view, removal promotes the newest other") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    provider::select(provider::parse_selection("anthropic"));
+    Model m = seeded_model();
+    m.d.auth.loaded = true;
+    m.d.auth.providers["anthropic"] = agentty::auth::ProviderAuth{
+        .stored = true, .accounts = {"work", "home"}, .active_account = "work"};
+
+    auto [m1, c1] = app::update(std::move(m), Msg{LoginMsg{OpenAccounts{"anthropic"}}});
+    auto* al = std::get_if<ui::login::AccountList>(&m1.ui.login);
+    REQUIRE(al != nullptr);
+    REQUIRE(al->rows.size() == 2);
+    CHECK(al->rows[0].label == "work");
+    CHECK(al->rows[0].active);
+    CHECK(al->cursor == 0);
+
+    // Remove the active one: two presses, then Remove + Activate("home").
+    auto [m2, c2] = app::update(std::move(m1), Msg{LoginMsg{AccountRemove{}}});
+    auto [m3, c3] = app::update(std::move(m2), Msg{LoginMsg{AccountRemove{}}});
+    bool removed = false, promoted = false, reload = false;
+    agtest::fx::for_each(c3, [&](const auto& e) {
+        using U = std::remove_cvref_t<decltype(e)>;
+        if constexpr (std::same_as<U, agentty::AccountOp>) {
+            if (e.kind == agentty::AccountOp::Kind::Remove && e.label == "work")
+                removed = true;
+            if (e.kind == agentty::AccountOp::Kind::Activate && e.label == "home")
+                promoted = true;
+        } else if constexpr (std::same_as<U, agentty::LoadAuthView>) {
+            reload = true;
+        }
+    });
+    CHECK(removed);
+    CHECK(promoted);
+    CHECK(reload);
+
+    // The view coming back rebuilds the open list.
+    agentty::auth::AuthView v;
+    v.loaded = true;
+    v.providers["anthropic"] = agentty::auth::ProviderAuth{
+        .stored = true, .accounts = {"home"}, .active_account = "home"};
+    auto [m4, c4] = app::update(std::move(m3),
+        Msg{LoginMsg{AuthViewLoaded{std::move(v), {}}}});
+    auto* al4 = std::get_if<ui::login::AccountList>(&m4.ui.login);
+    REQUIRE(al4 != nullptr);
+    REQUIRE(al4->rows.size() == 1);
+    CHECK(al4->rows[0].label == "home");
+    CHECK(al4->rows[0].active);
+}

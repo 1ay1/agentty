@@ -2293,7 +2293,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // neither loses this fact nor applies it to an account
                     // that may well be entitled.
                     (void)entitlement_record_blocked(
-                        s, domain::entitlement::Fact::Context1M,
+                        s, m.d.auth, domain::entitlement::Fact::Context1M,
                         active_provider_id(m), wire_model_id(m.d.model_id.value));
                     s.model_id = m.d.model_id;
                     // Also strip `[1m]` from the per-provider recall so a
@@ -2371,7 +2371,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                             // ACCOUNT-wide, empty model_id. The model can
                             // see; this login may not.
                             remembered = detail::entitlement_record_blocked(
-                                s, domain::entitlement::Fact::VisionOrgPolicy,
+                                s, m.d.auth, domain::entitlement::Fact::VisionOrgPolicy,
                                 active_provider_id(m));
                             break;
                         case provider::VisionRejection::ModelCapability:

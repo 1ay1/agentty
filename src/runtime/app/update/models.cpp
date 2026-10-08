@@ -155,7 +155,8 @@ void hydrate_recents(Model& m) {
 // switch target.
 [[nodiscard]] bool mru_ref_is_live(const Model& m, const ModelRef& ref,
                                    const store::Settings& settings) {
-    if (!provider::provider_is_authed(ref.provider_id, settings)) return false;
+    if (!provider::provider_is_authed(ref.provider_id, settings, m.d.auth))
+        return false;
     for (const auto& c : m.d.provider_catalogs) {
         if (c.provider_id != ref.provider_id) continue;
         if (c.models.empty()) return true;          // catalog not loaded yet
@@ -183,7 +184,7 @@ void refresh_fused_sources(Model& m) {
     // its models keep showing in the fused list until restart. The id overload
     // handles custom hosts too (authed iff their saved key still exists).
     std::erase_if(m.d.provider_catalogs, [&](const ProviderCatalog& c) {
-        return !provider::provider_is_authed(c.provider_id, settings);
+        return !provider::provider_is_authed(c.provider_id, settings, m.d.auth);
     });
 
     auto find_cat = [&](std::string_view id) -> ProviderCatalog* {
@@ -204,7 +205,7 @@ void refresh_fused_sources(Model& m) {
     // catalog and its models simply never appeared. Splitting the list
     // across call sites is what let a whole source be forgotten, so the
     // list now lives in one place and every consumer reads it from there.
-    for (const auto& src : provider::catalog_sources(settings)) {
+    for (const auto& src : provider::catalog_sources(settings, &m.d.auth)) {
         if (src.needs_signin) {
             // Un-authed preset → a QUERY-GATED sign-in offer: it never
             // clutters the browse view (build_fused_rows hides offers while
@@ -1067,8 +1068,6 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // for raw host/URL specs, at most once per process.
             if (auto proven = provider::take_unproven_spec(
                     active_provider_id(m))) {
-                // provider_keys is vault-owned — re-read before adding a row.
-                refresh_record(m);
                 settings.provider = proven->first;
                 if (!proven->second.empty())
                     settings.provider_models[proven->first] = proven->second;
@@ -1089,7 +1088,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 // flag is learned from the first rejection and cleared on
                 // sign-out/account switch.
                 if (entitlement_blocked(
-                        settings, domain::entitlement::Fact::Context1M,
+                        settings, m.d.auth, domain::entitlement::Fact::Context1M,
                         active_provider_id(m), wire_model_id(mi.id.value))
                     && mi.id.value.find("[1m]") != std::string::npos)
                     continue;

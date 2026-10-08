@@ -7,6 +7,7 @@
 #include "agentty/provider/registry.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/vault.hpp"
+#include "agentty/auth/accounts.hpp"
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
@@ -87,6 +88,79 @@ AuthSource auth_source(const ProviderDescriptor& p,
     for (auto env : p.auth_env)
         if (env_has(env)) return AuthSource::Env;
     return AuthSource::None;
+}
+
+AuthSource auth_source(const ProviderDescriptor& p,
+                       const store::Settings& settings,
+                       const auth::AuthView& view) {
+    if (p.is_local || p.auth == AuthStyle::None) return AuthSource::Local;
+    const std::string id{p.id};
+    switch (auth::vault::of(p.id).kind) {
+        case auth::vault::Kind::AnthropicFile:
+            if (view.stored(id) || settings.provider_keys.count(id) != 0)
+                return AuthSource::Saved;
+            return AuthSource::None;
+        case auth::vault::Kind::OAuthFile:
+            return view.stored(id) ? AuthSource::Saved : AuthSource::None;
+        case auth::vault::Kind::SettingsKey:
+        case auth::vault::Kind::None:
+            break;
+    }
+    if (auto it = settings.provider_keys.find(id);
+        it != settings.provider_keys.end() && !it->second.empty())
+        return AuthSource::Saved;
+    if (!view.env_var(id).empty()) return AuthSource::Env;
+    return AuthSource::None;
+}
+
+bool provider_is_authed(std::string_view id, const store::Settings& settings,
+                        const auth::AuthView& view) {
+    if (const ProviderDescriptor* p = preset_for(id))
+        return auth_source(*p, settings, view) != AuthSource::None;
+    return settings.provider_keys.count(std::string{id}) != 0;
+}
+
+bool signed_in(std::string_view id, const store::Settings& settings,
+               const auth::AuthView& view) {
+    const std::string pid{id};
+    switch (auth::vault::of(id).kind) {
+        case auth::vault::Kind::AnthropicFile:
+        case auth::vault::Kind::OAuthFile:
+            return view.stored(pid);
+        case auth::vault::Kind::SettingsKey:
+        case auth::vault::Kind::None:
+            break;
+    }
+    auto it = settings.provider_keys.find(pid);
+    return it != settings.provider_keys.end() && !it->second.empty();
+}
+
+auth::AuthView load_auth_view(const store::Settings& settings) {
+    auth::AuthView v;
+    v.loaded = true;
+    auto fill = [&](const std::string& id, const ProviderDescriptor* p) {
+        auth::ProviderAuth a;
+        switch (auth::vault::of(id).kind) {
+            case auth::vault::Kind::AnthropicFile:
+            case auth::vault::Kind::OAuthFile:
+                a.stored = auth::vault::signed_in(id);
+                break;
+            default: break;
+        }
+        if (p)
+            for (auto env : p->auth_env)
+                if (env_has(env)) { a.env_var = std::string{env}; break; }
+        for (auto& acc : auth::accounts::list_for(id))
+            a.accounts.push_back(std::move(acc.label));
+        a.active_account = auth::accounts::active_label(id);
+        if (a.accounts.empty())
+            a.unregistered_label = auth::accounts::derive_current_label(id);
+        v.providers.emplace(id, std::move(a));
+    };
+    for (const auto& p : providers()) fill(std::string{p.id}, &p);
+    for (const auto& [spec, key] : settings.provider_keys)
+        if (!preset_for(spec)) fill(spec, nullptr);
+    return v;
 }
 
 } // namespace agentty::provider

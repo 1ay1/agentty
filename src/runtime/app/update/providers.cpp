@@ -220,18 +220,23 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             const std::string removed = target;
             Cmd key_save = Cmd::none();
             {
-                // provider_keys is vault-owned; re-read before mutating so a
-                // key added since this Model was built isn't written away.
-                refresh_record(m);
                 m.d.persisted.provider_keys.erase(removed);
                 if (is_custom_host) m.d.persisted.provider_models.erase(removed);
                 key_save = save_record(m);
             }
             // Also drop any stored account credentials for a preset sign-out
             // (custom hosts keep everything in provider_keys, handled above).
-            if (!is_custom_host)
-                for (const auto& acc : auth::accounts::list_for(removed))
-                    auth::accounts::remove(removed, acc.label);
+            if (!is_custom_host) {
+                std::vector<Cmd> ops;
+                if (const auto* pa = m.d.auth.find(removed))
+                    for (const auto& l : pa->accounts)
+                        ops.push_back(Cmd(AccountOp{
+                            .kind = AccountOp::Kind::Remove,
+                            .provider = removed, .label = l}));
+                ops.push_back(Cmd(LoadAuthView{}));
+                key_save = Cmd::batch(std::move(key_save),
+                                      Cmd::batch(std::move(ops)));
+            }
             p->confirm_remove.clear();
             // Signing out of the ACTIVE provider must not leave the session
             // pointing at a dead credential — the palette SignOut zeroes the
@@ -334,7 +339,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             // Whether a key exists is answered from the settings record (and
             // the env chain), the same check sign-out's fallback uses.
             const bool has_key =
-                provider::auth_source(preset, m.d.persisted)
+                provider::auth_source(preset, m.d.persisted, m.d.auth)
                     != provider::AuthSource::None;
 
             // A hosted (non-local) OpenAI-family provider with no resolvable
@@ -369,7 +374,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             // vault::signed_in answers "has this provider a live token" for
             // every OAuth row through one table.
             if (preset.token_in_transport
-                && !auth::vault::signed_in(std::string{spec})) {
+                && !provider::signed_in(spec, m.d.persisted, m.d.auth)) {
                 // State only — subscribe() runs the worker, keyed on the
                 // attempt, so leaving the state cancels it.
                 const auto attempt_id = cmd::next_codex_login_attempt_id();

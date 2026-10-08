@@ -207,7 +207,9 @@ using Cmd = jaal::Cmd<Msg,
     publish_selection,
     // ── agentty's own: credentials ───────────────────────────────
     install_auth,
-    save_credentials
+    save_credentials,
+    load_auth_view,
+    account_op
 >;
 
 /// Every event source an agentty subscription may name.
