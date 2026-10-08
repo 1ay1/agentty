@@ -908,6 +908,16 @@ add_test(NAME layering
          COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}
                  -P ${CMAKE_SOURCE_DIR}/tests/lint/layering.cmake)
 set_tests_properties(layering PROPERTIES LABELS static)
+# The rest of the chain, from agentty's own static label so one
+# `ctest -L static` checks the whole hierarchy: maya names nothing above it
+# and only maya/host/ touches jaal; jaal names nothing above it.
+add_test(NAME layering_maya
+         COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}/third_party/maya
+                 -P ${CMAKE_SOURCE_DIR}/third_party/maya/tests/lint/layering.cmake)
+add_test(NAME layering_jaal
+         COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}/third_party/maya/third_party/jaal
+                 -P ${CMAKE_SOURCE_DIR}/third_party/maya/third_party/jaal/tests/lint/layering.cmake)
+set_tests_properties(layering_maya layering_jaal PROPERTIES LABELS static TIMEOUT 120)
 # The submodules own no runtime: no threads, no background work of their own.
 # Each library's ban-list allowlist lives in its own tree.
 add_test(NAME submodule_runtime
