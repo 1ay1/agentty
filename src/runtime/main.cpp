@@ -2221,22 +2221,15 @@ int main(int argc, char** argv) {
         });
     }
 
-    // Run on agentty's host: maya's terminal_host plus the persistence
-    // effects (runtime/app/host.hpp). This is maya::run's four lines,
-    // inlined only because the host type differs — maya::run hardcodes its
-    // own, and it should, since the terminal half is its business.
+    // Run on agentty's host: maya's terminal_host plus agentty's own
+    // effects (runtime/app/host.hpp). maya::run opens the terminal, installs
+    // maya's executor and runs the program on jaal; agentty never calls jaal.
     {
-        // Names the effect AND the program if the row and the host ever
-        // disagree, instead of failing as an unsatisfied constraint several
-        // levels inside jaal::run.
-        jaal::require_host_for<app::Host<app::AgenttyApp>, app::AgenttyApp>();
-
         maya::Options cfg{.title = "agentty", .fps = 0,
                           .mode = maya::Mode::Inline, .backend = backend};
-        auto term = maya::Screen::open(cfg);
-        if (!term) return 70;                 // couldn't take the terminal
-        app::Host<app::AgenttyApp> host{*term, cfg.fps};
-        jaal::run<app::AgenttyApp>(host);
+        if (const int rc = maya::run<app::AgenttyApp, app::Host>(cfg);
+            rc == 70)
+            return 70;                         // couldn't take the terminal
     }
 
     // Tell the speculative prewarms to stop, FIRST.
