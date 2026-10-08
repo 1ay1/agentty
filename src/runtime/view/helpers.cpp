@@ -234,7 +234,7 @@ std::string context_override_key(std::string_view provider_id,
 }
 
 int max_context_tokens_from_env() noexcept {
-    const char* env = std::getenv("AGENTTY_MAX_CONTEXT_TOKENS");
+    const char* env = std::getenv("AGENTTY_MAX_CONTEXT_TOKENS");   // launch-env: read once by read_launch_env
     if (!env || !*env) return 0;
     char* end = nullptr;
     const long v = std::strtol(env, &end, 10);

@@ -15,7 +15,7 @@
 
 #include "agentty/util/update.hpp"   // self_update_possible
 #include "agentty/runtime/view/helpers.hpp"      // max_context_tokens_from_env
-#include "agentty/runtime/view/host_escape.hpp"  // integration_active
+#include "agentty/runtime/view/host_escape.hpp"  // detect_integration
 
 namespace agentty::app {
 
@@ -89,7 +89,7 @@ Model::Env read_launch_env() noexcept {
     e.reveal_typewriter   = on_unless_off("AGENTTY_REVEAL_TYPEWRITER");
     e.reveal_decorate     = on_unless_off("AGENTTY_REVEAL_DECORATE");
     e.painted_caret       = set("AGENTTY_PAINTED_CARET");
-    e.host_integration    = ui::host::integration_active();
+    e.host_integration    = ui::host::detect_integration();
     // Only probe when it could matter: the probe writes a file next to our
     // binary, and an install that opted out of auto-update shouldn't touch
     // its directory at all.

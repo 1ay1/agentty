@@ -28,15 +28,16 @@ namespace agentty::ui::host {
 
 // Is agentty running under a cooperating editor host that wants integration
 // escapes? True when AGENTTY_HOST names a known host (currently "emacs"), or
-// as a fallback when $INSIDE_EMACS is set with a vterm marker. Sampled once
-// and cached (the environment doesn't change mid-process).
-[[nodiscard]] bool integration_active();
+// as a fallback when $INSIDE_EMACS is set with a vterm marker. Reads the
+// environment, so it is called once, by read_launch_env, and the answer
+// lives in Model::env.host_integration; reducers gate on that.
+[[nodiscard]] bool detect_integration();
 
 // The private OSC that tells the host a file tool just acted on `path`
 // (absolute, forward-slash) at an optional 1-based `line`. `kind` is the tool
 // name ("read" | "edit" | "write" | "move" | …) so the host can choose the
-// gesture (open vs. diff vs. reveal). Returns nullopt when integration is
-// inactive or `path` is empty — the caller emits nothing.
+// gesture (open vs. diff vs. reveal). Pure: the caller decides whether
+// integration is on. Returns nullopt when `path` is empty.
 [[nodiscard]] std::optional<std::string>
 file_event_osc(std::string_view kind, std::string_view path,
                std::optional<int> line = std::nullopt);

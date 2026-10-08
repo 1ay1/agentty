@@ -301,4 +301,42 @@ if(DEFINED VIEW_ROOT)
             "`// stopwatch: ...`.")
     endif()
     message(STATUS "elm_purity: view reads time from the frame clock")
+
+    # ...and the environment through Model::env, captured once at launch.
+    # A detection helper that happens to live under view/ but only ever runs
+    # from read_launch_env marks its line `// launch-env: ...`.
+    set(env_reads "")
+    foreach(f IN LISTS vfiles)
+        if(NOT f MATCHES "^runtime/(view|panel)/")
+            continue()
+        endif()
+        execute_process(
+            COMMAND ${GREP_EXE} -nE "${ban_env}" ${VIEW_ROOT}/${f}
+            OUTPUT_VARIABLE hits OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(NOT hits)
+            continue()
+        endif()
+        string(ASCII 1 _sc)
+        string(REPLACE ";" "${_sc}" hits "${hits}")
+        string(REGEX MATCHALL "[^\n]+" hl "${hits}")
+        foreach(h IN LISTS hl)
+            string(REPLACE "${_sc}" ";" h "${h}")
+            string(REGEX MATCH "^([0-9]+):(.*)$" _ "${h}")
+            set(lineno "${CMAKE_MATCH_1}")
+            set(c "${CMAKE_MATCH_2}")
+            if(c MATCHES "^[ \t]*//" OR c MATCHES "// launch-env:")
+                continue()
+            endif()
+            string(STRIP "${c}" c)
+            list(APPEND env_reads "${f}:${lineno}: ${c}")
+        endforeach()
+    endforeach()
+    if(env_reads)
+        list(JOIN env_reads "\n  " msg)
+        message(FATAL_ERROR
+            "view code reads the environment:\n  ${msg}\n\n"
+            "Capture it in read_launch_env (runtime/app/env.cpp) into "
+            "Model::env and read that.")
+    endif()
+    message(STATUS "elm_purity: view reads the environment through Model::env")
 endif()

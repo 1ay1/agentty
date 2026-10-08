@@ -565,7 +565,7 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
             // (Emacs/vterm) that watches for our OSC, tell it which file the
             // agent just touched so it can open / reveal / diff it natively.
             // Frame-safe (maya cmd::emit_osc, out-of-band), and a complete
-            // no-op on a normal terminal (integration_active() is false).
+            // no-op on a normal terminal (m.env.host_integration is false).
             Cmd host_cmd = Cmd::none();
             if (m.env.host_integration) {
                 for (const auto& msg_ : m.d.current.messages) {

@@ -14,15 +14,15 @@ namespace agentty::ui::host {
 
 namespace {
 
-// Detect the cooperating host ONCE. AGENTTY_HOST is the explicit first-class
-// signal (an editor launching agentty sets AGENTTY_HOST=emacs); INSIDE_EMACS
-// is Emacs's own marker and only its "vterm" frontend can run our OSC hooks.
-bool detect_integration() {
-    if (const char* h = std::getenv("AGENTTY_HOST"); h && *h) {
+// AGENTTY_HOST is the explicit first-class signal (an editor launching
+// agentty sets AGENTTY_HOST=emacs); INSIDE_EMACS is Emacs's own marker and
+// only its "vterm" frontend can run our OSC hooks.
+bool detect_integration_impl() {
+    if (const char* h = std::getenv("AGENTTY_HOST"); h && *h) {   // launch-env: read once by read_launch_env
         std::string_view v{h};
         if (v == "emacs" || v == "vterm") return true;
     }
-    if (const char* ie = std::getenv("INSIDE_EMACS"); ie && *ie) {
+    if (const char* ie = std::getenv("INSIDE_EMACS"); ie && *ie) {   // launch-env: read once by read_launch_env
         if (std::string_view{ie}.find("vterm") != std::string_view::npos)
             return true;
     }
@@ -57,15 +57,12 @@ void append_json_escaped(std::string& out, std::string_view s) {
 
 } // namespace
 
-bool integration_active() {
-    static const bool on = detect_integration();
-    return on;
-}
+bool detect_integration() { return detect_integration_impl(); }
 
 std::optional<std::string>
 file_event_osc(std::string_view kind, std::string_view path,
                std::optional<int> line) {
-    if (!integration_active() || path.empty()) return std::nullopt;
+    if (path.empty()) return std::nullopt;
 
     // OSC 5379 ; agentty ; {"event":"file","kind":..,"path":..,"line":N}
     // We return only the OSC PAYLOAD (everything after "ESC ] <code> ;"); the

@@ -120,7 +120,7 @@ inline constexpr int kPickerChromeRows = 7;
 // is how those tests say what width they render at.
 [[nodiscard]] inline int panel_terminal_rows() {
     if (maya::have_render_context()) return maya::available_height();
-    if (const char* lines_env = std::getenv("LINES"))
+    if (const char* lines_env = std::getenv("LINES"))   // launch-env: only outside a view (a test calling a panel builder)
         if (const int n = std::atoi(lines_env); n > 0) return n;
     return 40;
 }
@@ -141,7 +141,7 @@ inline constexpr int kPickerChromeRows = 7;
 // Terminal WIDTH, resolved the same way panel_terminal_rows() resolves height.
 [[nodiscard]] inline int panel_terminal_cols() {
     if (maya::have_render_context()) return maya::available_width();
-    if (const char* c = std::getenv("COLUMNS"))
+    if (const char* c = std::getenv("COLUMNS"))   // launch-env: only outside a view (a test calling a panel builder)
         if (const int n = std::atoi(c); n > 0) return n;
     return 80;
 }
