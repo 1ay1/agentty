@@ -149,7 +149,8 @@ tool/util/sandbox.cpp: atomic
 # The symbol index fans a directory walk across helpers in a maya::scope; the
 # atomic is the shared work cursor they pull file indexes from.
 workspace/symbols.cpp: atomic
-workspace/files.cpp: mutex atomic
+# files.cpp: the atomics are the walk single-flight latch and the prewarm cancel flag.
+workspace/files.cpp: atomic
 # checkpoint.cpp's atomic is a teardown cancel flag, and it is the one place
 # here where the raw primitive is load-bearing rather than incidental.
 #

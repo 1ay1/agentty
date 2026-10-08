@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
-#include <mutex>
 #include <sstream>
 #include <string_view>
 #include <system_error>
@@ -14,6 +13,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <maya/runtime.hpp>
 
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/subprocess.hpp"
@@ -291,10 +292,8 @@ util::AtomicSnapshot<std::vector<std::string>> g_files;
 // Frecency: paths the user has referenced, most-recent-first-weighted.
 // A tiny recency list (not a full frecency decay) — the last-referenced
 // files are exactly what a follow-up `@` wants at the top.
-std::mutex& frecency_mu() { static std::mutex m; return m; }
-std::vector<std::string>& frecency_list() {
-    static std::vector<std::string> v; return v;
-}
+using Frecency = std::vector<std::string>;
+maya::guarded<Frecency>& frecency() { static maya::guarded<Frecency> v; return v; }
 
 // ── Git signals ──────────────────────────────────────────
 // The single strongest "which file matters" signal is git: the files you
@@ -302,15 +301,12 @@ std::vector<std::string>& frecency_list() {
 // both lead their pickers with these. We compute a status map once at
 // prewarm (git status --porcelain + recent commit touch history) and fold
 // it into ranking + row tags. path (workspace-relative) -> GitTag.
-std::mutex& git_mu() { static std::mutex m; return m; }
-std::unordered_map<std::string, GitTag>& git_status_map() {
-    static std::unordered_map<std::string, GitTag> m; return m;
-}
-std::atomic<bool>& git_ready_flag() { static std::atomic<bool> b{false}; return b; }
+using GitTags = std::unordered_map<std::string, GitTag>;
+maya::guarded<GitTags>& git_status_map() { static maya::guarded<GitTags> m; return m; }
 
 void build_git_signals() {
     const auto root = tools::util::project_root();
-    if (root.empty()) { git_ready_flag() = true; return; }
+    if (root.empty()) return;
     std::unordered_map<std::string, GitTag> tags;
 
     // 1. Working-tree status. NEWLINE-separated (NOT -z: the subprocess
@@ -354,11 +350,7 @@ void build_git_signals() {
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lk(git_mu());
-        git_status_map() = std::move(tags);
-    }
-    git_ready_flag() = true;
+    git_status_map().with([](GitTags& m, GitTags t) { m = std::move(t); }, std::move(tags));
 }
 
 std::vector<std::string> build_file_list(std::size_t cap) {
@@ -504,17 +496,18 @@ bool files_ready() {
 
 void note_file_referenced(std::string_view path) {
     if (path.empty()) return;
-    std::lock_guard<std::mutex> lk(frecency_mu());
-    auto& v = frecency_list();
-    std::erase(v, std::string{path});     // dedupe — move to front
-    v.insert(v.begin(), std::string{path});
-    if (v.size() > 64) v.resize(64);      // bounded recency window
+    frecency().with([](Frecency& v, std::string p) {
+        std::erase(v, p);                     // dedupe — move to front
+        v.insert(v.begin(), std::move(p));
+        if (v.size() > 64) v.resize(64);      // bounded recency window
+    }, std::string{path});
 }
 
 GitTag file_git_tag(std::string_view path) {
-    std::lock_guard<std::mutex> lk(git_mu());
-    auto it = git_status_map().find(std::string{path});
-    return it == git_status_map().end() ? GitTag::None : it->second;
+    return git_status_map().read([](const GitTags& m, std::string p) {
+        auto it = m.find(p);
+        return it == m.end() ? GitTag::None : it->second;
+    }, std::string{path});
 }
 
 std::string_view git_tag_label(GitTag tag) {
@@ -561,17 +554,12 @@ filter_files(const std::vector<std::string>& files, std::string_view query) {
     // read once per filter pass.
     std::unordered_map<std::string, int> frec;
     {
-        std::lock_guard<std::mutex> lk(frecency_mu());
-        const auto& v = frecency_list();
+        const auto v = frecency().read([](const Frecency& f) { return f; });
         for (std::size_t i = 0; i < v.size(); ++i) frec.emplace(v[i], (int)i);
     }
     // Git-status snapshot: the STRONGEST signal. The file you're editing is
     // almost always dirty/staged — lead with it.
-    std::unordered_map<std::string, GitTag> git;
-    {
-        std::lock_guard<std::mutex> lk(git_mu());
-        git = git_status_map();
-    }
+    const auto git = git_status_map().read([](const GitTags& m) { return m; });
     auto git_bonus = [&](std::size_t i) -> int {
         auto it = git.find(files[i]);
         if (it == git.end()) return 0;
