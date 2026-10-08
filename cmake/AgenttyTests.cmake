@@ -602,7 +602,7 @@ add_executable(sandbox_config_race_test EXCLUDE_FROM_ALL
     tests/sandbox_config_race_stubs.cpp
     src/tool/util/sandbox.cpp src/tool/util/subprocess.cpp
     src/tool/util/sandbox_claybin.cpp
-    src/tool/util/sandbox_broker.cpp
+    src/tool/util/sandbox_broker.cpp src/tool/util/handoff_gate.cpp
     src/domain/sandbox_provenance.cpp
     src/tool/util/utf8.cpp
     src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp

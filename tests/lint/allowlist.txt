@@ -189,8 +189,6 @@ mcp/oauth.cpp: atomic
 rag/adapter.cpp: mutex atomic
 
 # ── Process-wide plumbing ────────────────────────────────────────────────
-# The teardown registry IS what joins the workers above.
-util/teardown.cpp: mutex
 util/logx.cpp: atomic
 
 # ── The runtime ──────────────────────────────────────────────────────────
