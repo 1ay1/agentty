@@ -292,7 +292,7 @@ Cmd submit_message(Model& m) {
         auto sp  = user.text.find_first_of(" \t\n");
         auto tok = user.text.substr(1, sp == std::string::npos
                                            ? std::string::npos : sp - 1);
-        const auto* sk = tools::skills::find(tok);
+        const auto sk = tools::skills::find(tok);
         perf_stamp("skills_find");
         if (sk) {
             std::string rest = sp == std::string::npos

@@ -66,6 +66,7 @@
 // SKILL.md skips the entry.
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -126,12 +127,12 @@ struct Skill {
 // is cached process-wide keyed by the roots' AND each SKILL.md's mtime
 // (an in-place edit to a skill is picked up next turn). Project skills
 // shadow user skills with the same name.
-[[nodiscard]] const std::vector<Skill>& all();
+[[nodiscard]] std::vector<Skill> all();
 
 // Look up one skill by exact name. nullptr if absent. Finds
 // `disable-model-invocation` skills too (explicit lookup is allowed;
 // only the catalog hides them).
-[[nodiscard]] const Skill* find(std::string_view name);
+[[nodiscard]] std::optional<Skill> find(std::string_view name);
 
 // Render the compact tier-1 catalog block for the system prompt:
 //   <skills>
@@ -301,7 +302,7 @@ struct Shadowed {
 
 // Every skill dropped for a name collision during the last discovery.
 // Empty in the overwhelming majority of installs.
-[[nodiscard]] const std::vector<Shadowed>& shadowed();
+[[nodiscard]] std::vector<Shadowed> shadowed();
 
 // Is this name claimed by more than one directory in the SAME scope?
 // That is the case worth flagging — cross-scope shadowing is intended.

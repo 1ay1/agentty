@@ -285,7 +285,7 @@ public:
 class AgenttySkillResolver final : public mt::SkillResolver {
 public:
     std::optional<std::string> load(const std::string& name, std::string& err) override {
-        const auto* s = skills::find(name);
+        const auto s = skills::find(name);
         if (!s) {
             std::ostringstream avail;
             bool first = true;

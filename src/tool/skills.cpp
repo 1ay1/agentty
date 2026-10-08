@@ -3,6 +3,7 @@
 
 #include "agentty/util/user_root.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/util/sendable.hpp"
 #include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
@@ -18,7 +19,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <sstream>
 #include <system_error>
 
@@ -327,15 +327,10 @@ void enumerate_resources(const fs::path& dir, std::vector<std::string>& out) {
 // keep their flat names so existing libraries load unchanged.
 // Appends each found SKILL.md's mtime into `sig` so an in-place edit
 // (same dir mtime) still invalidates the cache.
-// Shadowed skills from the last discovery pass. Rebuilt whenever all()
-// re-scans, cleared first so a fixed collision stops being reported.
-std::vector<Shadowed>& shadow_log() {
-    static std::vector<Shadowed> v;
-    return v;
-}
-
+// `shadows` collects the skills this pass hides behind an earlier root.
 void scan_root(const fs::path& root, const std::string& source,
-               std::size_t cap, std::vector<Skill>& out, std::string& sig) {
+               std::size_t cap, std::vector<Skill>& out, std::string& sig,
+               std::vector<Shadowed>& shadows) {
     std::error_code ec;
     if (!fs::is_directory(root, ec) || ec) return;
     auto mt = fs::last_write_time(root, ec);
@@ -483,7 +478,7 @@ void scan_root(const fs::path& root, const std::string& source,
             // the UI layer; same-scope is what gets surfaced.
             std::error_code sec;
             auto sdir = fs::weakly_canonical(md.parent_path(), sec);
-            shadow_log().push_back(Shadowed{
+            shadows.push_back(Shadowed{
                 .name        = s.name,
                 .dir         = (sec ? md.parent_path() : sdir).string(),
                 .source      = source,
@@ -505,9 +500,17 @@ void scan_root(const fs::path& root, const std::string& source,
     }
 }
 
-std::vector<Skill>& cache() {
-    static std::vector<Skill> c;
-    return c;
+// The last discovery: the skills, what they shadowed, and the signature
+// they were scanned at. One guarded value so the three can't disagree.
+struct Discovery {
+    std::vector<Skill>    skills;
+    std::vector<Shadowed> shadows;
+    std::string           sig = "\x01uninit";
+    std::uint64_t         generation = 0;   // bumped on every rescan
+};
+maya::guarded<Discovery>& discovery() {
+    static maya::guarded<Discovery> d;
+    return d;
 }
 
 } // namespace
@@ -566,10 +569,10 @@ void scan_root_signature(const fs::path& root, std::string& sig) {
     }
 }
 
-const std::vector<Skill>& all() {
-    static std::mutex mu;
-    static std::string cached_sig = "\x01uninit";
-    std::lock_guard lk(mu);
+std::vector<Skill> all() {
+    // Both passes run outside the lock; only the swap of the result is
+    // locked. Two callers racing a change both scan, and the second's
+    // identical result replaces the first's: wasted work, never a wrong one.
 
     // Resolve the cap ONCE for this pass — every root's scan bound and
     // every catalog slice below share this value, so the environment
@@ -611,42 +614,50 @@ const std::vector<Skill>& all() {
     // which flips the env var and re-reads all().
     sig += "#cap=" + std::to_string(cap);
 
-    if (sig == cached_sig) return cache();
+    if (auto hit = discovery().read(
+            [](const Discovery& d, std::string s) -> std::optional<std::vector<Skill>> {
+                if (s != d.sig) return std::nullopt;
+                return d.skills;
+            },
+            sig))
+        return *hit;
 
     // PASS 2 — something changed on disk; do the expensive read+parse.
-    std::vector<Skill> fresh;
+    Discovery fresh;
     std::string parse_sig;
-    shadow_log().clear();   // rebuilt by this pass
     for (const scope::Source& src : sources) {
         scan_root(src.base / layout.leaf, std::string{scope::to_string(src.locus)},
-                  cap, fresh, parse_sig);
+                  cap, fresh.skills, parse_sig, fresh.shadows);
     }
-
-    cache() = std::move(fresh);
-    cached_sig = sig;
-    return cache();
+    fresh.sig = sig;
+    std::vector<Skill> out = fresh.skills;
+    discovery().with([](Discovery& d, Discovery f) {
+        f.generation = d.generation + 1;
+        d = std::move(f);
+    }, std::move(fresh));
+    return out;
 }
 
-const std::vector<Shadowed>& shadowed() {
+std::vector<Shadowed> shadowed() {
     (void)all();           // ensure a discovery has run
-    return shadow_log();
+    return discovery().read([](const Discovery& d) { return d.shadows; });
 }
 
 bool shadowed_within_scope(std::string_view name) {
     // Cross-scope shadowing is the documented rule (project beats user),
     // so it is not a warning. Two directories in the SAME scope claiming
     // one name is the case that is either a mistake or a hiding place.
-    const auto* winner = find(name);
+    const auto winner = find(name);
     if (!winner) return false;
     for (const auto& sh : shadowed())
         if (sh.name == name && sh.source == winner->source) return true;
     return false;
 }
 
-const Skill* find(std::string_view name) {
-    for (const auto& s : all())
-        if (s.name == name) return &s;
-    return nullptr;
+std::optional<Skill> find(std::string_view name) {
+    for (auto& s : all())
+        if (s.name == name) return std::move(s);
+    return std::nullopt;
 }
 
 std::string catalog_block() {
@@ -661,12 +672,16 @@ std::string catalog_block() {
     // all() already rescans on its own mtime signature, so a skill edit
     // lands next turn exactly as before; an approve lands when the file
     // it wrote changes.
-    static std::mutex mu;
-    static std::string cached;
-    static std::uintmax_t cached_key = 0;
-    static const void*    cached_data = nullptr;
+    struct Built {
+        std::string    text;
+        std::uintmax_t key = 0;
+        std::uint64_t  generation = ~std::uint64_t{0};
+    };
+    static maya::guarded<Built> built_cache;
 
-    const auto& skills = all();
+    const auto skills = all();
+    const std::uint64_t gen =
+        discovery().read([](const Discovery& d) { return d.generation; });
 
     // Approvals file identity — cheap stat, no parse.
     std::uintmax_t akey = 0;
@@ -682,18 +697,17 @@ std::string catalog_block() {
                     t.time_since_epoch().count()) * 1099511628211ull;
         }
     }
-    // all() returns a reference to its own cached vector and rebuilds it
-    // in place on rescan; pairing the data pointer with the size catches
-    // both "vector reallocated" and "count changed".
-    const std::uintmax_t key =
-        akey ^ (static_cast<std::uintmax_t>(skills.size()) << 32);
+    // The discovery generation says the skills changed; the approvals
+    // fingerprint says a trust decision did.
+    const std::uintmax_t key = akey;
 
-    {
-        std::lock_guard lk(mu);
-        if (cached_data == static_cast<const void*>(skills.data())
-            && cached_key == key)
-            return cached;
-    }
+    if (auto hit = built_cache.read(
+            [](const Built& b, std::uintmax_t k, std::uint64_t g) -> std::optional<std::string> {
+                if (b.key != k || b.generation != g) return std::nullopt;
+                return b.text;
+            },
+            key, gen))
+        return *hit;
 
     // Hidden beats listed-but-blocked: user_only skills never appear, so
     // the model can't waste a turn trying to activate one. An UNAPPROVED
@@ -715,10 +729,8 @@ std::string catalog_block() {
     std::size_t eligible = 0;
     for (const auto& s : skills) if (eligible_for_model(s)) ++eligible;
     if (eligible == 0) {
-        std::lock_guard lk(mu);
-        cached.clear();
-        cached_key = key;
-        cached_data = static_cast<const void*>(skills.data());
+        built_cache.with([](Built& b, Built v) { b = std::move(v); },
+                         Built{{}, key, gen});
         return {};
     }
 
@@ -748,12 +760,8 @@ std::string catalog_block() {
     }
     m << "</skills>";
     auto built = m.str();
-    {
-        std::lock_guard lk(mu);
-        cached = built;
-        cached_key = key;
-        cached_data = static_cast<const void*>(skills.data());
-    }
+    built_cache.with([](Built& b, Built v) { b = std::move(v); },
+                     Built{built, key, gen});
     return built;
 }
 

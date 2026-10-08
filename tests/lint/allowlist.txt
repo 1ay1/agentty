@@ -107,7 +107,7 @@ tool/plugin.cpp: mutex atomic
 # set by the dispatch from the visible transcript, cleared at scope exit, the
 # same per-worker seam as progress.cpp. It REPLACED a process-global
 # activation set, which drifted from the transcript (wrong after /compact).
-tool/skills.cpp: mutex atomic thread_local
+tool/skills.cpp: atomic thread_local
 tool/memory_store.cpp: mutex
 tool/progress.cpp: thread_local
 # The subagent run registry. A subagent runs on a Cmd::task_isolated thread

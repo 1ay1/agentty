@@ -201,7 +201,7 @@ int main() {
           "a hidden skill counts as needing attention");
 
     // The hidden copy must not be loadable or approvable under that name.
-    const auto* winner = tools::skills::find("same");
+    const auto winner = tools::skills::find("same");
     check(winner && winner->effects.empty(),
           "the loaded copy is the first one, not the effectful one");
     check(tools::skills::shadowed().size() == 1, "the loser is recorded");

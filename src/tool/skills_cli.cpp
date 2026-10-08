@@ -436,7 +436,7 @@ int verb_add(const std::vector<std::string>& argv) {
     // skill that silently never loads — the user would see a success
     // message and then never see the skill again. Refuse with the
     // conflicting path rather than writing a file that does nothing.
-    if (const auto* clash = find(s.name);
+    if (const auto clash = find(s.name);
         clash && !clash->dir.empty()
               && fs::weakly_canonical(clash->dir) != fs::weakly_canonical(dest)) {
         std::fprintf(stderr,
@@ -554,7 +554,7 @@ int verb_add(const std::vector<std::string>& argv) {
     if (needs_trust_gate(s.effects)) {
         // all() re-scans when a root's mtime signature changes, which the
         // copy above just did — so find() sees the freshly installed file.
-        const auto* installed = find(s.name);
+        const auto installed = find(s.name);
         if (!installed) {
             std::fprintf(stderr,
                 "installed, but %s did not load — run `agentty skills` to see why\n",
@@ -644,7 +644,7 @@ int verb_remove(const std::vector<std::string>& argv) {
     // resolve by declared name.
     auto dest = install_dir_for(argv[0]);
     if (!fs::exists(dest)) {
-        if (const auto* s = find(argv[0]);
+        if (const auto s = find(argv[0]);
             s && !s->dir.empty() && s->source == "user") {
             dest = s->dir;
         }
@@ -679,7 +679,7 @@ int verb_approve(const std::vector<std::string>& argv) {
         std::fprintf(stderr, "usage: agentty skill approve <name>\n");
         return 2;
     }
-    const auto* s = find(argv[0]);
+    const auto s = find(argv[0]);
     if (!s) {
         std::fprintf(stderr, "no such skill: %s\n", argv[0].c_str());
         return 1;
