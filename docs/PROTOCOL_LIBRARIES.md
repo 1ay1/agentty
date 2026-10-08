@@ -167,19 +167,18 @@ and the shape that replaces it.
 
 - **Today:** `request_raw` returns a `std::future`; a waiter table under a
   mutex; a deadline thread on a condition variable fails late waiters.
-- **Rule shape:** the engine is a state machine:
-  - `send_request(method, params, deadline) -> {RequestId, frame}` records a
-    pending entry and returns the frame to write.
-  - `feed_line` resolves a pending entry and returns it in
-    `Outcome.completed` as `{RequestId, expected<Json, RpcError>}`.
-  - `expire(now) -> std::vector<Completed>` fails every entry past its
-    deadline. `next_deadline() -> optional<time_point>` says when that is next
-    worth calling.
-  - No futures. No promises. A completion is a value handed back to the
-    caller.
+- **Rule shape:** the engine is an Elm model (§5):
+  - `request<M>(engine, params, deadline) -> {RequestId, Effects}` records a
+    pending entry; `Effects.send` holds the frame to write.
+  - `step(engine, Received{line})` resolves it into `Effects.completed` as
+    `{RequestId, method, expected<Json, RpcError>}`; `result<M>(c)` decodes
+    it to `M::result`.
+  - `step(engine, Tick{now})` fails every entry past its deadline.
+    `next_deadline()` says when the next Tick is worth sending.
+  - No futures. No promises. A completion is a value handed back.
 - **agentty:** keeps the continuation for each `RequestId` (a callback, a
-  maya promise, or a coroutine handle — agentty's choice), arms a
-  `maya::delay_for` to `next_deadline()`, and calls `expire(now)` when it
+  maya promise or a coroutine handle — agentty's choice), arms a
+  `maya::delay_for` to `next_deadline()`, and steps a `Tick{now}` when it
   fires.
 
 ### 4.4 Thread safety of an engine/connection object
@@ -198,15 +197,15 @@ and the shape that replaces it.
 - **Today:** handlers registered on the engine run on the reader thread;
   async handlers capture a `Responder` and reply later "from any thread";
   cancellation watchers spawn polling jobs.
-- **Rule shape:** inbound requests come back as **values** in
-  `Outcome.requests` (`{RpcId, method, params}`); the library does not run
-  handlers. Replying is `engine.respond(id, result) -> frame` (or
-  `respond_error`), called by the owner whenever it has the answer.
-  Cancellation is a frame like any other (`engine.cancel(id) -> frame`) or an
-  incoming `$/cancel_request` surfaced in `Outcome.cancelled`.
-  A typed **dispatch table** (`Router<Ctx>`) is still allowed as a pure helper:
-  `router.handle(ctx, request) -> optional<Json>` runs synchronously on the
-  caller's thread.
+- **Rule shape:** the peer's requests come back as **values** in
+  `Effects.calls` (`Call{Id, method, params}`); the engine runs no handler.
+  Replying is `reply<M>(id, result) -> frame`, written by the owner whenever
+  it has the answer. Giving up on one of OUR requests is
+  `step(engine, Cancel{RequestId})`; telling the peer is the protocol's own
+  notification. The peer's cancel arrives in `Effects.notifications`.
+  A typed **dispatch table** (`Router<Ctx>`) is a pure helper:
+  `router.handle(ctx, call) -> Maybe<frame>` runs synchronously on the
+  caller's thread, Nothing for a deferred method.
 - **agentty:** decides which requests run inline and which go to a worker,
   holds the `RpcId` until done, and owns any cancellation token (a real
   `std::stop_token` from maya, never a library flag).
@@ -277,48 +276,68 @@ coro.hpp 2 lines apart; core, codec, rpc, stdio drifted copies). Under R7
 they become:
 
 ```
-agentty/include/jsonrpc/   (header-only, C++20, no deps but nlohmann_json)
-  core.hpp        Maybe / List / Sum / Newtype / Unit, match()
-  codec.hpp       Codec<T>, the codec algebra, to_json / from_json
-  error.hpp       RpcError, errc
-  ids.hpp         RpcId
-  engine.hpp      Engine (the state machine in §4.3/§4.5), Outcome, Completed
-  framing.hpp     LineSplitter (bytes → lines), frame encoding
-  router.hpp      Router<Ctx>: typed method table, pure dispatch
-  coro.hpp        Task<T>, awaitables resumed by the caller (§4.9)
+jsonrpc-cpp   (its own repo, third_party/jsonrpc-cpp; header-only, C++23,
+               no deps but nlohmann_json)
+  core.hpp      the algebra: Unit, Maybe, List, Sum, Newtype, StaticString, match
+  codec.hpp     Codec<T>: serialization as a fold (record, sum_tagged, enum_codec)
+  error.hpp     Id (the wire's), RequestId (ours), RpcError, errc
+  message.hpp   Message = Call | Notification | Reply, parsed once at the edge
+  method.hpp    Method<"name", Params, Result>, Note<"name", Params>
+  engine.hpp    Engine + step(Engine&, Event) -> Effects  (the Elm model)
+  router.hpp    Router<Ctx>: the peer's calls, dispatched by method type
+  framing.hpp   LineSplitter: a byte stream to lines
 
-mcp-cpp  includes <jsonrpc/...>.  Owns: MCP types, methods, capabilities,
+mcp-cpp  links jsonrpc::jsonrpc.  Owns: MCP types, methods, capabilities,
          the Client/Server protocol state machines, builtin tool logic.
-acp-cpp  includes <jsonrpc/...>.  Owns: ACP types, methods, session updates,
+acp-cpp  links jsonrpc::jsonrpc.  Owns: ACP types, methods, session updates,
          the Agent/Client protocol state machines.
 ```
 
+The engine is an Elm model. Its state is a value; its one transition is
+
+```
+Effects step(Engine&, Event)
+Event   = Received{line} | Tick{now} | Cancel{RequestId} | Closed{reason}
+Effects = send (frames, in order) + completed (our requests, answered)
+        + calls (the peer asks)   + notifications (the peer tells)
+```
+
+and starting a request, `request<M>(engine, params, deadline)`, returns the
+minted `RequestId` with its effects. The host is the Elm runtime around it:
+it feeds events, performs effects and arms a timer for `next_deadline()`.
+
+Types carry the protocol:
+
+- **A method is declared once**, as `Method<"name", Params, Result>`. The
+  typed `request<M>` takes exactly `M::params`, `result<M>` decodes exactly
+  `M::result`, and `Router::on<M>` only accepts a handler
+  `f(Ctx&, const M::params&) -> M::result`. Drift between caller, handler and
+  codec doesn't compile.
+- **Two kinds of id, two types.** `Id` is what the peer sent (number or
+  string); `RequestId` is what we minted. A `Cancel` takes only a
+  `RequestId`; neither converts into the other.
+- **`Newtype` never decays.** No implicit conversion to its carrier; unwrap
+  with `.get()`. (The implicit one let a `RequestId` pass as a wire `Id`.)
+- **Parsed once.** A frame becomes a `Message` at the edge and is handled by
+  a total `match` after. Malformed input is a value carrying the error reply
+  it earns, not an exception.
+
 Rules for the core:
 
-- It is the **only** place JSON-RPC 2.0 is implemented. A dialect that
-  needs different behaviour gets an option or a hook in the core, not a
-  fork.
-- Dialect libraries put their names in their own namespace (`mcp::`,
-  `acp::`) via `using` aliases where the vocabulary is shared, so callers
-  are unaffected by where a type lives.
-- It obeys every rule in §2. It is a library too.
-- **It lives in agentty, at `include/jsonrpc/`**, its own top-level header
-  directory and namespace (`jsonrpc::`), not under `include/agentty/`. No
-  separate repo, no submodule.
-- **It is self-contained.** A `jsonrpc/` header includes only the standard
-  library, `<nlohmann/json.hpp>` and other `jsonrpc/` headers. Never
-  `agentty/`, `maya/`, `jaal/`, `mcp/`, `acp/`. That is what lets the
-  libraries use it without depending on agentty: `jsonrpc/` is a leaf that
-  happens to be stored in agentty's tree.
-- **It is the only thing from agentty the libraries may include.**
-  mcp-cpp and acp-cpp may `#include <jsonrpc/...>` and nothing else from
-  agentty. The parent build exports it as the INTERFACE target
-  `jsonrpc::jsonrpc` (include dir `${agentty}/include`, restricted by lint to
-  `jsonrpc/`), defined before the libraries are added, and they link it.
-- **The libraries are no longer standalone builds.** They are built as part
-  of agentty. Their own unit tests are registered by agentty's test build
-  (still single-threaded, still without `-pthread`), not by a separate
-  top-level CMake project.
+- It is the **only** place JSON-RPC 2.0 is implemented. A dialect that needs
+  different behaviour gets an option in the core, not a fork.
+- Dialect libraries re-export its names into their own namespace (`mcp::`,
+  `acp::`) with `using` where the vocabulary is shared, so callers don't care
+  where a type lives.
+- It obeys every rule in §2, and depends on nothing above it: not agentty,
+  maya, jaal, mcp-cpp or acp-cpp.
+- **No jaal.** jaal is a runtime and needs C++26; the core is a pure state
+  machine and needs neither. The Elm shape is in the types, not borrowed.
+- It lives in its own repo, `1ay1/jsonrpc-cpp`, as an agentty submodule.
+  agentty adds it before mcp-cpp and acp-cpp; built alone, it fetches
+  nlohmann_json and runs its own tests (without `-pthread`).
+- **One standard: C++23** for jsonrpc-cpp, mcp-cpp, acp-cpp and rag-cpp
+  (`std::expected`). acp-cpp moves up from C++20 when it adopts the core.
 
 ## 6. What agentty provides
 
@@ -357,14 +376,14 @@ Lints in agentty's `static` ctest label, so one `ctest -L static` proves it:
   whose code (comments and namespace names normalised away) matches another
   library's above a small threshold, or if either redefines a name the core
   exports (`RpcEngine`, `Codec`, `RpcError`, `Newtype` ...).
-- **`jsonrpc_leaf`** (new) — `include/jsonrpc/` includes only the standard
-  library, nlohmann and itself; mcp-cpp and acp-cpp include nothing from
-  agentty except `<jsonrpc/...>`; nothing in agentty's own `src/` needs
-  `jsonrpc/` except the integration modules of §6.
+- **`jsonrpc_leaf`** (new) — jsonrpc-cpp includes only the standard library,
+  nlohmann and itself, and is covered by `submodule_runtime` and
+  `submodule_purity` like the other libraries. In agentty's own `src/`, only
+  the integration modules of §6 include `<jsonrpc/...>`.
 - **`layering` / `layering_maya` / `layering_jaal`** — unchanged: agentty
   never names jaal; maya never names agentty; jaal never names either.
 - agentty's test build compiles each library's unit tests (and
-  `include/jsonrpc/`'s) **single-threaded**: no `-pthread`, no
+  jsonrpc-cpp's) **single-threaded**: no `-pthread`, no
   `Threads::Threads` link. A library that needs a thread to pass its own
   tests fails to link.
 
@@ -377,8 +396,8 @@ Each step leaves the tree compiling, agentty's binary working end to end,
 and the `static` label green. Each library gets its own commits; agentty
 bumps the submodule pointer after each.
 
-1. **jsonrpc core.** Extract the shared headers from mcp-cpp/acp-cpp into
-   `agentty/include/jsonrpc/`, rewritten to §4.3/§4.5 (Engine as a state machine, no
+1. **jsonrpc-cpp core.** *(done)* The shared headers extracted from
+   mcp-cpp/acp-cpp into the `1ay1/jsonrpc-cpp` repo, rewritten to §4.3/§4.5 (Engine as a state machine, no
    futures, no transport, no runtime). Unit-test it single-threaded:
    request/response, ids of every JSON type, batches, deadlines via
    `expire(now)`, malformed frames, notifications, responses to unknown ids.
@@ -437,5 +456,5 @@ And for agentty code that drives a library:
   write, completions, inbound requests, cancellations.
 - **Splitter** — a caller-supplied function that runs `fn(i)` over `[0, n)`,
   possibly in parallel. The only form of parallelism a library may accept.
-- **Core** — `include/jsonrpc/` in agentty, the one shared implementation of JSON-RPC 2.0 and
+- **Core** — jsonrpc-cpp, the one shared implementation of JSON-RPC 2.0 and
   the codec vocabulary.

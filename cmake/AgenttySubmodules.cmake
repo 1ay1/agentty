@@ -205,6 +205,13 @@ if(TARGET simdjson)
     endif()
 endif()
 
+# jsonrpc-cpp — JSON-RPC 2.0 as a passive, header-only library (submodule):
+# the one engine and codec algebra mcp-cpp and acp-cpp share. Added first so
+# both find jsonrpc::jsonrpc already defined. No runtime of any kind; see
+# docs/PROTOCOL_LIBRARIES.md.
+set(JSONRPC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/jsonrpc-cpp)
+
 # acp-cpp — header-only Agent Client Protocol library (submodule). Provides
 # the wire algebra + JSON-RPC engine + stdio transport for `agentty acp`.
 # Tests/examples off; it reuses the nlohmann_json target already populated

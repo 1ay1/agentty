@@ -2,6 +2,10 @@
 	path = third_party/maya
 	url = https://github.com/1ay1/maya.git
 	branch = master
+[submodule "jsonrpc-cpp"]
+	path = third_party/jsonrpc-cpp
+	url = https://github.com/1ay1/jsonrpc-cpp.git
+	branch = master
 [submodule "acp-cpp"]
 	path = third_party/acp-cpp
 	url = https://github.com/1ay1/acp-cpp.git
