@@ -28,7 +28,6 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <random>
 #include <cstdio>
