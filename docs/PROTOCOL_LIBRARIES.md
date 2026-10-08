@@ -420,9 +420,15 @@ bumps the submodule pointer after each.
      `mcp_reload_race_test`, `plugin_disabled_tools_test`,
      `toolset_e2e_test`, `mcp-serve`, a hanging-tool cancel + reconnect
      probe.
-   - Still to do: `cap::Registry` keeps its mutex; builtin tools still hold
-     locks/atomics for caches (`fs_helpers`, `textproc`, `repomap`) — these
-     become caller-owned objects.
+   - *(done)* `cap::Registry` is a single-owner value (routes computed on
+     lookup, no lock); textproc/grep/structural shares scan disjoint
+     strides into their own slots, with no cursor, counter or mutex.
+   - Still to do: process-wide tool state becomes a context agentty owns
+     and passes to `make_provider`: workspace root and read roots
+     (`fs_helpers`), the file-snapshot and read caches (`fs_helpers`,
+     `fs.cpp`), `ProcessManager` (`process.cpp`), the repomap cache, the
+     temp-file counter, and the `shellx`/`support`/read-context
+     thread_locals. ~25 agentty files read `workspace_root()` today.
 4. **rag-cpp.** `parallel.hpp`'s executor becomes the `Splitter` parameter;
    corpus/hnsw/bm25 build-then-freeze; caches and the plugin registry become
    caller-owned. Verify: `rag adapter`, `rag shutdown interrupts warm
