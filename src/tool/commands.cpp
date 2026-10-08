@@ -11,11 +11,11 @@
 #include "agentty/config/inventory.hpp"   // kCommandsLayout — the one declaration
 #include "agentty/util/capped_read.hpp"   // the one capped-read primitive
 
+#include <maya/runtime.hpp>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
-#include <mutex>
 #include <ranges>
 #include <sstream>
 #include <string>
@@ -158,7 +158,7 @@ void scan_dir(const fs::path& dir, const std::string& prefix,
         if (c.body.empty()) continue;
         std::error_code cec;
         auto abs = fs::weakly_canonical(p, cec);
-        c.file = cec ? fs::absolute(p, cec) : abs;
+        c.file = (cec ? fs::absolute(p, cec) : abs).string();
         out.push_back(std::move(c));
     }
 }
@@ -175,26 +175,21 @@ void scan_root(const fs::path& root, const std::string& source,
     scan_dir(root, /*prefix=*/{}, source, /*depth=*/0, out, sig);
 }
 
-std::vector<Command>& cache() {
-    static std::vector<Command> c;
+// The scanned commands and the mtime signature they were scanned at.
+struct Cache {
+    std::vector<Command> commands;
+    std::string          sig = "\x01uninit";
+};
+maya::guarded<Cache>& cache() {
+    static maya::guarded<Cache> c;
     return c;
-}
-
-std::string& cached_sig() {
-    static std::string s = "\x01uninit";
-    return s;
-}
-
-std::mutex& cache_mu() {
-    static std::mutex mu;
-    return mu;
 }
 
 } // namespace
 
-const std::vector<Command>& all() {
-    std::lock_guard lk(cache_mu());
-
+std::vector<Command> all() {
+    // Scan outside the lock (directory walk + file reads), then keep the
+    // fresh list only if the signature moved.
     std::string sig;
     std::vector<Command> fresh;
     // Root ladder from scope::plan (Locus-major, Dialect-minor): project
@@ -212,23 +207,25 @@ const std::vector<Command>& all() {
         scan_root(src.base / layout.leaf,
                   std::string{scope::to_string(src.locus)}, fresh, sig);
     }
-
-    if (sig != cached_sig()) {
-        cache() = std::move(fresh);
-        cached_sig() = sig;
-    }
-    return cache();
+    return cache().with(
+        [](Cache& c, std::string s, std::vector<Command> f) {
+            if (s != c.sig) {
+                c.commands = std::move(f);
+                c.sig      = std::move(s);
+            }
+            return c.commands;
+        },
+        std::move(sig), std::move(fresh));
 }
 
-const Command* find(std::string_view name) {
-    for (const auto& c : all())
-        if (c.name == name) return &c;
-    return nullptr;
+std::optional<Command> find(std::string_view name) {
+    for (auto& c : all())
+        if (c.name == name) return std::move(c);
+    return std::nullopt;
 }
 
 void invalidate_cache() {
-    std::lock_guard lk(cache_mu());
-    cached_sig() = "\x01invalidated";
+    cache().with([](Cache& c) { c.sig = "\x01invalidated"; });
 }
 
 std::string expand(std::string_view body, std::string_view args) {
@@ -284,7 +281,7 @@ std::optional<std::string> try_expand(std::string_view text) {
     if (name_end == 1) return std::nullopt;   // bare "/"
     const std::string_view name = text.substr(1, name_end - 1);
 
-    const Command* cmd = find(name);
+    const auto cmd = find(name);
     if (!cmd) return std::nullopt;   // /etc/hosts, /unknown → plain text
 
     std::string_view args =

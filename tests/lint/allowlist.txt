@@ -123,7 +123,6 @@ tool/progress.cpp: thread_local
 # mutex for the installed Config; thread_local for the per-chain nesting depth
 # and deadline, since each run is synchronous on its own worker thread.
 tool/subagent.cpp: mutex thread_local
-tool/commands.cpp: mutex
 # Windows: run_command_s tees child output while polling for exit. It used to
 # be a bare reader std::thread plus `std::mutex buf_mu` guarding four loose
 # `shared_*` variables, joined ~90 lines later with a caller-supplied

@@ -54,16 +54,17 @@ struct Command {
     std::string argument_hint; // frontmatter `argument-hint`
     std::string body;          // the prompt template
     std::string source;        // "project" | "user"
-    std::filesystem::path file;// absolute path (diagnostics)
+    std::string file;          // absolute path (diagnostics)
 };
 
 // Discover + parse every command under the project + user roots. Cached
 // process-wide keyed on the roots' + files' mtimes (edit → next lookup
 // re-scans). Bounded: kMaxCommands entries, kMaxBodyBytes per body.
-[[nodiscard]] const std::vector<Command>& all();
+// Returned by value: the cache can be replaced by another thread's rescan.
+[[nodiscard]] std::vector<Command> all();
 
-// Exact-name lookup. nullptr when absent.
-[[nodiscard]] const Command* find(std::string_view name);
+// Exact-name lookup.
+[[nodiscard]] std::optional<Command> find(std::string_view name);
 
 // Substitute $ARGUMENTS / $1..$9 / $$ in `body` using the raw argument
 // string `args` (everything the user typed after `/name `).
