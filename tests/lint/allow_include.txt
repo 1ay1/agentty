@@ -44,4 +44,3 @@ agentty/domain/smart_mode.hpp: const_cast
 
 # ── ACP: a separate process mode, no jaal loop ───────────────────────────
 agentty/acp/server.hpp: atomic
-agentty/provider/external_acp_backend.hpp: mutex

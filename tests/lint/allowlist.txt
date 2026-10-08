@@ -167,11 +167,6 @@ workspace/checkpoint.cpp: mutex atomic
 
 # ── Providers: transports and their shared state ─────────────────────────
 provider/selection.cpp: mutex
-# external_acp_backend: the prompt getter moved to a maya::scope nursery, so
-# the raw worker and its hand-written JoinGuard are gone. The mutex guards the
-# connection map.
-provider/external_acp_backend.cpp: mutex
-provider/acp_provider_adapter.cpp: mutex
 provider/chatgpt/codex_oauth.cpp: mutex
 provider/chatgpt/provider.cpp: mutex
 provider/chatgpt/responses.cpp: thread_local

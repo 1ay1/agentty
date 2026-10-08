@@ -33,15 +33,15 @@
 //
 // See docs/internal-acp-backends.md — this header is §6, step 5 of that plan.
 
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include <maya/runtime.hpp>
 
 #include <acp/agent.hpp>          // acp::AgentConnection, acp::ClientHandlers
 #include <acp/methods.hpp>        // acp::StopReason, PromptParams, NewSessionParams
@@ -165,29 +165,31 @@ private:
     std::optional<acp::SessionId> ensure_session_(const Request& req,
                                                   std::optional<TurnError>& err);
 
-    acp::AgentConnection* conn_ = nullptr;   // set by connect(); non-owning
+    // Set once by connect(), before the backend is shared or prompted.
+    acp::AgentConnection* conn_ = nullptr;
     ExternalAcpOptions    opts_;
 
-    mutable std::mutex          mu_;
-    std::optional<acp::SessionId> session_;
+    // The reused session id (reuse_session mode), empty until the first round.
+    maya::guarded<std::optional<std::string>> session_;
 
-    // The sink for the round currently in flight. session/update arrives on the
-    // transport's reader thread, so `prompt()` publishes the active sink here
-    // for the duration of the round and clears it on exit. A null sink drops
-    // updates (e.g. a late notification after the round settled) rather than
-    // crashing — matching the "emit terminal exactly once" invariant.
-    std::mutex                              sink_mu_;
-    std::function<void(acp::SessionUpdate)> active_sink_;
+    // The round in flight. session/update arrives on the transport's reader
+    // thread, which joins `inflight` before calling `sink`. prompt() takes the
+    // round on exit and waits for in-flight calls, so the sink (which points at
+    // prompt's stack) is never called after it returns. No round: updates drop.
+    struct Round {
+        std::function<void(acp::SessionUpdate)> sink;
+        maya::stop_group                        inflight;
+    };
+    maya::published<Round> round_;
 
-    // Terminal lifecycle state. terminal/create runs the command synchronously
-    // (via the delegate) and caches its result here under a generated id;
-    // terminal/output + terminal/wait_for_exit read it back; terminal/release
-    // drops it. Guarded by its own mutex — terminal callbacks arrive on the
-    // transport reader thread, independent of the round's sink.
+    // terminal/create runs the command synchronously (via the delegate) and
+    // keeps its result here under a fresh id until terminal/release.
     struct TerminalState { std::string output; int exit_code = 0; bool truncated = false; };
-    std::mutex                                       term_mu_;
-    std::unordered_map<std::string, TerminalState>   terminals_;
-    std::uint64_t                                    next_terminal_id_ = 1;
+    struct Terminals {
+        std::unordered_map<std::string, TerminalState> by_id;
+        std::uint64_t                                  next_id = 1;
+    };
+    maya::guarded<Terminals> terminals_;
 };
 
 // ── Turn-level StopReason mapping (pure, testable) ───────────────────────────

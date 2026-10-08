@@ -225,13 +225,13 @@ ExternalAcpBackend::ExternalAcpBackend(ExternalAcpOptions opts)
     : opts_(std::move(opts)) {}
 
 void ExternalAcpBackend::connect(acp::AgentConnection& conn) noexcept {
-    std::lock_guard<std::mutex> lk(mu_);
     conn_ = &conn;
 }
 
 std::string ExternalAcpBackend::session_id() const {
-    std::lock_guard<std::mutex> lk(mu_);
-    return session_ ? session_->value : std::string{};
+    return session_.read([](const std::optional<std::string>& s) {
+        return s.value_or(std::string{});
+    });
 }
 
 // ── Inbound callback wiring ──────────────────────────────────────────────────
@@ -244,8 +244,9 @@ acp::ClientHandlers ExternalAcpBackend::make_handlers() {
 
     // session/update → normalized SessionUpdate to the round's sink.
     h.on_session_update = [this](const acp::SessionUpdateMsg& m) {
-        std::lock_guard<std::mutex> lk(sink_mu_);
-        if (active_sink_) active_sink_(m.update);
+        auto round = round_.current();
+        if (!round) return;
+        if (auto member = round->inflight.join()) round->sink(m.update);
     };
 
     // request_permission → delegate decides; default allow. We answer with the
@@ -306,12 +307,11 @@ acp::ClientHandlers ExternalAcpBackend::make_handlers() {
                                                    : std::nullopt;
             auto r = opts_.delegate.run_terminal(p.command, p.args, cwd);
 
-            std::string id;
-            {
-                std::lock_guard<std::mutex> lk(term_mu_);
-                id = "term_" + std::to_string(next_terminal_id_++);
-                terminals_[id] = TerminalState{std::move(r.output), r.exit_code, r.truncated};
-            }
+            std::string id = terminals_.with([](Terminals& t, TerminalState st) {
+                std::string tid = "term_" + std::to_string(t.next_id++);
+                t.by_id[tid] = std::move(st);
+                return tid;
+            }, TerminalState{std::move(r.output), r.exit_code, r.truncated});
             acp::CreateTerminalResult res;
             res.terminalId = std::move(id);
             return res;
@@ -320,13 +320,16 @@ acp::ClientHandlers ExternalAcpBackend::make_handlers() {
         h.on_terminal_output =
             [this](const acp::TerminalOutputParams& p) -> acp::TerminalOutputResult {
             acp::TerminalOutputResult res;
-            std::lock_guard<std::mutex> lk(term_mu_);
-            auto it = terminals_.find(p.terminalId);
-            if (it != terminals_.end()) {
-                res.output    = it->second.output;
-                res.truncated = it->second.truncated;
+            const auto term = terminals_.read([](const Terminals& t, std::string id) {
+                auto it = t.by_id.find(id);
+                return it == t.by_id.end() ? std::optional<TerminalState>{}
+                                           : std::optional<TerminalState>{it->second};
+            }, p.terminalId);
+            if (term) {
+                res.output    = term->output;
+                res.truncated = term->truncated;
                 acp::TerminalExitStatus st;
-                st.exitCode = it->second.exit_code;
+                st.exitCode = term->exit_code;
                 res.exitStatus = st;   // command already ran to completion
             }
             return res;
@@ -335,9 +338,11 @@ acp::ClientHandlers ExternalAcpBackend::make_handlers() {
         h.on_terminal_wait_for_exit =
             [this](const acp::TerminalWaitForExitParams& p) -> acp::TerminalWaitForExitResult {
             acp::TerminalExitStatus st;
-            std::lock_guard<std::mutex> lk(term_mu_);
-            auto it = terminals_.find(p.terminalId);
-            if (it != terminals_.end()) st.exitCode = it->second.exit_code;
+            st.exitCode = terminals_.read([](const Terminals& t, std::string id) {
+                auto it = t.by_id.find(id);
+                return it == t.by_id.end() ? std::optional<int>{}
+                                           : std::optional<int>{it->second.exit_code};
+            }, p.terminalId);
             return st;   // already exited (synchronous executor)
         };
 
@@ -349,8 +354,8 @@ acp::ClientHandlers ExternalAcpBackend::make_handlers() {
 
         h.on_terminal_release =
             [this](const acp::TerminalReleaseParams& p) -> acp::Unit {
-            std::lock_guard<std::mutex> lk(term_mu_);
-            terminals_.erase(p.terminalId);
+            terminals_.with([](Terminals& t, std::string id) { t.by_id.erase(id); },
+                            p.terminalId);
             return {};
         };
     }
@@ -362,8 +367,10 @@ acp::ClientHandlers ExternalAcpBackend::make_handlers() {
 std::optional<acp::SessionId>
 ExternalAcpBackend::ensure_session_(const Request& req, std::optional<TurnError>& err) {
     (void)req;
-    std::lock_guard<std::mutex> lk(mu_);
-    if (opts_.reuse_session && session_) return session_;
+    if (opts_.reuse_session) {
+        auto have = session_.read([](const std::optional<std::string>& s) { return s; });
+        if (have) return acp::SessionId{std::move(*have)};
+    }
     if (conn_ == nullptr) {
         err = TurnError{"ExternalAcpBackend: connect() not called (no connection bound)"};
         return std::nullopt;
@@ -376,8 +383,13 @@ ExternalAcpBackend::ensure_session_(const Request& req, std::optional<TurnError>
     try {
         auto fut = conn_->session_new(np);
         acp::NewSessionResult r = fut.get();
-        if (opts_.reuse_session) session_ = r.sessionId;
-        return r.sessionId;
+        if (!opts_.reuse_session) return r.sessionId;
+        // Rounds are one at a time, but if two ever raced, the first id wins.
+        auto kept = session_.with([](std::optional<std::string>& s, std::string id) {
+            if (!s) s = std::move(id);
+            return *s;
+        }, r.sessionId.value);
+        return acp::SessionId{std::move(kept)};
     } catch (const std::exception& e) {
         err = TurnError{std::string("session/new failed: ") + e.what()};
         return std::nullopt;
@@ -397,16 +409,16 @@ TurnResult ExternalAcpBackend::prompt(const Request&              req,
     // reader thread) reach it. Cleared on scope exit — a late update becomes a
     // no-op, never a second terminal event.
     {
-        std::lock_guard<std::mutex> lk(sink_mu_);
-        active_sink_ = [&sink](acp::SessionUpdate su) { sink(std::move(su)); };
+        auto round = std::make_shared<Round>();
+        round->sink = [&sink](acp::SessionUpdate su) { sink(std::move(su)); };
+        round_.publish(std::move(round));
     }
-    struct SinkGuard {
+    struct RoundGuard {
         ExternalAcpBackend* self;
-        ~SinkGuard() {
-            std::lock_guard<std::mutex> lk(self->sink_mu_);
-            self->active_sink_ = nullptr;
+        ~RoundGuard() {
+            if (auto r = self->round_.take()) (void)r->inflight.stop_and_wait(std::nullopt);
         }
-    } sink_guard{this};
+    } round_guard{this};
 
     // Fire the prompt.
     acp::PromptParams pp;
