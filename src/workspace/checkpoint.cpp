@@ -13,11 +13,12 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/subprocess.hpp"
 
+#include <maya/runtime.hpp>
+
 #include <algorithm>
 #include <cstdio>
 #include <atomic>
 #include <filesystem>
-#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -136,10 +137,12 @@ bool ok(const util::SubprocessResult& r) {
 // Scratch index path inside the git dir. Seeded from a COPY of the real
 // index so `add -A` only re-hashes files whose stat info changed —
 // without the seed, every checkpoint would re-hash the entire worktree.
-// Serialized by a process-wide mutex: checkpoint creation runs on a BG
-// worker while restore runs on the UI thread, and two concurrent users
-// of one scratch index would corrupt it.
-std::mutex g_scratch_mu;
+// Checkpoint creation runs on a BG worker while restore runs on the UI
+// thread, and two users of one scratch index would corrupt it. So the index
+// is only reachable through scratch().with: the helpers below take the
+// ScratchIndex token, which only exists while the lock is held.
+struct ScratchIndex {};
+maya::guarded<ScratchIndex>& scratch() { static maya::guarded<ScratchIndex> s; return s; }
 
 std::string prepare_scratch_index() {
     const fs::path idx = fs::path(repo().git_dir) / "agentty-checkpoint-index";
@@ -274,6 +277,27 @@ void prewarm_repo_info() {
     g_repo_ready.store(true, std::memory_order_release);
 }
 
+namespace {
+bool create_checkpoint_locked(ScratchIndex& si, const std::string& id);
+
+// Tree id of the current worktree, built in the scratch index (seeded from
+// the real one so `add -A` only re-hashes changed files). nullopt on failure.
+std::optional<std::string> worktree_tree(ScratchIndex&) {
+    const std::string idx = prepare_scratch_index();
+    // --ignore-errors: an unreadable file (perms, vanished mid-scan) degrades
+    // to "not in the tree", not a failure.
+    if (!ok(run_git_scratch(idx, {"git", "-C", repo().root, "add", "-A",
+                                  "--ignore-errors"}))) {
+        drop_scratch_index(idx);
+        return std::nullopt;
+    }
+    auto tree = run_git_scratch(idx, {"git", "-C", repo().root, "write-tree"});
+    drop_scratch_index(idx);
+    if (!ok(tree)) return std::nullopt;
+    return chomp(tree.output);
+}
+} // namespace
+
 CheckpointDiff checkpoint_summary(const std::string& id) {
     CheckpointDiff out;
     if (!repo().in_repo || id.empty()) return out;
@@ -290,17 +314,9 @@ CheckpointDiff checkpoint_summary(const std::string& id) {
     // checkpoint tree against it. Doing it tree-vs-tree (not
     // tree-vs-worktree) keeps the untracked/new-file accounting identical
     // to what a rewind would actually revert.
-    std::lock_guard<std::mutex> lk(g_scratch_mu);
-    const std::string idx = prepare_scratch_index();
-    if (!ok(run_git_scratch(idx, {"git", "-C", repo().root, "add", "-A",
-                                  "--ignore-errors"}))) {
-        drop_scratch_index(idx);
-        return out;
-    }
-    auto tree = run_git_scratch(idx, {"git", "-C", repo().root, "write-tree"});
-    drop_scratch_index(idx);
-    if (!ok(tree)) return out;
-    const std::string cur_tree = chomp(tree.output);
+    const auto tree = scratch().with([](ScratchIndex& si) { return worktree_tree(si); });
+    if (!tree) return out;
+    const std::string& cur_tree = *tree;
 
     // --numstat: one line per changed file, "<added>\t<deleted>\t<path>".
     // Binary files report "-\t-\t<path>" — counted as a changed file, no
@@ -336,21 +352,17 @@ CheckpointDiff checkpoint_summary(const std::string& id) {
 
 bool create_checkpoint(const std::string& id) {
     if (!repo().in_repo || id.empty()) return false;
-    std::lock_guard<std::mutex> lk(g_scratch_mu);
+    // The whole create (commit, ref, prune) stays serialized, as before.
+    return scratch().with([](ScratchIndex& si, std::string cid) {
+        return create_checkpoint_locked(si, cid);
+    }, id);
+}
 
-    const std::string idx = prepare_scratch_index();
-    // Stage EVERYTHING (tracked changes + new files, deletions included)
-    // into the scratch index. --ignore-errors: an unreadable file (perms,
-    // vanished mid-scan) should degrade to "not in the snapshot", not
-    // abort the checkpoint.
-    if (!ok(run_git_scratch(idx, {"git", "-C", repo().root, "add", "-A",
-                                  "--ignore-errors"}))) {
-        drop_scratch_index(idx);
-        return false;
-    }
-    auto tree = run_git_scratch(idx, {"git", "-C", repo().root, "write-tree"});
-    drop_scratch_index(idx);
-    if (!ok(tree)) return false;
+namespace {
+bool create_checkpoint_locked(ScratchIndex& si, const std::string& id) {
+    // Stage EVERYTHING (tracked changes + new files, deletions included).
+    const auto tree = worktree_tree(si);
+    if (!tree) return false;
 
     // Parentless commit: restore never walks history, and no parent
     // means dropping the ref makes the whole snapshot collectable.
@@ -358,7 +370,7 @@ bool create_checkpoint(const std::string& id) {
     // user hasn't configured user.name/email yet.
     auto commit = run_git({"-c", "user.name=agentty",
                            "-c", "user.email=checkpoint@agentty",
-                           "commit-tree", chomp(tree.output),
+                           "commit-tree", *tree,
                            "-m", "agentty checkpoint " + id});
     if (!ok(commit)) return false;
 
@@ -368,6 +380,7 @@ bool create_checkpoint(const std::string& id) {
     prune_old_checkpoints();
     return true;
 }
+} // namespace
 
 bool checkpoint_exists(const std::string& id) {
     if (!repo().in_repo || id.empty()) return false;
@@ -395,19 +408,20 @@ bool restore_checkpoint(const std::string& id, std::string* error) {
     std::vector<std::string> now;
     if (!current_paths(now)) return fail("failed to list current files");
 
-    std::lock_guard<std::mutex> lk(g_scratch_mu);
-
     // Rewrite every snapshotted file from the checkpoint tree via a
     // scratch index: read-tree populates it, checkout-index -a -f
     // force-writes the files. The real index and HEAD stay untouched —
     // `git status` afterwards shows the restored state as ordinary
     // working-tree changes, which is exactly what the user expects.
-    const std::string idx = prepare_scratch_index();
-    bool wrote =
-        ok(run_git_scratch(idx, {"git", "-C", repo().root, "read-tree", commit}))
-        && ok(run_git_scratch(idx, {"git", "-C", repo().root,
-                                    "checkout-index", "-a", "-f"}));
-    drop_scratch_index(idx);
+    const bool wrote = scratch().with([](ScratchIndex&, std::string c) {
+        const std::string idx = prepare_scratch_index();
+        const bool w =
+            ok(run_git_scratch(idx, {"git", "-C", repo().root, "read-tree", c}))
+            && ok(run_git_scratch(idx, {"git", "-C", repo().root,
+                                        "checkout-index", "-a", "-f"}));
+        drop_scratch_index(idx);
+        return w;
+    }, commit);
     if (!wrote) return fail("failed to write checkpoint files");
 
     // Delete files that exist now but weren't in the snapshot — the

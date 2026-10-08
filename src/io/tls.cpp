@@ -4,7 +4,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
+#include <utility>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -16,6 +16,8 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
+
+#include <maya/runtime.hpp>
 
 #if defined(__APPLE__)
 #  include <Security/Security.h>
@@ -59,18 +61,51 @@ constexpr unsigned char kAlpn[] = {
 // Without both halves, every dial pays a full handshake — resumption never
 // fires. We keep one most-recent SSL_SESSION per SNI host in a tiny
 // process-wide map; a single-endpoint client (api.anthropic.com) only ever
-// has a couple of distinct hosts, so a flat map under a mutex is ample.
+// has a couple of distinct hosts, so a flat guarded map is ample.
 //
 // Resumption to api.anthropic.com is a 1-RTT (TLS 1.3) abbreviated handshake
 // instead of the full 2-RTT exchange — ~30-150 ms saved on every fresh dial
 // after the connection-pool idle TTL evicts the live socket.
 // --------------------------------------------------------------------------
-std::mutex&                                          sess_mu() {
-    static std::mutex m; return m;
-}
-std::unordered_map<std::string, SSL_SESSION*>&       sess_map() {
-    static auto* m = new std::unordered_map<std::string, SSL_SESSION*>{};
-    return *m;
+// One owned reference to an SSL_SESSION. Move-only; frees its ref on drop.
+class Ticket {
+public:
+    Ticket() = default;
+    explicit Ticket(SSL_SESSION* s) noexcept : s_(s) {}
+    Ticket(Ticket&& o) noexcept : s_(std::exchange(o.s_, nullptr)) {}
+    Ticket& operator=(Ticket&& o) noexcept {
+        if (this != &o) { reset(); s_ = std::exchange(o.s_, nullptr); }
+        return *this;
+    }
+    Ticket(const Ticket&) = delete;
+    Ticket& operator=(const Ticket&) = delete;
+    ~Ticket() { reset(); }
+
+    // A second owned reference to the same session.
+    [[nodiscard]] Ticket share() const noexcept {
+        if (s_) SSL_SESSION_up_ref(s_);
+        return Ticket{s_};
+    }
+    [[nodiscard]] SSL_SESSION* get() const noexcept { return s_; }
+
+private:
+    void reset() noexcept { if (s_) SSL_SESSION_free(s_); s_ = nullptr; }
+    SSL_SESSION* s_ = nullptr;
+};
+} // namespace
+} // namespace agentty::tls
+
+// A Ticket owns its own reference (OpenSSL session refcounts are atomic), so
+// it can move between threads.
+MAYA_SENDABLE(agentty::tls::Ticket);
+
+namespace agentty::tls {
+namespace {
+using Tickets = std::unordered_map<std::string, Ticket>;
+// Leaked on purpose: freeing sessions at exit can race OpenSSL's own teardown.
+maya::guarded<Tickets>& tickets() {
+    static auto* t = new maya::guarded<Tickets>;
+    return *t;
 }
 
 // ex_data slot carrying the SNI host string pointer through to new_session_cb
@@ -87,11 +122,9 @@ int new_session_cb(SSL* ssl, SSL_SESSION* sess) {
     const auto* host = static_cast<const std::string*>(
         SSL_get_ex_data(ssl, sni_ex_index()));
     if (!host) return 0;   // not ours to keep — let OpenSSL free it
-    std::lock_guard<std::mutex> lk(sess_mu());
-    auto& m = sess_map();
-    auto it = m.find(*host);
-    if (it != m.end() && it->second) SSL_SESSION_free(it->second);
-    m[*host] = sess;       // we now own one ref (cb gives us a ref to keep)
+    // We now own one ref (the cb hands us a ref to keep); the old one drops.
+    tickets().with([](Tickets& m, std::string h, Ticket t) { m[h] = std::move(t); },
+                   *host, Ticket{sess});
     return 1;
 }
 
@@ -461,12 +494,13 @@ SSL* wrap_client(int fd, std::string_view sni_host) {
     // is freed in free_ssl on the happy path, or by ~Building on failure.
     building.host = new std::string{host};
     SSL_set_ex_data(ssl, sni_ex_index(), building.host);
-    {
-        std::lock_guard<std::mutex> lk(sess_mu());
-        auto& m = sess_map();
-        if (auto it = m.find(host); it != m.end() && it->second)
-            SSL_set_session(ssl, it->second);
-    }
+    // A shared ref, so a concurrent replace can't free it mid-attach.
+    // SSL_set_session takes its own ref; ours drops at scope end.
+    if (auto t = tickets().read([](const Tickets& m, std::string h) {
+            auto it = m.find(h);
+            return it == m.end() ? Ticket{} : it->second.share();
+        }, std::string{host}); t.get())
+        SSL_set_session(ssl, t.get());
 
     if (SSL_set_fd(ssl, fd) != 1) {
         return nullptr;   // ~Building frees host key + SSL

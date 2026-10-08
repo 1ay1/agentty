@@ -72,7 +72,7 @@ util/modelsdev.cpp: atomic
 # maya::guarded. thread_local is the turn's cancel token; const_cast is the
 # OpenSSL C API.
 io/http.cpp: thread_local const_cast
-io/tls.cpp: mutex const_cast
+io/tls.cpp: const_cast
 
 # ── Persistence and credentials ──────────────────────────────────────────
 # Not reducer code: these run on a worker a task already put them on, or on
@@ -162,7 +162,7 @@ workspace/files.cpp: atomic
 # they were filling: intermittent abort on Linux, 0xC0000005 on Windows.
 # A mutex would be wrong (teardown must not block on a subprocess spawn)
 # and there is no kernel in scope for guarded<T>.
-workspace/checkpoint.cpp: mutex atomic
+workspace/checkpoint.cpp: atomic
 
 # ── Providers: transports and their shared state ─────────────────────────
 provider/chatgpt/responses.cpp: thread_local
