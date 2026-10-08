@@ -20,6 +20,7 @@
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/smart_mode.hpp"
 #include "agentty/provider/provider.hpp"
+#include "agentty/util/sendable.hpp"
 
 namespace agentty::tools::subagent {
 
@@ -268,3 +269,9 @@ std::size_t shutdown_running(std::chrono::milliseconds grace
 [[nodiscard]] std::string_view agent_origin(std::string_view name) noexcept;
 
 } // namespace agentty::tools::subagent
+
+// The stream seams are std::function, which jaal can't see inside. They
+// are set at install and called, never mutated, after; the callables they
+// wrap capture shared, thread-safe provider handles (main.cpp). Moving a
+// Config to another thread therefore shares nothing unsafe.
+MAYA_SENDABLE(agentty::tools::subagent::Config);

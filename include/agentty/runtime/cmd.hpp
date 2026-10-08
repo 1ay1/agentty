@@ -30,32 +30,16 @@
 
 #include "agentty/domain/conversation.hpp"   // ImageContent
 #include "agentty/domain/id.hpp"
+#include "agentty/util/sendable.hpp"       // Id<Tag>, fs::path, EffectSet
 #include "agentty/io/http.hpp"               // http::CancelTokenPtr
 #include "agentty/provider/selection.hpp"    // provider::Selection
 #include "agentty/runtime/msg.hpp"
 #include "agentty/runtime/store_fx.hpp"   // save_thread, write_file, …
 
 // ── agentty's value types, as jaal sees them ──────────────────────────────
-// jaal's Sendable walks a type's fields to prove a Msg is safe to hand to
-// another thread (D7). Id<Tag> is a strong newtype around one std::string,
-// but it has user-declared constructors, so it isn't an aggregate and jaal
-// can't look inside — it refuses rather than guess:
-//
-//   it contains 'agentty::Id<agentty::ToolCallIdTag>', a class jaal can't
-//   see inside; if it owns everything it holds, specialise
-//   jaal::sendable_opt_in for it
-//
-// It does own everything it holds: one std::string, by value, no views and
-// no pointers. So it is Sendable, and Frozen too — nothing reachable
-// through a const Id can change.
-//
-// Declared HERE rather than in domain/id.hpp so the domain header stays
-// free of jaal: the same rule maya follows (host/interop.hpp), and the same
-// reason — a value type shouldn't know which runtime is carrying it.
-template <class Tag>
-MAYA_SENDABLE_T(agentty::Id<Tag>);
-template <class Tag>
-MAYA_FROZEN_T(agentty::Id<Tag>);
+// Id<Tag>, fs::path and EffectSet are opted in by util/sendable.hpp, which
+// any guarded value can include. The ones below need heavier headers, so
+// they live with the Msg tree that carries them.
 
 // ImageContent owns its bytes (LazyBytes) and a shared base64 cell, and
 // LazyBytes owns a content-addressed Source plus the bytes it resolves to.

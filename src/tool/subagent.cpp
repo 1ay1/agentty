@@ -1,10 +1,10 @@
 #include "agentty/tool/subagent.hpp"
 #include "agentty/util/teardown.hpp"
 
-#include <maya/runtime.hpp>
+#include "agentty/util/sendable.hpp"   // maya::guarded + the opt-ins Live needs
 
 #include <algorithm>
-#include <mutex>
+#include <mutex>   // std::once_flag
 #include <optional>
 #include <stop_token>
 #include <vector>
@@ -12,54 +12,58 @@
 namespace agentty::tools::subagent {
 
 namespace {
-Config     g_cfg;
-std::mutex g_mu;
+// The installed config, behind one guarded value. A whole Config is
+// copied out by current() and replaced by install(); the setters change one
+// field at a time as the user switches.
+maya::guarded<Config>& cfg() {
+    static maya::guarded<Config> c;
+    return c;
+}
+
 // Per-thread nesting depth. Each subagent runs synchronously on its own
 // (task_isolated) worker thread, so thread_local correctly scopes the
 // depth to one chain of nested subagents.
 thread_local int g_depth = 0;
 } // namespace
 
-void install(Config cfg) {
-    cfg.installed = true;
-    std::lock_guard lk(g_mu);
-    g_cfg = std::move(cfg);
+void install(Config c) {
+    c.installed = true;
+    cfg().with([](Config& k, Config v) { k = std::move(v); }, std::move(c));
 }
 
 Config current() {
-    std::lock_guard lk(g_mu);
-    return g_cfg;
+    return cfg().read([](const Config& c) { return c; });
 }
 
 void set_auth(auth::AuthHeader auth) {
-    std::lock_guard lk(g_mu);
-    if (!g_cfg.installed) return;
-    g_cfg.auth = std::move(auth);
+    cfg().with([](Config& c, auth::AuthHeader a) {
+        if (c.installed) c.auth = std::move(a);
+    }, std::move(auth));
 }
 
 void set_model(std::string model) {
     if (model.empty()) return;
-    std::lock_guard lk(g_mu);
     // Only meaningful once a config exists; leave `installed` untouched.
-    g_cfg.model = std::move(model);
+    cfg().with([](Config& c, std::string m) { c.model = std::move(m); },
+               std::move(model));
 }
 
 void set_candidates(std::vector<ModelInfo> candidates) {
-    std::lock_guard lk(g_mu);
-    if (!g_cfg.installed) return;
-    g_cfg.candidates = std::move(candidates);
+    cfg().with([](Config& c, std::vector<ModelInfo> v) {
+        if (c.installed) c.candidates = std::move(v);
+    }, std::move(candidates));
 }
 
 void set_smart(smart::RoleConfig smart) {
-    std::lock_guard lk(g_mu);
-    if (!g_cfg.installed) return;
-    g_cfg.smart = std::move(smart);
+    cfg().with([](Config& c, smart::RoleConfig v) {
+        if (c.installed) c.smart = std::move(v);
+    }, std::move(smart));
 }
 
 void set_provider(std::string provider) {
-    std::lock_guard lk(g_mu);
-    if (!g_cfg.installed) return;
-    g_cfg.provider = std::move(provider);
+    cfg().with([](Config& c, std::string p) {
+        if (c.installed) c.provider = std::move(p);
+    }, std::move(provider));
 }
 
 int current_depth() noexcept { return g_depth; }

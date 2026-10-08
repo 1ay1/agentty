@@ -14,7 +14,17 @@
 
 #include <maya/runtime.hpp>
 
+#include "agentty/domain/id.hpp"
 #include "agentty/tool/effects.hpp"
+
+// Id<Tag> is a strong newtype around ONE std::string, by value, no views and
+// no pointers. jaal can't look inside only because it has user-declared
+// constructors. So it is Sendable, and Frozen too: nothing reachable
+// through a const Id can change.
+template <class Tag>
+MAYA_SENDABLE_T(agentty::Id<Tag>);
+template <class Tag>
+MAYA_FROZEN_T(agentty::Id<Tag>);
 
 // std::filesystem::path owns one string (its native form); a moved path
 // shares nothing with the source.
