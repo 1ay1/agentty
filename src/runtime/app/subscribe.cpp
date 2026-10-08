@@ -1486,6 +1486,12 @@ Sub subscribe(const Model& m) {
     // its caret anchor and the real cursor parks + hides.
     auto focus_sub = Sub::on(maya::on_focus{}, 
         [](const maya::FocusEvent& fe) -> Msg { return TerminalFocus{fe.focused}; });
+    // Terminal size: the host reports it at attach and on every SIGWINCH, so
+    // the reducers' row math reads the Model, never the tty.
+    auto resize_sub = Sub::on(maya::on_resize{},
+        [](const maya::ResizeEvent& re) -> Msg {
+            return TerminalResized{re.width.value, re.height.value};
+        });
 
     // ── The login workers ────────────────────────────────────────────
     //
@@ -1520,11 +1526,12 @@ Sub subscribe(const Model& m) {
     if (animation_demand(m)) {
         auto tick = Sub::every(streaming_tick_period(m.env), Tick{});
         return Sub::batch(std::move(key_sub), std::move(paste_sub),
-                               std::move(focus_sub), std::move(tick),
-                               std::move(login_sub));
+                               std::move(focus_sub), std::move(resize_sub),
+                               std::move(tick), std::move(login_sub));
     }
     return Sub::batch(std::move(key_sub), std::move(paste_sub),
-                           std::move(focus_sub), std::move(login_sub));
+                           std::move(focus_sub), std::move(resize_sub),
+                           std::move(login_sub));
 }
 
 // Keep this in step with subscribe() above: every field it reads, and every

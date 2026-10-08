@@ -321,6 +321,12 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             m.ui.terminal_focused = e.focused;
             return Cmd::none();
         },
+        [&](TerminalResized& e) -> Cmd {
+            // A transient 0 from a detached tty keeps the last good value.
+            if (e.cols > 0) m.ui.term_cols = e.cols;
+            if (e.rows > 0) m.ui.term_rows = e.rows;
+            return Cmd::none();
+        },
         [&](ToggleRetrievedExpanded& e) -> Cmd {
             // Flip the addressed retrieved-context card between its compact
             // snippet form and full-passage expansion. Frozen-prefix gate,

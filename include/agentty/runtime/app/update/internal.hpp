@@ -279,10 +279,12 @@ void restyle_sealed_turns(Model& m);
 // nothing was in native scrollback, and reset_inline()'s \x1b[3J had just
 // wiped whatever was. Exported so rehydrate_scrollback_test can pin the
 // relationship at a fixed row count.
+// The Model overloads read the terminal size the host last reported
+// (Model::ui.term_rows); the int ones take it explicitly, for tests.
 [[nodiscard]] std::size_t frozen_row_budget(int term_rows);
-[[nodiscard]] std::size_t frozen_row_budget();
+[[nodiscard]] std::size_t frozen_row_budget(const Model& m);
 [[nodiscard]] std::size_t rehydrate_row_budget(int term_rows);
-[[nodiscard]] std::size_t rehydrate_row_budget();
+[[nodiscard]] std::size_t rehydrate_row_budget(const Model& m);
 
 // Settle one Assistant message's StreamingMarkdown widget: feed the
 // final bytes, finish() (flush tail → prefix, flip live_ off), apply the

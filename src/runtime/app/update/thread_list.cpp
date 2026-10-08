@@ -453,18 +453,14 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             auto t2 = std::chrono::steady_clock::now();
             release_to_kernel();
             stamp("release_to_kernel", t2);
-            {
-                const auto _ts = maya::platform::query_terminal_size(
-                    maya::platform::stdout_handle());
-                AGT_LOG(Perf, Debug, "thread.load_done",
-                        "msgs={} frozen={} frozen_rows={} "
-                        "frozen_through={} term_h={}",
-                        m.d.current.messages.size(),
-                        m.ui.frozen.size(),
-                        m.ui.frozen.row_total(),
-                        m.ui.frozen_through,
-                        _ts.height.value);
-            }
+            AGT_LOG(Perf, Debug, "thread.load_done",
+                    "msgs={} frozen={} frozen_rows={} "
+                    "frozen_through={} term_h={}",
+                    m.d.current.messages.size(),
+                    m.ui.frozen.size(),
+                    m.ui.frozen.row_total(),
+                    m.ui.frozen_through,
+                    m.ui.term_rows);
             // Wholesale model swap into the loaded thread. Same
             // rationale as NewThread above: the previous thread's
             // overflow rows are committed to native scrollback and only

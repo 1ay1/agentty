@@ -62,24 +62,20 @@ namespace agentty::app::detail {
 
 namespace {
 
-// Single source of truth for the live terminal geometry. ONE TIOCGWINSZ
-// ioctl returns both axes; every row-math / trim caller reads through
-// this so width and height can never disagree across a frame. The
-// row estimate (estimate_msg_rows) divides byte counts by `cols`, and
-// the trims size their keep-margins off `rows` — both must reflect the
+// Single source of truth for the live terminal geometry: the Model, which
+// the host's resize subscription keeps current (TerminalResized). Both axes
+// come from one report, so width and height can never disagree within a
+// fold. The row estimate (estimate_msg_rows) divides byte counts by `cols`,
+// and the trims size their keep-margins off `rows` — both must reflect the
 // SAME terminal state the renderer laid the canvas out against, or the
 // "provably above the viewport" trim proof drifts (under-counted rows
 // → drop an on-screen entry → re-emit committed scrollback shifted =
-// the duplication ghost). Falls back to a sane 80x40 when the ioctl
-// fails (piped output, detached tty).
+// the duplication ghost). A reducer reading the Model instead of the tty
+// is also what makes a replay see the size the original run saw.
 struct TermDims { int cols; int rows; };
-TermDims term_dims() {
-    const auto sz = maya::platform::query_terminal_size(
-        maya::platform::stdout_handle());
-    return TermDims{
-        sz.width.value  > 0 ? sz.width.value  : 80,
-        sz.height.value > 0 ? sz.height.value : 40,
-    };
+TermDims term_dims(const Model& m) {
+    return TermDims{m.ui.term_cols > 0 ? m.ui.term_cols : 80,
+                    m.ui.term_rows > 0 ? m.ui.term_rows : 40};
 }
 
 // Effective wrap width used by the row estimate, derived from an explicit
@@ -88,13 +84,12 @@ TermDims term_dims() {
 // over-trim). The renderer reserves a couple of columns for the turn rail
 // / gutter, so subtract a small margin. Callers that already hold a
 // term_dims() snapshot pass its .cols so every row-math call in one trim
-// reflects ONE terminal state (the proof depends on it); the no-arg
-// overload queries fresh for the one-shot freeze paths.
+// reflects ONE terminal state (the proof depends on it).
 int estimate_wrap_cols(int term_cols) {
     // Rail + padding eat ~4 columns of real content width.
     return std::max(16, term_cols - 4);
 }
-int estimate_wrap_cols() { return estimate_wrap_cols(term_dims().cols); }
+int estimate_wrap_cols(const Model& m) { return estimate_wrap_cols(term_dims(m).cols); }
 
 // measure_cols is GONE. It reconstructed the EXACT content width a
 // frozen block is laid out at (term_cols - 4: AppLayout's padding(1)
@@ -133,7 +128,7 @@ std::size_t frozen_row_budget(int term_rows) {
     // resize while still bounding the canvas.
     return static_cast<std::size_t>(std::max(48, term_rows * 3));
 }
-std::size_t frozen_row_budget() { return frozen_row_budget(term_dims().rows); }
+std::size_t frozen_row_budget(const Model& m) { return frozen_row_budget(term_dims(m).rows); }
 
 // How much transcript a RESUME paints, as opposed to how much stays live.
 //
@@ -173,7 +168,7 @@ std::size_t rehydrate_row_budget(int term_rows) {
     const int rows = term_rows > 0 ? term_rows : 24;
     return static_cast<std::size_t>(std::max(1200, rows * 20));
 }
-std::size_t rehydrate_row_budget() { return rehydrate_row_budget(term_dims().rows); }
+std::size_t rehydrate_row_budget(const Model& m) { return rehydrate_row_budget(term_dims(m).rows); }
 
 namespace {
 
@@ -484,8 +479,8 @@ std::size_t estimate_msg_rows(const Message& mm, int cols) {
 // distinctly rather than overloaded: an anonymous-namespace overload would
 // SHADOW the external two-arg one for every later caller in this file.
 namespace {
-std::size_t estimate_msg_rows_auto(const Message& mm) {
-    return estimate_msg_rows(mm, estimate_wrap_cols());
+std::size_t estimate_msg_rows_auto(const Model& m, const Message& mm) {
+    return estimate_msg_rows(mm, estimate_wrap_cols(m));
 }
 
 // Estimated rows for the run messages[from..to) that collapse into
@@ -502,7 +497,7 @@ std::size_t estimate_run_rows(const Model& m, std::size_t from,
     return rows;
 }
 std::size_t estimate_run_rows(const Model& m, std::size_t from, std::size_t to) {
-    return estimate_run_rows(m, from, to, estimate_wrap_cols());
+    return estimate_run_rows(m, from, to, estimate_wrap_cols(m));
 }
 
 // ── Seal / trim primitives (thin wrappers over maya::ScrollbackLedger) ─
@@ -560,7 +555,7 @@ void drop_leading_separators(Model& m) {
 void collapse_oversized_offscreen_entries(Model& m) {
     if (!m.env.frozen_collapse)          return;
     if (m.ui.frozen.size() < 2)          return;  // only the current result
-    const std::size_t budget = frozen_row_budget();
+    const std::size_t budget = frozen_row_budget(m);
     if (m.ui.frozen.row_total() <= budget) return;  // already fits
 
     // Trailing non-separator entry = the current result; never collapse it.
@@ -714,7 +709,7 @@ void freeze_range(Model& m, std::size_t from, std::size_t to,
             // text+tools unit the run builder already lays out
             // independently, so N blocks paint the same rows as one.
             const std::size_t run_rows = estimate_run_rows(m, i, run_end);
-            const std::size_t split_at = frozen_row_budget();
+            const std::size_t split_at = frozen_row_budget(m);
 
             if (split_oversized_runs && run_rows > split_at && (run_end - i) > 1) {
                 int turn_num = m.ui.frozen_turn + 1;
@@ -868,7 +863,7 @@ void rehydrate_frozen(Model& m) {
     // the budget, cut INSIDE it at sub-turn granularity (keep the
     // trailing sub-turns that fit) so even a giant final auto-pilot run
     // resumes fast.
-    const std::size_t kRehydrateRowBudget = rehydrate_row_budget();
+    const std::size_t kRehydrateRowBudget = rehydrate_row_budget(m);
     std::size_t row_budget = 0;
     std::size_t start      = total;
     std::size_t cursor     = total;
@@ -881,7 +876,7 @@ void rehydrate_frozen(Model& m) {
         }
         std::size_t run_rows = 0;
         for (std::size_t k = j; k < cursor; ++k)
-            run_rows += estimate_msg_rows_auto(msgs[k]);
+            run_rows += estimate_msg_rows_auto(m, msgs[k]);
 
         // Cut INSIDE a run that would overshoot what is left of the
         // budget, keeping its newest sub-turns.
@@ -908,7 +903,7 @@ void rehydrate_frozen(Model& m) {
             std::size_t kept = 0;
             std::size_t cut  = cursor;
             for (std::size_t k = cursor; k-- > j; ) {
-                kept += estimate_msg_rows_auto(msgs[k]);
+                kept += estimate_msg_rows_auto(m, msgs[k]);
                 cut = k;
                 if (kept >= remaining) break;
             }
@@ -996,7 +991,7 @@ Cmd trim_frozen_if_oversized(Model& m) {
     // overflowed live), and the full message history is intact on
     // disk — only the in-app re-render window shrinks.
 
-    const std::size_t kFrozenMaxRows = frozen_row_budget();
+    const std::size_t kFrozenMaxRows = frozen_row_budget(m);
     constexpr std::size_t kFrozenMaxEntries = 120;
     // Retention floor — see the row-driven rationale above: keep
     // trailing blocks until they cover ~kFrozenMaxRows of recent work,
@@ -1046,7 +1041,7 @@ Cmd trim_frozen_if_oversized(Model& m) {
     if (drop == 0 && over_rows && m.ui.frozen.size() > 2) {
         const std::size_t first_rows = m.ui.frozen.block_rows(0);
         const std::size_t rest       = m.ui.frozen.row_total() - first_rows;
-        const auto dims = term_dims();
+        const auto dims = term_dims(m);
         const std::size_t viewport =
             static_cast<std::size_t>(dims.rows > 0 ? dims.rows : 24);
         if (first_rows > kFrozenMaxRows && rest >= viewport)

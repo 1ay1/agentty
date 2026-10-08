@@ -7,7 +7,7 @@
 # list can only shrink. When it is empty, agentty is pure Elm.
 #
 # Format: `path: name name ...` with names from elm_purity.cmake
-#   clock env fileio subprocess net global auth static thread
+#   clock env fileio subprocess net global auth static thread tty
 # STOPWATCHES, not debt. The `clock` grants below are not reducers reading the
 # time: every reducer reads the fold's time from Model::now, which jaal hands
 # update(). These two time how long work INSIDE the reducer takes (a submit's

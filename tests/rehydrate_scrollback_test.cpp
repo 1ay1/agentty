@@ -35,6 +35,7 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
+#include "agentty/runtime/app/update.hpp"
 
 #include <cstdio>
 #include <string>
@@ -90,6 +91,21 @@ int rehydrate_scrollback_test_main() {
           "rehydrate seeds MORE than the live canvas keeps");
     check(seed >= live * 2,
           "the seed is wide enough to be worth committing (>= 2x)");
+
+    // 1b. The reducers' budgets read the terminal size from the Model, which
+    //     the host feeds as TerminalResized. So the answer is whatever the
+    //     Msg said, never what the test's own tty happens to be.
+    {
+        Model sized;
+        (void)agentty::app::update(sized, agentty::msg::MetaMsg{agentty::TerminalResized{120, 40}});
+        check(sized.ui.term_cols == 120 && sized.ui.term_rows == 40,
+              "TerminalResized lands in the Model");
+        check(detail::frozen_row_budget(sized) == live,
+              "the live budget follows the Model's rows");
+        (void)agentty::app::update(sized, agentty::msg::MetaMsg{agentty::TerminalResized{0, 0}});
+        check(sized.ui.term_rows == 40,
+              "a 0x0 report (detached tty) keeps the last good size");
+    }
 
     // 2. Seeding a long thread fills the canvas past the LIVE budget --
     //    i.e. there is something for the trim to hand to scrollback.

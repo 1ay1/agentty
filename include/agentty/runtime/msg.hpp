@@ -1167,6 +1167,9 @@ struct CheckpointDiffLoaded {
 // Gates the hardware caret: an unfocused agentty parks + hides the real
 // cursor instead of leaving a blinking bar in an inactive pane.
 struct TerminalFocus { bool focused = true; };
+// The terminal's size, from the host: once at attach, then on every SIGWINCH.
+// The reducers' row math reads it from the Model instead of asking the tty.
+struct TerminalResized { int cols = 0; int rows = 0; };
 // Ctrl+U on the transcript — flip the newest retrieved-context card between
 // its compact one-line-per-source form and a full-passage-text expansion.
 // Carries the target message id so the reducer mutates exactly that card
@@ -1383,6 +1386,7 @@ using MetaMsg = std::variant<
     RestoreCheckpoint, CheckpointRestored,
     ToggleRetrievedExpanded,
     TerminalFocus,
+    TerminalResized,
     Tick, Quit, NoOp, ClearStatus, RedrawScreen,
     UpdateCheckDone, UpdateProgress, UpdateApplied, GitSignalsRefreshed>;
 

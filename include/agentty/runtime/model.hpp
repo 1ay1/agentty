@@ -499,6 +499,11 @@ struct Model {
         // that launched agentty has focus. Gates the hardware caret:
         // unfocused ⇒ park + hide (no blinking bar in inactive panes).
         bool                terminal_focused = true;
+        // Terminal geometry as the host last reported it (TerminalResized).
+        // 80x40 until the first report, the same fallback the old direct
+        // tty query used for a piped or detached stdout.
+        int                 term_cols = 80;
+        int                 term_rows = 40;
 
         // ── Sealed scrollback prefix (maya ScrollbackLedger) ───
         //
