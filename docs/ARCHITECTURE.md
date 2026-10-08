@@ -25,6 +25,11 @@ Rendering is a second pure function, `view : Model -> Element`, delegated to
 constructs chrome glyphs or makes layout decisions; it builds widget *Config*
 values from `Model` state and maya owns every pixel, border, and animation.
 
+The loop itself, the effects, tasks, subscriptions and every thread and lock
+in the process are **jaal**, which agentty reaches only through maya:
+agentty → maya → jaal, strictly. agentty orchestrates; no other submodule
+runs anything of its own. See [LAYERING.md](LAYERING.md).
+
 The four maya `Program` hooks are bound in
 `include/agentty/runtime/app/program.hpp`:
 
@@ -456,7 +461,7 @@ input, or timer tick. Two host-side optimizations keep it cheap under load:
 ## 12. One-paragraph mental model
 
 `main.cpp` resolves credentials and installs a Provider + Store behind the
-`Deps` seam, then hands control to maya. maya calls `view(model)` to paint and
+`Deps` seam, then hands control to maya, which runs the program on jaal. maya calls `view(model)` to paint and
 `update(model, msg)` for every event. User input and SSE chunks become `Msg`s;
 the reducer dispatches each to a per-domain handler that returns the next
 `Model` plus a `Cmd` describing any side effects. Tools run behind a JSON
