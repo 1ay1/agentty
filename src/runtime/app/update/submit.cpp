@@ -769,7 +769,7 @@ void refresh_record(Model& m) {
 
 Cmd
 commit_provider_switch(Model& m, std::string_view spec,
-                       auth::AuthHeader new_auth, std::string_view label,
+                       std::string_view label,
                        std::string_view desired_model,
                        bool open_panel) {
     const std::string spec_s{spec};
@@ -846,7 +846,9 @@ commit_provider_switch(Model& m, std::string_view spec,
     //     dropped on a hop, then swap the Deps auth and refetch models.
     auto settings_save = persist_settings(m);
 
-    app::switch_provider(std::move(new_auth));
+    // The live header for the new backend is resolved by the host after this
+    // fold (InstallAuth), not read here.
+    Cmd install = Cmd(InstallAuth{.provider = spec_s});
     m.d.available_models.clear();
     m.s.models_loading = true;
 
@@ -860,10 +862,8 @@ commit_provider_switch(Model& m, std::string_view spec,
     Cmd refresh_cmd = Cmd::none();
     if (const auto* prow = provider::preset_for(spec_s);
         prow && prow->oauth_proactive_refresh && !m.s.oauth_refresh_in_flight) {
-        if (auto tok = auth::oauth_proactive_refresh_token()) {
-            m.s.oauth_refresh_in_flight = true;
-            refresh_cmd = cmd::refresh_oauth(std::move(*tok));
-        }
+        m.s.oauth_refresh_in_flight = true;
+        refresh_cmd = cmd::refresh_oauth_if_due();
     }
 
     // Open the model picker immediately so the user sees "Loading models…"
@@ -906,7 +906,7 @@ commit_provider_switch(Model& m, std::string_view spec,
                                   std::chrono::seconds{4});
     return Cmd::batch(std::move(recall_save), std::move(settings_save),
                       std::move(prewarm), std::move(toast), cmd::fetch_models(m),
-                      std::move(refresh_cmd));
+                      std::move(refresh_cmd), std::move(install));
 }
 
 Cmd set_status_toast(Model& m, std::string text,

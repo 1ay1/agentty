@@ -248,6 +248,10 @@ struct LoopBreak {
 // the reducer tick.
 [[nodiscard]] Cmd open_browser_async(std::string url);
 
+// Mint a PKCE verifier + state and the authorize URL for an Anthropic OAuth
+// login; replies with LoginOAuthMinted.
+[[nodiscard]] Cmd mint_oauth_login();
+
 // Run the OAuth code-exchange HTTP POST off the UI thread. Dispatches
 // LoginExchanged{result} on completion regardless of success/failure —
 // the reducer matches on `expected<OAuthToken, OAuthError>` to decide
@@ -265,6 +269,16 @@ struct LoopBreak {
 // gated on the network round trip.
 [[nodiscard]] Cmd refresh_oauth(std::string refresh_token);
 
+// Read the Anthropic OAuth token and refresh it if it lapses within ~5 min.
+// Replies TokenRefreshed when it refreshed, else OAuthRefreshNotDue. The
+// caller sets m.s.oauth_refresh_in_flight; both replies clear it.
+[[nodiscard]] Cmd refresh_oauth_if_due();
+
+// A 401 parked the stream. Read the stored Anthropic refresh token and
+// refresh with it. Replies TokenRefreshed either way: success resumes the
+// stream, and "no refresh token stored" fails it with a sign-in hint.
+[[nodiscard]] Cmd refresh_oauth_for_401();
+
 // Allocate a process-unique identity for a ChatGPT login attempt. Async
 // progress/completion must carry it so an abandoned attempt cannot mutate a
 // newer login modal.
@@ -273,9 +287,9 @@ struct LoopBreak {
 // Connect-probe a custom host off the UI thread: dial its model list
 // (configured path → /v1/models → Ollama /api/tags), detect the dialect,
 // dispatch HostProbed. Shares next_codex_login_attempt_id() so a stale
-// probe result (user Esc'd / resubmitted) is dropped by the reducer.
-[[nodiscard]] Cmd probe_host_async(
-    std::string spec, std::uint64_t attempt_id, auth::AuthHeader auth);
+// probe result (user Esc'd / resubmitted) is dropped by the reducer. The
+// worker resolves the host's saved key itself.
+[[nodiscard]] Cmd probe_host_async(std::string spec, std::uint64_t attempt_id);
 
 // The login workers are SUBSCRIPTIONS, not Cmds.
 //

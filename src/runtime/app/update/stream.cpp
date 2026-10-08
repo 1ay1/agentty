@@ -2459,12 +2459,10 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 // Anthropic bearer as the cached header, and the retry ships
                 // it to the wrong host → an unbreakable 401 loop.
                 && m.d.selection.kind == provider::Kind::Anthropic) {
-                std::string refresh_token;
-                if (auto loaded = auth::load_credentials()) {
-                    if (auto* o = std::get_if<auth::cred::OAuth>(&*loaded))
-                        refresh_token = o->refresh_token;
-                }
-                if (!refresh_token.empty()) {
+                // Park and refresh. The worker reads the stored refresh
+                // token; with none (an API key) it fails the parked stream
+                // through TokenRefreshed with a sign-in hint.
+                {
                     // cancel token was already reset at the top of this
                     // handler; we just rebuild the ctx with bumped
                     // counters and the Scheduled retry sentinel.
@@ -2493,7 +2491,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     m.s.oauth_refresh_in_flight = true;
                     m.s.status = "auth expired \xE2\x80\x94 refreshing token\xE2\x80\xA6";
                     m.s.status_until = {};
-                    auto refresh_cmd = cmd::refresh_oauth(std::move(refresh_token));
+                    auto refresh_cmd = cmd::refresh_oauth_for_401();
                     // No force_redraw needed: the StreamingMarkdown
                     // pre-settle above already locks the message's
                     // height; the next render takes the normal diff
@@ -2502,9 +2500,6 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // also unnecessary.)
                     return refresh_cmd;
                 }
-                // No refresh_token on disk (env-var OAuth, api-key with
-                // a stale Bearer, etc.) — fall through to the terminal
-                // path so the user gets the actionable login hint.
             }
 
             // Mid-stream signal for the per-class retry cap. A failure is

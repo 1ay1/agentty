@@ -204,7 +204,10 @@ using Cmd = jaal::Cmd<Msg,
     // Returned by the dispatch seam, never by a reducer — see Model::
     // published_subagent for why syncing isn't a step a reducer performs.
     publish_subagent,
-    publish_selection
+    publish_selection,
+    // ── agentty's own: credentials ───────────────────────────────
+    install_auth,
+    save_credentials
 >;
 
 /// Every event source an agentty subscription may name.

@@ -241,7 +241,9 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             // picker stays open so the user can pick another provider (or
             // re-enter this one to sign back in).
             const bool was_active = (removed == active_provider_id(m));
-            if (was_active) app::update_auth(auth::AuthHeader{});
+            Cmd clear_auth = was_active
+                ? Cmd(InstallAuth{.provider = removed, .clear = true})
+                : Cmd::none();
             // Rebuild the row list so a removed custom host is gone; clamp.
             const auto& s2 = m.d.persisted;
             const auto fresh = ui::build_provider_rows(
@@ -254,7 +256,8 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
                           + " (active) — pick a provider to continue"
                     : (is_custom_host ? "removed custom host: "
                                       : "signed out of ") + removed);
-            return Cmd::batch(std::move(key_save), std::move(toast));
+            return Cmd::batch(std::move(key_save), std::move(clear_auth),
+                              std::move(toast));
         },
         [&](ProvidersSelect) -> Cmd {
             // Capture the cursor before closing: assigning Closed destroys the
@@ -285,8 +288,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             // An external ACP agent row: agentty drives the agent subprocess,
             // which does its OWN auth — no key resolution here.
             if (const provider::AcpAgentSpec* agent = chosen.acp()) {
-                return commit_provider_switch(m, agent->id,
-                                              auth::AuthHeader{}, agent->id);
+                return commit_provider_switch(m, agent->id, agent->id);
             }
 
             // A saved custom OpenAI-compatible host row: the spec string is the
@@ -308,9 +310,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
 
                 // Not active — switch to it via the central resolver (the key
                 // is already on disk; resolve reads provider_keys[spec]).
-                auth::AuthHeader new_auth = provider::credentials::resolve(spec);
-                return commit_provider_switch(m, spec,
-                                              std::move(new_auth), spec);
+                return commit_provider_switch(m, spec, spec);
             }
 
             const auto& preset = *chosen.preset();
@@ -330,11 +330,12 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
 
             const std::string spec{preset.id};
 
-            // Resolve the new backend's credentials BEFORE committing through
-            // the ONE central resolver, so we can refuse a switch that would
-            // land in a silently-broken state — same credential model as every
-            // other switch site.
-            auth::AuthHeader new_auth = provider::credentials::resolve(spec);
+            // Refuse a switch that would land in a silently-broken state.
+            // Whether a key exists is answered from the settings record (and
+            // the env chain), the same check sign-out's fallback uses.
+            const bool has_key =
+                provider::auth_source(preset, m.d.persisted)
+                    != provider::AuthSource::None;
 
             // A hosted (non-local) OpenAI-family provider with no resolvable
             // key can't stream. Open the in-app key-entry modal for THIS
@@ -343,7 +344,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             const bool needs_key =
                 preset.kind() == provider::Kind::OpenAI && !preset.is_local
                 && preset.auth != provider::AuthStyle::None;
-            if (needs_key && auth::is_empty(new_auth)) {
+            if (needs_key && !has_key) {
                 m.ui.login = ui::login::ApiKeyInput{
                     .key_input      = {},
                     .cursor         = 0,
@@ -391,8 +392,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             // Every entry point funnels the actual switch through the ONE
             // helper so provider + per-provider model recall + effort clamp +
             // auth swap + refetch can never drift between call sites.
-            return commit_provider_switch(m, spec, std::move(new_auth),
-                                          std::string{preset.label});
+            return commit_provider_switch(m, spec, std::string{preset.label});
         },
     }, pm);
 }

@@ -51,7 +51,7 @@ set(ban_fileio      "std::(if|of|f)stream|(fs|std::filesystem)::(remove|rename|c
 set(ban_subprocess  "run_command|::system[ \t]*\\(|popen[ \t]*\\(")
 set(ban_net         "prewarm_active_provider|http::default_client|dial_new")
 set(ban_global      "provider::select[ \t]*\\(|tools::(subagent::set_|skills::(reset_activations|note_activated)|invalidate_mcp_catalog|plugin::(set_|remove_|approve_|add_|update_)|util::allow_read_root)")
-set(ban_auth        "auth::(load_credentials|oauth_proactive_refresh_token|clear_credentials|save_credentials|random_urlsafe)|credentials::(resolve|add_method)")
+set(ban_auth        "auth::(load_credentials|oauth_proactive_refresh_token|clear_credentials|save_credentials|random_urlsafe|anthropic_signed_in)|credentials::(resolve|add_key|clear_active|needs_login)|(acc|accounts)::(activate|remove|snapshot_active|get|list_for|active_label|derive_current_label)[ \t]*\\(|vault::(sign_out|signed_in)[ \t]*\\(")
 set(ban_static      "^[ \t]+static[ \t]+(std::|auto[ \t]|bool[ \t]|int[ \t]|long[ \t]|unsigned[ \t]|double[ \t]|float[ \t]|size_t[ \t])[^(]*[=;{][ \t]*$")
 set(ban_thread      "std::j?thread([^_:]|$)|\\.detach\\(\\)|std::async[^_]")
 set(ban_names clock env fileio subprocess net global auth static thread)

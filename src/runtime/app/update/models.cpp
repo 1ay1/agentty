@@ -427,17 +427,6 @@ void rebuild_fused_rows(Model& m, bool sync_sources) {
     }
 }
 
-// Resolve the AuthHeader for switching to `spec` (an ALREADY-AUTHED provider,
-// since the fused picker only surfaces authed rows). Delegates to the same
-// resolver the provider picker uses: Anthropic OAuth/key from disk, hosted
-// Resolve auth for switching to `spec` through the ONE central resolver, so
-// the picker uses the same credential model as everything else (no local
-// re-implementation, no anthropic side-channel). oauth-native / local resolve
-// empty here and their transports supply the token.
-auth::AuthHeader resolve_switch_auth(const std::string& spec) {
-    return provider::credentials::resolve(spec);
-}
-
 // THE atomic switch: make (provider, model) active.
 //   • same provider  → change the model in place (effort re-clamp, persist,
 //     refetch), no provider hop.
@@ -475,12 +464,10 @@ Cmd switch_to_model_ref(Model& m, const ModelRef& ref, bool record = true) {
     // Cross-provider — atomic switch through the ONE funnel, model pre-stashed.
     const provider::ProviderPreset* p = provider::preset_for(ref.provider_id);
     const std::string label = p ? std::string{p->label} : ref.provider_id;
-    auth::AuthHeader auth = resolve_switch_auth(ref.provider_id);
     auto mru = record ? record_recent(m, ref.provider_id, ref.model_id)
                       : Cmd::none();
     return Cmd::batch(std::move(mru),
-                      commit_provider_switch(m, ref.provider_id,
-                                             std::move(auth), label,
+                      commit_provider_switch(m, ref.provider_id, label,
                                              ref.model_id));
 }
 

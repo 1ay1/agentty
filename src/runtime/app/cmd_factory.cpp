@@ -2448,6 +2448,23 @@ Cmd open_browser_async(std::string url) {
     }, std::move(url));
 }
 
+Cmd mint_oauth_login() {
+    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token) {
+        LoginOAuthMinted r;
+        // random_urlsafe throws if the CSPRNG is unavailable. Fail closed
+        // into the modal's Failed state rather than mint a weak secret.
+        try {
+            r.verifier      = auth::PkceVerifier{auth::random_urlsafe(128)};
+            r.state         = auth::OAuthState{auth::random_urlsafe(32)};
+            r.authorize_url = auth::oauth_authorize_url(r.verifier, r.state);
+        } catch (const std::exception& e) {
+            r = LoginOAuthMinted{};
+            r.error = e.what();
+        }
+        out.send(Msg{msg::LoginMsg{std::move(r)}});
+    });
+}
+
 Cmd oauth_exchange(auth::OAuthCode    code,
                         auth::PkceVerifier verifier,
                         auth::OAuthState   state) {
@@ -2658,20 +2675,19 @@ std::uint64_t next_codex_login_attempt_id() noexcept {
     return next.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-Cmd probe_host_async(std::string spec, std::uint64_t attempt_id,
-                          auth::AuthHeader auth) {
+Cmd probe_host_async(std::string spec, std::uint64_t attempt_id) {
     // Connect-probe a custom host on a worker: dial its model list
     // (configured path → /v1/models → Ollama /api/tags) and report the
     // DETECTED dialect. Bounded by probe_host's own 3s/6s timeouts, so the
     // modal's "probing…" state resolves quickly either way.
     return Cmd::task([](jaal::Sink<Msg> out, std::stop_token,
-                        std::string spec, std::uint64_t attempt_id,
-                        auth::AuthHeader auth) {
+                        std::string spec, std::uint64_t attempt_id) {
         HostProbed r;
         r.attempt_id = attempt_id;
         r.spec       = spec;
         try {
             const auto sel = provider::parse_selection(spec);
+            const auto auth = provider::credentials::resolve(spec);
             const auto probe =
                 provider::openai::probe_host(auth, sel.openai_endpoint);
             using D = provider::openai::HostProbe::Dialect;
@@ -2745,7 +2761,7 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id,
             r.error = "probe failed";
         }
         out.send(Msg{std::move(r)});
-    }, std::move(spec), attempt_id, std::move(auth));
+    }, std::move(spec), attempt_id);
 }
 
 Sub device_login_sub(std::string provider, std::string provider_label,
@@ -2874,22 +2890,72 @@ Sub codex_login_sub(std::uint64_t attempt_id) {
     }, attempt_id);
 }
 
+namespace {
+// Run the locked refresh and turn it into the Msg. After it, re-check that
+// the store still carries the token we got: an account switch can replace
+// the store after the worker saved, and installing the old account's bearer
+// would cross-wire them. That case reports Superseded, which the reducer
+// treats as benign.
+TokenRefreshed run_refresh(const std::string& refresh_token) {
+    try {
+        auto r = auth::refresh_access_token_locked(auth::RefreshToken{refresh_token});
+        if (r) {
+            auto on_disk = auth::load_credentials();
+            const auto* o = on_disk ? std::get_if<auth::cred::OAuth>(&*on_disk)
+                                    : nullptr;
+            if (!o || o->access_token != r->access_token)
+                return TokenRefreshed{std::unexpected(auth::OAuthError{
+                    auth::OAuthErrorKind::Superseded,
+                    "store no longer carries the refreshed token"})};
+        }
+        return TokenRefreshed{std::move(r)};
+    } catch (const std::exception& e) {
+        return TokenRefreshed{std::unexpected(auth::OAuthError{
+            auth::OAuthErrorKind::Network,
+            std::string{"refresh threw: "} + e.what()})};
+    } catch (...) {
+        return TokenRefreshed{std::unexpected(auth::OAuthError{
+            auth::OAuthErrorKind::Network,
+            "refresh threw: unknown exception"})};
+    }
+}
+}  // namespace
+
+Cmd refresh_oauth_if_due() {
+    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token) {
+        std::optional<std::string> tok;
+        try { tok = auth::oauth_proactive_refresh_token(); } catch (...) {}
+        if (!tok) {
+            out.send(Msg{msg::LoginMsg{OAuthRefreshNotDue{}}});
+            return;
+        }
+        out.send(Msg{run_refresh(*tok)});
+    });
+}
+
+Cmd refresh_oauth_for_401() {
+    return Cmd::task([](jaal::Sink<Msg> out, std::stop_token) {
+        std::string rt;
+        try {
+            if (auto loaded = auth::load_credentials())
+                if (auto* o = std::get_if<auth::cred::OAuth>(&*loaded))
+                    rt = o->refresh_token;
+        } catch (...) {}
+        if (rt.empty()) {
+            // An API key or env token: nothing to refresh with.
+            out.send(Msg{TokenRefreshed{std::unexpected(auth::OAuthError{
+                auth::OAuthErrorKind::MissingToken,
+                "no refresh token stored; sign in again with /login"})}});
+            return;
+        }
+        out.send(Msg{run_refresh(rt)});
+    });
+}
+
 Cmd refresh_oauth(std::string refresh_token) {
     return Cmd::task(
         [](jaal::Sink<Msg> out, std::stop_token, std::string refresh_token) {
-            try {
-                auto r = auth::refresh_access_token_locked(
-                    auth::RefreshToken{refresh_token});
-                out.send(Msg{TokenRefreshed{std::move(r)}});
-            } catch (const std::exception& e) {
-                out.send(Msg{TokenRefreshed{std::unexpected(auth::OAuthError{
-                    auth::OAuthErrorKind::Network,
-                    std::string{"refresh threw: "} + e.what()})}});
-            } catch (...) {
-                out.send(Msg{TokenRefreshed{std::unexpected(auth::OAuthError{
-                    auth::OAuthErrorKind::Network,
-                    "refresh threw: unknown exception"})}});
-            }
+            out.send(Msg{run_refresh(refresh_token)});
         }, std::move(refresh_token));
 }
 

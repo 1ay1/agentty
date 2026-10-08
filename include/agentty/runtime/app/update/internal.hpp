@@ -219,7 +219,7 @@ std::string    model_for_provider(const store::Settings& s,
 // provider+model switch. Empty (every existing caller) keeps the recall path.
 [[nodiscard]] Cmd
 commit_provider_switch(Model& m, std::string_view spec,
-                       auth::AuthHeader new_auth, std::string_view label,
+                       std::string_view label,
                        std::string_view desired_model = {},
                        bool open_panel = true);
 

@@ -14,10 +14,11 @@
 # stages, a thread load) and log the interval. That needs two readings of a real clock — one fold instant would
 # make every interval zero — and the result never reaches the Model, so a
 # replay is unaffected. Each site says so in a comment.
-update/composer.cpp: auth
+#
+# AUTH is the account registry (auth::accounts / vault): the account picker
+# lists, activates and removes accounts straight from disk. Credential reads
+# and header installs are already effects (InstallAuth / SaveCredentials).
 update/login.cpp: auth
-update/models.cpp: auth
 update/providers.cpp: auth
-update/stream.cpp: auth
 update/submit.cpp: auth clock
 update/thread_list.cpp: clock

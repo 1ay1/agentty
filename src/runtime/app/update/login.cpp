@@ -42,57 +42,18 @@ namespace login = agentty::ui::login;
 namespace {
 
 // Persist + live-install credentials, then close the modal. Single
-// point so OAuth and ApiKey paths can't drift — both end here.
-void install_and_close(Model& m, auth::Credentials creds,
-                       bool as_new_account = false) {
-    auth::save_credentials(creds);
-    agentty::app::update_auth(auth::make_auth_header(creds));
-
-    // Capture this login as a named account so it's switchable in-app.
-    //
-    // OAuth / API-key credentials carry NO stable per-account identity
-    // (the tokens rotate; there's no email/subject on the wire), so the
-    // derived label IS the account's identity here. A re-login — an
-    // expired-token refresh, or just re-testing — therefore produces the
-    // SAME derived label ("OAuth login", "API key") and must UPDATE the
-    // existing slot in place, not spawn "OAuth login 2/3/…". The old
-    // suffix-until-unique loop turned every re-auth into a fresh junk
-    // account and could leave the active-label pointer aimed at a slot
-    // whose live credential no longer matched — the reported
-    // accumulation + wedge.
-    //
-    // snapshot_active(label) upserts by (provider, label): reusing the
-    // derived label overwrites the same account's stored secret and
-    // re-marks it active, which is exactly right for a re-login. A
-    // DELIBERATE second account on the same provider is created through
-    // the account manager's "+ Add another account…" flow, which the
-    // user labels explicitly — that path already carries its own label
-    // and never lands here with a colliding one.
-    {
-        namespace acc = agentty::auth::accounts;
-        const std::string provider = "anthropic";
-        std::string base = acc::derive_current_label(provider);
-        if (base.empty()) base = "account";
-        std::string label = base;
-        if (as_new_account) {
-            // DELIBERATE add of a separate account whose derived label
-            // collides (two "OAuth login"s — Anthropic OAuth carries no
-            // distinguishing identity). Suffix until unique so both slots
-            // survive and the user can flip between them.
-            for (int n = 2; acc::get(provider, label).has_value() && n < 100; ++n)
-                label = base + " " + std::to_string(n);
-        }
-        // Plain sign-in (as_new_account == false): reuse the derived-label
-        // slot. snapshot_active upserts by (provider, label), so a re-auth
-        // overwrites the same account's secret in place instead of spawning
-        // "OAuth login 2/3/…" — the reported accumulation + wedge.
-        acc::snapshot_active(provider, label);
-    }
-
+// point so OAuth and ApiKey paths can't drift — both end here. The save,
+// the account snapshot and the header install are host effects
+// (SaveCredentials then InstallAuth), run in that order after this fold.
+[[nodiscard]] Cmd install_and_close(Model& m, auth::Credentials creds,
+                                    bool as_new_account = false) {
     m.ui.login = login::Closed{};
     m.s.status = "logged in";
     m.s.status_until = m.now
                      + std::chrono::seconds{4};
+    return Cmd::batch(
+        Cmd(SaveCredentials{std::move(creds), as_new_account}),
+        Cmd(InstallAuth{.provider = "anthropic"}));
 }
 
 } // namespace
@@ -258,9 +219,8 @@ Cmd host_probed(Model& m, HostProbed r) {
             save = save_record(m);
         }
     }
-    auth::AuthHeader new_auth = provider::credentials::resolve(spec);
     m.ui.login = login::Closed{};
-    auto switch_cmd = commit_provider_switch(m, spec, std::move(new_auth),
+    auto switch_cmd = commit_provider_switch(m, spec,
                                        provider::provider_display_name(
                                            provider::parse_selection(spec)));
     // Enrich the switch toast with what the probe FOUND — the "it just
@@ -392,7 +352,7 @@ Cmd sign_out(Model& m) {
 
     // Zero the live auth header so the very next turn can't reuse a
     // now-revoked credential.
-    agentty::app::update_auth(auth::AuthHeader{});
+    Cmd clear_auth = Cmd(InstallAuth{.provider = pid, .clear = true});
 
     // If ANOTHER provider is still authed, fall back to it rather than
     // dumping the user at a sign-in modal — signing out of one of several
@@ -427,11 +387,10 @@ Cmd sign_out(Model& m) {
                              provider::parse_selection(fallback));
             m.s.status_until = m.now
                              + std::chrono::seconds{5};
-            auth::AuthHeader fb_auth = provider::credentials::resolve(fallback);
             return Cmd::batch(
-                std::move(key_save),
+                std::move(key_save), std::move(clear_auth),
                 commit_provider_switch(
-                    m, fallback, std::move(fb_auth),
+                    m, fallback,
                     provider::provider_display_name(
                         provider::parse_selection(fallback))));
         }
@@ -442,7 +401,7 @@ Cmd sign_out(Model& m) {
     m.s.status = "signed out of " + what + " \xe2\x80\x94 sign in to continue";
     m.s.status_until = m.now
                      + std::chrono::seconds{5};
-    return key_save;
+    return Cmd::batch(std::move(key_save), std::move(clear_auth));
 }
 
 namespace {
@@ -636,10 +595,8 @@ Cmd account_select(Model& m) {
                 m.d.persisted.provider_models.count(provider)
                     ? m.d.persisted.provider_models.at(provider)
                     : std::string{};
-            return commit_provider_switch(
-                m, provider,
-                                          provider::credentials::resolve(provider),
-                                          plabel, recalled, /*open_panel=*/false);
+            return commit_provider_switch(m, provider, plabel, recalled,
+                                          /*open_panel=*/false);
         }
     }
     // Re-install the live auth header from the now-swapped active store.
@@ -657,8 +614,8 @@ Cmd account_select(Model& m) {
     // oauth-native transports (ChatGPT/Copilot/Kimi) read their token from the
     // just-swapped store on the next turn, so resolve() returns empty and that
     // empty CLEARS the cached header — exactly the "force a fresh read" the old
-    // per-provider branch did.
-    agentty::app::update_auth(provider::credentials::resolve(provider));
+    // per-provider branch did. The host resolves it after this fold.
+    Cmd install = Cmd(InstallAuth{.provider = provider});
 
     // Anthropic-SPECIFIC extras (legitimately not uniform): a long-idle OAuth
     // token may be stale — kick a background proactive refresh so the first
@@ -671,10 +628,9 @@ Cmd account_select(Model& m) {
         // two refresh workers would exchange back-to-back — harmless since
         // the file lock serializes them and the second re-reads the freshest
         // token, but wasteful and it double-toggles the in-flight flag.
-        if (auto tok = auth::oauth_proactive_refresh_token();
-            tok && !m.s.oauth_refresh_in_flight) {
+        if (!m.s.oauth_refresh_in_flight) {
             m.s.oauth_refresh_in_flight = true;
-            refresh_cmd = cmd::refresh_oauth(std::move(*tok));
+            refresh_cmd = cmd::refresh_oauth_if_due();
         }
         // No entitlement re-arm here: facts are keyed by (provider,
         // ACCOUNT, model), so the account we just left cannot speak for the
@@ -684,13 +640,10 @@ Cmd account_select(Model& m) {
     }
     const std::string provider_label = al->provider_label;
     m.ui.login = login::Closed{};
-    m.s.status = m.s.oauth_refresh_in_flight
-               ? "switched " + provider_label + " to " + label
-                     + " \xE2\x80\x94 refreshing token\xE2\x80\xA6"
-               : "switched " + provider_label + " to " + label;
+    m.s.status = "switched " + provider_label + " to " + label;
     m.s.status_until = m.now
                      + std::chrono::seconds{4};
-    return refresh_cmd;
+    return Cmd::batch(std::move(install), std::move(refresh_cmd));
 }
 
 Cmd account_remove(Model& m) {
@@ -729,26 +682,15 @@ Cmd account_remove(Model& m) {
 
     // If we removed the account we're currently authed as, the newest
     // remaining one (promoted to active by remove()) becomes live.
+    Cmd install = Cmd::none();
     if (was_active) {
         if (auto next = acc::get(row.provider, acc::active_label(row.provider))) {
             acc::activate(row.provider, next->label);
-            const auto* rrow = provider::preset_for(row.provider);
-            if (rrow && rrow->oauth_proactive_refresh) {
-                // Anthropic-shaped: credentials live in the shared store and
-                // resolve to a real header.
-                if (auto c = auth::load_credentials())
-                    agentty::app::update_auth(auth::make_auth_header(*c));
-            } else if (rrow && rrow->token_in_transport) {
-                // The transport owns the token and reads it per turn; the
-                // cached header must be CLEARED, not replaced.
-                agentty::app::update_auth(auth::AuthHeader{});
-            } else {
-                // CUSTOM HOST: activate() wrote the promoted key into
-                // provider_keys[spec]; re-resolve the live header through the
-                // central resolver so the promoted account is used next turn.
-                agentty::app::update_auth(
-                    provider::credentials::resolve(row.provider));
-            }
+            // Re-install the live header for the promoted account. resolve()
+            // already covers each shape: Anthropic reads the shared store,
+            // transport-owned tokens resolve empty (clearing the cache), and
+            // a custom host reads the key activate() just promoted.
+            install = Cmd(InstallAuth{.provider = row.provider});
             m.s.status = "removed " + row.label + " \xc2\xb7 switched to " + next->label;
         } else {
             // The registry is empty. Clear the underlying live credential too
@@ -756,7 +698,7 @@ Cmd account_remove(Model& m) {
             // otherwise build_account_list() would rediscover and silently
             // resurrect the account the user just removed.
             provider::credentials::clear_active(row.provider);
-            agentty::app::update_auth(auth::AuthHeader{});
+            install = Cmd(InstallAuth{.provider = row.provider, .clear = true});
 
             login::AccountList empty;
             empty.provider = row.provider;
@@ -765,7 +707,7 @@ Cmd account_remove(Model& m) {
             m.s.status = "removed the last " + provider_label + " account";
             m.s.status_until = m.now
                              + std::chrono::seconds{4};
-            return Cmd::none();
+            return Cmd::batch(std::move(forget_save), std::move(install));
         }
     } else {
         m.s.status = "removed " + row.label;
@@ -779,7 +721,7 @@ Cmd account_remove(Model& m) {
     rebuilt.cursor = std::min(old_cursor,
                               static_cast<int>(rebuilt.rows.size()));
     m.ui.login = std::move(rebuilt);
-    return forget_save;
+    return Cmd::batch(std::move(forget_save), std::move(install));
 }
 
 Cmd login_pick_method(Model& m, char32_t key) {
@@ -791,30 +733,9 @@ Cmd login_pick_method(Model& m, char32_t key) {
     const auto* mrow = picking ? provider::preset_for(picking->provider) : nullptr;
     const bool anthropic_only = mrow && mrow->method_menu;
     if (key == U'2') {
-        // OAuth: mint PKCE pair, open browser, transition to OAuthCode.
-        // The URL lives in state so the modal can show it as a fallback
-        // if the system browser opener fails silently (broken xdg-open,
-        // headless SSH session, etc.).
-        //
-        // random_urlsafe throws if the OpenSSL CSPRNG is unavailable
-        // (astronomically rare, but a pure reducer must not propagate an
-        // exception into maya's update loop). Fail closed into the login
-        // modal's Failed state instead of minting a weak/empty secret.
-        try {
-            auth::PkceVerifier verifier{auth::random_urlsafe(128)};
-            auth::OAuthState   state{auth::random_urlsafe(32)};
-            std::string url = auth::oauth_authorize_url(verifier, state);
-            login::OAuthCode oc;
-            oc.verifier      = std::move(verifier);
-            oc.state         = std::move(state);
-            oc.authorize_url = url;
-            m.ui.login = std::move(oc);
-            return cmd::open_browser_async(std::move(url));
-        } catch (const std::exception& e) {
-            m.ui.login = login::Failed{
-                std::string{"could not start secure login: "} + e.what()};
-            return Cmd::none();
-        }
+        // OAuth: the PKCE pair is random, so a Cmd mints it; the reply
+        // (LoginOAuthMinted) moves to OAuthCode and opens the browser.
+        return cmd::mint_oauth_login();
     }
     if (key == U'1') {
         login::ApiKeyInput api;
@@ -1021,14 +942,12 @@ Cmd login_submit(Model& m) {
         // the spec restored and the reason named. No more committing blind
         // to a dead endpoint and discovering it at the first prompt.
         {
-            auth::AuthHeader probe_auth = provider::credentials::resolve(spec);
             const auto attempt_id = cmd::next_codex_login_attempt_id();
             auto origin = std::move(ch->origin);
             m.ui.login = login::HostProbing{
                 .spec = spec, .attempt_id = attempt_id,
                 .origin = std::move(origin)};
-            return cmd::probe_host_async(spec, attempt_id,
-                                          std::move(probe_auth));
+            return cmd::probe_host_async(spec, attempt_id);
         }
     }
     if (auto* api = std::get_if<login::ApiKeyInput>(&m.ui.login)) {
@@ -1085,19 +1004,17 @@ Cmd login_submit(Model& m) {
                 m.d.persisted.provider = provider;
                 key_save = save_record(m);
             }
-            auth::AuthHeader new_auth = provider::credentials::resolve(provider);
             m.ui.login = login::Closed{};
             // Commit through the ONE shared switch path like every other entry;
             // commit_provider_switch opens the model picker for us.
             return Cmd::batch(
                 std::move(key_save),
-                commit_provider_switch(m, provider, std::move(new_auth),
-                                       provider_label));
+                commit_provider_switch(m, provider, provider_label));
         }
 
-        install_and_close(m, auth::Credentials{auth::cred::ApiKey{std::move(key)}},
-                          std::holds_alternative<login::origin::Accounts>(api->origin));
-        return Cmd::none();
+        return install_and_close(
+            m, auth::Credentials{auth::cred::ApiKey{std::move(key)}},
+            std::holds_alternative<login::origin::Accounts>(api->origin));
     }
     if (auto* oc = std::get_if<login::OAuthCode>(&m.ui.login)) {
         std::string code_raw = std::move(oc->code_input);
@@ -1182,12 +1099,11 @@ Cmd login_exchanged(Model& m, auth::TokenResult result) {
     auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         m.wall_now().time_since_epoch()).count();
     auto& tok = *result;
-    install_and_close(m, auth::Credentials{auth::cred::OAuth{
+    return install_and_close(m, auth::Credentials{auth::cred::OAuth{
         std::move(tok.access_token),
         std::move(tok.refresh_token),
         tok.expires_in_s ? now_ms + tok.expires_in_s * 1000 : 0,
     }}, as_new);
-    return Cmd::none();
 }
 
 Cmd login_codex_device_code_ready(Model& m, std::uint64_t attempt_id,
@@ -1225,9 +1141,7 @@ Cmd login_codex_done(Model& m, std::uint64_t attempt_id,
     m.ui.login = login::Closed{};
     m.s.status = "signed in to ChatGPT";
     m.s.status_until = m.now + std::chrono::seconds{4};
-    return commit_provider_switch(
-                m, "chatgpt",
-                                  auth::AuthHeader{}, "ChatGPT");
+    return commit_provider_switch(m, "chatgpt", "ChatGPT");
 }
 
 Cmd login_device_code_ready(Model& m, std::string provider,
@@ -1266,9 +1180,7 @@ Cmd login_device_done(Model& m, std::string provider, std::string provider_label
     m.ui.login = login::Closed{};
     m.s.status = "signed in to " + provider_label;
     m.s.status_until = m.now + std::chrono::seconds{4};
-    return commit_provider_switch(
-                m, std::move(provider),
-                                  auth::AuthHeader{}, std::move(provider_label));
+    return commit_provider_switch(m, provider, provider_label);
 }
 
 Cmd token_refreshed(Model& m, auth::TokenResult result) {
@@ -1346,40 +1258,12 @@ Cmd token_refreshed(Model& m, auth::TokenResult result) {
         return cmd;
     }
 
-    // Refresh OK — install fresh creds into Deps so the next stream uses
-    // the new bearer.
-    //
-    // Do NOT save here. The refresh worker (refresh_access_token_locked)
-    // already persisted under the cross-process file lock — and crucially,
-    // its save preserves the previous refresh token when the server chose
-    // not to rotate (empty refresh_token in the response). A second save
-    // here wrote `tok.refresh_token` VERBATIM — possibly empty — wiping the
-    // on-disk refresh token, so the NEXT refresh had nothing to exchange
-    // and the account was stuck until re-login ("switch refuses to refresh"
-    // when the wiped slot was later snapshotted/activated). One writer, one
-    // policy: the locked worker owns persistence; the reducer only installs.
-    //
-    // LINEAGE before install: an account switch may have replaced the store
-    // after the worker saved. Installing this (older account's) bearer into
-    // Deps would cross-wire the live header against the registry-active
-    // account. The store is the truth — install only if it still carries
-    // the access token this refresh produced.
-    auto& tok = *result;
-    {
-        auto on_disk = auth::load_credentials();
-        const auto* o = on_disk ? std::get_if<auth::cred::OAuth>(&*on_disk)
-                                : nullptr;
-        if (!o || o->access_token != tok.access_token) {
-            AGT_LOG(Auth, Info, "auth.refresh.stale_install_dropped",
-                    "store no longer carries the refreshed token "
-                    "(account switched); keeping live header as-is");
-            if (stream_parked)
-                return Cmd::after(std::chrono::milliseconds{0},
-                                        Msg{RetryStream{}});
-            return Cmd::none();
-        }
-        agentty::app::update_auth(auth::make_auth_header(*on_disk));
-    }
+    // Refresh OK. The worker already persisted (under the cross-process
+    // lock, keeping the old refresh token when the server didn't rotate) and
+    // checked the store still holds this token; a switched store came back
+    // as Superseded above. All that's left is to install the header, which
+    // the host resolves from the store after this fold.
+    Cmd install = Cmd(InstallAuth{.provider = "anthropic"});
 
     auto toast_cmd = set_status_toast(m, "OAuth token refreshed",
                                       std::chrono::seconds{3});
@@ -1391,7 +1275,7 @@ Cmd token_refreshed(Model& m, auth::TokenResult result) {
     // up the freshly-installed bearer from Deps.
     if (stream_parked) {
         return Cmd::batch(
-                std::move(toast_cmd),
+                std::move(install), std::move(toast_cmd),
                 Cmd::after(std::chrono::milliseconds{0},
                                 Msg{RetryStream{}}));
     }
@@ -1409,9 +1293,9 @@ Cmd token_refreshed(Model& m, auth::TokenResult result) {
         m.ui.composer.queued.erase(m.ui.composer.queued.begin());
         auto sub_cmd = submit_message(m);
         return Cmd::batch(
-                std::move(toast_cmd), std::move(sub_cmd));
+                std::move(install), std::move(toast_cmd), std::move(sub_cmd));
     }
-    return toast_cmd;
+    return Cmd::batch(std::move(install), std::move(toast_cmd));
 }
 
 // ============================================================================
@@ -1442,6 +1326,24 @@ Cmd login_update(Model& m, msg::LoginMsg lm) {
         [&](LoginCopyCode)          -> Cmd { return login_copy_code(m); },
         [&](LoginOpenBrowserAgain)  -> Cmd { return login_open_browser_again(m); },
         [&](LoginExchanged& e)      -> Cmd { return login_exchanged(m, std::move(e.result)); },
+        [&](LoginOAuthMinted& e)    -> Cmd {
+            // Only while the method menu that asked is still up; Esc or a
+            // second pick in the meantime makes this reply stale.
+            if (!std::holds_alternative<login::Picking>(m.ui.login)
+                && !std::holds_alternative<login::Failed>(m.ui.login))
+                return Cmd::none();
+            if (!e.error.empty()) {
+                m.ui.login = login::Failed{
+                    "could not start secure login: " + e.error};
+                return Cmd::none();
+            }
+            login::OAuthCode oc;
+            oc.verifier      = std::move(e.verifier);
+            oc.state         = std::move(e.state);
+            oc.authorize_url = e.authorize_url;
+            m.ui.login = std::move(oc);
+            return cmd::open_browser_async(std::move(e.authorize_url));
+        },
         [&](CodexDeviceCodeReady& e) -> Cmd {
             return login_codex_device_code_ready(m, e.attempt_id,
                 std::move(e.verification_url), std::move(e.user_code));
@@ -1460,6 +1362,10 @@ Cmd login_update(Model& m, msg::LoginMsg lm) {
                 std::move(e.provider_label), e.attempt_id, std::move(e.error));
         },
         [&](TokenRefreshed& e)      -> Cmd { return token_refreshed(m, std::move(e.result)); },
+        [&](OAuthRefreshNotDue)     -> Cmd {
+            m.s.oauth_refresh_in_flight = false;
+            return Cmd::none();
+        },
     }, lm);
 }
 

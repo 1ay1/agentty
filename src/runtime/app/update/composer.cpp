@@ -456,10 +456,9 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             && now - m.s.last_refresh_probe_at < std::chrono::seconds(30);
         if (!probe_throttled && !m.s.active() && !m.s.oauth_refresh_in_flight) {
             m.s.last_refresh_probe_at = now;
-            if (auto tok = auth::oauth_proactive_refresh_token()) {
-                m.s.oauth_refresh_in_flight = true;
-                proactive_refresh = cmd::refresh_oauth(std::move(*tok));
-            }
+            // The worker reads the token and refreshes only if it is due.
+            m.s.oauth_refresh_in_flight = true;
+            proactive_refresh = cmd::refresh_oauth_if_due();
         }
     }
     Cmd step = std::visit(overload{

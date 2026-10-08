@@ -1600,3 +1600,57 @@ TEST_CASE("catalog_sources enumerates presets and custom hosts, once each") {
     for (const auto& c : srcs)
         if (!c.is_preset) CHECK(!c.needs_signin);
 }
+
+// Credentials are host effects now: a switch says WHICH provider's header to
+// install and the host resolves it; sign-out says to clear it. The reducer
+// never reads a credential file itself.
+TEST_CASE("provider switch and sign-out return InstallAuth, not a resolved header") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["openrouter"] = "sk-or";
+    g_settings.provider_keys["groq"]       = "sk-gr";
+    provider::select(provider::parse_selection("openrouter"));
+
+    Model m = seeded_model();
+    m.d.recent_models = { ModelRef{"groq", "llama-3.3-70b"} };
+    auto [m1, c1] = app::update(std::move(m), Msg{LoginMsg{SignOut{}}});
+
+    // Sign-out clears the provider it left, then the fallback switch
+    // installs groq's header.
+    bool cleared = false, installed_groq = false;
+    agtest::fx::for_each(c1, [&](const auto& e) {
+        if constexpr (std::same_as<std::remove_cvref_t<decltype(e)>,
+                                   agentty::InstallAuth>) {
+            if (e.clear && e.provider == "openrouter") cleared = true;
+            if (!e.clear && e.provider == "groq") installed_groq = true;
+        }
+    });
+    CHECK(cleared);
+    CHECK(installed_groq);
+}
+
+TEST_CASE("OAuth login: the PKCE pair is minted by a Cmd, and a stale mint is dropped") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    Model m = seeded_model();
+    m.ui.login = ui::login::Picking{};
+
+    // The reply moves to OAuthCode with the minted verifier.
+    auth::PkceVerifier v{"verifier"};
+    auth::OAuthState   st{"state"};
+    auto [m1, c1] = app::update(std::move(m), Msg{LoginMsg{LoginOAuthMinted{
+        v, st, "https://claude.ai/oauth/authorize?x", {}}}});
+    auto* oc = std::get_if<ui::login::OAuthCode>(&m1.ui.login);
+    REQUIRE(oc != nullptr);
+    CHECK(oc->verifier.value == "verifier");
+    CHECK(oc->authorize_url == "https://claude.ai/oauth/authorize?x");
+
+    // The user already closed the modal: a late mint changes nothing.
+    m1.ui.login = ui::login::Closed{};
+    auto [m2, c2] = app::update(std::move(m1), Msg{LoginMsg{LoginOAuthMinted{
+        v, st, "https://late", {}}}});
+    CHECK(std::holds_alternative<ui::login::Closed>(m2.ui.login));
+    CHECK(c2.is_none());
+}

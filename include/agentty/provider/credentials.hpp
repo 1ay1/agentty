@@ -53,7 +53,8 @@ enum class AddMethod : std::uint8_t {
 // "route to login on switch".
 [[nodiscard]] bool needs_login(std::string_view provider_id);
 
-// The add-account method this provider offers.
+// The add-account method this provider offers. Pure: a registry lookup, no
+// credential read, so reducers may call it.
 [[nodiscard]] AddMethod add_method(std::string_view provider_id);
 
 // ── Account management — uniform for every provider ──────────────────────────

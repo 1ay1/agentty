@@ -868,6 +868,14 @@ struct LoginOpenBrowserAgain {};
 // `auth::TokenResult` so the reducer can distinguish ApiError /
 // Network / MissingToken without parsing strings.
 struct LoginExchanged   { agentty::auth::TokenResult result; };
+// The PKCE pair for an Anthropic OAuth login, minted by a Cmd (random bytes
+// are not something update can make). `error` set when the CSPRNG failed.
+struct LoginOAuthMinted {
+    agentty::auth::PkceVerifier verifier;
+    agentty::auth::OAuthState   state;
+    std::string                 authorize_url;
+    std::string                 error;
+};
 // The SSH/device flow dispatches this as soon as OpenAI allocates the
 // one-time code, while the same worker continues polling for approval.
 struct CodexDeviceCodeReady {
@@ -916,6 +924,9 @@ struct DeviceLoginDone {
 // leaves the queue intact so the user can retry through the in-app
 // login modal.
 struct TokenRefreshed   { agentty::auth::TokenResult result; };
+// cmd::refresh_oauth_if_due looked and the token was not near expiry (or not
+// refreshable). Clears the in-flight flag the reducer set when it asked.
+struct OAuthRefreshNotDue {};
 
 // Proactive pre-turn retrieval landed off-thread. Proactive RAG runs on the
 // submit path under a small wall-clock hedge so Enter never freezes (see
@@ -1329,8 +1340,9 @@ using LoginMsg = std::variant<
     LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
     LoginCopyAuthUrl, LoginCopyCode, LoginOpenBrowserAgain,
-    LoginExchanged, CodexDeviceCodeReady, CodexLoginDone,
-    DeviceCodeReady, DeviceLoginDone, TokenRefreshed, HostProbed>;
+    LoginExchanged, LoginOAuthMinted, CodexDeviceCodeReady, CodexLoginDone,
+    DeviceCodeReady, DeviceLoginDone, TokenRefreshed, OAuthRefreshNotDue,
+    HostProbed>;
 
 using DiffReviewMsg = std::variant<
     OpenDiffReview, CloseDiffReview, DiffReviewMove, DiffReviewScroll,

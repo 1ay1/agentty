@@ -21,7 +21,9 @@
 
 #include <maya/host/terminal.hpp>
 
+#include "agentty/auth/accounts.hpp"
 #include "agentty/io/persistence.hpp"
+#include "agentty/provider/credentials.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/store_fx.hpp"
@@ -88,6 +90,27 @@ struct Host : maya::terminal_host<P> {
     // Publish the Model's active provider (see store_fx.hpp PublishSelection).
     // The one writer of the process-global selection after launch.
     void handle(PublishSelection e) { provider::select(std::move(e.selection)); }
+
+    // Credentials (see store_fx.hpp). Small local reads/writes, run in order
+    // on the loop thread so the next fold's stream launch sees them.
+    void handle(InstallAuth e) {
+        update_auth(e.clear ? auth::AuthHeader{}
+                            : provider::credentials::resolve(e.provider));
+    }
+    void handle(SaveCredentials e) {
+        auth::save_credentials(e.creds);
+        namespace acc = auth::accounts;
+        const std::string provider = "anthropic";
+        // Re-login of the same account reuses its label; "+ Add another"
+        // picks the next free one.
+        std::string base = acc::derive_current_label(provider);
+        if (base.empty()) base = "account";
+        std::string label = base;
+        if (e.as_new_account)
+            for (int n = 2; acc::get(provider, label).has_value() && n < 100; ++n)
+                label = base + " " + std::to_string(n);
+        acc::snapshot_active(provider, label);
+    }
 
     // Teardown, and the ONE thing that has to happen before jaal's pool
     // spends its shutdown grace.

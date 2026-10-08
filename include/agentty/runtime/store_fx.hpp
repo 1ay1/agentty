@@ -37,6 +37,7 @@
 #include "agentty/domain/smart_mode.hpp"     // smart::RoleConfig
 #include "agentty/provider/selection.hpp"    // provider::Selection
 #include "agentty/store/store.hpp"           // store::Settings
+#include "agentty/auth/auth.hpp"             // auth::Credentials
 
 namespace agentty {
 
@@ -92,5 +93,26 @@ using publish_subagent = jaal::pure_fx<PublishSubagent, "publish_subagent">;
 /// and only when the selection changed.
 struct PublishSelection { provider::Selection selection; };
 using publish_selection = jaal::pure_fx<PublishSelection, "publish_selection">;
+
+/// Re-install the live auth header the stream and subagents use.
+///
+/// Reducers used to resolve the credential themselves (a read of the
+/// credential file or settings) and push the result into Deps. Now they say
+/// which provider, and the host resolves and installs it. `clear` installs an
+/// empty header instead (sign-out, a removed account).
+struct InstallAuth {
+    std::string provider;
+    bool        clear = false;
+};
+using install_auth = jaal::pure_fx<InstallAuth, "install_auth">;
+
+/// Persist Anthropic credentials from a login and file them as an account.
+/// `as_new_account` picks a fresh label rather than reusing the current one.
+/// Followed by an InstallAuth for "anthropic" so the new header goes live.
+struct SaveCredentials {
+    auth::Credentials creds;
+    bool              as_new_account = false;
+};
+using save_credentials = jaal::pure_fx<SaveCredentials, "save_credentials">;
 
 }  // namespace agentty
