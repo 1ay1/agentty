@@ -31,6 +31,7 @@
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/io/persistence.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/selection.hpp"
@@ -1386,44 +1387,61 @@ void AgentServer::on_logout() {
 }
 
 // ── Session lifecycle: list / resume / close / delete ────────────────────────
-json AgentServer::load_session_index() {
-    util::RankedLock lk(index_mtx_);
-    std::ifstream ifs(persistence::threads_dir() / "acp_sessions.json");
+// acp_sessions.json is read-modify-written by every ACP instance (one per
+// editor window), so it goes through with_shared_file like the thread index:
+// the in-process lane plus the cross-process file lock.
+namespace {
+std::filesystem::path session_index_path() {
+    return persistence::threads_dir() / "acp_sessions.json";
+}
+persistence::Lane& session_index_lane() {
+    static persistence::Lane l;
+    return l;
+}
+json read_session_index(const char* where) {
+    std::ifstream ifs(session_index_path());
     if (!ifs) return json::object();
     try { json j; ifs >> j; if (j.is_object()) return j; }
-    catch (const std::exception& e) { util::dbglog("acp.load_session_index", e.what()); }
-    catch (...) { util::dbglog("acp.load_session_index", "non-std exception"); }
+    catch (const std::exception& e) { util::dbglog(where, e.what()); }
+    catch (...) { util::dbglog(where, "non-std exception"); }
     return json::object();
 }
-
-void AgentServer::index_session(const Session& sess) {
-    util::RankedLock lk(index_mtx_);
-    auto path = persistence::threads_dir() / "acp_sessions.json";
-    json j = json::object();
-    { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (const std::exception& e) { util::dbglog("acp.index_session", e.what()); j = json::object(); } catch (...) { j = json::object(); } } }
-    if (!j.is_object()) j = json::object();
-    j[sess.id] = json{
-        {"cwd", sess.cwd},
-        {"title", sess.thread.title},
-        {"updatedAt", std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count()},
-    };
+void write_session_index(const json& j) {
     // A session title/cwd derived from an untrusted ACP `cwd` can contain
     // invalid UTF-8; the default dump() throws type_error(316) on that.
     // Substitute U+FFFD instead so indexing can never crash the worker.
     (void)persistence::write_json_atomic(
-        path, j.dump(-1, ' ', false, json::error_handler_t::replace));
+        session_index_path(), j.dump(-1, ' ', false, json::error_handler_t::replace));
+}
+}  // namespace
+
+json AgentServer::load_session_index() {
+    return persistence::with_shared_file(session_index_lane(), session_index_path(),
+        [](persistence::Held) { return read_session_index("acp.load_session_index"); });
+}
+
+void AgentServer::index_session(const Session& sess) {
+    persistence::with_shared_file(session_index_lane(), session_index_path(),
+        [](persistence::Held, std::string id, json entry) {
+            json j = read_session_index("acp.index_session");
+            j[id] = std::move(entry);
+            write_session_index(j);
+        }, sess.id, json{
+            {"cwd", sess.cwd},
+            {"title", sess.thread.title},
+            {"updatedAt", std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count()},
+        });
 }
 
 void AgentServer::unindex_session(const std::string& id) {
-    util::RankedLock lk(index_mtx_);
-    auto path = persistence::threads_dir() / "acp_sessions.json";
-    json j = json::object();
-    { std::ifstream ifs(path); if (ifs) { try { ifs >> j; } catch (const std::exception& e) { util::dbglog("acp.unindex_session", e.what()); return; } catch (...) { return; } } }
-    if (!j.is_object() || !j.contains(id)) return;
-    j.erase(id);
-    (void)persistence::write_json_atomic(
-        path, j.dump(-1, ' ', false, json::error_handler_t::replace));
+    persistence::with_shared_file(session_index_lane(), session_index_path(),
+        [](persistence::Held, std::string key) {
+            json j = read_session_index("acp.unindex_session");
+            if (!j.contains(key)) return;
+            j.erase(key);
+            write_session_index(j);
+        }, id);
 }
 
 a::ListSessionsResult AgentServer::on_list_sessions(const a::ListSessionsParams& p) {
