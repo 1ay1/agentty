@@ -66,7 +66,20 @@ struct ComposerCursorLeft {};
 struct ComposerCursorRight {};
 struct ComposerCursorHome {};
 struct ComposerCursorEnd {};
-struct ComposerPaste { std::string text; };
+struct ComposerPaste {
+    std::string text;
+    // Set when this paste already went through the image-path check (see
+    // ImagePathSniffed), so it is not sent round again.
+    bool path_checked = false;
+};
+// The worker looked at a pasted path. `path` is empty when it was not a
+// readable image; then the reducer pastes `text` as ordinary text.
+struct ImagePathSniffed {
+    std::string text;
+    std::string path;
+    std::string media_type;
+    std::string body;
+};
 // Fired ~1.2s after an escape-based clipboard read (OSC 5522 / OSC 52) was
 // emitted. If no paste reply arrived by then, the reducer surfaces an
 // ACTIONABLE diagnosis (which terminal, tmux, mosh, the exact env-var fix)
@@ -74,6 +87,8 @@ struct ComposerPaste { std::string text; };
 // lapsing and teaching the user nothing. `seq` matches the query that armed
 // it so a stale timeout never fires after a successful paste.
 struct ClipboardQueryTimeout { std::uint64_t seq = 0; };
+// The worker's answer to "why did that clipboard read go unanswered".
+struct ClipboardDiagnosed { std::string message; };
 // Recall queued messages back into the composer for editing. Bound to
 // Up-arrow when the composer is empty and queued messages exist.
 // Mirrors Claude Code's `Lc_` (binary offset 76303220): drains every
@@ -1048,6 +1063,13 @@ struct ForkMove  { int delta; };
 // Fork with the CURRENTLY-highlighted choice (the reducer reads the picker's
 // cursor). A leaf with no payload keeps the key handler from needing Model.
 struct ForkThread      {};
+// The worker wrote the parent's transcript (and let the read tool see it).
+// `path` is empty when the write failed. The fork is built on this reply.
+struct ForkTranscriptWritten {
+    std::string        parent_id;
+    fork_panel::Choice choice = fork_panel::Choice::RagOff;
+    std::string        path;
+};
 
 // ── Diff review ──────────────────────────────────────────────────────────
 struct OpenDiffReview {};
@@ -1207,7 +1229,8 @@ using ComposerMsg = std::variant<
     ComposerUndo, ComposerRedo,
     ComposerHistoryPrev, ComposerHistoryNext,
     ComposerImagePasteFromClipboard,
-    ComposerPaste, ClipboardQueryTimeout, ComposerRecallQueued,
+    ComposerPaste, ImagePathSniffed, ClipboardQueryTimeout, ClipboardDiagnosed,
+    ComposerRecallQueued,
     ComposerQueuePeekPrev, ComposerQueuePeekNext, ComposerQueuePopLast>;
 
 using StreamMsg = std::variant<
@@ -1295,7 +1318,7 @@ using SettingsListMsg = std::variant<
     SettingsListBackspace, SettingsListSubmitInput, SettingsListCancelInput>;
 
 using ForkMsg = std::variant<
-    OpenFork, CloseFork, ForkMove, ForkThread>;
+    OpenFork, CloseFork, ForkMove, ForkThread, ForkTranscriptWritten>;
 
 using TodoMsg = std::variant<
     OpenTodoModal, CloseTodoModal>;

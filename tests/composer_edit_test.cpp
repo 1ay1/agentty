@@ -16,6 +16,7 @@
 #include "agentty/runtime/msg.hpp"
 
 using agentty::Model;
+using agentty::Cmd;
 using agentty::app::detail::composer_update;
 namespace msg = agentty::msg;
 // The composer message structs live in the agentty:: namespace; the
@@ -334,5 +335,40 @@ TEST_CASE("composer_edit") {
         check_edit("Retry-After is honoured verbatim",
                    c.loop_wait_secs(t0) == 42,
                    std::to_string(c.loop_wait_secs(t0)));
+    }
+}
+
+// A paste that could be a dropped image path goes to a worker (the check reads
+// the file); anything else pastes in place. The reply is handled either way.
+TEST_CASE("composer paste: image paths are checked off the fold") {
+    using agentty::ComposerPaste;
+    using agentty::ImagePathSniffed;
+    {
+        Model m;
+        (void)composer_update(m, ComposerPaste{"hello world"});
+        REQUIRE(m.ui.composer.attachments.size() == 1);   // pasted in place
+        CHECK(m.ui.composer.attachments[0].kind
+              == agentty::Attachment::Kind::Paste);
+    }
+    {
+        Model m;
+        Cmd c = composer_update(m, ComposerPaste{"/tmp/shot.png"});
+        CHECK_FALSE(c.is_none());          // the sniff task
+        CHECK(m.ui.composer.attachments.empty());   // nothing pasted yet
+        // Not an image: the text goes in as an ordinary paste.
+        (void)composer_update(m, ImagePathSniffed{.text = "/tmp/shot.png"});
+        REQUIRE(m.ui.composer.attachments.size() == 1);
+        CHECK(m.ui.composer.attachments[0].kind
+              == agentty::Attachment::Kind::Paste);
+    }
+    {
+        Model m;
+        (void)composer_update(m, ImagePathSniffed{
+            .text = "/tmp/a.png", .path = "/tmp/a.png",
+            .media_type = "image/png", .body = "\x89PNG...."});
+        REQUIRE(m.ui.composer.attachments.size() == 1);
+        CHECK(m.ui.composer.attachments[0].kind
+              == agentty::Attachment::Kind::Image);
+        CHECK(m.ui.composer.attachments[0].media_type == "image/png");
     }
 }

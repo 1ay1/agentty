@@ -30,6 +30,7 @@
 
 #if AGENTTY_MCP
 #include <mcp/tools/util/bash_validate.hpp>
+#include <mcp/tools/util/fs_helpers.hpp>
 #endif
 #include "agentty/util/dbglog.hpp"
 #include "agentty/tool/registry.hpp"
@@ -40,6 +41,7 @@
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/io/persistence.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
 namespace agentty::app::cmd {
@@ -2584,6 +2586,30 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
             out.send(Msg{std::move(r)});
         },
         path.string(), std::move(reply), std::move(spec));
+}
+
+Cmd write_fork_transcript(Thread parent, fork_panel::Choice choice) {
+    return Cmd::task(
+        [](jaal::Sink<Msg> out, std::stop_token, Thread t,
+           fork_panel::Choice choice) {
+            ForkTranscriptWritten r{.parent_id = t.id.value, .choice = choice};
+            try {
+                r.path = persistence::write_thread_transcript_md(t).string();
+            } catch (...) {
+                r.path.clear();
+            }
+            // The transcript sits under ~/.agentty/threads, outside the
+            // workspace the read tool is sandboxed to. Open that dir to both
+            // fs layers (tools are served through mcp-cpp) so the model can
+            // read the file the fork note points at.
+            if (!r.path.empty()) {
+                const auto dir = persistence::threads_dir();
+                tools::util::allow_read_root(dir);
+                ::mcp::tools::util::allow_read_root(dir);
+            }
+            out.send(Msg{msg::ForkMsg{std::move(r)}});
+        },
+        std::move(parent), choice);
 }
 
 Cmd prewarm_provider(const Model& m) {

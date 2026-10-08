@@ -353,4 +353,17 @@ struct LoopBreak {
 [[nodiscard]] Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
                               tools::plugin::ServerSpec spec = {});
 
+// Write `parent`'s transcript for a fork, off the UI thread, and open its
+// directory to the read tool. Replies with ForkTranscriptWritten.
+[[nodiscard]] Cmd write_fork_transcript(Thread parent, fork_panel::Choice choice);
+
+// Work out why a clipboard read went unanswered (mosh, tmux config, ssh) and
+// reply with ClipboardDiagnosed. Walks /proc and asks tmux, hence a worker.
+// In cmd_clipboard_diag.cpp.
+[[nodiscard]] Cmd diagnose_clipboard(bool in_ssh);
+
+// Check whether a pasted path names an image file and read it, replying with
+// ImagePathSniffed. In cmd_image_paste.cpp.
+[[nodiscard]] Cmd sniff_image_path(std::string text);
+
 } // namespace agentty::app::cmd

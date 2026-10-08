@@ -38,9 +38,6 @@
 #include "agentty/runtime/panel/palette.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/io/persistence.hpp"
-#include "agentty/tool/util/fs_helpers.hpp"
-#include <mcp/tools/util/fs_helpers.hpp>
-#include <filesystem>
 #include "agentty/tool/skills.hpp"
 #include "agentty/provider/selection.hpp"   // prewarm_active_provider
 
@@ -112,31 +109,25 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
                 return set_status_toast(m, "cannot fork while the agent is working");
 
-            // 1. Persist the parent untouched. A VALUE, batched into this
-            //    arm's return below — and taken BEFORE the fork replaces
-            //    m.d.current, so it captures the parent, not the child.
-            Cmd save_parent = Cmd(SaveThread{m.d.current});
-            const std::string parent_id = m.d.current.id.value;
-
-            // 2. Write the parent's transcript to a clean, readable file
-            //    the fork can READ ON DEMAND — the whole point of forking:
-            //    escape a full context window CHEAPLY. The new thread starts
-            //    EMPTY (near-zero tokens); the model pulls earlier context
-            //    from disk only if it needs it (exactly like manually
-            //    opening a new thread and asking it to read the old one).
-            const std::filesystem::path transcript =
-                persistence::write_thread_transcript_md(m.d.current);
-
-            // The transcript lives under ~/.agentty/threads — OUTSIDE the
-            // workspace the read tool is sandboxed to. Allowlist that dir
-            // for reads (both the agentty and mcp-cpp fs layers, since
-            // tools are served through mcp-cpp) so the model can actually
-            // read the file the note points it at.
-            if (!transcript.empty()) {
-                const auto dir = persistence::threads_dir();
-                tools::util::allow_read_root(dir);
-                ::mcp::tools::util::allow_read_root(dir);
-            }
+            // 1. Persist the parent untouched, and 2. write its transcript
+            //    to a clean, readable file the fork can READ ON DEMAND. That
+            //    is the whole point of forking: the new thread starts EMPTY
+            //    and the model pulls earlier context from disk only if it
+            //    needs it. The write runs on a worker; the fork is built when
+            //    ForkTranscriptWritten comes back.
+            return Cmd::batch(Cmd(SaveThread{m.d.current}),
+                              cmd::write_fork_transcript(m.d.current, choice));
+        },
+        [&](ForkTranscriptWritten& e) -> Cmd {
+            // The user may have moved on while the transcript was written
+            // (switched thread, started a turn, forked twice). Only fork the
+            // thread that asked, and only while it is still safe to.
+            if (m.d.current.id.value != e.parent_id) return Cmd::none();
+            if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
+                return Cmd::none();
+            const fp::Choice choice = e.choice;
+            const std::string& parent_id = e.parent_id;
+            const std::string& transcript = e.path;
 
             // 3. Build the fork: a FRESH, EMPTY thread with provenance +
             //    per-thread RAG override. No messages carried over.
@@ -169,10 +160,10 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
                 note.role = Role::User;
                 note.fork_note = true;
                 if (!transcript.empty()) {
-                    note.fork_transcript = transcript.string();
+                    note.fork_transcript = transcript;
                     note.text =
                         "This conversation is a fork of an earlier one. Its "
-                        "full transcript is saved at:\n  " + transcript.string() +
+                        "full transcript is saved at:\n  " + transcript +
                         "\nRead it with the `read` tool (or grep it) ONLY if "
                         "you need earlier context — don't read it "
                         "pre-emptively. The fork starts fresh precisely to "
@@ -210,8 +201,8 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
                 std::chrono::seconds{5});
             // The fork's first turn hits the network fresh, and the idle TTL
             // has usually evicted the launch-time socket — so warm it, as an
-            // effect alongside the saves.
-            return Cmd::batch(std::move(save_parent), std::move(save_fork),
+            // effect alongside the save.
+            return Cmd::batch(std::move(save_fork),
                               cmd::prewarm_provider(m),
                               std::move(toast), cmd::reset_inline());
         },

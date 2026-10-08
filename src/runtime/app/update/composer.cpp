@@ -10,12 +10,6 @@
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
-#if !defined(_WIN32)
-#  include <unistd.h>   // getppid (mosh ancestry walk in the clipboard diagnosis)
-#endif
 #include <string>
 #include <string_view>
 
@@ -29,7 +23,6 @@
 #include "agentty/io/clipboard.hpp"
 #include "agentty/util/logx.hpp"          // AGT_LOG — paste-path tracing
 #include "agentty/provider/selection.hpp"   // prewarm_active_provider
-#include "agentty/util/home_dir.hpp"
 #include "agentty/util/env.hpp"
 #include "agentty/util/image_dims.hpp"
 #include "agentty/runtime/panel/palette.hpp"
@@ -44,9 +37,36 @@ namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
 
-namespace {
+// Image-paste detection. Terminal bracketed-paste delivers UTF-8 text
+// only — to attach an image the user drops the file's *path* (drag-
+// onto-terminal, "copy as path", whatever). We accept it iff the
+// payload is a single trimmed line, names a regular file under the
+// workspace's filesystem, and starts with one of the recognised
+// image magic-byte prefixes.
+const char* detect_image_media_type(std::string_view bytes) noexcept {
+    auto u = [&](std::size_t i){ return static_cast<unsigned char>(bytes[i]); };
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (bytes.size() >= 8 && u(0) == 0x89 && u(1) == 0x50 && u(2) == 0x4E
+        && u(3) == 0x47 && u(4) == 0x0D && u(5) == 0x0A && u(6) == 0x1A
+        && u(7) == 0x0A) return "image/png";
+    // JPEG: FF D8 FF
+    if (bytes.size() >= 3 && u(0) == 0xFF && u(1) == 0xD8 && u(2) == 0xFF)
+        return "image/jpeg";
+    // GIF87a / GIF89a
+    if (bytes.size() >= 6
+        && bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F'
+        && bytes[3] == '8' && (bytes[4] == '7' || bytes[4] == '9')
+        && bytes[5] == 'a') return "image/gif";
+    // WEBP: "RIFF" .... "WEBP"
+    if (bytes.size() >= 12
+        && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
+        && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P')
+        return "image/webp";
+    return nullptr;
+}
 
-namespace fs = std::filesystem;
+
+namespace {
 
 constexpr std::size_t kUndoDepth = 64;
 
@@ -177,146 +197,18 @@ int word_right(std::string_view s, int pos) noexcept {
     return p;
 }
 
-// Image-paste detection. Terminal bracketed-paste delivers UTF-8 text
-// only — to attach an image the user drops the file's *path* (drag-
-// onto-terminal, "copy as path", whatever). We accept it iff the
-// payload is a single trimmed line, names a regular file under the
-// workspace's filesystem, and starts with one of the recognised
-// image magic-byte prefixes.
-const char* detect_image_media_type(std::string_view bytes) noexcept {
-    auto u = [&](std::size_t i){ return static_cast<unsigned char>(bytes[i]); };
-    // PNG: 89 50 4E 47 0D 0A 1A 0A
-    if (bytes.size() >= 8 && u(0) == 0x89 && u(1) == 0x50 && u(2) == 0x4E
-        && u(3) == 0x47 && u(4) == 0x0D && u(5) == 0x0A && u(6) == 0x1A
-        && u(7) == 0x0A) return "image/png";
-    // JPEG: FF D8 FF
-    if (bytes.size() >= 3 && u(0) == 0xFF && u(1) == 0xD8 && u(2) == 0xFF)
-        return "image/jpeg";
-    // GIF87a / GIF89a
-    if (bytes.size() >= 6
-        && bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F'
-        && bytes[3] == '8' && (bytes[4] == '7' || bytes[4] == '9')
-        && bytes[5] == 'a') return "image/gif";
-    // WEBP: "RIFF" .... "WEBP"
-    if (bytes.size() >= 12
-        && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
-        && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P')
-        return "image/webp";
-    return nullptr;
-}
-
-// Returns (path, media_type) if the paste looks like a single-line
-// path to a recognised image file. Empty path on no match.
-struct ImagePasteResult {
-    std::string  path;
-    const char*  media_type = nullptr;
-    std::string  body;       // raw image bytes
-};
-
-// Normalise a pasted path candidate:
-//   – expand a leading `~/` to $HOME (file managers / shells emit this)
-//   – unescape `\ ` / `\(` / `\)` / `\'` etc. (drag-drop on macOS and
-//     several Linux file managers backslash-escape every shell-special
-//     character so the path can be re-pasted into a shell verbatim)
-//   – drop CR if a CRLF terminal slipped one through
-std::string normalize_path_candidate(std::string_view in) {
-    // Trim trailing CR.
-    while (!in.empty() && (in.back() == '\r' || in.back() == ' ')) in.remove_suffix(1);
-    std::string s;
-    s.reserve(in.size());
-    if (in.size() >= 2 && in[0] == '~' && in[1] == '/') {
-        // Unified home root ($HOME on POSIX/MSYS2, $USERPROFILE on native
-        // Windows) so a dropped `~/…` path expands on every platform.
-        const fs::path home = agentty::util::home_dir();
-        if (!home.empty()) {
-            s.append(home.string());
-            in.remove_prefix(1);  // keep the '/'
-        }
-    }
-#ifdef _WIN32
-    // On Windows the backslash is the PATH SEPARATOR, not a shell escape:
-    // a dropped native path `C:\Users\foo\bar` must survive verbatim.
-    // Stripping `\` here would mangle it to `C:Usersfoobar`. Take the
-    // whole remainder as-is (drag/drop sources on Windows don't
-    // shell-escape).
-    s.append(in);
-#else
-    for (std::size_t i = 0; i < in.size(); ++i) {
-        if (in[i] == '\\' && i + 1 < in.size()) {
-            // Shell-style escape (macOS / Linux file managers backslash
-            // every shell-special char). Drop the backslash, keep the char.
-            s.push_back(in[i + 1]);
-            ++i;
-            continue;
-        }
-        s.push_back(in[i]);
-    }
-#endif
-    return s;
-}
-
-ImagePasteResult sniff_image_paste(std::string_view text) {
-    ImagePasteResult r;
-    // Trim leading / trailing whitespace (incl. CR).
+// Could this paste be a dropped image path? A cheap lexical check only (one
+// trimmed line, not too long); the worker does the file reads. Keeps every
+// ordinary text paste synchronous.
+bool may_be_image_path(std::string_view text) noexcept {
     std::size_t a = 0, b = text.size();
     while (a < b && std::isspace(static_cast<unsigned char>(text[a]))) ++a;
     while (b > a && std::isspace(static_cast<unsigned char>(text[b - 1]))) --b;
-    auto trimmed = text.substr(a, b - a);
-    if (trimmed.empty()) return r;
-    // Must be a single line — embedded newlines hint at pasted prose
-    // rather than a path.
-    if (trimmed.find('\n') != std::string_view::npos) return r;
-    if (trimmed.size() > 4096) return r;  // sane upper bound
-
-    // Strip surrounding quotes (drag-and-drop on macOS / GNOME quotes
-    // paths automatically).
-    if (trimmed.size() >= 2
-        && (trimmed.front() == '\'' || trimmed.front() == '"')
-        && trimmed.back() == trimmed.front()) {
-        trimmed = trimmed.substr(1, trimmed.size() - 2);
-    }
-    // file:// URIs land here on some desktops. Accept either two or
-    // three leading slashes (file:// vs file:///).
-    constexpr std::string_view kFileUri = "file://";
-    if (trimmed.size() > kFileUri.size()
-        && trimmed.substr(0, kFileUri.size()) == kFileUri) {
-        trimmed.remove_prefix(kFileUri.size());
-        // Some emitters use file:/// for absolute paths. Collapse the
-        // extra slash so the result starts with exactly one '/'.
-        if (!trimmed.empty() && trimmed.front() == '/') {
-            // already absolute, fine
-        }
-    }
-
-    auto candidate = normalize_path_candidate(trimmed);
-    if (candidate.empty()) return r;
-
-    fs::path p{candidate};
-    std::error_code ec;
-    if (!fs::is_regular_file(p, ec) || ec) return r;
-    // Sniff first 16 bytes for a magic prefix.
-    std::ifstream in(p, std::ios::binary);
-    if (!in) return r;
-    char buf[16]{};
-    in.read(buf, sizeof(buf));
-    auto got = static_cast<std::size_t>(in.gcount());
-    auto* mt = detect_image_media_type(std::string_view{buf, got});
-    if (!mt) return r;
-    // Slurp full bytes. 8 MiB cap — Anthropic's per-image limit is
-    // 5 MB and base64 expansion adds ~33 %, so anything bigger than
-    // ~6 MB on disk would fail server-side anyway.
-    auto sz = fs::file_size(p, ec);
-    if (ec || sz > 8 * 1024 * 1024) return r;
-    in.clear();
-    in.seekg(0);
-    std::string body(static_cast<std::size_t>(sz), '\0');
-    in.read(body.data(), static_cast<std::streamsize>(sz));
-    if (in.gcount() != static_cast<std::streamsize>(sz)) return r;
-
-    r.path       = p.string();
-    r.media_type = mt;
-    r.body       = std::move(body);
-    return r;
+    const auto t = text.substr(a, b - a);
+    if (t.empty() || t.size() > 4096) return false;
+    if (t.find('\n') != std::string_view::npos) return false;
+    // A path has a separator or an extension; a pasted word has neither.
+    return t.find_first_of("/\\.") != std::string_view::npos;
 }
 
 // Build the reverse-chronological list of user-message text refs in
@@ -988,26 +880,12 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             }
 
             // Image-path paste: a single-line path naming a real image
-            // file becomes an Image attachment. Try this first so a
-            // path under 800 bytes doesn't get inlined as plain text.
-            // Sniff the first 16 bytes for a known magic prefix; only
-            // ingest if it actually looks like an image.
-            if (auto img = sniff_image_paste(e.text); !img.path.empty()) {
-                begin_edit(m.ui.composer);
-                Attachment att;
-                att.kind       = Attachment::Kind::Image;
-                att.path       = std::move(img.path);
-                att.media_type = img.media_type;
-                att.byte_count = img.body.size();
-                att.body.set_bytes(std::move(img.body));
-                std::size_t idx = m.ui.composer.attachments.size();
-                m.ui.composer.attachments.push_back(std::move(att));
-                auto placeholder = attachment::make_placeholder(idx);
-                m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
-                m.ui.composer.cursor += static_cast<int>(placeholder.size());
-                m.ui.composer.expanded = true;
-                return Cmd::none();
-            }
+            // file becomes an Image attachment. Checking that reads the
+            // file, so a paste that could be a path goes to a worker and
+            // comes back as ImagePathSniffed; if it was not an image, the
+            // reply re-sends the text here with path_checked set.
+            if (!e.path_checked && may_be_image_path(e.text))
+                return cmd::sniff_image_path(std::move(e.text));
 
             // Empty paste (clipboard manager hiccup, terminal dropped
             // a binary clipboard) — nothing to do.
@@ -1180,139 +1058,32 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                     std::move(toast));
             }
             // Name the user's EXACT situation and the shortest path out —
-            // an unanswered query must never dead-end in silence.
-            const bool in_mosh = [] {
-                // mosh-server exports no reliable env marker into its child
-                // shell — detect it by walking the process ancestry instead
-                // (Linux/procfs; other platforms fall through to false and
-                // get the generic SSH wording, which still applies).
-#if defined(__linux__)
-                int pid = static_cast<int>(::getppid());
-                for (int hop = 0; hop < 12 && pid > 1; ++hop) {
-                    std::string base = "/proc/" + std::to_string(pid);
-                    if (std::ifstream comm(base + "/comm"); comm) {
-                        std::string name;
-                        std::getline(comm, name);
-                        if (name.find("mosh-server") != std::string::npos)
-                            return true;
-                    }
-                    std::ifstream stat(base + "/stat");
-                    if (!stat) break;
-                    // stat: pid (comm) state ppid … — comm may contain
-                    // spaces, so parse from after the LAST ')'.
-                    std::string line;
-                    std::getline(stat, line);
-                    auto rp = line.rfind(')');
-                    if (rp == std::string::npos) break;
-                    int state_and_ppid_at = static_cast<int>(rp) + 2;
-                    std::istringstream tail(line.substr(
-                        static_cast<std::size_t>(state_and_ppid_at)));
-                    char state_ch; int ppid = 0;
-                    tail >> state_ch >> ppid;
-                    if (ppid <= 1) break;
-                    pid = ppid;
-                }
-#endif
-                // Ancestry misses the common persistent-tmux topology:
-                // when the tmux SERVER is started by systemd (or an older
-                // login) the mosh client attaches to it later, so
-                // mosh-server is a sibling of the server, never an ancestor
-                // of us. Ask tmux who is attached and walk THAT process
-                // instead — otherwise a genuine mosh session is diagnosed
-                // with the tmux wording and the user chases a tmux config
-                // that was never the problem.
-#if defined(__linux__)
-                if (maya::tmux::active()) {
-                    if (const int cpid = maya::tmux::client_pid(); cpid > 1) {
-                        int p = cpid;
-                        for (int hop = 0; hop < 12 && p > 1; ++hop) {
-                            std::string base = "/proc/" + std::to_string(p);
-                            if (std::ifstream comm(base + "/comm"); comm) {
-                                std::string name;
-                                std::getline(comm, name);
-                                if (name.find("mosh-server") != std::string::npos)
-                                    return true;
-                            }
-                            std::ifstream stat(base + "/stat");
-                            if (!stat) break;
-                            std::string line;
-                            std::getline(stat, line);
-                            auto rp = line.rfind(')');
-                            if (rp == std::string::npos) break;
-                            std::istringstream tail(line.substr(rp + 2));
-                            char st; int pp = 0;
-                            tail >> st >> pp;
-                            if (pp <= 1) break;
-                            p = pp;
-                        }
-                    }
-                }
-#endif
-                return false;
-            }();
-            // Single source of truth for tmux presence: maya::tmux owns
-            // both topologies ($TMUX here, or a tmux-*/screen-* TERM that
-            // survived ssh) plus the passthrough/feature probes below.
-            const bool in_tmux = maya::tmux::active();
-            // The capability answers below come from a probe maya memoises
-            // for the whole process. tmux capabilities are per-CLIENT, so
-            // detaching a desktop kitty and reattaching from a phone (or
-            // simply fixing tmux.conf and reattaching) leaves the cached
-            // verdict describing a terminal that is no longer there — the
-            // failure then repeats forever and no amount of correct config
-            // clears it. A clipboard read has just FAILED, which is exactly
-            // the moment a stale verdict is worth one ~8 ms round-trip to
-            // re-check. Only re-probes when the attached client changed.
-            if (in_tmux) (void)maya::tmux::refresh_if_client_changed();
-            const bool in_ssh  = m.env.ssh;
-            std::string msg;
-            if (in_mosh) {
-                msg = "clipboard: mosh doesn't relay terminal clipboard "
-                      "replies \xe2\x80\x94 use plain ssh (or tmux over ssh), or set "
-                      "AGENTTY_CLIPBOARD_CMD";
-            } else if (in_tmux) {
-                // Name the ACTUAL blocker instead of guessing. Order
-                // matters: these are checked in the order tmux applies
-                // them, so the first failure reported is the first one
-                // the user has to fix.
-                if (!maya::tmux::clipboard_reads_relayed()) {
-                    // THE common case, and silent until now: tmux's
-                    // `get-clipboard` defaults to `buffer`, so tmux
-                    // answers a clipboard read from its OWN paste buffer
-                    // and never asks the terminal. A paste buffer holds
-                    // TEXT — an image can never come back through it, no
-                    // matter what the outer terminal supports.
-                    msg = "clipboard: tmux answers reads from its own paste "
-                          "buffer (text only) \xe2\x80\x94 run `tmux set -g "
-                          "get-clipboard both` so it asks your terminal, "
-                          "then retry";
-                } else if (!maya::tmux::passthrough_allowed()) {
-                    msg = "clipboard: tmux is dropping the request \xe2\x80\x94 run "
-                          "`tmux set -g allow-passthrough on` (it is OFF by "
-                          "default), then retry";
-                } else if (!maya::tmux::has_feature(
-                               maya::tmux::Feature::Clipboard)) {
-                    msg = "clipboard: tmux reports your outer terminal has no "
-                          "clipboard support \xe2\x80\x94 add `set -ga terminal-features "
-                          "\",*:clipboard\"` if it does, or set AGENTTY_CLIPBOARD_CMD";
-                } else {
-                    msg = "clipboard: no reply through tmux \xe2\x80\x94 passthrough and "
-                          "clipboard are on, so the outer terminal refused the "
-                          "read (in kitty: add read-clipboard to clipboard_control "
-                          "in kitty.conf and restart kitty)";
-                }
-            } else if (in_ssh) {
-                msg = "clipboard: your terminal didn't answer \xe2\x80\x94 images "
-                      "over SSH need kitty with clipboard_control read-clipboard "
-                      "in kitty.conf (restart kitty after adding it); else set "
-                      "AGENTTY_CLIPBOARD_CMD='ssh <laptop> wl-paste -t image/png'";
-            } else {
-                msg = "clipboard: terminal didn't answer the read query "
-                      "\xe2\x80\x94 install wl-clipboard/xclip (Linux) or use a "
-                      "terminal with OSC 52 read support";
-            }
-            auto toast = set_status_toast(m, msg, std::chrono::seconds{8});
-            return toast;
+            // an unanswered query must never dead-end in silence. Working
+            // that out walks /proc and asks tmux, so it runs on a worker.
+            return cmd::diagnose_clipboard(m.env.ssh);
+        },
+        [&](ImagePathSniffed& e) -> Cmd {
+            if (e.path.empty())
+                return composer_update(
+                    m, ComposerPaste{std::move(e.text), /*path_checked=*/true});
+            begin_edit(m.ui.composer);
+            Attachment att;
+            att.kind       = Attachment::Kind::Image;
+            att.path       = std::move(e.path);
+            att.media_type = std::move(e.media_type);
+            att.byte_count = e.body.size();
+            att.body.set_bytes(std::move(e.body));
+            std::size_t idx = m.ui.composer.attachments.size();
+            m.ui.composer.attachments.push_back(std::move(att));
+            auto placeholder = attachment::make_placeholder(idx);
+            m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
+            m.ui.composer.cursor += static_cast<int>(placeholder.size());
+            m.ui.composer.expanded = true;
+            return Cmd::none();
+        },
+        [&](ClipboardDiagnosed& e) -> Cmd {
+            return set_status_toast(m, std::move(e.message),
+                                    std::chrono::seconds{8});
         },
         [&](ComposerRecallQueued) -> Cmd {
             // No-op when there's nothing to recall — the caller (the
