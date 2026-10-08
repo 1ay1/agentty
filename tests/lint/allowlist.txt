@@ -99,7 +99,6 @@ airgap/airgap.cpp: const_cast
 # A tool runs on a worker and may spawn a child process. progress.cpp's
 # thread_local is the sink the cmd runner captures — UI-thread only, and
 # documented there.
-tool/registry.cpp: mutex atomic
 # rag apply is synchronous now (the TUI runs it through cmd::apply_rag_settings)
 # and the subagent stream's cancel bridge is stop_callbacks on real tokens, so
 # this file starts no thread of its own. mutex/atomic guard the retriever +
