@@ -155,8 +155,7 @@ DisplayText clip_long_lines(DisplayText in) {
 bool composer_uses_hardware_caret(const Model& m) noexcept {
     // AGENTTY_PAINTED_CARET=1 opts out wholesale (broken-DECTCEM terminals,
     // or users who prefer the painted block).
-    static const bool painted_caret_env =
-        std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
+    const bool painted_caret_env = m.env.painted_caret;
     const auto state = composer_state(m);
     const bool agent_active =
         state == maya::Composer::State::Streaming ||

@@ -7,11 +7,15 @@
 
 #include "agentty/runtime/app/env.hpp"
 
+#include <cctype>
 #include <cstdlib>
+#include <string>
 
 #include <maya/terminal/ansi.hpp>
 
 #include "agentty/util/update.hpp"   // self_update_possible
+#include "agentty/runtime/view/helpers.hpp"      // max_context_tokens_from_env
+#include "agentty/runtime/view/host_escape.hpp"  // integration_active
 
 namespace agentty::app {
 
@@ -32,6 +36,16 @@ bool truthy(const char* name) noexcept {
     if (!v || !*v) return false;
     return v[0] == '1' || v[0] == 't' || v[0] == 'T'
         || v[0] == 'y' || v[0] == 'Y';
+}
+
+// Unset → on; "0"/"false"/"off"/"no" (any case) → off; anything else → on.
+bool on_unless_off(const char* name) noexcept {
+    const char* v = std::getenv(name);
+    if (!v || !*v) return true;
+    std::string s;
+    for (const char* p = v; *p; ++p)
+        s += static_cast<char>(std::tolower(static_cast<unsigned char>(*p)));
+    return !(s == "0" || s == "false" || s == "off" || s == "no");
 }
 
 bool detect_remote() noexcept {
@@ -70,6 +84,12 @@ Model::Env read_launch_env() noexcept {
     e.frozen_collapse     = truthy("AGENTTY_FROZEN_COLLAPSE");
     e.no_update_check     = set("AGENTTY_NO_UPDATE_CHECK");
     e.no_auto_update      = set("AGENTTY_NO_AUTO_UPDATE");
+    e.max_context_tokens  = ui::max_context_tokens_from_env();
+    e.reveal              = on_unless_off("AGENTTY_REVEAL");
+    e.reveal_typewriter   = on_unless_off("AGENTTY_REVEAL_TYPEWRITER");
+    e.reveal_decorate     = on_unless_off("AGENTTY_REVEAL_DECORATE");
+    e.painted_caret       = set("AGENTTY_PAINTED_CARET");
+    e.host_integration    = ui::host::integration_active();
     // Only probe when it could matter: the probe writes a file next to our
     // binary, and an install that opted out of auto-update shouldn't touch
     // its directory at all.

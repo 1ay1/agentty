@@ -90,7 +90,8 @@ int resolved_context_max(const Model& m, std::string_view provider_id) {
     }
     const int resolved =
         ui::resolve_context_window(provider_id, m.d.model_id.value,
-                                   advertised, m.d.persisted);
+                                   advertised, m.d.persisted,
+                                   m.env.max_context_tokens);
 
     // Ollama does not serve what the weights claim. It allocates a KV cache
     // to match, so agentty clamps num_ctx to a ceiling that will actually

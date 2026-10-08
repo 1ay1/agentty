@@ -233,10 +233,21 @@ std::string context_override_key(std::string_view provider_id,
     return k;
 }
 
+int max_context_tokens_from_env() noexcept {
+    const char* env = std::getenv("AGENTTY_MAX_CONTEXT_TOKENS");
+    if (!env || !*env) return 0;
+    char* end = nullptr;
+    const long v = std::strtol(env, &end, 10);
+    if (end && *end == '\0' && v > 0 && v <= std::numeric_limits<int>::max())
+        return static_cast<int>(v);
+    return 0;
+}
+
 int resolve_context_window(std::string_view provider_id,
                            std::string_view model_id,
                            int advertised,
-                           const store::Settings& settings) noexcept {
+                           const store::Settings& settings,
+                           int env_max) noexcept {
     // FIVE rungs, strongest evidence first. The ordering is the whole design,
     // so it is stated here rather than inferred from the code below.
     //
@@ -336,16 +347,9 @@ int resolve_context_window(std::string_view provider_id,
     //    LAST, not first: it is global, so a session that reaches several
     //    models would otherwise have one number applied to all of them. It
     //    only speaks when nothing better did.
-    if (const char* env = std::getenv("AGENTTY_MAX_CONTEXT_TOKENS");
-        env && *env) {
-        // Bad input must not silently become a tiny window: a value that
-        // does not parse, or is <= 0, is treated as unset. strtol's endptr
-        // check rejects "1M" and "abc" rather than reading them as 1 or 0.
-        char* end = nullptr;
-        const long v = std::strtol(env, &end, 10);
-        if (end && *end == '\0' && v > 0 && v <= std::numeric_limits<int>::max())
-            return static_cast<int>(v);
-    }
+    //    Read once at launch (Model::Env::max_context_tokens); bad input
+    //    parses to 0, i.e. unset.
+    if (env_max > 0) return env_max;
 
     // Nothing is known. Stay conservative: an over-estimate fails the turn
     // on the wire, an under-estimate only compacts sooner than it had to.
@@ -354,12 +358,13 @@ int resolve_context_window(std::string_view provider_id,
 
 void bake_context_window(ModelInfo& row,
                          std::string_view provider_id,
-                         const store::Settings& settings) noexcept {
+                         const store::Settings& settings,
+                         int env_max) noexcept {
     // The row's current value IS the advertisement (0 = nothing reported),
     // so feed it in as rung 2 and take whatever the ladder returns.
     row.context_window =
         resolve_context_window(provider_id, row.id.value,
-                               row.context_window, settings);
+                               row.context_window, settings, env_max);
 }
 
 int context_max_for_model(std::string_view model_id) noexcept {

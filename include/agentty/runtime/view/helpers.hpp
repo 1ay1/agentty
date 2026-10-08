@@ -188,10 +188,19 @@ inline constexpr int kDefaultContextWindow = 200'000;
 // context_window defaults to 0 rather than a number: "unknown" and "200k"
 // must not be the same value, or a real 1M model gets clamped by a default
 // nobody chose.
+//
+// `env_max` is AGENTTY_MAX_CONTEXT_TOKENS as parsed at launch (Model::Env::
+// max_context_tokens, 0 = unset): the last rung before the default. Passed
+// in so the ladder reads no environment.
 [[nodiscard]] int resolve_context_window(std::string_view provider_id,
                                         std::string_view model_id,
                                         int advertised,
-                                        const store::Settings& settings) noexcept;
+                                        const store::Settings& settings,
+                                        int env_max = 0) noexcept;
+
+// Parse AGENTTY_MAX_CONTEXT_TOKENS. 0 when unset or not a positive integer
+// ("1M", "abc", "-5" are rejected rather than read as a tiny window).
+[[nodiscard]] int max_context_tokens_from_env() noexcept;
 
 // The composite key an override is stored under. Exposed so the settings
 // writer and the resolver cannot disagree about the spelling.
@@ -217,7 +226,8 @@ inline constexpr int kDefaultContextWindow = 200'000;
 // said nothing), which is exactly what the ladder's rung 2 wants.
 void bake_context_window(ModelInfo& row,
                          std::string_view provider_id,
-                         const store::Settings& settings) noexcept;
+                         const store::Settings& settings,
+                         int env_max = 0) noexcept;
 
 [[nodiscard]] int context_max_for_model(std::string_view model_id) noexcept;
 

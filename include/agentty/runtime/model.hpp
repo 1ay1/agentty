@@ -814,6 +814,18 @@ struct Model {
         // AGENTTY_NO_UPDATE_CHECK / AGENTTY_NO_AUTO_UPDATE.
         bool no_update_check      = false;
         bool no_auto_update       = false;
+        // AGENTTY_MAX_CONTEXT_TOKENS, parsed (0 = unset): the context
+        // ladder's last rung before the default.
+        int  max_context_tokens   = 0;
+        // AGENTTY_REVEAL / _TYPEWRITER / _DECORATE (unset = on).
+        bool reveal               = true;
+        bool reveal_typewriter    = true;
+        bool reveal_decorate      = true;
+        // AGENTTY_PAINTED_CARET: always paint the composer caret.
+        bool painted_caret        = false;
+        // Running under a cooperating editor host (AGENTTY_HOST=emacs or
+        // INSIDE_EMACS with vterm): emit file-event OSCs.
+        bool host_integration     = false;
         // Can this binary replace itself? Answered once at launch: resolving
         // our own path and probing its directory for write access (it creates
         // and deletes a file there). The reducer used to call that inline

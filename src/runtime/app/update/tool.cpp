@@ -567,7 +567,7 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
             // Frame-safe (maya cmd::emit_osc, out-of-band), and a complete
             // no-op on a normal terminal (integration_active() is false).
             Cmd host_cmd = Cmd::none();
-            if (ui::host::integration_active()) {
+            if (m.env.host_integration) {
                 for (const auto& msg_ : m.d.current.messages) {
                     bool done_scan = false;
                     for (const auto& tc : msg_.tool_calls) {

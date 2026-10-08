@@ -43,18 +43,6 @@ namespace agentty::ui {
 
 namespace {
 
-// Tri-state env flag: unset → `def`; "0"/"false"/"off"/"no" (any case) →
-// false; anything else → true. Lets a switch DEFAULT ON yet be explicitly
-// forced either way. Callers cache the result in a static (read once).
-[[nodiscard]] inline bool env_on(const char* name, bool def) noexcept {
-    const char* v = std::getenv(name);
-    if (!v || !*v) return def;
-    std::string s;
-    for (const char* p = v; *p; ++p)
-        s += static_cast<char>(std::tolower(static_cast<unsigned char>(*p)));
-    return !(s == "0" || s == "false" || s == "off" || s == "no");
-}
-
 // ── Cached markdown render. The ONE Element-returning helper kept in
 //    agentty — strictly because cross-frame cache state lives in the
 //    StreamingMarkdown widget instance, which we keep alive across
@@ -293,8 +281,8 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // isn't one any more. A test that wants the reveal OFF still
         // pre-seeds the flag on its own widget (midrun_wire_test), which
         // this never clobbers.
-        const bool fx_default = true;
-        const bool master     = env_on("AGENTTY_REVEAL", fx_default);
+        // Read once at launch into m.env (env.cpp).
+        const bool master     = m.env.reveal;
         // The MOTION pref gates both layers, under the env flags. Reduced
         // keeps the progressive clip — text walking in is information about
         // progress — and drops the decorative glyph churn, which is not.
@@ -341,9 +329,9 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
 
         if (fresh_widget || motion_changed) {
             cache.streaming->set_reveal_fx(
-                want_fx && env_on("AGENTTY_REVEAL_TYPEWRITER", fx_default));
+                want_fx && m.env.reveal_typewriter);
             cache.streaming->set_reveal_decorate(
-                want_deco && env_on("AGENTTY_REVEAL_DECORATE", fx_default));
+                want_deco && m.env.reveal_decorate);
             // Stamp what we just configured, so the next frame re-applies
             // only on a real move. Unconditional inside the branch: a fresh
             // widget has applied_motion = -1 and must record its level too,

@@ -682,7 +682,8 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                     {
                         const auto& settings = m.d.persisted;
                         for (auto& mi : c.models)
-                            ui::bake_context_window(mi, c.provider_id, settings);
+                            ui::bake_context_window(mi, c.provider_id, settings,
+                                                    m.env.max_context_tokens);
                     }
                     c.invalidate_derived();  // ids changed — all caches stale
                     c.state  = ProviderCatalog::State::Ready;
@@ -813,7 +814,8 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                     // in). A genuinely-advertised value returns on the next
                     // refresh — ^L, or the next switch.
                     mi.context_window = ui::resolve_context_window(
-                        row_provider, mi.id.value, 0, settings);
+                        row_provider, mi.id.value, 0, settings,
+                        m.env.max_context_tokens);
                 }
             };
 
@@ -857,7 +859,8 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                 // default layers are what auto falls back to here; the
                 // advertised figure returns on the next catalog load.
                 const int auto_win = ui::resolve_context_window(
-                    row_provider, row_model.value, 0, settings);
+                    row_provider, row_model.value, 0, settings,
+                    m.env.max_context_tokens);
                 if (auto_win > 0)
                     note += " (" + ui::context_window_label(auto_win) + ")";
             }
@@ -1108,7 +1111,7 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                                         e.provider_id.empty()
                                             ? active_provider_id(m)
                                             : e.provider_id,
-                                        settings);
+                                        settings, m.env.max_context_tokens);
                 m.d.available_models.push_back(std::move(mi));
             }
             // The subagent router's candidate pool, Smart Mode policy and

@@ -215,38 +215,40 @@ TEST_CASE("context ladder: the env floor catches what no catalog can know") {
     };
     agentty::store::Settings s;
     const char* kEnv = "AGENTTY_MAX_CONTEXT_TOKENS";
+    namespace ui = agentty::ui;
 
-    {   // Unset: the conservative default stands.
+    // The ladder takes the parsed value (Model::Env::max_context_tokens).
+    // Unset (0): the conservative default stands.
+    CHECK(ui::resolve_context_window("priv", "ctxtest-env-1", 0, s, 0)
+          == ui::kDefaultContextWindow);
+    // Set: it is used, because nothing better spoke.
+    CHECK(ui::resolve_context_window("priv", "ctxtest-env-1", 0, s, 1'000'000)
+          == 1'000'000);
+    // LAST rung, not first. It is GLOBAL, so a session reaching several
+    // models would otherwise stamp one number on all of them — anything that
+    // actually knows this model must win.
+    CHECK(ui::resolve_context_window("priv", "ctxtest-env-1",
+                                     /*advertised=*/32'768, s, 1'000'000)
+          == 32'768);
+    agentty::set_catalog_context_window("priv/ctxtest-env-2", 262'144);
+    CHECK(ui::resolve_context_window("priv", "ctxtest-env-2", 0, s, 1'000'000)
+          == 262'144);
+    CHECK(ui::resolve_context_window("anthropic", "claude-sonnet-4-5", 0, s,
+                                     1'000'000)
+          == 200'000);
+
+    // The parser. Garbage must not become a tiny window: "1M" parses as 1
+    // under a naive atoi, and a 1-token context would compact on every turn.
+    {
+        ScopedEnv e{kEnv, "1000000"};
+        CHECK(ui::max_context_tokens_from_env() == 1'000'000);
+    }
+    {
         ScopedEnv e{kEnv, nullptr};
-        CHECK(agentty::ui::resolve_context_window("priv", "ctxtest-env-1", 0, s)
-              == agentty::ui::kDefaultContextWindow);
+        CHECK(ui::max_context_tokens_from_env() == 0);
     }
-    {   // Set: it is used, because nothing better spoke.
-        ScopedEnv e{kEnv, "1000000"};
-        CHECK(agentty::ui::resolve_context_window("priv", "ctxtest-env-1", 0, s)
-              == 1'000'000);
-    }
-    {   // LAST rung, not first. It is GLOBAL, so a session reaching several
-        // models would otherwise stamp one number on all of them — anything
-        // that actually knows this model must win.
-        ScopedEnv e{kEnv, "1000000"};
-        CHECK(agentty::ui::resolve_context_window("priv", "ctxtest-env-1",
-                                                  /*advertised=*/32'768, s)
-              == 32'768);
-        agentty::set_catalog_context_window("priv/ctxtest-env-2", 262'144);
-        CHECK(agentty::ui::resolve_context_window("priv", "ctxtest-env-2", 0, s)
-              == 262'144);
-        CHECK(agentty::ui::resolve_context_window("anthropic",
-                                                  "claude-sonnet-4-5", 0, s)
-              == 200'000);
-    }
-    {   // Garbage must not become a tiny window. "1M" parses as 1 under a
-        // naive atoi, and a 1-token context would compact on every turn —
-        // far worse than the default it replaced.
-        for (const char* bad : {"1M", "abc", "", "0", "-5", "12x", "1e6"}) {
-            ScopedEnv e{kEnv, bad};
-            CHECK(agentty::ui::resolve_context_window("priv", "ctxtest-env-3", 0, s)
-                  == agentty::ui::kDefaultContextWindow);
-        }
+    for (const char* bad : {"1M", "abc", "", "0", "-5", "12x", "1e6"}) {
+        ScopedEnv e{kEnv, bad};
+        CHECK(ui::max_context_tokens_from_env() == 0);
     }
 }

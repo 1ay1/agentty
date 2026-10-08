@@ -93,7 +93,8 @@ std::pair<Model, Cmd> init() {
     //
     // Cheap: a handful of bundled rows, once, at startup.
     for (auto& mi : m.d.available_models)
-        ui::bake_context_window(mi, detail::active_provider_id(m), settings);
+        ui::bake_context_window(mi, detail::active_provider_id(m), settings,
+                                m.env.max_context_tokens);
     // ONE-TIME MIGRATION: the legacy account-blind `context_1m_blocked`
     // bool becomes a keyed fact for the CURRENTLY ACTIVE account. That is
     // the best available attribution — the bool never recorded whose block
