@@ -32,50 +32,30 @@ agentty          orchestrates: owns the program, decides what runs when
 4. **agentty orchestrates.** It decides what runs, on which worker, under
    which cancellation, and for how long. It hands the other libraries the
    capabilities they need; they do not go and get them.
-5. **The other submodules own no runtime.** mcp-cpp, acp-cpp, rag-cpp and
-   claybin are libraries, not programs. They contain no threads, pools,
-   timers, locks, atomics-for-coordination, `std::async`, `detach()` or
-   thread-locals. Where one needs concurrency or a process, it **declares an
-   interface** and the host (agentty) **implements it on maya → jaal**.
+5. **The other submodules contain no runtime at all.** mcp-cpp, acp-cpp,
+   rag-cpp and claybin are passive libraries: no threads, pools, timers,
+   locks, atomics, `std::async`, futures, `detach()`, thread-locals, clocks
+   or processes — not even a standalone fallback, and no `Runtime`/
+   `Executor` hook they call out through. They are state machines that agentty
+   drives on maya → jaal. mcp-cpp and acp-cpp share one JSON-RPC core instead
+   of keeping copies. The full rules, the replacement shape for every need,
+   and the migration plan are in
+   **[PROTOCOL_LIBRARIES.md](PROTOCOL_LIBRARIES.md)**, which is binding.
 
 ## How a library gets concurrency without owning it
 
-The pattern already exists in mcp-cpp, and every library follows it:
+It doesn't. A library is a state machine: it takes bytes, values and `now`
+as arguments and returns frames, completions and deadlines as values.
+agentty owns every reader, timer, lock and process around it and drives it
+from one owner per connection. See
+[PROTOCOL_LIBRARIES.md](PROTOCOL_LIBRARIES.md) §4 for the shape that
+replaces each need (reading frames, request matching and timeouts, handlers,
+data-parallel work, caches, processes, coroutines) and §6 for which agentty
+module provides each.
 
-```cpp
-// mcp-cpp: states what it needs, owns nothing
-struct HostServices {
-    std::shared_ptr<Exec> exec;      // null ⇒ tools that run programs are off
-    ...
-};
-
-// agentty: provides it, built on maya's runtime
-class JaalExec final : public mcp::tools::Exec { ... };   // tool/util/exec.cpp
-svc.exec = std::make_shared<JaalExec>(defaults);
-```
-
-The library calls an interface. agentty implements it with maya's runtime
-primitives (a worker group, a scope, a guarded value, a process and a poll
-reactor) and installs it. So:
-
-- a library's behaviour under cancellation and shutdown is agentty's policy,
-  enforced in one place;
-- tests can hand a library a deterministic fake (maya's `sim` host);
-- there is exactly one thread pool, one shutdown path and one lock discipline
-  in the process.
-
-The same shape applies to:
-
-| library  | needs                                   | declares                          |
-|----------|-----------------------------------------|-----------------------------------|
-| mcp-cpp  | running programs, RPC over stdio/HTTP,  | `HostServices` (exec, transport,  |
-|          | per-request timeouts, parallel search   | executor); no threads inside      |
-| acp-cpp  | the stdio RPC loop, request cancellation| an executor + transport interface |
-| rag-cpp  | parallel indexing / embedding / search  | an executor for parallel loops    |
-| claybin  | spawning a sandboxed child              | nothing it runs itself            |
-
-A library may keep plain, single-threaded data structures. It may not decide
-*when* or *on what thread* anything runs.
+The old pattern here, a `Runtime`/`Executor` interface the library calls out
+through with a `std::jthread` fallback, is being removed (§8 of that doc):
+it still let the library decide when concurrent work happens.
 
 ## What maya exposes for this
 
@@ -113,27 +93,16 @@ All are static ctest entries (label `static`), no build needed:
 
 ## The runtimes agentty installs
 
+None, once PROTOCOL_LIBRARIES.md §8 is done. Until then
 `tools::util::install_protocol_runtimes()` (src/tool/util/protocol_runtime.cpp)
-runs right after argument parsing, before any subcommand:
-
-| library | interface             | agentty's implementation                      |
-|---------|-----------------------|-----------------------------------------------|
-| mcp-cpp | `mcp::Runtime`        | job = isolated task on a `maya::pool`;        |
-|         | `tools::Executor`     | `parallel_for` = `maya::scope`;               |
-| acp-cpp | `acp::Runtime`        | `sleep_for` = `maya::delay_for`               |
-| rag-cpp | `rag::util::Executor` | `maya::scope` (nests without deadlock)        |
-| maya    | `maya::exec`          | installed by `maya::run` on jaal              |
-
-Each library also ships a small standalone fallback (plain `std::jthread`,
-joined) for programs that install nothing. It is the one place that library
-names a thread, and agentty replaces it at startup.
+installs maya-backed implementations of the libraries' remaining runtime
+hooks; it is deleted in step 5 of that plan.
 
 ## Where it stands
 
 - agentty → maya → jaal is strict: no jaal include or name in agentty.
 - maya starts no thread of its own.
-- mcp-cpp, acp-cpp, rag-cpp and claybin start no threads of their own. What
-  remains on their allowlists is the standalone fallback and locks/atomics
-  that protect a structure's own state (an engine's waiter table, a cache, a
-  work cursor) — they make a type safe to call from the host's threads and
-  run nothing.
+- claybin is fully passive. mcp-cpp, acp-cpp and rag-cpp start no threads
+  of their own, but still carry a standalone fallback runtime, locks around
+  their own state, and duplicated JSON-RPC code. Removing all of it is
+  [PROTOCOL_LIBRARIES.md](PROTOCOL_LIBRARIES.md) §8.

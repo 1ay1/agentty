@@ -28,7 +28,9 @@ values from `Model` state and maya owns every pixel, border, and animation.
 The loop itself, the effects, tasks, subscriptions and every thread and lock
 in the process are **jaal**, which agentty reaches only through maya:
 agentty → maya → jaal, strictly. agentty orchestrates; no other submodule
-runs anything of its own. See [LAYERING.md](LAYERING.md).
+runs anything of its own. See [LAYERING.md](LAYERING.md), and for the
+protocol libraries (mcp-cpp, acp-cpp, rag-cpp) the binding rules in
+[PROTOCOL_LIBRARIES.md](PROTOCOL_LIBRARIES.md).
 
 The four maya `Program` hooks are bound in
 `include/agentty/runtime/app/program.hpp`:
