@@ -62,7 +62,6 @@
 #include <fstream>
 #include <future>
 #include <memory>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -614,26 +613,22 @@ struct AgentType {
 // three under ~. Built-in types always win over a user agent of the same
 // name (a user file can't silently replace `general`).
 //
-// Storage note: AgentType's fields are string_views, so the parsed user
-// agents live in a process-lifetime cache; entries are appended once per
-// (mtime-signature) scan and NEVER erased or reordered in place — a
-// returned reference stays valid for the life of a subagent run.
+// Storage note: AgentType's fields are string_views into `owned`. A
+// generation is immutable once published and never freed: a subagent holds
+// a `const AgentType&` across its whole (minutes-long) run, so each
+// generation keeps the one it replaced alive through `prev`. Bounded in
+// practice by how often the agent files change on disk.
 struct UserAgentStore {
     std::vector<std::unique_ptr<AgentType>> types;   // stable addresses
     std::deque<std::string>                 owned;   // element-stable backing
-    // Prior generations, kept alive for the process lifetime: a subagent
-    // holds a `const AgentType&` across its whole (minutes-long) run, so a
-    // cache refresh mid-run must not destroy the referenced storage.
-    // Bounded in practice by how often the agent files change on disk.
-    std::vector<std::vector<std::unique_ptr<AgentType>>> retired_types;
-    std::vector<std::deque<std::string>>                 retired_owned;
     std::string                             sig = "\x01uninit";
-    std::mutex                              mu;
+    std::shared_ptr<const UserAgentStore>   prev;
 };
 
-UserAgentStore& user_agents() {
-    static UserAgentStore s;
-    return s;
+// Leaked on purpose, like the generations it holds.
+maya::published<const UserAgentStore>& user_agent_gen() {
+    static auto* g = new maya::published<const UserAgentStore>;
+    return *g;
 }
 
 // Frontmatter subset parser (same lenient rules as commands/skills).
@@ -688,10 +683,9 @@ void parse_user_agent(const std::string& raw, const std::string& slug,
     store.types.push_back(std::move(at));
 }
 
-// Scan the six roots; refresh the cache when the mtime signature moves.
-// Returns under the store lock — callers copy names or hold refs to the
-// stable unique_ptr targets.
-void refresh_user_agents_locked(UserAgentStore& store) {
+// Scan the six roots; publish a new generation when the mtime signature
+// moves. Returns the current generation.
+std::shared_ptr<const UserAgentStore> user_agents() {
     namespace fs = std::filesystem;
     std::string sig;
     auto scan_root = [&](const fs::path& root) {
@@ -737,15 +731,12 @@ void refresh_user_agents_locked(UserAgentStore& store) {
     }
     for (const auto& [r, org] : roots) if (!r.empty()) scan_root(r);
 
-    if (sig == store.sig) return;
-    store.sig = sig;
-    // Retire (never destroy) the previous generation — see UserAgentStore.
-    if (!store.types.empty()) {
-        store.retired_types.push_back(std::move(store.types));
-        store.retired_owned.push_back(std::move(store.owned));
-    }
-    store.types.clear();
-    store.owned.clear();
+    auto cur = user_agent_gen().current();
+    if (cur && cur->sig == sig) return cur;
+    auto next = std::make_shared<UserAgentStore>();
+    next->sig  = sig;
+    next->prev = cur;
+    UserAgentStore& store = *next;
     // std::deque never moves existing elements on push_back, so the
     // string_views taken into owned.back() stay valid even for SSO-small
     // strings (a vector would move the inline bytes on reallocation).
@@ -763,7 +754,7 @@ void refresh_user_agents_locked(UserAgentStore& store) {
             if (it->path().extension() == ".md") files.push_back(it->path());
         std::sort(files.begin(), files.end());
         for (const auto& p : files) {
-            if (store.types.size() >= kMaxUserAgents) return;
+            if (store.types.size() >= kMaxUserAgents) break;
             const std::string slug = p.stem().string();
             if (slug.empty() || slug[0] == '.') continue;
             bool taken = false;
@@ -781,17 +772,21 @@ void refresh_user_agents_locked(UserAgentStore& store) {
             raw.resize(static_cast<std::size_t>(f.gcount()));
             parse_user_agent(raw, slug, org, store);
         }
+        if (store.types.size() >= kMaxUserAgents) break;
     }
+    std::shared_ptr<const UserAgentStore> out = std::move(next);
+    // Lost a race to another scan: theirs saw the same files, use it.
+    if (!user_agent_gen().publish_if(cur, out))
+        if (auto won = user_agent_gen().current()) return won;
+    return out;
 }
 
 // Names of the discovered user agents (for the task tool's enum).
 std::vector<std::string> user_agent_names() {
-    auto& store = user_agents();
-    std::lock_guard lk(store.mu);
-    refresh_user_agents_locked(store);
+    const auto store = user_agents();
     std::vector<std::string> out;
-    out.reserve(store.types.size());
-    for (const auto& t : store.types) out.emplace_back(t->name);
+    out.reserve(store->types.size());
+    for (const auto& t : store->types) out.emplace_back(t->name);
     return out;
 }
 
@@ -838,15 +833,10 @@ const AgentType& resolve_agent_type(std::string_view t) {
         if (a.name == t) return a;
     // User-defined agents (.agentty/agents/*.md): consulted after the
     // built-ins so a user file can never shadow `general` etc. The
-    // returned reference points into process-lifetime storage (see
+    // returned reference points into a generation that is never freed (see
     // UserAgentStore) so it outlives the whole subagent run.
-    {
-        auto& store = user_agents();
-        std::lock_guard lk(store.mu);
-        refresh_user_agents_locked(store);
-        for (const auto& ua : store.types)
-            if (ua->name == t) return *ua;
-    }
+    for (const auto& ua : user_agents()->types)
+        if (ua->name == t) return *ua;
     return kTypes.back();
 }
 
@@ -2005,10 +1995,7 @@ std::string known_agent_types() {
     // one should see it listed rather than be told their own agent is
     // invalid-looking.
     try {
-        auto& store = user_agents();
-        std::lock_guard lk(store.mu);
-        refresh_user_agents_locked(store);
-        for (const auto& ua : store.types) {
+        for (const auto& ua : user_agents()->types) {
             out += ", ";
             out += ua->name;
         }
@@ -2049,9 +2036,8 @@ bool memory_fact_in_prompt_(const std::string& mem_path) {
     if (slash == std::string::npos || slash + 1 >= mem_path.size()) return false;
     const std::string id = mem_path.substr(slash + 1);
 
-    static std::mutex mu;
-    static std::unordered_set<std::string> prompt_ids;
-    static std::uint64_t stamp = ~0ULL;
+    struct PromptIds { std::uint64_t stamp = ~0ULL; std::unordered_set<std::string> ids; };
+    static maya::guarded<PromptIds> cache;
 
     std::uint64_t now_stamp = 1469598103934665603ULL;
     auto mix = [&now_stamp](std::uint64_t v) {
@@ -2068,16 +2054,23 @@ bool memory_fact_in_prompt_(const std::string& mem_path) {
                : static_cast<std::uint64_t>(t.time_since_epoch().count()));
     }
 
-    std::lock_guard<std::mutex> lock(mu);
-    if (stamp != now_stamp) {
-        stamp = now_stamp;
-        prompt_ids.clear();
-        for (auto load : {&memory::load_recent_user, &memory::load_recent_project}) {
-            auto picked = memory::select_for_prompt(load());
-            for (const auto& r : picked.records) prompt_ids.insert(r.id);
-        }
+    // Fresh: answer from the cache. Stale: reload outside the lock.
+    auto hit = cache.read([](const PromptIds& c, std::uint64_t st, std::string k) {
+        return c.stamp == st ? std::optional<bool>{c.ids.count(k) > 0} : std::nullopt;
+    }, now_stamp, id);
+    if (hit) return *hit;
+
+    std::unordered_set<std::string> ids;
+    for (auto load : {&memory::load_recent_user, &memory::load_recent_project}) {
+        auto picked = memory::select_for_prompt(load());
+        for (const auto& r : picked.records) ids.insert(r.id);
     }
-    return prompt_ids.count(id) > 0;
+    const bool in = ids.count(id) > 0;
+    cache.with([](PromptIds& c, std::uint64_t st, std::unordered_set<std::string> fresh) {
+        c.stamp = st;
+        c.ids   = std::move(fresh);
+    }, now_stamp, std::move(ids));
+    return in;
 }
 
 // Cross-turn de-duplication for PROACTIVE injection. Without this, a stable
@@ -2100,34 +2093,34 @@ bool memory_fact_in_prompt_(const std::string& mem_path) {
 // and the caller commits the surviving keys ONLY when it actually returns the
 // hit to the wire. Both share one mutex/FIFO.
 namespace {
-std::mutex& proactive_dedup_mu_() { static std::mutex mu; return mu; }
-std::unordered_set<std::string>& proactive_dedup_seen_() {
-    static std::unordered_set<std::string> seen; return seen;
-}
-std::deque<std::string>& proactive_dedup_fifo_() {
-    static std::deque<std::string> fifo; return fifo;
+struct ProactiveDedup {
+    std::unordered_set<std::string> seen;
+    std::deque<std::string>         fifo;
+};
+maya::guarded<ProactiveDedup>& proactive_dedup_() {
+    static maya::guarded<ProactiveDedup> d;
+    return d;
 }
 constexpr std::size_t kProactiveDedupMax = 256;
 }
 
 // PEEK: true if `key` was already injected this session. Does NOT record it.
 bool proactive_seen_(const std::string& key) {
-    std::lock_guard<std::mutex> lock(proactive_dedup_mu_());
-    return proactive_dedup_seen_().count(key) > 0;
+    return proactive_dedup_().read([](const ProactiveDedup& d, std::string k) {
+        return d.seen.count(k) > 0;
+    }, key);
 }
 
 // COMMIT: record `key` as injected (bounded FIFO eviction). Idempotent.
 void proactive_mark_injected_(const std::string& key) {
-    std::lock_guard<std::mutex> lock(proactive_dedup_mu_());
-    auto& seen = proactive_dedup_seen_();
-    if (seen.count(key)) return;
-    seen.insert(key);
-    auto& fifo = proactive_dedup_fifo_();
-    fifo.push_back(key);
-    while (fifo.size() > kProactiveDedupMax) {
-        seen.erase(fifo.front());
-        fifo.pop_front();
-    }
+    proactive_dedup_().with([](ProactiveDedup& d, std::string k) {
+        if (!d.seen.insert(k).second) return;
+        d.fifo.push_back(std::move(k));
+        while (d.fifo.size() > kProactiveDedupMax) {
+            d.seen.erase(d.fifo.front());
+            d.fifo.pop_front();
+        }
+    }, key);
 }
 
 } // namespace
