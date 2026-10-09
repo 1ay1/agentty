@@ -114,6 +114,9 @@ struct AdoptedChild {
 struct ChildRun {
     /// argv[0] is the program; no shell unless argv says so.
     std::vector<std::string> argv;
+    /// Windows: the command line verbatim (cmd.exe /S /C "..."), instead
+    /// of quoting argv. Ignored elsewhere.
+    std::string windows_command_line;
     std::string cwd;                                          ///< empty = ours
     std::vector<std::pair<std::string, std::string>> env;     ///< layered on ours
     /// Bytes written to the child's stdin, then closed. Empty = /dev/null.

@@ -24,14 +24,19 @@
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/util/sandbox_claybin.hpp"
 
-#include <fcntl.h>
-#include <unistd.h>
+#if !defined(_WIN32)
+#  include <fcntl.h>
+#  include <unistd.h>
+#  include <cerrno>
+#endif
 
 namespace agentty::tools::util {
 namespace {
 
 namespace pf = maya::platform;
 namespace mt = ::mcp::tools;
+using process_t = pf::native_process;
+using reactor_t = pf::native_reactor;
 
 using clock_t_ = std::chrono::steady_clock;
 
@@ -71,7 +76,7 @@ sandbox_spawner(const std::vector<std::string>& argv, const std::string& cwd) {
 }
 
 struct started {
-    pf::posix_process    proc;
+    process_t            proc;
     int                  supervisor_fd = -1;
     std::function<bool()> service_broker;
     std::function<bool()> kill_tree;
@@ -82,6 +87,7 @@ struct started {
 [[nodiscard]] std::expected<started, std::string>
 start_child(const ChildRun& run) {
     if (run.argv.empty()) return std::unexpected(std::string{"empty command"});
+#if !defined(_WIN32)
     if (run.spawn_adopted) {
         int fds[2];
         if (::pipe2(fds, O_CLOEXEC) != 0)
@@ -103,44 +109,81 @@ start_child(const ChildRun& run) {
         return started{std::move(*adopted), a.supervisor_fd,
                        std::move(a.service_broker), std::move(a.kill_tree)};
     }
+#endif
 
     pf::process_spec spec;
     spec.argv         = run.argv;
+    spec.windows_command_line = run.windows_command_line;
     spec.cwd          = run.cwd;
     spec.env          = run.env;
     spec.merge_stderr = true;
     spec.new_session  = true;
     if (!run.stdin_data.empty()) spec.stdin_from = pf::stream_to::pipe;
-    auto p = pf::posix_process::spawn(spec);
-    if (!p) return std::unexpected(std::string{p.error().what} + ": " + std::strerror(p.error().native));
+    auto p = process_t::spawn(spec);
+    if (!p) return std::unexpected(std::string{p.error().what} + " (" +
+                                   std::to_string(p.error().native) + ")");
     return started{std::move(*p), -1, nullptr, nullptr};
+}
+
+/// Read up to `cap` bytes without blocking. 0 with `eof` = the writer closed.
+std::size_t read_ready(pf::borrowed_handle h, char* buf, std::size_t cap, bool& eof) {
+#if defined(_WIN32)
+    return pf::read_some(h, buf, cap, eof);
+#else
+    eof = false;
+    for (;;) {
+        const auto n = ::read(h.get(), buf, cap);
+        if (n > 0) return static_cast<std::size_t>(n);
+        if (n < 0 && errno == EINTR) continue;
+        if (n == 0) eof = true;
+        return 0;   // EAGAIN: nothing left
+    }
+#endif
+}
+
+/// Write without blocking past what the pipe takes. `closed` = reader gone.
+std::size_t write_ready(pf::borrowed_handle h, const char* buf, std::size_t len, bool& closed) {
+#if defined(_WIN32)
+    return pf::write_some(h, buf, len, closed);
+#else
+    closed = false;
+    for (;;) {
+        const auto n = ::write(h.get(), buf, len);
+        if (n > 0) return static_cast<std::size_t>(n);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return 0;
+        closed = true;   // EPIPE
+        return 0;
+    }
+#endif
 }
 
 /// Read everything currently available. Never blocks: the handles are
 /// non-blocking and we only get here because the reactor said ready.
-std::size_t drain_into(int fd, std::string& out, std::size_t cap, bool& truncated) {
+std::size_t drain_into(pf::borrowed_handle h, std::string& out, std::size_t cap,
+                       bool& truncated) {
     char buf[64 * 1024];
     std::size_t got = 0;
     for (;;) {
-        const auto n = ::read(fd, buf, sizeof buf);
+        bool eof = false;
+        const auto n = read_ready(h, buf, sizeof buf, eof);
         if (n > 0) {
-            got += static_cast<std::size_t>(n);
+            got += n;
             // Past the cap we keep READING and discard. Stopping the drain
             // would leave the child blocked on a full pipe, which is how a
             // command that produced too much output became a command that
             // never finished.
             if (out.size() < cap) {
                 const auto room = cap - out.size();
-                const auto take = std::min(room, static_cast<std::size_t>(n));
+                const auto take = std::min(room, n);
                 out.append(buf, take);
-                if (take < static_cast<std::size_t>(n)) truncated = true;
+                if (take < n) truncated = true;
             } else {
                 truncated = true;
             }
             continue;
         }
-        if (n < 0 && errno == EINTR) continue;
-        break;   // EAGAIN (nothing left) or 0 (EOF)
+        break;   // nothing left, or EOF
     }
     return got;
 }
@@ -164,7 +207,7 @@ std::optional<std::chrono::seconds> env_wall_override() {
 /// (util::WorkerGroup): stop_token to wind it up, joined on destruction.
 class JaalSession final : public mt::Session {
   public:
-    JaalSession(pf::posix_process p, std::size_t cap)
+    JaalSession(process_t p, std::size_t cap)
         : proc_(std::move(p)), cap_(cap), started_(clock_t_::now()) {
         drain_.post([this](std::stop_token st) { pump(st); });
     }
@@ -207,11 +250,11 @@ class JaalSession final : public mt::Session {
 
   private:
     void pump(std::stop_token st) {
-        auto reactor = pf::poll_reactor::create();
+        auto reactor = reactor_t::create();
         if (!reactor) return;
         auto exit_reg = reactor->watch(proc_.exit_handle().get(),
                                        pf::interest::read, kExitToken);
-        std::optional<pf::poll_reactor::registration> out_reg;
+        std::optional<reactor_t::registration> out_reg;
         if (auto h = proc_.stdout_handle())
             if (auto r = reactor->watch(h->get(), pf::interest::read, kOutToken))
                 out_reg = std::move(*r);
@@ -226,7 +269,7 @@ class JaalSession final : public mt::Session {
                     std::string chunk;
                     bool        lost = false;
                     if (auto h = proc_.stdout_handle())
-                        drain_into(h->get(), chunk, cap_, lost);
+                        drain_into(*h, chunk, cap_, lost);
                     if (!chunk.empty() || lost)
                         st_.with([](Shared& s, std::string c, bool l,
                                     std::size_t cap) {
@@ -250,7 +293,7 @@ class JaalSession final : public mt::Session {
         std::string tail;
         bool        lost = false;
         if (auto h = proc_.stdout_handle())
-            drain_into(h->get(), tail, cap_, lost);
+            drain_into(*h, tail, cap_, lost);
 
         mt::ExecOutcome oc = mt::Signalled{0};
         if (auto s = proc_.reap())
@@ -283,7 +326,7 @@ class JaalSession final : public mt::Session {
         mt::ExecOutcome outcome   = mt::Exited{0};
     };
 
-    pf::posix_process    proc_;
+    process_t            proc_;
     std::size_t          cap_;
     clock_t_::time_point started_;
     maya::guarded<Shared> st_;
@@ -361,11 +404,13 @@ class JaalExec final : public mt::Exec {
     }
 
     [[nodiscard]] bool stops_whole_tree() const noexcept override {
-        // Honest: a process group is not a tree. A descendant that calls
-        // setsid() leaves it and survives. A Linux host with a delegated
-        // cgroup can do better, and when that backend lands this answer
-        // comes from it rather than from here.
+        // Windows: a job object holds the tree. POSIX: a process group is not
+        // a tree, since a descendant that calls setsid() leaves it.
+#if defined(_WIN32)
+        return true;
+#else
         return false;
+#endif
     }
 
   private:
@@ -389,7 +434,7 @@ ChildResult run_child(const ChildRun& run) {
     if (!st) { r.start_error = st.error(); stamp(); return r; }
     auto& proc = st->proc;
 
-    auto reactor = pf::poll_reactor::create();
+    auto reactor = reactor_t::create();
     if (!reactor) {
         (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
         r.start_error = "reactor: " + std::string{reactor.error().what};
@@ -399,15 +444,17 @@ ChildResult run_child(const ChildRun& run) {
     r.started = true;
 
     auto exit_reg = reactor->watch(proc.exit_handle().get(), pf::interest::read, kExitToken);
-    std::optional<pf::poll_reactor::registration> out_reg, in_reg, broker_reg;
+    std::optional<reactor_t::registration> out_reg, in_reg, broker_reg;
     if (auto h = proc.stdout_handle())
         if (auto reg = reactor->watch(h->get(), pf::interest::read, kOutToken))
             out_reg = std::move(*reg);
+#if !defined(_WIN32)
     // The seccomp broker, when the policy delegates syscalls. It MUST be
     // serviced: the kernel blocks the guest until someone answers.
     if (st->supervisor_fd >= 0 && st->service_broker)
         if (auto reg = reactor->watch(st->supervisor_fd, pf::interest::read, kBrokerToken))
             broker_reg = std::move(*reg);
+#endif
 
     // stdin is fed from this loop, a chunk per wake, so a child that writes
     // before it reads cannot deadlock against us.
@@ -416,21 +463,29 @@ ChildResult run_child(const ChildRun& run) {
         const auto h = proc.stdin_handle();
         if (!h) return;
         while (fed < run.stdin_data.size()) {
-            const auto n = ::write(h->get(), run.stdin_data.data() + fed,
-                                   run.stdin_data.size() - fed);
-            if (n > 0) { fed += static_cast<std::size_t>(n); continue; }
-            if (n < 0 && errno == EINTR) continue;
-            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
-            break;   // EPIPE: it closed its stdin, nothing more to give
+            bool closed = false;
+            const auto n = write_ready(*h, run.stdin_data.data() + fed,
+                                       run.stdin_data.size() - fed, closed);
+            if (n > 0) { fed += n; continue; }
+            if (!closed) return;   // full: wait to be writable again
+            break;                 // it closed its stdin, nothing more to give
         }
         in_reg.reset();
         proc.close_stdin();
     };
     if (auto h = proc.stdin_handle()) {
+#if defined(_WIN32)
+        // No writable readiness for an anonymous pipe, so feed it all now.
+        // The 64 KiB pipe buffer covers what agentty sends (hook JSON,
+        // clipboard text); a bigger blob to a child that never reads would
+        // block here.
+        feed();
+#else
         ::fcntl(h->get(), F_SETFL, ::fcntl(h->get(), F_GETFL) | O_NONBLOCK);
         if (auto reg = reactor->watch(h->get(), pf::interest::write, kInToken))
             in_reg = std::move(*reg);
         feed();
+#endif
     }
 
     auto last_progress = clock_t_::time_point{};
@@ -473,7 +528,7 @@ ChildResult run_child(const ChildRun& run) {
             const auto& e = res->ready[i];
             if (e.token == kOutToken && (e.readable || e.hangup)) {
                 if (auto h = proc.stdout_handle())
-                    if (drain_into(h->get(), r.output, run.max_output_bytes, r.truncated) > 0)
+                    if (drain_into(*h, r.output, run.max_output_bytes, r.truncated) > 0)
                         saw_output = true;
             } else if (e.token == kExitToken && (e.readable || e.hangup)) {
                 exited = true;
@@ -521,7 +576,7 @@ ChildResult run_child(const ChildRun& run) {
 
     // The exit says the bytes are done, not that we have them.
     if (auto h = proc.stdout_handle())
-        drain_into(h->get(), r.output, run.max_output_bytes, r.truncated);
+        drain_into(*h, r.output, run.max_output_bytes, r.truncated);
     progress(true);
 
     if (auto status = proc.reap()) {

@@ -59,9 +59,15 @@ int main(int argc, char** argv) {
 #if defined(_WIN32)
         _putenv_s("AGENTTY_HOME", sandbox.string().c_str());
         _putenv_s("AGENTTY_UNDER_TEST", "1");
+        _putenv_s("AGENTTY_NO_PREWARM", "1");
 #else
         ::setenv("AGENTTY_HOME", sandbox.string().c_str(), 1);
         ::setenv("AGENTTY_UNDER_TEST", "1", 1);
+        // A prewarm is a background TLS dial to a real host. A test that runs
+        // init() starts one, and it can outlive main() and race libcrypto's
+        // atexit teardown (SIGSEGV in OBJ_sn2nid). The standalone harness
+        // already opts out.
+        ::setenv("AGENTTY_NO_PREWARM", "1", 1);
 #endif
     }
     // Sweep anything an EARLIER run abandoned (a crash or a SIGKILL skips the
