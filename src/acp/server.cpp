@@ -2038,15 +2038,19 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
                 return tools::skills::active_in(::agentty::visible_text(s.thread));
             }).value_or(std::vector<std::string>{});
         }
+        tools::CallContext call_ctx;
+        call_ctx.active_skills = std::move(active_skills);
+        // The session's cancel reaches the running tool itself (a shell is
+        // stopped), not only this wait.
+        if (ctx.cancel) call_ctx.cancel.push_back(ctx.cancel->token());
         auto fut = util::background_pool().submit_isolated(
             [td, name = tc.name.value, args = tc.args, wake,
-             active_skills = std::move(active_skills)]() mutable {
+             call_ctx = std::move(call_ctx)]() mutable {
                 struct Signal {
                     std::stop_source& s;
                     ~Signal() { s.request_stop(); }
                 } on_exit{wake};
-                tools::skills::active::Scope skills_scope{std::move(active_skills)};
-                return tool::DynamicDispatch::execute_with(td, name, args);
+                return tool::DynamicDispatch::execute_with(td, name, args, call_ctx);
             });
         std::optional<std::stop_callback<std::function<void()>>> on_cancel;
         if (ctx.cancel)

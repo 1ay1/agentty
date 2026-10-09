@@ -116,7 +116,7 @@ const ::rag::plugin::Registries& registries() {
         req.budgets.idle     = std::chrono::seconds{60};
         req.budgets.wall     = std::chrono::seconds{300};
         req.max_output_bytes = 64u << 20;
-        auto r = exec->run(req);
+        auto r = exec->run(::mcp::tools::Call{}, req);   // not a tool call: no card, no cancel
         if (std::holds_alternative<mt::StartFailed>(r.outcome)) return std::nullopt;
         return std::move(r.output);
     };

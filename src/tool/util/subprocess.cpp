@@ -549,10 +549,8 @@ SubprocessResult Subprocess::run(SubprocessOptions opts) {
 
 // ── Convenience wrappers ────────────────────────────────────────────────
 //
-// on_progress defaults to `progress::emit`, the thread-local sink the cmd
-// runner installs for tool execution. Wiring this at the wrapper level (not
-// inside Subprocess::run) keeps the core runner free of app-specific state
-// — other callers can skip the sink by going direct to Subprocess::run.
+// For agentty's own helpers (git for checkpoints, keyring, hooks). No live
+// progress: these are not tool calls, so nobody is watching a card.
 
 SubprocessResult run_command_s(const std::string& cmd,
                                std::size_t max_bytes,
@@ -561,7 +559,6 @@ SubprocessResult run_command_s(const std::string& cmd,
     opts.command     = SubprocessOptions::Shell{cmd};
     opts.max_bytes   = max_bytes;
     opts.timeout     = timeout;
-    opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
     return Subprocess::run(std::move(opts));
 }
 
@@ -572,7 +569,6 @@ SubprocessResult run_argv_s(const std::vector<std::string>& argv,
     opts.command     = SubprocessOptions::Argv{argv};
     opts.max_bytes   = max_bytes;
     opts.timeout     = timeout;
-    opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
     return Subprocess::run(std::move(opts));
 }
 

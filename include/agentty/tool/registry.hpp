@@ -96,6 +96,49 @@ using ExecResult = std::expected<ToolOutput, ToolError>;
 enum class ToolOrigin : std::uint8_t { Native, Mcp, Passthrough };
 enum class OutputTruncation : std::uint8_t { Head, Tail, HeadTail };
 
+// ── The tool call's context ────────────────────────────────────────────────────
+//
+// Everything a tool call carries besides its arguments, passed explicitly to
+// ToolDef::execute. The dispatcher builds it; the tool reads it; nothing is
+// parked on the thread. These used to be thread_locals installed by RAII
+// scopes, which went silently missing whenever work moved to another thread
+// (shell output stopped streaming and Esc stopped working for a release).
+struct CallContext {
+    using Sink = std::function<void(std::string_view snapshot)>;
+
+    // Live output for the UI, whole buffer each time. Empty: nobody watches.
+    Sink progress;
+    // Whose context the call serves: empty for the main conversation, a
+    // subagent's run id inside one, so a subagent never reads its parent's
+    // "you already read this file".
+    std::string reader;
+    // The call is cancelled when any of these stops (Esc, a newer turn,
+    // shutdown, the enclosing subagent run).
+    std::vector<std::stop_token> cancel;
+    // Skills whose bodies are already in the conversation the call serves.
+    std::vector<std::string> active_skills;
+    // Nesting: how many subagents enclose this call, and the earliest
+    // deadline any of them set (a nested run can only shorten it).
+    int depth = 0;
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+
+    void emit(std::string_view snapshot) const { if (progress) progress(snapshot); }
+    [[nodiscard]] bool cancelled() const noexcept {
+        for (const auto& t : cancel) if (t.stop_requested()) return true;
+        return false;
+    }
+    // Wait up to `d`, waking the instant the call is cancelled (or `also`
+    // stops). True when cancelled.
+    [[nodiscard]] bool wait(std::chrono::milliseconds d, std::stop_token also = {}) const;
+    // One token that stops when any of `cancel` does. The returned source
+    // owns the callbacks, so keep it alive while the token is in use.
+    [[nodiscard]] std::shared_ptr<std::stop_source> merged_stop() const;
+    [[nodiscard]] bool skill_active(std::string_view name) const noexcept {
+        for (const auto& n : active_skills) if (n == name) return true;
+        return false;
+    }
+};
+
 struct ToolDef {
     ToolName    name;
     std::string description;
@@ -142,7 +185,7 @@ struct ToolDef {
     // (empty) means "this tool is pure and never needs permission".
     EffectSet effects;
 
-    std::function<ExecResult(const nlohmann::json& args)> execute;
+    std::function<ExecResult(const nlohmann::json& args, const CallContext& ctx)> execute;
 
     // A stable fingerprint of everything a consent decision depends on:
     // which tool this is, what it claims to do, what it accepts, and what it
@@ -247,86 +290,6 @@ struct ToolDef {
 // race-prone. Cheap and synchronous; safe to call from the UI thread.
 void invalidate_mcp_catalog();
 
-// ── Live progress sink (thread-local) ────────────────────────────────────
-//
-// Set by the cmd runner (cmd_factory::run_tool) before dispatching a tool
-// and cleared after — bracketed in RAII so exceptions can't leak state
-// across tools. Subprocess runners (run_command_s / run_win32_cmdline_s)
-// forward each read of the child's stdout+stderr to this sink, which
-// ultimately materialises as a ToolExecProgress Msg on the UI thread.
-//
-// Why thread-local: keeps ToolDef::execute's signature (json -> ExecResult)
-// stable; progress is an orthogonal concern of the *outer* cmd runner, not
-// of individual tool implementations. A tool that never touches a
-// subprocess (e.g. read_file) simply never emits anything.
-namespace progress {
-    using Sink = std::function<void(std::string_view snapshot)>;
-    void set(Sink s);
-    void clear();
-    // No-op if no sink is installed — cheap enough to call per pipe read.
-    void emit(std::string_view snapshot);
-    // Copy the sink installed on this worker so an async protocol reader can
-    // forward progress back to the originating tool card.
-    [[nodiscard]] Sink current();
-
-    // RAII guard. `set` on construction, `clear` on destruction.
-    struct Scope {
-        explicit Scope(Sink s) { set(std::move(s)); }
-        ~Scope()                { clear(); }
-        Scope(const Scope&)            = delete;
-        Scope& operator=(const Scope&) = delete;
-    };
-}
-
-// Whose context a tool call serves: empty for the main conversation, a
-// unique id per subagent run. `read` remembers what it has shown each
-// reader, so a subagent is never told it already has a file only its parent
-// read. Per worker, like progress; a Scope sets it for a run.
-namespace reader {
-    void set(std::string id);
-    [[nodiscard]] const std::string& current();
-
-    struct Scope {
-        explicit Scope(std::string id) : prev_(current()) { set(std::move(id)); }
-        ~Scope() { set(std::move(prev_)); }
-        Scope(const Scope&)            = delete;
-        Scope& operator=(const Scope&) = delete;
-    private:
-        std::string prev_;
-    };
-}
-
-namespace cancellation {
-    using Probe = std::function<bool()>;
-    void set(Probe probe);
-    void clear();
-    [[nodiscard]] Probe current();
-    [[nodiscard]] bool requested();
-
-    // The same cancellation as EVENTS. A probe can only be polled, so code
-    // that needs to react to a cancel — rather than check inside its own
-    // loop — had to run a thread that slept and rechecked it (the subagent
-    // stream's 20 ms bridge). When the scope was built from tokens, this
-    // hands them out so the caller can attach a std::stop_callback to each
-    // and wake instantly. Empty when the probe has no token behind it, in
-    // which case polling it is still the only option.
-    [[nodiscard]] std::vector<std::stop_token> tokens();
-
-    // Wait up to `d`, waking the instant any of the scope's tokens (or
-    // `also`) stops. True when cancelled. A scope built from a bare probe
-    // has no token to wait on, so it is checked once at the end.
-    [[nodiscard]] bool wait(std::chrono::milliseconds d, std::stop_token also = {});
-
-    struct Scope {
-        explicit Scope(Probe probe) { set(std::move(probe)); }
-        // Preferred: cancellation is "any of these tokens". The probe is
-        // derived, so pollers see exactly what subscribers see.
-        explicit Scope(std::vector<std::stop_token> toks);
-        ~Scope() { clear(); }
-        Scope(const Scope&) = delete;
-        Scope& operator=(const Scope&) = delete;
-    };
-}
 
 } // namespace agentty::tools
 

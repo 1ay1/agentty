@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
         if (tab == std::string::npos) continue;
         const std::string path = line.substr(0, tab), sym = line.substr(tab + 1);
         ++total;
-        auto r = read->execute(json{{"path", path}, {"symbol", sym}});
+        auto r = read->execute(json{{"path", path}, {"symbol", sym}}, agentty::tools::CallContext{});
         if (r && r->text.find("no definition of") == std::string::npos) {
             ++ok;
             if (verbose) {

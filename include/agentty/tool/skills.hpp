@@ -188,23 +188,8 @@ struct Skill {
 [[nodiscard]] std::vector<std::string>
 active_in(const std::vector<std::string_view>& visible);
 
-// The skill tool's view, published per dispatch. The tool runs on a worker
-// thread and cannot read the Thread, so the reducer derives the active set
-// when it dispatches the call and installs it here for that call only
-// (thread-local, scoped — the same seam as tools::progress / cancellation).
-// Not a cache and not cross-call state: a Scope sets it, its destructor
-// clears it, and outside a dispatch it is empty.
-namespace active {
-    void set(std::vector<std::string> names);
-    void clear();
-    [[nodiscard]] bool contains(std::string_view name);
-    struct Scope {
-        explicit Scope(std::vector<std::string> names) { set(std::move(names)); }
-        ~Scope() { clear(); }
-        Scope(const Scope&)            = delete;
-        Scope& operator=(const Scope&) = delete;
-    };
-}  // namespace active
+// The skill tool's "already active" set travels with the call:
+// tools::CallContext::active_skills, derived from the visible transcript.
 
 // ── Spec validation (the spec's `skills-ref validate` equivalent) ────
 // Lint one skill against the agentskills.io constraints. Loading stays

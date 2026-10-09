@@ -37,9 +37,9 @@ template <ToolArgs Args>
 [[nodiscard]] auto adapt(
         std::expected<Args, ToolError> (*parse)(const nlohmann::json&),
         ExecResult (*run)(const Args&))
-    -> std::function<ExecResult(const nlohmann::json&)>
+    -> std::function<ExecResult(const nlohmann::json&, const CallContext&)>
 {
-    return [parse, run](const nlohmann::json& j) -> ExecResult {
+    return [parse, run](const nlohmann::json& j, const CallContext&) -> ExecResult {
         auto parsed = parse(j);
         if (!parsed) return std::unexpected(std::move(parsed.error()));
         return run(*parsed);

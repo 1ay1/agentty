@@ -58,7 +58,7 @@ std::shared_ptr<mt::Exec> exec() {
 }
 
 mt::ExecResult sh(std::string script, mt::Budgets b) {
-    return exec()->run({.program = {"/bin/sh", {"-c", std::move(script)}},
+    return exec()->run(mt::Call{}, {.program = {"/bin/sh", {"-c", std::move(script)}},
                         .budgets = b,
                         .max_output_bytes = 64u * 1024u});
 }
@@ -138,7 +138,7 @@ TEST_CASE("exec: a program that never ran is not a program that failed") {
     // The distinction a bare exit code cannot express, and the reason the
     // outcome is a sum. "127" could be the shell's not-found or the
     // program's own choice; StartFailed cannot be either.
-    auto r = exec()->run({.program = {"/definitely/not/a/program", {}}});
+    auto r = exec()->run(mt::Call{}, {.program = {"/definitely/not/a/program", {}}});
 
     CHECK(std::holds_alternative<mt::StartFailed>(r.outcome));
     CHECK_FALSE(r.ok());
@@ -176,7 +176,7 @@ TEST_CASE("exec: the sandboxed path spawns, is watched, and still obeys the cloc
     auto e = agentty::tools::util::make_exec();
 
     // 1. it runs at all -- the adopt() hand-off works.
-    auto ran = e->run({.program = {"/bin/sh", {"-c", "echo inside"}},
+    auto ran = e->run(mt::Call{}, {.program = {"/bin/sh", {"-c", "echo inside"}},
                        .budgets = {.idle = 10s, .wall = 30s}});
     CHECK_MESSAGE(ran.ok(), "a sandboxed command still runs and is reaped");
     CHECK(ran.output.find("inside") != std::string::npos);
@@ -191,7 +191,7 @@ TEST_CASE("exec: the sandboxed path spawns, is watched, and still obeys the cloc
     //    clock cannot (output keeps resetting it), and a sandboxed child is
     //    exactly where an unreaped runaway would be hardest to notice.
     const auto t0 = std::chrono::steady_clock::now();
-    auto runaway = e->run({.program = {"/bin/sh", {"-c", "while :; do echo s; done"}},
+    auto runaway = e->run(mt::Call{}, {.program = {"/bin/sh", {"-c", "while :; do echo s; done"}},
                            .budgets = {.idle = 30s, .wall = 2s},
                            .max_output_bytes = 32u * 1024u});
     const auto elapsed = std::chrono::steady_clock::now() - t0;
@@ -300,17 +300,17 @@ TEST_CASE("exec: a child cannot read the host's open descriptors") {
 #endif
 
 // A running tool's output reaches the UI as it is produced, and Esc stops
-// it. Both go through the tool call's scope (cmd_factory installs the
-// progress sink and the cancel scope); exec has to honour them. From
+// it. Both travel in the call's CallContext; exec has to honour them. From
 // Oct 7 until this test existed it did neither: shell output arrived only
 // at the end, and Esc waited for the command to finish on its own.
 TEST_CASE("exec: a tool call streams progress and stops on cancel") {
     using agentty::tool::DynamicDispatch;
     int calls = 0;
     {
-        agentty::tools::progress::Scope ps{[&](std::string_view) { ++calls; }};
+        agentty::tools::CallContext ctx;
+        ctx.progress = [&](std::string_view) { ++calls; };
         auto r = DynamicDispatch::execute(
-            "shell", json{{"command", "for i in 1 2 3; do echo tick$i; sleep 0.2; done"}});
+            "shell", json{{"command", "for i in 1 2 3; do echo tick$i; sleep 0.2; done"}}, ctx);
         CHECK(r.has_value());
     }
     CHECK_MESSAGE(calls >= 3, "output streamed while the command ran");
@@ -319,8 +319,9 @@ TEST_CASE("exec: a tool call streams progress and stops on cancel") {
     std::jthread trip([&] { std::this_thread::sleep_for(300ms); src.request_stop(); });
     const auto t0 = std::chrono::steady_clock::now();
     {
-        agentty::tools::cancellation::Scope cs{std::vector<std::stop_token>{src.get_token()}};
-        (void)DynamicDispatch::execute("shell", json{{"command", "sleep 20; echo done"}});
+        agentty::tools::CallContext ctx;
+        ctx.cancel.push_back(src.get_token());
+        (void)DynamicDispatch::execute("shell", json{{"command", "sleep 20; echo done"}}, ctx);
     }
     CHECK_MESSAGE(std::chrono::steady_clock::now() - t0 < 5s, "Esc stopped the command");
 }

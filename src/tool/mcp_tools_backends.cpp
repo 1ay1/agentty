@@ -23,7 +23,7 @@
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/subagent.hpp"
-#include "agentty/tool/registry.hpp"   // tools::progress::emit
+#include "agentty/tool/registry.hpp"   // CallContext
 #include "agentty/tool/tool.hpp"       // tool::DynamicDispatch, ToolUse, Message …
 #include "agentty/tool/util/partial_json.hpp"   // args salvage for truncated tool JSON
 #include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
@@ -272,6 +272,14 @@ public:
     }
 };
 
+// The agentty CallContext the dispatcher put in cap::Request::host, handed
+// back by mcp-cpp in Call::host. A call that did not come through
+// DynamicDispatch (an MCP client over mcp-serve) has none: an empty one.
+const CallContext& context_of(const mt::Call& call) {
+    static const CallContext kNone{};
+    return call.host ? *static_cast<const CallContext*>(call.host) : kNone;
+}
+
 // ── SkillResolver ──────────────────────────────────────────────────────
 //   Backs the skill tool. The shell returns whatever string load() yields
 //   verbatim, so load() returns the FULL activation payload (body wrapped
@@ -282,7 +290,8 @@ public:
 //   with the available-skills recovery hint.
 class AgenttySkillResolver final : public mt::SkillResolver {
 public:
-    std::optional<std::string> load(const std::string& name, std::string& err) override {
+    std::optional<std::string> load(const mt::Call& call, const std::string& name,
+                                    std::string& err) override {
         const auto s = skills::find(name);
         if (!s) {
             std::ostringstream avail;
@@ -302,7 +311,7 @@ public:
         // remembered: a body /compact summarised away is not active, so the
         // model gets it again instead of being pointed at a tool_result that
         // is no longer there.
-        if (skills::active::contains(s->name)) {
+        if (context_of(call).skill_active(s->name)) {
             return "Skill '" + s->name + "' is already active in this "
                    "session — its instructions are in an earlier tool_result. "
                    "Refer to that instead of re-loading.";
@@ -946,6 +955,7 @@ provider::StreamResult run_one_completion(Thread& thread,
                               const subagent::Config& cfg,
                               const AgentType& type,
                               std::string& log,
+                              const CallContext& ctx,
                               const subagent::RunRegistration* run_reg = nullptr) {
     // Provider-agnostic request — the generic shape every transport accepts.
     // fresh_auth_header refreshes the ANTHROPIC OAuth token from disk; on any
@@ -1256,7 +1266,7 @@ provider::StreamResult run_one_completion(Thread& thread,
             snap += "\n  \xe2\x96\xb8 ";
             snap += asst.text;
         }
-        progress::emit(snap);
+        ctx.emit(snap);
     };
 
     auto sink = [&](Msg m) {
@@ -1375,9 +1385,9 @@ provider::StreamResult run_one_completion(Thread& thread,
     std::vector<std::unique_ptr<StopCb>> stop_cbs;
     const auto trip = std::function<void()>{[cancel] { cancel->cancel(); }};
     if (run_reg) stop_cbs.push_back(std::make_unique<StopCb>(run_reg->token(), trip));
-    for (auto& t : cancellation::tokens())
-        stop_cbs.push_back(std::make_unique<StopCb>(std::move(t), trip));
-    if (cancellation::requested()
+    for (const auto& t : ctx.cancel)
+        stop_cbs.push_back(std::make_unique<StopCb>(t, trip));
+    if (ctx.cancelled()
         || (run_reg && run_reg->cancelled())) cancel->cancel();
     if (!route_provider.empty() && cfg.stream_to) {
         // A role pinned on another endpoint. stream_to resolves that
@@ -1433,7 +1443,8 @@ public:
         return user_agent_names();
     }
 
-    std::string unavailable_reason() const override {
+    std::string unavailable_reason(const mt::Call& call) const override {
+        const auto& ctx = context_of(call);
         auto cfg = subagent::current();
         if (!cfg.installed)
             return "subagent runtime was not installed; restart agentty with the current executable";
@@ -1445,30 +1456,32 @@ public:
         // header here.
         if (!cfg.stream && auth::is_empty(cfg.auth))
             return "no provider stream or fallback Anthropic credential is configured";
-        if (subagent::current_depth() >= subagent::kMaxDepth)
+        if (ctx.depth >= subagent::kMaxDepth)
             return "subagent nesting depth limit reached (maximum "
                  + std::to_string(subagent::kMaxDepth) + ")";
-        if (cancellation::requested())
+        if (ctx.cancelled())
             return "cancelled before the subagent started";
         return {};
     }
 
-    std::string run(const mt::SubagentRequest& sreq, bool& is_error) override {
+    std::string run(const mt::Call& call, const mt::SubagentRequest& sreq,
+                    bool& is_error) override {
         is_error = false;
+        // The enclosing call's context: its progress card, cancel and the
+        // depth/deadline of the subagents around it.
+        const CallContext& ctx = context_of(call);
         auto cfg = subagent::current();
         if (!cfg.installed || cfg.model.empty()
             || (!cfg.stream && auth::is_empty(cfg.auth))) {
             is_error = true;
             return "subagents are unavailable in this context (no model/stream wired)";
         }
-        if (subagent::current_depth() >= subagent::kMaxDepth) {
+        if (ctx.depth >= subagent::kMaxDepth) {
             is_error = true;
             return "subagent depth limit reached — a subagent cannot spawn "
                    "further subagents at this nesting level";
         }
 
-        subagent::push_depth();
-        struct DepthGuard { ~DepthGuard() { subagent::pop_depth(); } } depth_guard;
 
         const AgentType& type = resolve_agent_type(sreq.agent_type);
 
@@ -1502,10 +1515,8 @@ public:
         // had read — reintroducing, for the sequential case, exactly the bug
         // this scope exists to prevent.
         static std::atomic<std::uint64_t> subagent_run_seq{0};
-        tools::reader::Scope read_scope{
-            "subagent:" + std::string{type.name} + ":"
-            + std::to_string(subagent_run_seq.fetch_add(
-                  1, std::memory_order_relaxed))};
+        const std::string run_reader = "subagent:" + std::string{type.name} + ":"
+            + std::to_string(subagent_run_seq.fetch_add(1, std::memory_order_relaxed));
         // Transient stream failures (429/529 brown-out, TLS reset, transport
         // hiccup) are RETRIED with backoff instead of aborting the whole
         // subagent — "task fails a lot" was mostly one flaky completion
@@ -1557,10 +1568,8 @@ public:
         // TU allowed to hold it.
         const auto own_deadline =
             subagent::RunClock::now() + max_wall_clock;
-        const auto enclosing = subagent::current_deadline();
         const auto run_deadline =
-            enclosing ? std::min(*enclosing, own_deadline) : own_deadline;
-        const subagent::DeadlineScope deadline_scope{run_deadline};
+            ctx.deadline ? std::min(*ctx.deadline, own_deadline) : own_deadline;
         // Publish this run so teardown can find it. Without this, shutdown
         // asks the TOOL thread to stop (run_tool's probe) but nothing waits
         // for the provider stream to unwind, and main() can return while
@@ -1569,6 +1578,15 @@ public:
         // destructor latches "done", which is what shutdown_running() waits
         // on. See subagent::RunRegistration.
         const subagent::RunRegistration run_reg;
+        // The context this run's own tool calls get: one level deeper, its
+        // own reader, the tighter deadline, and cancelled when either the
+        // parent call or this run is.
+        CallContext child = ctx;
+        child.depth    = ctx.depth + 1;
+        child.reader   = run_reader;
+        child.deadline = run_deadline;
+        child.active_skills.clear();
+        child.cancel.push_back(run_reg.token());
         bool deadline_hit = false;
         // Repeat-failure breaker (same rule as the parent's doom-loop
         // breaker): the identical tool call failing 3× means the loop is
@@ -1657,7 +1675,7 @@ public:
             }
 
             provider::StreamResult stream_result =
-                run_one_completion(thread, cfg, type, log, &run_reg);
+                run_one_completion(thread, cfg, type, log, ctx, &run_reg);
 
             if (!stream_result.ok()) {
                 const std::string err = stream_result.error.value_or("stream failed");
@@ -1678,10 +1696,10 @@ public:
                     && thread.messages.back().role == Role::Assistant)
                     thread.messages.pop_back();
                 if (!retryable || error_class == provider::ErrorClass::Cancelled
-                    || cancellation::requested()) {
+                    || ctx.cancelled()) {
                     is_error = true;
                     if (error_class == provider::ErrorClass::Cancelled
-                        || cancellation::requested())
+                        || ctx.cancelled())
                         last_error = "subagent cancelled: " + err;
                     break;
                 }
@@ -1690,7 +1708,7 @@ public:
                     log += "\n  ⚠ stream failed "
                          + std::to_string(stream_failures) + "× — giving up: "
                          + err;
-                    progress::emit(log);
+                    ctx.emit(log);
                     break;
                 }
                 // A RETRY-AFTER MEASURED IN HOURS IS A QUOTA, NOT A BURST
@@ -1710,7 +1728,7 @@ public:
                     && stream_result.retry_after->count()
                            > provider::kRetryAfterTerminalSeconds) {
                     log += "\n  \xe2\x9a\xa0 " + err;
-                    progress::emit(log);
+                    ctx.emit(log);
                     break;
                 }
                 // Honor server guidance, but cap it so a hostile/mistaken
@@ -1724,8 +1742,8 @@ public:
                 log += "\n  ↻ retry " + std::to_string(stream_failures)
                      + "/" + std::to_string(kMaxStreamRetries)
                      + " in " + std::to_string(wait.count()) + "ms (" + err + ")";
-                progress::emit(log);
-                if (cancellation::wait(wait, run_reg.token())) {
+                ctx.emit(log);
+                if (ctx.wait(wait, run_reg.token())) {
                     is_error = true;
                     return "subagent cancelled while waiting to retry: " + err;
                 }
@@ -1740,7 +1758,7 @@ public:
             if (!asst.tool_calls.empty()) {
                 const auto now = std::chrono::steady_clock::now();
                 for (auto& tc : asst.tool_calls) {
-                    if (cancellation::requested()) {
+                    if (child.cancelled()) {
                         is_error = true;
                         last_error = "subagent cancelled before local tool execution";
                         doomed = true;
@@ -1751,7 +1769,7 @@ public:
                             "tool args failed to parse \xe2\x80\x94 re-emit the call "
                             "with complete, valid JSON arguments"};
                         log += "\n    \xe2\x9c\x97 " + tc.name.value + ": bad args";
-                        progress::emit(log);
+                        ctx.emit(log);
                         // A parse failure still counts as a tool ROUND-TRIP:
                         // the model sees the error tool_result and can
                         // re-emit. Without this the loop broke out on the
@@ -1761,7 +1779,11 @@ public:
                     }
                     ran_a_tool = true;
                     const auto t_start = std::chrono::steady_clock::now();
-                    auto res = tool::DynamicDispatch::execute(tc.name.value, tc.args);
+                    // The subagent's own context: deeper, its own reader and
+                    // deadline, the parent's card for live output (as before).
+                    CallContext tool_ctx = child;
+                    tool_ctx.active_skills = skills::active_in(::agentty::visible_text(thread));
+                    auto res = tool::DynamicDispatch::execute(tc.name.value, tc.args, tool_ctx);
                     // Same tool.exec record the main loop emits, so a headless
                     // `agentty run` and a subagent turn are as diagnosable as
                     // an interactive one. A failing tool is Warn (and therefore
@@ -1841,7 +1863,7 @@ public:
                             log += "\n  \xe2\x9a\xa0 same call failed 3\xc3\x97 \xe2\x80\x94 stopping";
                         }
                     }
-                    progress::emit(log);
+                    ctx.emit(log);
                 }
             }
 
@@ -2007,14 +2029,15 @@ std::string run_one_shot(const std::string& prompt,
     // instead of from the `task` tool: same loop, same toolset, same
     // bounds. Instantiate the runner directly — no HostServices needed.
     AgenttySubagentRunner runner;
-    if (auto why = runner.unavailable_reason(); !why.empty()) {
+    const mt::Call top{};   // top level: depth 0, no card, no enclosing cancel
+    if (auto why = runner.unavailable_reason(top); !why.empty()) {
         is_error = true;
         return why;
     }
     mt::SubagentRequest sreq;
     sreq.prompt     = prompt;
     sreq.agent_type = agent_type.empty() ? "general" : agent_type;
-    return runner.run(sreq, is_error);
+    return runner.run(top, sreq, is_error);
 }
 
 // ── Proactive retrieval (SOTA active-RAG / FLARE / Self-RAG) ────────────

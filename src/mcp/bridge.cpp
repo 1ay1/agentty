@@ -636,15 +636,15 @@ tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t,
     def.always_expose = policy.pin.contains(mcp_bare_name(exposed));
     def.output_truncation = tools::OutputTruncation::HeadTail;
 
-    def.execute = [pool, exposed](const json& args) -> tools::ExecResult {
+    def.execute = [pool, exposed](const json& args, const tools::CallContext& ctx) -> tools::ExecResult {
         try {
             ::mcp::cap::Result r;
             // Registry dispatch resolves a provider through its own
             // generation-safe route snapshot; independent servers may run in
             // parallel and each provider serializes only its own transport.
             r = pool->registry.dispatch(::mcp::cap::Request{
-                exposed, args, tools::progress::current(),
-                tools::cancellation::current()});
+                exposed, args, ctx.progress,
+                [&ctx] { return ctx.cancelled(); }});
             if (r.is_error)
                 return std::unexpected(tools::ToolError::subprocess(
                     r.text.empty() ? "MCP tool reported an error"
@@ -687,7 +687,7 @@ tools::ToolDef make_read_resource_tool(PoolHandle pool) {
     def.origin_id = "resources";
     def.scheduling_effects = def.effects;
     def.max_output_chars = 30'000;
-    def.execute = [pool](const json& args) -> tools::ExecResult {
+    def.execute = [pool](const json& args, const tools::CallContext&) -> tools::ExecResult {
         const std::string uri = args.is_object() ? args.value("uri", std::string{}) : std::string{};
         const bool want_list  = uri.empty() || (args.is_object() && args.value("list", false));
         try {
@@ -798,7 +798,7 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
     def.origin_id = "prompts";
     def.scheduling_effects = def.effects;
     def.max_output_chars = 30'000;
-    def.execute = [pool](const json& args) -> tools::ExecResult {
+    def.execute = [pool](const json& args, const tools::CallContext&) -> tools::ExecResult {
         const std::string name = args.is_object() ? args.value("name", std::string{}) : std::string{};
         const bool want_list   = name.empty() || (args.is_object() && args.value("list", false));
         try {
@@ -934,7 +934,7 @@ tools::ToolDef make_search_tools_tool(PoolHandle pool) {
     def.scheduling_effects = def.effects;
     def.max_output_chars = 12'000;
     def.always_expose = true;
-    def.execute = [pool](const json& args) -> tools::ExecResult {
+    def.execute = [pool](const json& args, const tools::CallContext&) -> tools::ExecResult {
         const std::string query = args.value("query", std::string{});
         if (query.empty())
             return std::unexpected(tools::ToolError::invalid_args("query is required"));
@@ -1011,7 +1011,7 @@ tools::ToolDef make_call_tool(PoolHandle pool) {
     def.scheduling_effects = tools::EffectSet{tools::Effect::Exec};
     def.max_output_chars = 30'000;
     def.always_expose = true;
-    def.execute = [pool](const json& args) -> tools::ExecResult {
+    def.execute = [pool](const json& args, const tools::CallContext& ctx) -> tools::ExecResult {
         const std::string name = args.value("name", std::string{});
         const json call_args = args.contains("arguments") && args["arguments"].is_object()
             ? args["arguments"] : json::object();
@@ -1030,8 +1030,8 @@ tools::ToolDef make_call_tool(PoolHandle pool) {
                     "mcp.json."));
         }
         auto result = pool->registry.dispatch(::mcp::cap::Request{
-            *route, call_args, tools::progress::current(),
-            tools::cancellation::current()});
+            *route, call_args, ctx.progress,
+            [&ctx] { return ctx.cancelled(); }});
         if (result.is_error)
             return std::unexpected(tools::ToolError::subprocess(
                 result.text.empty() ? "MCP tool reported an error"
@@ -1121,7 +1121,7 @@ std::vector<tools::ToolDef> passthrough_tools() {
             def.effects  = tools::EffectSet{tools::Effect::Net};
             def.scheduling_effects = def.effects;
             def.max_output_chars   = 30'000;
-            def.execute = [url, name = pt.name, parse_pt_url](const json& args)
+            def.execute = [url, name = pt.name, parse_pt_url](const json& args, const tools::CallContext&)
                 -> tools::ExecResult {
                 const PtUrl u = parse_pt_url(url);
                 if (!u.ok)

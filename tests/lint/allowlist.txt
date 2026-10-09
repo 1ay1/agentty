@@ -81,22 +81,16 @@ io/keystore.cpp: const_cast
 io/cred_crypt.cpp: const_cast
 
 # ── Tools ────────────────────────────────────────────────────────────────
-# A tool runs on a worker and may spawn a child process. progress.cpp's
-# thread_local is the sink the cmd runner captures — UI-thread only, and
-# documented there.
+# A tool runs on a worker and may spawn a child process. Its progress sink,
+# cancel, reader and nesting travel in tools::CallContext, not on the thread.
 # rag apply is synchronous now (the TUI runs it through cmd::apply_rag_settings)
 # and the subagent stream's cancel bridge is stop_callbacks on real tokens, so
 # this file starts no thread of its own. Its caches are maya::guarded or
 # published; the atomics are two sequence counters.
 tool/mcp_tools_backends.cpp: atomic
 tool/plugin.cpp: atomic
-# skills: mutex/atomic guard the discovery cache. thread_local is the `skill`
-# tool's per-call view of which skills are active (skills::active::Scope) —
-# set by the dispatch from the visible transcript, cleared at scope exit, the
-# same per-worker seam as progress.cpp. It REPLACED a process-global
-# activation set, which drifted from the transcript (wrong after /compact).
-tool/skills.cpp: atomic thread_local
-tool/progress.cpp: thread_local
+# skills: the atomic counts discovery-cache resolutions for a test.
+tool/skills.cpp: atomic
 # The subagent run registry. A subagent runs on a Cmd::task_isolated thread
 # and holds provider objects by reference off main's stack, so teardown has to
 # stop each live run and wait a bounded moment for it to leave the stream.
@@ -106,10 +100,9 @@ tool/progress.cpp: thread_local
 # "cannot be expressed as a jaal task — the threads are ones jaal disowned".
 # True of a task, and exactly the gap maya::stop_group now fills:
 # cancel + wait for work on threads you don't own, with admission closing
-# at shutdown (which the old snapshot-then-wait missed). What is left here:
-# thread_local for the per-chain nesting depth and deadline, since each run is
-# synchronous on its own worker thread. The installed Config is maya::guarded.
-tool/subagent.cpp: thread_local
+# at shutdown (which the old snapshot-then-wait missed). Nesting depth and the
+# inherited deadline travel in the tool call's CallContext. The installed
+# Config is maya::guarded, so nothing here needs a grant any more.
 # Windows: run_command_s tees child output while polling for exit. It used to
 # be a bare reader std::thread plus `std::mutex buf_mu` guarding four loose
 # `shared_*` variables, joined ~90 lines later with a caller-supplied

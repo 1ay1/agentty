@@ -124,7 +124,7 @@ int main() {
     CHECK(add != nullptr);
 
     if (add) {
-        auto r = add->execute(nlohmann::json{{"a", 17}, {"b", 25}});
+        auto r = add->execute(nlohmann::json{{"a", 17}, {"b", 25}}, agentty::tools::CallContext{});
         CHECK(r.has_value());
         if (r) {
             std::printf("  add(17,25) -> %s\n", r->text.c_str());
@@ -179,7 +179,7 @@ int main() {
     for (const auto& t : tools) if (t.name.value == "mcp_read_resource") read_res = &t;
     CHECK(read_res != nullptr);
     if (read_res) {
-        auto listing = read_res->execute(nlohmann::json::object());
+        auto listing = read_res->execute(nlohmann::json::object(), agentty::tools::CallContext{});
         CHECK(listing.has_value());
         if (listing) CHECK(listing->text.find("motd") != std::string::npos);
     }

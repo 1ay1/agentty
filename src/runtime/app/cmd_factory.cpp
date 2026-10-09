@@ -1515,28 +1515,22 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
            http::CancelTokenPtr cancel, std::uint64_t exec_seq,
            std::uint64_t approved_def_hash,
            std::vector<std::string> active_skills) {
-            // The skills the model can already see, derived by the reducer
-            // from the visible transcript (::agentty::visible_text). The `skill`
-            // tool reads it to decide "already active"; it has no Thread of
-            // its own on this worker. Scoped to this call only.
-            agentty::tools::skills::active::Scope skills_scope{
-                std::move(active_skills)};
+            // Everything this call carries besides its arguments, handed to
+            // the tool explicitly. The skills the model can already see were
+            // derived by the reducer from the visible transcript.
+            agentty::tools::CallContext ctx;
+            ctx.active_skills = std::move(active_skills);
             // Every result this worker sends carries its exec_seq, so the
             // reducer can drop it if the call it was started for is gone.
             auto out = [exec_seq](ToolExecOutput o) {
                 o.exec_seq = exec_seq;
                 return o;
             };
-            // Install a thread-local progress sink *before* dispatch so the
-            // subprocess runner inside the tool can stream stdout+stderr to
-            // the UI as bytes arrive. RAII scope guarantees the sink is
-            // cleared even if the tool throws, so the next tool run can't
-            // inherit a stale dispatch lambda.
-            agentty::tools::progress::Scope progress_scope{
-                [sink, id, exec_seq](std::string_view snapshot) {
-                    sink.send(Msg{ToolExecProgress{id, std::string{snapshot},
-                                              exec_seq}});
-                }};
+            // Live output, so a subprocess inside the tool streams to the
+            // card as bytes arrive.
+            ctx.progress = [sink, id, exec_seq](std::string_view snapshot) {
+                sink.send(Msg{ToolExecProgress{id, std::string{snapshot}, exec_seq}});
+            };
             // Cancelled on EITHER the turn's cancel token (user pressed
             // escape) or jaal's stop_token (the app is shutting down). The
             // second half used to be missing — this parameter was unnamed, so
@@ -1552,13 +1546,10 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
             // a long-running one and hits escape, so it reads as "subagents
             // crash sometimes".
             //
-            // Published as TOKENS, not an opaque probe, so anything below
-            // that needs to react (the subagent stream's cancel) can attach a
-            // stop_callback instead of running a thread that polls this.
-            std::vector<std::stop_token> cancel_tokens{stop};
-            if (cancel) cancel_tokens.push_back(cancel->token());
-            agentty::tools::cancellation::Scope cancellation_scope{
-                std::move(cancel_tokens)};
+            // Tokens, so anything below that needs to react (the subagent
+            // stream's cancel) attaches a stop_callback instead of polling.
+            ctx.cancel.push_back(stop);
+            if (cancel) ctx.cancel.push_back(cancel->token());
             try {
                 // ── pre_tool hooks (consent-gated, see hooks.hpp) ─────
                 // A blocking decision becomes the tool's error result: the
@@ -1600,7 +1591,7 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 }
                 const auto t_start = std::chrono::steady_clock::now();
                 auto result = tool::DynamicDispatch::execute_approved(
-                    name.value, args, approved_def_hash);
+                    name.value, args, approved_def_hash, ctx);
                 const auto t_ms = std::chrono::duration_cast<
                     std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t_start).count();

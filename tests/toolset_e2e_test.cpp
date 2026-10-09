@@ -58,7 +58,7 @@ tools::ExecResult run(std::string_view name, json args) {
     const auto* td = tools::find(name);
     if (!td) return std::unexpected(tools::ToolError::unknown(
         "tool not in registry: " + std::string{name}));
-    return td->execute(args);
+    return td->execute(args, agentty::tools::CallContext{});
 }
 
 std::string text_of(const tools::ExecResult& r) {
@@ -134,9 +134,9 @@ int main() {
     {
         tools::ToolDef throwing;
         throwing.name.value = "throwing_test_tool";
-        throwing.execute = [](const json&) -> tools::ExecResult { throw 7; };
+        throwing.execute = [](const json&, const tools::CallContext&) -> tools::ExecResult { throw 7; };
         auto guarded = tool::DynamicDispatch::execute_with(
-            &throwing, throwing.name.value, json::object());
+            &throwing, throwing.name.value, json::object(), tools::CallContext{});
         check(!guarded && guarded.error().kind == tools::ErrorKind::Unknown,
               "dispatch: contains non-standard tool exceptions");
     }

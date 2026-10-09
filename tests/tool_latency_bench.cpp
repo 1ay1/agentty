@@ -74,10 +74,10 @@ int main(int argc, char** argv) {
         if (!td) { std::printf("%-18s  (tool not registered)\n", c.label); continue; }
         std::vector<long> us;
         bool ok = true;
-        (void)td->execute(c.args);   // warm: first-touch caches, page cache
+        (void)td->execute(c.args, agentty::tools::CallContext{});   // warm: first-touch caches, page cache
         for (int i = 0; i < runs; ++i) {
             const auto t0 = std::chrono::steady_clock::now();
-            auto r = td->execute(c.args);
+            auto r = td->execute(c.args, agentty::tools::CallContext{});
             const auto t1 = std::chrono::steady_clock::now();
             if (!r.has_value() && ok)
                 std::printf("  [%s] %s\n", c.label,

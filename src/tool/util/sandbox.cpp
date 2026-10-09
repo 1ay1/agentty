@@ -413,7 +413,6 @@ constexpr const char* kHomeToolSubdirs[] = {
     SubprocessOptions opts;
     opts.max_bytes = max_bytes;
     opts.timeout = timeout;
-    opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
 
 #if defined(__linux__) || defined(__APPLE__)
     if (detected_backend() == Backend::Claybin) {
@@ -486,7 +485,6 @@ constexpr const char* kHomeToolSubdirs[] = {
     SubprocessOptions opts;
     opts.max_bytes   = max_bytes;
     opts.timeout     = timeout;
-    opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
 
 #if defined(__linux__)
     if (detected_backend() == Backend::Claybin) {
@@ -601,7 +599,6 @@ constexpr const char* kHomeToolSubdirs[] = {
     SubprocessOptions opts;
     opts.max_bytes = max_bytes;
     opts.timeout = timeout;
-    opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
 
     if (detected_backend() == Backend::Claybin) {
         // Byte-for-byte the Linux claybin branch minus the broker, which macOS
@@ -655,7 +652,6 @@ constexpr const char* kHomeToolSubdirs[] = {
     opts.command = SubprocessOptions::Argv{std::move(argv)};
     opts.max_bytes = max_bytes;
     opts.timeout = timeout;
-    opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
     return Subprocess::run(std::move(opts));
 }
 

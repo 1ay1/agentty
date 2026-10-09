@@ -523,7 +523,8 @@ std::vector<ToolDef> build_mcp_tool_defs() {
         }
 
         std::string tool_name = spec.name;
-        def.execute = [provider, tool_name](const nlohmann::json& args_in) -> ExecResult {
+        def.execute = [provider, tool_name](const nlohmann::json& args_in,
+                                            const CallContext& ctx) -> ExecResult {
             // Canonify alias keys HERE, at the dispatch boundary.
             //
             // PR #66 canonified at every stream-parse site, which fixes the
@@ -618,9 +619,15 @@ std::vector<ToolDef> build_mcp_tool_defs() {
                 before = tools::util::handoff::snapshot_trusted(
                     tools::util::workspace_root().string());
 
+            // The call's context rides along: mcp-cpp hands `host` back to
+            // agentty's Exec / SkillResolver / SubagentRunner untouched.
             ::mcp::cap::Request req{tool_name, args};
-            req.cancelled = [] { return tools::cancellation::requested(); };
-            req.reader    = tools::reader::current();
+            req.progress = ctx.progress;
+            req.reader   = ctx.reader;
+            req.host     = &ctx;
+            const auto merged = ctx.merged_stop();
+            req.stop      = merged->get_token();
+            req.cancelled = [&ctx] { return ctx.cancelled(); };
             auto r = provider->execute(req);
 
             if (watchable && !before.empty()) {

@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -48,7 +49,6 @@ namespace fs = std::filesystem;
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/subagent.hpp"
 #include "agentty/runtime/msg.hpp"
-#include "mcp/tools/util/fs_helpers.hpp"   // util::read_context (case N)
 
 using nlohmann::json;
 using namespace agentty;
@@ -73,11 +73,11 @@ bool has(const std::string& hay, std::string_view needle) {
 // runner's is_error path re-wraps as an unexpected through the bridge).
 struct TaskOut { std::string text; bool is_error = false; };
 
-TaskOut run_task(const std::string& prompt) {
+TaskOut run_task(const std::string& prompt, const tools::CallContext& ctx = {}) {
     const auto* td = tools::find("task");
     if (!td) return {"[task tool missing from registry]", true};
     json args; args["prompt"] = prompt;
-    auto r = td->execute(args);         // production dispatch, as cmd_factory does
+    auto r = td->execute(args, ctx);    // production dispatch, as cmd_factory does
     if (!r) return {r.error().detail, true};
     return {r->text, false};
 }
@@ -398,17 +398,17 @@ int main() {
 
     // ── F. Cancellation interrupts retry backoff. ────────────────────────
     {
-        auto cancelled = std::make_shared<std::atomic<bool>>(false);
-        tools::cancellation::set([cancelled] { return cancelled->load(); });
-        install_scripted_stream([cancelled](int, const provider::Request&,
-                                            const provider::EventSink& sink) {
+        auto cancel = std::make_shared<std::stop_source>();
+        install_scripted_stream([cancel](int, const provider::Request&,
+                                         const provider::EventSink& sink) {
             emit_error(sink, "temporary network failure");
-            cancelled->store(true);
+            cancel->request_stop();
         });
+        tools::CallContext ctx;
+        ctx.cancel.push_back(cancel->get_token());
         const auto began = std::chrono::steady_clock::now();
-        auto out = run_task("cancel during retry backoff");
+        auto out = run_task("cancel during retry backoff", ctx);
         const auto elapsed = std::chrono::steady_clock::now() - began;
-        tools::cancellation::clear();
         check(out.is_error && has(out.text, "cancelled"),
               "F: cancellation returns an actionable retry error");
         check(elapsed < std::chrono::milliseconds(500),
@@ -487,13 +487,12 @@ int main() {
 
     // ── J. Parent cancellation trips the active provider request token. ──
     {
-        // Published as a token, the way the tool runner publishes it
-        // (cmd_factory's cancellation::Scope). The stream reacts to a token
-        // the instant it trips; a bare probe is only checked between turns.
+        // The parent call's cancel token, as cmd_factory puts it in the
+        // CallContext. The stream reacts to it the instant it trips.
         auto parent = std::make_shared<std::stop_source>();
         auto request_cancelled = std::make_shared<std::atomic<bool>>(false);
-        tools::cancellation::Scope parent_scope{
-            std::vector<std::stop_token>{parent->get_token()}};
+        tools::CallContext parent_ctx;
+        parent_ctx.cancel.push_back(parent->get_token());
         install_scripted_stream([parent, request_cancelled](
                                     int, const provider::Request& req,
                                     const provider::EventSink& sink) {
@@ -508,7 +507,7 @@ int main() {
             request_cancelled->store(req.cancel->is_cancelled());
             emit_error(sink, "cancelled");
         });
-        auto out = run_task("cancel active stream");
+        auto out = run_task("cancel active stream", parent_ctx);
         check(request_cancelled->load() && out.is_error,
               "J: parent cancellation reaches provider and stops the task");
     }
@@ -608,18 +607,28 @@ int main() {
     // turns re-asking, and reported nothing useful. Exactly the bug the
     // scope exists to prevent, reintroduced for the sequential case.
     //
-    // Asserted through the observable consequence: run the same role twice
-    // and require the two runs to be given DIFFERENT read contexts.
+    // Asserted through the observable consequence: both runs read the same
+    // file, and the second must get it fresh, not tagged as cached.
     {
-        std::vector<std::string> contexts;
+        {
+            std::ofstream f("n_probe.txt");
+            f << "probe line\n";
+        }
+        // One output per run: the read's tool_result as the model saw it.
+        std::vector<std::string> outputs;
         install_scripted_stream(
-            [&](int, const provider::Request&, const provider::EventSink& sink) {
-                // Record on EVERY turn and dedup below. The scripted stream's
-                // turn counter is per-install, not per-run, so "turn == 0"
-                // does not mean "first turn of this run" once run_task is
-                // called twice — an earlier draft keyed on that and silently
-                // recorded nothing.
-                contexts.push_back(tools::reader::current());
+            [&](int, const provider::Request& req, const provider::EventSink& sink) {
+                std::string seen;
+                bool have = false;
+                for (const auto& m : req.messages)
+                    for (const auto& tc : m.tool_calls)
+                        if (tc.name.value == "read") { seen = std::string{tc.output()}; have = true; }
+                if (!have) {
+                    emit_tool_call(sink, "n_read", "read", json{{"path", "n_probe.txt"}});
+                    emit_finish(sink, StopReason::ToolUse);
+                    return;
+                }
+                outputs.push_back(seen);
                 emit_text(sink, "REPORT_N");
                 emit_finish(sink);
             });
@@ -627,18 +636,14 @@ int main() {
         (void)run_task("same role, run one");
         (void)run_task("same role, run two");
 
-        std::vector<std::string> uniq;
-        for (const auto& c : contexts)
-            if (std::find(uniq.begin(), uniq.end(), c) == uniq.end())
-                uniq.push_back(c);
-
-        check(contexts.size() >= 2,
-              "N: both sequential subagent runs were observed");
-        check(!contexts.empty() && !contexts.front().empty(),
-              "N: a subagent run gets a non-empty read context");
-        check(uniq.size() >= 2,
-              "N: sequential same-role subagents get DISTINCT read "
-              "contexts (a stack address would collide)");
+        check(outputs.size() == 2,
+              "N: both sequential subagent runs read the file");
+        check(outputs.size() == 2 && has(outputs[0], "probe line")
+                  && has(outputs[1], "probe line"),
+              "N: both reads returned the file");
+        check(outputs.size() == 2 && !has(outputs[1], "[cached"),
+              "N: the second run's read is fresh, not the first run's "
+              "cache entry (distinct read contexts)");
     }
 
     // ── O. The wall-clock deadline actually stops a run, and says so.

@@ -46,7 +46,7 @@ ToolDef mcp_tool(std::string name, std::string desc, EffectSet fx) {
     d.origin      = ToolOrigin::Mcp;
     d.origin_id   = "notes";
     d.effects     = fx;
-    d.execute     = [](const json&) -> agentty::tools::ExecResult {
+    d.execute     = [](const json&, const agentty::tools::CallContext&) -> agentty::tools::ExecResult {
         return agentty::tools::ToolOutput{"ok", std::nullopt};
     };
     return d;
@@ -116,7 +116,7 @@ TEST_CASE("definition pin: execute refuses a tool redefined after approval") {
     // name that is actually registered and feed a hash that cannot match.
     auto result = agentty::tool::DynamicDispatch::execute_approved(
         "read", json{{"path", "/definitely/not/read"}},
-        /*approved_hash=*/0xDEADBEEFull);
+        /*approved_hash=*/0xDEADBEEFull, agentty::tools::CallContext{});
 
     REQUIRE_FALSE(result.has_value());
     CHECK_MESSAGE(result.error().kind == agentty::tools::ErrorKind::Denied,
@@ -131,7 +131,7 @@ TEST_CASE("definition pin: a zero hash means unchecked, not denied") {
     // error -- which proves the consent gate let it through.
     auto result = agentty::tool::DynamicDispatch::execute_approved(
         "read", json{{"path", "/definitely/not/a/real/file"}},
-        /*approved_hash=*/0);
+        /*approved_hash=*/0, agentty::tools::CallContext{});
 
     REQUIRE_FALSE(result.has_value());
     CHECK_MESSAGE(result.error().kind != agentty::tools::ErrorKind::Denied,
@@ -143,7 +143,7 @@ TEST_CASE("definition pin: a matching hash runs the tool") {
     REQUIRE(td != nullptr);
     auto result = agentty::tool::DynamicDispatch::execute_approved(
         "read", json{{"path", "/definitely/not/a/real/file"}},
-        td->definition_hash());
+        td->definition_hash(), agentty::tools::CallContext{});
 
     REQUIRE_FALSE(result.has_value());   // the path doesn't exist
     CHECK_MESSAGE(result.error().kind != agentty::tools::ErrorKind::Denied,
@@ -153,7 +153,7 @@ TEST_CASE("definition pin: a matching hash runs the tool") {
 
 TEST_CASE("definition pin: an unknown tool is not found, not silently allowed") {
     auto result = agentty::tool::DynamicDispatch::execute_approved(
-        "no_such_tool_exists_here", json::object(), 0);
+        "no_such_tool_exists_here", json::object(), 0, agentty::tools::CallContext{});
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().kind == agentty::tools::ErrorKind::NotFound);
 }

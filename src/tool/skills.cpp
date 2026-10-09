@@ -833,9 +833,6 @@ std::string body_tag_for(std::string_view name) {
     return t;
 }
 
-// What the skill tool's dispatch installed for this call. thread_local:
-// one tool runs per worker thread, and the value must not leak to the next.
-thread_local std::vector<std::string> g_active_for_call;
 } // namespace
 
 bool is_active_in(std::string_view name,
@@ -867,14 +864,6 @@ active_in(const std::vector<std::string_view>& visible) {
     return out;
 }
 
-namespace active {
-void set(std::vector<std::string> names) { g_active_for_call = std::move(names); }
-void clear() { g_active_for_call.clear(); }
-bool contains(std::string_view name) {
-    for (const auto& n : g_active_for_call) if (n == name) return true;
-    return false;
-}
-} // namespace active
 
 // ── Effects + trust ────────────────────────────────────────────────────────
 

@@ -259,13 +259,13 @@ TEST_CASE("skills engine") {
         // (The old set started empty on resume and re-injected it.)
         CHECK(skills::is_active_in("review-pr", visible_text(t)));
 
-        // The tool-side view: what the dispatch installs, scoped to one call.
+        // The tool-side view: what the dispatch puts in the call's context.
         {
-            skills::active::Scope s{skills::active_in(visible_text(t))};
-            CHECK(skills::active::contains("alpha"));
-            CHECK(!skills::active::contains("delta"));
+            CallContext ctx;
+            ctx.active_skills = skills::active_in(visible_text(t));
+            CHECK(ctx.skill_active("alpha"));
+            CHECK(!ctx.skill_active("delta"));
         }
-        CHECK(!skills::active::contains("alpha"));   // cleared at scope exit
     }
 
     // ── Stage 5b: spec lint ───────────────────────────────────
