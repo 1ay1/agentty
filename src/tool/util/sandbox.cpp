@@ -25,8 +25,6 @@
 // seccomp, cgroup2) and on macOS (seatbelt, rlimits). Windows compiles the
 // policy and refuses to apply it, so the include stays out there.
 #if defined(__linux__) || defined(__APPLE__)
-#include <unistd.h>  // ::close, for the pidfd the runner does not use
-
 #include "agentty/tool/util/sandbox_claybin.hpp"
 #include "agentty/tool/util/handoff_gate.hpp"   // snapshot_trusted: ONE path table
 #endif
@@ -444,8 +442,8 @@ constexpr const char* kHomeToolSubdirs[] = {
                 out.error = r.start_error;
                 return out;
             }
-            if (r.pidfd >= 0) ::close(r.pidfd);  // the runner reaps by pid
-            out.pid = r.pid;
+            out.pid   = r.pid;
+            out.pidfd = r.pidfd;   // jaal reaps by it: no pid-reuse race
             // Hand the syscall supervisor to the runner, which polls it beside
             // the output pipe. It must be polled for the child's whole life: a
             // brokered syscall blocks in the kernel until someone answers.
@@ -501,8 +499,8 @@ constexpr const char* kHomeToolSubdirs[] = {
             auto r = claybin_backend::spawn_argv(posture, argv, pipe_write_fd,
                                                  pipe_write_fd);
             if (!r.started) { out.error = r.start_error; return out; }
-            if (r.pidfd >= 0) ::close(r.pidfd);
             out.pid           = r.pid;
+            out.pidfd         = r.pidfd;
             out.supervisor_fd = r.supervisor_fd;
             out.service       = std::move(r.service_broker);
             out.kill_tree     = std::move(r.kill_tree);

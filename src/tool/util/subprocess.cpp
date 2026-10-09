@@ -28,25 +28,8 @@
 #  endif
 #  include <windows.h>
 #else
-#  include <cerrno>
-#  include <fcntl.h>
-#  include <poll.h>
-#  if defined(__linux__)
-#    include <sys/syscall.h>   // SYS_pidfd_open (reap wait)
-#  endif
-#  include <signal.h>
-#  include <sys/wait.h>
-#  include <unistd.h>
-// <spawn.h> is gated behind __ANDROID_API__ >= 28 on Bionic and absent from
-// the sysroot below that (Termux on some devices). Prefer posix_spawn where
-// available; otherwise run_posix falls back to fork/exec (no header needed).
-#  if __has_include(<spawn.h>)
-#    include <spawn.h>
-#    define AGENTTY_HAVE_POSIX_SPAWN 1
-#  else
-#    define AGENTTY_HAVE_POSIX_SPAWN 0
-#  endif
-extern char** environ;
+#  include <cstdlib>
+#  include "agentty/tool/util/exec.hpp"   // run_child: the one supervise loop
 #endif
 
 namespace agentty::tools::util {
@@ -460,613 +443,51 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
 
 #else // POSIX
 
-// In-process runner: posix_spawn the child with stdout+stderr piped back
-// here, then poll(2) the read end with a deadline. Replaces the previous
-// `popen("timeout ... sh -c ...")` design, which had two problems:
-//   1. macOS doesn't ship GNU `timeout` (it lives in coreutils → brew),
-//      so every bash call on a stock Mac failed at the shell layer.
-//   2. Even on Linux it stacked an extra process layer, made stderr
-//      structure invisible (forced 2>&1 in the shell), and gave us no
-//      handle to actually kill the child if shell quoting went sideways.
-//
-// The new design owns the entire lifecycle: we hold the pid, we send
-// SIGTERM at the deadline, we escalate to SIGKILL after a 2 s grace,
-// and we close the read end ourselves once the child reaps so a
-// grandchild that inherits the pipe can't block us forever (same edge
-// case the Windows path handles via the reader-thread grace + force-
-// close pattern).
-
-namespace {
-
-// Drain whatever's currently readable on `fd` without blocking.
-// Returns true if EOF (read==0) was observed; the caller uses that to
-// distinguish "more might come later" from "writer closed for good".
-bool drain_pipe(int fd, std::ostringstream& out, std::size_t& total,
-                std::size_t max_bytes, bool& truncated) {
-    if (fd < 0) return true;
-    char buf[4096];
-    for (;;) {
-        ssize_t n = ::read(fd, buf, sizeof(buf));
-        if (n > 0) {
-            if (truncated) continue;
-            std::size_t room = (total < max_bytes) ? max_bytes - total : 0;
-            std::size_t w = std::min<std::size_t>(static_cast<std::size_t>(n), room);
-            out.write(buf, static_cast<std::streamsize>(w));
-            total += w;
-            if (w < static_cast<std::size_t>(n)) truncated = true;
-            continue;
-        }
-        if (n == 0) return true;                          // EOF
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return false;
-        return true;                                       // fatal read error
-    }
-}
-
-} // namespace
-
-// -----------------------------------------------------------------------
-// Spawn-lifecycle RAII + typestate (POSIX).
-// -----------------------------------------------------------------------
-// run_posix's prologue acquires resources in sequence — a pipe (two fds),
-// a posix_spawn_file_actions_t, then the child pid — and EVERY early
-// failure path used to hand-unwind whatever was acquired so far
-// (::close(pipefd[0]); ::close(pipefd[1]); posix_spawn_file_actions_destroy).
-// That ladder is correct but fragile: a new early-return added mid-prologue
-// silently leaks an fd. Model it as move-only owning guards + a two-state
-// typestate (Piped ─spawn─▶ Spawned) so cleanup is RAII and the legal
-// ordering is compiler-checked. Zero overhead: the guards are thin
-// fd/handle wrappers, the states are empty move-only tokens.
-namespace {
-
-// Owns one fd; closes on destruction unless released. Move-only.
-struct FdGuard {
-    int fd = -1;
-    FdGuard() = default;
-    explicit FdGuard(int f) noexcept : fd(f) {}
-    FdGuard(FdGuard&& o) noexcept : fd(std::exchange(o.fd, -1)) {}
-    FdGuard& operator=(FdGuard&& o) noexcept {
-        if (this != &o) { reset(); fd = std::exchange(o.fd, -1); }
-        return *this;
-    }
-    ~FdGuard() { reset(); }
-    void reset() noexcept { if (fd >= 0) ::close(fd); fd = -1; }
-    [[nodiscard]] int release() noexcept { return std::exchange(fd, -1); }
-    [[nodiscard]] bool valid() const noexcept { return fd >= 0; }
-};
-
-// Owns a posix_spawn_file_actions_t; destroys on scope exit. Move-only.
-// Only compiled when posix_spawn is available; the fork/exec fallback wires
-// the child fds by hand instead.
-#if AGENTTY_HAVE_POSIX_SPAWN
-struct SpawnFileActions {
-    posix_spawn_file_actions_t a{};
-    bool inited = false;
-    SpawnFileActions() = default;
-    SpawnFileActions(SpawnFileActions&& o) noexcept
-        : a(o.a), inited(std::exchange(o.inited, false)) {}
-    SpawnFileActions& operator=(SpawnFileActions&&) = delete;
-    ~SpawnFileActions() { if (inited) ::posix_spawn_file_actions_destroy(&a); }
-    [[nodiscard]] bool init() noexcept {
-        inited = (::posix_spawn_file_actions_init(&a) == 0);
-        return inited;
-    }
-};
-#else
-// Fork/exec fallback: no file_actions object exists, so provide an empty
-// stand-in that always "inits" successfully. The child does the fd wiring.
-struct SpawnFileActions {
-    bool inited = false;
-    [[nodiscard]] bool init() noexcept { inited = true; return true; }
-};
-#endif
-
-// Typestate: a wired-up pipe + file_actions, ready to spawn. OWNS both pipe
-// ends and the file_actions until spawn consumes it.
-struct Piped : io::fsm::State<struct PipedTag> {
-    using fsm_to = io::fsm::to<struct Spawned>;
-    FdGuard          read_end;    // parent reads child stdout/stderr here
-    FdGuard          write_end;   // dup'd into child stdout/stderr, then closed
-    SpawnFileActions actions;
-};
-
-// Typestate: child is running. OWNS the read fd (parent side) and the pid.
-// The write end is closed by the spawn transition (parent never writes).
-struct Spawned : io::fsm::State<struct SpawnedTag> {
-    FdGuard read_end;
-    pid_t   pid = -1;
-};
-
-} // namespace
-
-// argv form: arguments passed verbatim, no shell. shell_command form:
-// `/bin/sh -c <cmd>`. Either way, env is inherited.
-SubprocessResult run_posix(const std::vector<std::string>& argv_in,
-                           bool                           use_shell,
-                           const SubprocessOptions&       opts) {
-    SubprocessResult r;
-
-    // ── Piped: create the pipe + file_actions ───────────────────────────
-    // Set the parent end non-blocking so drain_pipe returns instead of
-    // stalling on partial reads. Use pipe2(O_CLOEXEC) where available so the
-    // fd doesn't leak to nested posix_spawns; fall back to fcntl on macOS.
-    Piped piped;
-    {
-        int pipefd[2] = {-1, -1};
-#if defined(__linux__)
-        if (::pipe2(pipefd, O_CLOEXEC) != 0) {
-            r.started = false; r.start_error = "pipe2 failed: " + std::string{std::strerror(errno)};
-            return r;
-        }
-#else
-        if (::pipe(pipefd) != 0) {
-            r.started = false; r.start_error = "pipe failed: " + std::string{std::strerror(errno)};
-            return r;
-        }
-        (void)::fcntl(pipefd[0], F_SETFD, ::fcntl(pipefd[0], F_GETFD) | FD_CLOEXEC);
-        (void)::fcntl(pipefd[1], F_SETFD, ::fcntl(pipefd[1], F_GETFD) | FD_CLOEXEC);
-#endif
-        (void)::fcntl(pipefd[0], F_SETFL, ::fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
-        // From here on both fds are owned by RAII guards: any early return
-        // below closes them automatically (no hand-written close ladder).
-        piped.read_end  = FdGuard{pipefd[0]};
-        piped.write_end = FdGuard{pipefd[1]};
-    }
-
-    // file_actions: redirect stdin from /dev/null (so the child can't
-    // steal terminal input from the TUI), and stdout+stderr to the pipe
-    // write end. Close the read end in the child so grandchildren that
-    // inherit fds don't hold it open after the child itself exits.
-    if (!piped.actions.init()) {
-        r.started = false; r.start_error = "posix_spawn_file_actions_init failed";
-        return r;   // ~Piped closes both pipe fds
-    }
-#if AGENTTY_HAVE_POSIX_SPAWN
-    ::posix_spawn_file_actions_addopen(&piped.actions.a, STDIN_FILENO,
-        "/dev/null", O_RDONLY, 0);
-    ::posix_spawn_file_actions_adddup2 (&piped.actions.a, piped.write_end.fd, STDOUT_FILENO);
-    ::posix_spawn_file_actions_adddup2 (&piped.actions.a, piped.write_end.fd, STDERR_FILENO);
-    ::posix_spawn_file_actions_addclose(&piped.actions.a, piped.write_end.fd);
-    ::posix_spawn_file_actions_addclose(&piped.actions.a, piped.read_end.fd);
-#endif
-
-    // Build child argv. Shell form goes through `/bin/sh -c <cmd>` so
-    // pipes / redirects / globs work; argv form bypasses the shell for
-    // exact-arg fidelity (matters for `git commit -m "msg with $vars"`
-    // and similar where the shell would mangle the message).
-    std::vector<std::string> argv_storage;
-    if (use_shell) {
-        if (argv_in.empty()) {
-            r.started = false; r.start_error = "empty shell command";
-            return r;   // ~Piped closes fds + destroys actions
-        }
-        argv_storage = {"sh", "-c", argv_in[0]};
-    } else {
-        argv_storage = argv_in;
-    }
-    std::vector<char*> arg_ptrs;
-    arg_ptrs.reserve(argv_storage.size() + 1);
-    for (auto& s : argv_storage) arg_ptrs.push_back(s.data());
-    arg_ptrs.push_back(nullptr);
-
-    // ── Piped ─spawn─▶ Spawned ──────────────────────────────────────────
-    io::fsm::assert_legal_edge<Piped, Spawned>();
-    pid_t pid = -1;
-    int rc = 0;
-
-    // A backend may replace the fork/exec step only.
-    //
-    // This is how the claybin sandbox plugs in: it is a library, not a binary,
-    // so it cannot be expressed as an argv prefix the way bwrap and
-    // sandbox-exec are -- it has to fork, apply the namespace/landlock/seccomp
-    // plan in the child, and exec there itself. Everything below this point
-    // (poll, progress throttle, idle deadline, SIGTERM then SIGKILL, reap) is
-    // the same either way, and it is the part that is easy to get wrong, so it
-    // is not duplicated per backend.
-    //
-    // The spawner gets the write end of the pipe we already made and is
-    // responsible for putting it on the child's stdout and stderr. We keep the
-    // read end and the deadline.
-    // The syscall supervisor, when the sandbox brokers calls. Both stay unset
-    // in the common case, and the poll loop below skips them at zero cost.
-    //
-    // Hoisted out of the `if` so the supervise loop can see them: the listener
-    // has to be polled for as long as the child runs, because a brokered
-    // syscall blocks in the kernel until someone answers it.
-    int supervisor_fd = -1;
-    std::function<bool()> service_supervisor;
-    // Set only by a spawner that can stop the tree better than killpg can
-    // (claybin's cgroup). Hoisted for the same reason as the two above: the
-    // poll loop needs it long after this block.
-    std::function<bool()> kill_tree_fn;
-
-    if (opts.spawner) {
-        auto child = opts.spawner(opts, piped.write_end.fd);
-        if (child.pid < 0) {
-            SubprocessResult r;
-            r.started = false;
-            r.start_error = child.error.empty() ? "sandbox spawner failed" : child.error;
-            return r;
-        }
-        pid = child.pid;
-        supervisor_fd = child.supervisor_fd;
-        service_supervisor = std::move(child.service);
-        kill_tree_fn = std::move(child.kill_tree);
-    } else
-#if AGENTTY_HAVE_POSIX_SPAWN
-    {
-    // Own session (or at least own process group) so timeout/cancel can
-    // signal the whole tree: `sh -c` plus anything it forks. Signalling
-    // only the leader left `cmd &`, pipelines and dev servers running.
-    posix_spawnattr_t attr;
-    const bool have_attr = (::posix_spawnattr_init(&attr) == 0);
-    posix_spawnattr_t* attrp = nullptr;
-#  ifdef POSIX_SPAWN_SETSID
-    if (have_attr && ::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID) == 0)
-        attrp = &attr;
-#  endif
-#  ifdef POSIX_SPAWN_SETPGROUP
-    if (have_attr && !attrp
-        && ::posix_spawnattr_setpgroup(&attr, 0) == 0
-        && ::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP) == 0)
-        attrp = &attr;
-#  endif
-    rc = ::posix_spawnp(&pid, arg_ptrs[0], &piped.actions.a, attrp,
-                        arg_ptrs.data(), environ);
-    // Some libcs advertise SETSID but reject it at spawn time. Retry with
-    // a plain process group, which every POSIX libc supports.
-#  if defined(POSIX_SPAWN_SETSID) && defined(POSIX_SPAWN_SETPGROUP)
-    if (rc == EINVAL && attrp
-        && ::posix_spawnattr_setpgroup(&attr, 0) == 0
-        && ::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP) == 0)
-        rc = ::posix_spawnp(&pid, arg_ptrs[0], &piped.actions.a, attrp,
-                            arg_ptrs.data(), environ);
-#  endif
-    if (have_attr) ::posix_spawnattr_destroy(&attr);
-    }
-#else
-    {
-    // Fork/exec fallback (Bionic without <spawn.h> below API 28). Perform
-    // the same fd wiring the file_actions would have — stdin<-/dev/null,
-    // stdout+stderr->pipe write end, close the read end — in the forked
-    // child before exec. execvp honours PATH like posix_spawnp.
-    pid = ::fork();
-    if (pid == 0) {
-        if (::setsid() < 0) (void)::setpgid(0, 0);
-        int devnull = ::open("/dev/null", O_RDONLY);
-        if (devnull >= 0) { ::dup2(devnull, STDIN_FILENO); ::close(devnull); }
-        ::dup2(piped.write_end.fd, STDOUT_FILENO);
-        ::dup2(piped.write_end.fd, STDERR_FILENO);
-        ::close(piped.write_end.fd);
-        ::close(piped.read_end.fd);
-        ::execvp(arg_ptrs[0], arg_ptrs.data());
-        ::_exit(127);   // exec only returns on failure
-    } else if (pid < 0) {
-        rc = errno;
-    }
-    }
-#endif
-    // file_actions no longer needed; the write end is parent-side dead
-    // weight (the child has its dup'd copy). Releasing them here mirrors
-    // the original eager teardown — ~Piped would do it too, but we want
-    // the write end gone BEFORE the supervise loop so EOF is observable.
-    piped.write_end.reset();
-    // (piped.actions is destroyed when `piped` leaves scope below.)
-
-    if (rc != 0 || pid < 0) {
-        r.started = false;
-        r.start_error = "spawn failed: " +
-            std::string{std::strerror(rc != 0 ? rc : errno)};
-        return r;   // ~Piped closes the read end
-    }
-
-    // Hand the read fd + pid to the running-child token. After this `piped`
-    // owns nothing but its (now-destroyed-on-scope-exit) file_actions.
-    Spawned child;
-    child.read_end = FdGuard{piped.read_end.release()};
-    child.pid      = pid;
-
-    // The supervise loop drives the genuinely-concurrent phase (poll +
-    // drain + idle-deadline SIGTERM/SIGKILL + reap). It is a select-loop,
-    // not a state sequence, so it stays a loop — but it now reads the
-    // child's read fd / pid through the owning Spawned token.
-    int read_fd = child.read_end.fd;
-    const pid_t cpid = child.pid;
-
-    using clock = std::chrono::steady_clock;
-    const auto start    = clock::now();
-    // Idle deadline: rather than an absolute wall-clock cap from spawn,
-    // the deadline rolls forward every time the child writes output.  A
-    // long-running command that's actively printing progress (a build,
-    // a streaming logs tail, a slow git operation) never trips the
-    // watchdog, but a stuck child that goes silent for `opts.timeout`
-    // seconds gets SIGTERM'd just as before.
-    //
-    // The window resets on EACH successful read (see the post-drain
-    // bump near the bottom of the loop), so the only way to die here is
-    // to actually go quiet for the configured budget.
-    const auto idle_window = (opts.timeout.count() > 0)
-        ? std::chrono::seconds(opts.timeout.count())
-        : std::chrono::seconds::zero();
-    const bool has_idle_window = idle_window > std::chrono::seconds::zero();
-    auto idle_deadline = has_idle_window
-        ? start + idle_window
-        : clock::time_point::max();
-    // Absolute ceiling from spawn, never reset by output. The idle window
-    // above cannot catch a child that stays chatty forever -- every byte
-    // rolls it forward, and past the output cap those bytes are read and
-    // discarded, so nothing bounds it at all. Derived at 20x the idle
-    // budget with a 10-minute floor, which no realistic build or test run
-    // comes near; `hard_timeout` overrides when a caller knows better.
-    //
-    // $AGENTTY_TOOL_HARD_TIMEOUT_SECS overrides the derived value for the
-    // whole process, and 0 switches the ceiling off entirely. A ceiling that
-    // cannot be raised is its own kind of broken: the one session where a
-    // legitimate job needs 40 minutes should not need a rebuild. Read live,
-    // never cached, same as the other AGENTTY_* knobs.
-    const auto hard_window = [&]() -> std::chrono::seconds {
+// One supervise loop for every child agentty runs: run_child (exec.cpp) on
+// jaal's posix_process. This only maps the options across.
+SubprocessResult run_posix(std::vector<std::string> argv, const SubprocessOptions& opts) {
+    ChildRun run;
+    run.argv = std::move(argv);
+    run.idle = opts.timeout;
+    run.wall = [&]() -> std::chrono::seconds {
+        // $AGENTTY_TOOL_HARD_TIMEOUT_SECS overrides for the whole process;
+        // 0 switches the ceiling off.
         if (const char* e = std::getenv("AGENTTY_TOOL_HARD_TIMEOUT_SECS"); e && e[0]) {
             char* end = nullptr;
             const long v = std::strtol(e, &end, 10);
             if (end != e && v >= 0) return std::chrono::seconds{v};
         }
         if (opts.hard_timeout.count() > 0) return opts.hard_timeout;
-        if (!has_idle_window)              return std::chrono::seconds::zero();
-        const auto scaled = idle_window * 20;
-        return std::max<std::chrono::seconds>(scaled, std::chrono::minutes{10});
+        if (opts.timeout.count() <= 0)     return std::chrono::seconds::zero();
+        return std::max<std::chrono::seconds>(opts.timeout * 20, std::chrono::minutes{10});
     }();
-    const bool has_hard_window = hard_window > std::chrono::seconds::zero();
-    const auto hard_deadline = has_hard_window
-        ? start + hard_window
-        : clock::time_point::max();
-    constexpr auto kKillGrace = std::chrono::milliseconds{2000};
-
-    auto last_emit  = start;
-    auto kill_at    = clock::time_point::max();
-    bool sent_term  = false;
-    bool sent_kill  = false;
-    bool timed_out  = false;
-    bool hard_capped = false;
-    bool eof        = false;
-    int  wait_status = 0;
-
-    std::ostringstream out;
-    std::size_t total     = 0;
-    bool        truncated = false;
-
-    auto emit_progress = [&]{
-        if (!opts.on_progress) return;
-        opts.on_progress(clean_capture(out.str()));
-        last_emit = clock::now();
-    };
-
-    // Main poll loop. Exits as soon as we've got both EOF on the pipe AND
-    // a reaped child — the order can vary (child can exit before its
-    // last bytes drain on a heavily-buffered pipe; pipe can EOF before
-    // waitpid completes if the child is being reparented).
-    auto signal_group = [&](int sig) {
-        // SIGTERM is a REQUEST, so it goes to the process group: the point is
-        // to let the child shut down cooperatively, and a cgroup kill offers
-        // no cooperative mode (it is SIGKILL by definition).
-        //
-        // SIGKILL is where the group falls short. A descendant that called
-        // setsid() is no longer in the group and survives it, which is how a
-        // runaway outlives the tool that started it. When the spawner handed
-        // us a tree killer -- claybin's cgroup.kill -- use that instead: one
-        // atomic kernel operation over the whole subtree, nothing to race and
-        // nowhere to escape to. It reports failure rather than throwing, so
-        // the group path below stays the fallback on an old kernel or a host
-        // that could not delegate a cgroup.
-        if (sig == SIGKILL && kill_tree_fn && kill_tree_fn()) return;
-        // The child leads its own group (see spawn). Fall back to the
-        // leader alone only if the group is already gone.
-        if (::kill(-cpid, sig) != 0 && errno == ESRCH)
-            (void)::kill(cpid, sig);
-    };
-
-    bool reaped = false;
-    int  exit_fd = -2;   // pidfd for the reap wait; -2 = not opened yet
-    auto reap_backoff = std::chrono::microseconds{200};
-    bool group_done = false;
-    auto cleanup_deadline = clock::time_point::max();
-    while (!eof || !reaped || (sent_term && !group_done)) {
-        auto now = clock::now();
-
-        // Cancellation has the same bounded SIGTERM → SIGKILL path as the
-        // idle watchdog, but is not reported as a timeout to the caller.
-        if (!sent_term && opts.stop_requested && opts.stop_requested()) {
-            signal_group(SIGTERM);
-            sent_term = true;
-            kill_at   = now + kKillGrace;
-        }
-
-        // Idle-deadline state machine. SIGTERM first (cooperative
-        // shutdown), SIGKILL after a 2 s grace if still alive.
-        // `timed_out` is sticky so we report it even if the child
-        // happened to exit cleanly moments after we sent the signal.
-        // `idle_deadline` was reset to `now + idle_window` on every
-        // successful drain below, so reaching it means the child has
-        // gone silent for at least `opts.timeout` seconds.
-        if (!sent_term && has_idle_window && now >= idle_deadline) {
-            signal_group(SIGTERM);
-            sent_term = true;
-            timed_out = true;
-            kill_at   = now + kKillGrace;
-        }
-        // Same escalation for the wall-clock ceiling. Reported as a timeout
-        // too -- from the caller's side "it ran too long" is one outcome,
-        // and legacy_format explains which budget it was.
-        if (!sent_term && has_hard_window && now >= hard_deadline) {
-            signal_group(SIGTERM);
-            sent_term  = true;
-            timed_out  = true;
-            hard_capped = true;
-            kill_at    = now + kKillGrace;
-        }
-        if (sent_term && !sent_kill && now >= kill_at) {
-            signal_group(SIGKILL);
-            sent_kill = true;
-            cleanup_deadline = now + std::chrono::seconds{1};
-        }
-        if (sent_term) {
-            // Keep going until every process in the group is gone, bounded
-            // so a descendant stuck in D state can't hang us forever.
-            group_done = (::kill(-cpid, 0) != 0 && errno == ESRCH);
-            if (sent_kill && now >= cleanup_deadline) group_done = true;
-        }
-
-        // Compute the next event we care about and bound the poll
-        // accordingly. 100 ms ceiling so we still revisit the kill
-        // state even when the child is silent and no timer is close.
-        auto next = last_emit + kEmitGap;
-        if (!sent_term && has_idle_window && idle_deadline < next)
-            next = idle_deadline;
-        if (!sent_term && has_hard_window && hard_deadline < next)
-            next = hard_deadline;
-        if (sent_term && !sent_kill && kill_at < next) next = kill_at;
-        auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           next - now).count();
-        if (wait_ms < 0)   wait_ms = 0;
-        if (wait_ms > 100) wait_ms = 100;
-
-        if (!eof) {
-            // Two descriptors when the sandbox brokers syscalls, one otherwise.
-            //
-            // The listener MUST be in the same poll as the pipe. A brokered
-            // syscall blocks the guest thread in the kernel until someone
-            // answers, so a listener that is only serviced between reads can
-            // deadlock: the child waits for a decision, we wait for output it
-            // cannot produce until it gets one, and the idle watchdog fires on
-            // a child that was never idle.
-            struct pollfd pfds[2];
-            pfds[0] = {read_fd, POLLIN, 0};
-            const bool brokering = supervisor_fd >= 0 && service_supervisor;
-            if (brokering) pfds[1] = {supervisor_fd, POLLIN, 0};
-            const int nfds = brokering ? 2 : 1;
-
-            int pn = ::poll(pfds, static_cast<nfds_t>(nfds),
-                            static_cast<int>(wait_ms));
-
-            // Service the supervisor FIRST. If both are ready, answering the
-            // blocked syscall is what lets the child produce the next bytes --
-            // draining first would just mean another poll round trip.
-            if (pn > 0 && brokering &&
-                (pfds[1].revents & (POLLIN | POLLHUP | POLLERR))) {
-                if (!service_supervisor()) {
-                    // The listener is finished: the guest is gone, or the fd
-                    // closed. Stop polling it rather than spinning on a dead
-                    // descriptor -- POLLHUP is level-triggered and would make
-                    // this loop busy-wait at 100% CPU for the rest of the
-                    // command.
-                    supervisor_fd = -1;
-                    service_supervisor = nullptr;
-                }
-                // A brokered syscall is forward progress by the child, even
-                // though it produced no output. Resetting the idle window here
-                // is what stops the watchdog killing a command that is
-                // legitimately waiting on us.
-                if (has_idle_window) idle_deadline = clock::now() + idle_window;
-            }
-
-            if (pn > 0 && (pfds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
-                const auto bytes_before = total;
-                if (drain_pipe(read_fd, out, total, opts.max_bytes, truncated))
-                    eof = true;
-                // Any forward progress in stdout/stderr resets the idle
-                // window — a chatty child (build with progress lines, log
-                // tail, long-running test runner) never starves the
-                // watchdog.  The deadline only fires after `idle_window`
-                // of *silence*, not from spawn.
-                if (has_idle_window && total > bytes_before) {
-                    idle_deadline = clock::now() + idle_window;
-                }
-            } else if (pn < 0 && errno != EINTR) {
-                eof = true;   // poll error → stop trying to read
-            }
-        } else {
-            // Pipe is done; wait for the reap. pidfd wakes the instant the
-            // child exits instead of a flat 20 ms sleep on every command.
-            const long cap = std::min<long>(wait_ms, 20);
-
-            // The supervisor still has to be answered here, and missing this
-            // would be a real hang rather than a slow path.
-            //
-            // EOF on the pipe does NOT mean the child is finished: it closed
-            // stdout, or a grandchild holds it, or it is about to make one
-            // last brokered syscall before exiting. If that call blocks and we
-            // are only polling the exit fd, nobody ever answers -- the child
-            // waits on us, we wait on its exit, and the command hangs until
-            // the hard deadline kills it. The symptom would be "commands with
-            // brokering sometimes take exactly the timeout", which is
-            // miserable to diagnose.
-            const bool brokering = supervisor_fd >= 0 && service_supervisor;
-#if defined(__linux__) && defined(SYS_pidfd_open)
-            if (exit_fd == -2)
-                exit_fd = static_cast<int>(::syscall(SYS_pidfd_open, cpid, 0));
-            if (exit_fd >= 0 || brokering) {
-                struct pollfd xfds[2];
-                int n = 0;
-                if (exit_fd >= 0) xfds[n++] = {exit_fd, POLLIN, 0};
-                const int sup_at = brokering ? n : -1;
-                if (brokering) xfds[n++] = {supervisor_fd, POLLIN, 0};
-
-                (void)::poll(xfds, static_cast<nfds_t>(n), static_cast<int>(cap));
-
-                if (sup_at >= 0 &&
-                    (xfds[sup_at].revents & (POLLIN | POLLHUP | POLLERR))) {
-                    if (!service_supervisor()) {
-                        supervisor_fd = -1;
-                        service_supervisor = nullptr;
-                    }
-                }
-            } else
-#endif
-            {
-                std::this_thread::sleep_for(reap_backoff);
-                reap_backoff = std::min<std::chrono::microseconds>(
-                    reap_backoff * 2, std::chrono::milliseconds(cap > 0 ? cap : 1));
-            }
-        }
-
-        // Non-blocking reap. If the child is gone but the pipe's still
-        // open (grandchild inherited stdout), force-close the read end
-        // so the next loop iteration sees eof=true and we exit cleanly
-        // instead of waiting forever on a phantom writer.
-        if (!reaped) {
-            int status = 0;
-            pid_t w = ::waitpid(cpid, &status, WNOHANG);
-            if (w == cpid) {
-                wait_status = status;
-                reaped = true;
-                if (!eof) {
-                    // One last best-effort drain of buffered bytes the
-                    // child wrote between its final flush and exit.
-                    drain_pipe(read_fd, out, total, opts.max_bytes, truncated);
-                    child.read_end.reset();
-                    read_fd = -1;
-                    eof = true;
-                }
-            } else if (w < 0 && errno != EINTR && errno != ECHILD) {
-                // Genuinely unexpected — bail rather than spin.
-                reaped = true;
-            }
-        }
-
-        now = clock::now();
-        if (opts.on_progress && now - last_emit >= kEmitGap)
-            emit_progress();
+    run.max_output_bytes = opts.max_bytes;
+    run.stop_requested   = opts.stop_requested;
+    if (opts.on_progress)
+        run.on_progress = [&opts](std::string_view raw) { opts.on_progress(clean_capture(std::string{raw})); };
+    if (opts.spawner) {
+        run.spawn_adopted = [&opts](int out_fd) {
+            auto c = opts.spawner(opts, out_fd);
+            AdoptedChild a;
+            a.pid   = c.pid;
+            a.pidfd = c.pidfd;
+            if (c.pid < 0) a.error = c.error.empty() ? "sandbox spawner failed" : c.error;
+            a.supervisor_fd  = c.supervisor_fd;
+            a.service_broker = std::move(c.service);
+            a.kill_tree      = std::move(c.kill_tree);
+            return a;
+        };
     }
 
-    if (read_fd >= 0) child.read_end.reset();
-    if (exit_fd >= 0) ::close(exit_fd);
-    emit_progress();   // final flush so the UI sees the last bytes
-
-    if      (WIFEXITED  (wait_status)) r.exit_code = WEXITSTATUS(wait_status);
-    else if (WIFSIGNALED(wait_status)) r.exit_code = 128 + WTERMSIG(wait_status);
-    r.timed_out = timed_out;
-    r.hard_capped = hard_capped;
-    r.truncated = truncated;
-    r.output    = clean_capture(out.str());
+    auto c = run_child(run);
+    SubprocessResult r;
+    r.started     = c.started;
+    r.start_error = c.start_error;
+    r.output      = clean_capture(std::move(c.output));
+    r.truncated   = c.truncated;
+    r.timed_out   = c.timed_out_idle || c.timed_out_wall || c.cancelled;
+    r.hard_capped = c.timed_out_wall;
+    r.exit_code   = c.exited ? c.exit_code : 128 + c.signal;
     return r;
 }
 
@@ -1113,7 +534,7 @@ SubprocessResult Subprocess::run(SubprocessOptions opts) {
         // argument. The runner sets up sh "-c" "<cmd>" itself; no
         // additional quoting needed (and we don't want any — the user
         // passed shell syntax expecting it to be parsed verbatim).
-        return run_posix({*sh}, /*use_shell=*/true, opts);
+        return run_posix({"sh", "-c", *sh}, opts);
     }
     const std::vector<std::string>& av = *opts.argv_if();
     if (av.empty()) {
@@ -1122,7 +543,7 @@ SubprocessResult Subprocess::run(SubprocessOptions opts) {
     // argv form: exec directly with no shell in the loop. Preserves
     // every byte of every arg, which is what callers like git_commit
     // (commit messages with $vars / quotes / newlines) actually need.
-    return run_posix(av, /*use_shell=*/false, opts);
+    return run_posix(av, opts);
 #endif
 }
 

@@ -13,12 +13,11 @@
 //             + restored (prevents a child resetting ENABLE_LINE_INPUT from
 //             corrupting TUI input). Reader thread drains the pipe so a
 //             grandchild that inherits stdout can't deadlock the wait.
-//   POSIX   → posix_spawn + poll-based deadline. Shell form goes through
-//             /bin/sh -c; argv form execs directly. Timeouts are enforced
-//             in-process via SIGTERM (with a 2 s grace) → SIGKILL — no
-//             dependency on GNU coreutils `timeout`, which isn't on stock
-//             macOS. stdin redirected from /dev/null; stdout+stderr both
-//             dup2'd onto a single pipe so callers see merged output.
+//   POSIX   → run_child (exec.hpp) on jaal's posix_process: the same
+//             supervise loop the tools use. Shell form goes through
+//             sh -c; argv form execs directly. Idle and wall clocks, then
+//             SIGTERM, a grace, SIGKILL to the tree. stdin is /dev/null and
+//             stdout+stderr share one pipe.
 //
 // Both paths stream captured bytes through the thread-local progress sink
 // (see agentty/tool/registry.hpp) at most every ~80 ms, so the UI reveals live
@@ -121,6 +120,7 @@ struct SubprocessOptions {
     // as started==false, exactly like a posix_spawn failure.
     struct SpawnedChild {
         int pid{-1};
+        int pidfd{-1};   // taken: the runner reaps by it when set
         std::string error;
 
         // A syscall supervisor, when the sandbox brokers calls.

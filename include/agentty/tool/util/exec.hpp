@@ -37,7 +37,12 @@
 // two measure. Tonight's bug was having only the first.
 
 #include <chrono>
+#include <functional>
 #include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include <mcp/tools/host.hpp>
 
@@ -85,6 +90,67 @@ make_exec(ExecDefaults defaults = {});
 /// Run fn(0..n-1) on a maya::scope, the caller taking share 0; every share
 /// is joined before it returns. The fan-out behind the libraries' splitters.
 void scope_fan_out(std::size_t n, const std::function<void(std::size_t)>& fn);
+
+// ── run_child: the one supervise loop ───────────────────────────────────────────
+//
+// Everything agentty runs to completion goes through here: tool commands,
+// git for checkpoints, the keyring helpers, sandbox probes, hooks. jaal
+// spawns (or adopts what the sandbox spawned) and makes the exit a handle;
+// this loop is the policy around it: two clocks, SIGTERM then SIGKILL,
+// output cap, progress, cancel, the seccomp broker.
+
+/// A child the sandbox started, for run_child to adopt. The sandbox gets the
+/// write end of one pipe for stdout+stderr and hands back the rest.
+struct AdoptedChild {
+    int pid = -1;
+    int pidfd = -1;
+    int supervisor_fd = -1;                 ///< seccomp listener, -1 if none
+    std::function<bool()> service_broker;   ///< answer one notification
+    std::function<bool()> kill_tree;        ///< cgroup.kill; false = fall back
+    bool leads_own_group = true;
+    std::string error;                      ///< non-empty = it never started
+};
+
+struct ChildRun {
+    /// argv[0] is the program; no shell unless argv says so.
+    std::vector<std::string> argv;
+    std::string cwd;                                          ///< empty = ours
+    std::vector<std::pair<std::string, std::string>> env;     ///< layered on ours
+    /// Bytes written to the child's stdin, then closed. Empty = /dev/null.
+    std::string stdin_data;
+
+    std::chrono::milliseconds idle{120'000};   ///< silence budget; 0 = none
+    std::chrono::milliseconds wall{0};         ///< ceiling from spawn; 0 = none
+    std::chrono::milliseconds kill_grace{2000};
+    std::size_t max_output_bytes = 30'000;
+
+    /// Whole buffer so far, at most every ~80 ms and once at the end.
+    std::function<void(std::string_view)> on_progress;
+    /// Polled each wake (at least every 100 ms); true stops the child.
+    std::function<bool()> stop_requested;
+    /// Given the output so far; true stops the child as "done early".
+    std::function<bool(std::string_view)> stop_when;
+    /// Spawn inside a sandbox instead: receives the write end of the output
+    /// pipe (stdout and stderr both), returns what it started.
+    std::function<AdoptedChild(int out_fd)> spawn_adopted;
+};
+
+struct ChildResult {
+    bool started = false;
+    std::string start_error;
+    std::string output;               ///< stdout+stderr, raw bytes
+    bool truncated = false;
+    /// How it ended. Exactly one of these describes it.
+    bool exited = false;   int exit_code = 0;     ///< ran and returned
+    bool signalled = false; int signal = 0;       ///< killed (by us or the OS)
+    bool timed_out_idle = false;
+    bool timed_out_wall = false;
+    bool cancelled = false;
+    bool stopped_early = false;
+    std::chrono::milliseconds elapsed{0};
+};
+
+[[nodiscard]] ChildResult run_child(const ChildRun& run);
 
 /// How many shares are worth making: the hardware threads.
 [[nodiscard]] std::size_t fan_out_width() noexcept;
