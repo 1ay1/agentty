@@ -1141,6 +1141,12 @@ int main(int argc, char** argv) {
 
     install_crash_handler();
 
+    // AGENTTY_FORCE_EFFORT and AGENTTY_MAX_OUTPUT_TOKENS into the capability
+    // registry, once, for every mode (TUI, run, acp). The domain does not
+    // read the environment.
+    set_effort_force(parse_effort_force(std::getenv("AGENTTY_FORCE_EFFORT")));
+    set_max_output_override(parse_max_output(std::getenv("AGENTTY_MAX_OUTPUT_TOKENS")));
+
     // ── Teardown, on EVERY exit path ────────────────────────────────────
     //
     // main() has ~20 early returns (help, version, login, status, skills,
@@ -1811,9 +1817,9 @@ int main(int argc, char** argv) {
         // second hand-written copy of the slot mapping, which is precisely how
         // the two drifted.
         smart::RoleConfig sa_smart = sa_settings.smart;
-        if (auto ov = smart::tuning::enabled_override())
-            sa_smart.enabled = *ov;
-        settings::registry::apply_env(sa_smart);
+        const auto sa_env = settings::registry::read_env();
+        if (sa_env.smart_enabled) sa_smart.enabled = *sa_env.smart_enabled;
+        settings::registry::apply_env(sa_smart, sa_env);
         // An explicit --model is a contract, not a hint: every role runs on
         // it. Without this, `--model X` bound the main turn while compaction
         // and read-only subagents still routed to whatever the catalog said

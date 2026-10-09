@@ -441,6 +441,10 @@ struct EnvSnapshot {
     std::vector<std::pair<std::string, std::string>> set;
     // AGENTTY_SMART_MODE: the session pin on the master switch.
     std::optional<bool> smart_enabled;
+    // AGENTTY_SMART_NO_INTERNAL / _NO_ORCHESTRATE / _NO_SUBAGENTS.
+    bool smart_no_internal    = false;
+    bool smart_no_orchestrate = false;
+    bool smart_no_subagents   = false;
 
     [[nodiscard]] const std::string* find(std::string_view var) const noexcept {
         for (const auto& [k, v] : set) if (k == var) return &v;

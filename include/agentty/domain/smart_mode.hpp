@@ -186,6 +186,13 @@ struct RoleConfig {
     // in favour of this provider's own catalog, never dispatched as a 404.
     bool cross_provider_roles = false;
 
+    // Developer escape hatches (AGENTTY_SMART_NO_INTERNAL / _NO_ORCHESTRATE
+    // / _NO_SUBAGENTS), filled in with the env overrides by
+    // settings::registry::apply_env. Never persisted, never in the UI.
+    bool no_internal    = false;
+    bool no_orchestrate = false;
+    bool no_subagents   = false;
+
     // ONE decision, three slots. There used to be seven more toggles here.
     //
     // Three of them (internal routing, orchestration, subagent routing) are
@@ -194,7 +201,7 @@ struct RoleConfig {
     // of the cheap model" is not a preference worth a row — it is strictly
     // more expensive for no benefit. A toggle earns its place only where a
     // reasonable user would reasonably choose either way; these didn't.
-    // Debug/bisect escape hatches live in env vars (smart::tuning::layers()),
+    // Debug/bisect escape hatches live in env vars (the no_* fields above),
     // not in the UI.
     //
     // Four of them (learned routing, outcome feedback, speculative prewarm,
@@ -298,31 +305,15 @@ struct RoleConfig {
     [[nodiscard]] bool operator==(const RoleConfig&) const = default;
 };
 
-// Resolve the numeric routing policy: an env override wins, else the persisted
-// value already in `c`. Applied in place, so the struct that comes off disk
-// becomes the struct the router uses without a second shape.
-//
-// settings_registry::apply_env(RoleConfig&) does exactly this by walking the
-// table, and is what callers should use. This exists for the three knobs the
-// domain also exposes as bare accessors.
-inline void apply_tuning(RoleConfig& c) noexcept {
-    c.deep_margin       = tuning::deep_margin_env().value_or(c.deep_margin);
-    c.bias_clamp        = tuning::bias_clamp_env().value_or(c.bias_clamp);
-    c.complex_threshold =
-        tuning::complex_threshold_env().value_or(c.complex_threshold);
-}
-
-// Layer gates. Each is the master switch minus a developer escape hatch
-// (see smart_tuning.hpp). Defined out-of-class so the tuning header's
-// helpers are in scope; still header-inline, still trivially inlined.
+// Layer gates: the master switch minus a developer escape hatch.
 inline bool RoleConfig::internal_routing() const noexcept {
-    return enabled && !tuning::no_internal();
+    return enabled && !no_internal;
 }
 inline bool RoleConfig::orchestration() const noexcept {
-    return enabled && !tuning::no_orchestrate();
+    return enabled && !no_orchestrate;
 }
 inline bool RoleConfig::subagent_routing() const noexcept {
-    return enabled && !tuning::no_subagents();
+    return enabled && !no_subagents;
 }
 
 // ── Complexity → role ──────────────────────────────────────────
@@ -725,7 +716,7 @@ namespace detail {
     // the main model", so it has to stop the tier fallback too -- it used to
     // gate only the slot below, which left the downgrade running and made the
     // promise false (#70).
-    if (slot == &cfg.utility && tuning::no_internal())
+    if (slot == &cfg.utility && cfg.no_internal)
         return {parent, Effort::None, {}};
 
     // A Smart Mode slot the user set explicitly comes next.

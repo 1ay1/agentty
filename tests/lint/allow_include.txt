@@ -36,8 +36,5 @@ agentty/domain/smart_mode.hpp: const_cast
 agentty/acp/server.hpp: atomic
 
 # ── Process plumbing ─────────────────────────────────────────────────────
-# child_process: the pipe streambuf's "interrupted" bit, set by whoever stops
-# the peer while its reader is parked in read(). A one-bit cross-thread
-# signal inside the platform wrapper; nothing else shared. (Moved here from
-# mcp-cpp, which no longer starts processes.)
-agentty/util/child_process.hpp: atomic
+# child_process: the streambuf's "interrupted" bit is a maya::guarded<bool>
+# now, so nothing here is banned.

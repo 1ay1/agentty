@@ -10,16 +10,7 @@
 #include <vector>
 
 #include "agentty/tool/util/exec.hpp"   // run_child: the one supervise loop
-
-#ifdef _WIN32
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  ifndef NOMINMAX
-#    define NOMINMAX
-#  endif
-#  include <windows.h>
-#endif
+#include <maya/runtime.hpp>                // windows command-line helpers
 
 namespace agentty::tools::util {
 
@@ -40,83 +31,6 @@ std::string clean_capture(std::string s) {
 } // namespace
 
 namespace {
-
-#ifdef _WIN32
-
-// UTF-8 → UTF-16. Win32 process APIs are UTF-16 natively; anything narrower
-// routes through the ANSI code page and silently corrupts non-ASCII bytes.
-std::wstring utf8_to_wide(std::string_view s) {
-    if (s.empty()) return {};
-    int n = ::MultiByteToWideChar(CP_UTF8, 0, s.data(),
-                                  static_cast<int>(s.size()), nullptr, 0);
-    if (n <= 0) return {};
-    std::wstring out(static_cast<size_t>(n), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
-                          out.data(), n);
-    return out;
-}
-
-// CommandLineToArgvW-compatible quoting (see MSDN "Parsing C++ Command-Line
-// Arguments"). Run of backslashes doubles if followed by `"`, literal `"`
-// gets prefixed with `\`. Quoting only wraps the arg when it contains
-// whitespace or `"`.
-std::string win_quote_arg(const std::string& arg) {
-    if (!arg.empty()
-        && arg.find_first_of(" \t\n\v\"") == std::string::npos) {
-        return arg;
-    }
-    std::string out;
-    out.push_back('"');
-    int backslashes = 0;
-    for (char c : arg) {
-        if (c == '\\') { backslashes++; continue; }
-        if (c == '"') {
-            out.append((size_t)backslashes * 2, '\\');
-            out += "\\\"";
-        } else {
-            out.append((size_t)backslashes, '\\');
-            out.push_back(c);
-        }
-        backslashes = 0;
-    }
-    out.append((size_t)backslashes * 2, '\\');
-    out.push_back('"');
-    return out;
-}
-
-// Return true when the argv path resolves to a .bat / .cmd file on PATH.
-// CreateProcess cannot natively spawn batch files — they require cmd.exe —
-// but tools like npx / npm / yarn ship as .cmd on Windows, and the model
-// will reach for them. SearchPathW honors PATHEXT so .cmd is found even
-// when the caller wrote just "npx".
-bool resolves_to_batch(const std::string& exe) {
-    auto we = utf8_to_wide(exe);
-    wchar_t out[MAX_PATH * 2]{};
-    DWORD n = ::SearchPathW(nullptr, we.c_str(), L".exe",
-                            (DWORD)std::size(out), out, nullptr);
-    if (n == 0 || n >= std::size(out)) {
-        // .exe miss — try default PATHEXT order (batch files second).
-        n = ::SearchPathW(nullptr, we.c_str(), nullptr,
-                          (DWORD)std::size(out), out, nullptr);
-        if (n == 0 || n >= std::size(out)) return false;
-    }
-    std::wstring_view resolved{out, n};
-    auto dot = resolved.find_last_of(L'.');
-    if (dot == std::wstring_view::npos) return false;
-    auto ext = resolved.substr(dot);
-    auto ieq = [](wchar_t a, wchar_t b) {
-        return (a >= L'A' && a <= L'Z' ? a - L'A' + L'a' : a)
-            == (b >= L'A' && b <= L'Z' ? b - L'A' + L'a' : b);
-    };
-    auto equal_i = [&](std::wstring_view s, std::wstring_view t) {
-        if (s.size() != t.size()) return false;
-        for (size_t i = 0; i < s.size(); ++i) if (!ieq(s[i], t[i])) return false;
-        return true;
-    };
-    return equal_i(ext, L".cmd") || equal_i(ext, L".bat");
-}
-
-#endif
 
 // One supervise loop for every child agentty runs: run_child (exec.cpp) on
 // jaal's native process. This only maps the options across. `win_cmdline`,
@@ -178,26 +92,19 @@ SubprocessResult Subprocess::run(SubprocessOptions opts) {
 
     // Build a final command line appropriate for this platform.
 #ifdef _WIN32
+    namespace pf = maya::platform;
     std::string cmdline;
     if (const std::string* sh = opts.shell_if()) {
-        // cmd.exe /S /C "…" — /S strips just the outermost quotes and
-        // leaves everything else (including embedded "...") intact.
-        cmdline = "cmd.exe /S /C \"" + *sh + "\"";
+        cmdline = pf::cmd_command_line(*sh);
     } else {
         const std::vector<std::string>& av = *opts.argv_if();
         if (av.empty()) {
             r.started = false; r.start_error = "empty command"; return r;
         }
-        // If argv[0] is a .cmd / .bat on PATH, wrap through cmd.exe — raw
-        // CreateProcess refuses batch files (they need the interpreter).
-        // Checked once up-front so we don't quote twice on the happy path.
-        const bool needs_cmd_shell = resolves_to_batch(av[0]);
-        for (size_t i = 0; i < av.size(); ++i) {
-            if (i) cmdline.push_back(' ');
-            cmdline += win_quote_arg(av[i]);
-        }
-        if (needs_cmd_shell)
-            cmdline = "cmd.exe /S /C \"" + cmdline + "\"";
+        // CreateProcess cannot start a .cmd/.bat (npx, npm, yarn); those go
+        // through cmd.exe.
+        cmdline = pf::join_command_line(av);
+        if (pf::resolves_to_batch(av[0])) cmdline = pf::cmd_command_line(cmdline);
     }
     // No trailing "no command specified" arm: the variant has exactly two
     // alternatives, so shell_if() being null means argv_if() is not.

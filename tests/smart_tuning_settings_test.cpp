@@ -455,7 +455,7 @@ TEST_CASE("smart tuning: a config change reaches all three holders") {
     CHECK(router.strategic.model == "gpt-5");
 }
 
-TEST_CASE("smart tuning: apply_tuning is the one resolution rule") {
+TEST_CASE("smart tuning: registry::apply_env is the one resolution rule") {
     // Startup and the settings-pane save both resolve env-over-stored into
     // RoleConfig. They call the SAME function, because a rule written out at
     // both is how a pane ends up applying something different from what a
@@ -471,7 +471,7 @@ TEST_CASE("smart tuning: apply_tuning is the one resolution rule") {
     {
         sm::RoleConfig c;
         c.deep_margin = 6; c.bias_clamp = 3; c.complex_threshold = 7;
-        sm::apply_tuning(c);
+        agentty::settings::registry::apply_env(c);
         CHECK(c.deep_margin == 6);
         CHECK(c.bias_clamp == 3);
         CHECK(c.complex_threshold == 7);
@@ -483,7 +483,7 @@ TEST_CASE("smart tuning: apply_tuning is the one resolution rule") {
         setenv("AGENTTY_SMART_COMPLEX_THRESHOLD", "2", 1);
         sm::RoleConfig c;
         c.deep_margin = 6; c.bias_clamp = 3; c.complex_threshold = 7;
-        sm::apply_tuning(c);
+        agentty::settings::registry::apply_env(c);
         CHECK(c.complex_threshold == 2);   // env wins
         CHECK(c.deep_margin == 6);         // others untouched
         clear_env();

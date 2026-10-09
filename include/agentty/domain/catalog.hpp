@@ -1516,20 +1516,26 @@ inline void set_reasoning_overrides(std::map<std::string, bool> all) {
     return v ? (*v ? 1 : 0) : -1;
 }
 
-// AGENTTY_FORCE_EFFORT env override, read once. Returns 1 (force on),
-// 0 (force off), or -1 (unset). Global fallback below the per-model override.
+// AGENTTY_FORCE_EFFORT, captured once at launch by read_launch_env (the
+// domain does not read the environment). 1 force on, 0 force off, -1 unset.
+// Global fallback below the per-model override.
+namespace effort_force_detail {
+inline std::atomic<int>& cell() noexcept { static std::atomic<int> v{-1}; return v; }
+}
+inline void set_effort_force(int v) noexcept {
+    effort_force_detail::cell().store(v, std::memory_order_relaxed);
+    bump_caps_epoch();
+}
+// Parse AGENTTY_FORCE_EFFORT's value: "1"/true/yes/on → 1, "0" → 0, else -1.
+[[nodiscard]] inline int parse_effort_force(const char* e) noexcept {
+    if (!e || !*e) return -1;
+    if (e[0] == '0' && e[1] == '\0') return 0;
+    const char c = (e[0] >= 'A' && e[0] <= 'Z') ? static_cast<char>(e[0] + 32) : e[0];
+    if (e[0] == '1' || c == 't' || c == 'y' || c == 'o') return 1;
+    return -1;
+}
 [[nodiscard]] inline int effort_force_override() noexcept {
-    static const int v = [] {
-        const char* e = std::getenv("AGENTTY_FORCE_EFFORT");
-        if (!e || !*e) return -1;
-        if (e[0] == '0' && e[1] == '\0') return 0;
-        const char c = (e[0] >= 'A' && e[0] <= 'Z')
-                           ? static_cast<char>(e[0] + 32) : e[0];
-        // "1", "true", "yes", "on" → force on; anything else → unset.
-        if (e[0] == '1' || c == 't' || c == 'y' || c == 'o') return 1;
-        return -1;
-    }();
-    return v;
+    return effort_force_detail::cell().load(std::memory_order_relaxed);
 }
 
 // ── Learned effort-set registry (feature DETECTION, not enumeration) ──────
@@ -2154,14 +2160,24 @@ enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max,
 // (Anthropic 400s a max_tokens above the model ceiling).
 //
 // OVERRIDE: AGENTTY_MAX_OUTPUT_TOKENS (mirrors Claude Code's env knob). A
-// positive integer wins for every model — the escape hatch for a user on a
-// model/endpoint we don't have hard-coded, or who wants 128k beta output.
+// positive integer wins for every model. main() reads it once and calls
+// set_max_output_override(); the domain does not read the environment.
+namespace max_output_detail {
+inline std::atomic<int>& cell() noexcept { static std::atomic<int> v{0}; return v; }
+}
+inline void set_max_output_override(int v) noexcept {
+    max_output_detail::cell().store(v > 0 ? v : 0, std::memory_order_relaxed);
+}
+// Digits only; anything else reads as unset.
+[[nodiscard]] inline int parse_max_output(const char* e) noexcept {
+    if (!e) return 0;
+    int v = 0;
+    for (const char* p = e; *p >= '0' && *p <= '9'; ++p) v = v * 10 + (*p - '0');
+    return v;
+}
 [[nodiscard]] inline int max_output_tokens_for(std::string_view model_id) noexcept {
-    if (const char* env = std::getenv("AGENTTY_MAX_OUTPUT_TOKENS")) {
-        int v = 0;
-        for (const char* p = env; *p >= '0' && *p <= '9'; ++p) v = v * 10 + (*p - '0');
-        if (v > 0) return v;
-    }
+    if (const int v = max_output_detail::cell().load(std::memory_order_relaxed); v > 0)
+        return v;
 
     const auto caps = ModelCapabilities::from_id(model_id);
     if (caps.is_known_family()) {

@@ -45,7 +45,7 @@ set(ban_clock       "(steady_clock|system_clock|high_resolution_clock)::now[ \t]
 # The theme detectors read TERM/COLORTERM/COLORFGBG themselves, and the
 # settings helpers read AGENTTY_* vars, so they are env reads too: use
 # Model::env.terminal / Model::env.settings.
-set(ban_env         "(std::)?(getenv|setenv|unsetenv|secure_getenv)[ \t]*\\(|detect_(tier|polarity)[ \t]*\\(|ui_prefs::detect[ \t]*\\(|terminal_is_dumb[ \t]*\\(|enabled_override[ \t]*\\(|registry::read_env[ \t]*\\(|apply_env[ \t]*\\([^,)]*\\)")
+set(ban_env         "(std::)?(getenv|setenv|unsetenv|secure_getenv)[ \t]*\\(|detect_(tier|polarity)[ \t]*\\(|ui_prefs::detect[ \t]*\\(|terminal_is_dumb[ \t]*\\(|registry::read_env[ \t]*\\(|apply_env[ \t]*\\([^,)]*\\)")
 # fileio: an operation that touches the disk. NOT the bare `std::filesystem::`
 # prefix: `std::filesystem::path` is a value type (string manipulation, no
 # syscall), and flagging it reported a reducer composing a path as IO. Only

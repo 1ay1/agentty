@@ -235,14 +235,23 @@ EnvSnapshot read_env() {
         if (const char* raw = std::getenv(var.c_str()); raw && raw[0])
             e.set.emplace_back(var, raw);
     }
-    e.smart_enabled = smart::tuning::enabled_override();
+    namespace t = smart::tuning;
+    e.smart_enabled        = t::parse_enabled(std::getenv("AGENTTY_SMART_MODE"));
+    e.smart_no_internal    = t::parse_disabled(std::getenv("AGENTTY_SMART_NO_INTERNAL"));
+    e.smart_no_orchestrate = t::parse_disabled(std::getenv("AGENTTY_SMART_NO_ORCHESTRATE"));
+    e.smart_no_subagents   = t::parse_disabled(std::getenv("AGENTTY_SMART_NO_SUBAGENTS"));
     return e;
 }
 
 void apply_env(store::RagConfig& c, const EnvSnapshot& env) { apply_env_impl(c, env); }
-void apply_env(smart::RoleConfig& s, const EnvSnapshot& env) { apply_env_impl(s, env); }
-void apply_env(store::RagConfig& c) { apply_env_impl(c, read_env()); }
-void apply_env(smart::RoleConfig& s) { apply_env_impl(s, read_env()); }
+void apply_env(smart::RoleConfig& s, const EnvSnapshot& env) {
+    apply_env_impl(s, env);
+    s.no_internal    = env.smart_no_internal;
+    s.no_orchestrate = env.smart_no_orchestrate;
+    s.no_subagents   = env.smart_no_subagents;
+}
+void apply_env(store::RagConfig& c) { apply_env(c, read_env()); }
+void apply_env(smart::RoleConfig& s) { apply_env(s, read_env()); }
 
 std::string env_override(const SettingDef& d, const EnvSnapshot& env) {
     if (d.env.empty()) return {};

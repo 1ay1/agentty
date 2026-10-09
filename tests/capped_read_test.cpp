@@ -32,13 +32,23 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#  include <process.h>
+#  define getpid _getpid
+#else
+#  include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 namespace u  = agentty::util;
 
 namespace {
 
 [[nodiscard]] fs::path sandbox() {
-    const auto d = fs::temp_directory_path() / "agentty_capped_read_test";
+    // Per process: ctest runs each case as its own process in parallel, and
+    // a shared directory let one case's remove_all delete another's files.
+    const auto d = fs::temp_directory_path()
+        / ("agentty_capped_read_test." + std::to_string(::getpid()));
     fs::remove_all(d);
     fs::create_directories(d);
     return d;

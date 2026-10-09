@@ -445,6 +445,9 @@ ChildResult run_child(const ChildRun& run) {
 
     auto exit_reg = reactor->watch(proc.exit_handle().get(), pf::interest::read, kExitToken);
     std::optional<reactor_t::registration> out_reg, in_reg, broker_reg;
+#if defined(_WIN32)
+    maya::worker_group feeder;   // stdin writer; destroyed after the reap
+#endif
     if (auto h = proc.stdout_handle())
         if (auto reg = reactor->watch(h->get(), pf::interest::read, kOutToken))
             out_reg = std::move(*reg);
@@ -475,11 +478,27 @@ ChildResult run_child(const ChildRun& run) {
     };
     if (auto h = proc.stdin_handle()) {
 #if defined(_WIN32)
-        // No writable readiness for an anonymous pipe, so feed it all now.
-        // The 64 KiB pipe buffer covers what agentty sends (hook JSON,
-        // clipboard text); a bigger blob to a child that never reads would
-        // block here.
-        feed();
+        // No writable readiness for an anonymous pipe, so the feed runs as a
+        // job with its own copy of the handle. The loop keeps draining output
+        // meanwhile; once the child ends, the write fails and the job ends.
+        // feeder.stop() after the reap is the join.
+        if (auto dup = maya::platform::duplicate_handle(h->get())) {
+            proc.close_stdin();
+            feeder.post([&run, raw = *dup](std::stop_token) {
+                maya::platform::owned_handle own{raw};
+                std::size_t off = 0;
+                while (off < run.stdin_data.size()) {
+                    bool closed = false;
+                    const auto n = maya::platform::write_some(
+                        maya::platform::borrowed_handle{own.get()},
+                        run.stdin_data.data() + off, run.stdin_data.size() - off, closed);
+                    if (closed || n == 0) break;
+                    off += n;
+                }
+            });   // `own` closes here: EOF for the child
+        } else {
+            proc.close_stdin();
+        }
 #else
         ::fcntl(h->get(), F_SETFL, ::fcntl(h->get(), F_GETFL) | O_NONBLOCK);
         if (auto reg = reactor->watch(h->get(), pf::interest::write, kInToken))
@@ -580,6 +599,9 @@ ChildResult run_child(const ChildRun& run) {
     progress(true);
 
     if (auto status = proc.reap()) {
+#if defined(_WIN32)
+        feeder.stop();   // the child is gone, so its pipe is broken
+#endif
         if (status->how == pf::exit_status::kind::exited) { r.exited = true; r.exit_code = status->code; }
         else                                              { r.signalled = true; r.signal = status->code; }
     } else {
@@ -593,7 +615,7 @@ void scope_fan_out(std::size_t n, const std::function<void(std::size_t)>& fn) {
     if (n <= 1) { if (n) fn(0); return; }
     maya::scope([&](maya::nursery& nur) {
         for (std::size_t i = 1; i < n; ++i)
-            nur.spawn([&fn, i] { fn(i); });
+            (void)nur.spawn([&fn, i] { fn(i); });   // joined by scope
         fn(0);   // the caller runs a share too
     });
 }
