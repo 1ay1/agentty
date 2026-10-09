@@ -183,12 +183,6 @@ void refresh_status(rs::EmbedForm& f) {
     rs::EmbedForm f;
     f.cfg  = current_embed_config(env, settings);
     f.form = rs::build_form(f.cfg, mode, settings, env.settings, advanced);
-    const auto st = tools::rag_embed_status();
-    using S = tools::RagEmbedStatus::State;
-    if (st.state == S::Ready)
-        f.probe = rs::EmbedForm::Ok{st.dim, st.latency_ms};
-    else if (st.state == S::Unavailable)
-        f.probe = rs::EmbedForm::Failed{st.reason};
     refresh_status(f);
     return f;
 }
@@ -218,15 +212,18 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             const auto mode = st.rag.configured ? st.rag.mode : store::RagMode::On;
             m.ui.panel.descend(
                 pn::Rag{{mode, mode, make_embed_form(m.env, m.d.persisted, mode)}});
+            // What the live retriever already knows, read on a worker (it is
+            // shared with tool threads) and folded in by RagEmbedStatusRead.
+            Cmd status = cmd::read_rag_embed_status(m.ui.panel.get<pn::Rag>()->embed.probe_gen);
             // The key lives in the secure store, which may mean spawning
             // secret-tool: read it on a worker.
             const auto& cfg = m.ui.panel.get<pn::Rag>()->embed.cfg;
-            if (!eb::needs_api_key(cfg.backend)) return Cmd::none();
-            return Cmd::task_isolated(
+            if (!eb::needs_api_key(cfg.backend)) return status;
+            return Cmd::batch(std::move(status), Cmd::task_isolated(
                 [](maya::Sink<Msg> out, std::stop_token, std::string slot) {
                     std::string key = eb::load_key(slot);
                     out.send(Msg{RagEmbedKeyLoaded{std::move(slot), std::move(key)}});
-                }, eb::endpoint_key(cfg));
+                }, eb::endpoint_key(cfg)));
         },
         [&](CloseRag) -> Cmd {
             // Esc unwinds ONE level: the parent snapshot (palette or settings
@@ -450,6 +447,18 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             if (e.ok) return Cmd::none();
             return set_status_toast(m, "Embeddings: key not saved (no secure store)",
                                     std::chrono::seconds{4});
+        },
+        [&](RagEmbedStatusRead& e) -> Cmd {
+            // Only into the form it was read for, and only if nothing newer
+            // (an edit, a test) has replaced the untested state since.
+            auto* f = form_of(m);
+            if (!f || f->probe_gen != e.gen
+                || !std::holds_alternative<rs::EmbedForm::Idle>(f->probe))
+                return Cmd::none();
+            if (e.ready)       f->probe = rs::EmbedForm::Ok{e.dim, e.latency_ms};
+            else if (e.failed) f->probe = rs::EmbedForm::Failed{std::move(e.reason)};
+            refresh_status(*f);
+            return Cmd::none();
         },
     }, rm);
 }

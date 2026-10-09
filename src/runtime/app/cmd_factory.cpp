@@ -2540,6 +2540,20 @@ Cmd settings_add(settings::Category concern, std::string line) {
         }, concern, std::move(line));
 }
 
+Cmd read_rag_embed_status(std::uint64_t gen) {
+    return Cmd::task_isolated([](maya::Sink<Msg> out, std::stop_token, std::uint64_t g) {
+        const auto st = tools::rag_embed_status();
+        RagEmbedStatusRead r;
+        r.gen        = g;
+        r.ready      = st.state == tools::RagEmbedStatus::State::Ready;
+        r.failed     = st.state == tools::RagEmbedStatus::State::Unavailable;
+        r.dim        = st.dim;
+        r.latency_ms = st.latency_ms;
+        r.reason     = st.reason;
+        out.send(Msg{std::move(r)});
+    }, gen);
+}
+
 Cmd apply_rag_settings(store::RagConfig cfg) {
     // Isolated: the embedder re-probe is a network dial that may never
     // return, and must not occupy a shared worker. The stop_token is the

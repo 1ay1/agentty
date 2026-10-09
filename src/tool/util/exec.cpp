@@ -242,10 +242,15 @@ class JaalSession final : public mt::Session {
     }
 
     void stop() override {
-        if (!st_.read([](const Shared& s) { return s.alive; })) return;
-        (void)proc_.stop(pf::stop_mode::graceful, pf::stop_scope::tree);
-        st_.with([](Shared& s, clock_t_::time_point at) { s.stopping = true; s.stop_at = at; },
-                 clock_t_::now() + std::chrono::seconds{2});
+        // Only the pump touches proc_: posix_process isn't thread-safe, and
+        // a kill racing the pump's reap() could signal a reused pid. So this
+        // just asks; the pump sends the signals.
+        // The pump sees this within its 100ms wait and sends SIGTERM.
+        st_.with([](Shared& s, clock_t_::time_point at) {
+            if (!s.alive || s.stopping) return;
+            s.stopping = true;
+            s.stop_at  = at;
+        }, clock_t_::now() + std::chrono::seconds{2});
     }
 
   private:
@@ -260,6 +265,7 @@ class JaalSession final : public mt::Session {
                 out_reg = std::move(*r);
 
         bool exited = false;
+        bool term_sent = false;
         while (!st.stop_requested()) {
             auto res = reactor->wait(std::chrono::milliseconds{100});
             if (!res) break;
@@ -284,14 +290,32 @@ class JaalSession final : public mt::Session {
                     exited = true;
                 }
             }
-            if (!exited && st_.read([](const Shared& s, clock_t_::time_point now) {
-                    return s.stopping && now >= s.stop_at;
-                }, clock_t_::now())) {
-                (void)proc_.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+            if (!exited) {
+                const auto [stopping, overdue] = st_.read(
+                    [](const Shared& s, clock_t_::time_point now) {
+                        return std::pair{s.stopping, s.stopping && now >= s.stop_at};
+                    }, clock_t_::now());
+                if (stopping && !term_sent) {
+                    (void)proc_.stop(pf::stop_mode::graceful, pf::stop_scope::tree);
+                    term_sent = true;
+                }
+                if (overdue)
+                    (void)proc_.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
             }
             if (exited) break;
         }
-
+        // Stopped by the owner while the child ran: kill it, then wait for
+        // the exit before reaping. Reaping straight after the kill fails
+        // (it hasn't died yet) and leaves a zombie.
+        if (!exited) {
+            (void)proc_.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+            for (int i = 0; i < 20 && !exited; ++i) {
+                auto res = reactor->wait(std::chrono::milliseconds{100});
+                if (!res) break;
+                for (std::uint8_t k = 0; k < res->count; ++k)
+                    if (res->ready[k].token == kExitToken) exited = true;
+            }
+        }
         // Whatever was written before the end is still in the pipe.
         std::string tail;
         bool        lost = false;

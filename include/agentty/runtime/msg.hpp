@@ -1009,6 +1009,16 @@ struct RagEmbedTestDone {
 struct RagEmbedSave  {};                    // persist + live-apply
 // The stored API key for the pane's endpoint, read on a worker after open.
 struct RagEmbedKeyLoaded { std::string endpoint; std::string key; };
+// What the live retriever reported when the pane opened, read on a worker.
+// `gen` is the form's probe_gen then; a later edit or test supersedes it.
+struct RagEmbedStatusRead {
+    std::uint64_t gen = 0;
+    bool          ready = false;
+    bool          failed = false;
+    std::uint32_t dim = 0;
+    int           latency_ms = 0;
+    std::string   reason;
+};
 // The key write the save asked for; false when there was no secure store.
 struct RagEmbedKeySaved  { bool ok = true; };
 
@@ -1340,7 +1350,7 @@ using RagMsg = std::variant<
     OpenRag, CloseRag, RagAdvanced,
     RagEmbedClose, RagEmbedKey, RagEmbedPaste,
     RagEmbedTest, RagEmbedTestDone, RagEmbedSave,
-    RagEmbedKeyLoaded, RagEmbedKeySaved>;
+    RagEmbedKeyLoaded, RagEmbedKeySaved, RagEmbedStatusRead>;
 
 // Its own domain, not a corner of RagMsg: the stats viewer shares no state
 // and no reducer with retrieval, and folding unrelated panels into one

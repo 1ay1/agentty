@@ -9,9 +9,8 @@
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
-#include "agentty/tool/subagent.hpp"   // subagent::agent_origin (provenance tag)
 #include "agentty/tool/util/utf8.hpp"
-#include "agentty/domain/ui_live.hpp"   // path_roots
+#include "agentty/domain/ui_live.hpp"   // path_roots, project agents
 
 namespace agentty::ui {
 
@@ -749,8 +748,10 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         // the clean common case. Transparency, not a gate: the agent still
         // runs, its tools still pass the normal permission/sandbox checks.
         std::string type_tag = type;
-        if (tools::subagent::agent_origin(type) == "project")
-            type_tag += " (project agent)";
+        bool project = false;
+        for (const auto& a : agentty::ui_prefs::path_roots().project_agents)
+            if (a == type) { project = true; break; }
+        if (project) type_tag += " (project agent)";
         std::string what = safe("display_description");
         if (what.empty()) {
             what = safe("prompt");

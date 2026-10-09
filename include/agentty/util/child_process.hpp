@@ -93,10 +93,27 @@ private:
 
 // The child's stdin as a streambuf: blocking writes; failure (the child
 // closed it) surfaces as badbit on the ostream.
+//
+// close() races a writer on another thread. Closing the fd under a write
+// would let a newly opened file reuse the number and take the bytes, so the
+// fd is only closed when no write is in flight. close() must also never wait
+// on a writer: the writer can be blocked on a full pipe to a child that
+// stopped reading, and close() is called on the way to killing that child.
+// So close() marks the stream closed and, if a write is in flight, leaves
+// the fd to that writer, which closes it as it leaves.
 class child_in_buf final : public std::streambuf {
 public:
     explicit child_in_buf(maya::platform::native_process& p) : p_(p) { setp(out_, out_ + sizeof(out_)); }
-    void close() noexcept { closed_.with([](bool& v) { v = true; }); p_.close_stdin(); }
+    void close() noexcept {
+        // Decide under the lock, act outside it. The writer, if any, sees
+        // `closed` when it leaves and closes the fd itself.
+        const bool close_now = st_.with([](State& s) {
+            if (s.closed) return false;
+            s.closed = true;
+            return !s.writing;
+        });
+        if (close_now) p_.close_stdin();
+    }
 
 protected:
     int_type overflow(int_type ch) override {
@@ -111,32 +128,49 @@ protected:
         const char* p = pbase();
         std::size_t left = static_cast<std::size_t>(pptr() - pbase());
         if (left == 0) return 0;
-        if (closed_.read([](const bool& v) { return v; })) return -1;
-        const auto h = p_.stdin_handle();
-        if (!h) return -1;
+        // Claim the fd: nobody closes it while `writing` is set.
+        const bool mine = st_.with([](State& s) {
+            if (s.closed || s.writing) return false;
+            s.writing = true;
+            return true;
+        });
+        if (!mine) return -1;
+        const auto h = p_.stdin_handle();   // only close_stdin() changes it, and it can't run now
+        if (!h) { st_.with([](State& s) { s.writing = false; }); return -1; }
+        const int rc = write_all(*h, p, left);
+        const bool closed = st_.with([](State& s) { s.writing = false; return s.closed; });
+        if (closed) { p_.close_stdin(); return -1; }   // close() left it to us
+        if (rc == 0) setp(out_, out_ + sizeof(out_));
+        return rc;
+    }
+
+private:
+    static int write_all(maya::platform::borrowed_handle h, const char* p, std::size_t left) {
         while (left > 0) {
 #if defined(_WIN32)
             DWORD put = 0;
-            if (!::WriteFile(static_cast<HANDLE>(h->get()), p, static_cast<DWORD>(left), &put, nullptr)
+            if (!::WriteFile(static_cast<HANDLE>(h.get()), p, static_cast<DWORD>(left), &put, nullptr)
                 || put == 0)
                 return -1;
             p += put;
             left -= put;
 #else
-            const auto n = ::write(h->get(), p, left);
+            const auto n = ::write(h.get(), p, left);
             if (n < 0 && errno == EINTR) continue;
             if (n <= 0) return -1;
             p += n;
             left -= static_cast<std::size_t>(n);
 #endif
         }
-        setp(out_, out_ + sizeof(out_));
         return 0;
     }
 
-private:
+    struct State {
+        bool closed  = false;
+        bool writing = false;   // a write is in flight; it owns the fd
+    };
     maya::platform::native_process& p_;
-    maya::guarded<bool> closed_{false};
+    maya::guarded<State> st_;
     char out_[4096]{};
 };
 

@@ -135,6 +135,9 @@ inline void publish(const Prefs& p) {
 struct PathRoots {
     std::string cwd;
     std::string home;
+    // Subagent types defined by the project (Model::ui.library). The task
+    // card tags them; it sits under the same free helper as pretty_path.
+    std::vector<std::string> project_agents;
 };
 
 namespace detail {

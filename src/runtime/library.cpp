@@ -3,6 +3,7 @@
 #include "agentty/runtime/library.hpp"
 
 #include "agentty/tool/hooks.hpp"
+#include "agentty/tool/mcp_tools_backends.hpp"   // project_agent_names
 
 namespace agentty {
 
@@ -14,6 +15,7 @@ Library read_library() {
     l.commands        = tools::commands::all();
     l.hooks_file      = tools::hooks::active_file();
     l.hooks_pending   = !l.hooks_file.empty() && tools::hooks::pending_approval();
+    try { l.project_agents = tools::project_agent_names(); } catch (...) {}
     l.loaded          = true;
     return l;
 }

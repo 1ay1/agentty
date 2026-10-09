@@ -23,6 +23,15 @@ struct Library {
     std::vector<tools::commands::Command> commands;
     std::string                           hooks_file;      // "" when none
     bool                                  hooks_pending = false;
+    // Subagent types that came from a project .agentty/agents/. The task card
+    // tags them; reading the directories from the view would be disk IO.
+    std::vector<std::string>              project_agents;
+
+    [[nodiscard]] bool is_project_agent(std::string_view name) const noexcept {
+        for (const auto& a : project_agents)
+            if (a == name) return true;
+        return false;
+    }
 
     [[nodiscard]] const tools::skills::Skill* skill(std::string_view name) const noexcept {
         for (const auto& s : skills)

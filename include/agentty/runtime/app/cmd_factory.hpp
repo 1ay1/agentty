@@ -351,6 +351,11 @@ struct LoopBreak {
 // kernel's own shutdown. Dispatches nothing; the retriever is its own state.
 [[nodiscard]] Cmd apply_rag_settings(store::RagConfig cfg);
 
+// Ask the live retriever what it knows about its embedder, for the RAG pane
+// opened at probe generation `gen`. The retriever is shared with tool threads,
+// so this reads it on a worker. Answers RagEmbedStatusRead.
+[[nodiscard]] Cmd read_rag_embed_status(std::uint64_t gen);
+
 // Open a TLS connection to the active provider's host ahead of the first
 // request, so the user's first turn skips the handshake.
 //

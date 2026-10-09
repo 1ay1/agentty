@@ -249,12 +249,14 @@ constexpr std::string_view kSkipDirs[] = {
 // Everything a host tool actually RUNS from .git lives in one of these.
 constexpr std::string_view kGitWatch[] = {"hooks", "info"};
 
-// Is `rel` inside a .git directory, and if so is it a part we care about?
+// Is `p` inside a git dir, and if so is it a part we care about? `is_dir`
+// says whether p itself is a directory: a FILE directly in the git dir
+// (config, FETCH_HEAD) is watched, but a directory there (objects, logs) is
+// noise unless it is hooks/ or info/.
 //
 // A submodule's git dir lives at .git/modules/<name>[/modules/<name>...] and
-// has the same layout, so the noise filter applies there too: its hooks/ and
-// info/ and top-level files are watched, its objects/ and logs/ are not.
-[[nodiscard]] bool git_noise(const fs::path& p) {
+// has the same layout, so the filter applies there too.
+[[nodiscard]] bool git_noise(const fs::path& p, bool is_dir = false) {
     auto it = std::find(p.begin(), p.end(), fs::path{".git"});
     if (it == p.end()) return false;
     auto next = std::next(it);
@@ -264,9 +266,8 @@ constexpr std::string_view kGitWatch[] = {"hooks", "info"};
         next = std::next(it);
     }
     if (next == p.end()) return false;                    // the git dir itself
-    // Files directly in the git dir (config, FETCH_HEAD, ...) are watched:
-    // `config` is the credential-helper vector. Only subdirectories filter.
-    if (std::next(next) == p.end()) return false;
+    if (*next == "modules") return false;                // leads to submodule git dirs
+    if (std::next(next) == p.end() && !is_dir) return false;   // a file in it
     const std::string seg = next->string();
     return std::ranges::find(kGitWatch, seg) == std::ranges::end(kGitWatch);
 }
@@ -415,7 +416,7 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
                     // .git/objects and friends are thousands of files that
                     // carry no trust; pruning them is what keeps this pass
                     // cheap enough to be uncapped.
-                    if (git_noise(p)) {
+                    if (git_noise(p, true)) {
                         // .git/objects and friends: not a root, not walked.
                         dit.disable_recursion_pending();
                     } else {
@@ -479,7 +480,7 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
             // Prune unwatched git subtrees rather than filtering them after the
             // fact: .git/objects is thousands of files on any real repo, and
             // walking it only to discard it is the cost without the benefit.
-            if (git_noise(e.path())) {
+            if (git_noise(e.path(), true)) {
                 it.disable_recursion_pending();
                 std::error_code iec;
                 it.increment(iec);

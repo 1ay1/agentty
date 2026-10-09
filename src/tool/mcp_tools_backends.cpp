@@ -798,6 +798,17 @@ std::vector<std::string> user_agent_names() {
     return out;
 }
 
+} // namespace (anonymous)
+
+std::vector<std::string> project_agent_names() {
+    std::vector<std::string> out;
+    for (const auto& t : user_agents()->types)
+        if (t->origin == AgentOrigin::Project) out.emplace_back(t->name);
+    return out;
+}
+
+namespace {
+
 const AgentType& resolve_agent_type(std::string_view t) {
     using MR = smart::ModelRole;
     static const std::vector<AgentType> kTypes = {

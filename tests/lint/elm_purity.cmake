@@ -68,7 +68,7 @@ set(ban_diskhelper  "(add_plugin_from_line|create_starter)[ \t]*\\(")
 # lookup. Reducers read the answer from the Model instead: m.ui.library
 # (skills, approvals, commands, hooks), m.ui.git_repo, m.env (embed
 # defaults, user root). A worker that needs them gets them in a cmd::.
-set(ban_disk_lookup "(skills|commands)::(all|find|shadowed|shadowed_within_scope|load_approvals)[ \t]*\\(|skills::trust_of[ \t]*\\([^,)]*\\)|commands::try_expand[ \t]*\\([^,)]*\\)|hooks::(active_file|pending_approval)[ \t]*\\(|workspace::in_git_repo(_if_ready)?[ \t]*\\(|eb::apply_env[ \t]*\\(|skills_panel::scan[ \t]*\\([ \t]*\\)|take_unproven_spec[ \t]*\\(|config_path[ \t]*\\([^,)]*\\)[^,]|util::(user_root|home_dir)[ \t]*\\(")
+set(ban_disk_lookup "(skills|commands)::(all|find|shadowed|shadowed_within_scope|load_approvals)[ \t]*\\(|skills::trust_of[ \t]*\\([^,)]*\\)|commands::try_expand[ \t]*\\([^,)]*\\)|hooks::(active_file|pending_approval)[ \t]*\\(|workspace::in_git_repo(_if_ready)?[ \t]*\\(|eb::apply_env[ \t]*\\(|skills_panel::scan[ \t]*\\([ \t]*\\)|take_unproven_spec[ \t]*\\(|config_path[ \t]*\\([^,)]*\\)[^,]|util::(user_root|home_dir)[ \t]*\\(|(^|[^_a-z])rag_embed_status[ \t]*\\(|shared_retriever[ \t]*\\(")
 set(ban_names clock env fileio subprocess net global auth static thread tty diskhelper disk_lookup)
 
 # Parse the allowlist: `path: name name ...`, `#` comments.

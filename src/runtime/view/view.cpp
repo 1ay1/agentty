@@ -136,7 +136,7 @@ maya::Element view(const Model& m) {
         ui_prefs::publish(m.d.ui());
         // Paths in tool cards are shown relative to these (Model::env,
         // captured at launch), so the view never asks the OS for its cwd.
-        ui_prefs::publish_path_roots({m.env.cwd, m.env.home});
+        ui_prefs::publish_path_roots({m.env.cwd, m.env.home, m.ui.library.project_agents});
         // Motion::Off freezes maya's stepped animations at their source —
         // one gate under every spinner, blink and frame counter, including
         // widgets that do not know this setting exists. It also stops the

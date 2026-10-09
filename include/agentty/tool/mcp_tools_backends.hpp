@@ -46,6 +46,10 @@ void install_host_backends(::mcp::tools::HostServices& svc);
 // Comma-separated list of the valid names, for that error message.
 [[nodiscard]] std::string known_agent_types();
 
+// Names of the subagent types defined in a project .agentty/agents/. Reads
+// the disk, so it runs on a worker (read_library).
+[[nodiscard]] std::vector<std::string> project_agent_names();
+
 // Apply user RAG configuration to the process-wide retriever, ON THE CALLING
 // THREAD. It probes the embedder (a network dial) and may block, so the TUI
 // never calls this directly: the reducer returns cmd::apply_rag_settings,
