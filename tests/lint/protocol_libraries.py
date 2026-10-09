@@ -8,11 +8,13 @@
   spawn_via_jaal    agentty starts no process by hand: no fork, exec*,
                     posix_spawn, popen, system or waitpid outside _WIN32
                     branches (jaal has no Windows backend yet)
+  no_sleep_poll     agentty waits on events, never sleep_for/usleep, outside
+                    _WIN32 branches
 
 Comments and string literals are stripped before matching, so docs and error
 messages may name anything.
 
-Usage: protocol_libraries.py ROOT {purity|duplication|jsonrpc_leaf|spawn_via_jaal}
+Usage: protocol_libraries.py ROOT {purity|duplication|jsonrpc_leaf|spawn_via_jaal|no_sleep_poll}
 """
 import os
 import re
@@ -240,9 +242,22 @@ def drop_win32(code):
 
 
 def spawn_via_jaal(root):
+    return scan_agentty(root, re.compile(
+        r"[^\w.>:]v?fork\s*\(|::v?fork\s*\(|\bexec[lv]p?e?\s*\(|\bposix_spawnp?\b"
+        r"|[^\w.>]_?popen\s*\(|\bpclose\s*\(|\bwaitpid\s*\(|[^\w.>]system\s*\("),
+        "spawn_via_jaal: every agentty child starts through jaal's posix_process")
+
+
+def no_sleep_poll(root):
+    # A wait is on the event: maya::delay_for on a stop_token, a reactor, or
+    # guarded::wait_with(_for). A sleep in a loop that rechecks a flag is a
+    # poll, and it is how cancel ended up taking a second to land.
+    return scan_agentty(root, re.compile(r"\bsleep_for\b|\bsleep_until\b|[^\w.>:]usleep\s*\("),
+        "no_sleep_poll: agentty waits on events, not sleeps")
+
+
+def scan_agentty(root, rx, banner):
     hits = []
-    rx = re.compile(r"[^\w.>:]v?fork\s*\(|::v?fork\s*\(|\bexec[lv]p?e?\s*\(|\bposix_spawnp?\b"
-                    r"|[^\w.>]_?popen\s*\(|\bpclose\s*\(|\bwaitpid\s*\(|[^\w.>]system\s*\(")
     for sub in ("src", "include"):
         for dp, _, fs in os.walk(os.path.join(root, sub)):
             for f in sorted(fs):
@@ -253,17 +268,18 @@ def spawn_via_jaal(root):
                 for no, line in enumerate(code.split("\n"), 1):
                     if rx.search(" " + line):
                         hits.append(f"{os.path.relpath(path, root)}:{no}: {line.strip()}")
-    print("spawn_via_jaal: every agentty child starts through jaal's posix_process")
+    print(banner)
     return hits
 
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[2] not in ("purity", "duplication", "jsonrpc_leaf", "spawn_via_jaal"):
+    if len(sys.argv) != 3 or sys.argv[2] not in ("purity", "duplication", "jsonrpc_leaf",
+                                                 "spawn_via_jaal", "no_sleep_poll"):
         print(__doc__)
         return 2
     root, what = sys.argv[1], sys.argv[2]
     hits = {"purity": purity, "duplication": duplication, "jsonrpc_leaf": jsonrpc_leaf,
-            "spawn_via_jaal": spawn_via_jaal}[what](root)
+            "spawn_via_jaal": spawn_via_jaal, "no_sleep_poll": no_sleep_poll}[what](root)
     if hits:
         print(f"\n{what}: {len(hits)} violation(s) (docs/PROTOCOL_LIBRARIES.md):")
         for h in hits:
