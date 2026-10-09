@@ -28,6 +28,7 @@
 #include "agentty/tool/util/exec.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/tool.hpp"
+#include "agentty/tool/registry.hpp"
 
 #include <nlohmann/json.hpp>
 #include <csignal>
@@ -39,6 +40,7 @@
 
 #include <chrono>
 #include <string>
+#include <thread>
 #include <variant>
 
 using namespace std::chrono_literals;
@@ -296,3 +298,29 @@ TEST_CASE("exec: a child cannot read the host's open descriptors") {
     fs::remove_all(dir, ec);
 }
 #endif
+
+// A running tool's output reaches the UI as it is produced, and Esc stops
+// it. Both go through the tool call's scope (cmd_factory installs the
+// progress sink and the cancel scope); exec has to honour them. From
+// Oct 7 until this test existed it did neither: shell output arrived only
+// at the end, and Esc waited for the command to finish on its own.
+TEST_CASE("exec: a tool call streams progress and stops on cancel") {
+    using agentty::tool::DynamicDispatch;
+    int calls = 0;
+    {
+        agentty::tools::progress::Scope ps{[&](std::string_view) { ++calls; }};
+        auto r = DynamicDispatch::execute(
+            "shell", json{{"command", "for i in 1 2 3; do echo tick$i; sleep 0.2; done"}});
+        CHECK(r.has_value());
+    }
+    CHECK_MESSAGE(calls >= 3, "output streamed while the command ran");
+
+    std::stop_source src;
+    std::jthread trip([&] { std::this_thread::sleep_for(300ms); src.request_stop(); });
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+        agentty::tools::cancellation::Scope cs{std::vector<std::stop_token>{src.get_token()}};
+        (void)DynamicDispatch::execute("shell", json{{"command", "sleep 20; echo done"}});
+    }
+    CHECK_MESSAGE(std::chrono::steady_clock::now() - t0 < 5s, "Esc stopped the command");
+}

@@ -18,6 +18,7 @@
 
 #include <maya/runtime.hpp>
 #include "agentty/util/background.hpp"   // util::WorkerGroup
+#include "agentty/tool/registry.hpp"     // tools::progress / cancellation: the tool call's scope
 
 #include <mcp/tools/util/utf8.hpp>
 
@@ -315,6 +316,15 @@ class JaalExec final : public mt::Exec {
         if (req.stop_when)
             run.stop_when = [&req](std::string_view so_far) { return req.stop_when(so_far); };
         run.spawn_adopted = sandbox_spawner(run.argv, run.cwd);
+        // mcp-cpp's request carries no sink and no cancel on purpose: the host
+        // knows where this call's output goes and whether its user hit Esc.
+        // Here that is the running tool's scope (cmd_factory sets it).
+        if (auto sink = tools::progress::current())
+            run.on_progress = [sink](std::string_view raw) {
+                sink(::mcp::tools::util::to_valid_utf8(std::string{raw}));
+            };
+        if (tools::cancellation::current())
+            run.stop_requested = [] { return tools::cancellation::requested(); };
 
         auto r = run_child(run);
 
