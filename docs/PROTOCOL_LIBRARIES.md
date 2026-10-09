@@ -454,8 +454,15 @@ bumps the submodule pointer after each.
    Verified: rag-cpp 192 cases (also with OpenCL on an RTX 4060), mcp-cpp
    62, claybin escape/broker/embed/plan/mount/cgroup, `rag adapter`,
    `toolset_e2e_test`, `shell_cmd_alias_test`, `mcp-serve`.
-6. **Full verification.** Build and run `agentty_tests` once; a TSan build of
-   the race tests and the ACP/MCP storms.
+6. **Full verification.** *(done)* `ctest -j12 -LE perf`: 1462/1462 on the
+   normal build. The full run found five things the earlier steps' focused
+   tests missed, all fixed: jaal's posix spawn leaked fds opened without
+   O_CLOEXEC into children (it now closes everything above stderr), and four
+   tests had gone stale (acp_integration on the old client API, ghost caret
+   not sending TerminalResized, maya_host_sequence missing an include,
+   fork_test). Under TSan, the RPC/ACP/MCP/rag/exec/race subset (54 tests)
+   passes with no reports; the whole TSan suite found one race, in a panel
+   test's own setenv, now fixed.
 
 ## 9. Decision checklist for any change
 
