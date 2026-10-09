@@ -270,6 +270,9 @@ class JaalSession final : public mt::Session {
                     bool        lost = false;
                     if (auto h = proc_.stdout_handle())
                         drain_into(*h, chunk, cap_, lost);
+                    // Hung up and drained: stop watching, or the reactor
+                    // reports the hangup on every wait and the loop spins.
+                    if (r.hangup && chunk.empty()) out_reg.reset();
                     if (!chunk.empty() || lost)
                         st_.with([](Shared& s, std::string c, bool l,
                                     std::size_t cap) {
@@ -546,9 +549,13 @@ ChildResult run_child(const ChildRun& run) {
         for (std::uint8_t i = 0; i < res->count; ++i) {
             const auto& e = res->ready[i];
             if (e.token == kOutToken && (e.readable || e.hangup)) {
+                std::size_t got = 0;
                 if (auto h = proc.stdout_handle())
-                    if (drain_into(*h, r.output, run.max_output_bytes, r.truncated) > 0)
-                        saw_output = true;
+                    got = drain_into(*h, r.output, run.max_output_bytes, r.truncated);
+                if (got > 0) saw_output = true;
+                // Hung up and drained: stop watching, or the reactor reports
+                // the hangup on every wait and this loop spins until exit.
+                else if (e.hangup) out_reg.reset();
             } else if (e.token == kExitToken && (e.readable || e.hangup)) {
                 exited = true;
             } else if (e.token == kInToken && (e.writable || e.hangup)) {
@@ -599,14 +606,18 @@ ChildResult run_child(const ChildRun& run) {
     progress(true);
 
     if (auto status = proc.reap()) {
-#if defined(_WIN32)
-        feeder.stop();   // the child is gone, so its pipe is broken
-#endif
         if (status->how == pf::exit_status::kind::exited) { r.exited = true; r.exit_code = status->code; }
         else                                              { r.signalled = true; r.signal = status->code; }
     } else {
         r.signalled = true;   // gone, and nothing to tell us how
     }
+#if defined(_WIN32)
+    // A grandchild can still hold the stdin pipe's read end, leaving the
+    // feeder blocked in WriteFile. Ending the job closes every copy, so the
+    // write fails and the barrier below can't hang.
+    (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+    feeder.stop();
+#endif
     stamp();
     return r;
 }

@@ -220,7 +220,21 @@ namespace {
 constexpr std::string_view kSkipDirs[] = {
     "node_modules", "target", "build", "dist", "out", "__pycache__",
     ".mypy_cache", ".pytest_cache", ".cache", ".next", ".gradle", ".tox",
+    "_deps", "CMakeFiles",
 };
+
+// Build trees come under many names (build-rel, build-tsan, cmake-build-debug,
+// testbuild, fuzzbuild). A name prefix/suffix catches the common spellings and
+// a CMakeCache.txt catches the rest. These held ~7000 of the ~7500 entries the
+// walk visited on the agentty repo, on every shell call.
+[[nodiscard]] bool skip_dir(const fs::path& dir, std::string_view name) {
+    if (std::ranges::find(kSkipDirs, name) != std::ranges::end(kSkipDirs)) return true;
+    if (name.starts_with("build") || name.starts_with("cmake-build")
+        || name.ends_with("build"))
+        return true;
+    std::error_code ec;
+    return fs::exists(dir / "CMakeCache.txt", ec);
+}
 
 // Inside a .git directory, only these subtrees are worth watching.
 //
@@ -236,22 +250,25 @@ constexpr std::string_view kSkipDirs[] = {
 constexpr std::string_view kGitWatch[] = {"hooks", "info"};
 
 // Is `rel` inside a .git directory, and if so is it a part we care about?
+//
+// A submodule's git dir lives at .git/modules/<name>[/modules/<name>...] and
+// has the same layout, so the noise filter applies there too: its hooks/ and
+// info/ and top-level files are watched, its objects/ and logs/ are not.
 [[nodiscard]] bool git_noise(const fs::path& p) {
-    bool in_git = false;
-    for (auto it = p.begin(); it != p.end(); ++it) {
-        if (*it != ".git") continue;
-        in_git = true;
-        auto next = std::next(it);
-        if (next == p.end()) return false;           // ".git" itself
-        const std::string seg = next->string();
-        // Files directly in .git (config, FETCH_HEAD, …) are watched: `config`
-        // is the credential-helper vector and is a trusted shape in its own
-        // right. Only the subdirectories are filtered.
-        if (std::next(next) == p.end()) return false;
-        return std::ranges::find(kGitWatch, seg) == std::ranges::end(kGitWatch);
+    auto it = std::find(p.begin(), p.end(), fs::path{".git"});
+    if (it == p.end()) return false;
+    auto next = std::next(it);
+    // Step through modules/<name> pairs to the innermost git dir.
+    while (next != p.end() && *next == "modules" && std::next(next) != p.end()) {
+        it = std::next(next);
+        next = std::next(it);
     }
-    (void)in_git;
-    return false;
+    if (next == p.end()) return false;                    // the git dir itself
+    // Files directly in the git dir (config, FETCH_HEAD, ...) are watched:
+    // `config` is the credential-helper vector. Only subdirectories filter.
+    if (std::next(next) == p.end()) return false;
+    const std::string seg = next->string();
+    return std::ranges::find(kGitWatch, seg) == std::ranges::end(kGitWatch);
 }
 
 // Depth cap. A trusted path matters because a HOST tool finds and runs it, and
@@ -352,6 +369,9 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
         ".git", ".vscode", ".claude", ".agentty", ".cursor", ".idea",
         ".direnv",
     };
+    // Directories the priority pass walked in full. The general walk below
+    // skips them, or it records their roots twice and walks .git again.
+    std::unordered_set<std::string> walked;
     {
         std::error_code pec;
         fs::recursive_directory_iterator pit{
@@ -373,6 +393,8 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
                             != std::ranges::end(kPriorityDirs)) {
                         targets.push_back(pit->path());
                         pit.disable_recursion_pending();   // walked below
+                    } else if (skip_dir(pit->path(), name)) {
+                        pit.disable_recursion_pending();
                     }
                 }
                 std::error_code iec;
@@ -393,10 +415,14 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
                     // .git/objects and friends are thousands of files that
                     // carry no trust; pruning them is what keeps this pass
                     // cheap enough to be uncapped.
-                    if (git_noise(p)) dit.disable_recursion_pending();
-                    sandbox_cfg::TrustKind dk{};
-                    if (sandbox_cfg::is_host_trusted(p.string() + "/probe", &dk))
-                        snap.roots.push_back(p.string());
+                    if (git_noise(p)) {
+                        // .git/objects and friends: not a root, not walked.
+                        dit.disable_recursion_pending();
+                    } else {
+                        sandbox_cfg::TrustKind dk{};
+                        if (sandbox_cfg::is_host_trusted(p.string() + "/probe", &dk))
+                            snap.roots.push_back(p.string());
+                    }
                 } else if (!git_noise(p)) {
                     sandbox_cfg::TrustKind kind{};
                     if (sandbox_cfg::is_host_trusted(p.string(), &kind))
@@ -411,6 +437,10 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
             AGT_LOG(General, Debug, "handoff",
                     "priority pass covered {} trusted dir(s), {} entry(s)",
                     targets.size(), snap.entries.size());
+        for (const auto& t : targets) {
+            walked.insert(t.string());
+            snap.roots.push_back(t.string());   // a new file directly inside
+        }
     }
     // Everything the priority pass already recorded; the general walk skips
     // these rather than double-recording (review() would report one write
@@ -434,7 +464,7 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
 
         if (is_dir && !dec) {
             const std::string name = e.path().filename().string();
-            if (std::ranges::find(kSkipDirs, name) != std::ranges::end(kSkipDirs)) {
+            if (skip_dir(e.path(), name) || walked.contains(e.path().string())) {
                 it.disable_recursion_pending();
                 std::error_code iec;
                 it.increment(iec);

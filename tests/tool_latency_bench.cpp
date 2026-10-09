@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -69,7 +70,9 @@ int main(int argc, char** argv) {
 
     std::printf("tool_latency_bench  root=%s  runs=%d\n", root.c_str(), runs);
     std::printf("%-18s %9s %9s %9s  %s\n", "case", "p50 us", "p90 us", "max us", "ok");
+    const char* only = std::getenv("AGENTTY_BENCH_ONLY");   // profile one case
     for (const auto& c : cases) {
+        if (only && std::string_view{c.label} != only) continue;
         const auto* td = tools::find(c.tool);
         if (!td) { std::printf("%-18s  (tool not registered)\n", c.label); continue; }
         std::vector<long> us;
