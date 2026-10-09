@@ -446,7 +446,7 @@ if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/rag-cpp/CMakeLists.txt")
     # per-build auto-pull stays gated inside the function by
     # AGENTTY_AUTO_PULL_SUBMODULES (and the rag-specific override below).
     option(AGENTTY_AUTO_PULL_RAGCPP "Fast-forward third_party/rag-cpp/ to origin/master on every build" OFF)
-    agentty_pull_submodule_latest(rag-cpp master ragcpp)
+    agentty_pull_submodule_latest(rag-cpp main ragcpp)
 else()
     message(FATAL_ERROR "agentty: third_party/rag-cpp/ submodule is empty. Run "
                         "`git submodule update --init --recursive` to vendor "

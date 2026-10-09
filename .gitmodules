@@ -9,9 +9,11 @@
 [submodule "acp-cpp"]
 	path = third_party/acp-cpp
 	url = https://github.com/1ay1/acp-cpp.git
+	branch = main
 [submodule "mcp-cpp"]
 	path = third_party/mcp-cpp
 	url = https://github.com/1ay1/mcp-cpp.git
+	branch = master
 [submodule "rag-cpp"]
 	path = third_party/rag-cpp
 	url = https://github.com/1ay1/rag-cpp.git
