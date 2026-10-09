@@ -16,6 +16,7 @@
 // false/nullopt and do nothing.
 
 #include <optional>
+#include <stop_token>
 #include <string>
 
 namespace agentty::workspace {
@@ -32,23 +33,14 @@ namespace agentty::workspace {
 // lands -- takes this nullopt path, keeping the keystroke instant on Windows.
 [[nodiscard]] std::optional<bool> in_git_repo_if_ready();
 
-// Warm the cached repo discovery on a detached background thread at
-// launch. The first call to in_git_repo()/create_checkpoint() otherwise
+// Warm the cached repo discovery; run it on a background task at launch.
+// The first call to in_git_repo()/create_checkpoint() otherwise
 // spawns two blocking `git rev-parse` subprocesses on the submit path --
 // cheap on POSIX, but process creation is heavy on Windows and lands
 // squarely on the first turn's critical path. Priming it while the user
-// is still typing moves that cost off the hot path. Idempotent and safe
-// to call once at startup.
-void prewarm_repo_info();
-
-// Make a not-yet-started prewarm_repo_info() a no-op. Called at teardown.
-//
-// The prewarm runs on jaal's ISOLATED pool. jaal waits for isolated tasks
-// inside its shutdown grace (kernel/pool.hpp), but only a task that RETURNS
-// can be waited for — and this one's body is a pair of blocking `git`
-// spawns that fill an agentty static. This flag is how it returns early.
-// Host::release() trips it before the pool's wait begins.
-void cancel_repo_info_prewarm() noexcept;
+// is still typing moves that cost off the hot path. Idempotent; does
+// nothing once `stop` is requested.
+void prewarm_repo_info(std::stop_token stop = {});
 
 // A one-glance summary of what the worktree has changed SINCE a
 // checkpoint was taken — the diff between the pinned snapshot tree and

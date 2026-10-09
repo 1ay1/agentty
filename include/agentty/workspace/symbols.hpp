@@ -10,6 +10,7 @@
 // of these.
 
 #include <cstddef>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -37,14 +38,10 @@ struct SymbolEntry {
 [[nodiscard]] util::Snapshot<std::vector<SymbolEntry>>
 list_workspace_symbols(std::size_t cap = 50000);
 
-// Kick the (parallel) symbol scan on a background thread pool — single-
-// flight, safe to call repeatedly. Call at startup so the first `#` is
-// instant instead of freezing the UI for a multi-second regex scan.
-void prewarm_workspace_symbols(std::size_t cap = 50000);
-
-// Join the prewarm scan if still running — see join_workspace_prewarm() in
-// files.hpp for the fast-exit UAF this closes.
-void join_workspace_symbols_prewarm();
+// Run the (parallel) symbol scan — single-flight, safe to call repeatedly.
+// Synchronous: run it on a background task at startup so the first `#` is
+// instant. Returns early, publishing nothing, once `stop` is requested.
+void prewarm_workspace_symbols(std::stop_token stop = {}, std::size_t cap = 50000);
 
 // Non-blocking: is the symbol index built yet? The composer opens the
 // `#` picker INSTANTLY and shows "indexing…" until this returns true.

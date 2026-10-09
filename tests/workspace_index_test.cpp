@@ -167,16 +167,14 @@ TEST_CASE("prewarm walk bails promptly when cancelled") {
     fs::current_path(root);
     agentty::tools::util::set_workspace_root(root);
 
-    // Request cancel BEFORE kicking the walk: the loop's first cancel check
-    // fires and it bails almost immediately. join must not scan all 3000 files.
-    agentty::request_prewarm_cancel();
-    CHECK(agentty::prewarm_cancelled());
+    // Stop BEFORE kicking the walk: the loop's first check sees it and bails
+    // almost immediately. It must not scan all 3000 files.
+    std::stop_source stop;
+    stop.request_stop();
 
     const auto t0 = std::chrono::steady_clock::now();
-    agentty::prewarm_workspace_files();
-    agentty::prewarm_workspace_symbols();
-    agentty::join_workspace_prewarm();
-    agentty::join_workspace_symbols_prewarm();
+    agentty::prewarm_workspace_files(stop.get_token());
+    agentty::prewarm_workspace_symbols(stop.get_token());
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     CHECK(ms < 1000);   // generous; a full 3000-file scan is far slower

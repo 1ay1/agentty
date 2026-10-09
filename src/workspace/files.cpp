@@ -353,7 +353,7 @@ void build_git_signals() {
     git_status_map().with([](GitTags& m, GitTags t) { m = std::move(t); }, std::move(tags));
 }
 
-std::vector<std::string> build_file_list(std::size_t cap) {
+std::vector<std::string> build_file_list(std::size_t cap, std::stop_token stop = {}) {
     std::vector<std::string> out;
     out.reserve(std::min<std::size_t>(cap, 1024));
     const auto root = tools::util::project_root();
@@ -364,10 +364,9 @@ std::vector<std::string> build_file_list(std::size_t cap) {
              root, fs::directory_options::skip_permission_denied, ec);
          it != fs::recursive_directory_iterator() && out.size() < cap;
          it.increment(ec)) {
-        // Bail promptly on shutdown: this walk is joined at teardown, so an
-        // uncancellable full-tree scan would stall ^C on a large repo. Check
-        // every 64 entries (cheap; the flag is only set on quit).
-        if ((++tick & 63) == 0 && prewarm_cancelled()) return out;
+        // Bail promptly on shutdown: jaal waits for this task to return, so
+        // an uncancellable full-tree scan would stall ^C on a large repo.
+        if ((++tick & 63) == 0 && stop.stop_requested()) return out;
         if (ec) { ec.clear(); continue; }
         const auto& entry = *it;
         auto fn = entry.path().filename().string();
@@ -404,16 +403,11 @@ std::atomic<bool>& files_building() {
 }
 }  // namespace
 
-void prewarm_workspace_files(std::size_t cap) {
+void prewarm_workspace_files(std::stop_token stop, std::size_t cap) {
     // SYNCHRONOUS. The caller decides where this runs — init.cpp hands it to
     // maya's Cmd::task_isolated, which owns the thread and swallows
-    // exceptions. This module used to hand-roll both, in parallel with
-    // maya's pool doing the same job two lines away in the same function.
-    //
-    // "Owns the thread" is not "joins it": jaal DETACHES isolated threads,
-    // and waits for them to return only inside its shutdown grace, and only
-    // if something trips the cancel flag they poll. That is what
-    // join_workspace_prewarm() below is for.
+    // exceptions. At shutdown jaal stops `stop` and waits for us to return,
+    // which matters: the walk touches process-wide caches.
     if (g_files.has_value()) return;   // already warm
     bool expected = false;
     if (!files_building().compare_exchange_strong(expected, true)) return;
@@ -425,20 +419,9 @@ void prewarm_workspace_files(std::size_t cap) {
     // already git-aware the instant it publishes — a blank `@` leads with
     // your dirty files from the very first open.
     build_git_signals();
-    g_files.store(build_file_list(cap));
+    auto files = build_file_list(cap, stop);
+    if (!stop.stop_requested()) g_files.store(std::move(files));
     files_building() = false;
-}
-
-// Shared cooperative-cancel flag for BOTH prewarm walks. A single process-wide
-// atomic (defined here, declared in files.hpp) so files.cpp and symbols.cpp
-// observe the same request. Set once at teardown; never reset.
-std::atomic<bool> g_prewarm_cancel{false};
-
-void request_prewarm_cancel() noexcept {
-    g_prewarm_cancel.store(true, std::memory_order_relaxed);
-}
-bool prewarm_cancelled() noexcept {
-    return g_prewarm_cancel.load(std::memory_order_relaxed);
 }
 
 void deprioritize_prewarm_thread() noexcept {
@@ -455,39 +438,6 @@ void deprioritize_prewarm_thread() noexcept {
 #if defined(__unix__) || defined(__APPLE__)
     (void)::setpriority(PRIO_PROCESS, 0, 19);
 #endif
-}
-
-void join_workspace_prewarm() {
-    // Trips the cooperative cancel; the WAITING is jaal's.
-    //
-    // The name is a historical wart — there is no handle here to join. The
-    // walk runs as Cmd::task_isolated, and jaal's pool detaches isolated
-    // threads, so neither we nor anything else can wait on one directly.
-    // What jaal does instead is wait for the task to RETURN, inside its
-    // shutdown grace (kernel/pool.hpp). A cooperative task returns when it
-    // sees this flag, which is why setting it is load-bearing rather than a
-    // nicety.
-    //
-    // The previous comment here claimed "the walk runs on maya's worker
-    // pool, which owns and joins its own threads at teardown". That was
-    // wrong in the way that matters: jaal USED to ask isolated threads to
-    // stop and never wait for them at all, and this walk touches
-    // process-wide caches (and, in the symbols sibling, a static
-    // vector<std::regex>). The gap between "asked to stop" and "actually
-    // gone" is where a scan kept reading a static the CRT was destroying —
-    // an abort on Linux, 0xC0000005 on Windows, on ~every fast exit.
-    //
-    // Two things closed it, and both are load-bearing:
-    //   * jaal waits for isolated tasks now, bounded by the same grace.
-    //   * Host::release() trips this flag while the kernel is still
-    //     stopping, so the task has something to see BEFORE that wait
-    //     starts. Calling it only from main()'s teardown was one scope too
-    //     late: the grace expired on a scan nobody had told to stop.
-    //
-    // Still called from main()'s teardown as well, for the exit paths that
-    // never construct a Host, and because `agentty run` / acp / mcp-serve
-    // call the prewarm synchronously and have no kernel at all. Idempotent.
-    request_prewarm_cancel();
 }
 
 bool files_ready() {

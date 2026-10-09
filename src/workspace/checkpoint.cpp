@@ -238,7 +238,6 @@ bool in_git_repo() { return repo().in_repo; }
 // in_git_repo_if_ready().
 namespace {
 std::atomic<bool> g_repo_ready{false};
-std::atomic<bool> g_repo_prewarm_cancelled{false};
 }
 
 std::optional<bool> in_git_repo_if_ready() {
@@ -246,33 +245,15 @@ std::optional<bool> in_git_repo_if_ready() {
     return repo().in_repo;   // cache already built: this is a pure field read
 }
 
-void cancel_repo_info_prewarm() noexcept {
-    g_repo_prewarm_cancelled.store(true, std::memory_order_relaxed);
-}
-
-void prewarm_repo_info() {
+void prewarm_repo_info(std::stop_token stop) {
     // SYNCHRONOUS. Touching repo() forces its function-local static to
     // initialise, running the two `git rev-parse` probes here instead of
     // on the first submit.
     //
-    // The caller (init.cpp) runs this via Cmd::task_isolated. jaal gives an
-    // isolated task its own thread, DETACHES it, and at shutdown requests
-    // stop and then waits for it to return — bounded by the shutdown grace,
-    // so a wedged `git` on a dead NFS mount still can't block quit
-    // (jaal/kernel/pool.hpp).
-    //
-    // "Waits for it to return" only helps if the task returns, and a task
-    // that never checks anything doesn't. That is what the flag is for: the
-    // probe below is a pair of blocking subprocess spawns, so the check has
-    // to happen before them, and Host::release() trips the flag while the
-    // kernel is still stopping — before the pool starts its wait.
-    //
-    // Without both halves this raced static destruction: the two `git
-    // rev-parse` spawns kept running while main() returned and the CRT
-    // destroyed the static they were filling. Intermittent abort on Linux,
-    // 0xC0000005 on Windows, on essentially every fast exit (stdin already
-    // at EOF, e.g. `type NUL | agentty.exe` under MSYS2).
-    if (g_repo_prewarm_cancelled.load(std::memory_order_relaxed)) return;
+    // Runs as Cmd::task_isolated. At shutdown jaal stops `stop` and waits
+    // for us to return; the probe fills a static, so skip it once stopped
+    // or a fast exit races static destruction.
+    if (stop.stop_requested()) return;
     (void)repo();
     g_repo_ready.store(true, std::memory_order_release);
 }

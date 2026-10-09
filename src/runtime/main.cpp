@@ -119,9 +119,9 @@
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
-#include "agentty/workspace/files.hpp"     // join_workspace_prewarm
-#include "agentty/workspace/checkpoint.hpp" // cancel_repo_info_prewarm
-#include "agentty/workspace/symbols.hpp"   // join_workspace_symbols_prewarm
+#include "agentty/workspace/files.hpp"
+#include "agentty/workspace/checkpoint.hpp"
+#include "agentty/workspace/symbols.hpp"
 #include "agentty/util/modelsdev.hpp"       // join_background_refresh
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/subagent.hpp"
@@ -1163,16 +1163,6 @@ int main(int argc, char** argv) {
             // registry, because logx's own worker is one of the registered
             // teardowns.
             http::default_client().join_prewarm();
-            join_workspace_prewarm();
-            join_workspace_symbols_prewarm();
-            // Same class, different owner: this one runs on jaal's ISOLATED
-            // pool. jaal waits for isolated tasks inside its shutdown grace
-            // (kernel/pool.hpp), but only a task that RETURNS can be waited
-            // for, and this one returns when it sees the flag. Host::release()
-            // trips it while the kernel is still stopping, which is the call
-            // that matters; this one covers the exit paths that never built a
-            // Host. Idempotent, so both firing is fine.
-            agentty::workspace::cancel_repo_info_prewarm();
             modelsdev::join_background_refresh();
             blobs::join_background_gc();
             util::teardown::run();
@@ -2211,23 +2201,6 @@ int main(int argc, char** argv) {
             rc == 70)
             return 70;                         // couldn't take the terminal
     }
-
-    // Tell the speculative prewarms to stop, FIRST.
-    //
-    // They run as Cmd::task_isolated, and jaal's pool waits for isolated
-    // tasks inside its shutdown grace (kernel/pool.hpp) — but that wait
-    // happens INSIDE jaal::run above, and a task only leaves when it sees
-    // this flag. Setting it in the TeardownGuard destructor, as it used to
-    // be, is too late by exactly one scope: the pool has already spent its
-    // grace on a scan that was never told to stop, given up, and abandoned
-    // it. The scan then walks its `static vector<std::regex>` while the CRT
-    // destroys it — an abort on Linux, 0xC0000005 on Windows.
-    //
-    // The guard still calls these (they are idempotent), for the exit paths
-    // that never reach this line.
-    join_workspace_prewarm();
-    join_workspace_symbols_prewarm();
-    agentty::workspace::cancel_repo_info_prewarm();
 
     // Tear down connected MCP plugin servers FIRST — before the blocking
     // flushes below. Closing each server's stdin (→ EOF) unblocks any

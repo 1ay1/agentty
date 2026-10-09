@@ -462,7 +462,7 @@ std::pair<Model, Cmd> init() {
     // a shared-pool slot forever and starve every later tool call. A wedged
     // isolated task leaks one thread instead.
     cmds.push_back(Cmd::task_isolated(
-        [](maya::Sink<Msg>, std::stop_token) { prewarm_workspace_files(); }));
+        [](maya::Sink<Msg>, std::stop_token st) { prewarm_workspace_files(st); }));
 
     // Warm the RAG retriever OFF the reducer thread. The first call to
     // shared_retriever() runs its function-local static ctor, which
@@ -480,13 +480,13 @@ std::pair<Model, Cmd> init() {
     cmds.push_back(Cmd::task_isolated(
         [](maya::Sink<Msg>, std::stop_token) { (void)tools::rag_embed_status(); }));
     cmds.push_back(Cmd::task_isolated(
-        [](maya::Sink<Msg>, std::stop_token) { prewarm_workspace_symbols(); }));
+        [](maya::Sink<Msg>, std::stop_token st) { prewarm_workspace_symbols(st); }));
 
     // Is the workspace a git repo? Two `git rev-parse` spawns, so off the
     // reducer; the answer comes back as RepoProbed and lives on the Model.
     cmds.push_back(Cmd::task_isolated(
-        [](maya::Sink<Msg> out, std::stop_token) {
-            workspace::prewarm_repo_info();
+        [](maya::Sink<Msg> out, std::stop_token st) {
+            workspace::prewarm_repo_info(st);
             if (auto r = workspace::in_git_repo_if_ready())
                 out.send(Msg{RepoProbed{*r}});
         }));

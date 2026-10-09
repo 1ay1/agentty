@@ -116,21 +116,11 @@ tool/util/sandbox.cpp: atomic
 # The symbol index fans a directory walk across helpers in a maya::scope; the
 # atomic is the shared work cursor they pull file indexes from.
 workspace/symbols.cpp: atomic
-# files.cpp: the atomics are the walk single-flight latch and the prewarm cancel flag.
+# files.cpp: the atomic is the walk's single-flight latch. The prewarms
+# stop on their task's stop_token.
 workspace/files.cpp: atomic
-# checkpoint.cpp's atomic is a teardown cancel flag, and it is the one place
-# here where the raw primitive is load-bearing rather than incidental.
-#
-# prewarm_repo_info() runs on jaal's ISOLATED pool. jaal waits for isolated
-# tasks inside its shutdown grace, but only a task that RETURNS can be
-# waited for — and this one's body is a pair of blocking `git rev-parse`
-# spawns that force a function-local static. The flag is what lets it
-# return early; Host::release() trips it before the pool's wait begins.
-#
-# Without it the spawns outran main(), and the CRT destroyed the static
-# they were filling: intermittent abort on Linux, 0xC0000005 on Windows.
-# A mutex would be wrong (teardown must not block on a subprocess spawn)
-# and there is no kernel in scope for guarded<T>.
+# checkpoint.cpp: the atomic is the "repo info is ready" latch that lets
+# the reducer read the cache without blocking.
 workspace/checkpoint.cpp: atomic
 
 # ── Providers: transports and their shared state ─────────────────────────

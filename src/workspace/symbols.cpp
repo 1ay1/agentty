@@ -1,6 +1,6 @@
 #include <maya/runtime.hpp>
 #include "agentty/workspace/symbols.hpp"
-#include "agentty/workspace/files.hpp"   // prewarm_cancelled (shared shutdown flag)
+#include "agentty/workspace/files.hpp"   // deprioritize_prewarm_thread
 
 #include <algorithm>
 #include <atomic>
@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <regex>
+#include <stop_token>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -155,7 +156,7 @@ util::AtomicSnapshot<std::vector<SymbolEntry>> g_symbols;
 // Single-flight latch for the symbol scan lives beside
 // prewarm_workspace_symbols below, next to the only code that reads it.
 
-std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
+std::vector<SymbolEntry> build_symbol_list(std::size_t cap, std::stop_token stop = {}) {
     std::vector<SymbolEntry> out;
     const auto root = tools::util::project_root();
     if (root.empty()) return out;
@@ -169,7 +170,7 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
                  root, fs::directory_options::skip_permission_denied, ec);
              it != fs::recursive_directory_iterator() && src.size() < kFileCap;
              ) {
-            if (prewarm_cancelled()) return {};   // bail early on shutdown
+            if (stop.stop_requested()) return {};   // bail early on shutdown
             if (ec) {
                 ec.clear();
                 std::error_code step_ec;
@@ -242,7 +243,7 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
     std::vector<std::vector<SymbolEntry>> partials(nthreads);
     // maya::scope joins every helper before it returns (and on a throw),
     // which is what makes the [&] captures of `partials` and `next` safe.
-    maya::scope([&](maya::nursery& n) {
+    maya::scope(stop, [&](maya::nursery& n) {
         for (unsigned t = 0; t < nthreads; ++t) {
             n.spawn([&, t] {
                 // Lowest priority: this is a speculative cache for a picker
@@ -251,7 +252,7 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap) {
                 deprioritize_prewarm_thread();
                 auto& local = partials[t];
                 for (;;) {
-                    if (prewarm_cancelled()) return;   // drain on shutdown
+                    if (stop.stop_requested()) return;   // drain on shutdown
                     std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
                     if (i >= src.size()) return;
                     if (local.size() >= cap) return;
@@ -283,24 +284,24 @@ namespace {
 // Single-flight latch. NOT a thread — this module does not own one.
 //
 // WHO runs the scan is the caller's business: init.cpp hands it to maya's
-// Cmd::task_isolated, which owns the thread and swallows exceptions. (Owns
-// is not joins — jaal detaches it and waits for it to RETURN, inside the
-// shutdown grace; see join_workspace_symbols_prewarm below.) What has to
-// live HERE is only "don't scan twice at
-// once", because that is a property of the cache being filled, not of the
-// scheduler filling it.
+// Cmd::task_isolated. What has to live HERE is only "don't scan twice at
+// once", because that is a property of the cache being filled.
 std::atomic<bool>& sym_building() {
     static std::atomic<bool> b{false};
     return b;
 }
 }  // namespace
 
-void prewarm_workspace_symbols(std::size_t cap) {
+void prewarm_workspace_symbols(std::stop_token stop, std::size_t cap) {
     // SYNCHRONOUS — see files.cpp for the full rationale. In short: agentty
     // had two mechanisms for "run this in the background" (maya's Cmd seam
     // and hand-rolled std::threads), and the duplication is what let the git
     // refresh ship with a bare detached thread and no single-flight at all.
     // There is one mechanism now, and it is maya's.
+    //
+    // Honouring `stop` matters more here than for the file walk: the scan
+    // reads symbol_patterns(), a function-local static vector<std::regex>,
+    // and jaal's shutdown waits for us only if we return.
     if (g_symbols.has_value()) return;
     bool expected = false;
     if (!sym_building().compare_exchange_strong(expected, true)) return;
@@ -309,24 +310,9 @@ void prewarm_workspace_symbols(std::size_t cap) {
     // thousands of stat() calls; it gets the same treatment so the whole
     // prewarm — walk and scan — stays out of the foreground's way.
     deprioritize_prewarm_thread();
-    g_symbols.store(build_symbol_list(cap));
+    auto syms = build_symbol_list(cap, stop);
+    if (!stop.stop_requested()) g_symbols.store(std::move(syms));
     sym_building() = false;
-}
-
-void join_workspace_symbols_prewarm() {
-    // Trips the cooperative cancel; the WAITING is jaal's. Same contract as
-    // join_workspace_prewarm() in files.cpp — see the note there for why
-    // "nothing to join" was the wrong way to think about it.
-    //
-    // It matters more here than for the file walk. This scan holds a
-    // reference to symbol_patterns(), a function-local
-    // `static vector<std::regex>`, for its whole run. If the task is still
-    // inside scan_file() when main() returns, the CRT destroys that vector
-    // out from under a live regex_search: TSan catches it as ~_NFA on the
-    // main thread racing _M_dfs on the worker, and it surfaces as
-    // __glibcxx_assert(false) in _M_node() — the executor reading an opcode
-    // out of freed memory.
-    request_prewarm_cancel();
 }
 
 bool symbols_ready() {
