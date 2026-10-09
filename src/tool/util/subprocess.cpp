@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -264,9 +263,9 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
         std::ostringstream buf;
         std::size_t        total     = 0;
         bool               truncated = false;
+        bool               done      = false;   // the reader hit EOF
     };
     maya::guarded<PipeBuf> shared;
-    std::atomic<bool>      reader_done{false};
 
     auto snapshot = [&] {
         return shared.read([](const PipeBuf& s) { return s.buf.str(); });
@@ -311,7 +310,7 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
                 },
                 std::string(tmp, (std::size_t)n_read), (std::size_t)opts.max_bytes);
         }
-        reader_done.store(true, std::memory_order_release);
+        shared.with([](PipeBuf& s) { s.done = true; });
     });
 
     // Idle deadline: same semantics as the POSIX path — we cap *silence*,
@@ -417,11 +416,8 @@ SubprocessResult run_win32_cmdline(const std::string& cmdline,
     // after the child exited (its write end closed → ReadFile is returning).
     // Grandchildren that inherited the pipe can hold it open past the
     // parent's death — if the reader is still blocked, force-close rd.
-    const auto grace_deadline = now_ms() + std::chrono::milliseconds(500);
-    while (!reader_done.load(std::memory_order_acquire)
-           && now_ms() < grace_deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    (void)shared.wait_with_for(std::chrono::milliseconds(500),
+        [](const PipeBuf& s) { return s.done; }, [](PipeBuf&) { return 0; });
     ::CloseHandle(rd_h);   // safe: even if reader is mid-ReadFile, it returns false
     reader.join();         // explicit: surfaces a reader exception here
 

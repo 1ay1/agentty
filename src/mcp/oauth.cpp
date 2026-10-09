@@ -217,7 +217,7 @@ std::string query_param(std::string_view target, std::string_view key) {
 }
 
 // Accept one request on `srv`, extract code/state/iss, reply with a page.
-CallbackResult wait_for_callback(sock_t srv, int timeout_s, std::atomic<bool>& cancel) {
+CallbackResult wait_for_callback(sock_t srv, int timeout_s) {
     CallbackResult out;
 #if defined(_WIN32)
     const sock_t kInvalid = INVALID_SOCKET;
@@ -228,13 +228,16 @@ CallbackResult wait_for_callback(sock_t srv, int timeout_s, std::atomic<bool>& c
 #endif
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
     for (;;) {
-        if (cancel.load() || std::chrono::steady_clock::now() >= deadline) {
+        const auto left = deadline - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) {
             close_sock(srv);
-            out.error = cancel.load() ? "login cancelled" : "login timed out";
+            out.error = "login timed out";
             return out;
         }
         fd_set rfds; FD_ZERO(&rfds); FD_SET(srv, &rfds);
-        timeval tv{1, 0};
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(left).count();
+        timeval tv{static_cast<decltype(tv.tv_sec)>(us / 1000000),
+                   static_cast<decltype(tv.tv_usec)>(us % 1000000)};
         if (::select(static_cast<int>(srv + 1), &rfds, nullptr, nullptr, &tv) <= 0) continue;
         sock_t cli = ::accept(srv, nullptr, nullptr);
         if (cli == kInvalid) continue;
@@ -519,8 +522,7 @@ LoginResult login(const std::string& server_name, const std::string& endpoint_ur
                          "If it doesn't open, visit:\n\n  %s\n\n", server_name.c_str(), url.c_str());
     auth::open_browser(url);
 
-    std::atomic<bool> cancel{false};
-    CallbackResult cb = wait_for_callback(srv, timeout_s, cancel);
+    CallbackResult cb = wait_for_callback(srv, timeout_s);
     if (!cb.error.empty()) { r.message = cb.error; return r; }
 
     // 7. Validate (state + RFC 9207 iss) and exchange the code for a token.

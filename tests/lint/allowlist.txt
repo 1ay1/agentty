@@ -48,15 +48,9 @@
 #
 # settings_cache: the write-behind settings worker; its state is
 # maya::guarded and the worker sleeps in wait_with. Nothing banned left.
-# blob_gc: the sweep moved to its own maya::pool, so the thread, the
-# mutex, the condition variable and the detach are all gone. What is left is
-# two atomics: the walk's cancel flag (read deep inside the walk) and the
-# once-per-process scheduled flag.
-io/blob_gc.cpp: atomic
-# modelsdev: the refresh moved to its own maya::pool, same as
-# blob_gc, so the thread, the mutex, the condition variable and the detach
-# are gone. One atomic left: the once-per-process scheduled flag.
-util/modelsdev.cpp: atomic
+# blob_gc: the sweep moved to its own maya::pool; the walk takes the pool's
+# stop_token and the schedule is a once_flag. Nothing banned left.
+# modelsdev: same shape as blob_gc. Nothing banned left.
 
 # ── HTTP: the turn's cancel token, and the transport ─────────────────────
 # A streaming turn is a Cmd::task holding an http::CancelToken, tripped from
@@ -73,7 +67,7 @@ io/tls.cpp: const_cast
 # ── Persistence and credentials ──────────────────────────────────────────
 # Not reducer code: these run on a worker a task already put them on, or on
 # CLI paths with no loop at all.
-io/auth.cpp: atomic const_cast
+io/auth.cpp: const_cast
 io/keystore.cpp: const_cast
 io/cred_crypt.cpp: const_cast
 
@@ -113,8 +107,7 @@ tool/skills.cpp: atomic
 # passed `char*` into the lock body, which it rejects because a pointer
 # argument is how a body reaches data the lock does not cover.
 #
-# Only `atomic` is left, for the reader_done flag the poll loop samples.
-tool/util/subprocess.cpp: atomic
+# The reader's EOF is a field in PipeBuf now, waited on with wait_with_for.
 # Unique temp names for atomic writes, and a parallel directory walk.
 tool/util/fs_helpers.cpp: atomic
 tool/util/sandbox.cpp: atomic
@@ -176,8 +169,7 @@ runtime/app/cmd_factory.cpp: atomic
 # bare std::thread with an unguarded join (same std::terminate-on-throw bug as
 # subprocess.cpp above), and it takes its own stop_token so Esc stops the
 # spinner through the task's cancellation instead of a second ad-hoc flag.
-# `atomic` remains for the "command finished" flag, which is not a cancel.
-runtime/app/cmd_code_block_run.cpp: atomic
+# "command finished" is a stop_source the spinner's delay_for waits on.
 
 # View-layer render caches: NO LONGER LISTED, and that is the interesting
 # part. They were four thread_locals (three LRU caches in agent_timeline.cpp,

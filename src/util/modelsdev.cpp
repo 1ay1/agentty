@@ -2,7 +2,6 @@
 
 #include "agentty/util/modelsdev.hpp"
 
-#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -280,7 +279,6 @@ maya::pool& refresh_pool() {
     return p;
 }
 constexpr auto kStartDelay = std::chrono::seconds(5);
-std::atomic<bool> g_scheduled{false};
 }  // namespace
 
 void start_background_refresh(bool no_net) {
@@ -292,15 +290,12 @@ void start_background_refresh(bool no_net) {
     // exit.
     //
     // refresh_pool() is a function-local static that lives to process exit, so
-    // the callback can never outlive its target and needs no cancel(). Inside
-    // the once-flag, so repeated starts register once.
-    static std::once_flag registered;
-    std::call_once(registered, [] {
+    // the callback can never outlive its target and needs no cancel(). The
+    // whole start runs once per process.
+    static std::once_flag once;
+    std::call_once(once, [no_net] {
         util::teardown::on_shutdown("modelsdev.refresh",
                                     [] { join_background_refresh(); });
-    });
-
-    if (g_scheduled.exchange(true, std::memory_order_relaxed)) return;
 
     // Isolated: refresh() is a network fetch, so it may never return and must
     // not occupy a shared worker.
@@ -319,6 +314,7 @@ void start_background_refresh(bool no_net) {
         } catch (const std::exception& e) {
             util::dbglog("modelsdev.refresh", e.what());
         } catch (...) {}
+    });
     });
 }
 

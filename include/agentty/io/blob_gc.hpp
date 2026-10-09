@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <stop_token>
 
 namespace agentty::blobs {
 
@@ -71,15 +72,17 @@ struct GcStats {
 // old. A save writes its blobs BEFORE the thread file that references
 // them (and another agentty process may be mid-save), so a fresh
 // unreferenced blob may be about to become referenced. 0 = no grace.
+// `stop` is checked between files; a stopped walk deletes nothing.
 [[nodiscard]] GcStats collect_in(const std::filesystem::path& threads_dir,
                                  bool dry_run = false,
                                  std::chrono::seconds min_age =
-                                     std::chrono::seconds{0});
+                                     std::chrono::seconds{0},
+                                 std::stop_token stop = {});
 
 // Background-safe housekeeping: runs collect with a 24 h grace window, at
 // most once per day (stamp file in the blob dir). Returns nullopt when
 // skipped because it ran recently, or when cancelled.
-[[nodiscard]] std::optional<GcStats> collect_if_due();
+[[nodiscard]] std::optional<GcStats> collect_if_due(std::stop_token stop = {});
 
 // Run collect_if_due() on its own thread after a short delay, so it never
 // competes with startup and never runs at all in a process that exits at

@@ -20,7 +20,7 @@
 
 #include <maya/runtime.hpp>
 #include <algorithm>
-#include <atomic>
+#include <mutex>
 #include <cerrno>
 #include <chrono>
 #include <concepts>
@@ -242,9 +242,10 @@ CrossProcessFileLock::~CrossProcessFileLock() {
 // pool keeps the connection until used or until the 90 s idle TTL elapses.
 // ---------------------------------------------------------------------------
 void prewarm_anthropic() {
-    static std::atomic<bool> started{false};
-    bool expected = false;
-    if (!started.compare_exchange_strong(expected, true)) {
+    static std::once_flag once;
+    bool first = false;
+    std::call_once(once, [&first] { first = true; });
+    if (!first) {
         AGT_LOG(Perf, Debug, "prewarm.anthropic", "skip=already_started");
         return;
     }

@@ -28,11 +28,11 @@
     #include <unistd.h>
     #include <maya/runtime.hpp>
 #else
-    #include <atomic>
     #include <chrono>
     #include <cstdio>
     #include <io.h>
-    #include <thread>
+    #include <stop_token>
+    #include <maya/runtime.hpp>
 #endif
 
 #include <string>
@@ -478,19 +478,18 @@ static void run_block_body(maya::Sink<Msg> out, std::stop_token stop,
     };
 
     auto outcome = maya::scope(stop, [&](maya::nursery& n) {
-        std::atomic<bool> done_flag{false};
+        std::stop_source done;
 
-        // The helper takes its own stop_token: jaal derives it from the
-        // scope's, which in turn derives from the task's, so Esc reaches the
-        // spinner without anybody wiring a second flag.
-        auto beat = n.spawn([&done_flag, &label, con](std::stop_token st) {
+        // The helper's own token comes from the scope's, so Esc reaches the
+        // spinner too; the callback folds it into `done`.
+        auto beat = n.spawn([&done, &label, con](std::stop_token st) {
             if (!con) return;
+            const std::stop_callback on_stop(st, [&done] { done.request_stop(); });
             static constexpr const char* kSpin[] =
                 {"⣷","⣯","⣟","⡿","⣾","⣽","⣻","⣷"};
             int spin = 0;
             const auto start = std::chrono::steady_clock::now();
-            while (!done_flag.load(std::memory_order_relaxed)
-                   && !st.stop_requested()) {
+            do {
                 const long secs = static_cast<long>(
                     std::chrono::duration_cast<std::chrono::seconds>(
                         std::chrono::steady_clock::now() - start).count());
@@ -499,8 +498,7 @@ static void run_block_body(maya::Sink<Msg> out, std::stop_token stop,
                 s += "\r\x1b[2K\x1b[2m" + std::string(kSpin[spin++ % 8])
                    + " running\u2026 " + std::to_string(secs) + "s\x1b[0m";
                 std::fputs(s.c_str(), stdout); std::fflush(stdout);
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            }
+            } while (!maya::delay_for(done.get_token(), std::chrono::milliseconds(250)));
         });
 
         const auto start = std::chrono::steady_clock::now();
@@ -510,7 +508,7 @@ static void run_block_body(maya::Sink<Msg> out, std::stop_token stop,
             std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start).count());
 
-        done_flag.store(true, std::memory_order_relaxed);
+        done.request_stop();
         beat.join();          // explicit, so a throwing helper surfaces here
         return o;
     });

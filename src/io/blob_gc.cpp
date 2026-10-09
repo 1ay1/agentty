@@ -11,7 +11,6 @@
 
 #include <maya/runtime.hpp>
 
-#include <atomic>
 #include <chrono>
 #include <fstream>
 #include <mutex>
@@ -26,11 +25,6 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace {
-
-// Set by join_background_gc(). Checked between files in every walk so a
-// sweep over thousands of threads stops promptly at shutdown.
-std::atomic<bool> g_cancel{false};
-[[nodiscard]] bool cancelled() noexcept { return g_cancel.load(std::memory_order_relaxed); }
 
 constexpr std::string_view kStampName = ".gc-stamp";
 
@@ -104,7 +98,7 @@ void collect_refs(const json& j, std::unordered_set<std::string>& out) {
 } // namespace
 
 GcStats collect_in(const fs::path& threads_dir, bool dry_run,
-                   std::chrono::seconds min_age) {
+                   std::chrono::seconds min_age, std::stop_token stop) {
     GcStats st;
     std::error_code ec;
     if (!fs::is_directory(threads_dir, ec)) return st;
@@ -134,7 +128,7 @@ GcStats collect_in(const fs::path& threads_dir, bool dry_run,
             return st;   // ran == false
         }
         for (const auto& e : walk) {
-            if (cancelled()) return st;      // ran == false: nothing deleted
+            if (stop.stop_requested()) return st;   // ran == false: nothing deleted
             if (!e.is_regular_file(ec)) continue;
             const auto p   = e.path();
             const auto ext = p.extension();
@@ -183,7 +177,7 @@ GcStats collect_in(const fs::path& threads_dir, bool dry_run,
     // ── SWEEP ─────────────────────────────────────────────────────────────────────
     const auto cutoff = fs::file_time_type::clock::now() - min_age;
     for (const auto& e : fs::directory_iterator(blob_dir, ec)) {
-        if (cancelled()) break;              // partial sweep is safe: each delete stands alone
+        if (stop.stop_requested()) break;   // partial sweep is safe: each delete stands alone
         if (!e.is_regular_file(ec)) continue;
         const auto name = e.path().filename().string();
         if (referenced.count(name)) continue;
@@ -220,7 +214,7 @@ GcStats collect(bool dry_run) {
     return collect_in(persistence::threads_dir(), dry_run);
 }
 
-std::optional<GcStats> collect_if_due() {
+std::optional<GcStats> collect_if_due(std::stop_token stop) {
     using namespace std::chrono;
     const auto blob_dir = persistence::threads_dir() / "blobs";
     std::error_code ec;
@@ -233,7 +227,7 @@ std::optional<GcStats> collect_if_due() {
     // sweep; a failed sweep simply retries tomorrow.
     { std::ofstream touch(stamp, std::ios::trunc); }
     fs::last_write_time(stamp, now, ec);
-    return collect_in(persistence::threads_dir(), /*dry_run=*/false, hours{24});
+    return collect_in(persistence::threads_dir(), /*dry_run=*/false, hours{24}, stop);
 }
 
 namespace {
@@ -257,7 +251,6 @@ maya::pool& gc_pool() {
     return p;
 }
 constexpr auto kStartDelay = std::chrono::seconds(20);
-std::atomic<bool> g_scheduled{false};
 }  // namespace
 
 void start_background_gc() {
@@ -265,14 +258,10 @@ void start_background_gc() {
     // this subsystem is threaded. gc_pool() is a process-lifetime
     // function-local static, so the callback cannot outlive its target and
     // needs no cancel().
-    static std::once_flag registered;
-    std::call_once(registered, [] {
+    // Once per process.
+    static std::once_flag once;
+    std::call_once(once, [] {
         util::teardown::on_shutdown("blobs.gc", [] { join_background_gc(); });
-    });
-
-    // Once per process. Previously expressed as "is the thread joinable",
-    // which the pool no longer exposes — and did not need to be a lock.
-    if (g_scheduled.exchange(true, std::memory_order_relaxed)) return;
 
     // Isolated, not queued: the walk is unbounded in principle (a large blob
     // store on a slow disk), and it must not occupy a shared worker.
@@ -282,25 +271,16 @@ void start_background_gc() {
         // cancellation channel, the token, rather than a second stop flag that
         // someone has to remember to notify.
         if (maya::delay_for(st, kStartDelay)) return;
-        // Bridge the token to the walk's own cancel flag, so a sweep already
-        // in progress stops at its next check instead of running to
-        // completion after shutdown has been requested.
-        const std::stop_callback cancel_on_stop(st, [] {
-            g_cancel.store(true, std::memory_order_relaxed);
-        });
         try {
-            (void)collect_if_due();
+            (void)collect_if_due(st);   // stops at its next check on shutdown
         } catch (const std::exception& e) {
             AGT_LOG(Persist, Warn, "blob_gc", "{}", e.what());
         } catch (...) {}
     });
+    });
 }
 
 void join_background_gc() noexcept {
-    // Cancel first, then wait: setting the flag before the stop request means
-    // a walk between checks sees it on this side of the grace rather than
-    // burning the grace and being abandoned.
-    g_cancel.store(true, std::memory_order_relaxed);
     (void)gc_pool().shutdown();   // requests stop, waits within the grace
 }
 
