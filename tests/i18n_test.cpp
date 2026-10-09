@@ -316,7 +316,7 @@ TEST_CASE("i18n: the appearance pane carries a language row") {
     REQUIRE(set_active(Lang::en));
 
     agentty::ui_prefs::Prefs p;          // empty lang = auto
-    const auto form = agentty::ui::panel::build_appearance_form(p, false);
+    const auto form = agentty::ui::panel::build_appearance_form(p, agentty::ui_prefs::detect(false));
 
     const auto* row = form.find(agentty::ui::panel::kApLang);
     REQUIRE(row != nullptr);

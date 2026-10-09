@@ -94,6 +94,8 @@ Model::Env read_launch_env() noexcept {
     e.reveal_decorate     = on_unless_off("AGENTTY_REVEAL_DECORATE");
     e.painted_caret       = set("AGENTTY_PAINTED_CARET");
     e.host_integration    = ui::host::detect_integration();
+    e.terminal            = ui_prefs::detect(/*tty=*/true);
+    e.settings            = settings::registry::read_env();
     {
         std::error_code ec;
         const auto cwd = std::filesystem::current_path(ec);

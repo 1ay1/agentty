@@ -65,14 +65,26 @@ struct Resolved {
     return maya::theme::ColorTier::Ansi16;
 }
 
-// Resolve. `tty` is whether stdout is a terminal — the caller owns that
-// question because it is a platform fact, not a preference.
-[[nodiscard]] inline Resolved resolve(const Prefs& p, bool tty) {
+// What the terminal reports about itself. Read from the environment, which
+// is fixed at exec, so detect it once at launch and keep it (Model::env).
+struct Detected {
+    maya::theme::ColorTier tier     = maya::theme::ColorTier::Ansi16;
+    maya::theme::Polarity  polarity = maya::theme::Polarity::Unknown;
+};
+
+// Reads TERM / COLORTERM / COLORFGBG / NO_COLOR. `tty` is whether stdout
+// is a terminal.
+[[nodiscard]] inline Detected detect(bool tty) {
+    return {maya::theme::detect_tier(tty), maya::theme::detect_polarity()};
+}
+
+// Resolve. Pure: the terminal's side comes in as `d`.
+[[nodiscard]] inline Resolved resolve(const Prefs& p, const Detected& d) {
     Resolved r;
 
     // Tier: detection unless overridden.
     if (p.tier == ColorTier::Auto) {
-        r.tier = maya::theme::detect_tier(tty);
+        r.tier = d.tier;
         r.tier_detected = true;
     } else {
         r.tier = to_maya(p.tier);
@@ -82,7 +94,7 @@ struct Resolved {
     // Polarity: COLORFGBG unless overridden. Stays Unknown when nothing
     // said — a guess here is the bug this whole feature exists to fix.
     if (p.polarity == Polarity::Auto) {
-        r.polarity = maya::theme::detect_polarity();
+        r.polarity = d.polarity;
         r.polarity_detected = true;
     } else {
         r.polarity = (p.polarity == Polarity::Light)

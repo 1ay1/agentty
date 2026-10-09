@@ -23,6 +23,8 @@
 #include "agentty/domain/id.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/domain/ui_prefs.hpp"
+#include "agentty/domain/ui_theme.hpp"   // ui_prefs::Detected
+#include "agentty/runtime/settings_registry.hpp"   // registry::EnvSnapshot
 #include "agentty/domain/session.hpp"
 #include "agentty/domain/todo.hpp"
 #include "agentty/runtime/panel/slot.hpp"   // ui::panel::State (the exclusive slot)
@@ -859,6 +861,11 @@ struct Model {
         // Running under a cooperating editor host (AGENTTY_HOST=emacs or
         // INSIDE_EMACS with vterm): emit file-event OSCs.
         bool host_integration     = false;
+        // Colour tier and background polarity the terminal reports (TERM,
+        // COLORTERM, COLORFGBG, NO_COLOR). "auto" appearance resolves here.
+        ui_prefs::Detected terminal;
+        // Env overrides for settings rows, and the AGENTTY_SMART_MODE pin.
+        settings::registry::EnvSnapshot settings;
         // Can this binary replace itself? Answered once at launch: resolving
         // our own path and probing its directory for write access (it creates
         // and deletes a file there). The reducer used to call that inline

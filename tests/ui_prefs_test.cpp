@@ -208,20 +208,20 @@ TEST_CASE("appearance: resolution never leaves the user unable to read") {
     ui_prefs::Prefs p;
     p.theme = "Dracula";
     p.tier  = ui_prefs::ColorTier::TrueColor;
-    CHECK(ui_prefs::resolve(p, true).theme != &maya::theme::native);
+    CHECK(ui_prefs::resolve(p, agentty::ui_prefs::detect(true)).theme != &maya::theme::native);
     p.tier  = ui_prefs::ColorTier::Ansi16;
-    CHECK(ui_prefs::resolve(p, true).theme == &maya::theme::native);
+    CHECK(ui_prefs::resolve(p, agentty::ui_prefs::detect(true)).theme == &maya::theme::native);
     // An unknown name is a config typo, not a reason to refuse to start.
     p.theme = "Nope";
     p.tier  = ui_prefs::ColorTier::TrueColor;
-    CHECK(ui_prefs::resolve(p, true).theme == &maya::theme::native);
+    CHECK(ui_prefs::resolve(p, agentty::ui_prefs::detect(true)).theme == &maya::theme::native);
 }
 
 
 TEST_CASE("appearance form: rows, groups and provenance") {
     install_stub_deps();
     ui_prefs::Prefs p;
-    const auto f = ui::panel::build_appearance_form(p, /*tty=*/true);
+    const auto f = ui::panel::build_appearance_form(p, ui_prefs::detect(true));
 
     // Every knob has a row, and the pane is grouped rather than a flat wall.
     CHECK(f.fields.size() >= 11);
@@ -501,7 +501,7 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
     for (const Env& e : envs) {
         with_env(e, [&] {
             // Defaults: native, tier auto, polarity auto.
-            const auto r = ui_prefs::resolve(ui_prefs::Prefs{}, /*tty=*/true);
+            const auto r = ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true));
 
             // THE invariant. Whatever was detected, the default theme states
             // neither a foreground nor a background, so it is legible on a
@@ -517,30 +517,30 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
     // TERM is genuinely consulted — the reporter's specific complaint.
     // Different TERMs must produce different tiers, or detection is theatre.
     with_env({"dumb", nullptr, nullptr, nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).tier
               == maya::theme::ColorTier::Mono);
     });
     with_env({"vt100", nullptr, nullptr, nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).tier
               == maya::theme::ColorTier::Ansi16);
     });
     with_env({"xterm-256color", nullptr, nullptr, nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).tier
               == maya::theme::ColorTier::Ansi256);
     });
     with_env({"xterm-256color", "truecolor", nullptr, nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).tier
               == maya::theme::ColorTier::TrueColor);
     });
     // konsole over ssh: COLORTERM does not survive the hop, TERM does.
     with_env({"konsole", nullptr, nullptr, nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).tier
               == maya::theme::ColorTier::TrueColor);
     });
 
     // A light background is DETECTED, not guessed, when COLORFGBG says so.
     with_env({"xterm", nullptr, "0;15", nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).polarity
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).polarity
               == maya::theme::Polarity::Light);
     });
 
@@ -548,7 +548,7 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
     // request is honoured, and still leaves a readable, unpainted frame.
     with_env({"xterm-256color", "truecolor", nullptr, nullptr}, [&] {
         ::setenv("MAYA_COLOR", "none", 1);
-        const auto r = ui_prefs::resolve(ui_prefs::Prefs{}, true);
+        const auto r = ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true));
         CHECK(r.tier == maya::theme::ColorTier::Mono);
         CHECK_FALSE(maya::theme::owns_canvas(*r.theme));
     });
@@ -557,7 +557,7 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
     // Dracula into sixteen is worse than the user's own palette.
     with_env({"vt100", nullptr, nullptr, nullptr}, [&] {
         ui_prefs::Prefs p; p.theme = "Dracula";
-        const auto r = ui_prefs::resolve(p, true);
+        const auto r = ui_prefs::resolve(p, agentty::ui_prefs::detect(true));
         CHECK(r.theme == &maya::theme::native);
     });
 }

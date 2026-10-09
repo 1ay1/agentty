@@ -21,6 +21,7 @@
 
 #include "agentty/domain/smart_mode.hpp"
 #include "agentty/runtime/panel/form.hpp"
+#include "agentty/runtime/settings_registry.hpp"   // EnvSnapshot
 #include "agentty/store/store.hpp"   // Settings: what the advanced rows read
 
 namespace agentty::smart_form {
@@ -63,6 +64,9 @@ struct Inputs {
     // that used to sit here are gone: every one of them was a copy of
     // something the table already knew.
     smart::RoleConfig smart{};
+
+    // Which rows an env var is overriding (they render locked).
+    settings::registry::EnvSnapshot env{};
 
     // Reveal the advanced rows (`a`).
     bool advanced = false;

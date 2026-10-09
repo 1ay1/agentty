@@ -104,6 +104,7 @@ inline constexpr const char* kFieldTest      = "test";
 [[nodiscard]] form::Form build_form(const rag::embed::EmbedConfig& c,
                                     store::RagMode mode,
                                     const store::Settings& settings = {},
+                                    const ::agentty::settings::registry::EnvSnapshot& env = {},
                                     bool advanced = false);
 
 // Read the rows back into a config (the inverse of build_form).

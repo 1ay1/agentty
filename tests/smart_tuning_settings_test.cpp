@@ -202,7 +202,7 @@ TEST_CASE("smart tuning: the Retrieval pane does not carry the routing rows") {
     const Settings s;
 
     for (bool advanced : {false, true}) {
-        const auto f = rs::build_form(cfg, agentty::store::RagMode::On, s,
+        const auto f = rs::build_form(cfg, agentty::store::RagMode::On, s, {},
                                       advanced);
         for (const char* id : {kCut, kDeep, kBias})
             CHECK(f.find(id) == nullptr);
@@ -267,6 +267,7 @@ TEST_CASE("smart tuning: an env override locks the row in the pane") {
     sf::Inputs in;
     in.enabled  = true;
     in.advanced = true;
+    in.env      = agentty::settings::registry::read_env();
     const auto f = sf::build_form(in);
 
     const auto* row = f.find(kCut);

@@ -55,7 +55,7 @@ TEST_CASE("appearance: every row the pane builds is a real, reachable setting") 
     // the SAME named constants precisely so that cannot drift, and this walks
     // the built form to prove every id is one of them.
     Model m;
-    const auto form = pn::build_appearance_form(m.d.ui(), true);
+    const auto form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
 
     static constexpr std::string_view kKnown[] = {
         pn::kApLang, pn::kApTheme, pn::kApTier, pn::kApPolarity, pn::kApDensity,
@@ -85,7 +85,7 @@ TEST_CASE("appearance: a colour row restyles, a structural row does not") {
     // turn at a new height tears the inline scrollback ledger, so those rows
     // are forward-only by design.
     Model m;
-    const auto form = pn::build_appearance_form(m.d.ui(), true);
+    const auto form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
 
     // Colour-affecting rows must all exist — a typo'd id here would silently
     // stop restyling and the symptom is "the transcript kept the old theme".
@@ -102,7 +102,7 @@ TEST_CASE("appearance: Thinking is the only home for reasoning display") {
     // gone — both the footer chip and the keybinding — so this pane is the
     // sole owner and the two can no longer report different answers.
     Model m;
-    const auto form = pn::build_appearance_form(m.d.ui(), true);
+    const auto form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
     const auto* thinking = field(form, pn::kApThinking);
     REQUIRE(thinking != nullptr);
 

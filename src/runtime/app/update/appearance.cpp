@@ -72,7 +72,7 @@ void reproject(Model& m) {
     if (!o) return;
     const int cursor = o->pane.form.cursor;
     auto focus = o->pane.form.focus;
-    o->pane.form = pn::build_appearance_form(m.d.ui(), /*tty=*/true);
+    o->pane.form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
     o->pane.form.cursor = std::clamp(cursor, 0,
                                 std::max(0, static_cast<int>(o->pane.form.fields.size()) - 1));
     o->pane.form.focus = focus;
@@ -160,7 +160,7 @@ void restyle_sealed_turns(Model& m) {
     //
     // Cheap and idempotent: view() publishes the same value again next
     // frame, and publish is a pointer store plus a value compare.
-    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui(), /*tty=*/true).theme);
+    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui(), m.env.terminal).theme);
 
     // NOTHING ELSE TO DO.
     //
@@ -201,7 +201,7 @@ void restyle_sealed_turns(Model& m) {
 // All three reach the same already-built Elements, and all three used to
 // change nothing until the next turn redrew.
 void rebuild_rendered_content(Model& m) {
-    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui(), /*tty=*/true).theme);
+    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui(), m.env.terminal).theme);
     m.ui.view_cache.clear_settled();
     if (m.ui.frozen_through == 0) return;
     rehydrate_frozen(m);
@@ -363,7 +363,7 @@ Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
 
         [&](OpenAppearance&) -> Cmd {
             pn::Appearance o;
-            o.pane.form = pn::build_appearance_form(m.d.ui(), /*tty=*/true);
+            o.pane.form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
             // Land on the first real setting, not the "Theme" section
             // header — a cursor parked on a row that does nothing reads as
             // a broken pane for the one keystroke it takes to notice.

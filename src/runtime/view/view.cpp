@@ -103,15 +103,11 @@ maya::Element view(const Model& m) {
     // The reducer is pure — it cannot reach the runtime — so the swap lands
     // here, on the one path that sees both the Model and the frame. It is a
     // no-op whenever the resolved theme has not changed, which is every
-    // frame but the one after a settings row is pressed.
-    //
-    // Resolving per frame rather than at startup is deliberate: `auto` is
-    // answered by the terminal, and the terminal changes under us — a tmux
-    // detach, an ssh hop, a COLORFGBG that only arrives late. Re-asking
-    // costs two getenvs and means the look follows the terminal it is
-    // actually on.
+    // frame but the one after a settings row is pressed. "auto" resolves
+    // against what the terminal reported at launch (m.env.terminal); the
+    // env vars it came from cannot change while we run.
     {
-        const auto r = ui_prefs::resolve(m.d.ui(), /*tty=*/true);
+        const auto r = ui_prefs::resolve(m.d.ui(), m.env.terminal);
         // ONE call, two sinks. There used to be a `static const Theme*
         // applied` cache here that skipped the push when the pointer had not
         // moved, which duplicated a guard maya already owns — app_set_theme()

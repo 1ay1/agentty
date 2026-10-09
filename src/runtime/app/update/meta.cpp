@@ -66,7 +66,7 @@ form::Form build_smart_form(const Model& m, bool advanced) {
     in.enabled = sm.enabled;
     // An env pin is a LOCK, not a late refusal: the row renders read-only and
     // names the variable, instead of looking live and toasting on Enter.
-    if (smart::tuning::enabled_override())
+    if (m.env.settings.smart_enabled)
         in.enabled_lock = "env: AGENTTY_SMART_MODE";
     in.strategic      = slot(smart::ModelRole::Strategic);
     in.implementation = slot(smart::ModelRole::Implementation);
@@ -77,6 +77,7 @@ form::Form build_smart_form(const Model& m, bool advanced) {
     // provenance all come from the row. Nothing to mirror here.
     in.advanced = advanced;
     in.smart = m.d.smart;
+    in.env = m.env.settings;
     return smart_form::build_form(in);
 }
 
@@ -1072,7 +1073,7 @@ void ascend(Model& m) {
     // Env overrides win over anything a pane or a config file can say, and
     // they win HERE so every holder below sees the same resolved value —
     // rather than each one re-reading the environment and possibly disagreeing.
-    settings::registry::apply_env(cfg);
+    settings::registry::apply_env(cfg, m.env.settings);
 
     // 1. The UI thread's copy — what the classifier and the effort scaler
     //    read on the next turn.

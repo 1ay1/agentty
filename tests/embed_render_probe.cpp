@@ -59,7 +59,7 @@ int main(int argc, char** argv) {
     const bool advanced = (arg == "--advanced" || arg == "--scroll");
     const bool edit     = (arg == "--edit");
     agentty::store::Settings settings;
-    auto form = rs::build_form(c, agentty::store::RagMode::On, settings, advanced);
+    auto form = rs::build_form(c, agentty::store::RagMode::On, settings, {}, advanced);
     form.subtitle = eb::describe(c);
     form.note     = "unsaved \xe2\x80\x94 ^T test, ^S save";
     form.cursor   = 0;

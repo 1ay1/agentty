@@ -746,7 +746,7 @@ void reset_composer_draft(ComposerState& c) {
     // AGENTTY_SMART_MODE session pin is active the in-memory `enabled` flag is
     // the ENV's value, not the user's choice — so the persisted preference is
     // kept as it was, and the pin never leaks into config.
-    const bool keep_enabled = smart::tuning::enabled_override().has_value();
+    const bool keep_enabled = m.env.settings.smart_enabled.has_value();
     const bool was_enabled  = s.smart.enabled;
     s.smart = m.d.smart;
     if (keep_enabled) s.smart.enabled = was_enabled;

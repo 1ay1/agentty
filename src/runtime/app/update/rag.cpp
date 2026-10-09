@@ -96,13 +96,13 @@ void write_embed_into(store::RagConfig& r, const eb::EmbedConfig& c) {
 // rebuild: dropping it would silently collapse the pane back to the basic rows
 // the next time any field changed the row set.
 void resync_rows(rs::EmbedForm& f, const store::Settings& settings,
-                 store::RagMode mode, bool advanced) {
+                 const Model::Env& env, store::RagMode mode, bool advanced) {
     const auto* focused = f.form.focused();
     const std::string focused_id = focused ? focused->id : std::string{};
     f.cfg = rs::config_from_form(f.cfg, f.form);
 
     const bool was_dirty = f.form.dirty;
-    f.form = rs::build_form(f.cfg, mode, settings, advanced);
+    f.form = rs::build_form(f.cfg, mode, settings, env.settings, advanced);
     f.form.dirty = was_dirty;
     for (std::size_t i = 0; i < f.form.fields.size(); ++i)
         if (f.form.fields[i].id == focused_id) {
@@ -182,7 +182,7 @@ void refresh_status(rs::EmbedForm& f) {
                                             bool advanced = false) {
     rs::EmbedForm f;
     f.cfg  = current_embed_config(env, settings);
-    f.form = rs::build_form(f.cfg, mode, settings, advanced);
+    f.form = rs::build_form(f.cfg, mode, settings, env.settings, advanced);
     const auto st = tools::rag_embed_status();
     using S = tools::RagEmbedStatus::State;
     if (st.state == S::Ready)
@@ -244,7 +244,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
                 o->advanced = !o->advanced;
                 const int cursor = o->embed.form.cursor;
                 o->embed.form = rs::build_form(o->embed.cfg, o->cursor,
-                                               m.d.persisted,
+                                               m.d.persisted, m.env.settings,
                                                o->advanced);
                 // Clamp: hiding rows can leave the cursor past the end.
                 const int n = static_cast<int>(o->embed.form.fields.size());
@@ -297,7 +297,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
                     if (on_backend) {
                         auto* o = m.ui.panel.get<pn::Rag>();
                         const auto mode = o ? o->cursor : store::RagMode::On;
-                        resync_rows(*f, m.d.persisted, mode, o && o->advanced);
+                        resync_rows(*f, m.d.persisted, m.env, mode, o && o->advanced);
                     } else {
                         sync_cfg(*f);
                     }
@@ -441,7 +441,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             auto* o = m.ui.panel.get<pn::Rag>();
             const int cursor = f->form.cursor;
             f->form = rs::build_form(f->cfg, o ? o->cursor : store::RagMode::On,
-                                     m.d.persisted, o && o->advanced);
+                                     m.d.persisted, m.env.settings, o && o->advanced);
             f->form.cursor = cursor;
             refresh_status(*f);
             return Cmd::none();

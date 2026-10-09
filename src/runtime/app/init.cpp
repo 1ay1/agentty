@@ -195,9 +195,8 @@ std::pair<Model, Cmd> init() {
     m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
     m.d.profile = settings.profile;
     // Appearance needs no line here: `m.d.ui()` IS `m.d.persisted.ui`, seated
-    // with the whole record above. Nothing to resolve either — the view
-    // resolves prefs against the live terminal every frame, so a theme
-    // survives a resize, a tmux detach and an ssh hop on its own.
+    // with the whole record above. The view resolves it against
+    // m.env.terminal every frame.
     m.d.effort  = effort_from_wire(settings.effort);
     // Publish the user's per-model reasoning-effort overrides into the catalog
     // registry so resolved_caps() (and thus supports_effort / the picker /
@@ -218,14 +217,14 @@ std::pair<Model, Cmd> init() {
     // for THIS process (scripted runs, benchmarks, bisecting).
     // persist_settings skips the field while pinned, so the user's saved
     // preference survives the session untouched.
-    if (auto ov = smart::tuning::enabled_override())
-        m.d.smart.enabled = *ov;
+    if (m.env.settings.smart_enabled)
+        m.d.smart.enabled = *m.env.settings.smart_enabled;
     // `agentty --model X` binds every role interactively too: without this,
     // compaction routed away from the model the user named (#70).
     m.d.smart.pinned_model = smart::tuning::model_pinned();
     // Env overrides for the numeric policy, resolved once here so the
     // classifier reads a plain int rather than calling getenv() per turn.
-    settings::registry::apply_env(m.d.smart);
+    settings::registry::apply_env(m.d.smart, m.env.settings);
 
     // Push the rehydrated config down to the subagent router NOW.
     //

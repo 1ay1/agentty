@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
 
     if (arg == "--pane") {
         pn::Appearance ap;
-        ap.pane.form = pn::build_appearance_form(m.d.ui(), true);
+        ap.pane.form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
         ap.pane.form.cursor = argc > 2 ? std::atoi(argv[2]) : 0;
         m.ui.panel.descend(std::move(ap));
         int w = 86;

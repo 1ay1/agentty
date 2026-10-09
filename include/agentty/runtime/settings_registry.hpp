@@ -36,9 +36,13 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
+#include <vector>
 
 #include "agentty/domain/smart_tuning.hpp"   // shipped defaults + ranges
 #include "agentty/runtime/panel/form.hpp"           // Builder (add_rows)
@@ -430,7 +434,27 @@ static_assert(smart_rows_match_tuning(),
 // struct it binds to, so passing the wrong one is a compile error rather than
 // a silent no-op — and each walker naturally SKIPS rows it cannot reach.
 
+// The registry's env overrides, read once. Env vars are fixed at exec, so a
+// reducer or view takes this from Model::env instead of calling getenv.
+struct EnvSnapshot {
+    // (variable, value) for every row whose variable is set and non-empty.
+    std::vector<std::pair<std::string, std::string>> set;
+    // AGENTTY_SMART_MODE: the session pin on the master switch.
+    std::optional<bool> smart_enabled;
+
+    [[nodiscard]] const std::string* find(std::string_view var) const noexcept {
+        for (const auto& [k, v] : set) if (k == var) return &v;
+        return nullptr;
+    }
+};
+
+// Reads the process environment.
+[[nodiscard]] EnvSnapshot read_env();
+
 // Apply environment overrides on top of `c`. Clamps to each row's range.
+void apply_env(store::RagConfig& c, const EnvSnapshot& env);
+void apply_env(smart::RoleConfig& c, const EnvSnapshot& env);
+// Same, reading the environment now. For CLI paths with no Model.
 void apply_env(store::RagConfig& c);
 void apply_env(smart::RoleConfig& c);
 
@@ -452,7 +476,7 @@ void apply_env(smart::RoleConfig& c);
 // The env var that is OVERRIDING this row right now, or "" when none is set.
 // A row under an override renders LOCKED and names the variable, instead of
 // looking editable and silently losing the edit on the next read.
-[[nodiscard]] std::string env_override(const SettingDef& d);
+[[nodiscard]] std::string env_override(const SettingDef& d, const EnvSnapshot& env);
 
 // Restore a row to its shipped default.
 void reset(store::RagConfig& c, const SettingDef& d);
@@ -474,8 +498,8 @@ void reset(smart::RoleConfig& c, const SettingDef& d);
 // `first` and `last_group` thread across calls so group headers stay correct
 // when a pane walks more than one owner.
 template <class C>
-inline void add_rows(form::Builder& b, const C& cfg, Owner owner, bool advanced,
-                     bool& first, Group& last_group) {
+inline void add_rows(form::Builder& b, const C& cfg, const EnvSnapshot& env,
+                     Owner owner, bool advanced, bool& first, Group& last_group) {
     for (const auto& d : kSettings) {
         if (d.owner() != owner) continue;
 
@@ -532,9 +556,9 @@ inline void add_rows(form::Builder& b, const C& cfg, Owner owner, bool advanced,
         // variable. The row would otherwise look editable and silently lose
         // the edit on the next read — layered config's worst failure, and the
         // reason `origin` exists at all.
-        if (const std::string env = env_override(d); !env.empty()) {
-            b.origin("env: " + env);
-            b.lock("env: " + env);
+        if (const std::string var = env_override(d, env); !var.empty()) {
+            b.origin("env: " + var);
+            b.lock("env: " + var);
         }
         // Provenance: a row still on its shipped value says so, which is the
         // difference between "I never touched this" and "I set it to that".

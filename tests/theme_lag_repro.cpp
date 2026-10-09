@@ -152,7 +152,7 @@ int main(int argc, char** argv) {
         // headless run can silently resolve everything to the same palette —
         // which would look exactly like the bug without being it.
         {
-            const auto r0 = ui_prefs::resolve(m.d.ui(), /*tty=*/true);
+            const auto r0 = ui_prefs::resolve(m.d.ui(), m.env.terminal);
             std::printf("    resolved tier=%d  scheme=%s  ink=%02x%02x%02x\n",
                         static_cast<int>(r0.tier),
                         (r0.theme == &maya::theme::native) ? "native(FALLBACK)"

@@ -21,6 +21,7 @@
 #include <string_view>
 
 #include "agentty/domain/ui_prefs.hpp"
+#include "agentty/domain/ui_theme.hpp"
 #include "agentty/runtime/panel/form.hpp"
 
 #include "agentty/runtime/panel/filtered_picker.hpp"
@@ -115,9 +116,9 @@ inline constexpr bool
 namespace agentty::ui::panel {
 static_assert(visual::parts_cover_all<AppearancePane::ThemePicker>);
 
-// Build the pane's rows from the prefs. Pure: prefs in, form out, so the
-// view can rebuild it whenever the model changes and never hold stale rows.
-[[nodiscard]] form::Form build_appearance_form(const ui_prefs::Prefs& p, bool tty);
+// Build the pane's rows from the prefs and what the terminal reported. Pure.
+[[nodiscard]] form::Form build_appearance_form(const ui_prefs::Prefs& p,
+                                               const ui_prefs::Detected& d);
 
 // The schemes a query matches, most relevant first. Shared by the picker's
 // view and its reducer so what is listed and what Enter selects cannot

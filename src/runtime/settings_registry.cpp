@@ -181,17 +181,17 @@ void reset_impl(C& c, const C& dflt, const SettingDef& d) {
 }
 
 template <class C>
-void apply_env_impl(C& c) {
+void apply_env_impl(C& c, const EnvSnapshot& env) {
     for (const auto& d : kSettings) {
         if (d.env.empty()) continue;
-        const char* raw = std::getenv(std::string{d.env}.c_str());
-        if (!raw || !raw[0]) continue;
+        const std::string* raw = env.find(d.env);
+        if (!raw) continue;
         // A malformed env value is IGNORED, not fatal and not silently
         // coerced: the shipped default stands, which is the least surprising
         // behaviour for a typo in a shell profile. A row belonging to the
         // OTHER config struct is skipped by with_slot, so each overload
         // applies exactly the rows it owns.
-        (void)set_impl(c, d, raw);
+        (void)set_impl(c, d, *raw);
     }
 }
 
@@ -227,13 +227,26 @@ void reset(smart::RoleConfig& s, const SettingDef& d) {
 
 // ── Environment ─────────────────────────────────────────────
 
-void apply_env(store::RagConfig& c) { apply_env_impl(c); }
-void apply_env(smart::RoleConfig& s) { apply_env_impl(s); }
+EnvSnapshot read_env() {
+    EnvSnapshot e;
+    for (const auto& d : kSettings) {
+        if (d.env.empty()) continue;
+        const std::string var{d.env};
+        if (const char* raw = std::getenv(var.c_str()); raw && raw[0])
+            e.set.emplace_back(var, raw);
+    }
+    e.smart_enabled = smart::tuning::enabled_override();
+    return e;
+}
 
-std::string env_override(const SettingDef& d) {
+void apply_env(store::RagConfig& c, const EnvSnapshot& env) { apply_env_impl(c, env); }
+void apply_env(smart::RoleConfig& s, const EnvSnapshot& env) { apply_env_impl(s, env); }
+void apply_env(store::RagConfig& c) { apply_env_impl(c, read_env()); }
+void apply_env(smart::RoleConfig& s) { apply_env_impl(s, read_env()); }
+
+std::string env_override(const SettingDef& d, const EnvSnapshot& env) {
     if (d.env.empty()) return {};
-    const char* raw = std::getenv(std::string{d.env}.c_str());
-    return (raw && raw[0]) ? std::string{d.env} : std::string{};
+    return env.find(d.env) ? std::string{d.env} : std::string{};
 }
 
 } // namespace agentty::settings::registry

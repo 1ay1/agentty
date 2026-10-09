@@ -49,8 +49,8 @@ void enum_choice(form::Builder& b, std::string_view id, std::string label,
 
 }  // namespace
 
-form::Form build_appearance_form(const up::Prefs& p, bool tty) {
-    const up::Resolved r = up::resolve(p, tty);
+form::Form build_appearance_form(const up::Prefs& p, const up::Detected& d) {
+    const up::Resolved r = up::resolve(p, d);
 
     form::Builder b{" Appearance "};
 

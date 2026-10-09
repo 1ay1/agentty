@@ -122,6 +122,9 @@ Model seeded() {
     });
 
     Model m;
+    // A truecolor terminal, stated in the Model: themes only paint at
+    // truecolor/256, and the view reads the tier from m.env.
+    m.env.terminal.tier = maya::theme::ColorTier::TrueColor;
     for (int i = 0; i < 40; ++i) {
         Message msg;
         msg.role = (i % 2 == 0) ? Role::User : Role::Assistant;

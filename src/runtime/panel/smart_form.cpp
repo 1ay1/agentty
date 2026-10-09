@@ -66,7 +66,7 @@ form::Form build_form(const Inputs& in) {
     // three ranges retyped out of the table that already declared them, plus a
     // second implementation of the env-lock rule. Everything the registry
     // exists to prevent.
-    settings::registry::add_rows(b, in.smart,
+    settings::registry::add_rows(b, in.smart, in.env,
                                  settings::registry::Owner::Smart,
                                  in.advanced, first, last_group);
 
