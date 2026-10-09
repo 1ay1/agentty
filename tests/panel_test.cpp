@@ -570,6 +570,9 @@ TEST_CASE("panel: independent panels do not interfere across threads") {
     constexpr int kThreads = 8;
     std::atomic<int> failures{0};
     std::vector<std::thread> threads;
+    // render() sets COLUMNS around each call, and setenv from eight threads
+    // races. Every thread uses width 72, so set it once here instead.
+    setenv("COLUMNS", "72", 1);
 
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&, t] {
@@ -586,7 +589,7 @@ TEST_CASE("panel: independent panels do not interfere across threads") {
                     r.leading = "row" + std::to_string(i);
                     c.items.push_back(std::move(r));
                 }
-                if (render(std::move(c), 72).empty()) ++failures;
+                if (maya::render_to_string(Panel{std::move(c)}.build(), 72).empty()) ++failures;
             }
             // Each thread's state must describe ITS OWN content. A shared
             // registry or dirty flag would show up as a neighbour's extent
@@ -595,6 +598,7 @@ TEST_CASE("panel: independent panels do not interfere across threads") {
         });
     }
     for (auto& th : threads) th.join();
+    unsetenv("COLUMNS");
 
     CHECK(failures.load() == 0);
 }
