@@ -1,7 +1,7 @@
 # Protocol libraries: no runtime, one copy, agentty drives
 
-This is a rule, not a description. It governs mcp-cpp, acp-cpp and rag-cpp
-(and claybin, which already complies). Where the code disagrees, the code is
+This is a rule, not a description. It governs jsonrpc-cpp, mcp-cpp, acp-cpp,
+rag-cpp and claybin. Where the code disagrees, the code is
 the thing to fix. A change that breaks a rule here is not merged with a
 "we'll fix it later"; it either complies or it changes this document first,
 with a reason.
@@ -96,7 +96,9 @@ a pipe, or blocks reading one. It parses bytes it is given and produces bytes
 to send. Spawning, reading and writing are agentty's (maya's
 `platform::process` and the poll reactor). The one allowed I/O is reading a
 **file the caller named**, synchronously, on the caller's thread, when that
-is the library's whole job (rag-cpp loading a document).
+is the library's whole job (rag-cpp loading a document). claybin is the one
+exception to spawning: building and starting a jailed child is what it is
+for, and agentty calls it from its own process code.
 
 **R6. Deterministic and re-entrant.** Same inputs, same outputs. No hidden
 caches that change behaviour (a pure memo keyed on inputs is allowed if it is
@@ -355,39 +357,36 @@ library's concern.
 | rag index build / batch embed | `src/rag/adapter.cpp` | `Splitter` on `maya::scope`; index swap via `maya::published` |
 | caches/registries the libraries used to keep | the owning agentty module | `maya::guarded` / `maya::published` |
 
-`src/tool/util/protocol_runtime.cpp` (today's `install_protocol_runtimes`)
-is **deleted**: there is no runtime left to install.
+There is no runtime to install: `protocol_runtime.cpp` is gone.
 
 ## 7. How it is enforced
 
-Lints in agentty's `static` ctest label, so one `ctest -L static` proves it:
+Lints in agentty's `static` ctest label, so one `ctest -L static` proves it.
+All three live in `tests/lint/protocol_libraries.py`, strip comments and
+string literals first, and have **no allowlist**:
 
-- **`submodule_runtime`** — jaal's concurrency banlist over each library's
-  `src/` and `include/`, with **empty** allowlists. The only way to pass is
-  to contain none of R1's primitives. (Today it runs against per-library
-  allowlists; those files are deleted when each library is done.)
-- **`submodule_purity`** (new) — bans, in library code: clock reads
-  (`steady_clock::now`, `system_clock::now`), sleeps, `std::future`/
-  `promise`/`stop_source`, `set_runtime`/`set_executor`/`Runtime`/
-  `Executor` declarations, process spawning (`fork`, `exec*`, `posix_spawn`,
-  `CreateProcess`, `popen`), mutable `static` locals and globals (R3).
-- **`no_duplication`** (new) — fails if mcp-cpp and acp-cpp contain a header
-  whose code (comments and namespace names normalised away) matches another
-  library's above a small threshold, or if either redefines a name the core
-  exports (`RpcEngine`, `Codec`, `RpcError`, `Newtype` ...).
-- **`jsonrpc_leaf`** (new) — jsonrpc-cpp includes only the standard library,
-  nlohmann and itself, and is covered by `submodule_runtime` and
-  `submodule_purity` like the other libraries. In agentty's own `src/`, only
-  the integration modules of §6 include `<jsonrpc/...>`.
+- **`submodule_purity`** — over every library's `src/` and `include/`:
+  R1's primitives (threads, locks, atomics, `thread_local`, futures,
+  `stop_source`, latches, semaphores); R2 hooks (`set_runtime`,
+  `set_executor`, a `Runtime`/`Executor` type); R3 mutable `static`s; R4
+  clock reads; R5 sleeps, process spawning, sockets and environment reads.
+  claybin is exempt from R5's process and environ rules only, because
+  spawning a jailed child is what it is for.
+- **`no_duplication`** — fails if mcp-cpp or acp-cpp redefines a name the
+  core exports (`Engine`, `Codec`, `RpcError`, `RequestId`, `Newtype` ...)
+  or shares a 12-line run of code with another of the three.
+- **`jsonrpc_leaf`** — jsonrpc-cpp includes only listed standard headers,
+  nlohmann and itself. In agentty only the rpc/mcp/acp modules of §6
+  include `<jsonrpc/...>`.
 - **`layering` / `layering_maya` / `layering_jaal`** — unchanged: agentty
   never names jaal; maya never names agentty; jaal never names either.
-- agentty's test build compiles each library's unit tests (and
-  jsonrpc-cpp's) **single-threaded**: no `-pthread`, no
-  `Threads::Threads` link. A library that needs a thread to pass its own
-  tests fails to link.
+- jsonrpc-cpp's and acp-cpp's unit tests build **single-threaded**: no
+  `-pthread`, no `Threads::Threads`, so a library that needs a thread fails
+  to link. mcp-cpp's and rag-cpp's tests do link threads, but only to play
+  the host (a parallel splitter, a pipe reader); the library code under test
+  is covered by `submodule_purity`.
 
-A lint is only added together with the change that makes it pass, and its
-allowlist (if any) can only shrink.
+A lint is only added together with the change that makes it pass.
 
 ## 8. Migration plan and order
 
@@ -431,7 +430,7 @@ bumps the submodule pointer after each.
      (`process_poll` waits on the host's Session; uptime/elapsed come from
      the host). mcp-cpp's sandbox module, progress/cancel thread_locals and
      `ChildProcess` are gone — the last moved to `agentty/util/
-     child_process.hpp`. mcp-cpp's concurrency allowlist is empty.
+     child_process.hpp`.
      Verified: mcp-cpp 62 cases + process_tools/shell_bound,
      `toolset_e2e_test`, `mcp_bridge_test`, `mcp_http_test`,
      `plugin_disabled_tools_test`, `subagent_report_test`,
@@ -441,13 +440,20 @@ bumps the submodule pointer after each.
    values the caller owns. Network and process backends use the host's
    `HostIo` (no HTTP client or spawner in rag-cpp), so `builtin()` resolves
    them by name and reports unavailable. agentty's side is
-   `agentty/rag/rag_host.hpp`. rag-cpp's concurrency allowlist holds only
-   the OpenCL `const_cast`. Verified: rag-cpp 192 cases + C API smoke,
+   `agentty/rag/rag_host.hpp`. Verified: rag-cpp 192 cases + C API smoke,
    `rag adapter`, `rag shutdown interrupts warm promptly`,
    `search_docs`/`search_code` through `mcp-serve`.
-5. **agentty cleanup.** Delete `protocol_runtime.cpp`, the per-library
-   concurrency allowlists, and every library-side runtime mention in
-   `LAYERING.md`. Turn on `submodule_purity` and `no_duplication`.
+5. **agentty cleanup.** *(done)* `protocol_runtime.cpp` and the
+   per-library allowlists are deleted, and the three lints of §7 are on.
+   Getting them green took: rag-cpp's GPU as a caller-owned `gpu::Device`
+   (no static context, no `RAGCPP_GPU_BACKEND`); rag's retry without a
+   wait hook; mcp-cpp scans on a `Splitter` value instead of an `Executor`;
+   `~` and jina from `ToolState::home` / `ToolsetConfig::jina` instead of
+   the environment; mcp's `RequestId` replaced by `jsonrpc::Id`; claybin's
+   apply fds in an `ApplyFds` value instead of file-scope globals.
+   Verified: rag-cpp 192 cases (also with OpenCL on an RTX 4060), mcp-cpp
+   62, claybin escape/broker/embed/plan/mount/cgroup, `rag adapter`,
+   `toolset_e2e_test`, `shell_cmd_alias_test`, `mcp-serve`.
 6. **Full verification.** Build and run `agentty_tests` once; a TSan build of
    the race tests and the ACP/MCP storms.
 

@@ -1287,6 +1287,8 @@ struct Index {
             auto opened = ::rag::Engine::open(db.string());
             if (!opened) return false;
             engine = std::move(*opened);
+            // load() can't restore the splitter; it is ours, not the file's.
+            engine.corpus().set_parallelism(::agentty::rag::splitter(), nullptr);
             embedder_ready = false;
             attach_embedder();
             apply_pipeline(engine);
@@ -1447,6 +1449,7 @@ struct Index {
             auto opened = ::rag::Engine::open(db.string());
             if (!opened) return false;
             code_engine = std::move(*opened);
+            code_engine.corpus().set_parallelism(::agentty::rag::splitter(), nullptr);
             attach_code_embedder();
             apply_pipeline(code_engine);
             code_root = root.string();

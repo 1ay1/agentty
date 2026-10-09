@@ -473,29 +473,22 @@ std::shared_ptr<mt::Exec> make_exec(ExecDefaults defaults) {
     return std::make_shared<JaalExec>(defaults);
 }
 
-namespace {
+void scope_fan_out(std::size_t n, const std::function<void(std::size_t)>& fn) {
+    if (n <= 1) { if (n) fn(0); return; }
+    maya::scope([&](maya::nursery& nur) {
+        for (std::size_t i = 1; i < n; ++i)
+            nur.spawn([&fn, i] { fn(i); });
+        fn(0);   // the caller runs a share too
+    });
+}
 
-class ScopeExecutor final : public mt::Executor {
-  public:
-    void parallel_for(std::size_t n,
-                      const std::function<void(std::size_t)>& fn) override {
-        if (n <= 1) { if (n) fn(0); return; }
-        maya::scope([&](maya::nursery& nur) {
-            for (std::size_t i = 1; i < n; ++i)
-                nur.spawn([&fn, i] { fn(i); });
-            fn(0);   // the caller runs a share too
-        });
-    }
-    [[nodiscard]] std::size_t width() const noexcept override {
-        const unsigned hc = std::thread::hardware_concurrency();
-        return hc == 0 ? 4 : hc;
-    }
-};
+std::size_t fan_out_width() noexcept {
+    const unsigned hc = std::thread::hardware_concurrency();
+    return hc == 0 ? 4 : hc;
+}
 
-}  // namespace
-
-std::shared_ptr<mt::Executor> make_executor() {
-    return std::make_shared<ScopeExecutor>();
+mt::Splitter make_splitter() {
+    return mt::Splitter{scope_fan_out, fan_out_width()};
 }
 
 }  // namespace agentty::tools::util

@@ -53,9 +53,9 @@ replaces each need (reading frames, request matching and timeouts, handlers,
 data-parallel work, caches, processes, coroutines) and §6 for which agentty
 module provides each.
 
-The old pattern here, a `Runtime`/`Executor` interface the library calls out
-through with a `std::jthread` fallback, is being removed (§8 of that doc):
-it still let the library decide when concurrent work happens.
+A library never calls out to a `Runtime`/`Executor` interface either. The
+one thing it takes for parallel work is a splitter value the caller passes
+in, which runs shares of work the caller already split.
 
 ## What maya exposes for this
 
@@ -81,9 +81,10 @@ All are static ctest entries (label `static`), no build needed:
 
 - **layering** — fails on `<jaal/` or `jaal::` in agentty's `src/`,
   `include/` or `tests/` (tests/lint/layering.cmake).
-- **submodule_runtime** — jaal's concurrency ban-list, TIGHT, over each
-  library's `src/` and `include/` against the library's own
-  `tests/lint/concurrency_allowlist.txt` (tests/lint/submodule_runtime.cmake).
+- **submodule_purity / no_duplication / jsonrpc_leaf** — the libraries hold
+  no runtime, keep one copy of the JSON-RPC core, and jsonrpc-cpp stays a
+  leaf, with no allowlist (tests/lint/protocol_libraries.py; rules in
+  PROTOCOL_LIBRARIES.md §7).
 - **concurrency_banlist_src / _include** — the same ban-list over agentty.
   The allowlist names the few files that ARE the implementation of a safe
   type and says why.
@@ -95,8 +96,8 @@ All are static ctest entries (label `static`), no build needed:
 
 None. The libraries take what they need with each call: rag-cpp gets a
 Splitter, HostIo and converter runner from `agentty/rag/rag_host.hpp`,
-mcp-cpp's tools get executor, exec and state through HostServices, and the
-JSON-RPC connections run on rpc::Peer.
+mcp-cpp's tools get a splitter, exec, HTTP and state through HostServices,
+and the JSON-RPC connections run on rpc::Peer.
 
 ## Where it stands
 

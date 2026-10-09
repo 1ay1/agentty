@@ -82,9 +82,15 @@ struct ExecDefaults {
 [[nodiscard]] std::shared_ptr<::mcp::tools::Exec>
 make_exec(ExecDefaults defaults = {});
 
-/// Build the executor agentty hands to mcp-cpp for its parallel scans
-/// (grep, structural search, repo map, extract/aggregate). Each call is a
-/// maya::scope: every share is joined before parallel_for returns.
-[[nodiscard]] std::shared_ptr<::mcp::tools::Executor> make_executor();
+/// Run fn(0..n-1) on a maya::scope, the caller taking share 0; every share
+/// is joined before it returns. The fan-out behind the libraries' splitters.
+void scope_fan_out(std::size_t n, const std::function<void(std::size_t)>& fn);
+
+/// How many shares are worth making: the hardware threads.
+[[nodiscard]] std::size_t fan_out_width() noexcept;
+
+/// The splitter agentty hands to mcp-cpp for its parallel scans (grep,
+/// structural search, repo map, extract/aggregate).
+[[nodiscard]] ::mcp::tools::Splitter make_splitter();
 
 }  // namespace agentty::tools::util

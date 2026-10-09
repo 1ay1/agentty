@@ -16,7 +16,8 @@
 #include "agentty/tool/registry.hpp"   // tools::progress::emit
 #include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
 #include "agentty/tool/spec.hpp"       // spec catalog — effects authority
-#include "agentty/tool/util/fs_helpers.hpp"   // agentty workspace_root()
+#include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/util/home_dir.hpp"   // agentty workspace_root()
 
 #include <mcp/tools/toolset.hpp>
 #include <mcp/tools/host.hpp>
@@ -421,6 +422,10 @@ using StateFnRef = tool_state::FnRef;
 
 class GuardedToolState final : public mt::StateAccess {
   public:
+    explicit GuardedToolState(std::filesystem::path home) {
+        st_.with([](mt::ToolState& s, std::filesystem::path h) { s.home = std::move(h); },
+                 std::move(home));
+    }
     void with(const StateFn& f) override {
         auto ws    = util::workspace_root();
         auto roots = util::read_roots_now();
@@ -442,7 +447,6 @@ struct ProviderKeepAlive {
     std::shared_ptr<::mcp::cap::CapabilityProvider> provider;
     std::shared_ptr<mt::HttpClient>                 http;
     std::shared_ptr<mt::Exec>                       exec;
-    std::shared_ptr<mt::Executor>                   executor;
     std::shared_ptr<mt::StateAccess>                state;
 };
 ProviderKeepAlive& keep_alive() { static ProviderKeepAlive k; return k; }
@@ -458,14 +462,13 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     // the idle-vs-wall policy that the two old poll loops disagreed about.
     ka.exec = util::make_exec();
     // Parallel scans too: mcp-cpp owns no threads, so its grep / structural
-    // search / repo map fan out on agentty's executor (maya::scope).
-    ka.executor = util::make_executor();
-    ka.state = std::make_shared<GuardedToolState>();
+    ka.state = std::make_shared<GuardedToolState>(::agentty::util::home_dir_or_empty());
 
     mt::HostServices svc;
     svc.http = ka.http;
     svc.exec = ka.exec;
-    svc.executor = ka.executor;
+    // search / repo map fan out on maya::scope.
+    svc.split = util::make_splitter();
     svc.state    = ka.state;
     // Inject the host-coupled backends (memory/skill/retriever/subagent).
     // todo stays null — its shell renders identical text with no host state.
@@ -479,6 +482,9 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     if (const char* v = std::getenv("AGENTTY_NO_TRANSFORMS");
         v && v[0] && v[0] != '0' && v[0] != 'f' && v[0] != 'F' && v[0] != 'n' && v[0] != 'N')
         cfg.transforms = false;
+    // AGENTTY_NO_JINA=1 stops web_fetch re-rendering SPA shells via r.jina.ai.
+    if (const char* v = std::getenv("AGENTTY_NO_JINA"); v && v[0] && v[0] != '0')
+        cfg.jina = false;
     auto provider = mt::make_provider(svc, cfg, "local");
     ka.provider = provider;
 

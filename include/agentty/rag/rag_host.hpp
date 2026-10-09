@@ -17,8 +17,7 @@ namespace agentty::rag {
 [[nodiscard]] ::rag::util::Splitter splitter();
 
 // HTTP through agentty's client (TLS, proxy, SSRF guard off: these are the
-// user's configured endpoints), processes through util::ChildProcess, waits
-// as plain sleeps.
+// user's configured endpoints) and processes through util::ChildProcess.
 [[nodiscard]] ::rag::plugin::HostIo host_io();
 
 // The built-in backends with host_io().

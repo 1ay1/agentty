@@ -5,7 +5,6 @@
 #include <chrono>
 #include <memory>
 #include <string>
-#include <thread>
 #include <variant>
 
 #include <maya/runtime.hpp>
@@ -92,22 +91,14 @@ public:
 }  // namespace
 
 ::rag::util::Splitter splitter() {
-    const unsigned hc = std::thread::hardware_concurrency();
-    return ::rag::util::Splitter(
-        [](std::size_t n, const std::function<void(std::size_t)>& fn) {
-            maya::scope([&](maya::nursery& nur) {
-                for (std::size_t i = 1; i < n; ++i) nur.spawn([&fn, i] { fn(i); });
-                fn(0);   // the caller runs a share too
-            });
-        },
-        hc ? hc : 1);
+    return ::rag::util::Splitter(::agentty::tools::util::scope_fan_out,
+                                 ::agentty::tools::util::fan_out_width());
 }
 
 ::rag::plugin::HostIo host_io() {
     ::rag::plugin::HostIo io;
     io.http  = std::make_shared<AgenttyHttp>();
     io.spawn = spawn_peer;
-    io.wait  = [](std::chrono::milliseconds d) { std::this_thread::sleep_for(d); };
     return io;
 }
 

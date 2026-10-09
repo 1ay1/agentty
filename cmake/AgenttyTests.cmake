@@ -919,12 +919,24 @@ add_test(NAME layering_jaal
          COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}/third_party/maya/third_party/jaal
                  -P ${CMAKE_SOURCE_DIR}/third_party/maya/third_party/jaal/tests/lint/layering.cmake)
 set_tests_properties(layering_maya layering_jaal PROPERTIES LABELS static TIMEOUT 120)
-# The submodules own no runtime: no threads, no background work of their own.
-# Each library's ban-list allowlist lives in its own tree.
-add_test(NAME submodule_runtime
-         COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}
-                 -P ${CMAKE_SOURCE_DIR}/tests/lint/submodule_runtime.cmake)
-set_tests_properties(submodule_runtime PROPERTIES LABELS static)
+# The libraries agentty vendors hold no runtime, keep one copy of the JSON-RPC
+# core, and jsonrpc-cpp stays a leaf (docs/PROTOCOL_LIBRARIES.md §7).
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+foreach(_pl purity duplication jsonrpc_leaf)
+    if(_pl STREQUAL "purity")
+        set(_pl_name submodule_purity)
+    elseif(_pl STREQUAL "duplication")
+        set(_pl_name no_duplication)
+    else()
+        set(_pl_name jsonrpc_leaf)
+    endif()
+    add_test(NAME ${_pl_name}
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/protocol_libraries.py
+                     ${CMAKE_SOURCE_DIR} ${_pl})
+    set_tests_properties(${_pl_name} PROPERTIES LABELS static TIMEOUT 60)
+endforeach()
+endif()
 
 add_test(NAME elm_purity
          COMMAND ${CMAKE_COMMAND}
