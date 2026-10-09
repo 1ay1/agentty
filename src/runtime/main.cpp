@@ -1127,6 +1127,18 @@ Utf8Argv recover_utf8_argv() {
 int main(int argc, char** argv) {
     using namespace agentty;
 
+    // Any setenv happens here, before a thread exists: setenv racing a getenv
+    // on another thread is undefined. The old opt-in spelling for maya's
+    // gate abort was MAYA_NO_GATE_ABORT=0/false; translate it.
+    if (const char* g = std::getenv("MAYA_NO_GATE_ABORT");
+        g && (std::string_view{g} == "0" || std::string_view{g} == "false")) {
+#if defined(_WIN32)
+        _putenv_s("MAYA_GATE_ABORT", "1");
+#else
+        setenv("MAYA_GATE_ABORT", "1", /*overwrite=*/0);
+#endif
+    }
+
     install_crash_handler();
 
     // ── Teardown, on EVERY exit path ────────────────────────────────────
@@ -1222,23 +1234,6 @@ int main(int argc, char** argv) {
         agentty::logx::session_banner(banner);
     }
     if (args.bad)                    { print_usage(); return 2; }
-
-    // ── Scrollback-gate abort: opt-in for maya developers ──────────────────
-    // maya's debug-build invariant tripwires now default to SOFT-RECOVER
-    // (the same non-destructive recovery a Release build performs) and only
-    // std::abort() when MAYA_GATE_ABORT=1 is exported — two field SIGABRTs
-    // proved the old abort-by-default killed daily-driven Debug sessions on
-    // benign, self-healing gate trips. Back-compat: the previous opt-in
-    // spelling was MAYA_NO_GATE_ABORT=0/false; translate it so a maya
-    // developer's old launch alias still gets the loud abort.
-    if (const char* g = std::getenv("MAYA_NO_GATE_ABORT");
-        g && (std::string_view{g} == "0" || std::string_view{g} == "false")) {
-#if defined(_WIN32)
-        _putenv_s("MAYA_GATE_ABORT", "1");
-#else
-        setenv("MAYA_GATE_ABORT", "1", /*overwrite=*/0);
-#endif
-    }
 
     // ── Startup banner ────────────────────────────────────────────────
     // ONE line, first in every log, naming the build and the machine.

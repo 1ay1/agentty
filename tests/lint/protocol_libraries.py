@@ -256,6 +256,14 @@ def no_sleep_poll(root):
         "no_sleep_poll: agentty waits on events, not sleeps")
 
 
+def setenv_in_main(root):
+    # setenv racing a getenv on another thread is undefined, so the process
+    # environment is written only at the top of main(), before any thread.
+    hits = scan_agentty(root, re.compile(r"[^\w.>]_?(setenv|unsetenv|putenv|putenv_s)\s*\("),
+        "setenv_in_main: only main() writes the environment, before threads start")
+    return [h for h in hits if "runtime/main.cpp" not in h.split(":", 1)[0]]
+
+
 def scan_agentty(root, rx, banner):
     hits = []
     for sub in ("src", "include"):
@@ -274,12 +282,14 @@ def scan_agentty(root, rx, banner):
 
 def main():
     if len(sys.argv) != 3 or sys.argv[2] not in ("purity", "duplication", "jsonrpc_leaf",
-                                                 "spawn_via_jaal", "no_sleep_poll"):
+                                                 "spawn_via_jaal", "no_sleep_poll",
+                                                 "setenv_in_main"):
         print(__doc__)
         return 2
     root, what = sys.argv[1], sys.argv[2]
     hits = {"purity": purity, "duplication": duplication, "jsonrpc_leaf": jsonrpc_leaf,
-            "spawn_via_jaal": spawn_via_jaal, "no_sleep_poll": no_sleep_poll}[what](root)
+            "spawn_via_jaal": spawn_via_jaal, "no_sleep_poll": no_sleep_poll,
+            "setenv_in_main": setenv_in_main}[what](root)
     if hits:
         print(f"\n{what}: {len(hits)} violation(s) (docs/PROTOCOL_LIBRARIES.md):")
         for h in hits:
