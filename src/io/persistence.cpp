@@ -2246,7 +2246,7 @@ private:
     void start_worker() {
         worker.with([](Worker& w) {
             w.group.emplace("persistence.async_writer");
-            w.group->post([] { run(); });
+            w.group->post([](std::stop_token) { run(); });
         });
     }
 

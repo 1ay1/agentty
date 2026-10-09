@@ -114,7 +114,7 @@ void start_worker() {
             util::teardown::on_shutdown("settings_cache", [] { shutdown(); });
         }
         if (!w.group) w.group.emplace("settings_cache.drain");
-        w.group->post([] { run(); });
+        w.group->post([](std::stop_token) { run(); });
     });
 }
 

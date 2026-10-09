@@ -879,11 +879,11 @@ AgentServer::AgentServer(rpc::Channel      channel,
                          std::string       model_id,
                          Profile           profile)
     : router_(make_router()),
+      peer_(std::make_unique<rpc::Peer>(std::move(channel), make_dispatch(), "acp")),
       stream_(std::move(stream)),
-      auth_(std::move(auth)),
       model_id_(std::move(model_id)),
-      profile_(profile) {
-    peer_ = std::make_unique<rpc::Peer>(std::move(channel), make_dispatch(), "acp");
+      profile_(profile),
+      auth_(std::move(auth)) {
     // A dead client must not wedge a worker forever: our calls to it
     // (permission, terminal/*) fail with Timeout after this. 5 min is
     // generous for a human reading a permission dialog.
@@ -919,7 +919,7 @@ AgentServer::Router AgentServer::make_router() {
         return s.on_set_config_option(p);
     });
     r.on<m::Authenticate>([](AgentServer& s, const a::AuthenticateParams&) {
-        if (auth::is_empty(s.auth_))
+        if (auth::is_empty(s.auth()))
             throw a::RpcError(a::AuthRequired,
                 "agentty has no credentials — run `agentty login` first");
         return a::Unit{};
@@ -1143,7 +1143,7 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     // out-of-band (`agentty login`) — but surfacing it matches the native
     // agent's sign-in UX. When already authenticated we advertise nothing, so
     // Zed shows the agent as ready.
-    if (auth::is_empty(auth_)) {
+    if (auth::is_empty(auth())) {
         a::AuthMethod m;
         m.id          = "agentty-login";
         m.name        = "Sign in to agentty";
@@ -1368,7 +1368,7 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
 
 void AgentServer::on_logout() {
     auth::clear_credentials();
-    auth_ = auth::ApiKeyHeader{""};
+    auth_.with([](auth::AuthHeader& a) { a = auth::ApiKeyHeader{""}; });
 }
 
 // ── Session lifecycle: list / resume / close / delete ────────────────────────
@@ -1501,7 +1501,7 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
             resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
             return;
         }
-        if (auth::is_empty(auth_) && !keyless_local) {
+        if (auth::is_empty(auth()) && !keyless_local) {
             resp.error(a::AuthRequired,
                 "agentty has no credentials — run `agentty login` first");
             return;
@@ -1545,19 +1545,14 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
 
     // Run the whole turn off the reader thread; the engine stays free to
     // deliver our outbound permission responses. The Responder resolves the
-    // deferred session/prompt when the turn settles.
-    //
-    // run_isolated_detached (util/background.hpp) instead of a raw detached
-    // worker: the body is wrapped so NO exception — std or otherwise — can
-    // reach std::terminate and kill every other session, and the job is
-    // owned by the background pool, so teardown asks it to stop and waits.
-    // The outer try/catch inside run_turn is belt-and-suspenders, not the
-    // only line of defence. See RUST-CRITIQUE.md #3.
+    // deferred session/prompt when the turn settles. The job co-owns the
+    // server, so a turn still running at exit can't outlive it.
     util::run_isolated_detached("acp.turn_worker",
-        [this, sid = std::move(sid), rid = std::move(req_id_dump),
-         r = std::move(resp)]() mutable {
-            run_turn(std::move(sid), std::move(rid), std::move(r));
-        });
+        [](std::stop_token, maya::co_owned<AgentServer> self, std::string sid,
+           std::string rid, Responder r) {
+            self->run_turn(std::move(sid), std::move(rid), std::move(r));
+        }, maya::co_owned<AgentServer>::of(*this), std::move(sid),
+        std::move(req_id_dump), std::move(resp));
 }
 
 namespace {
@@ -1739,7 +1734,7 @@ StopReason AgentServer::stream_completion(const std::string& session_id,
             && sel.openai_endpoint.native_api;
     }
     req.cancel        = snap->cancel;
-    req.auth          = auth_;
+    req.auth          = auth();
     req.messages      = std::move(snap->messages);
     // suppress_tools: a weak local model that just leaked a junk tool call
     // gets a tool-free retry. With no tools advertised it cannot leak another
@@ -2043,15 +2038,19 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         // The session's cancel reaches the running tool itself (a shell is
         // stopped), not only this wait.
         if (ctx.cancel) call_ctx.cancel.push_back(ctx.cancel->token());
+        // The job gets its own copy of the definition it was gated against.
         auto fut = util::background_pool().submit_isolated(
-            [td, name = tc.name.value, args = tc.args, wake,
-             call_ctx = std::move(call_ctx)]() mutable {
+            [](std::stop_token, std::optional<tools::ToolDef> def, std::string name,
+               nlohmann::json args, std::stop_source wake, tools::CallContext call_ctx) {
                 struct Signal {
                     std::stop_source& s;
                     ~Signal() { s.request_stop(); }
                 } on_exit{wake};
-                return tool::DynamicDispatch::execute_with(td, name, args, call_ctx);
-            });
+                return tool::DynamicDispatch::execute_with(def ? &*def : nullptr,
+                                                           name, args, call_ctx);
+            },
+            td ? std::optional<tools::ToolDef>{*td} : std::nullopt,
+            tc.name.value, tc.args, wake, std::move(call_ctx));
         std::optional<std::stop_callback<std::function<void()>>> on_cancel;
         if (ctx.cancel)
             on_cancel.emplace(ctx.cancel->token(),

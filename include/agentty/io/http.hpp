@@ -54,6 +54,12 @@ namespace agentty::http {
 // implementation), and the I/O loop keeps calling it exactly as before.
 class CancelToken {
 public:
+    CancelToken() = default;
+    // Shared between threads through a pointer; swapping the whole source
+    // under a watcher would be a race, so it can't be assigned or copied.
+    CancelToken(const CancelToken&)            = delete;
+    CancelToken& operator=(const CancelToken&) = delete;
+
     void cancel() noexcept { src_.request_stop(); }
     [[nodiscard]] bool is_cancelled() const noexcept {
         return src_.stop_requested();
@@ -434,3 +440,6 @@ is_chunked(const Headers& headers);
 // a new turn, session/cancel) while a worker watches it. It holds only a
 // std::stop_source, which is built for exactly that, so the pointer may cross.
 MAYA_SENDABLE(agentty::http::CancelTokenPtr);
+// And for the same reason it is Sync: one std::stop_source, used only through
+// its thread-safe calls, and the class has no assignment that swaps it.
+MAYA_SYNC(agentty::http::CancelToken);

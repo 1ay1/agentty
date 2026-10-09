@@ -2698,6 +2698,12 @@ private:
 };
 
 } // namespace
+} // namespace agentty::http
+
+// Its one field is a guarded map; every method goes through it.
+MAYA_SYNC(agentty::http::Pool);
+
+namespace agentty::http {
 
 namespace test {
 std::expected<std::string, std::string>
@@ -2724,9 +2730,13 @@ std::expected<bool, std::string> is_chunked(const Headers& headers) {
 // ---------------------------------------------------------------------------
 // Client::Impl
 // ---------------------------------------------------------------------------
+// Pool is one guarded map, so dials on other threads can share it.
+using PoolRef = maya::co_owned<Pool>;
+
 struct Client::Impl {
-    Config cfg;
-    Pool   pool;
+    Config  cfg;
+    PoolRef pool_ref = PoolRef::make();
+    Pool&   pool     = *pool_ref;
 
     // Outstanding prewarm() dials. OWNED (not detached) so join_prewarm()
     // can cancel and wait for them before CRT/OpenSSL teardown, closing the
@@ -3085,10 +3095,8 @@ void Client::prewarm(std::string host, uint16_t port,
     // its own accounting without polling.
     auto cancel = std::make_shared<CancelToken>();
     impl_->prewarm_pool.post_isolated(
-        [this, cancel,
-         host = std::move(host), port,
-         dial_host = std::move(dial_host), dial_port](
-            std::stop_token st) mutable {
+        [](std::stop_token st, PoolRef pool, CancelTokenPtr cancel,
+           std::string host, uint16_t port, std::string dial_host, uint16_t dial_port) {
 #if !defined(_WIN32)
         // Block every signal so SIGWINCH / SIGINT / SIGTERM route to the
         // main thread's handlers instead of being delivered here mid
@@ -3118,8 +3126,9 @@ void Client::prewarm(std::string host, uint16_t port,
         Timeouts warm_tos{};
         warm_tos.connect = std::chrono::milliseconds{4'000};
         auto r = dial_new(ep, warm_tos, cancel);
-        if (r && !cancel->is_cancelled()) impl_->pool.release(std::move(*r));
-    });
+        if (r && !cancel->is_cancelled()) pool->release(std::move(*r));
+    }, impl_->pool_ref, std::move(cancel), std::move(host), port,
+       std::move(dial_host), dial_port);
 }
 
 void Client::join_prewarm() noexcept {

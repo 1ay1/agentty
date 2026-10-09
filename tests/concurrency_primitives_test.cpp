@@ -41,34 +41,39 @@ int failures = 0;
 // a test. Here shutdown() JOINS, so the counter is an assertion and not a
 // race: if the work were still detached, these counts would be unreliable
 // and `stuck` would be meaningless.
-void test_background_work_is_owned() {
+struct Counters {
     std::atomic<int>  ran{0};
     std::atomic<bool> saw_stop{false};
+};
+using counters_t = maya::co_owned<Counters>;
+
+void test_background_work_is_owned() {
+    auto c = counters_t::make();
 
     // (a) throwing bodies must be isolated, every one of them.
     for (int i = 0; i < 8; ++i) {
         agentty::util::run_isolated_detached("test.throwing_worker",
-            [&ran] {
-                ran.fetch_add(1);
+            [](std::stop_token, counters_t c) {
+                c->ran.fetch_add(1);
                 throw std::logic_error("boom — must not reach std::terminate");
-            });
+            }, c);
     }
 
-    // (c) a body that asks for the stop_token must actually be stopped.
+    // (c) a body must actually be stopped through its token.
     agentty::util::run_isolated_detached("test.cancellable_worker",
-        [&saw_stop](std::stop_token st) {
+        [](std::stop_token st, counters_t c) {
             while (!st.stop_requested())
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
-            saw_stop = true;
-        });
+            c->saw_stop = true;
+        }, c);
 
     // (b) shutdown REQUESTS STOP and WAITS. Returns how many were still
     // stuck at the grace deadline.
     const std::size_t stuck = agentty::util::background_pool().shutdown();
 
-    CHECK(ran.load() == 8,
+    CHECK(c->ran.load() == 8,
           "every throwing body ran and was waited for (not detached)");
-    CHECK(saw_stop.load(),
+    CHECK(c->saw_stop.load(),
           "a background body is handed a stop_token and is asked to stop");
     CHECK(stuck == 0, "shutdown drained every job within the grace");
     CHECK(true, "8 throwing workers did not terminate the process");

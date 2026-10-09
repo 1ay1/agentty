@@ -74,12 +74,15 @@ struct Sessions {
     std::unordered_map<std::string, std::string> reqid_to_session;
 };
 
-class AgentServer {
+class AgentServer : public std::enable_shared_from_this<AgentServer> {
 public:
     // `stream` is the provider entrypoint (bind AnthropicProvider::stream or a
     // test double). `auth` is the resolved wire credential; may be empty (then
     // prompts report authentication-required). `model_id` is the default model
     // for new sessions.
+    //
+    // Build it with maya::co_owned<AgentServer>::make(...): turn workers hold
+    // a handle to it, so it must outlive any turn still running.
     AgentServer(rpc::Channel      channel,
                 StreamFn          stream,
                 auth::AuthHeader  auth,
@@ -197,12 +200,18 @@ private:
     void                  replay_history(const std::string& session_id,
                                          const Thread& thread);
 
-    Router                    router_;
-    std::unique_ptr<rpc::Peer> peer_;
-    StreamFn                  stream_;
-    auth::AuthHeader          auth_;
-    std::string               model_id_;
-    Profile                   profile_;
+    // Reader thread only (Router::handle isn't const).
+    Router                           router_;
+    // Set in the constructor, then only read; turn workers read them too.
+    const std::unique_ptr<rpc::Peer> peer_;
+    const StreamFn                   stream_;
+    const std::string                model_id_;
+    const Profile                    profile_;
+    // on_logout (reader thread) clears it while a turn may be reading it.
+    maya::guarded<auth::AuthHeader>  auth_;
+    [[nodiscard]] auth::AuthHeader auth() const {
+        return auth_.read([](const auth::AuthHeader& a) { return a; });
+    }
 
     // Did the client advertise `terminal` support at initialize? When true
     // (and agentty's sandbox is NOT wrapping commands), a `bash` tool call is
@@ -227,3 +236,9 @@ private:
 };
 
 } // namespace agentty::acp
+
+// Checked by hand (jaal can't walk a class with private fields and a base):
+// every field is const after construction, a guarded, or an atomic, except
+// router_, which only the peer's reader thread touches. Turn workers and the
+// reader share the server through co_owned<AgentServer>.
+MAYA_SYNC(agentty::acp::AgentServer);

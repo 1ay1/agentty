@@ -1549,13 +1549,21 @@ struct Index {
 };
 
 
-struct Retriever::Impl {
-    // Outside the lock: warm_async's one-at-a-time gate, and the cancel flag
-    // shutdown trips while a rebuild holds the index.
-    std::atomic<bool> warming{false};
-    std::atomic<bool> warm_stop{false};
-
+// What the warm worker shares with the Retriever: the index, plus (outside
+// its lock) the one-at-a-time gate and the cancel flag shutdown trips while
+// a rebuild holds the index.
+struct WarmState {
+    std::atomic<bool>    warming{false};
+    std::atomic<bool>    warm_stop{false};
     maya::guarded<Index> index{&warm_stop};
+};
+using WarmRef = maya::co_owned<WarmState>;
+
+struct Retriever::Impl {
+    WarmRef               warm = WarmRef::make();
+    std::atomic<bool>&    warming   = warm->warming;
+    std::atomic<bool>&    warm_stop = warm->warm_stop;
+    maya::guarded<Index>& index     = warm->index;
 
     // Optional LLM seam for HyDE / multi-query. Outside the index: it is a
     // closure that may dial out, so retrieve() takes a snapshot of it and
@@ -2139,29 +2147,28 @@ void Retriever::warm_async() {
     // The CAS allows one LOGICAL warm at a time. There is no handle handoff
     // to synchronize any more: the old jthread had to be joined and reseated
     // under mu, and the group's post() is safe from any thread on its own.
-    Impl* state = impl_.get();
     // Fresh warm pass: clear any stale cancellation from a prior worker. The
     // CAS above means no other warm is running, so nothing reads this yet.
     impl_->warm_stop.store(false, std::memory_order_relaxed);
-    impl_->warmer.post([state](std::stop_token st) {
+    impl_->warmer.post([](std::stop_token st, WarmRef state) {
         // Bridge the group's stop_token to the flag the deep index functions
         // poll, so a shutdown interrupts the embed pass.
-        std::stop_callback on_stop(st, [state] {
+        std::stop_callback on_stop(st, [&state] {
             state->warm_stop.store(true, std::memory_order_relaxed);
         });
         // Clear the gate however this exits; the group's wrapper catches a
         // throw, but only after this frame unwinds.
         struct ClearWarming {
-            Impl* s;
-            ~ClearWarming() { s->warming.store(false); }
-        } clear{state};
+            WarmState& s;
+            ~ClearWarming() { s.warming.store(false); }
+        } clear{*state};
         state->index.with([](Index& ix) {
             auto root = resolve_docs_root(ix.cfg.docs_root);
             if (ix.engine.corpus().chunk_count() == 0)
                 (void)ix.try_load_persisted(root);
             ix.refresh_docs(root);
         });
-    });
+    }, impl_->warm);
 }
 
 // Stop any in-flight warm promptly and reclaim the worker. Called early in

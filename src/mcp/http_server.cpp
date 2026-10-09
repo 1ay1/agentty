@@ -31,6 +31,7 @@
 #include "agentty/util/dbglog.hpp"
 
 #include <maya/runtime.hpp>
+#include <optional>
 #include <mcp/auth.hpp>
 #include <mcp/protocol.hpp>
 
@@ -109,88 +110,14 @@ std::string header_value(const http::Headers& hh, std::string_view name) {
     return {};
 }
 
-// ── HttpTransport ─────────────────────────────────────────────────────────
-// Owns the endpoint config and session id. channel() is what the peer runs
-// on: write POSTs a frame on a worker, read drains the frames the replies
-// carried.
-class HttpTransport {
-public:
-    HttpTransport(ParsedUrl url, std::vector<http::Header> extra_headers,
-                  std::chrono::milliseconds timeout, std::string server_name = {})
-        : url_(std::move(url)), extra_headers_(std::move(extra_headers)),
-          timeout_(timeout), server_name_(std::move(server_name)) {
-        auto [peer_end, ours] = rpc::channel_pair();
-        inbound_ = std::move(peer_end);
-        feed_    = std::move(ours);
-    }
-
-    void set_protocol_version(std::string v) {
-        session_.with([](Session& s, std::string pv) { s.protocol_version = std::move(pv); },
-                      std::move(v));
-    }
-
-    [[nodiscard]] bool alive() const noexcept { return alive_.load(std::memory_order_acquire); }
-
-    void stop() {
-        // Admission is the WorkerGroup's job now: workers_.stop() refuses
-        // further posts under the pool's own lock, which is the same
-        // check-then-admit atomicity the alive_/inflight_ pair hand-rolled
-        // (and the reason alive_ used to have to flip under worker_mu_).
-        // alive_ is left as the plain liveness flag the provider reads.
-        alive_.store(false, std::memory_order_release);
-        cancel_->cancel();
-        // Hard barrier: when this returns no POST worker is running, so
-        // nothing touches this transport after it is dropped.
-        workers_.stop();
-        if (feed_.interrupt) feed_.interrupt();   // the peer's reader sees EOF
-    }
-
-    // The channel the peer runs on. Valid while this transport lives.
-    rpc::Channel channel() {
-        rpc::Channel ch;
-        ch.read      = inbound_.read;
-        ch.write     = [this](std::string_view bytes) {
-            // The peer writes whole lines; each is one JSON-RPC frame.
-            std::size_t start = 0;
-            while (start < bytes.size()) {
-                auto nl = bytes.find('\n', start);
-                auto line = bytes.substr(start, nl == std::string_view::npos ? std::string_view::npos : nl - start);
-                if (!line.empty()) dispatch(std::string{line});
-                if (nl == std::string_view::npos) break;
-                start = nl + 1;
-            }
-            return alive();
-        };
-        ch.interrupt = [this] { stop(); };
-        return ch;
-    }
-
-private:
+// What the POST workers share with the transport: endpoint config that is
+// fixed at construction, the session (guarded), the liveness flag, the cancel
+// source and the feed end of the pipe. Sync, so the workers can hold it.
+struct Conn {
     // Is this outbound frame a request (needs a response) or a notification
     // (fire-and-forget, no response expected)?
     static bool is_request(const json& j) {
         return j.is_object() && j.contains("id") && j.contains("method");
-    }
-
-    void dispatch(std::string frame) {
-        if (!alive_.load(std::memory_order_acquire)) return;   // stopped
-        // POST off this thread: it is the peer's writer, and a slow server
-        // must not hold up every other frame.
-        //
-        // The worker's accounting, admission and the shutdown barrier all
-        // belong to the group (util/background.hpp). What used to be here —
-        // a mutex, a condition variable, an inflight counter and three
-        // separate decrement-and-notify paths for the error cases — is the
-        // bookkeeping that is now written once instead of per call site.
-        workers_.post([this, frame]() mutable {
-            try {
-                post_and_feed(frame);
-            } catch (const std::exception& error) {
-                fail_request(frame, error.what());
-            } catch (...) {
-                fail_request(frame, "unknown transport exception");
-            }
-        });
     }
 
     void fail_request(const std::string& frame, std::string_view reason) noexcept {
@@ -275,8 +202,9 @@ private:
         std::string sse_buf;       // accumulates SSE bytes across chunks
         std::string json_buf;      // accumulates a non-SSE body
         bool is_sse = false;
-        http_status_401_ = false;
-        resource_metadata_url_.clear();
+        // This request's 401, if any. Per request: several POSTs run at once.
+        bool        http_status_401_ = false;
+        std::string resource_metadata_url_;
 
         http::StreamHandler handler;
         handler.on_headers = [&](int status, const http::Headers& hh) {
@@ -442,26 +370,100 @@ private:
         (void)feed_.write(line);
     }
 
-    ParsedUrl                 url_;
-    std::vector<http::Header> extra_headers_;
-    std::chrono::milliseconds timeout_;
-    std::string               server_name_;   // for oauth::bearer_for lookup
-    rpc::Channel              inbound_;   // the peer's end: frames the replies carried
-    rpc::Channel              feed_;      // our end: where we push them
+    const ParsedUrl                 url_;
+    const std::vector<http::Header> extra_headers_;
+    const std::chrono::milliseconds timeout_;
+    const std::string               server_name_;   // for oauth::bearer_for lookup
+    const rpc::Channel              feed_;          // our end: where we push frames
     struct Session { std::string id; std::string protocol_version; };
-    maya::guarded<Session>    session_;
-    std::atomic<bool>         alive_{true};
-    // MCP 2026-07-28 authorization: set when the last response was a 401, with
-    // the parsed protected-resource-metadata URL from the WWW-Authenticate
-    // challenge (empty if none). Read on the same worker after the stream ends.
-    bool                      http_status_401_ = false;
-    std::string               resource_metadata_url_;
+    maya::guarded<Session>          session_;
+    std::atomic<bool>               alive_{true};
     // One token for the transport's life: stop() cancels every POST in flight.
-    const http::CancelTokenPtr cancel_ = std::make_shared<http::CancelToken>();
-    // POST workers. The group owns their accounting, their admission after
-    // stop(), and the shutdown barrier — see util/background.hpp for why this
-    // one waits rather than abandoning.
-    util::WorkerGroup         workers_{"mcp.http_transport.worker"};
+    const http::CancelTokenPtr      cancel_ = std::make_shared<http::CancelToken>();
+};
+
+} // namespace
+} // namespace agentty::mcp
+
+namespace agentty::mcp {
+namespace {
+
+using ConnRef = maya::co_owned<Conn>;
+
+// ── HttpTransport ─────────────────────────────────────────────────────────
+// channel() is what the peer runs on: write POSTs a frame on a worker, read
+// drains the frames the replies carried.
+class HttpTransport {
+public:
+    HttpTransport(ParsedUrl url, std::vector<http::Header> extra_headers,
+                  std::chrono::milliseconds timeout, std::string server_name = {}) {
+        auto [peer_end, ours] = rpc::channel_pair();
+        inbound_ = std::move(peer_end);
+        conn_.emplace(ConnRef::make(std::move(url), std::move(extra_headers), timeout,
+                                    std::move(server_name), std::move(ours)));
+    }
+
+    void set_protocol_version(std::string v) {
+        (*conn_)->session_.with([](Conn::Session& s, std::string pv) { s.protocol_version = std::move(pv); },
+                      std::move(v));
+    }
+
+    [[nodiscard]] bool alive() const noexcept {
+        return (*conn_)->alive_.load(std::memory_order_acquire);
+    }
+
+    void stop() {
+        // Admission is the WorkerGroup's job: workers_.stop() refuses further
+        // posts under the pool's own lock. alive_ is the plain liveness flag
+        // the provider reads.
+        auto& c = **conn_;
+        c.alive_.store(false, std::memory_order_release);
+        c.cancel_->cancel();
+        // Hard barrier: when this returns no POST worker is running.
+        workers_.stop();
+        if (c.feed_.interrupt) c.feed_.interrupt();   // the peer's reader sees EOF
+    }
+
+    // The channel the peer runs on. Valid while this transport lives.
+    rpc::Channel channel() {
+        rpc::Channel ch;
+        ch.read      = inbound_.read;
+        ch.write     = [this](std::string_view bytes) {
+            // The peer writes whole lines; each is one JSON-RPC frame.
+            std::size_t start = 0;
+            while (start < bytes.size()) {
+                auto nl = bytes.find('\n', start);
+                auto line = bytes.substr(start, nl == std::string_view::npos ? std::string_view::npos : nl - start);
+                if (!line.empty()) dispatch(std::string{line});
+                if (nl == std::string_view::npos) break;
+                start = nl + 1;
+            }
+            return alive();
+        };
+        ch.interrupt = [this] { stop(); };
+        return ch;
+    }
+
+private:
+    void dispatch(std::string frame) {
+        if (!alive()) return;   // stopped
+        // POST off this thread: it is the peer's writer, and a slow server
+        // must not hold up every other frame.
+        workers_.post([](std::stop_token, ConnRef c, std::string frame) {
+            try {
+                c->post_and_feed(frame);
+            } catch (const std::exception& error) {
+                c->fail_request(frame, error.what());
+            } catch (...) {
+                c->fail_request(frame, "unknown transport exception");
+            }
+        }, *conn_, std::move(frame));
+    }
+
+    rpc::Channel           inbound_;   // the peer's end: frames the replies carried
+    std::optional<ConnRef> conn_;      // set in the constructor, never empty after
+    // POST workers. Last: stopped (joined) first.
+    util::WorkerGroup      workers_{"mcp.http_transport.worker"};
 };
 
 } // namespace

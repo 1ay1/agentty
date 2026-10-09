@@ -299,7 +299,7 @@ void start_background_refresh(bool no_net) {
 
     // Isolated: refresh() is a network fetch, so it may never return and must
     // not occupy a shared worker.
-    refresh_pool().post_isolated([no_net](std::stop_token st) {
+    refresh_pool().post_isolated([](std::stop_token st, bool no_net) {
         // A process that exits at once never dials at all. One cancellation
         // channel — the token — instead of a second stop flag to notify.
         if (maya::delay_for(st, kStartDelay)) return;
@@ -314,7 +314,7 @@ void start_background_refresh(bool no_net) {
         } catch (const std::exception& e) {
             util::dbglog("modelsdev.refresh", e.what());
         } catch (...) {}
-    });
+    }, no_net);
     });
 }
 

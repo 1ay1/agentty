@@ -85,6 +85,18 @@ struct Dispatch {
     std::function<void(bool inbound, std::string_view frame)>        trace;
 };
 
+} // namespace agentty::rpc
+
+// The peer calls a Channel's and a Dispatch's functions from its own reader,
+// writer and ticker threads, read and write at the same time. Handing one to
+// a Peer is the claim that this is safe; jaal can't look inside a closure to
+// check it. Every channel in rpc/peer.cpp keeps it: read and write touch
+// separate ends, and interrupt only closes them.
+MAYA_SYNC(agentty::rpc::Channel);
+MAYA_SYNC(agentty::rpc::Dispatch);
+
+namespace agentty::rpc {
+
 class Peer {
 public:
     using Clock = jsonrpc::Clock;
@@ -137,26 +149,34 @@ public:
     template <jsonrpc::IsMethod M>
     void reply(const jsonrpc::Id& id, const typename M::result& r) { write(jsonrpc::reply<M>(id, r)); }
 
+private:
+    struct Core;   // shared with the tasks, so an abandoned reader outlives us
+    using core_t = maya::co_owned<Core>;
+    static void write_core(const core_t& c, std::string frame);
+
+public:
+
     // A deferred call's answer, sent at most once. The first ok()/error()
-    // wins; later ones are dropped.
+    // wins; later ones are dropped. It co-owns the peer's core, so a worker
+    // holding one can outlive the Peer: the answer is just dropped then.
     template <jsonrpc::IsMethod M>
     class Deferred {
     public:
-        Deferred(Peer& p, jsonrpc::Id id) : p_(&p), id_(std::move(id)) {}
+        Deferred(Peer& p, jsonrpc::Id id) : c_(p.core_), id_(std::move(id)) {}
         Deferred(Deferred&&) noexcept            = default;
         Deferred& operator=(Deferred&&) noexcept = default;
 
         [[nodiscard]] const jsonrpc::Id& id() const { return id_; }
         void ok(const typename M::result& r) {
             if (std::exchange(done_, true)) return;
-            p_->reply<M>(id_, r);
+            write_core(c_, jsonrpc::reply<M>(id_, r));
         }
         void error(int code, std::string msg) {
             if (std::exchange(done_, true)) return;
-            p_->reply(id_, std::unexpected(jsonrpc::RpcError(code, std::move(msg))));
+            write_core(c_, jsonrpc::reply(id_, std::unexpected(jsonrpc::RpcError(code, std::move(msg)))));
         }
     private:
-        Peer*       p_;
+        maya::co_owned<Core> c_;
         jsonrpc::Id id_;
         bool        done_ = false;
     };
@@ -180,13 +200,16 @@ public:
     [[nodiscard]] bool closed() const;
 
 private:
-    struct Core;   // shared with the tasks, so an abandoned reader outlives us
-
     void write(std::string frame);
 
-    std::shared_ptr<Core>     core_;
+    core_t                    core_;
     std::chrono::milliseconds default_timeout_{0};
     maya::pool                pool_{3};   // reader, writer, ticker
 };
 
 }  // namespace agentty::rpc
+
+// A Deferred owns a handle to the peer's core (co_owned), the call's id and a
+// flag: moving it to the worker that will answer shares nothing.
+template <jsonrpc::IsMethod M>
+MAYA_SENDABLE_T(agentty::rpc::Peer::Deferred<M>);

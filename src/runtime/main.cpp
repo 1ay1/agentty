@@ -2078,7 +2078,7 @@ int main(int argc, char** argv) {
         _setmode(_fileno(stdin),  _O_BINARY);
         _setmode(_fileno(stdout), _O_BINARY);
 #endif
-        agentty::acp::AgentServer server(
+        auto server = maya::co_owned<agentty::acp::AgentServer>::make(
             agentty::rpc::fd_channel(0, 1),
             stream_fn,
             provider_auth,
@@ -2086,7 +2086,7 @@ int main(int argc, char** argv) {
             profile);
         std::fprintf(stderr, "agentty: ACP agent ready on stdio (profile=%s)\n",
                      std::string(to_string(profile)).c_str());
-        int rc = server.serve();
+        int rc = server->serve();
         persistence::flush_pending_saves();
         return rc;
     }

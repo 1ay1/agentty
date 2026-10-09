@@ -207,9 +207,12 @@ std::optional<std::chrono::seconds> env_wall_override() {
 /// (util::WorkerGroup): stop_token to wind it up, joined on destruction.
 class JaalSession final : public mt::Session {
   public:
-    JaalSession(process_t p, std::size_t cap)
-        : proc_(std::move(p)), cap_(cap), started_(clock_t_::now()) {
-        drain_.post([this](std::stop_token st) { pump(st); });
+    // The process moves into the pump: from here on nothing else can reach
+    // it, so a stop() racing the pump's reap() can't happen by construction.
+    JaalSession(process_t p, std::size_t cap) : started_(clock_t_::now()) {
+        drain_.post([](std::stop_token st, process_t proc, std::size_t cap,
+                       state_t state) { pump(st, std::move(proc), cap, state); },
+                    std::move(p), cap, st_);
     }
     ~JaalSession() override {
         stop();
@@ -223,7 +226,7 @@ class JaalSession final : public mt::Session {
         // Wakes the instant the pump writes news or the child ends. One
         // exclusive section that both drains and decides; returning a struct
         // by value is the only way out of the guarded state.
-        auto [u, news] = st_.wait_with_for(wait,
+        auto [u, news] = st_->wait_with_for(wait,
             [](const Shared& s) { return !s.pending.empty() || !s.alive; },
             [](Shared& s) {
             Update u;
@@ -242,11 +245,9 @@ class JaalSession final : public mt::Session {
     }
 
     void stop() override {
-        // Only the pump touches proc_: posix_process isn't thread-safe, and
-        // a kill racing the pump's reap() could signal a reused pid. So this
-        // just asks; the pump sends the signals.
-        // The pump sees this within its 100ms wait and sends SIGTERM.
-        st_.with([](Shared& s, clock_t_::time_point at) {
+        // The pump owns the process, so this just asks; the pump sees it
+        // within its 100ms wait and sends SIGTERM.
+        st_->with([](Shared& s, clock_t_::time_point at) {
             if (!s.alive || s.stopping) return;
             s.stopping = true;
             s.stop_at  = at;
@@ -254,7 +255,11 @@ class JaalSession final : public mt::Session {
     }
 
   private:
-    void pump(std::stop_token st) {
+    struct Shared;
+    using state_t = maya::co_owned<maya::guarded<Shared>>;
+
+    static void pump(std::stop_token st, process_t proc_, std::size_t cap_, state_t state) {
+        auto& st_ = *state;
         auto reactor = reactor_t::create();
         if (!reactor) return;
         auto exit_reg = reactor->watch(proc_.exit_handle().get(),
@@ -353,11 +358,9 @@ class JaalSession final : public mt::Session {
         mt::ExecOutcome outcome   = mt::Exited{0};
     };
 
-    process_t            proc_;
-    std::size_t          cap_;
     clock_t_::time_point started_;
-    maya::guarded<Shared> st_;
-    // Last member: destroyed (joined) first, before anything the pump uses.
+    state_t              st_ = state_t::make();
+    // Last member: destroyed (joined) first.
     ::agentty::util::WorkerGroup drain_{"exec.session.drain"};
 };
 
@@ -473,7 +476,7 @@ ChildResult run_child(const ChildRun& run) {
     auto exit_reg = reactor->watch(proc.exit_handle().get(), pf::interest::read, kExitToken);
     std::optional<reactor_t::registration> out_reg, in_reg, broker_reg;
 #if defined(_WIN32)
-    maya::worker_group feeder;   // stdin writer; destroyed after the reap
+    ::agentty::util::WorkerGroup feeder{"exec.stdin_feed"};   // destroyed after the reap
 #endif
     if (auto h = proc.stdout_handle())
         if (auto reg = reactor->watch(h->get(), pf::interest::read, kOutToken))
@@ -511,18 +514,18 @@ ChildResult run_child(const ChildRun& run) {
         // feeder.stop() after the reap is the join.
         if (auto dup = maya::platform::duplicate_handle(h->get())) {
             proc.close_stdin();
-            feeder.post([&run, raw = *dup](std::stop_token) {
-                maya::platform::owned_handle own{raw};
+            feeder.post([](std::stop_token, maya::platform::owned_handle own,
+                           std::string data) {
                 std::size_t off = 0;
-                while (off < run.stdin_data.size()) {
+                while (off < data.size()) {
                     bool closed = false;
                     const auto n = maya::platform::write_some(
                         maya::platform::borrowed_handle{own.get()},
-                        run.stdin_data.data() + off, run.stdin_data.size() - off, closed);
+                        data.data() + off, data.size() - off, closed);
                     if (closed || n == 0) break;
                     off += n;
                 }
-            });   // `own` closes here: EOF for the child
+            }, maya::platform::owned_handle{*dup}, run.stdin_data);   // `own` closes at the end: EOF for the child
         } else {
             proc.close_stdin();
         }

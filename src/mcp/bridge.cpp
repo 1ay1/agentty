@@ -1449,7 +1449,8 @@ std::vector<tools::ToolDef> build_pool(PoolHandle& out_pool) {
         // detached.
         pending.push_back(Pending{sname,
             ::agentty::util::background_pool().submit_isolated(
-            [sname, spec]() -> std::shared_ptr<::mcp::cap::CapabilityProvider> {
+            [](std::stop_token, std::string sname, json spec)
+                -> std::shared_ptr<::mcp::cap::CapabilityProvider> {
                 const std::string url  = spec.value("url", std::string{});
                 const std::string type = spec.value("type", std::string{});
                 const bool is_http = !url.empty() || type == "http" || type == "sse"
@@ -1472,7 +1473,7 @@ std::vector<tools::ToolDef> build_pool(PoolHandle& out_pool) {
                     return p;
                 }
                 return make_provider(sname, spec);
-            })});
+            }, sname, spec)});
     }
 
     const auto deadline = std::chrono::steady_clock::now()

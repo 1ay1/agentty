@@ -177,9 +177,9 @@ TEST_CASE("acp integration end-to-end") {
     ag::auth::AuthHeader cred = ag::auth::ApiKeyHeader{"sk-test-not-empty"};
     CHECK(!ag::auth::is_empty(cred));
 
-    ag::acp::AgentServer server(ag::rpc::fd_channel(c2a[0], a2c[1]), stream, cred,
-                                "claude-test", ag::Profile::Ask);
-    std::thread agent_thread([&]{ server.serve(); });   // returns at EOF on c2a
+    auto server = maya::co_owned<ag::acp::AgentServer>::make(
+        ag::rpc::fd_channel(c2a[0], a2c[1]), stream, cred, "claude-test", ag::Profile::Ask);
+    std::thread agent_thread([&]{ server->serve(); });   // returns at EOF on c2a
 
     // ── Client side ────────────────────────────────────────────────────────
 

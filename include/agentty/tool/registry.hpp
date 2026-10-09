@@ -298,3 +298,8 @@ void invalidate_mcp_catalog();
 // pool) that synchronise themselves, or nothing at all; none borrows from
 // the place it was built. So a ToolDef can be copied to another thread.
 MAYA_SENDABLE(agentty::tools::ToolDef);
+
+// Owned values, stop_tokens (thread-safe handles), and `progress`, a closure
+// the dispatcher builds to post into a Sink or a guarded buffer. A tool call
+// runs on a worker, so the context goes with it.
+MAYA_SENDABLE(agentty::tools::CallContext);

@@ -178,9 +178,12 @@ struct Peer::Core {
         bool closed = false;
     };
 
-    Channel     ch;
-    Dispatch    dispatch;
-    std::string name;
+    // Set once at construction, then only read (and the channel's functions
+    // are safe to call from the reader and writer at once: read and write
+    // are separate ends, interrupt is for stop()).
+    const Channel     ch;
+    const Dispatch    dispatch;
+    const std::string name;
     maya::guarded<Shared> s;
     maya::guarded<Outbox> out;
 
@@ -194,18 +197,14 @@ struct Peer::Core {
 };
 
 Peer::Peer(Channel ch, Dispatch d, std::string_view name)
-    : core_(std::make_shared<Core>()) {
-    core_->ch       = std::move(ch);
-    core_->dispatch = std::move(d);
-    core_->name     = std::string(name);
-}
+    : core_(core_t::make(std::move(ch), std::move(d), std::string(name))) {}
 
 Peer::~Peer() { stop(); }
 
 void Peer::start() {
-    pool_.post_isolated([c = core_](std::stop_token st) { c->reader(st); });
-    pool_.post_isolated([c = core_](std::stop_token) { c->writer(); });
-    pool_.post_isolated([c = core_](std::stop_token st) { c->ticker(st); });
+    pool_.post_isolated([](std::stop_token st, core_t c) { c->reader(st); }, core_);
+    pool_.post_isolated([](std::stop_token, core_t c) { c->writer(); }, core_);
+    pool_.post_isolated([](std::stop_token st, core_t c) { c->ticker(st); }, core_);
 }
 
 void Peer::stop() noexcept {
@@ -233,6 +232,7 @@ bool Peer::closed() const {
 }
 
 void Peer::write(std::string frame) { core_->write(std::move(frame)); }
+void Peer::write_core(const core_t& c, std::string frame) { c->write(std::move(frame)); }
 
 // ── the outbox ──────────────────────────────────────────────────────────────
 
@@ -421,7 +421,7 @@ jsonrpc::Completed Peer::call_raw(std::string_view method, jsonrpc::Json params,
 
     // A stop on `cancel`: tell whoever asked, then fail the call now or once
     // the grace runs out. Either way it settles as Cancelled, which wakes us.
-    std::stop_callback on_cancel(o.cancel, [c = core_.get(), id = started.id, &o] {
+    std::stop_callback on_cancel(o.cancel, [c = &core_.get(), id = started.id, &o] {
         if (o.on_cancel) {
             try { o.on_cancel(); } catch (...) {}
         }
