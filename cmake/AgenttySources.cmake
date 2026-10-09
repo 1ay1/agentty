@@ -140,6 +140,7 @@ set(AGENTTY_RAG_SOURCES
     src/rag/adapter.cpp
     src/rag/embed_backend.cpp
     src/rag/embed_secret.cpp
+    src/rag/rag_host.cpp
 )
 
 set(AGENTTY_TOOL_SOURCES
@@ -160,7 +161,6 @@ set(AGENTTY_TOOL_SOURCES
     # implemented over jaal's process + reactor. Replaces the two poll loops
     # (this tree's subprocess.cpp and mcp-cpp's) that drifted apart.
     src/tool/util/exec.cpp
-    src/tool/util/protocol_runtime.cpp
     src/tool/util/subprocess.cpp
     src/tool/util/sandbox.cpp
     src/tool/util/sandbox_claybin.cpp

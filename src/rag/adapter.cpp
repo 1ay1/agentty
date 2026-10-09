@@ -14,6 +14,7 @@
 //     mcp://<uri>            this session's MCP resources (opt-in)
 
 #include "agentty/rag/rag_adapter.hpp"
+#include "agentty/rag/rag_host.hpp"
 
 #include "agentty/util/background.hpp"
 #include "agentty/util/logx.hpp"
@@ -888,6 +889,7 @@ struct Index {
 
     ::rag::index::CorpusConfig make_engine_config(bool source_code = false) {
         ::rag::index::CorpusConfig cc;
+        cc.split      = ::agentty::rag::splitter();
         cc.contextual = cfg.contextual;
         if (source_code)
             cc.chunking = ::rag::index::CorpusConfig::Chunking::source;
@@ -907,6 +909,7 @@ struct Index {
     void apply_pipeline(::rag::Engine& eng) {
         namespace pl = ::rag::pipeline;
         pl::HybridRetrieveConfig hy;
+        hy.split        = ::agentty::rag::splitter();
         hy.candidate_k  = 60;
         hy.bm25_weight  = std::max(0.0f, cfg.bm25_weight);
         hy.dense_weight = std::max(0.0f, cfg.dense_weight);
@@ -1012,7 +1015,7 @@ struct Index {
     void attach_embedder() {
         embedder_ready = false;
         if (!dense_ready()) return;
-        embedder_ready = engine.with_embedder_spec(embedder_spec()).has_value();
+        embedder_ready = engine.with_embedder_spec(embedder_spec(), ::agentty::rag::registries()).has_value();
     }
 
     static void hash_text(std::uint64_t& h, std::string_view value) {
@@ -1059,7 +1062,7 @@ struct Index {
         if (warm_initialized
             && sfp == warm_skills_gen && mfp == warm_memory_gen) return;
         warm_engine = ::rag::Engine(make_engine_config());
-        if (dense_ready()) (void)warm_engine.with_embedder_spec(embedder_spec());
+        if (dense_ready()) (void)warm_engine.with_embedder_spec(embedder_spec(), ::agentty::rag::registries());
         if (cfg.skills)
             for (const auto& s : tools::skills::all())
                 if (!s.body.empty())
@@ -1293,6 +1296,10 @@ struct Index {
             docs_initialized = true;
             skills_gen = current_skills;
             memory_gen = current_memory;
+            // Persisted indexes never hold MCP resources (cfg.mcp_resources
+            // skips persistence), so this is the empty fingerprint. Left at 0
+            // it made needs_reindex() true and every warm open rebuilt.
+            mcp_gen = mcp_fingerprint();
             ::agentty::util::dbglog("rag.persist", "opened warm index " + db.string());
             return true;
         } catch (...) {
@@ -1331,6 +1338,7 @@ struct Index {
     // docs path is as bounded as the search_code path already is.
     static ::rag::loaders::DirOptions docs_dir_options() {
         ::rag::loaders::DirOptions opts;   // inherit rag-cpp include_ext
+        opts.extractors.run = ::agentty::rag::converter_runner();
         opts.exclude_dirs = {
             ".git",".hg",".svn","node_modules","build","dist","out",
             "target","venv",".venv","__pycache__",".cache","_deps",
@@ -1508,7 +1516,7 @@ struct Index {
             if (warm_cancelled()) return;
             auto old = docs_files.find(path);
             if (old != docs_files.end() && old->second == stamp) continue;
-            auto loaded = ::rag::loaders::load_file(root / fs::path{path});
+            auto loaded = ::rag::loaders::load_file(root / fs::path{path}, docs_dir_options().extractors);
             if (!loaded) continue;
             loaded->meta["rel"] = path;
             // upsert_document atomically replaces any live doc with this uri,
@@ -1533,7 +1541,7 @@ struct Index {
     void attach_code_embedder() {
         code_embedder_ready = false;
         if (!dense_ready()) return;
-        code_embedder_ready = code_engine.with_embedder_spec(embedder_spec()).has_value();
+        code_embedder_ready = code_engine.with_embedder_spec(embedder_spec(), ::agentty::rag::registries()).has_value();
     }
 };
 
@@ -2417,7 +2425,7 @@ int run(const std::string& root) {
         // Same SSOT the adapter uses — this site used to mint its own
         // {"type":"ollama"} literal and had already drifted from it.
         if (const auto spec = ::agentty::rag::embed::spec_json(cfg.embed);
-            spec && engine.with_embedder_spec(::rag::plugin::Json::parse(*spec))) {
+            spec && engine.with_embedder_spec(::rag::plugin::Json::parse(*spec), ::agentty::rag::registries())) {
             auto probe = engine.corpus().embed_text("rag benchmark availability probe");
             have_dense = probe.has_value() && !probe->empty();
         }

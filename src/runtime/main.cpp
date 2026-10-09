@@ -77,7 +77,6 @@
 
 #include <maya/maya.hpp>
 #include <maya/host/run.hpp>   // maya::run: the jaal host
-#include "agentty/tool/util/protocol_runtime.hpp"
 #include "agentty/runtime/app/host.hpp"   // agentty::app::Host
 
 #include "agentty/acp/server.hpp"
@@ -1213,12 +1212,6 @@ int main(int argc, char** argv) {
 #endif
 
     auto args = parse_args(argc, argv);
-
-    // The protocol libraries (mcp-cpp, acp-cpp) own no threads: their RPC
-    // engines and transports run every background job on the runtime
-    // installed here, which is maya's (and so jaal's). Before any subcommand,
-    // since acp / mcp-serve / plugin servers all start engines.
-    tools::util::install_protocol_runtimes();
 
     // Every run self-identifies in the (append-mode, multi-session) log:
     // version + build type + pid + cwd. `grep "=== agentty"` splits the file

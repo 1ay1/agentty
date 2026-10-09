@@ -93,18 +93,16 @@ All are static ctest entries (label `static`), no build needed:
 
 ## The runtimes agentty installs
 
-One, until PROTOCOL_LIBRARIES.md §8 step 4 lands:
-`tools::util::install_protocol_runtimes()` (src/tool/util/protocol_runtime.cpp)
-installs a maya-backed Executor for rag-cpp's parallel regions. mcp-cpp and
-acp-cpp take nothing installed: their engines run on rpc::Peer, and mcp-cpp's
-tools get their executor, exec and state through HostServices.
+None. The libraries take what they need with each call: rag-cpp gets a
+Splitter, HostIo and converter runner from `agentty/rag/rag_host.hpp`,
+mcp-cpp's tools get executor, exec and state through HostServices, and the
+JSON-RPC connections run on rpc::Peer.
 
 ## Where it stands
 
 - agentty → maya → jaal is strict: no jaal include or name in agentty.
 - maya starts no thread of its own.
-- claybin, jsonrpc-cpp, acp-cpp and mcp-cpp are passive: no threads, locks,
-  atomics, clocks, processes or global state. agentty runs their connections
-  on rpc::Peer and owns mcp-cpp's tool state. rag-cpp still asks an
-  installed Executor for its parallel regions and keeps caches of its own;
-  that is [PROTOCOL_LIBRARIES.md](PROTOCOL_LIBRARIES.md) §8 step 4.
+- claybin, jsonrpc-cpp, acp-cpp, mcp-cpp and rag-cpp are passive: no
+  threads, locks, atomics, clocks, processes or global state. agentty runs
+  their connections on rpc::Peer, owns mcp-cpp's tool state, and hands
+  rag-cpp its splitter and IO.

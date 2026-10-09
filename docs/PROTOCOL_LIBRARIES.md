@@ -436,10 +436,15 @@ bumps the submodule pointer after each.
      `toolset_e2e_test`, `mcp_bridge_test`, `mcp_http_test`,
      `plugin_disabled_tools_test`, `subagent_report_test`,
      `exec_policy_test` (now with the fd-leak cases), `mcp-serve`.
-4. **rag-cpp.** `parallel.hpp`'s executor becomes the `Splitter` parameter;
-   corpus/hnsw/bm25 build-then-freeze; caches and the plugin registry become
-   caller-owned. Verify: `rag adapter`, `rag shutdown interrupts warm
-   promptly`, `search_docs`/`search_code` through `mcp-serve`.
+4. **rag-cpp.** *(done)* Parallel regions take a `Splitter`; corpus, hnsw
+   and bm25 build then freeze; caches, `Extractors` and `Registries` are
+   values the caller owns. Network and process backends use the host's
+   `HostIo` (no HTTP client or spawner in rag-cpp), so `builtin()` resolves
+   them by name and reports unavailable. agentty's side is
+   `agentty/rag/rag_host.hpp`. rag-cpp's concurrency allowlist holds only
+   the OpenCL `const_cast`. Verified: rag-cpp 192 cases + C API smoke,
+   `rag adapter`, `rag shutdown interrupts warm promptly`,
+   `search_docs`/`search_code` through `mcp-serve`.
 5. **agentty cleanup.** Delete `protocol_runtime.cpp`, the per-library
    concurrency allowlists, and every library-side runtime mention in
    `LAYERING.md`. Turn on `submodule_purity` and `no_duplication`.

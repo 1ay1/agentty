@@ -11,6 +11,7 @@
 // file is pure and always builds.
 
 #include "agentty/rag/embed_backend.hpp"
+#include "agentty/rag/rag_host.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -281,7 +282,7 @@ ProbeResult probe(const EmbedConfig& c) {
     try {
         const auto t0 = std::chrono::steady_clock::now();
         ::rag::Engine engine;
-        if (!engine.with_embedder_spec(::rag::plugin::Json::parse(*spec)))
+        if (!engine.with_embedder_spec(::rag::plugin::Json::parse(*spec), ::agentty::rag::registries()))
             return ProbeErr{"backend '" + std::string{id_of(concrete(c.backend))}
                             + "' could not be constructed"};
         auto vector = engine.corpus().embed_text("agentty retrieval availability probe");

@@ -380,9 +380,6 @@ agentty_objlib(agentty_provider_obj  ${AGENTTY_PROVIDER_SOURCES})
 agentty_objlib(agentty_diff_obj      ${AGENTTY_DIFF_SOURCES})
 agentty_objlib(agentty_rag_obj       ${AGENTTY_RAG_SOURCES})
 agentty_objlib(agentty_tool_obj      ${AGENTTY_TOOL_SOURCES})
-# tool/util/protocol_runtime.cpp installs agentty's runtime into acp-cpp too
-# (header-only, so this is the include path and nothing linked).
-target_link_libraries(agentty_tool_obj PRIVATE acp::acp)
 agentty_objlib(agentty_runtime_obj   ${AGENTTY_RUNTIME_NOMAIN_SOURCES})
 # ACP glue is only needed by the exe + acp_integration_test. It also
 # needs the acp::acp include dir (acp/acp.hpp) on top of the standard set.

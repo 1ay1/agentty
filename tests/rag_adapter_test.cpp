@@ -326,6 +326,9 @@ TEST_CASE("rag adapter") {
             if (!updated.passages.empty())
                 check(updated.passages.front().text.find("lattice-refresh-marker") != std::string::npos,
                       "edited docs content replaces the stale passage");
+            // The code index also covers .md, so refresh it too. Otherwise the
+            // warm open below would rightly rewrite a stale code index.
+            (void)r.retrieve_code("rotate session nonce", 5);
         }
     }
 
