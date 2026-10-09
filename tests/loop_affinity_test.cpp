@@ -55,9 +55,8 @@ namespace k = maya;
 // the consumer side, so a jaal bump that regresses them breaks agentty's
 // build rather than silently widening agentty's exposure.
 
-static_assert(!std::is_default_constructible_v<k::loop_key>,
-              "loop_key's ctor must stay private: naming it IS the forge that "
-              "made every loop_bound in this codebase reachable from a worker");
+// loop_key isn't asserted here because maya doesn't export it at all: the
+// key that mints a token is jaal's, and agentty can't even name it.
 static_assert(!std::is_copy_constructible_v<k::loop_token>,
               "a copyable token could be stashed in a global and used off-loop");
 static_assert(!std::is_move_constructible_v<k::loop_token>,

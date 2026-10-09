@@ -26,7 +26,8 @@ EXTS = (".cpp", ".hpp", ".h", ".c", ".mm", ".cc")
 # rule -> regex over stripped code. A leading space is added to every line so
 # "not preceded by an identifier" can be written as [^\w.>:].
 RULES = {
-    "R1 thread":  r"std::j?thread\b(?!::)|\.detach\(\)|std::async\b",
+    "R1 thread":  r"std::j?thread\b(?!::)|\.detach\(\)|std::async\b|\bpthread_create\b|\bCreateThread\b"
+                  r"|\b_beginthread(ex)?\b|#\s*pragma\s+omp\b|std::execution::par\b|\bdispatch_async\b",
     "R1 lock":    r"std::(shared_|recursive_|timed_|recursive_timed_)?mutex\b|condition_variable"
                   r"|std::(unique|scoped|shared)_lock\b",
     "R1 atomic":  r"std::atomic|\batomic_flag\b",

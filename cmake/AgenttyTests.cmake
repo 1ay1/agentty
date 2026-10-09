@@ -899,6 +899,26 @@ if(EXISTS ${_BANLIST})
                      -P ${_BANLIST})
     set_tests_properties(concurrency_banlist_src concurrency_banlist_include
                          PROPERTIES LABELS "static")
+
+    # The same check over the layers below, each with its own allowlist. They
+    # run in maya's and jaal's own builds too, but agentty doesn't build
+    # those, so without these a new raw primitive in maya or jaal would go
+    # unseen here.
+    set(_MAYA ${CMAKE_SOURCE_DIR}/third_party/maya)
+    set(_JAAL ${_MAYA}/third_party/jaal)
+    foreach(_bl
+            "maya_src|${_MAYA}/src|${_MAYA}/tests/lint/allowlist.txt"
+            "maya_include|${_MAYA}/include/maya|${_MAYA}/tests/lint/allow_include.txt"
+            "jaal_src|${_JAAL}/src|${_JAAL}/tests/lint/allowlist_src.txt"
+            "jaal_include|${_JAAL}/include/jaal|${_JAAL}/tests/lint/allowlist.txt")
+        string(REPLACE "|" ";" _bl "${_bl}")
+        list(GET _bl 0 _n)
+        list(GET _bl 1 _root)
+        list(GET _bl 2 _allow)
+        add_test(NAME concurrency_banlist_${_n}
+                 COMMAND ${CMAKE_COMMAND} -DROOT=${_root} -DALLOW=${_allow} -P ${_BANLIST})
+        set_tests_properties(concurrency_banlist_${_n} PROPERTIES LABELS "static")
+    endforeach()
 endif()
 
 # ── Elm purity ────────────────────────────────────────────────────

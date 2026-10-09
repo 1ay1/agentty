@@ -249,6 +249,7 @@ endif()
 # only needs the mcp LIBRARY here, not mcp_tests in agentty's ctest run.
 set(MCP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(MCP_BUILD_EXAMPLES ON  CACHE BOOL "" FORCE)
+set(MCP_BUILD_CLIENT_EXAMPLE OFF CACHE BOOL "" FORCE)   # only the servers are used
 add_subdirectory(third_party/mcp-cpp)
 agentty_pull_submodule_latest(mcp-cpp master mcp)
 if(TARGET mcp)
