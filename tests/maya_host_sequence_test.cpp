@@ -14,6 +14,7 @@
 #include <doctest/doctest.h>
 
 #include <maya/host/effects.hpp>
+#include <maya/runtime.hpp>
 
 #include <string>
 #include <variant>

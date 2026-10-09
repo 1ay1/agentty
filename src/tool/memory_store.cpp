@@ -120,9 +120,9 @@ maya::guarded<Files>& store() { static maya::guarded<Files> f; return f; }
 // produce two lines with the same id — `forget {id}` would clear
 // both, which is the user-intuitive outcome anyway.
 [[nodiscard]] std::string make_id() {
-    struct Rng { std::mt19937_64 g{std::random_device{}()}; };
+    struct Rng { std::mt19937_64 engine{std::random_device{}()}; };
     static maya::guarded<Rng> rng;
-    const auto v = rng.with([](Rng& r) { return static_cast<std::uint32_t>(r.g()); });
+    const auto v = rng.with([](Rng& r) { return static_cast<std::uint32_t>(r.engine()); });
     char buf[9];
     std::snprintf(buf, sizeof(buf), "%08x", v);
     return std::string{buf, 8};

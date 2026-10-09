@@ -36,6 +36,7 @@
 #include "agtest.hpp"
 
 #include "agentty/acp/server.hpp"
+#include "agentty/rpc/peer.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -168,33 +169,19 @@ TEST_CASE("acp integration end-to-end") {
     };
 
     // ── Wire two real OS pipes between agent and client ────────────────────
-    // AgentServer now speaks FdTransport (raw fds), so the loopback uses two
-    // pipe(2) pairs instead of iostream streambufs: c2a = client→agent,
-    // a2c = agent→client.
+    // c2a = client→agent, a2c = agent→client. Both sides run on rpc::Peer.
     int c2a[2], a2c[2];
     CHECK(::pipe(c2a) == 0);
     CHECK(::pipe(a2c) == 0);
-    FdTransport agent_tx(c2a[0], a2c[1]);   // read client→agent, write agent→client
 
     ag::auth::AuthHeader cred = ag::auth::ApiKeyHeader{"sk-test-not-empty"};
     CHECK(!ag::auth::is_empty(cred));
 
-    ag::acp::AgentServer server(agent_tx, stream, cred, "claude-test", ag::Profile::Ask);
-    std::thread agent_thread([&]{ server.serve(); });   // start()+join() on agent_tx
+    ag::acp::AgentServer server(ag::rpc::fd_channel(c2a[0], a2c[1]), stream, cred,
+                                "claude-test", ag::Profile::Ask);
+    std::thread agent_thread([&]{ server.serve(); });   // returns at EOF on c2a
 
-    // ── Client side (AgentConnection) ──────────────────────────────────────
-    std::mutex client_write_mu;
-    auto client_sink = [&](std::string_view line) {
-        std::lock_guard lk(client_write_mu);
-        std::string frame(line);
-        frame.push_back('\n');
-        std::size_t off = 0;
-        while (off < frame.size()) {
-            ssize_t w = ::write(c2a[1], frame.data() + off, frame.size() - off);
-            if (w <= 0) { if (w < 0 && errno == EINTR) continue; break; }
-            off += static_cast<std::size_t>(w);
-        }
-    };
+    // ── Client side ────────────────────────────────────────────────────────
 
     std::atomic<int> agent_text_chunks{0};
     std::atomic<int> tool_calls{0};
@@ -229,8 +216,9 @@ TEST_CASE("acp integration end-to-end") {
     std::string transcript;
     std::mutex transcript_mu;
 
-    ClientHandlers ch;
-    ch.on_session_update = [&](const SessionUpdateMsg& m) {
+    struct Client {};
+    jsonrpc::Router<Client> router;
+    router.on<to_client::SessionUpdate>([&](Client&, const SessionUpdateMsg& m) {
         match(m.update,
             [&](const SU_AgentMessageChunk& c) {
                 ++agent_text_chunks;
@@ -318,10 +306,10 @@ TEST_CASE("acp integration end-to-end") {
                 }
             },
             [&](const auto&) {});
-    };
+    });
     std::atomic<bool> reject_mode{false};
     // Approve the write when asked (or reject when reject_mode is set).
-    ch.on_request_permission = [&](const RequestPermissionParams& p) {
+    router.on<to_client::RequestPermission>([&](Client&, const RequestPermissionParams& p) {
         ++perm_requests;
         {
             std::lock_guard lk(transcript_mu);
@@ -338,35 +326,26 @@ TEST_CASE("acp integration end-to-end") {
             if (o.kind == want) chosen = o.optionId;
         return RequestPermissionResult{
             RequestPermissionOutcome{PO_Selected{chosen, Json::object()}}, Json::object()};
-    };
-
-    AgentConnection agent(client_sink, std::move(ch));
-    // The client reads a2c[0]; pump raw bytes into the agent connection's
-    // engine, splitting on '\n' like a real fd transport would.
-    std::thread client_pump([&]{
-        std::string partial;
-        char buf[8192];
-        for (;;) {
-            ssize_t n = ::read(a2c[0], buf, sizeof(buf));
-            if (n < 0) { if (errno == EINTR) continue; break; }
-            if (n == 0) break;   // EOF
-            const char* p = buf; const char* end = buf + n;
-            while (p < end) {
-                const char* nl = static_cast<const char*>(std::memchr(p, '\n', end - p));
-                if (!nl) { partial.append(p, end - p); break; }
-                partial.append(p, nl - p);
-                if (!partial.empty()) agent.engine().feed_line(partial);
-                partial.clear();
-                p = nl + 1;
-            }
-        }
     });
+
+    Client client_ctx;
+    ag::rpc::Dispatch dispatch;
+    dispatch.on_call         = [&](const jsonrpc::Call& c) { return router.handle(client_ctx, c); };
+    dispatch.on_notification = [&](const jsonrpc::Notification& n) { router.handle(client_ctx, n); };
+    ag::rpc::Peer agent(ag::rpc::fd_channel(a2c[0], c2a[1]), std::move(dispatch), "acp-client");
+    agent.start();
+    // A call that must succeed; a failure throws the RpcError like the old
+    // future-based client did, so the error-code checks below read the same.
+    auto must = [](auto r) {
+        if (!r) throw r.error();
+        return std::move(*r);
+    };
 
     // ── Drive the protocol ─────────────────────────────────────────────────
     InitializeParams ip;
     ip.clientCapabilities.fs.readTextFile = true;
     ip.clientCapabilities.fs.writeTextFile = true;
-    auto init = agent.initialize(ip).get();
+    auto init = must(agent.call<to_agent::Initialize>(ip));
     CHECK(init.protocolVersion == kProtocolVersion);
     CHECK(init.agentCapabilities.loadSession == true);
     CHECK(init.agentCapabilities.promptCapabilities.embeddedContext == true);
@@ -379,7 +358,7 @@ TEST_CASE("acp integration end-to-end") {
     CHECK(init.agentInfo.has_value() && init.agentInfo->name == "agentty");
 
     NewSessionParams nsp; nsp.cwd = tmp.string();
-    auto ns = agent.session_new(nsp).get();
+    auto ns = must(agent.call<to_agent::SessionNew>(nsp));
     CHECK(!ns.sessionId.value.empty());
     CHECK(ns.modes.has_value());
     CHECK(ns.modes->currentModeId.value == "ask");
@@ -402,9 +381,9 @@ TEST_CASE("acp integration end-to-end") {
 
     // The MODEL option is version-agnostic. session/set_config_option applies
     // it and echoes the complete config state.
-    agent.session_set_config_option(
+    must(agent.call<to_agent::SessionSetConfig>(
         SetConfigOptionParams{ns.sessionId, "model", "claude-sonnet-4-20250514",
-                              Json::object()}).get();
+                              Json::object()}));
     // An unknown configId is a hard error, not a silent no-op — and the
     // CODE matters, not just that it threw.
     //
@@ -419,9 +398,9 @@ TEST_CASE("acp integration end-to-end") {
         Json data;
         bool threw = false;
         try {
-            agent.session_set_config_option(
+            must(agent.call<to_agent::SessionSetConfig>(
                 SetConfigOptionParams{ns.sessionId, "temperatuer", "9",
-                                      Json::object()}).get();
+                                      Json::object()}));
         } catch (const RpcError& e) {
             threw = true; code = e.code; data = e.data;
         } catch (...) { threw = true; }
@@ -436,9 +415,9 @@ TEST_CASE("acp integration end-to-end") {
     {
         int  code = 0;
         try {
-            agent.session_set_mode(
+            must(agent.call<to_agent::SessionSetMode>(
                 SetModeParams{SessionId{"no-such-session"},
-                              SessionModeId{"ask"}, Json::object()}).get();
+                              SessionModeId{"ask"}, Json::object()}));
         } catch (const RpcError& e) { code = e.code; }
           catch (...) {}
         CHECK(code == errc::InvalidParams);
@@ -446,13 +425,13 @@ TEST_CASE("acp integration end-to-end") {
 
     // set_mode round-trip (switch to minimal then back to ask). Keep the
     // session in Ask before the prompt so the `write` tool gates on the user.
-    agent.session_set_mode(SetModeParams{ns.sessionId, SessionModeId{"minimal"}, Json::object()}).get();
-    agent.session_set_mode(SetModeParams{ns.sessionId, SessionModeId{"ask"}, Json::object()}).get();
+    must(agent.call<to_agent::SessionSetMode>(SetModeParams{ns.sessionId, SessionModeId{"minimal"}, Json::object()}));
+    must(agent.call<to_agent::SessionSetMode>(SetModeParams{ns.sessionId, SessionModeId{"ask"}, Json::object()}));
 
     PromptParams pp;
     pp.sessionId = ns.sessionId;
     pp.prompt.push_back(TextContent{"please write the file", Nothing, Json::object()});
-    auto pr = agent.session_prompt(pp).get();   // resolves only after full turn
+    auto pr = must(agent.call<to_agent::SessionPrompt>(pp));   // resolves only after full turn
 
     CHECK(pr.stopReason == StopReason::EndTurn);
     CHECK(completions.load() == 2);             // two model completions ran
@@ -513,7 +492,7 @@ TEST_CASE("acp integration end-to-end") {
     PromptParams pp2;
     pp2.sessionId = ns.sessionId;
     pp2.prompt.push_back(TextContent{"write it again", Nothing, Json::object()});
-    auto pr2 = agent.session_prompt(pp2).get();
+    auto pr2 = must(agent.call<to_agent::SessionPrompt>(pp2));
 
     CHECK(pr2.stopReason == StopReason::EndTurn);
     CHECK(perm_requests.load() == perms_before + 1);   // asked again
@@ -533,7 +512,7 @@ TEST_CASE("acp integration end-to-end") {
     PromptParams pp3;
     pp3.sessionId = ns.sessionId;
     pp3.prompt.push_back(TextContent{"read it", Nothing, Json::object()});
-    auto pr3 = agent.session_prompt(pp3).get();
+    auto pr3 = must(agent.call<to_agent::SessionPrompt>(pp3));
     CHECK(pr3.stopReason == StopReason::EndTurn);
     { std::lock_guard lk(transcript_mu);
       // The Read card body is a fenced, tab-numbered excerpt: "```\n1\talpha…".
@@ -552,7 +531,7 @@ TEST_CASE("acp integration end-to-end") {
     PromptParams pp4;
     pp4.sessionId = ns.sessionId;
     pp4.prompt.push_back(TextContent{"run it", Nothing, Json::object()});
-    auto pr4 = agent.session_prompt(pp4).get();
+    auto pr4 = must(agent.call<to_agent::SessionPrompt>(pp4));
     CHECK(pr4.stopReason == StopReason::EndTurn);
     { std::lock_guard lk(transcript_mu);
       // The bash card body is fenced and contains the command's stdout.
@@ -580,7 +559,7 @@ TEST_CASE("acp integration end-to-end") {
         ip2.prompt.push_back(TextContent{"what is in this image?", Nothing, Json::object()});
         ip2.prompt.push_back(ImageContent{png_b64, "image/png", Nothing, Nothing,
                                           Json::object()});
-        (void)agent.session_prompt(ip2).get();
+        (void)must(agent.call<to_agent::SessionPrompt>(ip2));
 
         std::lock_guard lk(saw_mu);
         CHECK(saw_images.load() == 1);
@@ -592,13 +571,13 @@ TEST_CASE("acp integration end-to-end") {
     }
 
     // close round-trip.
-    agent.session_close(CloseSessionParams{ns.sessionId, Json::object()}).get();
+    must(agent.call<to_agent::SessionClose>(CloseSessionParams{ns.sessionId, Json::object()}));
 
     // ── Tear down ──────────────────────────────────────────────────────────
     ::close(c2a[1]);   // EOF on the agent's reader → serve() returns
     agent_thread.join();
-    ::close(a2c[1]);   // EOF on the client pump
-    client_pump.join();
+    ::close(a2c[1]);   // EOF on our reader
+    agent.stop();
     ::close(c2a[0]);
     ::close(a2c[0]);
 

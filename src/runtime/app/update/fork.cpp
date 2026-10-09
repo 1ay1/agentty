@@ -123,6 +123,7 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             // (switched thread, started a turn, forked twice). Only fork the
             // thread that asked, and only while it is still safe to.
             if (m.d.current.id.value != e.parent_id) return Cmd::none();
+            if (m.d.current.messages.empty()) return Cmd::none();
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
                 return Cmd::none();
             const fp::Choice choice = e.choice;

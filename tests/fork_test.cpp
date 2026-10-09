@@ -78,8 +78,8 @@ Model fork_with(Model m, int choice_index) {
     const std::string parent_id = m1.d.current.id.value;
     auto s2 = detail::step(detail::fork_update, std::move(m1), ForkThread{});
     // ForkThread only saves the parent and starts the transcript write. Play
-    // the worker's part with the reply it would send.
-    if (s2.second.is_none()) return std::move(s2.first);
+    // the worker's part with the reply it would send, if it was asked to.
+    if (agtest::fx::count<agentty::SaveThread>(s2.second) == 0) return std::move(s2.first);
     auto s3 = detail::step(detail::fork_update, std::move(s2.first),
         ForkTranscriptWritten{parent_id, choice, "/tmp/" + parent_id + ".transcript.md"});
     return std::move(s3.first);

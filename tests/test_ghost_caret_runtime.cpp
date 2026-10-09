@@ -405,6 +405,15 @@ int main() {
     maya::detail::Device& rt = scr.impl();
 
     Model m;
+    // The host sends the size as a Msg at attach and on every SIGWINCH;
+    // view() reads it from the Model, so the test has to do the same.
+    auto resized = [&](int cols, int rows) {
+        auto [m2, cmd] = agentty::app::update(std::move(m),
+                                              Msg{agentty::TerminalResized{cols, rows}});
+        m = std::move(m2);
+        (void)cmd;
+    };
+    resized(W, H);
     // Welcome screen off → plain composer-only frame.
     m.d.current.messages.push_back({});
     m.d.current.messages.back().role = agentty::Role::User;
@@ -651,6 +660,7 @@ int main() {
         ws2.ws_col = (unsigned short)W;
         ws2.ws_row = (unsigned short)H2;
         ioctl(master, TIOCSWINSZ, &ws2);
+        resized(W, H2);
         // maya picks the resize up on the next frame via its width-
         // backstop / SIGWINCH path.
         tick(50);
@@ -768,6 +778,7 @@ int main() {
             wsw.ws_col = (unsigned short)W;
             wsw.ws_row = (unsigned short)Hw;
             ioctl(master, TIOCSWINSZ, &wsw);
+            resized(W, Hw);
             tick(50);
             frame("welcome-resize");
         }
