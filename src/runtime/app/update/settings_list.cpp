@@ -51,10 +51,10 @@ namespace {
 // remove/toggle lands in the RIGHT file — a project server edits the project
 // config, a user server the user config. Empty config_dir (add-mode, or a
 // pre-provenance row) falls back to the user config, the historical default.
-[[nodiscard]] std::filesystem::path edit_target(const se::Item& row) {
+[[nodiscard]] std::filesystem::path edit_target(const se::Item& row, const Model& m) {
     if (!row.config_dir.empty())
         return std::filesystem::path{row.config_dir} / "mcp.json";
-    return tools::plugin::config_path(/*project=*/false);
+    return tools::plugin::config_path(/*project=*/false, m.env.user_root);
 }
 
 // True when row `i` is one the user can act on (Enter/toggle/etc).
@@ -279,7 +279,7 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                     // a second Enter while the write is in flight instead of
                     // racing it with a stale intent.
                     m.ui.plugins_loading = true;
-                    return cmdf::edit_plugin(edit_target(row), PluginEdited{
+                    return cmdf::edit_plugin(edit_target(row, m), PluginEdited{
                         .kind   = PluginEdited::Kind::SetServerDisabled,
                         .from   = PluginEdited::From::SettingsList,
                         .server = row.arg,
@@ -309,7 +309,7 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                     // happen on the worker (cmd::edit_plugin); PluginEdited
                     // brings the result back.
                     m.ui.plugins_loading = true;
-                    return cmdf::edit_plugin(edit_target(row), PluginEdited{
+                    return cmdf::edit_plugin(edit_target(row, m), PluginEdited{
                         .kind   = PluginEdited::Kind::SetToolEnabled,
                         .from   = PluginEdited::From::SettingsList,
                         .server = row.arg,
@@ -327,7 +327,7 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                     if (m.ui.plugins_loading)
                         return Cmd::none();
                     m.ui.plugins_loading = true;
-                    return cmdf::edit_plugin(edit_target(row), PluginEdited{
+                    return cmdf::edit_plugin(edit_target(row, m), PluginEdited{
                         .kind   = PluginEdited::Kind::Approve,
                         .from   = PluginEdited::From::SettingsList,
                         .server = row.arg,
@@ -377,7 +377,7 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
             o->confirm_remove.clear();
 
             m.ui.plugins_loading = true;
-            return cmdf::edit_plugin(edit_target(row), PluginEdited{
+            return cmdf::edit_plugin(edit_target(row, m), PluginEdited{
                 .kind   = PluginEdited::Kind::Remove,
                 .from   = PluginEdited::From::SettingsList,
                 .server = row.arg,

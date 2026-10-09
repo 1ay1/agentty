@@ -61,7 +61,12 @@ set(ban_tty         "platform::(query_terminal_size|stdout_handle|stdin_handle)|
 # found only by reading them. A name lint can't see through a call, so the
 # known ones are named here.
 set(ban_diskhelper  "(add_plugin_from_line|create_starter)[ \t]*\\(")
-set(ban_names clock env fileio subprocess net global auth static thread tty diskhelper)
+# disk_lookup: helpers that walk the disk or a secure store to answer a
+# lookup. Reducers read the answer from the Model instead: m.ui.library
+# (skills, approvals, commands, hooks), m.ui.git_repo, m.env (embed
+# defaults, user root). A worker that needs them gets them in a cmd::.
+set(ban_disk_lookup "(skills|commands)::(all|find|shadowed|shadowed_within_scope|load_approvals)[ \t]*\\(|skills::trust_of[ \t]*\\([^,)]*\\)|commands::try_expand[ \t]*\\([^,)]*\\)|hooks::(active_file|pending_approval)[ \t]*\\(|workspace::in_git_repo(_if_ready)?[ \t]*\\(|eb::apply_env[ \t]*\\(|skills_panel::scan[ \t]*\\([ \t]*\\)|take_unproven_spec[ \t]*\\(|config_path[ \t]*\\([^,)]*\\)[^,]|util::(user_root|home_dir)[ \t]*\\(")
+set(ban_names clock env fileio subprocess net global auth static thread tty diskhelper disk_lookup)
 
 # Parse the allowlist: `path: name name ...`, `#` comments.
 file(STRINGS ${ALLOW} allow_lines)

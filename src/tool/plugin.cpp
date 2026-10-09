@@ -151,9 +151,12 @@ struct Loaded {
 } // namespace
 
 fs::path config_path(bool project) {
+    return config_path(project, project ? fs::path{} : ::agentty::util::user_root());
+}
+
+fs::path config_path(bool project, const fs::path& user_root) {
     if (project) return fs::path{".agentty"} / "mcp.json";
-    auto root = ::agentty::util::user_root();
-    return (root.empty() ? fs::path{".agentty"} : root) / "mcp.json";
+    return (user_root.empty() ? fs::path{".agentty"} : user_root) / "mcp.json";
 }
 
 namespace {

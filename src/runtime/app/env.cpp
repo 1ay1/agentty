@@ -15,7 +15,9 @@
 #include <maya/terminal/ansi.hpp>
 
 #include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
 #include "agentty/util/update.hpp"   // self_update_possible
+#include "agentty/rag/embed_backend.hpp"   // apply_env
 #include "agentty/runtime/view/helpers.hpp"      // max_context_tokens_from_env
 #include "agentty/runtime/view/host_escape.hpp"  // detect_integration
 
@@ -103,6 +105,8 @@ Model::Env read_launch_env() noexcept {
     // its directory at all.
     if (!e.no_auto_update)
         e.self_update_ok = update::self_update_possible(e.self_update_reason);
+    rag::embed::apply_env(e.embed_defaults);
+    e.user_root = util::user_root().string();
     return e;
 }
 

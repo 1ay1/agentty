@@ -34,6 +34,7 @@
 #include "agentty/store/store.hpp"          // store::Settings (the persisted record)
 #include "agentty/domain/auth_view.hpp"     // auth::AuthView
 #include "agentty/runtime/library.hpp"      // Library: what is installed on disk
+#include "agentty/rag/embed_backend.hpp"    // Env::embed_defaults
 
 namespace agentty {
 
@@ -866,6 +867,12 @@ struct Model {
         // util/ helper. Neither answer can change while we run.
         bool        self_update_ok     = false;
         std::string self_update_reason;   // why not, when !self_update_ok
+        // The embedder config the AGENTTY_EMBED_* / AGENTTY_OLLAMA_HOST vars
+        // describe, layered on the defaults. The RAG pane starts from this.
+        rag::embed::EmbedConfig embed_defaults;
+        // agentty's per-user root (~/.agentty, or $AGENTTY_HOME), resolved
+        // once. Paths the reducers name (the user mcp.json) derive from it.
+        std::string user_root;
 
         // Where paths are shown relative to: the launch cwd ("src/x.cpp")
         // and the home dir ("~/notes"). Captured once so a tool card names a

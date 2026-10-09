@@ -71,12 +71,12 @@ void write_embed_into(store::RagConfig& r, const eb::EmbedConfig& c) {
     r.embed_dim            = c.dim;
 }
 
-// Load the live embed config for the form's initial state.
-// Takes the settings record; see model_for_provider in internal.hpp for why
-// a reducer helper should never re-read the seam.
-[[nodiscard]] eb::EmbedConfig current_embed_config(const store::Settings& s) {
-    eb::EmbedConfig c;
-    eb::apply_env(c);
+// The embed config for the form's initial state: the launch env's defaults
+// under the persisted record. The API key is not here; it is read from the
+// secure store by an effect after the pane opens (RagEmbedKeyLoaded).
+[[nodiscard]] eb::EmbedConfig current_embed_config(const Model::Env& env,
+                                                   const store::Settings& s) {
+    eb::EmbedConfig c = env.embed_defaults;
     if (!s.rag.embed_backend.empty()) {
         c.backend = eb::backend_from_id(s.rag.embed_backend);
         if (!s.rag.embed_model.empty()) c.model = s.rag.embed_model;
@@ -88,8 +88,6 @@ void write_embed_into(store::RagConfig& r, const eb::EmbedConfig& c) {
         c.tokenizer_path = s.rag.embed_tokenizer_path;
         c.dim            = s.rag.embed_dim;
     }
-    if (eb::needs_api_key(c.backend))
-        c.api_key = eb::load_key(eb::endpoint_key(c));
     return c;
 }
 
@@ -178,11 +176,12 @@ void refresh_status(rs::EmbedForm& f) {
 // Build the pane's form for `mode`, seeded with what the live retriever
 // already knows so opening it immediately shows whether embeddings work
 // rather than an empty "untested" state.
-[[nodiscard]] rs::EmbedForm make_embed_form(const store::Settings& settings,
+[[nodiscard]] rs::EmbedForm make_embed_form(const Model::Env& env,
+                                            const store::Settings& settings,
                                             store::RagMode mode,
                                             bool advanced = false) {
     rs::EmbedForm f;
-    f.cfg  = current_embed_config(settings);
+    f.cfg  = current_embed_config(env, settings);
     f.form = rs::build_form(f.cfg, mode, settings, advanced);
     const auto st = tools::rag_embed_status();
     using S = tools::RagEmbedStatus::State;
@@ -218,8 +217,16 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             const auto& st = m.d.persisted;
             const auto mode = st.rag.configured ? st.rag.mode : store::RagMode::On;
             m.ui.panel.descend(
-                pn::Rag{{mode, mode, make_embed_form(m.d.persisted, mode)}});
-            return Cmd::none();
+                pn::Rag{{mode, mode, make_embed_form(m.env, m.d.persisted, mode)}});
+            // The key lives in the secure store, which may mean spawning
+            // secret-tool: read it on a worker.
+            const auto& cfg = m.ui.panel.get<pn::Rag>()->embed.cfg;
+            if (!eb::needs_api_key(cfg.backend)) return Cmd::none();
+            return Cmd::task_isolated(
+                [](maya::Sink<Msg> out, std::stop_token, std::string slot) {
+                    std::string key = eb::load_key(slot);
+                    out.send(Msg{RagEmbedKeyLoaded{std::move(slot), std::move(key)}});
+                }, eb::endpoint_key(cfg));
         },
         [&](CloseRag) -> Cmd {
             // Esc unwinds ONE level: the parent snapshot (palette or settings
@@ -392,12 +399,15 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             }
 
             // The credential goes to the keystore (or a sealed file), keyed by
-            // endpoint — never into settings.json.
-            std::string note;
+            // endpoint — never into settings.json. Written on a worker; a
+            // failure comes back as RagEmbedKeySaved{false}.
+            Cmd store_key = Cmd::none();
             if (eb::needs_api_key(f->cfg.backend)) {
-                const auto slot = eb::endpoint_key(f->cfg);
-                if (!eb::store_key(slot, f->cfg.api_key) && !f->cfg.api_key.empty())
-                    note = " (key not saved: no secure store)";
+                store_key = Cmd::task_isolated(
+                    [](maya::Sink<Msg> out, std::stop_token, std::string slot, std::string key) {
+                        const bool ok = eb::store_key(slot, key) || key.empty();
+                        out.send(Msg{RagEmbedKeySaved{ok}});
+                    }, eb::endpoint_key(f->cfg), f->cfg.api_key);
             }
 
             // Edit the record the Model holds, then save it. The read this
@@ -415,9 +425,31 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             const std::string label = eb::describe(f->cfg);
             return Cmd::batch(
                 std::move(save),
+                std::move(store_key),
                 cmd::apply_rag_settings(m.d.persisted.rag),
-                set_status_toast(m, "Embeddings: " + label + note,
+                set_status_toast(m, "Embeddings: " + label,
                                  std::chrono::seconds{4}));
+        },
+        [&](RagEmbedKeyLoaded& e) -> Cmd {
+            // Only if the pane is still on the endpoint the key was read for
+            // and the user has not edited it meanwhile. A stored key wins
+            // over the env's, as it always has.
+            auto* f = form_of(m);
+            if (!f || f->form.dirty || e.key.empty() || eb::endpoint_key(f->cfg) != e.endpoint)
+                return Cmd::none();
+            f->cfg.api_key = std::move(e.key);
+            auto* o = m.ui.panel.get<pn::Rag>();
+            const int cursor = f->form.cursor;
+            f->form = rs::build_form(f->cfg, o ? o->cursor : store::RagMode::On,
+                                     m.d.persisted, o && o->advanced);
+            f->form.cursor = cursor;
+            refresh_status(*f);
+            return Cmd::none();
+        },
+        [&](RagEmbedKeySaved& e) -> Cmd {
+            if (e.ok) return Cmd::none();
+            return set_status_toast(m, "Embeddings: key not saved (no secure store)",
+                                    std::chrono::seconds{4});
         },
     }, rm);
 }

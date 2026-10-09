@@ -139,6 +139,8 @@ disabled_tools(const std::filesystem::path& path, const std::string& server);
 // The config path for a scope. user → ~/.agentty/mcp.json,
 // project → ./.agentty/mcp.json.
 [[nodiscard]] std::filesystem::path config_path(bool project);
+// The same, given the user root the caller already resolved. Pure.
+[[nodiscard]] std::filesystem::path config_path(bool project, const std::filesystem::path& user_root);
 
 // ── Project-config trust (the RCE gate) ─────────────────────────────────
 // A workspace-local ./.agentty/mcp.json can ride in on a clone and spawn

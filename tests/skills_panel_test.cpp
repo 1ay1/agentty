@@ -134,7 +134,9 @@ int main() {
     }
 
     // ── Open / move / close through the real reducer ────────────────────
-    Model m;
+    // The host delivers the on-disk library as LibraryLoaded; do the same.
+    Model m0;
+    auto [m, _c0] = app::update(std::move(m0), Msg{LibraryLoaded{agentty::read_library()}});
     auto [opened, _c1] = app::update(std::move(m), Msg{OpenSkills{}});
     const auto* open_pane = opened.ui.panel.get<pn::Skills>();
     check(open_pane != nullptr, "OpenSkills descends into the panel");

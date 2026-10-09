@@ -71,7 +71,7 @@ using pf::kNoteRemoveArmed;
         in.error     = s.error;
         in.scope_label = std::string{mcp::to_string(s.origin)};
         in.config_file = s.config_dir.empty()
-            ? tools::plugin::config_path(false).string()
+            ? tools::plugin::config_path(false, m.env.user_root).string()
             : (fs::path{s.config_dir} / "mcp.json").string();
         in.untrusted = s.untrusted;
         for (const auto& t : s.tools)
@@ -175,11 +175,11 @@ void rebuild_add_form(pn::PluginEdit& o, const std::string& kind) {
 
 [[nodiscard]] fs::path config_target(const pn::PluginEdit& o, const Model& m) {
     if (o.server.empty())
-        return tools::plugin::config_path(toggle_of(o.form, pf::kScopeProject));
+        return tools::plugin::config_path(toggle_of(o.form, pf::kScopeProject), m.env.user_root);
     for (const auto& s : m.ui.plugins.servers)
         if (s.name == o.server && !s.config_dir.empty())
             return fs::path{s.config_dir} / "mcp.json";
-    return tools::plugin::config_path(false);
+    return tools::plugin::config_path(false, m.env.user_root);
 }
 
 } // namespace

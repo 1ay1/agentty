@@ -1007,6 +1007,10 @@ struct RagEmbedTestDone {
     std::uint64_t gen = 0;
 };
 struct RagEmbedSave  {};                    // persist + live-apply
+// The stored API key for the pane's endpoint, read on a worker after open.
+struct RagEmbedKeyLoaded { std::string endpoint; std::string key; };
+// The key write the save asked for; false when there was no secure store.
+struct RagEmbedKeySaved  { bool ok = true; };
 
 // ── Settings pickers (Ctrl+K → Plugins/Commands/Agents/Hooks) ──────
 // One shared list modal, parameterised by the config concern. Opening
@@ -1335,7 +1339,8 @@ using CheckpointMsg = std::variant<
 using RagMsg = std::variant<
     OpenRag, CloseRag, RagAdvanced,
     RagEmbedClose, RagEmbedKey, RagEmbedPaste,
-    RagEmbedTest, RagEmbedTestDone, RagEmbedSave>;
+    RagEmbedTest, RagEmbedTestDone, RagEmbedSave,
+    RagEmbedKeyLoaded, RagEmbedKeySaved>;
 
 // Its own domain, not a corner of RagMsg: the stats viewer shares no state
 // and no reducer with retrieval, and folding unrelated panels into one
