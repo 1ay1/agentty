@@ -177,15 +177,12 @@ class JaalSession final : public mt::Session {
         // Wait for something to report rather than returning empty
         // immediately: a caller that polls in a loop should not spin, and one
         // that asks for 5s of news should get 5s of news.
-        const auto deadline = clock_t_::now() + wait;
-        while (st_.read([](const Shared& s) { return s.pending.empty() && s.alive; })
-               && clock_t_::now() < deadline)
-            std::this_thread::sleep_for(std::chrono::milliseconds{20});
-
-        // One exclusive section that both drains and decides. Returning a
-        // struct by value is the only way out -- nothing can hand back a
-        // reference into the guarded state.
-        auto u = st_.with([](Shared& s) {
+        // Wakes the instant the pump writes news or the child ends. One
+        // exclusive section that both drains and decides; returning a struct
+        // by value is the only way out of the guarded state.
+        auto [u, news] = st_.wait_with_for(wait,
+            [](const Shared& s) { return !s.pending.empty() || !s.alive; },
+            [](Shared& s) {
             Update u;
             u.output    = std::exchange(s.pending, {});
             u.truncated = std::exchange(s.truncated, false);
@@ -196,6 +193,7 @@ class JaalSession final : public mt::Session {
             }
             return u;
         });
+        (void)news;
         u.uptime = std::chrono::duration_cast<std::chrono::seconds>(clock_t_::now() - started_);
         return u;
     }
@@ -203,8 +201,8 @@ class JaalSession final : public mt::Session {
     void stop() override {
         if (!st_.read([](const Shared& s) { return s.alive; })) return;
         (void)proc_.stop(pf::stop_mode::graceful, pf::stop_scope::tree);
-        stop_at_ = clock_t_::now() + std::chrono::seconds{2};
-        st_.with([](Shared& s) { s.stopping = true; });
+        st_.with([](Shared& s, clock_t_::time_point at) { s.stopping = true; s.stop_at = at; },
+                 clock_t_::now() + std::chrono::seconds{2});
     }
 
   private:
@@ -240,8 +238,9 @@ class JaalSession final : public mt::Session {
                     exited = true;
                 }
             }
-            if (st_.read([](const Shared& s) { return s.stopping; }) && !exited
-                && clock_t_::now() >= stop_at_) {
+            if (!exited && st_.read([](const Shared& s, clock_t_::time_point now) {
+                    return s.stopping && now >= s.stop_at;
+                }, clock_t_::now())) {
                 (void)proc_.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
             }
             if (exited) break;
@@ -280,6 +279,7 @@ class JaalSession final : public mt::Session {
         bool            reported  = false;
         bool            alive     = true;
         bool            stopping  = false;
+        clock_t_::time_point stop_at{};   // SIGKILL after this, once stopping
         mt::ExecOutcome outcome   = mt::Exited{0};
     };
 
@@ -287,7 +287,6 @@ class JaalSession final : public mt::Session {
     std::size_t          cap_;
     clock_t_::time_point started_;
     maya::guarded<Shared> st_;
-    clock_t_::time_point stop_at_{};
     // Last member: destroyed (joined) first, before anything the pump uses.
     ::agentty::util::WorkerGroup drain_{"exec.session.drain"};
 };

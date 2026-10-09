@@ -1157,7 +1157,7 @@ int cmd_login() {
                           << "\n\nWaiting for approval\xE2\x80\xA6\n" << std::flush;
                 open_browser(dc.verification_uri);
             },
-            /*cancelled=*/{});
+            /*cancelled=*/std::stop_token{});
         if (!r) {
             std::cerr << "GitHub Copilot sign-in failed: " << r.error().render() << "\n";
             return 1;

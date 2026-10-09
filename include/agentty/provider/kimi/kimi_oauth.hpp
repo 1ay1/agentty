@@ -23,6 +23,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <stop_token>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -58,7 +59,8 @@ struct DeviceCode {
     int         expires_in = 900;
 };
 using DeviceCodeSink = std::function<void(const DeviceCode&)>;
-using CancelProbe    = std::function<bool()>;
+// Login stops when this is requested (Esc, a newer attempt, shutdown).
+using CancelProbe    = std::stop_token;
 
 // ── Device-flow login ─────────────────────────────────────────────────────
 // Requests a device code (delivered to `on_device_code` so the modal can show

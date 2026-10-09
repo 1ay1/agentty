@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <stop_token>
 #include <optional>
 #include <string>
 
@@ -58,7 +59,8 @@ struct CodexDeviceCode {
 };
 
 using CodexDeviceCodeSink = std::function<void(const CodexDeviceCode&)>;
-using CodexCancelProbe = std::function<bool()>;
+// Login stops when this is requested (Esc, a newer attempt, shutdown).
+using CodexCancelProbe = std::stop_token;
 
 // True when the environment requests device auth explicitly or identifies an
 // SSH session. AGENTTY_CHATGPT_DEVICE_AUTH=0/1 is an override for unusual

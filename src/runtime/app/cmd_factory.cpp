@@ -2798,7 +2798,7 @@ Sub device_login_sub(std::string provider, std::string provider_label,
         "login/device/" + provider + "/" + std::to_string(attempt_id),
         [](maya::Sink<Msg> out, std::stop_token stop, std::string provider,
            std::string provider_label, std::uint64_t attempt_id) {
-        const auto cancelled = [&stop] { return stop.stop_requested(); };
+        const std::stop_token cancelled = stop;
         auto emit_code = [&](std::string bare_url, std::string browser_url,
                              std::string user_code) {
             out.send(Msg{DeviceCodeReady{
@@ -2873,7 +2873,7 @@ Sub codex_login_sub(std::uint64_t attempt_id) {
     return Sub::stream(
         "login/codex/" + std::to_string(attempt_id),
         [](maya::Sink<Msg> out, std::stop_token stop, std::uint64_t attempt_id) {
-        const auto cancelled = [&stop] { return stop.stop_requested(); };
+        const std::stop_token cancelled = stop;
         try {
             auto r = provider::chatgpt::codex_login(
                 900, [attempt_id, out](

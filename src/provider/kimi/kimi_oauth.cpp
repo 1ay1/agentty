@@ -345,13 +345,11 @@ poll_for_token(const std::string& device_code, int interval_s, int timeout_s,
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
     int interval = interval_s > 0 ? interval_s : 5;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (cancelled && cancelled())
+        if (cancelled.stop_requested())
             return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
-        for (int slept = 0; slept < interval; ++slept) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (cancelled && cancelled())
-                return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
-        }
+        // The server's interval, cut short the moment the login is cancelled.
+        if (maya::delay_for(cancelled, std::chrono::seconds(interval)))
+            return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
         auto r = post_form(kTokenPath,
             form_encode({{"grant_type", "urn:ietf:params:oauth:grant-type:device_code"},
                          {"client_id", kClientId},
@@ -465,7 +463,7 @@ parse_token_response(std::string_view json_body, std::int64_t now_ms) {
 
 std::expected<KimiToken, OAuthError>
 login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled) {
-    if (cancelled && cancelled())
+    if (cancelled.stop_requested())
         return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
 
     std::string device_code;

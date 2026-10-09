@@ -312,6 +312,11 @@ namespace cancellation {
     // which case polling it is still the only option.
     [[nodiscard]] std::vector<std::stop_token> tokens();
 
+    // Wait up to `d`, waking the instant any of the scope's tokens (or
+    // `also`) stops. True when cancelled. A scope built from a bare probe
+    // has no token to wait on, so it is checked once at the end.
+    [[nodiscard]] bool wait(std::chrono::milliseconds d, std::stop_token also = {});
+
     struct Scope {
         explicit Scope(Probe probe) { set(std::move(probe)); }
         // Preferred: cancellation is "any of these tokens". The probe is

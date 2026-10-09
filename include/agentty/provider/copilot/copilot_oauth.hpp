@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <expected>
 #include <functional>
+#include <stop_token>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -85,7 +86,8 @@ struct DeviceCode {
     int         expires_in = 900;
 };
 using DeviceCodeSink = std::function<void(const DeviceCode&)>;
-using CancelProbe    = std::function<bool()>;
+// Login stops when this is requested (Esc, a newer attempt, shutdown).
+using CancelProbe    = std::stop_token;
 
 // Run the full device flow: request a code, invoke `on_device_code` so the host
 // can display it (+ open the browser), then poll until the user authorises.

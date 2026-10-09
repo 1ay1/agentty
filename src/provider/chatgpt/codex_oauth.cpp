@@ -262,16 +262,13 @@ poll_device_authorization(const DeviceAuthorization& device, int timeout_s,
     using clock = std::chrono::steady_clock;
     const auto timeout = std::chrono::seconds{std::max(timeout_s, 1)};
     const auto deadline = clock::now() + timeout;
-    const auto was_cancelled = [&] { return cancelled && cancelled(); };
+    const auto was_cancelled = [&] { return cancelled.stop_requested(); };
+    // The server's interval (or what is left of the deadline), cut short the
+    // moment the login is cancelled.
     const auto wait_for_next_poll = [&] {
-        const auto wake = std::min(deadline, clock::now()
-            + std::chrono::seconds{device.interval_s});
-        while (clock::now() < wake && !was_cancelled()) {
-            std::this_thread::sleep_for(std::min(
-                std::chrono::milliseconds{100},
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    wake - clock::now())));
-        }
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - clock::now());
+        (void)maya::delay_for(cancelled,
+            std::min<std::chrono::milliseconds>(std::chrono::seconds{device.interval_s}, left));
     };
 
     while (clock::now() < deadline) {
@@ -378,8 +375,21 @@ std::string query_param(std::string_view target, std::string_view key) {
     return {};
 }
 
-CallbackResult wait_for_callback(int timeout_s,
-                                 const CodexCancelProbe& cancelled) {
+// The sockets a cancel should shut down, so a blocked select() wakes at once.
+// -1 = none. Read by the cancel callback, written by the waiting thread.
+struct WakeFds { std::intptr_t srv = -1; std::intptr_t cli = -1; };
+
+void shut_read(std::intptr_t fd) noexcept {
+    if (fd < 0) return;
+#if defined(_WIN32)
+    ::shutdown(static_cast<SOCKET>(fd), SD_RECEIVE);
+#else
+    ::shutdown(static_cast<int>(fd), SHUT_RD);
+#endif
+}
+
+CallbackResult wait_for_callback_impl(int timeout_s, const CodexCancelProbe& cancelled,
+                                      maya::guarded<WakeFds>& wake) {
     CallbackResult out;
 #if defined(_WIN32)
     WSADATA wsa;
@@ -414,35 +424,55 @@ CallbackResult wait_for_callback(int timeout_s,
     }
     if (::listen(srv, 1) != 0) { close_sock(srv); out.error = "listen failed"; return out; }
 
-    // Poll accept with a deadline so a user who abandons the browser doesn't
-    // hang the process forever.
+    // Wait for the browser up to the deadline. A cancel shuts the sockets
+    // down, which wakes select() at once, so the waits can run to the deadline
+    // instead of waking every second to check.
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::seconds(timeout_s);
+    const auto arm = [&wake](sock_t a, sock_t b) {
+        wake.with([](WakeFds& w, std::intptr_t x, std::intptr_t y) { w = {x, y}; },
+                  static_cast<std::intptr_t>(a), static_cast<std::intptr_t>(b));
+    };
+    const auto disarm = [&wake] { wake.with([](WakeFds& w) { w = {}; }); };
+    arm(srv, kInvalid);
+    // A cancel that landed before arming would otherwise be missed.
+    if (cancelled.stop_requested()) shut_read(static_cast<std::intptr_t>(srv));
+    const auto until_deadline = [&] {
+        const auto left = std::chrono::duration_cast<std::chrono::microseconds>(
+            deadline - std::chrono::steady_clock::now());
+        timeval tv{};
+        if (left.count() > 0) {
+            tv.tv_sec  = static_cast<decltype(tv.tv_sec)>(left.count() / 1'000'000);
+            tv.tv_usec = static_cast<decltype(tv.tv_usec)>(left.count() % 1'000'000);
+        }
+        return tv;
+    };
     for (;;) {
-        const bool cancel = cancelled && cancelled();
+        const bool cancel = cancelled.stop_requested();
         if (cancel || std::chrono::steady_clock::now() >= deadline) {
-            close_sock(srv);
+            disarm(); close_sock(srv);
             out.error = cancel ? "login cancelled" : "login timed out";
             return out;
         }
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(srv, &rfds);
-        timeval tv{1, 0};   // 1s slices so cancel/timeout stay responsive
+        timeval tv = until_deadline();
         const int ready = ::select(static_cast<int>(srv + 1), &rfds, nullptr, nullptr, &tv);
         if (ready <= 0) continue;
 
         sock_t cli = ::accept(srv, nullptr, nullptr);
         if (cli == kInvalid) continue;
+        arm(srv, cli);
 
         // Read through short select() slices so a local peer that connects and
         // stalls cannot pin port 1455 or defeat cancellation/the deadline.
         std::string req;
         char buf[4096];
         while (req.size() <= 16384) {
-            const bool read_cancel = cancelled && cancelled();
+            const bool read_cancel = cancelled.stop_requested();
             if (read_cancel || std::chrono::steady_clock::now() >= deadline) {
-                close_sock(cli);
+                disarm(); close_sock(cli);
                 close_sock(srv);
                 out.error = read_cancel ? "login cancelled" : "login timed out";
                 return out;
@@ -450,7 +480,7 @@ CallbackResult wait_for_callback(int timeout_s,
             fd_set cli_rfds;
             FD_ZERO(&cli_rfds);
             FD_SET(cli, &cli_rfds);
-            timeval cli_tv{1, 0};
+            timeval cli_tv = until_deadline();
             const int readable = ::select(static_cast<int>(cli + 1), &cli_rfds,
                                           nullptr, nullptr, &cli_tv);
             if (readable < 0) break;
@@ -489,12 +519,22 @@ CallbackResult wait_for_callback(int timeout_s,
                            "Content-Length: " + std::to_string(page.size())
                          + "\r\nConnection: close\r\n\r\n" + page;
         (void)::send(cli, resp.data(), static_cast<int>(resp.size()), 0);
-        close_sock(cli);
+        disarm(); close_sock(cli);
         close_sock(srv);
         if (!ok) out.error = err.empty() ? "no authorization code in callback"
                                          : ("authorization denied: " + err);
         return out;
     }
+}
+
+CallbackResult wait_for_callback(int timeout_s, const CodexCancelProbe& cancelled) {
+    maya::guarded<WakeFds> wake;
+    std::stop_callback on_cancel(cancelled, [&wake] {
+        // Shut down under the lock, so the waiter cannot close the fd (and the
+        // number be reused) between our read of it and the shutdown.
+        wake.with([](WakeFds& w) { shut_read(w.srv); shut_read(w.cli); });
+    });
+    return wait_for_callback_impl(timeout_s, cancelled, wake);
 }
 
 // ── Credential (de)serialization ───────────────────────────────────────────
@@ -687,7 +727,7 @@ bool codex_device_auth_preferred() noexcept {
 std::expected<CodexCredentials, OAuthError>
 codex_device_login(CodexDeviceCodeSink on_device_code, int timeout_s,
                    CodexCancelProbe cancelled) {
-    if (cancelled && cancelled()) {
+    if (cancelled.stop_requested()) {
         return std::unexpected(OAuthError{OAuthErrorKind::Network,
             "device-code login cancelled"});
     }
@@ -703,7 +743,7 @@ codex_device_login(CodexDeviceCodeSink on_device_code, int timeout_s,
 
     auto grant = poll_device_authorization(*device, timeout_s, cancelled);
     if (!grant) return std::unexpected(grant.error());
-    if (cancelled && cancelled()) {
+    if (cancelled.stop_requested()) {
         return std::unexpected(OAuthError{OAuthErrorKind::Network,
             "device-code login cancelled"});
     }
@@ -754,7 +794,7 @@ codex_login(int timeout_s, CodexDeviceCodeSink on_device_code,
         return std::unexpected(OAuthError{OAuthErrorKind::BadResponse,
             "state mismatch — re-run login"});
 
-    if (cancelled && cancelled()) {
+    if (cancelled.stop_requested()) {
         return std::unexpected(OAuthError{OAuthErrorKind::Network,
             "login cancelled"});
     }

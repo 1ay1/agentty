@@ -14,9 +14,13 @@
 
 #include "agentty/tool/registry.hpp"
 
+#include <functional>
+#include <memory>
 #include <stop_token>
 #include <utility>
 #include <vector>
+
+#include <maya/runtime.hpp>
 
 namespace agentty::tools {
 namespace progress {
@@ -47,6 +51,18 @@ void clear() { g_probe = nullptr; g_tokens.clear(); }
 Probe current() { return g_probe; }
 bool requested() { return g_probe && g_probe(); }
 std::vector<std::stop_token> tokens() { return g_tokens; }
+
+bool wait(std::chrono::milliseconds d, std::stop_token also) {
+    // One source that any of them can trip, so a single delay_for covers all.
+    std::stop_source merged;
+    using Cb = std::stop_callback<std::function<void()>>;
+    std::vector<std::unique_ptr<Cb>> cbs;
+    const std::function<void()> trip = [&merged] { merged.request_stop(); };
+    for (const auto& t : g_tokens) cbs.push_back(std::make_unique<Cb>(t, trip));
+    if (also.stop_possible()) cbs.push_back(std::make_unique<Cb>(also, trip));
+    if (maya::delay_for(merged.get_token(), d)) return true;
+    return requested();
+}
 
 Scope::Scope(std::vector<std::stop_token> toks) {
     // The probe is DERIVED from the tokens, so a poller and a subscriber can

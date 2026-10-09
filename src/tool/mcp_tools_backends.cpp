@@ -1725,13 +1725,9 @@ public:
                      + "/" + std::to_string(kMaxStreamRetries)
                      + " in " + std::to_string(wait.count()) + "ms (" + err + ")";
                 progress::emit(log);
-                const auto retry_until = std::chrono::steady_clock::now() + wait;
-                while (std::chrono::steady_clock::now() < retry_until) {
-                    if (cancellation::requested()) {
-                        is_error = true;
-                        return "subagent cancelled while waiting to retry: " + err;
-                    }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                if (cancellation::wait(wait, run_reg.token())) {
+                    is_error = true;
+                    return "subagent cancelled while waiting to retry: " + err;
                 }
                 --turns;
                 continue;

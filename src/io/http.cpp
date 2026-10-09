@@ -2820,13 +2820,9 @@ static bool backoff_sleep(int attempt, const CancelTokenPtr& cancel) {
                  std::chrono::steady_clock::now().time_since_epoch().count());
     }()};
     std::uniform_int_distribution<long> dist(0, ceiling);
-    auto budget = std::chrono::milliseconds(dist(rng));
-    auto end = clock_t_::now() + budget;
-    while (clock_t_::now() < end) {
-        if (is_cancelled(cancel)) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return true;
+    const auto budget = std::chrono::milliseconds(dist(rng));
+    // Wakes the instant the request is cancelled; no token means a plain wait.
+    return !maya::delay_for(cancel ? cancel->token() : std::stop_token{}, budget);
 }
 
 HttpResult

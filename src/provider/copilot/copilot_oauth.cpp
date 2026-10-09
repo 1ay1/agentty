@@ -255,13 +255,11 @@ poll_for_token(const std::string& device_code, int interval_s, int timeout_s,
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
     int interval = interval_s > 0 ? interval_s : 5;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (cancelled && cancelled())
+        if (cancelled.stop_requested())
             return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
-        for (int slept = 0; slept < interval; ++slept) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (cancelled && cancelled())
-                return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
-        }
+        // The server's interval, cut short the moment the login is cancelled.
+        if (maya::delay_for(cancelled, std::chrono::seconds(interval)))
+            return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
         auto r = request(http::HttpMethod::Post, kGithubHost, kTokenPath,
             {{"content-type", "application/x-www-form-urlencoded"}},
             form_encode({{"client_id", kClientId},
@@ -511,7 +509,7 @@ bool is_supported_model(const std::string& model_id) {
 
 std::expected<GithubToken, OAuthError>
 login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled) {
-    if (cancelled && cancelled())
+    if (cancelled.stop_requested())
         return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
 
     std::string device_code;
