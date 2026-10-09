@@ -107,7 +107,6 @@ set(AGENTTY_PROVIDER_SOURCES
 # The wire protocol/engine/transport live in the acp-cpp submodule (linked
 # as acp::acp); server.cpp is the agentty-specific glue (turn loop + tools).
 set(AGENTTY_ACP_SOURCES
-    src/rpc/peer.cpp
     src/acp/server.cpp
     src/provider/external_acp_backend.cpp
     src/provider/acp_provider_adapter.cpp
@@ -117,6 +116,9 @@ set(AGENTTY_ACP_SOURCES
 # exposes their tools as agentty ToolDefs. The heavy mcp-cpp templates are
 # confined to these TUs (linked as mcp::mcp). Only compiled when AGENTTY_MCP.
 set(AGENTTY_MCP_SOURCES
+    # The JSON-RPC peer both MCP and ACP run on. Here, in the objects every
+    # binary links, because MCP connections use it.
+    src/rpc/peer.cpp
     src/mcp/bridge.cpp
     # Adopting another tool's servers, rather than growing a sixth read root
     # for each one. See include/agentty/mcp/import.hpp for the argument.

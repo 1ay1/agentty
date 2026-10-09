@@ -66,10 +66,6 @@ sc::Config read_saved_sandbox() {
     }
     const auto& b = j["sandbox"];
     c.configured = b.value("configured", true);
-    c.backend = b.value("backend", static_cast<int>(c.backend))
-                        == static_cast<int>(sc::LinuxBackend::Claybin)
-                    ? sc::LinuxBackend::Claybin
-                    : sc::LinuxBackend::Bwrap;
     c.fs_scope = static_cast<sc::FsScope>(
         b.value("fs_scope", static_cast<int>(c.fs_scope)));
     c.net_mode = static_cast<sc::NetMode>(
@@ -98,8 +94,6 @@ int main(int argc, char** argv) {
     const auto saved = read_saved_sandbox();
     std::printf("SAVED policy (~/.agentty/settings.json)\n");
     std::printf("  configured     %s\n", saved.configured ? "true" : "false");
-    std::printf("  backend        %s\n",
-                saved.backend == sc::LinuxBackend::Claybin ? "claybin" : "bwrap");
     std::printf("  fs_scope       %s\n", scope_name(saved.fs_scope));
     std::printf("  net_mode       %s\n", net_name(saved.net_mode));
     std::printf("  memory_mb      %d\n", saved.memory_mb);
@@ -114,8 +108,6 @@ int main(int argc, char** argv) {
 
     const auto live = sb::config();
     std::printf("\nLIVE policy (sandbox::config() after set_config + init)\n");
-    std::printf("  backend        %s\n",
-                live.backend == sc::LinuxBackend::Claybin ? "claybin" : "bwrap");
     std::printf("  net_mode       %s\n", net_name(live.net_mode));
     std::printf("  memory_mb      %d\n", live.memory_mb);
     std::printf("  state          %s\n", sb::describe_state().c_str());
@@ -124,8 +116,7 @@ int main(int argc, char** argv) {
 
     const bool match = live.net_mode == saved.net_mode
                     && live.memory_mb == saved.memory_mb
-                    && live.max_procs == saved.max_procs
-                    && live.backend == saved.backend;
+                    && live.max_procs == saved.max_procs;
     std::printf("\n  saved == live  %s\n", match ? "YES" : "NO  <-- the bug");
 
     // ── 3. does the LIVE policy actually shape a real command? ──────────

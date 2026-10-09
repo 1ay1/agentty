@@ -203,6 +203,7 @@ add_executable(sandbox_live_check EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/src/tool/util/handoff_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/exec.cpp   # run_child: subprocess.cpp spawns through it
     ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
     ${CMAKE_SOURCE_DIR}/src/util/logx.cpp
     ${CMAKE_SOURCE_DIR}/src/util/dbglog.cpp
@@ -212,7 +213,10 @@ add_executable(sandbox_live_check EXCLUDE_FROM_ALL
 target_include_directories(sandbox_live_check PRIVATE
     ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(sandbox_live_check PRIVATE
-    claybin nlohmann_json::nlohmann_json Threads::Threads)
+    claybin nlohmann_json::nlohmann_json Threads::Threads maya::app)
+if(TARGET mcp::tools)
+    target_link_libraries(sandbox_live_check PRIVATE mcp::tools)   # exec.cpp implements mcp-cpp's Exec
+endif()
 if(TARGET maya::app)
     target_include_directories(sandbox_live_check SYSTEM PRIVATE
         $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -239,6 +243,7 @@ add_executable(ws_bind_probe EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/src/tool/util/handoff_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/exec.cpp   # run_child: subprocess.cpp spawns through it
     ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
     ${CMAKE_SOURCE_DIR}/src/util/logx.cpp
     ${CMAKE_SOURCE_DIR}/src/util/dbglog.cpp
@@ -247,7 +252,10 @@ add_executable(ws_bind_probe EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/src/util/teardown.cpp)
 target_include_directories(ws_bind_probe PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(ws_bind_probe PRIVATE
-    claybin nlohmann_json::nlohmann_json Threads::Threads)
+    claybin nlohmann_json::nlohmann_json Threads::Threads maya::app)
+if(TARGET mcp::tools)
+    target_link_libraries(ws_bind_probe PRIVATE mcp::tools)   # exec.cpp implements mcp-cpp's Exec
+endif()
 if(TARGET maya::app)
     target_include_directories(ws_bind_probe SYSTEM PRIVATE
         $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -596,6 +604,7 @@ add_executable(sandbox_config_race_test EXCLUDE_FROM_ALL
     tests/sandbox_config_race_test.cpp tests/test_main.cpp
     tests/sandbox_config_race_stubs.cpp
     src/tool/util/sandbox.cpp src/tool/util/subprocess.cpp
+    src/tool/util/exec.cpp   # run_child: subprocess.cpp spawns through it
     src/tool/util/sandbox_claybin.cpp
     src/tool/util/sandbox_broker.cpp src/tool/util/handoff_gate.cpp
     src/domain/sandbox_provenance.cpp
@@ -604,7 +613,10 @@ add_executable(sandbox_config_race_test EXCLUDE_FROM_ALL
     src/util/user_root.cpp src/util/teardown.cpp)
 target_include_directories(sandbox_config_race_test PRIVATE include)
 target_link_libraries(sandbox_config_race_test PRIVATE
-    doctest::doctest nlohmann_json::nlohmann_json Threads::Threads claybin)
+    doctest::doctest nlohmann_json::nlohmann_json Threads::Threads claybin maya::app)
+if(TARGET mcp::tools)
+    target_link_libraries(sandbox_config_race_test PRIVATE mcp::tools)   # exec.cpp
+endif()
 # maya headers only (sandbox.cpp's transitive includes reach scroll_state /
 # anim_clock); no maya linking, so the TSan build stays small.
 if(TARGET maya::app)
