@@ -67,17 +67,6 @@ std::string to_string(EffectSet e) {
     return out;
 }
 
-// ── Live progress sink (thread-local implementation) ────────────────────
-//
-// thread_local so the cmd runner's dispatch lambda can be captured without
-// cross-thread synchronisation — each tool runs on its own worker, and
-// cmd_factory installs/clears the sink on that worker via a RAII Scope.
-// Subprocess runners (see util/subprocess.cpp) call progress::emit from the
-// same thread, so it's a plain load from TLS — no atomics, no locking.
-// The tools::progress sink itself now lives in its own TU (tool/progress.cpp)
-// so subprocess-only consumers can link it without pulling in build_registry()
-// and the MCP bridge behind it.
-
 namespace {
 
 // Assemble every tool. Order matters: the protocol treats the set as

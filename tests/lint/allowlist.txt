@@ -47,10 +47,7 @@
 # main() cannot forget one — that registration is the safety property here.
 #
 # settings_cache: the write-behind settings worker; its state is
-# maya::guarded and the worker sleeps in wait_with. thread_local: a
-# re-entrancy guard so the worker's own write doesn't invalidate the cache
-# it just filled.
-runtime/app/settings_cache.cpp: thread_local
+# maya::guarded and the worker sleeps in wait_with. Nothing banned left.
 # blob_gc: the sweep moved to its own maya::pool, so the thread, the
 # mutex, the condition variable and the detach are all gone. What is left is
 # two atomics: the walk's cancel flag (read deep inside the walk) and the
@@ -68,7 +65,7 @@ util/modelsdev.cpp: atomic
 # when work stops being subscribed — so this atomic is the app's own. The
 # reasoning is written out on the Sendable opt-in in runtime/cmd.hpp.
 # http: prewarm dials run on a maya::pool, the connection pool is
-# maya::guarded. thread_local is the turn's cancel token; const_cast is the
+# maya::guarded. thread_local is the retry-jitter RNG; const_cast is the
 # OpenSSL C API.
 io/http.cpp: thread_local const_cast
 io/tls.cpp: const_cast

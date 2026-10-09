@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <optional>
+#include <thread>
 #include <utility>
 
 #include "agentty/util/sendable.hpp"   // Id<Tag> inside Settings
@@ -33,6 +34,9 @@ struct State {
     bool writing  = false;   // a write is in flight right now
     bool stopping = false;
     bool started  = false;   // the drain worker has been posted
+    // The thread inside save_now(), so the write observer can tell our own
+    // save from a bypassing one.
+    std::optional<std::thread::id> saver;
 };
 
 maya::guarded<State>& state() {
@@ -64,22 +68,15 @@ maya::guarded<Worker>& worker() {
     return w;
 }
 
-// Set while THIS cache is inside a disk save.
-//
-// The save goes through persistence::save_settings like any other, so it
-// fires the same "settings were written" observer we register below. Acting
-// on our own write would be wrong twice over: the cached value is already
-// correct, and invalidate() drains — from the worker thread, waiting on
-// `writing` that only the worker clears. That is a self-deadlock. Per thread
-// because only the writing thread should skip.
-thread_local bool in_our_own_write = false;
-
+// Our save fires the same "settings were written" observer as everyone
+// else's. Acting on it would deadlock: invalidate() drains, waiting on
+// `writing`, which only this thread clears. So record who is saving.
 void save_now(const Disk& d, const store::Settings& value) noexcept {
-    in_our_own_write = true;
+    state().with([](State& s) { s.saver = std::this_thread::get_id(); });
     try {
         if (d.save) d.save(value);
     } catch (...) { /* best-effort: a failed save must not kill the app */ }
-    in_our_own_write = false;
+    state().with([](State& s) { s.saver.reset(); });
 }
 
 // Drain loop. Runs on its own thread; the ONLY place settings IO happens.
@@ -144,7 +141,10 @@ Seam wrap(std::function<store::Settings()> load_from_disk,
     // --model/--provider CLI paths — invalidates us, or their write would be
     // undone by the next save publishing a copy that predates it.
     persistence::on_settings_written([] {
-        if (in_our_own_write) return;
+        const bool ours = state().read([](const State& s) {
+            return s.saver == std::this_thread::get_id();
+        });
+        if (ours) return;
         invalidate();
     });
 
