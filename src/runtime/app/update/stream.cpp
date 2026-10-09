@@ -1122,12 +1122,15 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
             // step, costing a frame.
             auto compact_cmd = Cmd::send(Msg{CompactContext{}});
             return Cmd::batch(
-                std::move(kp), std::move(block_toast), std::move(compact_cmd));
+                std::move(kp), std::move(block_toast), std::move(compact_cmd),
+                cmd::load_library());
         }
     }
 
+    // The turn may have added or edited a skill, command or hooks file;
+    // re-read them off the fold so the next lookup sees it.
     return Cmd::batch(
-        std::move(kp), std::move(block_toast));
+        std::move(kp), std::move(block_toast), cmd::load_library());
 }
 
 // ============================================================================

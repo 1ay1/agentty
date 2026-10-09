@@ -142,17 +142,13 @@ struct Selection {
 // A custom --provider spec is raw INTENT until the host answers something;
 // persisting it at parse time let a typo poison settings.json for every
 // future bare launch. main.cpp registers the spec (and the -m recall to
-// file with it) here instead of writing settings; the ModelsLoaded reducer
-// calls take_unproven_spec() when a NON-EMPTY catalog lands for the active
-// provider and persists then — proof-gated stickiness. Known presets never
-// register (they persist at parse, as always). Thread-safe: set once on
-// the main thread before the UI starts; consumed on the UI thread.
+// file with it) here instead of writing settings. init() takes it into the
+// Model once; the ModelsLoaded reducer persists it when a NON-EMPTY catalog
+// lands for that provider — proof-gated stickiness. Known presets never
+// register (they persist at parse, as always).
 void set_unproven_spec(std::string spec, std::string model_recall);
-// Returns the registered (spec, model_recall) if `spec_now` matches the
-// pending one, clearing it; nullopt otherwise (nothing pending / different
-// provider active by the time models landed).
-[[nodiscard]] std::optional<std::pair<std::string, std::string>>
-take_unproven_spec(std::string_view spec_now);
+// The registered (spec, model_recall), clearing it. Called once, by init().
+[[nodiscard]] std::optional<std::pair<std::string, std::string>> take_unproven_spec_at_launch();
 
 // Session-wide custom auth header NAME (--auth-header) for OpenAI-family
 // backends whose gateway doesn't accept `Authorization: Bearer` (e.g.

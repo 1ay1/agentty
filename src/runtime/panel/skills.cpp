@@ -14,11 +14,11 @@
 
 namespace agentty::skills_panel {
 
-Open scan() {
+Open scan(const Library& lib) {
     Open out;
 
-    const auto& all = tools::skills::all();
-    const auto approvals = tools::skills::load_approvals();
+    const auto& all = lib.skills;
+    const auto& approvals = lib.skill_approvals;
 
     out.rows.reserve(all.size());
     for (const auto& s : all) {
@@ -53,7 +53,7 @@ Open scan() {
         // Is another directory in the same scope claiming this name? The
         // losing copy is invisible everywhere — including this panel — so
         // the winner has to carry the warning, or nothing does.
-        r.shadow_conflict = tools::skills::shadowed_within_scope(s.name);
+        r.shadow_conflict = lib.shadowed_within_scope(s.name);
 
         out.rows.push_back(std::move(r));
     }

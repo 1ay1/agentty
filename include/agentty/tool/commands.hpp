@@ -76,6 +76,10 @@ struct Command {
 // matches NO command falls through (the user may legitimately start a
 // message with a path like /etc/hosts).
 [[nodiscard]] std::optional<std::string> try_expand(std::string_view text);
+// The same against a list the caller already has (a reducer's snapshot):
+// no discovery, no disk.
+[[nodiscard]] std::optional<std::string> try_expand(std::string_view text,
+                                                    const std::vector<Command>& known);
 
 // Test seam: force a re-scan on next all() regardless of mtime cache.
 void invalidate_cache();

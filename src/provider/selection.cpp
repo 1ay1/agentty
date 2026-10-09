@@ -65,15 +65,14 @@ void set_unproven_spec(std::string spec, std::string model_recall) {
     }, std::move(spec), std::move(model_recall));
 }
 
-std::optional<std::pair<std::string, std::string>>
-take_unproven_spec(std::string_view spec_now) {
-    return g_unproven().with([](Unproven& u, std::string now)
+std::optional<std::pair<std::string, std::string>> take_unproven_spec_at_launch() {
+    return g_unproven().with([](Unproven& u)
             -> std::optional<std::pair<std::string, std::string>> {
-        if (u.spec.empty() || u.spec != now) return std::nullopt;
+        if (u.spec.empty()) return std::nullopt;
         auto out = std::make_pair(std::move(u.spec), std::move(u.model));
         u = {};
         return out;
-    }, std::string{spec_now});
+    });
 }
 
 void set_custom_auth_header(std::string name) {

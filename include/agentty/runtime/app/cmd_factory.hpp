@@ -326,6 +326,10 @@ struct LoopBreak {
 // snapshots the live pool. Mirrors load_threads_async.
 [[nodiscard]] Cmd load_plugins_async(bool reconnect);
 
+// Read the installed skills, approvals, commands and hooks state off the UI
+// thread; answers LibraryLoaded, which the reducer stores in m.ui.library.
+[[nodiscard]] Cmd load_library();
+
 // The settings pane's add-mode create: a plugin line into the user mcp.json,
 // or a starter command/agent file. Writes the disk off the fold and answers
 // with SettingsAddDone.

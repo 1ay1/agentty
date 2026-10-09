@@ -114,7 +114,7 @@ Cmd stats_update(Model& m, msg::StatsMsg sm) {
             // to produce a value that cannot change while the panel is
             // open would be paying per-frame for a snapshot.
             pn::Skills pane{};
-            static_cast<skills_panel::Open&>(pane) = skills_panel::scan();
+            static_cast<skills_panel::Open&>(pane) = skills_panel::scan(m.ui.library);
             m.ui.panel.descend(std::move(pane));
             return Cmd::none();
         },

@@ -151,6 +151,8 @@ struct Skill {
 // and the <skill_resources> listing of bundled files. This is what the
 // `skill` tool returns.
 [[nodiscard]] std::string activation_payload(const Skill& s);
+// The same against an approvals store the caller already has: pure.
+[[nodiscard]] std::string activation_payload(const Skill& s, const scope::Approvals& approvals);
 
 // ── Activation: derived from the transcript, not stored ──────────────
 // Once a skill body is in the conversation, re-injecting it doubles the

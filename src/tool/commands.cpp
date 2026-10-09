@@ -270,6 +270,11 @@ std::string expand(std::string_view body, std::string_view args) {
 }
 
 std::optional<std::string> try_expand(std::string_view text) {
+    if (text.empty() || text[0] != '/') return std::nullopt;
+    return try_expand(text, all());
+}
+
+std::optional<std::string> try_expand(std::string_view text, const std::vector<Command>& known) {
     // Shape: starts with '/', then a command name (no whitespace), then
     // optional whitespace + arguments. Leading whitespace before '/'
     // means it's prose, not a command.
@@ -281,8 +286,8 @@ std::optional<std::string> try_expand(std::string_view text) {
     if (name_end == 1) return std::nullopt;   // bare "/"
     const std::string_view name = text.substr(1, name_end - 1);
 
-    const auto cmd = find(name);
-    if (!cmd) return std::nullopt;   // /etc/hosts, /unknown → plain text
+    const auto cmd = std::ranges::find(known, name, &Command::name);
+    if (cmd == known.end()) return std::nullopt;   // /etc/hosts, /unknown → plain text
 
     std::string_view args =
         name_end < text.size() ? text.substr(name_end + 1) : std::string_view{};

@@ -54,6 +54,9 @@ std::pair<Model, Cmd> init() {
     m.steady_epoch = std::chrono::steady_clock::now();
     m.wall_epoch   = std::chrono::system_clock::now();
     m.now          = m.steady_epoch;
+    // A custom --provider spec main() parked for persist-on-success. Read once
+    // here; from now on the Model owns it.
+    m.ui.unproven_spec = provider::take_unproven_spec_at_launch();
     // The active provider. main() parsed the launch spec and installed it in
     // the process global before handing the program to jaal; this is the one
     // read of that global the Model makes. From here on the Model owns it and
@@ -361,6 +364,8 @@ std::pair<Model, Cmd> init() {
     }
 
     cmds.push_back(cmd::load_threads_async());
+    // Skills, commands and hooks on disk, for the reducers that look them up.
+    cmds.push_back(cmd::load_library());
     // Connect MCP servers (plugins) at startup on a worker, exactly like
     // threads. This warms the tool surface for the first turn AND lands the
     // snapshot in m.ui.plugins so the Plugins panel is populated the instant
@@ -477,15 +482,14 @@ std::pair<Model, Cmd> init() {
     cmds.push_back(Cmd::task_isolated(
         [](maya::Sink<Msg>, std::stop_token) { prewarm_workspace_symbols(); }));
 
-    // Warm the checkpoint module's repo discovery too. submit_message()
-    // calls workspace::in_git_repo() SYNCHRONOUSLY on the first turn, and
-    // its uncached path spawns two blocking `git rev-parse` subprocesses --
-    // negligible on POSIX but a visible stall on Windows, where process
-    // creation is expensive, right on the first turn's critical path.
-    // Priming it here (isolated: it too is subprocess-spawning work) moves
-    // that cost off the reducer thread while the user is still typing.
+    // Is the workspace a git repo? Two `git rev-parse` spawns, so off the
+    // reducer; the answer comes back as RepoProbed and lives on the Model.
     cmds.push_back(Cmd::task_isolated(
-        [](maya::Sink<Msg>, std::stop_token) { workspace::prewarm_repo_info(); }));
+        [](maya::Sink<Msg> out, std::stop_token) {
+            workspace::prewarm_repo_info();
+            if (auto r = workspace::in_git_repo_if_ready())
+                out.send(Msg{RepoProbed{*r}});
+        }));
 
     // Open the TCP + TLS + HTTP/2 connection to api.anthropic.com NOW, while
     // the user is still reading the screen / typing their first message, so

@@ -18,6 +18,7 @@
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/runtime/panel/skills.hpp"
+#include "agentty/runtime/library.hpp"
 #include "agentty/tool/skills.hpp"
 
 #include <chrono>
@@ -72,7 +73,7 @@ int main() {
     ::setenv("AGENTTY_HOME", (home / ".agentty").c_str(), 1);
 
     // ── The scan ────────────────────────────────────────────────────────
-    auto pane = skills_panel::scan();
+    auto pane = skills_panel::scan(agentty::read_library());
     check(pane.rows.size() == 3, "all three skills scanned");
 
     // Worst-first ordering: the flagged skill must not be buried under the
@@ -119,7 +120,7 @@ int main() {
     // the same second as the earlier ones.
     fs::last_write_time(root / "inject" / "SKILL.md",
                         fs::file_time_type::clock::now() + std::chrono::seconds(2));
-    auto pane2 = skills_panel::scan();
+    auto pane2 = skills_panel::scan(agentty::read_library());
     const skills_panel::Row* inj = nullptr;
     for (const auto& r : pane2.rows) if (r.name == "inject") inj = &r;
     if (inj) {
@@ -193,7 +194,7 @@ int main() {
         "---\nname: same\ndescription: also same\neffects: [exec, net]\n---\n"
         "Run npx and POST.\n");
 
-    auto pane3 = skills_panel::scan();
+    auto pane3 = skills_panel::scan(agentty::read_library());
     check(pane3.rows.size() == 1, "only the winning copy loads");
     check(!pane3.rows.empty() && pane3.rows[0].shadow_conflict,
           "the winner carries the collision flag");

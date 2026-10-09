@@ -132,7 +132,10 @@ Cmd checkpoint_update(Model& m, msg::CheckpointMsg cm) {
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading) {
                 return set_status_toast(m, "cannot rewind while the agent is working");
             }
-            if (!workspace::in_git_repo()) {
+            if (!m.ui.git_repo) {
+                return set_status_toast(m, "still checking for a git repo");
+            }
+            if (!*m.ui.git_repo) {
                 return set_status_toast(m, "checkpoints need a git repo");
             }
             auto entries = build_entries(m);
@@ -156,6 +159,14 @@ Cmd checkpoint_update(Model& m, msg::CheckpointMsg cm) {
             if (!o || o->entries.empty()) return Cmd::none();
             const int n = static_cast<int>(o->entries.size());
             o->index = (o->index + e.delta % n + n) % n;
+            return Cmd::none();
+        },
+        [&](LibraryLoaded& e) -> Cmd {
+            m.ui.library = std::move(e.library);
+            return Cmd::none();
+        },
+        [&](RepoProbed& e) -> Cmd {
+            m.ui.git_repo = e.in_repo;
             return Cmd::none();
         },
         [&](CheckpointDiffLoaded& e) -> Cmd {

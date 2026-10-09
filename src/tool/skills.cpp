@@ -766,6 +766,10 @@ std::string catalog_block() {
 }
 
 std::string activation_payload(const Skill& s) {
+    return activation_payload(s, load_approvals());
+}
+
+std::string activation_payload(const Skill& s, const scope::Approvals& approvals) {
     // The enforcement point. catalog_block() hides an unapproved skill, but
     // the model can name one directly (it may have seen it in a previous
     // session, or the user may have mentioned it), so the refusal has to
@@ -774,7 +778,7 @@ std::string activation_payload(const Skill& s) {
     // Refuse with an instruction the model can act on, not a bare error:
     // it should tell the user what to run, not retry or route around it.
     if (needs_trust_gate(s.effects)
-        && !std::holds_alternative<scope::Trusted>(trust_of(s))) {
+        && !std::holds_alternative<scope::Trusted>(trust_of(s, approvals))) {
         std::ostringstream deny;
         deny << "<skill_blocked name=\"" << s.name << "\">\n"
              << "This skill declares effects (" << effects_to_frontmatter(s.effects)

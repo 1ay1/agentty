@@ -1069,8 +1069,8 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // non-empty model fetch, so it's a real endpoint, not a typo.
             // Presets persisted at parse time as always; this only fires
             // for raw host/URL specs, at most once per process.
-            if (auto proven = provider::take_unproven_spec(
-                    active_provider_id(m))) {
+            if (m.ui.unproven_spec && m.ui.unproven_spec->first == active_provider_id(m)) {
+                auto proven = std::exchange(m.ui.unproven_spec, std::nullopt);
                 settings.provider = proven->first;
                 if (!proven->second.empty())
                     settings.provider_models[proven->first] = proven->second;

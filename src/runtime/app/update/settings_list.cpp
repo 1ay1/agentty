@@ -536,14 +536,16 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
             // Make it USABLE NOW, not after a restart. For Plugins the add
             // already wrote mcp.json; reload the live pool OFF the UI thread
             // (the connect handshake must never freeze the TUI — the bridge
-            // bounds it with a deadline). Commands are loaded fresh per use
-            // (create_starter invalidated the cache) and agents are scanned
-            // per task-tool call, so both are already live.
+            // bounds it with a deadline). A new command file reaches the
+            // Model through a library reload. Agents are scanned per
+            // task-tool call, so they are already live.
             Cmd reload = Cmd::none();
             if (d.ok && d.concern == se::Category::Plugins) {
                 m.ui.plugins_loading = true;
                 reload = cmdf::load_plugins_async(/*reconnect=*/true);
                 message += " — connecting…";
+            } else if (d.ok && d.concern == se::Category::Commands) {
+                reload = cmdf::load_library();
             }
             // Re-clamp the (possibly grown) list to the top of the new row.
             if (auto* oo = m.ui.panel.get<pn::SettingsList>()) {

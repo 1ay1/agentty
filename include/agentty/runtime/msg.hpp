@@ -1170,6 +1170,11 @@ struct CheckpointDiffLoaded {
     int  insertions     = 0;
     int  deletions      = 0;
 };
+// The startup probe answered: is the workspace a git repo? Checkpoints read
+// this from the Model instead of asking git on the reducer thread.
+struct RepoProbed { bool in_repo = false; };
+// The on-disk library (skills, approvals, commands, hooks), read on a worker.
+struct LibraryLoaded { Library library; };
 // Terminal window focus changed (?1004 CSI I/O via maya Sub::on_focus).
 // Gates the hardware caret: an unfocused agentty parks + hides the real
 // cursor instead of leaving a blinking bar in an inactive pane.
@@ -1325,7 +1330,7 @@ using CodeBlockMsg = std::variant<
 
 using CheckpointMsg = std::variant<
     OpenCheckpoints, CloseCheckpoints, CheckpointsMove,
-    CheckpointsSelect, CheckpointDiffLoaded>;
+    CheckpointsSelect, CheckpointDiffLoaded, RepoProbed, LibraryLoaded>;
 
 using RagMsg = std::variant<
     OpenRag, CloseRag, RagAdvanced,

@@ -182,6 +182,7 @@ set(AGENTTY_TOOL_SOURCES
 # without fighting main().
 set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/composer_attachment.cpp
+    src/runtime/library.cpp
     src/runtime/app/deps.cpp
     src/runtime/app/settings_cache.cpp
     src/runtime/app/init.cpp

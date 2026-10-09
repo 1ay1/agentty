@@ -1,4 +1,5 @@
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/library.hpp"
 #include "agentty/runtime/app/wire_audit.hpp"
 
 #include <algorithm>
@@ -2505,6 +2506,12 @@ Cmd load_threads_async() {
             // doesn't sit on "loading…" forever.
             out.send(Msg{ThreadsLoaded{std::vector<Thread>{}}});
         }
+    });
+}
+
+Cmd load_library() {
+    return Cmd::task_isolated([](maya::Sink<Msg> out, std::stop_token) {
+        out.send(Msg{LibraryLoaded{read_library()}});
     });
 }
 

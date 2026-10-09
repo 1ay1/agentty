@@ -252,9 +252,9 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
     return out;
 }
 
-std::vector<Item> commands() {
+std::vector<Item> commands(const Library& lib) {
     std::vector<Item> out;
-    for (const auto& c : tools::commands::all()) {
+    for (const auto& c : lib.commands) {
         Item i;
         i.primary   = "/" + c.name;
         i.secondary = c.description;
@@ -291,9 +291,9 @@ std::vector<Item> agents() {
     return out;
 }
 
-std::vector<Item> hooks() {
+std::vector<Item> hooks(const Library& lib) {
     std::vector<Item> out;
-    const std::string file = tools::hooks::active_file();
+    const std::string& file = lib.hooks_file;
     if (file.empty()) {
         Item i;
         i.primary   = "(no hooks file)";
@@ -305,7 +305,7 @@ std::vector<Item> hooks() {
     }
     Item i;
     i.primary = file;
-    if (tools::hooks::pending_approval()) {
+    if (lib.hooks_pending) {
         i.secondary = "NOT APPROVED — hooks will not run";
         i.hint      = "Enter: review & approve";
         i.action    = Action::ApproveHooks;
@@ -334,9 +334,9 @@ std::vector<Item> items_for(const Model& m, Category cat) {
         // the General category carries the door row that opens it.
         case Category::Sandbox: return {};
         case Category::Plugins:  return plugins(m.ui.plugins, m.ui.plugins_loading);
-        case Category::Commands: return commands();
+        case Category::Commands: return commands(m.ui.library);
         case Category::Agents:   return agents();
-        case Category::Hooks:    return hooks();
+        case Category::Hooks:    return hooks(m.ui.library);
     }
     return {};
 }

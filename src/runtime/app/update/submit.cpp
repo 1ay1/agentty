@@ -133,7 +133,8 @@ Cmd submit_message(Model& m) {
     // message must keep working). Attachment chips survive: only .text is
     // rewritten, placeholders inside it are left intact (a command body
     // does not carry chips, so expansion cannot orphan one).
-    if (auto expanded = tools::commands::try_expand(m.ui.composer.text)) {
+    if (auto expanded = tools::commands::try_expand(m.ui.composer.text,
+                                                    m.ui.library.commands)) {
         m.ui.composer.text   = std::move(*expanded);
         m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
     }
@@ -292,8 +293,7 @@ Cmd submit_message(Model& m) {
         auto sp  = user.text.find_first_of(" \t\n");
         auto tok = user.text.substr(1, sp == std::string::npos
                                            ? std::string::npos : sp - 1);
-        const auto sk = tools::skills::find(tok);
-        perf_stamp("skills_find");
+        const auto* sk = m.ui.library.skill(tok);
         if (sk) {
             std::string rest = sp == std::string::npos
                 ? std::string{}
@@ -305,7 +305,7 @@ Cmd submit_message(Model& m) {
             // got wrong (tools/skills.hpp, "derived from the transcript").
             if (!tools::skills::is_active_in(sk->name,
                                              ::agentty::visible_text(m.d.current))) {
-                expanded  = tools::skills::activation_payload(*sk);
+                expanded  = tools::skills::activation_payload(*sk, m.ui.library.skill_approvals);
                 expanded += "\n\nFollow the skill instructions above";
                 expanded += rest.empty() ? "." : " for this task: " + rest;
             } else {
@@ -355,16 +355,11 @@ Cmd submit_message(Model& m) {
     // restores the files + truncates the transcript back to this point.
     // Outside a git repo this is a no-op — no id, no divider, no worker.
     //
-    // Non-blocking repo probe: in_git_repo_if_ready() returns the cached
-    // answer only once startup's prewarm_repo_info() has forced discovery. On
-    // the very first Enter after launch — before the prewarm lands — it
-    // returns nullopt, and we skip the checkpoint for THIS turn rather than
-    // spawn `git` on the reducer thread (an expensive, visible freeze on
-    // Windows). The checkpoint resumes from the next turn, once the cache is
-    // warm. Losing a checkpoint on the opening turn is a fair trade for a
-    // keystroke that never stutters.
+    // The repo answer is on the Model once startup's probe lands
+    // (RepoProbed). Before that, skip the checkpoint for this turn rather than
+    // ask git from the reducer.
     std::optional<std::string> checkpoint_to_create;
-    if (workspace::in_git_repo_if_ready().value_or(false)) {
+    if (m.ui.git_repo.value_or(false)) {
         user.checkpoint_id  = CheckpointId{user.id.value};
         checkpoint_to_create = user.id.value;
     }

@@ -33,6 +33,7 @@
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/store/store.hpp"          // store::Settings (the persisted record)
 #include "agentty/domain/auth_view.hpp"     // auth::AuthView
+#include "agentty/runtime/library.hpp"      // Library: what is installed on disk
 
 namespace agentty {
 
@@ -633,6 +634,22 @@ struct Model {
         //
         // Deliberately NOT part of the visual hash — it changes no pixels.
         bool                git_refresh_inflight = false;
+
+        // A custom --provider spec (and its -m recall) that becomes sticky
+        // the first time its host answers a model fetch. Set once by init
+        // from main's launch args; ModelsLoaded takes it.
+        std::optional<std::pair<std::string, std::string>> unproven_spec;
+
+        // What is installed on disk: skills, their approvals, slash
+        // commands, the hooks file. Loaded by an effect (LibraryLoaded) at
+        // startup and after each turn, since a turn can add or edit any of
+        // them. Reducers and panels read this instead of the disk.
+        Library library;
+
+        // Is the workspace a git repo? nullopt until the startup probe
+        // answers (RepoProbed). Checkpoints read this; asking git directly
+        // would spawn it on the reducer thread.
+        std::optional<bool> git_repo;
 
         // Cross-frame widget state cache. The only consumers now are:
         //   • StreamingMarkdown — keeps a per-Message widget instance
