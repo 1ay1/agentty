@@ -1516,9 +1516,9 @@ inline void set_reasoning_overrides(std::map<std::string, bool> all) {
     return v ? (*v ? 1 : 0) : -1;
 }
 
-// AGENTTY_FORCE_EFFORT, captured once at launch by read_launch_env (the
-// domain does not read the environment). 1 force on, 0 force off, -1 unset.
-// Global fallback below the per-model override.
+// AGENTTY_FORCE_EFFORT, set once in main(). Lives beside the per-model
+// overrides above, in the same registry resolved_caps reads; the domain does
+// not read the environment. 1 force on, 0 force off, -1 unset.
 namespace effort_force_detail {
 inline std::atomic<int>& cell() noexcept { static std::atomic<int> v{-1}; return v; }
 }
