@@ -185,6 +185,9 @@ void allow_read_root(const fs::path& root);
 // (post-canonicalisation, symlink-escape checked like the workspace).
 [[nodiscard]] bool is_read_allowlisted(const fs::path& target);
 
+// The read roots registered so far (canonical).
+[[nodiscard]] std::vector<fs::path> read_roots_now();
+
 // Read-gate factory: passes when the path is within the workspace OR
 // under a read-allowlist root. Use ONLY in read-side tools (`read`).
 [[nodiscard]] std::expected<WorkspacePath, ToolError>

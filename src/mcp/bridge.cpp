@@ -395,8 +395,7 @@ read_config_servers() {
 // on any failure so the caller can skip it.
 //
 // STDIO transport spawns the server as a child process. This is supported on
-// every platform: POSIX via fork/exec, Windows via CreateProcess (mcp-cpp's
-// ChildProcess, MCP_CAP_HAVE_PROCESS). HTTP/SSE servers take the
+// every platform: POSIX via fork/exec, Windows via CreateProcess (util::ChildProcess). HTTP/SSE servers take the
 // make_http_provider path instead.
 std::shared_ptr<::mcp::cap::CapabilityProvider>
 make_provider(const std::string& name, const json& spec) {
@@ -452,7 +451,7 @@ make_provider(const std::string& name, const json& spec) {
     }
     ConnectionConfig cfg;
     cfg.name = name;
-    ::mcp::cap::ChildProcess::Spawn spawn;
+    ::agentty::util::ChildProcess::Spawn spawn;
     spawn.command = command;
     // Coerce non-string args/env elements instead of throwing: a single
     // numeric/bool element used to make `.get<std::string>()` throw

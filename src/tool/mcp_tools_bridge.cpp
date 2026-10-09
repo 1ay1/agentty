@@ -20,12 +20,11 @@
 
 #include <mcp/tools/toolset.hpp>
 #include <mcp/tools/host.hpp>
+#include <maya/runtime.hpp>
 
 #include <cstdlib>   // std::getenv
 #include <mcp/tools/meta.hpp>
 #include <mcp/tools/util/fs_helpers.hpp>
-#include <mcp/tools/util/progress.hpp>
-#include <mcp/tools/util/sandbox.hpp>
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/util/handoff_gate.hpp"
 #include <mcp/cap/capability.hpp>
@@ -42,6 +41,13 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace agentty::tools::tool_state {
+// See GuardedToolState below.
+struct FnRef { const std::function<void(::mcp::tools::ToolState&)>* fn; };
+}  // namespace agentty::tools::tool_state
+MAYA_SENDABLE(agentty::tools::tool_state::FnRef);
+MAYA_SENDABLE(mcp::tools::ToolState);
 
 namespace agentty::tools {
 
@@ -399,6 +405,36 @@ ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
     return out;
 }
 
+// The mcp-cpp tools' memory between calls (read cache, file snapshots,
+// background processes, repo graphs), under one maya::guarded. The workspace
+// root and read roots are agentty's (main sets one, the skills scanner adds
+// the other); they are copied in on every access, so there is one source of
+// truth and nothing to mirror.
+//
+// The tools hand us a function to run on the state. guarded<T> refuses an
+// opaque callable as an argument, because it could take a second lock while
+// this one is held. These can't: mcp-cpp holds no locks and starts nothing
+// (its concurrency allowlist is empty), and every with() body in it only
+// reads and writes ToolState. So the one callable type is opted in here.
+using StateFn    = std::function<void(mt::ToolState&)>;
+using StateFnRef = tool_state::FnRef;
+
+class GuardedToolState final : public mt::StateAccess {
+  public:
+    void with(const StateFn& f) override {
+        auto ws    = util::workspace_root();
+        auto roots = util::read_roots_now();
+        st_.with([](mt::ToolState& s, StateFnRef fn,
+                    std::filesystem::path w, std::vector<std::filesystem::path> r) {
+            s.workspace_root = std::move(w);
+            s.read_roots     = std::move(r);
+            (*fn.fn)(s);
+        }, StateFnRef{&f}, std::move(ws), std::move(roots));
+    }
+  private:
+    maya::guarded<mt::ToolState> st_;
+};
+
 // Process-lifetime keep-alive for the provider: the ToolDef::execute
 // closures capture a shared_ptr to it, but we also park it here so its
 // HostServices adapters (incl. the HttpClient) outlive every closure.
@@ -407,6 +443,7 @@ struct ProviderKeepAlive {
     std::shared_ptr<mt::HttpClient>                 http;
     std::shared_ptr<mt::Exec>                       exec;
     std::shared_ptr<mt::Executor>                   executor;
+    std::shared_ptr<mt::StateAccess>                state;
 };
 ProviderKeepAlive& keep_alive() { static ProviderKeepAlive k; return k; }
 
@@ -423,11 +460,13 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     // Parallel scans too: mcp-cpp owns no threads, so its grep / structural
     // search / repo map fan out on agentty's executor (maya::scope).
     ka.executor = util::make_executor();
+    ka.state = std::make_shared<GuardedToolState>();
 
     mt::HostServices svc;
     svc.http = ka.http;
     svc.exec = ka.exec;
     svc.executor = ka.executor;
+    svc.state    = ka.state;
     // Inject the host-coupled backends (memory/skill/retriever/subagent).
     // todo stays null — its shell renders identical text with no host state.
     install_host_backends(svc);
@@ -500,17 +539,7 @@ std::vector<ToolDef> build_mcp_tool_defs() {
             // key too. This is the backstop, not a replacement.
             nlohmann::json args = args_in;
             (void)::agentty::app::detail::canonify_tool_args(tool_name, args);
-            // Bridge mcp's thread-local progress sink to agentty's on THIS
-            // worker thread: cmd_factory already installed an agentty
-            // progress::Scope here, so the subprocess runners inside the
-            // mcp tools (bash/diagnostics/git) and the subagent loop stream
-            // their live output straight to the parent tool card. RAII
-            // scope clears it after the call so no stale sink leaks across
-            // tool runs.
-            ::mcp::tools::util::progress::Scope mcp_progress{
-                [](std::string_view snap) { tools::progress::emit(snap); }};
-            ::mcp::tools::util::cancellation::Scope mcp_cancellation{
-                [] { return tools::cancellation::requested(); }};
+
             // LEARNING LOOP (win side): the agent ACTING on a file shortly
             // after search_docs surfaced a passage from it is the implicit
             // relevance signal — the passage pointed somewhere worth acting
@@ -583,7 +612,10 @@ std::vector<ToolDef> build_mcp_tool_defs() {
                 before = tools::util::handoff::snapshot_trusted(
                     tools::util::workspace_root().string());
 
-            auto r = provider->execute(::mcp::cap::Request{tool_name, args});
+            ::mcp::cap::Request req{tool_name, args};
+            req.cancelled = [] { return tools::cancellation::requested(); };
+            req.reader    = tools::reader::current();
+            auto r = provider->execute(req);
 
             if (watchable && !before.empty()) {
                 // Name the command, not the tool: "shell" tells a user nothing
@@ -633,55 +665,5 @@ std::vector<ToolDef> build_mcp_tool_defs() {
         });
     return defs;
 }
-
-void wire_mcp_runtime(std::string_view sandbox_mode) {
-    namespace mu = ::mcp::tools::util;
-
-    // The workspace-root boundary is already mirrored automatically by
-    // agentty's set_workspace_root() (it forwards into mcp's util layer in
-    // the single canonical setter). Here we only need to mirror the sandbox
-    // mode so bash/diagnostics/git run under the same bwrap / sandbox-exec
-    // isolation. agentty's main.cpp already validated the flag + probed a
-    // backend; translate the CLI string into mcp's Mode and let its sandbox
-    // cache the probe result.
-    auto mode = mu::sandbox::Mode::Auto;
-    if      (sandbox_mode == "off") mode = mu::sandbox::Mode::Off;
-    else if (sandbox_mode == "on")  mode = mu::sandbox::Mode::On;
-    // "auto" / "" → Auto. main.cpp already rejected any other value.
-    (void)mu::sandbox::init(mode);
-
-    // Hand mcp-cpp OUR sandbox, so every tool it runs goes through the same
-    // engine — and therefore the same user policy — as agentty's own
-    // execution paths (hooks, ACP terminals).
-    //
-    // Without this the two layers each probe independently and each pick
-    // their own backend: the `shell` tool would run under mcp's built-in
-    // bwrap while agentty's hooks ran under claybin, and the settings pane
-    // would configure a boundary that the tool the user actually invokes
-    // never reads. One status banner described both, which made the split
-    // invisible. mcp-cpp cannot reach claybin on its own (it is a standalone
-    // library and claybin is OUR submodule), which is exactly why the hook
-    // exists.
-    if (mode != mu::sandbox::Mode::Off) {
-        // Tell mcp-cpp it is confined, and by what. It used to be handed a
-        // RUN FUNCTION here -- agentty's own subprocess runner, installed as
-        // mcp-cpp's sandbox -- which is how the two runners came to disagree
-        // about the wall clock. Tools reach the host through
-        // HostServices::exec now, so all that is left to say is "yes, and
-        // this is its name".
-        mu::sandbox::HostSandbox hs;
-        hs.active = true;
-        hs.label  = "claybin";
-        mu::sandbox::set_host_sandbox(std::move(hs));
-    } else {
-        // Explicitly CLEAR it, rather than just not installing. This function
-        // is callable more than once (tests, and any future re-wire), so
-        // "off" has to mean off and not "keep whatever was installed last
-        // time" -- a stale hook would quietly confine commands the user asked
-        // to run unconfined.
-        mu::sandbox::set_host_sandbox({});
-    }
-}
-
 
 } // namespace agentty::tools

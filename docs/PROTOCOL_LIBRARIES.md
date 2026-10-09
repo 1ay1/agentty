@@ -423,12 +423,19 @@ bumps the submodule pointer after each.
    - *(done)* `cap::Registry` is a single-owner value (routes computed on
      lookup, no lock); textproc/grep/structural shares scan disjoint
      strides into their own slots, with no cursor, counter or mutex.
-   - Still to do: process-wide tool state becomes a context agentty owns
-     and passes to `make_provider`: workspace root and read roots
-     (`fs_helpers`), the file-snapshot and read caches (`fs_helpers`,
-     `fs.cpp`), `ProcessManager` (`process.cpp`), the repomap cache, the
-     temp-file counter, and the `shellx`/`support`/read-context
-     thread_locals. ~25 agentty files read `workspace_root()` today.
+   - *(done)* The tools keep no state: `ToolState` (workspace, read roots,
+     read cache, file snapshots, process sessions, repo graphs) is
+     agentty's, shared through `StateAccess` (`GuardedToolState` in
+     `mcp_tools_bridge.cpp`, one `maya::guarded`); per-call reader and
+     cancel ride on `cap::Request`; scans split on `Call::split`. No clocks
+     (`process_poll` waits on the host's Session; uptime/elapsed come from
+     the host). mcp-cpp's sandbox module, progress/cancel thread_locals and
+     `ChildProcess` are gone — the last moved to `agentty/util/
+     child_process.hpp`. mcp-cpp's concurrency allowlist is empty.
+     Verified: mcp-cpp 62 cases + process_tools/shell_bound,
+     `toolset_e2e_test`, `mcp_bridge_test`, `mcp_http_test`,
+     `plugin_disabled_tools_test`, `subagent_report_test`,
+     `exec_policy_test` (now with the fd-leak cases), `mcp-serve`.
 4. **rag-cpp.** `parallel.hpp`'s executor becomes the `Splitter` parameter;
    corpus/hnsw/bm25 build-then-freeze; caches and the plugin registry become
    caller-owned. Verify: `rag adapter`, `rag shutdown interrupts warm

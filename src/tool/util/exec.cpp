@@ -148,7 +148,7 @@ std::optional<std::chrono::seconds> env_wall_override() {
 class JaalSession final : public mt::Session {
   public:
     JaalSession(pf::posix_process p, std::size_t cap)
-        : proc_(std::move(p)), cap_(cap) {
+        : proc_(std::move(p)), cap_(cap), started_(clock_t_::now()) {
         drain_.post([this](std::stop_token st) { pump(st); });
     }
     ~JaalSession() override {
@@ -168,7 +168,7 @@ class JaalSession final : public mt::Session {
         // One exclusive section that both drains and decides. Returning a
         // struct by value is the only way out -- nothing can hand back a
         // reference into the guarded state.
-        return st_.with([](Shared& s) {
+        auto u = st_.with([](Shared& s) {
             Update u;
             u.output    = std::exchange(s.pending, {});
             u.truncated = std::exchange(s.truncated, false);
@@ -179,6 +179,8 @@ class JaalSession final : public mt::Session {
             }
             return u;
         });
+        u.uptime = std::chrono::duration_cast<std::chrono::seconds>(clock_t_::now() - started_);
+        return u;
     }
 
     void stop() override {
@@ -266,6 +268,7 @@ class JaalSession final : public mt::Session {
 
     pf::posix_process    proc_;
     std::size_t          cap_;
+    clock_t_::time_point started_;
     maya::guarded<Shared> st_;
     clock_t_::time_point stop_at_{};
     // Last member: destroyed (joined) first, before anything the pump uses.
@@ -429,6 +432,7 @@ class JaalExec final : public mt::Exec {
         } else {
             out.outcome = mt::Signalled{0};   // gone, and nothing to tell us how
         }
+        out.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(clock_t_::now() - started);
         return out;
     }
 

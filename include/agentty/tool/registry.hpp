@@ -278,6 +278,24 @@ namespace progress {
     };
 }
 
+// Whose context a tool call serves: empty for the main conversation, a
+// unique id per subagent run. `read` remembers what it has shown each
+// reader, so a subagent is never told it already has a file only its parent
+// read. Per worker, like progress; a Scope sets it for a run.
+namespace reader {
+    void set(std::string id);
+    [[nodiscard]] const std::string& current();
+
+    struct Scope {
+        explicit Scope(std::string id) : prev_(current()) { set(std::move(id)); }
+        ~Scope() { set(std::move(prev_)); }
+        Scope(const Scope&)            = delete;
+        Scope& operator=(const Scope&) = delete;
+    private:
+        std::string prev_;
+    };
+}
+
 namespace cancellation {
     using Probe = std::function<bool()>;
     void set(Probe probe);

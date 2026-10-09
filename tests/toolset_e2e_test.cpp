@@ -108,7 +108,6 @@ int main() {
     ::unsetenv("AGENTTY_DOCS_DIR");
 
     tools::util::set_workspace_root(root);
-    tools::wire_mcp_runtime("off");   // no bwrap wrapping — CI portability
 
     // ── Registry completeness: every catalog tool must be advertised. ──
     {

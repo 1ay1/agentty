@@ -219,7 +219,7 @@ struct SpawnedAcpAgent {
 };
 
 // Spawn `argv[0]` (e.g. "claude-agent-acp" or "codex-acp") with the remaining
-// args as an ACP agent subprocess (mcp::cap::ChildProcess: fork/exec/pipe on
+// args as an ACP agent subprocess (util::ChildProcess: fork/exec/pipe on
 // POSIX, CreateProcess on Windows), run an rpc::Peer over its stdio with
 // `dispatch`, run `initialize`, and return the connected handle. On failure
 // returns a SpawnedAcpAgent with a null connection and `err` filled.

@@ -154,7 +154,6 @@ bool req_has_nudge(const provider::Request& req) {
 } // namespace
 
 int main() {
-    tools::wire_mcp_runtime("off");   // no bwrap wrapping — CI portability
     // Run from an EMPTY temp directory. This test drives the REAL subagent
     // runner, which executes REAL grep tool calls — each one spawns ripgrep
     // against the tool's workspace root (the process cwd). Left in the source
@@ -594,8 +593,8 @@ int main() {
     // ── N. Sequential subagents of the SAME ROLE must not share a
     // read-dedup context.
     //
-    // The runner scopes `read`'s dedup per subagent, because the cache is
-    // process-global and answers a repeat of the same (path, range) with
+    // The runner scopes `read`'s dedup per subagent (tools::reader), because
+    // the cache is shared and answers a repeat of the same (path, range) with
     // "refer to the earlier tool_result" — a claim only true for the context
     // that actually received those bytes. The id used to be derived from
     // `&thread`, a LOCAL in run().
@@ -620,7 +619,7 @@ int main() {
                 // does not mean "first turn of this run" once run_task is
                 // called twice — an earlier draft keyed on that and silently
                 // recorded nothing.
-                contexts.push_back(::mcp::tools::util::read_context());
+                contexts.push_back(tools::reader::current());
                 emit_text(sink, "REPORT_N");
                 emit_finish(sink);
             });

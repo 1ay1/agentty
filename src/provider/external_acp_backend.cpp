@@ -17,7 +17,7 @@
 #include <acp/methods.hpp>       // params/results
 #include <acp/tools.hpp>         // RequestPermissionOutcome, PO_*
 
-#include <mcp/cap/process.hpp>   // ::mcp::cap::ChildProcess (portable spawn)
+#include "agentty/util/child_process.hpp"   // util::ChildProcess (portable spawn)
 
 #include "agentty/domain/conversation.hpp"  // agentty::Message, Role
 #include "agentty/util/base64.hpp"
@@ -450,7 +450,7 @@ TurnResult ExternalAcpBackend::prompt(const Request&              req,
 // ── Subprocess factory ───────────────────────────────────────────────────────
 // Spawn `argv[0]` with the remaining args as an ACP agent, run an rpc::Peer
 // over its stdio, run `initialize`, and return the connected handle.
-// ::mcp::cap::ChildProcess is fork/exec/pipe on POSIX and CreateProcess on
+// ::agentty::util::ChildProcess is fork/exec/pipe on POSIX and CreateProcess on
 // Windows, exposing the child's stdout as an istream and its stdin as an
 // ostream.
 namespace {
@@ -460,7 +460,7 @@ namespace {
 // streams, so the child must outlive the read it may be parked in — see
 // the order in SpawnedAcpAgent::reset).
 struct AgentProcessHolder {
-    std::unique_ptr<::mcp::cap::ChildProcess> child;
+    std::unique_ptr<::agentty::util::ChildProcess> child;
     ~AgentProcessHolder() { if (child) child->terminate(); }
 };
 
@@ -487,10 +487,10 @@ SpawnedAcpAgent spawn_acp_agent(const std::vector<std::string>& argv,
 
     auto holder = std::make_shared<AgentProcessHolder>();
     try {
-        ::mcp::cap::ChildProcess::Spawn spawn;
+        ::agentty::util::ChildProcess::Spawn spawn;
         spawn.command = argv.front();
         spawn.args.assign(argv.begin() + 1, argv.end());
-        holder->child = std::make_unique<::mcp::cap::ChildProcess>(spawn);
+        holder->child = std::make_unique<::agentty::util::ChildProcess>(spawn);
     } catch (const std::exception& e) {
         err = std::string("spawn_acp_agent: cannot start '") + argv.front() + "': " + e.what();
         return {};

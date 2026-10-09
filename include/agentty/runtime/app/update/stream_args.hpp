@@ -64,7 +64,7 @@ inline constexpr std::string_view kContentAliases[] = {"content", "file_text", "
 // NOT mirrored from mcp-cpp's ArgReader, despite what the comment above says
 // about the older lists. ArgReader is a plain keyed reader -- str(key),
 // require_str(key), raw(key) -- with no alias table at all; the only "cmd"
-// anywhere in mcp-cpp is cmd.exe detection in cap/process.hpp. So
+// anywhere nearby is cmd.exe detection in util/child_process.hpp. So
 // canonification here is not a convenience that duplicates dispatch, it is
 // THE mechanism: relax the guard without canonifying and a `cmd`-shaped call
 // stops failing loudly and starts reaching a dispatcher that reads `command`,

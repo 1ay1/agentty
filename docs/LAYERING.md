@@ -93,16 +93,18 @@ All are static ctest entries (label `static`), no build needed:
 
 ## The runtimes agentty installs
 
-None, once PROTOCOL_LIBRARIES.md §8 is done. Until then
+One, until PROTOCOL_LIBRARIES.md §8 step 4 lands:
 `tools::util::install_protocol_runtimes()` (src/tool/util/protocol_runtime.cpp)
-installs maya-backed implementations of the libraries' remaining runtime
-hooks; it is deleted in step 5 of that plan.
+installs a maya-backed Executor for rag-cpp's parallel regions. mcp-cpp and
+acp-cpp take nothing installed: their engines run on rpc::Peer, and mcp-cpp's
+tools get their executor, exec and state through HostServices.
 
 ## Where it stands
 
 - agentty → maya → jaal is strict: no jaal include or name in agentty.
 - maya starts no thread of its own.
-- claybin is fully passive. mcp-cpp, acp-cpp and rag-cpp start no threads
-  of their own, but still carry a standalone fallback runtime, locks around
-  their own state, and duplicated JSON-RPC code. Removing all of it is
-  [PROTOCOL_LIBRARIES.md](PROTOCOL_LIBRARIES.md) §8.
+- claybin, jsonrpc-cpp, acp-cpp and mcp-cpp are passive: no threads, locks,
+  atomics, clocks, processes or global state. agentty runs their connections
+  on rpc::Peer and owns mcp-cpp's tool state. rag-cpp still asks an
+  installed Executor for its parallel regions and keeps caches of its own;
+  that is [PROTOCOL_LIBRARIES.md](PROTOCOL_LIBRARIES.md) §8 step 4.

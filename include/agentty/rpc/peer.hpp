@@ -56,7 +56,7 @@ struct Channel {
 // Raw read(2)/write(2) on two fds, e.g. our own stdin/stdout (0, 1).
 [[nodiscard]] Channel fd_channel(int in_fd, int out_fd);
 
-// A child's pipes as streams (mcp::cap::ChildProcess's out()/in()). The
+// A child's pipes as streams (util::ChildProcess's out()/in()). The
 // owner keeps the streams alive for the peer's life.
 [[nodiscard]] Channel stream_channel(std::istream& in, std::ostream& out);
 

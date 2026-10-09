@@ -53,7 +53,6 @@
 #include <cctype>
 #include <cstdint>
 
-#include "mcp/tools/util/fs_helpers.hpp"   // util::ReadContextScope
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -1488,7 +1487,7 @@ public:
         //
         // `read` answers a repeat of the same (path, range) with "refer to
         // the earlier tool_result" — true only for the context that received
-        // those bytes. The cache is process-global, so without this scope a
+        // those bytes. Its memory is keyed by reader, so without this scope a
         // subagent inherits the PARENT's entries and is refused files it has
         // never seen. That is not theoretical: a coder subagent spent all 23
         // of its turns re-requesting one file, got the sentinel every time,
@@ -1503,7 +1502,7 @@ public:
         // had read — reintroducing, for the sequential case, exactly the bug
         // this scope exists to prevent.
         static std::atomic<std::uint64_t> subagent_run_seq{0};
-        ::mcp::tools::util::ReadContextScope read_scope{
+        tools::reader::Scope read_scope{
             "subagent:" + std::string{type.name} + ":"
             + std::to_string(subagent_run_seq.fetch_add(
                   1, std::memory_order_relaxed))};

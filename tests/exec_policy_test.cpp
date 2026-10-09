@@ -33,6 +33,9 @@
 #include <csignal>
 #include <cstdio>
 #include <unistd.h>
+#include <fcntl.h>
+
+#include <filesystem>
 
 #include <chrono>
 #include <string>
@@ -244,3 +247,52 @@ TEST_CASE("process session: start, poll, stop through the registry") {
         "process_stop", json{{"id", id}});
     CHECK(stop.has_value());
 }
+
+// A spawned tool must not inherit the host's file descriptors.
+//
+// Access rights attach to the open file DESCRIPTION, not to the path, so a
+// descriptor the host holds open survives exec and voids the sandbox's file
+// policy: the child can read a file it was denied, even one that no longer
+// has a path. agentty holds credential stores and logs open while it runs
+// tools, so the exec has to close everything but the child's own three.
+// (Moved from mcp-cpp's fd_leak_test when spawning moved to agentty.)
+#if defined(__linux__)
+TEST_CASE("exec: a child cannot read the host's open descriptors") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / ("fd_leak_" + std::to_string(::getpid()));
+    fs::create_directories(dir);
+    const auto secret = dir / "secret.txt";
+    {
+        std::FILE* f = std::fopen(secret.c_str(), "w");
+        REQUIRE(f);
+        std::fputs("FLAG{fd-inherited}\n", f);
+        std::fclose(f);
+    }
+    // Opened before the spawn and deliberately without O_CLOEXEC, standing
+    // in for a long-lived host fd we don't control.
+    const int fd = ::open(secret.c_str(), O_RDONLY);
+    REQUIRE(fd >= 0);
+    const std::string peek = "cat /proc/self/fd/" + std::to_string(fd) + " 2>/dev/null; true";
+
+    auto r = sh(peek, mt::Budgets{10s, 10s});
+    CHECK_MESSAGE(r.output.find("FLAG{fd-inherited}") == std::string::npos,
+                  "child read an inherited fd");
+
+    // The sharp case: unlinked, so no path rule can name it.
+    fs::remove(secret);
+    auto r2 = sh(peek, mt::Budgets{10s, 10s});
+    CHECK_MESSAGE(r2.output.find("FLAG{fd-inherited}") == std::string::npos,
+                  "child read an UNLINKED file through an inherited fd");
+
+    // The child's own descriptors still work: stdout reaches us and stdin
+    // is at EOF rather than hanging (a sweep that closed 0/1/2 would pass
+    // the checks above by breaking every tool).
+    auto r3 = sh("echo alive; cat; echo done", mt::Budgets{10s, 10s});
+    CHECK(r3.output.find("alive") != std::string::npos);
+    CHECK(r3.output.find("done")  != std::string::npos);
+
+    ::close(fd);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+#endif

@@ -29,6 +29,14 @@ void emit(std::string_view snapshot)   { if (g_sink) g_sink(snapshot); }
 Sink current()                         { return g_sink; }
 } // namespace progress
 
+namespace reader {
+namespace {
+    thread_local std::string g_reader;
+}
+void set(std::string id)       { g_reader = std::move(id); }
+const std::string& current()   { return g_reader; }
+} // namespace reader
+
 namespace cancellation {
 namespace {
     thread_local Probe                        g_probe;

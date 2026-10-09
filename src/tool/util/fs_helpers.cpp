@@ -2,7 +2,7 @@
 #include "agentty/util/home_dir.hpp"
 
 #include <maya/runtime.hpp>
-#include <mcp/tools/util/fs_helpers.hpp>   // mirror the workspace root into mcp-cpp
+#include <mcp/tools/util/fs_helpers.hpp>   // project_root(): one rule for both layers
 
 #include <algorithm>
 #include <atomic>
@@ -338,12 +338,8 @@ void set_workspace_root(fs::path root) {
         auto abs = fs::absolute(resolved, aec);
         if (!aec) resolved = std::move(abs);
     }
-    // Mirror into mcp-cpp's util layer: the local tool set is served by the
-    // mcp-cpp toolset (filesystem tools enforce the workspace boundary there),
-    // so agentty's root MUST be the same root mcp sees. Doing it here — in the
-    // single canonical setter — means every caller (main.cpp, ACP, tests)
-    // gets the boundary mirrored automatically, with no second seam to forget.
-    ::mcp::tools::util::set_workspace_root(resolved);
+    // The mcp-cpp tools read this same root: the tool state agentty hands
+    // them takes the boundary from here on every call.
     mutable_workspace_root() = std::move(resolved);
 }
 
@@ -352,12 +348,11 @@ const fs::path& workspace_root() {
 }
 
 fs::path project_root() {
-    // Delegate to mcp-cpp's implementation: set_workspace_root() mirrors the
-    // boundary into mcp's util layer, so its project_root() sees the same
-    // boundary and the same process cwd. Delegating (rather than duplicating
-    // the cwd-clamp logic) guarantees agentty-native and mcp-served tools
-    // resolve relative paths to the identical directory.
-    return ::mcp::tools::util::project_root();
+    // mcp-cpp's rule (the cwd, clamped inside the boundary), over our
+    // boundary, so agentty-native and mcp-served tools resolve relative paths
+    // to the identical directory.
+    return ::mcp::tools::util::project_root(
+        ::mcp::tools::util::bounds_from(workspace_root(), {}));
 }
 
 bool is_within_workspace(const fs::path& target) {
@@ -456,6 +451,15 @@ void allow_read_root(const fs::path& root) {
                 roots.push_back(std::move(c));
         },
         canon.string());
+}
+
+std::vector<fs::path> read_roots_now() {
+    return read_roots().read([](const std::vector<std::string>& roots) {
+        std::vector<fs::path> out;
+        out.reserve(roots.size());
+        for (const auto& r : roots) out.emplace_back(r);
+        return out;
+    });
 }
 
 bool is_read_allowlisted(const fs::path& target) {

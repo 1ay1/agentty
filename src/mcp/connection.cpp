@@ -70,10 +70,10 @@ R take(std::expected<R, m::RpcError> r) {
 }
 }  // namespace
 
-Link stdio_link(m::cap::ChildProcess::Spawn spawn) {
+Link stdio_link(::agentty::util::ChildProcess::Spawn spawn) {
     Link link;
     link.open = [spawn = std::move(spawn)]() -> Link::Opened {
-        auto child = std::make_shared<m::cap::ChildProcess>(spawn);
+        auto child = std::make_shared<::agentty::util::ChildProcess>(spawn);
         auto ch = rpc::stream_channel(child->out(), child->in());
         // On stop: EOF on its stdin, then kill it so its stdout closes and a
         // reader parked on it wakes. The child object lives on in `holder`
@@ -86,7 +86,7 @@ Link stdio_link(m::cap::ChildProcess::Spawn spawn) {
         return {std::move(ch), child};
     };
     link.alive = [](const std::shared_ptr<void>& holder) {
-        return holder && static_cast<m::cap::ChildProcess*>(holder.get())->alive();
+        return holder && static_cast<::agentty::util::ChildProcess*>(holder.get())->alive();
     };
     return link;
 }

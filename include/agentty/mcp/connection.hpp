@@ -22,7 +22,7 @@
 
 #include <maya/runtime.hpp>
 #include <mcp/cap/capability.hpp>
-#include <mcp/cap/process.hpp>
+#include "agentty/util/child_process.hpp"
 #include <mcp/client.hpp>
 
 #include "agentty/rpc/peer.hpp"
@@ -44,7 +44,7 @@ struct Link {
 };
 
 // A server spawned as a child process, spoken to over its stdio.
-[[nodiscard]] Link stdio_link(::mcp::cap::ChildProcess::Spawn spawn);
+[[nodiscard]] Link stdio_link(::agentty::util::ChildProcess::Spawn spawn);
 
 struct ConnectionConfig {
     std::string                 name;   // origin becomes "mcp:<name>"

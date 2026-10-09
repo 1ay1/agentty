@@ -30,7 +30,6 @@
 
 #if AGENTTY_MCP
 #include <mcp/tools/util/bash_validate.hpp>
-#include <mcp/tools/util/fs_helpers.hpp>
 #endif
 #include "agentty/util/dbglog.hpp"
 #include "agentty/tool/registry.hpp"
@@ -2627,13 +2626,12 @@ Cmd write_fork_transcript(Thread parent, fork_panel::Choice choice) {
                 r.path.clear();
             }
             // The transcript sits under ~/.agentty/threads, outside the
-            // workspace the read tool is sandboxed to. Open that dir to both
-            // fs layers (tools are served through mcp-cpp) so the model can
-            // read the file the fork note points at.
+            // workspace the read tool is sandboxed to. Open that dir (the
+            // mcp-cpp tools see the same read roots) so the model can read
+            // the file the fork note points at.
             if (!r.path.empty()) {
                 const auto dir = persistence::threads_dir();
                 tools::util::allow_read_root(dir);
-                ::mcp::tools::util::allow_read_root(dir);
             }
             out.send(Msg{msg::ForkMsg{std::move(r)}});
         },

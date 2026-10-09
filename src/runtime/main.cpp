@@ -1601,22 +1601,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ── Mirror the tool runtime into mcp-cpp ────────────────────────────
-    // The local tool set is now served by mcp-cpp's batteries-included
-    // toolset (see build_registry / mcp_tools_bridge). Mirror agentty's
-    // workspace-root boundary + sandbox mode into mcp's util layer so the
-    // bridged read/write/edit/bash/git tools enforce the SAME --workspace
-    // gate and bwrap/sandbox-exec isolation the native tools did. Must run
-    // before any tool can dispatch (TUI, ACP, and mcp-serve all reach this).
-    //
-    // It also hands mcp OUR sandbox as its host sandbox, so the bridged
-    // tools run under the same engine and the same saved policy as agentty's
-    // own paths. That is why it has to come AFTER set_config()/init() above:
-    // the hook it installs closes over our backend choice, and installing it
-    // before the policy was loaded would publish a boundary we had not
-    // decided yet.
-    tools::wire_mcp_runtime(args.cli_sandbox);
-
     // ── Resolve the active provider ──────────────────────────────
     // --provider wins; otherwise the saved setting; otherwise Anthropic.
     // "anthropic" (default) keeps the OAuth/Pro/Max path. Any other value
