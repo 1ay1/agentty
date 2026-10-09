@@ -194,88 +194,34 @@ void run_isolated_detached(std::string_view where, Body body,
 
 // ── WorkerGroup ─ background work tied to ONE object's lifetime ────────
 //
-// The third shape, and the one the table above was missing. Not "finishes
-// before this frame returns" (maya::scope) and not "outlives the frame, nobody
-// waits" (run_isolated_detached), but: a long-lived OBJECT owns workers that
-// touch its collaborators, and its stop() is a HARD BARRIER — when stop()
-// returns, no job is running, so the caller may safely destroy things the jobs
-// were using.
+// maya::worker_group (jaal) is the primitive: a long-lived object's jobs,
+// and a stop() that is a hard barrier with no grace. This adds only the
+// `where` + spawn-site breadcrumb when a job throws.
 //
-// WHY THIS IS NOT run_isolated_detached
-//
-// jaal's pool shutdown is deliberately BOUNDED: it asks, waits out a grace,
-// then abandons. Abandoning is safe for anything the worker CO-OWNS — that is
-// why the pool keeps its own state in a shared core. It is not safe for
-// something a THIRD party owns and is about to free.
-//
-// agentty's MCP HTTP transport is exactly that case: its POST workers push
-// responses into the pipe its peer reads, and the connection drops the
-// transport right after stop() returns. Making
-// the worker co-own the transport does not help, because the dangling thing
-// is the ENGINE, which the transport cannot co-own. So "wait as long as it
-// takes" is a real requirement and not timidity.
-//
-// Each such site used to hand-roll it: a mutex, a condition variable, an
-// inflight counter, and an alive flag that had to flip under the SAME lock as
-// the counter so a stop() could not slip between "alive check passed" and
-// "counter incremented". That coupling is subtle, it was commented at length,
-// and it is the kind of thing that should exist once. The pool already does
-// the hard half: post_isolated counts a job under its own lock BEFORE the
-// thread exists, which is precisely that check-then-increment atomicity.
-//
-// So this adds exactly one thing to the pool — a barrier grace instead of a
-// teardown grace — and takes the lifetime bookkeeping off the call site.
+// Used where a job writes into something a third party frees right after
+// stop(): the MCP HTTP transport's POST workers push into a pipe the
+// connection drops once the transport is stopped.
 class WorkerGroup {
   public:
     /// `where` labels the group in logs. Static storage, same contract as the
     /// spawn functions above.
     explicit WorkerGroup(std::string_view where) : where_(where) {}
 
-    WorkerGroup(const WorkerGroup&)            = delete;
-    WorkerGroup& operator=(const WorkerGroup&) = delete;
-
-    /// Joins on destruction, so an object that forgets to call stop() is
-    /// still safe — it just blocks later than it meant to.
-    ~WorkerGroup() { stop(); }
-
-    /// Run `body` on a thread of its own. Dropped if the group is already
-    /// stopped, which is the admission half of the old alive_/inflight_
-    /// coupling and is handled inside the pool under its own lock.
-    ///
-    /// Isolated rather than queued because these jobs block on network IO by
-    /// nature; a queued one would occupy a shared worker for its duration.
+    /// Run `body` on a thread of its own. Dropped once the group is stopped.
     template <WorkerBody Body>
     void post(Body body,
               std::source_location loc = std::source_location::current()) {
-        pool_.post_isolated(detail::guarded_body(where_, loc, std::move(body)));
+        group_.post(detail::guarded_body(where_, loc, std::move(body)));
     }
 
-    /// Barrier: when this returns, no job posted to this group is running.
-    /// Idempotent — the pool's shutdown is, and stop() is reached from both
-    /// an explicit teardown path and the destructor.
-    ///
-    /// NO DEADLINE, and that is the contract rather than an oversight. A
-    /// group with a grace would be a barrier that sometimes isn't: it would
-    /// return while a job was still running, having told the caller it was
-    /// safe to destroy what that job writes into. Bounded-and-abandon is the
-    /// right default everywhere a worker only touches what it co-owns, which
-    /// is why jaal's pool defaults to it — it is the wrong answer HERE, where
-    /// the whole reason this type exists is that the jobs touch a
-    /// collaborator the caller is about to free.
-    ///
-    /// So a job that hangs forever hangs this. That turns silent corruption
-    /// at exit into a visibly stuck shutdown with a thread to look at, which
-    /// is the trade this type is for. Post work that carries its own timeout
-    /// — as the MCP transport's does.
-    void stop() noexcept {
-        (void)pool_.shutdown(maya::pool::no_deadline);
-    }
+    /// Barrier: when this returns, no job posted here is running. No
+    /// deadline, on purpose, so a job that hangs hangs this. Give jobs their
+    /// own timeouts. Idempotent; the destructor calls it too.
+    void stop() noexcept { group_.stop(); }
 
   private:
     std::string_view   where_;
-    // One worker: these groups serialize their own calls (the MCP provider
-    // holds a call mutex), so a second would never be used.
-    maya::pool pool_{/*max_workers=*/1};
+    maya::worker_group group_;
 };
 
 } // namespace agentty::util
