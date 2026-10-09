@@ -112,7 +112,7 @@ start_child(const ChildRun& run) {
     spec.new_session  = true;
     if (!run.stdin_data.empty()) spec.stdin_from = pf::stream_to::pipe;
     auto p = pf::posix_process::spawn(spec);
-    if (!p) return std::unexpected(std::string{p.error().what});
+    if (!p) return std::unexpected(std::string{p.error().what} + ": " + std::strerror(p.error().native));
     return started{std::move(*p), -1, nullptr, nullptr};
 }
 

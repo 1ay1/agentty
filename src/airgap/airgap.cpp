@@ -49,18 +49,9 @@
 #  endif
 #  include <windows.h>
 #else
-// <spawn.h> is gated behind __ANDROID_API__ >= 28 on Bionic and absent from
-// the sysroot below that (Termux on some devices). Prefer posix_spawn where
-// available; otherwise run_sync falls back to fork/exec (no header needed).
-#  if __has_include(<spawn.h>)
-#    include <spawn.h>
-#    define AGENTTY_HAVE_POSIX_SPAWN 1
-#  else
-#    define AGENTTY_HAVE_POSIX_SPAWN 0
-#  endif
-#  include <sys/wait.h>
-#  include <unistd.h>
-extern char** environ;
+#  include <cerrno>
+#  include <poll.h>
+#  include <maya/runtime.hpp>
 #endif
 
 namespace fs = std::filesystem;
@@ -194,49 +185,27 @@ int run_sync(const std::vector<std::string>& argv) {
 #else
 int run_sync(const std::vector<std::string>& argv) {
     if (argv.empty()) return -1;
-
-    // posix_spawn wants `char* const*`; build a contiguous argv buffer
-    // from the std::strings without const-casting their internals.
-    std::vector<char*> raw;
-    raw.reserve(argv.size() + 1);
-    for (const auto& s : argv) raw.push_back(const_cast<char*>(s.c_str()));
-    raw.push_back(nullptr);
-
-    pid_t pid = -1;
-    int   rc  = 0;
-
-#if AGENTTY_HAVE_POSIX_SPAWN
-    rc = ::posix_spawnp(&pid, raw[0], /*file_actions=*/nullptr,
-                        /*attr=*/nullptr, raw.data(), environ);
-#else
-    // Fallback (Bionic without <spawn.h> below API 28): fork + exec,
-    // inheriting stdin/stdout/stderr just like posix_spawnp with no
-    // file_actions does.
-    pid = ::fork();
-    if (pid == 0) {
-        ::execvp(raw[0], raw.data());
-        ::_exit(127);   // exec only returns on failure
-    } else if (pid < 0) {
-        rc = errno;
-    }
-#endif
-    if (rc != 0 || pid < 0) {
-        std::fprintf(stderr,
-            "agentty airgap: failed to spawn `%s`: %s\n",
-            raw[0], std::strerror(rc != 0 ? rc : errno));
+    namespace pf = maya::platform;
+    // ssh prompts and draws on our terminal, so it keeps our stdio and our
+    // session (a new session would lose the controlling tty).
+    pf::process_spec spec;
+    spec.argv        = argv;
+    spec.stdin_from  = pf::stream_to::inherit;
+    spec.stdout_to   = pf::stream_to::inherit;
+    spec.stderr_to   = pf::stream_to::inherit;
+    spec.new_session = false;
+    auto p = pf::posix_process::spawn(spec);
+    if (!p) {
+        std::fprintf(stderr, "agentty airgap: failed to spawn `%s`: %s\n",
+                     argv[0].c_str(), std::strerror(p.error().native));
         return -1;
     }
-
-    int status = 0;
-    while (::waitpid(pid, &status, 0) == -1) {
-        if (errno == EINTR) continue;
-        std::fprintf(stderr,
-            "agentty airgap: waitpid failed: %s\n", std::strerror(errno));
-        return -1;
-    }
-    if (WIFEXITED(status))   return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-    return -1;
+    // Block on the exit handle; this is a foreground CLI step.
+    pollfd pfd{p->exit_handle().get(), POLLIN, 0};
+    while (::poll(&pfd, 1, -1) < 0 && errno == EINTR) {}
+    auto st = p->reap();
+    if (!st) return -1;
+    return st->how == pf::exit_status::kind::exited ? st->code : 128 + st->code;
 }
 #endif
 

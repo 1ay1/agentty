@@ -79,7 +79,6 @@ io/tls.cpp: const_cast
 io/auth.cpp: atomic const_cast
 io/keystore.cpp: const_cast
 io/cred_crypt.cpp: const_cast
-airgap/airgap.cpp: const_cast
 
 # ── Tools ────────────────────────────────────────────────────────────────
 # A tool runs on a worker and may spawn a child process. progress.cpp's

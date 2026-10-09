@@ -923,13 +923,13 @@ set_tests_properties(layering_maya layering_jaal PROPERTIES LABELS static TIMEOU
 # core, and jsonrpc-cpp stays a leaf (docs/PROTOCOL_LIBRARIES.md §7).
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
-foreach(_pl purity duplication jsonrpc_leaf)
+foreach(_pl purity duplication jsonrpc_leaf spawn_via_jaal)
     if(_pl STREQUAL "purity")
         set(_pl_name submodule_purity)
     elseif(_pl STREQUAL "duplication")
         set(_pl_name no_duplication)
     else()
-        set(_pl_name jsonrpc_leaf)
+        set(_pl_name ${_pl})
     endif()
     add_test(NAME ${_pl_name}
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/protocol_libraries.py

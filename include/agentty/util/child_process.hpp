@@ -491,6 +491,7 @@ private:
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cstring>
 #include <istream>
 #include <memory>
 #include <optional>
@@ -623,7 +624,9 @@ public:
         spec.merge_stderr = s.merge_stderr;
         spec.new_session  = true;
         auto p = pf::posix_process::spawn(spec);
-        if (!p) throw std::runtime_error("cannot start '" + s.command + "': " + p.error().what);
+        if (!p) throw std::runtime_error("cannot start '" + s.command + "': "
+                                     + std::string{p.error().what} + ": "
+                                     + std::strerror(p.error().native));
         proc_.emplace(std::move(*p));
 
         const auto out = proc_->stdout_handle();

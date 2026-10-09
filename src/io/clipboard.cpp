@@ -32,9 +32,8 @@
   #include <shlwapi.h>    // SHCreateMemStream
   #include <gdiplus.h>
 #else
-  #define AGENTTY_POPEN  ::popen
-  #define AGENTTY_PCLOSE ::pclose
-  #define AGENTTY_POPEN_MODE "r"
+  #include <chrono>
+  #include "agentty/tool/util/exec.hpp"   // run_child
 #endif
 
 namespace agentty {
@@ -81,6 +80,21 @@ const char* sniff_image_type(std::string_view bytes) {
 // file, so the AGENTTY_CLIPBOARD_CMD override works there too.
 CaptureResult popen_capture(const char* cmd, std::size_t cap) {
     CaptureResult r;
+#if !defined(_WIN32)
+    // Through jaal like every other child: own session, no inherited fds,
+    // bounded in time so a clipboard tool that hangs cannot hang us.
+    tools::util::ChildRun run;
+    run.argv = {"/bin/sh", "-c", cmd};
+    run.idle = std::chrono::seconds{10};
+    run.wall = std::chrono::seconds{30};
+    run.max_output_bytes = cap;
+    auto c = tools::util::run_child(run);
+    if (!c.started) return r;   // status stays -1
+    r.bytes  = std::move(c.output);
+    // Shaped like a wait status, for the WIFEXITED/WEXITSTATUS readers.
+    r.status = c.exited ? (c.exit_code & 0xff) << 8 : (c.signal & 0x7f);
+    return r;
+#else
     FILE* fp = AGENTTY_POPEN(cmd, AGENTTY_POPEN_MODE);
     if (!fp) return r;
     r.bytes.reserve(std::min<std::size_t>(cap, 256 * 1024));
@@ -94,6 +108,7 @@ CaptureResult popen_capture(const char* cmd, std::size_t cap) {
     }
     r.status = AGENTTY_PCLOSE(fp);
     return r;
+#endif
 }
 
 // Image capture via a user-supplied command (AGENTTY_CLIPBOARD_CMD).
@@ -1012,11 +1027,17 @@ namespace {
 // iff the child exited 0. status==-1 (popen failed) or a non-zero exit
 // both report false. Windows maps popen()→_popen via the macros above.
 bool popen_write(const char* cmd, std::string_view data) {
-#if defined(_WIN32)
-    FILE* fp = ::_popen(cmd, "wb");
+#if !defined(_WIN32)
+    tools::util::ChildRun run;
+    run.argv       = {"/bin/sh", "-c", cmd};
+    run.stdin_data = std::string{data};
+    run.idle       = std::chrono::seconds{10};
+    run.wall       = std::chrono::seconds{30};
+    run.max_output_bytes = 4096;
+    auto c = tools::util::run_child(run);
+    return c.started && c.exited && c.exit_code == 0;
 #else
-    FILE* fp = ::popen(cmd, "w");
-#endif
+    FILE* fp = ::_popen(cmd, "wb");
     if (!fp) return false;
     bool wrote_ok = true;
     if (!data.empty()) {
@@ -1024,13 +1045,10 @@ bool popen_write(const char* cmd, std::string_view data) {
             std::fwrite(data.data(), 1, data.size(), fp);
         wrote_ok = (n == data.size());
     }
-#if defined(_WIN32)
     const int status = ::_pclose(fp);
-#else
-    const int status = ::pclose(fp);
-#endif
     // pclose returns the child wait-status; 0 means clean exit 0.
     return wrote_ok && status == 0;
+#endif
 }
 
 } // namespace

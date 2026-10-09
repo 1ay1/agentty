@@ -17,15 +17,16 @@
 #include "agentty/runtime/app/update/internal.hpp"
 
 #if !defined(_WIN32)
+    #include <cerrno>
     #include <csignal>
     #include <cstdio>
+    #include <cstring>
     #include <ctime>
-    #include <fcntl.h>
     #include <poll.h>
     #include <sys/ioctl.h>
-    #include <sys/wait.h>
     #include <termios.h>
     #include <unistd.h>
+    #include <maya/runtime.hpp>
 #else
     #include <atomic>
     #include <chrono>
@@ -200,40 +201,26 @@ namespace runner_ui {
         ui::emit(header);
     }
 
-    int fds[2];
-    if (::pipe(fds) != 0) {
-        fin.output    = "[failed to start: pipe() failed]";
+    // Started by jaal: no inherited descriptors, default signals in the
+    // child. It stays in OUR session and keeps our stdin, because it is a
+    // foreground job on the user's terminal: Ctrl-C at the tty has to reach
+    // it, and an interactive command has to be able to read keys.
+    namespace pf = maya::platform;
+    pf::process_spec spec;
+    spec.argv         = {"/bin/sh", "-c", command};
+    spec.stdin_from   = pf::stream_to::inherit;
+    spec.stdout_to    = pf::stream_to::pipe;
+    spec.merge_stderr = true;
+    spec.new_session  = false;
+    auto spawned = pf::posix_process::spawn(spec);
+    if (!spawned) {
+        fin.output    = std::string{"[failed to start: "} + std::strerror(spawned.error().native) + "]";
         fin.exit_code = -1;
         return fin;
     }
-    // CLOEXEC both ends: another thread's fork/exec (MCP server spawn, tool
-    // subprocess) must not inherit this capture pipe — a long-lived sibling
-    // child pinning fds[1] open would starve the read loop of EOF forever.
-    // Our own child's dup2 onto stdout below clears the flag on the duplicate.
-    (void)::fcntl(fds[0], F_SETFD, ::fcntl(fds[0], F_GETFD) | FD_CLOEXEC);
-    (void)::fcntl(fds[1], F_SETFD, ::fcntl(fds[1], F_GETFD) | FD_CLOEXEC);
-
-    const pid_t pid = ::fork();
-    if (pid < 0) {
-        ::close(fds[0]); ::close(fds[1]);
-        fin.output    = "[failed to start: fork() failed]";
-        fin.exit_code = -1;
-        return fin;
-    }
-
-    if (pid == 0) {
-        // ── Child ── default signal dispositions (the parent ignores
-        // SIGINT/SIGQUIT below; we must NOT inherit that or Ctrl+C
-        // couldn't stop the command).
-        ::signal(SIGINT,  SIG_DFL);
-        ::signal(SIGQUIT, SIG_DFL);
-        ::close(fds[0]);
-        ::dup2(fds[1], STDOUT_FILENO);
-        ::dup2(fds[1], STDERR_FILENO);
-        ::close(fds[1]);
-        ::execl("/bin/sh", "sh", "-c", command.c_str(), (char*)nullptr);
-        _exit(127);
-    }
+    auto& proc = *spawned;
+    const int out_fd  = proc.stdout_handle()->get();
+    const int exit_fd = proc.exit_handle().get();
 
     // ── Parent ── classic system() semantics: ignore INT/QUIT while the
     // child runs so Ctrl+C kills only the command, not agentty.
@@ -242,7 +229,6 @@ namespace runner_ui {
     ::sigaction(SIGINT,  &ign, &old_int);
     ::sigaction(SIGQUIT, &ign, &old_quit);
 
-    ::close(fds[1]);
     // Tee loop: live to the tty, captured to the buffer. Bounded capture
     // (2 MB) so a runaway command can't OOM the composer — the SCREEN
     // still shows everything; only the buffer stops growing.
@@ -299,26 +285,23 @@ namespace runner_ui {
     //     A still-attached background survivor that writes later gets
     //     EPIPE/SIGPIPE — the price of restoring the UI; a command that
     //     WANTS a survivor should redirect its output (`… > log &`).
-    bool child_reaped = false;
-    int  status = 0;
+    bool child_dead = false;
     for (;;) {
-        struct pollfd pfd{fds[0], POLLIN, 0};
-        const int pr = ::poll(&pfd, 1, 1000);
+        struct pollfd pfds[2] = {{out_fd, POLLIN, 0}, {exit_fd, POLLIN, 0}};
+        const int pr = ::poll(pfds, child_dead ? 1 : 2, 1000);
         tick();   // refresh timers whether or not output arrived this tick
-        if (!child_reaped
-            && ::waitpid(pid, &status, WNOHANG) == pid)
-            child_reaped = true;
-        if (pr == 0) {
-            if (child_reaped) break;   // dead + quiet ≥ 1s → done
-            continue;
-        }
         if (pr < 0) {
             if (errno == EINTR) continue;
             break;
         }
-        const ssize_t n = ::read(fds[0], buf, sizeof buf);
+        if (!child_dead && (pfds[1].revents & (POLLIN | POLLHUP))) child_dead = true;
+        if (!(pfds[0].revents & (POLLIN | POLLHUP))) {
+            if (child_dead && pr <= 1) break;   // dead + quiet ≥ 1s → done
+            continue;
+        }
+        const ssize_t n = ::read(out_fd, buf, sizeof buf);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR || errno == EAGAIN) continue;
             break;
         }
         if (n == 0) break;
@@ -333,10 +316,12 @@ namespace runner_ui {
     }
     ui::end_status(rows);
     ui::restore_title();
-    ::close(fds[0]);
 
-    if (!child_reaped)
-        while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    if (!child_dead) {
+        pollfd pe{exit_fd, POLLIN, 0};
+        while (::poll(&pe, 1, -1) < 0 && errno == EINTR) {}
+    }
+    const auto status = proc.reap();
     ::sigaction(SIGINT,  &old_int,  nullptr);
     ::sigaction(SIGQUIT, &old_quit, nullptr);
 
@@ -344,14 +329,13 @@ namespace runner_ui {
     // command failure — "failed exit 130" reads like the command broke
     // when the user actually stopped it on purpose.
     bool interrupted = false;
-    if (WIFEXITED(status)) {
-        fin.exit_code = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        const int sig = WTERMSIG(status);
-        interrupted = (sig == SIGINT || sig == SIGQUIT);
-        fin.exit_code = 128 + sig;
-    } else {
+    if (!status) {
         fin.exit_code = -1;
+    } else if (status->how == pf::exit_status::kind::exited) {
+        fin.exit_code = status->code;
+    } else {
+        interrupted = (status->code == SIGINT || status->code == SIGQUIT);
+        fin.exit_code = 128 + status->code;
     }
     if (truncated) fin.output += "\n[capture truncated at 2 MB — full output was shown on screen]";
 

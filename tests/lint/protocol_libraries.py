@@ -5,11 +5,14 @@
   no_duplication    R7: mcp-cpp and acp-cpp don't copy jsonrpc-cpp or each other
   jsonrpc_leaf      jsonrpc-cpp includes only std, nlohmann and itself; in
                     agentty only the rpc/mcp/acp integration modules include it
+  spawn_via_jaal    agentty starts no process by hand: no fork, exec*,
+                    posix_spawn, popen, system or waitpid outside _WIN32
+                    branches (jaal has no Windows backend yet)
 
 Comments and string literals are stripped before matching, so docs and error
 messages may name anything.
 
-Usage: protocol_libraries.py ROOT {purity|duplication|jsonrpc_leaf}
+Usage: protocol_libraries.py ROOT {purity|duplication|jsonrpc_leaf|spawn_via_jaal}
 """
 import os
 import re
@@ -213,12 +216,54 @@ def jsonrpc_leaf(root):
     return hits
 
 
+def drop_win32(code):
+    """Blank lines inside #if/#ifdef _WIN32 branches (and #else of #if !_WIN32)."""
+    out, stack = [], []   # stack of (is_win_branch_now, kind)
+    for line in code.split("\n"):
+        s = line.strip()
+        m = re.match(r"#\s*(if|ifdef|ifndef|elif|else|endif)\b(.*)", s)
+        if m:
+            d, rest = m.group(1), m.group(2)
+            if d in ("if", "ifdef", "ifndef"):
+                win = "_WIN32" in rest
+                neg = d == "ifndef" or bool(re.search(r"!\s*defined\s*\(?\s*_WIN32", rest))
+                stack.append([win and not neg, win])
+            elif d in ("elif", "else") and stack:
+                top = stack[-1]
+                top[0] = top[1] and not top[0] if d == "else" else ("_WIN32" in rest)
+            elif d == "endif" and stack:
+                stack.pop()
+            out.append("")
+            continue
+        out.append("" if any(t[0] for t in stack) else line)
+    return "\n".join(out)
+
+
+def spawn_via_jaal(root):
+    hits = []
+    rx = re.compile(r"[^\w.>:]v?fork\s*\(|::v?fork\s*\(|\bexec[lv]p?e?\s*\(|\bposix_spawnp?\b"
+                    r"|[^\w.>]_?popen\s*\(|\bpclose\s*\(|\bwaitpid\s*\(|[^\w.>]system\s*\(")
+    for sub in ("src", "include"):
+        for dp, _, fs in os.walk(os.path.join(root, sub)):
+            for f in sorted(fs):
+                if not f.endswith(EXTS):
+                    continue
+                path = os.path.join(dp, f)
+                code = drop_win32(strip(open(path, encoding="utf-8", errors="replace").read()))
+                for no, line in enumerate(code.split("\n"), 1):
+                    if rx.search(" " + line):
+                        hits.append(f"{os.path.relpath(path, root)}:{no}: {line.strip()}")
+    print("spawn_via_jaal: every agentty child starts through jaal's posix_process")
+    return hits
+
+
 def main():
-    if len(sys.argv) != 3 or sys.argv[2] not in ("purity", "duplication", "jsonrpc_leaf"):
+    if len(sys.argv) != 3 or sys.argv[2] not in ("purity", "duplication", "jsonrpc_leaf", "spawn_via_jaal"):
         print(__doc__)
         return 2
     root, what = sys.argv[1], sys.argv[2]
-    hits = {"purity": purity, "duplication": duplication, "jsonrpc_leaf": jsonrpc_leaf}[what](root)
+    hits = {"purity": purity, "duplication": duplication, "jsonrpc_leaf": jsonrpc_leaf,
+            "spawn_via_jaal": spawn_via_jaal}[what](root)
     if hits:
         print(f"\n{what}: {len(hits)} violation(s) (docs/PROTOCOL_LIBRARIES.md):")
         for h in hits:
