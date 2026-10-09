@@ -486,14 +486,11 @@ private:
 
 } // namespace agentty::util
 
-#else  // !_WIN32 — POSIX backend (fork/exec/pipe)
+#else  // !_WIN32 — POSIX backend: jaal's posix_process
 
-#include <atomic>
+#include <algorithm>
 #include <cerrno>
-#include <csignal>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <chrono>
 #include <istream>
 #include <memory>
 #include <optional>
@@ -501,187 +498,107 @@ private:
 #include <stdexcept>
 #include <streambuf>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <fcntl.h>
 #include <poll.h>
-#include <sys/wait.h>
 #include <unistd.h>
+
+#include <maya/runtime.hpp>
 
 namespace agentty::util {
 
-// A std::streambuf backed by a POSIX pipe FD. Historically this was
-// __gnu_cxx::stdio_filebuf, but that lives in <ext/stdio_filebuf.h> — a
-// libstdc++ extension that libc++ (Android/Termux, some macOS toolchains)
-// doesn't ship. Same shape as the Windows handle_streambuf above: owns the
-// FD, blocking read()/write(), buffered get/put areas sized for the
-// line-buffered JSON-RPC frames the peer exchanges.
-class fd_streambuf final : public std::streambuf {
+// The child's stdout as a streambuf. Reads wait on a jaal reactor (the pipe
+// is non-blocking) so interrupt() can wake a reader parked in underflow()
+// without closing the fd under it.
+class child_out_buf final : public std::streambuf {
 public:
-    explicit fd_streambuf(int fd) noexcept : fd_(fd) {
-        setg(in_, in_ + sizeof(in_), in_ + sizeof(in_));  // empty → underflow
-        setp(out_, out_ + sizeof(out_));
-        int wake[2] = {-1, -1};
-        if (::pipe(wake) == 0) {
-            wake_rd_ = wake[0];
-            wake_wr_ = wake[1];
-            (void)::fcntl(wake_rd_, F_SETFD, ::fcntl(wake_rd_, F_GETFD) | FD_CLOEXEC);
-            (void)::fcntl(wake_wr_, F_SETFD, ::fcntl(wake_wr_, F_GETFD) | FD_CLOEXEC);
-            (void)::fcntl(wake_wr_, F_SETFL, ::fcntl(wake_wr_, F_GETFL) | O_NONBLOCK);
-        }
+    explicit child_out_buf(int fd) {
+        setg(in_, in_ + sizeof(in_), in_ + sizeof(in_));
+        auto r = maya::platform::poll_reactor::create();
+        if (!r) throw std::runtime_error("child_process: reactor");
+        reactor_.emplace(std::move(*r));
+        auto reg = reactor_->watch(fd, maya::platform::interest::read, 1);
+        if (!reg) throw std::runtime_error("child_process: watch stdout");
+        reg_.emplace(std::move(*reg));
+        fd_ = fd;
     }
-    ~fd_streambuf() override { sync(); close(); }
-
-    fd_streambuf(const fd_streambuf&)            = delete;
-    fd_streambuf& operator=(const fd_streambuf&) = delete;
-
-    // Wake a thread blocked in underflow() without closing an FD underneath
-    // read(2). The owner joins that thread before destroying this streambuf.
     void interrupt() noexcept {
-        interrupted_.store(true, std::memory_order_release);
-        if (wake_wr_ >= 0) {
-            const char byte = 1;
-            (void)::write(wake_wr_, &byte, 1);
-        }
+        interrupted_.with([](bool& v) { v = true; });
+        if (reactor_) reactor_->waker().wake();
     }
-
-    void close() noexcept {
-        interrupt();
-        if (fd_ >= 0) { ::close(fd_); fd_ = -1; }
-        if (wake_rd_ >= 0) { ::close(wake_rd_); wake_rd_ = -1; }
-        if (wake_wr_ >= 0) { ::close(wake_wr_); wake_wr_ = -1; }
-    }
-    [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
 
 protected:
-    // ── reading: refill the get area from the pipe ────────────────────
     int_type underflow() override {
-        if (!valid() || interrupted_.load(std::memory_order_acquire))
-            return traits_type::eof();
-        if (wake_rd_ >= 0) {
-            pollfd fds[2] = {{fd_, POLLIN, 0}, {wake_rd_, POLLIN, 0}};
-            int ready;
-            do {
-                ready = ::poll(fds, 2, -1);
-            } while (ready < 0 && errno == EINTR);
-            if (ready <= 0 || (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) ||
-                interrupted_.load(std::memory_order_acquire))
-                return traits_type::eof();
+        for (;;) {
+            if (interrupted_.read([](const bool& v) { return v; })) return traits_type::eof();
+            const auto n = ::read(fd_, in_, sizeof(in_));
+            if (n > 0) { setg(in_, in_, in_ + n); return traits_type::to_int_type(in_[0]); }
+            if (n == 0) return traits_type::eof();
+            if (errno == EINTR) continue;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) return traits_type::eof();
+            if (!reactor_->wait(std::nullopt)) return traits_type::eof();
         }
-        ssize_t got;
-        do {
-            got = ::read(fd_, in_, sizeof(in_));
-        } while (got < 0 && errno == EINTR);
-        if (got <= 0) return traits_type::eof();   // 0 = writer closed
-        setg(in_, in_, in_ + got);
-        return traits_type::to_int_type(in_[0]);
     }
 
-    // ── writing: flush the put area to the pipe ─────────────────────
+private:
+    int fd_ = -1;
+    std::optional<maya::platform::poll_reactor> reactor_;
+    std::optional<maya::platform::poll_reactor::registration> reg_;
+    maya::guarded<bool> interrupted_{false};
+    char in_[4096]{};
+};
+
+// The child's stdin as a streambuf: blocking writes, failure (EPIPE, closed)
+// surfaces as badbit on the ostream.
+class child_in_buf final : public std::streambuf {
+public:
+    explicit child_in_buf(maya::platform::posix_process& p) : p_(p) { setp(out_, out_ + sizeof(out_)); }
+    void close() noexcept { closed_.with([](bool& v) { v = true; }); p_.close_stdin(); }
+
+protected:
     int_type overflow(int_type ch) override {
-        if (!flush_put_area()) return traits_type::eof();
+        if (sync() != 0) return traits_type::eof();
         if (!traits_type::eq_int_type(ch, traits_type::eof())) {
             *pptr() = traits_type::to_char_type(ch);
             pbump(1);
         }
         return traits_type::not_eof(ch);
     }
-
-    int sync() override { return flush_put_area() ? 0 : -1; }
-
-private:
-    [[nodiscard]] bool flush_put_area() noexcept {
+    int sync() override {
         const char* p = pbase();
-        const char* e = pptr();
-        while (p < e) {
-            if (!valid()) return false;
-            ssize_t n;
-            do {
-                n = ::write(fd_, p, static_cast<std::size_t>(e - p));
-            } while (n < 0 && errno == EINTR);
-            if (n <= 0) return false;   // EPIPE etc. — reader gone
+        std::size_t left = static_cast<std::size_t>(pptr() - pbase());
+        if (left == 0) return 0;
+        if (closed_.read([](const bool& v) { return v; })) return -1;
+        const auto h = p_.stdin_handle();
+        if (!h) return -1;
+        while (left > 0) {
+            const auto n = ::write(h->get(), p, left);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) return -1;
             p += n;
+            left -= static_cast<std::size_t>(n);
         }
         setp(out_, out_ + sizeof(out_));
-        return true;
+        return 0;
     }
-
-    int  fd_ = -1;
-    int  wake_rd_ = -1;
-    int  wake_wr_ = -1;
-    std::atomic<bool> interrupted_{false};
-    char in_[4096];
-    char out_[4096];
-};
-
-// Move-only owner of a single pipe-end FD. Closes on scope exit unless
-// release()'d, so the spawn prologue's leak-ladder (close every FD opened so
-// far on any early throw) becomes automatic and impossible to get wrong: each
-// ::pipe() end is parked in an FdGuard the instant it exists, a throw between
-// here and the commit point unwinds them in reverse, and at the commit point
-// the surviving ends are release()'d — into the child (via dup2) or into the
-// parent's streambufs. Zero runtime cost: one int, no vtable, no heap.
-class FdGuard {
-public:
-    FdGuard() noexcept = default;
-    explicit FdGuard(int fd) noexcept : fd_(fd) {}
-    FdGuard(FdGuard&& o) noexcept : fd_(o.fd_) { o.fd_ = -1; }
-    FdGuard& operator=(FdGuard&& o) noexcept {
-        if (this != &o) { reset(); fd_ = o.fd_; o.fd_ = -1; }
-        return *this;
-    }
-    FdGuard(const FdGuard&)            = delete;
-    FdGuard& operator=(const FdGuard&) = delete;
-    ~FdGuard() { reset(); }
-
-    [[nodiscard]] int get() const noexcept { return fd_; }
-    [[nodiscard]] int release() noexcept { int f = fd_; fd_ = -1; return f; }
-    void reset() noexcept { if (fd_ >= 0) { ::close(fd_); fd_ = -1; } }
 
 private:
-    int fd_ = -1;
+    maya::platform::posix_process& p_;
+    maya::guarded<bool> closed_{false};
+    char out_[4096]{};
 };
 
-// A pipe whose two ends are CLOEXEC FROM BIRTH — the property is part of the
-// TYPE, not a call site's discipline. Why it must be structural: providers
-// spawn in parallel, so a sibling's fork() between a bare ::pipe() and our
-// exec would inherit the ends; that sibling's long-lived child then holds our
-// child's stdout write end open, EOF never reaches our reader, and teardown
-// wedges forever in pthread_join (a real field hang). With CloexecPipe there
-// is no window in which an inheritable end exists, and no future edit can
-// forget the fcntl — the only way to get a pipe here is the safe way.
-// (pipe2(O_CLOEXEC) is atomic where the platform has it; the fcntl fallback
-// still closes the race down to our own two instructions, and every OTHER
-// concurrently-spawned child sees CLOEXEC set.) dup2() onto 0/1 in our own
-// child CLEARS the flag on the duplicate, so the exec'd server keeps stdio.
-struct CloexecPipe {
-    FdGuard rd, wr;
-    // Named constructor: the throwing path never yields a partially-armed pipe.
-    static CloexecPipe make(const char* what) {
-        int fds[2] = {-1, -1};
-#if defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-        if (::pipe2(fds, O_CLOEXEC) != 0)
-            throw std::runtime_error(std::string{"mcp::cap: pipe2() failed ("} + what + ")");
-#else
-        if (::pipe(fds) != 0)
-            throw std::runtime_error(std::string{"mcp::cap: pipe() failed ("} + what + ")");
-        (void)::fcntl(fds[0], F_SETFD, ::fcntl(fds[0], F_GETFD) | FD_CLOEXEC);
-        (void)::fcntl(fds[1], F_SETFD, ::fcntl(fds[1], F_GETFD) | FD_CLOEXEC);
-#endif
-        CloexecPipe p;
-        p.rd = FdGuard{fds[0]};
-        p.wr = FdGuard{fds[1]};
-        return p;
-    }
-};
-
-// A spawned child process whose stdin/stdout are wired to iostreams. stderr is
-// left attached to the parent's (MCP servers log there; the spec keeps stderr
-// free for logging). Construction throws std::runtime_error on spawn failure.
+// A long-lived child (an MCP server, an ACP agent, a rag peer) spoken to over
+// its stdin/stdout. stderr is inherited: servers log there. Started by jaal,
+// so it gets the same guarantees as every other child: its own session,
+// default signals, no inherited descriptors. Construction throws
+// std::runtime_error on spawn failure.
 class ChildProcess {
 public:
     struct Spawn {
-        std::string              command;   // executable (PATH-resolved via execvp)
+        std::string              command;   // executable (PATH-resolved)
         std::vector<std::string> args;      // NOT including argv[0]
         std::vector<std::string> env_kv;    // extra "KEY=VALUE" entries
         std::string              cwd;        // empty inherits parent cwd
@@ -689,226 +606,121 @@ public:
     };
 
     explicit ChildProcess(const Spawn& s) {
-        // parent.wr → child stdin; child stdout → parent.rd. Every end is
-        // CLOEXEC-from-birth by TYPE (see CloexecPipe) and owned by an
-        // FdGuard, so any throw before the commit point unwinds every open
-        // FD automatically — no hand-rolled close-ladder, no inheritable
-        // window for a concurrently-forking sibling.
-        CloexecPipe in_p    = CloexecPipe::make("stdin");
-        CloexecPipe out_p   = CloexecPipe::make("stdout");
-        CloexecPipe ready_p = CloexecPipe::make("ready");
-        FdGuard& in_rd = in_p.rd;       FdGuard& in_wr = in_p.wr;
-        FdGuard& out_rd = out_p.rd;     FdGuard& out_wr = out_p.wr;
-        FdGuard& ready_rd = ready_p.rd; FdGuard& ready_wr = ready_p.wr;
-        int in_pipe[2]    = {in_p.rd.get(), in_p.wr.get()};
-        int out_pipe[2]   = {out_p.rd.get(), out_p.wr.get()};
-        int ready_pipe[2] = {ready_p.rd.get(), ready_p.wr.get()};
-
-        pid_ = ::fork();
-        if (pid_ < 0)
-            throw std::runtime_error("mcp::cap: fork() failed");
-            // in_rd/in_wr/out_rd/out_wr all close here via guard unwind.
-
-        if (pid_ == 0) {
-            // ── child ────────────────────────────────────────────────────
-            // Raw FDs: this is the forked child; the parent's guards are
-            // copies in a separate address space and irrelevant here.
-            // Give the whole subprocess tree a private session/process group.
-            // The parent waits for the byte below before exposing pid(), so a
-            // prompt terminate() can safely signal -pid without racing setsid.
-            if (::setsid() < 0) (void)::setpgid(0, 0);
-            ready_rd.reset();
-            const char ready = 1;
-            (void)::write(ready_pipe[1], &ready, 1);
-            ready_wr.reset();
-
-            ::dup2(in_pipe[0],  STDIN_FILENO);
-            ::dup2(out_pipe[1], STDOUT_FILENO);
-            if (s.merge_stderr) ::dup2(out_pipe[1], STDERR_FILENO);
-            if (!s.cwd.empty() && ::chdir(s.cwd.c_str()) != 0) {
-                std::fprintf(stderr, "mcp::cap: chdir '%s' failed: %s\n",
-                             s.cwd.c_str(), std::strerror(errno));
-                ::_exit(126);
-            }
-            ::close(in_pipe[0]);  ::close(in_pipe[1]);
-            ::close(out_pipe[0]); ::close(out_pipe[1]);
-            for (const auto& kv : s.env_kv) {
-                if (kv.find('=') == std::string::npos) continue;
-                ::putenv(::strdup(kv.c_str()));   // intentionally leaked pre-exec
-            }
-            std::vector<std::string> store;
-            store.reserve(s.args.size() + 1);
-            store.push_back(s.command);
-            for (const auto& a : s.args) store.push_back(a);
-            std::vector<char*> argv;
-            argv.reserve(store.size() + 1);
-            for (auto& v : store) argv.push_back(v.data());
-            argv.push_back(nullptr);
-            ::execvp(s.command.c_str(), argv.data());
-            std::fprintf(stderr, "mcp::cap: exec '%s' failed: %s\n",
-                         s.command.c_str(), std::strerror(errno));
-            ::_exit(127);
+        namespace pf = maya::platform;
+        pf::process_spec spec;
+        spec.argv.reserve(s.args.size() + 1);
+        spec.argv.push_back(s.command);
+        for (const auto& a : s.args) spec.argv.push_back(a);
+        for (const auto& kv : s.env_kv) {
+            const auto eq = kv.find('=');
+            if (eq == std::string::npos) continue;
+            spec.env.emplace_back(kv.substr(0, eq), kv.substr(eq + 1));
         }
+        spec.cwd          = s.cwd;
+        spec.stdin_from   = pf::stream_to::pipe;
+        spec.stdout_to    = pf::stream_to::pipe;
+        spec.stderr_to    = s.merge_stderr ? pf::stream_to::pipe : pf::stream_to::inherit;
+        spec.merge_stderr = s.merge_stderr;
+        spec.new_session  = true;
+        auto p = pf::posix_process::spawn(spec);
+        if (!p) throw std::runtime_error("cannot start '" + s.command + "': " + p.error().what);
+        proc_.emplace(std::move(*p));
 
-        // ── parent ──────────────────────────────────────────────────────
-        // Drop the child-side ends (guards close them on destruction); the
-        // parent-side ends are release()'d into the fd_streambufs, which now
-        // own the FDs and close them via shutdown(). Commit point: from here
-        // on the streams hold the only references.
-        // Wait until the child has established its private group/session.
-        // EOF is also sufficient (the child failed before signalling).
-        ready_wr.reset();
-        char ready = 0;
-        ssize_t ready_n;
-        do { ready_n = ::read(ready_rd.get(), &ready, 1); }
-        while (ready_n < 0 && errno == EINTR);
-        ready_rd.reset();
+        const auto out = proc_->stdout_handle();
+        if (!out) throw std::runtime_error("child_process: no stdout pipe");
+        out_buf_   = std::make_unique<child_out_buf>(out->get());
+        in_buf_    = std::make_unique<child_in_buf>(*proc_);
+        out_stream_ = std::make_unique<std::istream>(out_buf_.get());
+        in_stream_  = std::make_unique<std::ostream>(in_buf_.get());
 
-        in_rd.reset();    // child's stdin read end — parent doesn't use it
-        out_wr.reset();   // child's stdout write end — parent doesn't use it
-        in_buf_  = std::make_unique<fd_streambuf>(out_rd.release());
-        out_buf_ = std::make_unique<fd_streambuf>(in_wr.release());
-        in_stream_  = std::make_unique<std::istream>(in_buf_.get());
-        out_stream_ = std::make_unique<std::ostream>(out_buf_.get());
     }
 
-    ~ChildProcess() { shutdown(); }
+    ~ChildProcess() { terminate(); }
 
     ChildProcess(const ChildProcess&)            = delete;
     ChildProcess& operator=(const ChildProcess&) = delete;
 
-    [[nodiscard]] std::istream& out() noexcept { return *in_stream_; }   // child stdout
-    [[nodiscard]] std::ostream& in()  noexcept { return *out_stream_; }  // child stdin
-    [[nodiscard]] int pid() const noexcept { return pid_; }
+    [[nodiscard]] std::istream& out() noexcept { return *out_stream_; }   // child stdout
+    [[nodiscard]] std::ostream& in()  noexcept { return *in_stream_; }    // child stdin
+    [[nodiscard]] int pid() const noexcept { return static_cast<int>(proc_->id()); }
 
-    [[nodiscard]] bool alive() const noexcept {
-        if (pid_ <= 0) return false;
-        int status = 0;
-        const pid_t r = ::waitpid(pid_, &status, WNOHANG);
-        if (r == pid_) {                       // just reaped — remember why
-            record_exit_(status);
-            pid_ = -1;
-        } else if (r < 0 && errno == ECHILD) {
-            pid_ = -1;
-        }
-        return pid_ > 0;
+    [[nodiscard]] bool alive() noexcept {
+        if (exited()) return false;
+        return !wait_exit(std::chrono::milliseconds::zero());
     }
 
-    // Exit status of the child once it has been reaped (by alive()/terminate()).
-    // nullopt while the child is still running or was never observed to exit.
-    // A value >= 0 is the normal exit code; a value of 128+N encodes death by
-    // signal N (the shell convention), so the model reads one comparable number.
-    [[nodiscard]] std::optional<int> exit_code() const noexcept { return exit_code_; }
-
-    // Close ONLY the child's stdin (our write end). A well-behaved server sees
-    // EOF and begins exiting, which in turn closes its stdout — unblocking a
-    // reader thread parked in getline on our read end. Does NOT reap or touch
-    // the read stream, so a reader can drain remaining output + the EOF
-    // cleanly. Safe to call before joining the reader, then shutdown() after.
-    // Close the child's stdin FD WITHOUT destroying out_stream_ OR out_buf_.
-    // The the peer holds an std::ostream& into out_stream_, and
-    // out_stream_'s rdbuf() points into out_buf_. Destroying out_buf_
-    // here leaves a dangling rdbuf: if the reader thread processes a
-    // notification and writes a reply between this call and
-    // the peer stopping (which ends the reader), the ostream dereferences
-    // freed memory → SIGSEGV. Calling close() shuts the FD (writes fail
-    // with EBADF/EPIPE, which the streambuf surfaces as badbit) but keeps
-    // the object alive until ~ChildProcess().
-    void close_stdin() noexcept {
-        // Do NOT call out_stream_->flush() here: the reader thread's sink()
-        // lambda writes to out_stream_ under the peer::write_mu_, and
-        // an unsynchronized flush() races it (ostream internals are not
-        // thread-safe). Any pending data in the put area is lost, which is
-        // acceptable during teardown.
-        if (out_buf_) out_buf_->close();   // closes FD; objects stay alive
+    // 0..255 for an exit, 128+N for death by signal N; nullopt while running.
+    [[nodiscard]] std::optional<int> exit_code() const noexcept {
+        return state_.read([](const State& s) { return s.exit_code; });
     }
 
-    void interrupt_output() noexcept {
-        if (in_buf_) in_buf_->interrupt();
+    // EOF on the child's stdin: a well-behaved server starts exiting. The
+    // streams stay alive (a peer may still hold them); writes now fail.
+    void close_stdin() noexcept { in_buf_->close(); }
+
+    // Wake a reader parked on the child's stdout; it sees EOF.
+    void interrupt_output() noexcept { out_buf_->interrupt(); }
+
+    // Ask it to finish, then make it. stdin EOF first; a cooperative child
+    // exits within `grace`. Then SIGTERM to its tree, another grace, SIGKILL.
+    void terminate(std::chrono::milliseconds grace = std::chrono::milliseconds{500}) noexcept {
+        if (exited()) return;
+        namespace pf = maya::platform;
+        close_stdin();
+        if (wait_exit(grace)) return;
+        (void)proc_->stop(pf::stop_mode::graceful, pf::stop_scope::tree);
+        if (wait_exit(std::chrono::milliseconds{2000})) return;
+        (void)proc_->stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+        (void)wait_exit(std::chrono::milliseconds{2000});
     }
 
-    // Stop/reap the entire process group with bounded waits. SIGTERM gives
-    // cooperative children two seconds; SIGKILL guarantees TERM-resistant
-    // children and descendants cannot retain stdout indefinitely.
-    // Like close_stdin(), this does NOT reset out_stream_ or out_buf_ — the
-    // reader thread may still be mid-notification holding a reference to
-    // them via the peer::out_. close() shuts the FD safely; the
-    // objects are destroyed when ChildProcess itself is destructed
-    // (proc.reset() in teardown_, after the reader is joined).
-    void terminate() noexcept {
-        // Do NOT call out_stream_->flush() here — same race as close_stdin():
-        // the reader thread may be writing via sink() and an unsynchronized
-        // flush() on the same ostream is a data race.
-        if (out_buf_) out_buf_->close();
-        if (pid_ <= 0) return;
-
-        const pid_t leader = pid_;
-        bool leader_reaped = false;
-        auto reap_leader = [&] {
-            if (leader_reaped) return;
-            int status = 0;
-            const pid_t result = ::waitpid(leader, &status, WNOHANG);
-            if (result == leader) {
-                record_exit_(status);
-                leader_reaped = true;
-                pid_ = -1;
-            } else if (result < 0 && errno == ECHILD) {
-                leader_reaped = true;
-                pid_ = -1;
-            }
-        };
-        auto group_alive = [&] {
-            if (::kill(-leader, 0) == 0) return true;
-            return errno == EPERM;
-        };
-        auto wait_for = [&](int attempts, bool require_group_gone) {
-            for (int i = 0; i < attempts; ++i) {
-                reap_leader();
-                if (leader_reaped && (!require_group_gone || !group_alive()))
-                    return true;
-                ::usleep(10'000);
-            }
-            return false;
-        };
-        auto signal_group = [&](int signal) {
-            if (::kill(-leader, signal) != 0 && errno == ESRCH && !leader_reaped)
-                (void)::kill(leader, signal);
-        };
-
-        // A child that exits on stdin EOF needs no signal, but descendants
-        // may still own stdout; only return early when the whole group is gone.
-        if (wait_for(50, true)) return;
-        signal_group(SIGTERM);
-        if (wait_for(200, true)) return;
-        signal_group(SIGKILL);
-        (void)wait_for(100, true);
-        reap_leader();
-    }
-
-    // Close child stdin (EOF → graceful exit), poll briefly, then SIGTERM.
-    // Idempotent; also called by the destructor.
     void shutdown() noexcept {
         terminate();
-        in_stream_.reset();
-        in_buf_.reset();
+        interrupt_output();
     }
 
 private:
-    // Translate a waitpid() status into the single comparable number the
-    // model sees: normal exit → its code; killed by signal N → 128+N (shell
-    // convention). Idempotent — only records the first observed exit.
-    void record_exit_(int status) const noexcept {
-        if (exit_code_) return;
-        if (WIFEXITED(status))        exit_code_ = WEXITSTATUS(status);
-        else if (WIFSIGNALED(status)) exit_code_ = 128 + WTERMSIG(status);
+    struct State {
+        bool reaping = false;
+        bool reaped = false;
+        std::optional<int> exit_code;
+    };
+
+    [[nodiscard]] bool exited() const noexcept {
+        return state_.read([](const State& s) { return s.reaping; });
     }
 
-    mutable int pid_ = -1;
-    mutable std::optional<int> exit_code_;
-    std::unique_ptr<fd_streambuf> in_buf_;
-    std::unique_ptr<fd_streambuf> out_buf_;
-    std::unique_ptr<std::istream> in_stream_;
-    std::unique_ptr<std::ostream> out_stream_;
+    // Wait up to `d` for the exit handle, and reap once it fires. True when
+    // the child is gone. Only the destructor's thread and alive() callers
+    // get here; the reap itself runs under the guard so it happens once.
+    bool wait_exit(std::chrono::milliseconds d) noexcept {
+        if (exited()) return true;
+        // poll(2) on the exit handle: a level-triggered question any thread
+        // may ask, with no shared reactor between them.
+        pollfd pfd{proc_->exit_handle().get(), POLLIN, 0};
+        int rc;
+        do rc = ::poll(&pfd, 1, static_cast<int>(d.count())); while (rc < 0 && errno == EINTR);
+        if (rc <= 0) return false;
+        // Claim the reap: only the first thread through gets to call it.
+        const bool mine = state_.with([](State& s) {
+            if (s.reaping) return false;
+            s.reaping = true;
+            return true;
+        });
+        if (!mine) return true;
+        std::optional<int> code;
+        if (auto st = proc_->reap())
+            code = st->how == maya::platform::exit_status::kind::exited ? st->code : 128 + st->code;
+        state_.with([](State& s, std::optional<int> c) { s.exit_code = c; s.reaped = true; }, code);
+        return true;
+    }
+
+    std::optional<maya::platform::posix_process>               proc_;
+    mutable maya::guarded<State>                               state_;
+    std::unique_ptr<child_out_buf> out_buf_;
+    std::unique_ptr<child_in_buf>  in_buf_;
+    std::unique_ptr<std::istream>  out_stream_;
+    std::unique_ptr<std::ostream>  in_stream_;
 };
 
 } // namespace agentty::util

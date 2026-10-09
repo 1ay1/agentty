@@ -485,7 +485,7 @@ SubprocessResult run_posix(std::vector<std::string> argv, const SubprocessOption
     r.start_error = c.start_error;
     r.output      = clean_capture(std::move(c.output));
     r.truncated   = c.truncated;
-    r.timed_out   = c.timed_out_idle || c.timed_out_wall || c.cancelled;
+    r.timed_out   = c.timed_out_idle || c.timed_out_wall;
     r.hard_capped = c.timed_out_wall;
     r.exit_code   = c.exited ? c.exit_code : 128 + c.signal;
     return r;

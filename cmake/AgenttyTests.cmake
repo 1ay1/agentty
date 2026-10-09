@@ -416,7 +416,7 @@ agentty_fold_test(md_cache_probe           TIMEOUT 120 LABELS perf)
 if(AGENTTY_MCP)
     agentty_fold_test(mcp_bridge_test      TIMEOUT 60)
     set_tests_properties(mcp_bridge_test PROPERTIES ENVIRONMENT
-        "AGENTTY_MCP_E2E_SERVER=${CMAKE_BINARY_DIR}/mcp-cpp/examples/mcp_server_example")
+        "AGENTTY_MCP_E2E_SERVER=${CMAKE_BINARY_DIR}/third_party/mcp-cpp/examples/mcp_server_example")
     agentty_fold_test(mcp_http_test        TIMEOUT 60)
 endif()
 # anthropic_md_stream is a capture/replay HARNESS, not a ctest entry of its own:

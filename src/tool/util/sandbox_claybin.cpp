@@ -264,6 +264,25 @@ using namespace ::clay::literals;
     return std::move(d).seal();
 }
 
+// execvp's lookup, done before the spawn: claybin's guest calls execve. A
+// name with a slash is a path already; anything not found stays as given,
+// so the guest's execve reports the real error.
+std::string resolve_on_path(const std::string& name) {
+    if (name.empty() || name.find('/') != std::string::npos) return name;
+    const char* path = std::getenv("PATH");
+    std::string_view rest = (path && *path) ? path : "/usr/local/bin:/usr/bin:/bin";
+    while (true) {
+        const auto colon = rest.find(':');
+        std::string dir{rest.substr(0, colon)};
+        if (dir.empty()) dir = ".";
+        std::string full = dir + "/" + name;
+        if (::access(full.c_str(), X_OK) == 0) return full;
+        if (colon == std::string_view::npos) break;
+        rest.remove_prefix(colon + 1);
+    }
+    return name;
+}
+
 }  // namespace
 
 #if defined(__APPLE__)
@@ -456,7 +475,10 @@ SpawnResult spawn_argv(const Posture& p, const std::vector<std::string>& argv_in
     argv.reserve(argv_in.size() + 1);
     for (const auto& a : argv_in) argv.push_back(a.c_str());
     argv.push_back(nullptr);
-    Command cmd{argv_in.front().c_str(), argv.data(), nullptr};
+    // claybin calls execve, which does no PATH lookup, so a bare "git" came
+    // back as exit 127. Resolve it here, in the parent, the way execvp would.
+    const std::string program = resolve_on_path(argv_in.front());
+    Command cmd{program.c_str(), argv.data(), nullptr};
     // stdin from /dev/null explicitly rather than inherited -- a guest that can
     // read the user's terminal can prompt them, and nothing a tool runs should.
     cmd.stdin_fd = Command::kDevNull;

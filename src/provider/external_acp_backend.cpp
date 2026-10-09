@@ -503,8 +503,7 @@ SpawnedAcpAgent spawn_acp_agent(const std::vector<std::string>& argv,
     ch.interrupt = [child = holder->child.get()] {
         using namespace std::chrono_literals;
         child->close_stdin();
-        for (int i = 0; i < 100 && child->alive(); ++i) std::this_thread::sleep_for(10ms);
-        child->terminate();
+        child->terminate(1s);   // EOF first, up to 1s to exit, then the tree
         child->interrupt_output();
     };
 
