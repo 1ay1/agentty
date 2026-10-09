@@ -323,6 +323,9 @@ constexpr std::size_t kStackLine = 4096;
 constexpr char kBodyNewline = ' ';
 
 struct Slot {
+    // 1 while a writer owns the slot. A writer that wraps onto a slot still
+    // being written skips its ring copy rather than tearing both lines.
+    std::atomic<bool>          busy{false};
     std::atomic<std::uint16_t> len{0};
     char bytes[kSlotBytes];
 };
@@ -754,11 +757,14 @@ void emit(Channel ch, Level lv, std::string_view site,
         const auto slot_idx = g_ring_head.fetch_add(1, std::memory_order_relaxed)
                               % kRingSlots;
         Slot& s = g_ring[slot_idx];
-        s.len.store(0, std::memory_order_release);        // invalidate
-        const auto take = std::min(n, sizeof(s.bytes));
-        std::memcpy(s.bytes, line, take);
-        s.len.store(static_cast<std::uint16_t>(take),
-                    std::memory_order_release);            // publish
+        if (!s.busy.exchange(true, std::memory_order_acquire)) {
+            s.len.store(0, std::memory_order_release);        // invalidate
+            const auto take = std::min(n, sizeof(s.bytes));
+            std::memcpy(s.bytes, line, take);
+            s.len.store(static_cast<std::uint16_t>(take),
+                        std::memory_order_release);            // publish
+            s.busy.store(false, std::memory_order_release);
+        }
     }
 
     // ── File sink: one write(2) on an O_APPEND fd — atomic append ─────

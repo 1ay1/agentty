@@ -723,22 +723,13 @@ add_test(NAME logx_rotation_test COMMAND logx_rotation_test)
 set_tests_properties(logx_rotation_test PROPERTIES TIMEOUT 30
     ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_HOME=${CMAKE_CURRENT_BINARY_DIR}/logx_rotation_test.home")
 
-agentty_test(keystore_test MODE raw LABELS sanitizer)
-add_executable(keystore_test EXCLUDE_FROM_ALL
-    tests/keystore_test.cpp src/io/keystore.cpp src/tool/util/subprocess.cpp
-    src/tool/util/fs_helpers.cpp src/tool/util/utf8.cpp src/tool/progress.cpp
-    src/util/home_dir.cpp)   # fs_helpers.cpp → util::home_dir(); undefined ref
-                             # only surfaces in the -fno-lto sanitizer link
-target_include_directories(keystore_test PRIVATE include)
-target_link_libraries(keystore_test PRIVATE maya::maya nlohmann_json::nlohmann_json)
-if(TARGET mcp::tools)
-    target_link_libraries(keystore_test PRIVATE mcp::tools)  # fs_helpers → mcp util include
+# keystore.cpp spawns its helper through run_child, which sits on the
+# sandbox and the tool layer, so this needs the full link.
+agentty_test(keystore_test MODE standalone LABELS sanitizer
+    OBJS $<TARGET_OBJECTS:agentty_acp_obj> LIBS acp::acp)
+if(WIN32 AND TARGET keystore_test)
+    target_link_libraries(keystore_test PRIVATE advapi32)   # CredReadW & co
 endif()
-if(WIN32)
-    target_link_libraries(keystore_test PRIVATE advapi32)
-endif()
-add_test(NAME keystore_test COMMAND keystore_test)
-set_tests_properties(keystore_test PROPERTIES TIMEOUT 60 LABELS sanitizer)
 
 agentty_test(host_escape_test MODE raw)
 add_executable(host_escape_test EXCLUDE_FROM_ALL
@@ -777,6 +768,7 @@ agentty_test(user_root_test MODE raw)
 add_executable(user_root_test EXCLUDE_FROM_ALL
     tests/user_root_test.cpp src/util/user_root.cpp src/util/home_dir.cpp)
 target_include_directories(user_root_test PRIVATE include)
+target_link_libraries(user_root_test PRIVATE maya::app)   # user_root.cpp uses maya::guarded
 add_test(NAME user_root_test COMMAND user_root_test)
 set_tests_properties(user_root_test PROPERTIES TIMEOUT 30)
 
