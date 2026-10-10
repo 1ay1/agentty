@@ -135,14 +135,15 @@ common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
 | Variable | Effect |
 |----------|--------|
 | `AGENTTY_HOME` | Root for all agentty state (credentials, threads, settings, logs). Default `~/.agentty`. Point it at a scratch dir to sandbox a session. |
-| `AGENTTY_THREADS_DIR` | Conversation history. Default `<root>/threads`. Kept 0700. Also `dirs.threads` in settings.json. |
-| `AGENTTY_CREDENTIALS_DIR` | Sign-ins and API keys. Default `<root>/credentials`. Kept 0700. Also `dirs.credentials`. |
-| `AGENTTY_STATE_DIR` | Approval hashes for project MCP servers, hooks and skills. Default `<root>/state`. Also `dirs.state`. |
-| `AGENTTY_CACHE_DIR` | Refetchable data, the model catalog and update stamps. Default `<root>/cache`. Safe to delete. Also `dirs.cache`. |
-| `AGENTTY_LOGS_DIR` | Diagnostic logs. Default `<root>/logs`. Also `dirs.logs`. |
-| `AGENTTY_PROJECT_DIR` | The per-project root. Default `<project>/.agentty`. Each project gets its own subfolder under it. Also `dirs.project`. |
-| `AGENTTY_RAG_DIR` | Search indexes. Default `<project root>/cache`. Safe to delete, the next search rebuilds. Also `dirs.rag`. |
-| `AGENTTY_PROJECT_STATE_DIR` | Search feedback. Default `<project root>/state`. Also `dirs.project_state`. |
+| `AGENTTY_THREADS_DIR` | Conversation history. Default `<root>/threads`. Kept 0700. |
+| `AGENTTY_CREDENTIALS_DIR` | Sign-ins and API keys. Default `<root>/credentials`. Kept 0700. |
+| `AGENTTY_STATE_DIR` | Approval hashes for project MCP servers, hooks and skills. Default `<root>/state`. |
+| `AGENTTY_CACHE_DIR` | Refetchable data, the model catalog and update stamps. Default `<root>/cache`. Safe to delete. |
+| `AGENTTY_LOGS_DIR` | Diagnostic logs. Default `<root>/logs`. |
+| `AGENTTY_PROJECT_DIR` | The per-project root. Default `<project>/.agentty`. Each project gets its own subfolder under it. |
+| `AGENTTY_RAG_DIR` | Search indexes. Default `<project root>/cache`. Safe to delete, the next search rebuilds. |
+| `AGENTTY_PROJECT_STATE_DIR` | Search feedback. Default `<project root>/state`. |
+| `AGENTTY_THREADS_KEEP_DAYS` | Delete threads idle this many days, once a day. Unset keeps everything. |
 | `AGENTTY_ENCRYPT_PASSPHRASE` / `AGENTTY_PASSPHRASE` | Passphrase for the encrypted credential store — for headless machines where no prompt is possible. |
 | `AGENTTY_USE_KEYSTORE` | Use the OS keychain for credentials instead of the file store. |
 | `AGENTTY_KDF` | Key-derivation parameters for the credential store. Change only if you know why. |
@@ -164,11 +165,8 @@ export AGENTTY_THREADS_DIR=/mnt/data/agentty/threads
 export AGENTTY_LOGS_DIR=/mnt/data/agentty/logs
 ```
 
-Or once, in `~/.agentty/settings.json` (a set variable still wins):
-
-```json
-{ "dirs": { "threads": "/mnt/data/agentty/threads", "logs": "/mnt/data/agentty/logs" } }
-```
+Use `agentty config move threads /mnt/data/agentty/threads` to bring
+existing data along; it prints the export line to add.
 
 See [Storage](/docs/storage) for every file and how long it stays.
 

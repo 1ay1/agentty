@@ -88,13 +88,8 @@ struct ExpireStats { std::size_t threads = 0; std::uintmax_t bytes = 0; };
 ExpireStats expire_threads(Io, int keep_days, const ThreadId& keep,
                            bool dry_run = false);
 
-// threads.keep_days from settings.json, read straight from the file so the
-// background sweep doesn't need the settings cache. 0 when unset.
+// $AGENTTY_THREADS_KEEP_DAYS, or 0 (keep everything) when unset or invalid.
 [[nodiscard]] int thread_keep_days(Io);
-
-// Set (or with an empty value, remove) settings.json "dirs".<key>, under the
-// settings lock. Used by `agentty config move`. False if the write failed.
-bool set_settings_dir(Io, std::string_view key, const std::string& value);
 
 // The per-message fingerprint the incremental save path uses to find what
 // changed. Exposed ONLY so the save bench can price that pass separately

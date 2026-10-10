@@ -16,7 +16,6 @@
 
 #include "agentty/dirs/dirs.hpp"
 #include "agentty/scope/scope.hpp"
-#include "agentty/util/io.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -57,13 +56,13 @@ inline constexpr scope::Layout kMemoryLayout{.leaf = "memory.jsonl"};
 
 // ── Write: where bytes land, and for how long ────────────────────────────
 //
-// Every directory has its own variable, AGENTTY_<NAME>_DIR, and the same
-// override as `dirs.<name>` in settings.json. docs/website/storage.md lists them.
+// Every directory has its own variable, AGENTTY_<NAME>_DIR. Storage is set
+// by environment only. docs/website/storage.md lists them.
 
 inline constexpr dirs::Spec kThreadsSpec{
     .root = dirs::Root::User, .leaf = "threads",
     .env = "AGENTTY_THREADS_DIR", .owner_only = true,
-    .retention = "kept until deleted; set threads.keep_days to expire old ones"};
+    .retention = "kept until deleted; AGENTTY_THREADS_KEEP_DAYS expires old ones"};
 inline constexpr dirs::Spec kCacheSpec{
     .root = dirs::Root::User, .leaf = "cache", .env = "AGENTTY_CACHE_DIR",
     .retention = "refetchable, safe to delete"};
@@ -190,6 +189,6 @@ struct Report {
 //   agentty config          every concern, one line each
 //   agentty config mcp      one ladder, including what is NOT read
 //   agentty config env      the model
-int cmd_config(Io, std::span<const std::string> argv);
+int cmd_config(std::span<const std::string> argv);
 
 }  // namespace agentty::config

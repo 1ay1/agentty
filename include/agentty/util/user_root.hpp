@@ -82,15 +82,14 @@ namespace agentty::util {
 // categories below, and they are exactly the ones that grow without
 // bound.
 //
-// So every directory takes its own override, as an env var or as a key
-// in settings.json's "dirs" object (main() turns the key into the env
-// var; a set env var wins):
+// So every directory takes its own environment variable. Storage is set
+// only through the environment; nothing in agentty writes it.
 //
-//   $AGENTTY_THREADS_DIR       dirs.threads       conversation history
-//   $AGENTTY_CACHE_DIR         dirs.cache         refetchable downloads
-//   $AGENTTY_LOGS_DIR          dirs.logs          diagnostics
-//   $AGENTTY_CREDENTIALS_DIR   dirs.credentials   secrets, forced 0700
-//   $AGENTTY_STATE_DIR         dirs.state         approval hashes
+//   $AGENTTY_THREADS_DIR       conversation history
+//   $AGENTTY_CACHE_DIR         refetchable downloads
+//   $AGENTTY_LOGS_DIR          diagnostics
+//   $AGENTTY_CREDENTIALS_DIR   secrets, forced 0700
+//   $AGENTTY_STATE_DIR         approval hashes
 //
 // This is NOT a retreat to the XDG four-root layout the rationale above
 // rejects, and the difference is the default. XDG scatters by default,

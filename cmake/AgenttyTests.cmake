@@ -791,10 +791,9 @@ set_tests_properties(loop_affinity_test PROPERTIES TIMEOUT 60 LABELS sanitizer)
 # can't interact with any other subsystem's statics.
 agentty_test(user_root_test MODE raw)
 add_executable(user_root_test EXCLUDE_FROM_ALL
-    tests/user_root_test.cpp src/util/user_root.cpp src/util/home_dir.cpp
-    src/util/storage_env.cpp)
+    tests/user_root_test.cpp src/util/user_root.cpp src/util/home_dir.cpp)
 target_include_directories(user_root_test PRIVATE include)
-target_link_libraries(user_root_test PRIVATE maya::app nlohmann_json::nlohmann_json)
+target_link_libraries(user_root_test PRIVATE maya::app)   # user_root.cpp uses maya::guarded
 add_test(NAME user_root_test COMMAND user_root_test)
 set_tests_properties(user_root_test PROPERTIES TIMEOUT 30)
 

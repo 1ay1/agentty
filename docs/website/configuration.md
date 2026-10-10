@@ -88,37 +88,33 @@ stays, is in [Storage](/docs/storage).
 ```
 ~/.agentty/                       ($AGENTTY_HOME)
   settings.json  mcp.json  hooks.json  skills/  AGENTS.md   hand-edited config
-  threads/     conversations, 0700           $AGENTTY_THREADS_DIR      dirs.threads
-  credentials/ sign-ins and keys, 0700       $AGENTTY_CREDENTIALS_DIR  dirs.credentials
-  state/       approval hashes               $AGENTTY_STATE_DIR        dirs.state
-  cache/       refetchable, safe to delete   $AGENTTY_CACHE_DIR        dirs.cache
-  logs/        rotates at 32 MB              $AGENTTY_LOGS_DIR         dirs.logs
+  threads/     conversations, 0700           $AGENTTY_THREADS_DIR
+  credentials/ sign-ins and keys, 0700       $AGENTTY_CREDENTIALS_DIR
+  state/       approval hashes               $AGENTTY_STATE_DIR
+  cache/       refetchable, safe to delete   $AGENTTY_CACHE_DIR
+  logs/        rotates at 32 MB              $AGENTTY_LOGS_DIR
   memory.jsonl
 
-<project>/.agentty/               ($AGENTTY_PROJECT_DIR, dirs.project)
-  cache/   search indexes, rebuildable       $AGENTTY_RAG_DIR          dirs.rag
-  state/   search feedback                   $AGENTTY_PROJECT_STATE_DIR dirs.project_state
+<project>/.agentty/               ($AGENTTY_PROJECT_DIR)
+  cache/   search indexes, rebuildable       $AGENTTY_RAG_DIR
+  state/   search feedback                   $AGENTTY_PROJECT_STATE_DIR
   memory.jsonl  mcp.json  skills/
 ```
 
-Every directory moves on its own, with the variable or with the same key in
-`settings.json` (the variable wins):
-
-```json
-{ "dirs": { "threads": "/mnt/big/agentty/threads" } }
-```
-
-Relative paths are relative to the root, never your current folder. Empty
-means unset. If a folder can't be made you get one warning and the default.
+Every directory moves on its own with its variable. Storage is set by
+environment only; nothing in the app changes it. Relative paths are relative
+to the root, never your current folder. Empty means unset. If a folder can't
+be made you get one warning and the default.
 
 Threads are the only thing that grows without limit. To expire old ones:
 
-```json
-{ "threads": { "keep_days": 90 } }
+```sh
+export AGENTTY_THREADS_KEEP_DAYS=90
 ```
 
-`agentty config move threads /mnt/big/threads` moves a folder with its data
-(refuses while agentty runs, verifies the copy before removing anything).
+`agentty config move threads /mnt/big/threads` moves a folder's data and
+prints the `export` line to add (refuses while agentty runs, verifies the
+copy before removing anything).
 `agentty config doctor` checks permissions and overrides.
 `agentty config clean` lists files older versions left behind, and
 `--yes` deletes them.

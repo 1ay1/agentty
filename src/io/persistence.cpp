@@ -2497,14 +2497,12 @@ ExpireStats expire_threads(Io io, int keep_days, const ThreadId& keep, bool dry_
 }
 
 int thread_keep_days(Io) {
-    std::ifstream in(settings_path());
-    if (!in) return 0;
-    const auto j = json::parse(in, nullptr, /*allow_exceptions=*/false);
-    if (!j.is_object()) return 0;
-    const auto t = j.find("threads");
-    if (t == j.end() || !t->is_object()) return 0;
-    const auto k = t->find("keep_days");
-    return (k != t->end() && k->is_number_integer()) ? std::max(0, k->get<int>()) : 0;
+    const char* v = std::getenv("AGENTTY_THREADS_KEEP_DAYS");
+    if (!v || !*v) return 0;
+    char* end = nullptr;
+    const long n = std::strtol(v, &end, 10);
+    if (end == v || *end != '\0' || n <= 0) return 0;
+    return static_cast<int>(std::min<long>(n, 365L * 100));
 }
 
 // The raw JSON this process last LOADED from disk.
@@ -2840,12 +2838,6 @@ std::function<void()>& settings_write_observer() {
 
 namespace {
 void save_settings_locked(persistence::Held held, const store::Settings& s);
-
-// Top-level settings keys only a human writes. The app reads them but never
-// serialises them, so the save merge must carry them through untouched.
-[[nodiscard]] bool is_user_only_key(std::string_view k) noexcept {
-    return k == "dirs" || k == "threads";
-}
 }
 
 void save_settings(Io, const store::Settings& s) {
@@ -2864,34 +2856,6 @@ void save_settings(Io, const store::Settings& s) {
     // why this is here and not in each of the four callers that bypass the
     // seam.
     if (auto& obs = settings_write_observer(); obs) obs();
-}
-
-bool set_settings_dir(Io, std::string_view key, const std::string& value) {
-    const bool ok = persistence::with_shared_file(settings_mu(), settings_path(),
-        [](persistence::Held, std::string k, std::string v) {
-            json j = json::object();
-            {
-                std::ifstream in(settings_path());
-                if (in) j = json::parse(in, nullptr, /*allow_exceptions=*/false);
-                if (!j.is_object()) {
-                    // Don't overwrite a file we can't read; the user would lose it.
-                    std::error_code ec;
-                    if (fs::exists(settings_path(), ec)) return false;
-                    j = json::object();
-                }
-            }
-            json& dirs = j["dirs"];
-            if (!dirs.is_object()) dirs = json::object();
-            if (v.empty()) dirs.erase(k); else dirs[k] = v;
-            if (dirs.empty()) j.erase("dirs");
-            const bool wrote = write_json_atomic(internal_io(), settings_path(), j.dump(2));
-            if (wrote) loaded_baseline().with([](json& b, json d) {
-                if (d.is_null()) b.erase("dirs"); else b["dirs"] = std::move(d);
-            }, j.contains("dirs") ? j["dirs"] : json{});
-            return wrote;
-        }, std::string{key}, value);
-    if (auto& obs = settings_write_observer(); obs) obs();
-    return ok;
 }
 
 namespace {
@@ -3176,9 +3140,6 @@ void save_settings_locked(persistence::Held held, const store::Settings& s) {
             const json base = loaded_baseline().read([](const json& b) { return b; });
             for (auto it = disk.begin(); it != disk.end(); ++it) {
                 const auto& key = it.key();
-                // Hand-written blocks agentty never writes (dirs, threads):
-                // always carried over, or a save would delete them.
-                if (is_user_only_key(key)) { j[key] = it.value(); continue; }
                 const bool we_changed =
                     !base.contains(key) || !j.contains(key)
                         ? true                       // appeared/vanished for us

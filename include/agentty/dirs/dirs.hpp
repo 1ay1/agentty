@@ -120,8 +120,7 @@ struct Spec {
     // "did this path move?" comparison.
     std::string_view leaf;
 
-    // Override variable, AGENTTY_<NAME>_DIR. Every directory has one; the
-    // same override can be set as `dirs.<name>` in settings.json.
+    // Override variable, AGENTTY_<NAME>_DIR. Every directory has one.
     std::string_view env = {};
 
     // Force 0700 on the resolved directory. The default is inherited from

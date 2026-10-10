@@ -10,7 +10,7 @@ Every conversation is a thread, stored as plain files you can inspect, back up, 
 
 ## Where threads live
 
-Threads are written to `~/.agentty/threads/` (move it with `AGENTTY_THREADS_DIR` or `dirs.threads` in settings.json). Each thread is an append-only log plus two small sidecars:
+Threads are written to `~/.agentty/threads/` (move it with `AGENTTY_THREADS_DIR`). Each thread is an append-only log plus two small sidecars:
 
 ```text
 ~/.agentty/threads/
@@ -27,10 +27,10 @@ Threads are global: the directory is flat and a thread isn't bound to the worksp
 
 Press [[Ctrl+J]] to open the thread list and switch between past conversations. [[Ctrl+N]] starts a new thread. Deleting a thread removes all its files; its blobs go in the next daily sweep if no other thread uses them.
 
-Threads are kept until you delete them. To expire old ones automatically, set a retention in `~/.agentty/settings.json`:
+Threads are kept until you delete them. To expire old ones automatically:
 
-```json
-{ "threads": { "keep_days": 90 } }
+```sh
+export AGENTTY_THREADS_KEEP_DAYS=90
 ```
 
 Once a day, threads with no activity for that long are deleted. A thread open in a running agentty is never touched. See [Storage](/docs/storage) for everything else agentty keeps on disk.

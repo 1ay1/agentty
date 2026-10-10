@@ -14,7 +14,7 @@ Everything agentty writes, where it goes, how long it stays, and how to move it.
 |---|---|
 | `agentty config` | every folder, where it is, how big |
 | `agentty config <name>` | one folder in detail: where it's read from, where it's written, how long things stay |
-| `agentty config env` | every override, and whether it's set by you or by settings.json |
+| `agentty config env` | every variable, and its current value |
 | `agentty config move <dir> <path>` | move a folder and its data, safely (below) |
 | `agentty config doctor` | check every folder is usable, secrets are private, no override is silently ignored |
 | `agentty config clean` | list files older versions left behind; `--yes` deletes them |
@@ -26,7 +26,7 @@ agentty keeps its files in two places.
 | root | follows | default | move it with |
 |---|---|---|---|
 | user root | you | `~/.agentty` | `$AGENTTY_HOME` |
-| project root | the code | `<project>/.agentty` | `$AGENTTY_PROJECT_DIR` or `dirs.project` |
+| project root | the code | `<project>/.agentty` | `$AGENTTY_PROJECT_DIR` |
 
 The **project** is the nearest folder above where you started agentty that
 has a `.git`, `.agentty`, `.hg` or `.svn` in it. So `cd src && agentty` uses
@@ -46,7 +46,7 @@ under it, named `<folder>-<hash>`, so two checkouts never share an index.
 | `settings.json.lock` | lock so two instances don't clobber each other | no | always |
 | `agentty.running.lock` | held shared by every running agentty, so `config move` can tell | no | always |
 | `credentials/` (0700) | sign-ins and API keys: `credentials.json` (Claude), `accounts.json`, `provider-keys.json`, `embed_keys.json`, copilot/codex/kimi files, each 0600 | no | until you sign out |
-| `threads/` (0700) | conversations: `<id>.jsonl` (the log), `<id>.ofs` (offsets), `<id>.meta.json`, `index.json` (picker cache), `<id>.transcript.md` (exports) | **yes** | until deleted, or `threads.keep_days` |
+| `threads/` (0700) | conversations: `<id>.jsonl` (the log), `<id>.ofs` (offsets), `<id>.meta.json`, `index.json` (picker cache), `<id>.transcript.md` (exports) | **yes** | until deleted, or `AGENTTY_THREADS_KEEP_DAYS` |
 | `threads/blobs/` | images and big tool outputs, shared between threads by content hash | **yes** | swept daily once no thread uses them (24 h grace) |
 | `memory.jsonl` | facts saved with `remember`, user scope | slowly | until forgotten |
 | `state/` | approval hashes: `skills_approved.json`, `hooks_approved.json`, `mcp_approvals.json` | no | until revoked |
@@ -83,36 +83,32 @@ approve itself.
 
 ## Moving things
 
-Every directory can move on its own. Use the variable, or put the same thing
-in `settings.json`:
+Storage is configured with environment variables only. Nothing in agentty,
+including the TUI, changes where your data lives. Set them in your shell
+profile:
 
-```json
-{
-  "dirs": {
-    "threads": "/mnt/big/agentty/threads",
-    "logs": "~/.local/state/agentty"
-  }
-}
+```sh
+export AGENTTY_THREADS_DIR=/mnt/big/agentty/threads
+export AGENTTY_LOGS_DIR=~/.local/state/agentty
 ```
 
-| what | variable | settings key |
-|---|---|---|
-| whole user root | `AGENTTY_HOME` | (variable only, it's where settings.json lives) |
-| threads | `AGENTTY_THREADS_DIR` | `dirs.threads` |
-| credentials | `AGENTTY_CREDENTIALS_DIR` | `dirs.credentials` |
-| approvals | `AGENTTY_STATE_DIR` | `dirs.state` |
-| cache | `AGENTTY_CACHE_DIR` | `dirs.cache` |
-| logs | `AGENTTY_LOGS_DIR` | `dirs.logs` |
-| whole project root | `AGENTTY_PROJECT_DIR` | `dirs.project` |
-| search indexes | `AGENTTY_RAG_DIR` | `dirs.rag` |
-| search feedback | `AGENTTY_PROJECT_STATE_DIR` | `dirs.project_state` |
-| one MCP config file | `AGENTTY_MCP_CONFIG` | (a file, not a dir) |
+| what | variable |
+|---|---|
+| whole user root | `AGENTTY_HOME` |
+| threads | `AGENTTY_THREADS_DIR` |
+| credentials | `AGENTTY_CREDENTIALS_DIR` |
+| approvals | `AGENTTY_STATE_DIR` |
+| cache | `AGENTTY_CACHE_DIR` |
+| logs | `AGENTTY_LOGS_DIR` |
+| whole project root | `AGENTTY_PROJECT_DIR` |
+| search indexes | `AGENTTY_RAG_DIR` |
+| search feedback | `AGENTTY_PROJECT_STATE_DIR` |
+| thread retention, days | `AGENTTY_THREADS_KEEP_DAYS` |
+| one MCP config file | `AGENTTY_MCP_CONFIG` (a file, not a dir) |
 
 Rules, the same for all of them:
 
-- a set variable beats the settings key
 - empty means unset
-- `~/` expands in settings (your shell does it for variables)
 - a relative path is relative to its root, never to your current folder.
   `AGENTTY_LOGS_DIR=logs2` is always `~/.agentty/logs2`
 - if the folder can't be made, you get one warning naming why, and the
@@ -124,12 +120,17 @@ Rules, the same for all of them:
 
 ### Moving existing data
 
+Setting a variable points agentty at a new folder; it doesn't bring your
+data along. `config move` does that part:
+
 ```sh
 agentty config move threads /mnt/big/agentty/threads
-agentty config move threads default        # and back
+# then add what it prints to your shell profile:
+export AGENTTY_THREADS_DIR='/mnt/big/agentty/threads'
 ```
 
-This moves the folder and records `dirs.threads` in settings.json. It:
+`agentty config move threads default` moves it back and tells you which
+variable to unset. It:
 
 - refuses while any agentty is running (every session holds a shared lock
   on `agentty.running.lock`; the kernel drops it if agentty crashes, so
@@ -137,20 +138,16 @@ This moves the folder and records `dirs.threads` in settings.json. It:
 - renames when the target is on the same disk, which is instant
 - otherwise copies, then checks the file count and byte total match before
   touching the original. If they don't, the copy is removed and nothing changes
-- writes settings.json only after the data is in place, and removes the old
-  copy last
 - refuses a target that isn't empty, or that is inside the source
 - keeps `credentials` and `threads` at 0700
-
-If you set the variable yourself (`AGENTTY_THREADS_DIR=...`), it wins over
-settings.json, so `move` won't touch it; change the variable instead.
+- never edits a config file. It only moves data and prints the line to add
 
 ## Keeping it small
 
 Threads are the only thing that grows without a limit. To expire them:
 
-```json
-{ "threads": { "keep_days": 90 } }
+```sh
+export AGENTTY_THREADS_KEEP_DAYS=90
 ```
 
 Once a day, threads with no activity for that many days are deleted, along

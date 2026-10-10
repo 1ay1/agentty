@@ -21,7 +21,6 @@
 #include <unistd.h>   // getpid
 #endif
 
-#include "agentty/util/storage_env.hpp"
 #include "agentty/util/user_root.hpp"
 
 namespace fs = std::filesystem;
@@ -201,25 +200,6 @@ int main() {
     ::unsetenv("AGENTTY_STATE_DIR");
     if (agentty::util::user_state_dir() != override_root / "state")
         return fail("state default not under the root");
-
-    // 11: settings.json "dirs" turns into variables; a set variable wins,
-    // unknown keys and non-strings are ignored, ~/ expands.
-    write_file(override_root / "settings.json",
-               R"({"dirs": {"threads": "/x/threads", "logs": "~/lg",
-                   "cache": 5, "bogus": "/nope", "rag": ""}})");
-    ::setenv("AGENTTY_THREADS_DIR", "/already", 1);
-    {
-        const auto as = agentty::util::settings_dir_assignments();
-        bool logs = false, other = false;
-        for (const auto& a : as) {
-            if (a.env == "AGENTTY_LOGS_DIR" && a.value == (home / "lg").string()) logs = true;
-            else other = true;
-        }
-        if (!logs) return fail("dirs.logs not turned into AGENTTY_LOGS_DIR");
-        if (other) return fail("dirs: set var, bad type, empty or unknown key was applied");
-    }
-    ::unsetenv("AGENTTY_THREADS_DIR");
-    fs::remove(override_root / "settings.json", ec);
 
     ::unsetenv("AGENTTY_CACHE_DIR");
     ::unsetenv("AGENTTY_LOGS_DIR");

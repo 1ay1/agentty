@@ -83,23 +83,6 @@ TEST_CASE("settings defaults + persistence round-trip") {
     check(persistence::load_settings(::agentty::IoAccess::grant()).profile == Profile::Minimal,
           "save/load round-trips Minimal");
 
-    // (5) Hand-written blocks the app never writes survive an app save.
-    {
-        std::ofstream ofs(settings_json, std::ios::trunc);
-        ofs << R"({"profile":2,"dirs":{"threads":"/x"},"threads":{"keep_days":30}})";
-    }
-    {
-        auto s = persistence::load_settings(::agentty::IoAccess::grant());
-        s.profile = Profile::Ask;
-        persistence::save_settings(::agentty::IoAccess::grant(), s);
-    }
-    {
-        std::ifstream in(settings_json);
-        const std::string body((std::istreambuf_iterator<char>(in)), {});
-        check(body.find("\"dirs\"") != std::string::npos, "save keeps the dirs block");
-        check(body.find("keep_days") != std::string::npos, "save keeps threads.keep_days");
-    }
-
     fs::remove_all(tmp);
 }
 

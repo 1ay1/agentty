@@ -83,7 +83,6 @@
 #include "agentty/airgap/airgap.hpp"
 #include "agentty/util/logx.hpp"   // flight recorder dump in crash handler
 #include "agentty/util/teardown.hpp"
-#include "agentty/util/storage_env.hpp"
 #include "agentty/util/storage_lock.hpp"
 #include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/domain/profile.hpp"
@@ -1140,23 +1139,6 @@ int main(int argc, char** argv) {
         setenv("MAYA_GATE_ABORT", "1", /*overwrite=*/0);
 #endif
     }
-    // settings.json "dirs" -> AGENTTY_<NAME>_DIR, before anything resolves a path.
-    {
-        std::string from_settings;
-        for (const auto& a : util::settings_dir_assignments()) {
-#if defined(_WIN32)
-            _putenv_s(a.env.c_str(), a.value.c_str());
-#else
-            ::setenv(a.env.c_str(), a.value.c_str(), /*overwrite=*/0);
-#endif
-            from_settings += (from_settings.empty() ? "" : " ") + a.env;
-        }
-#if defined(_WIN32)
-        _putenv_s(util::kFromSettingsVar, from_settings.c_str());
-#else
-        ::setenv(util::kFromSettingsVar, from_settings.c_str(), 1);
-#endif
-    }
 
     install_crash_handler();
 
@@ -1355,7 +1337,7 @@ int main(int argc, char** argv) {
     if (args.subcommand == "logout") return auth::cmd_logout(IoAccess::grant());
     if (args.subcommand == "status") return auth::cmd_status(IoAccess::grant());
     if (args.subcommand == "skills") return tools::skills::cmd_skills(IoAccess::grant());
-    if (args.subcommand == "config") return config::cmd_config(IoAccess::grant(), args.plugin_argv);
+    if (args.subcommand == "config") return config::cmd_config(args.plugin_argv);
 #if defined(AGENTTY_MCP)
     if (args.subcommand == "mcp") {
         if (args.plugin_argv.empty() || args.plugin_argv.front() != "import") {
