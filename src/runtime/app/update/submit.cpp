@@ -374,7 +374,7 @@ Cmd submit_message(Model& m) {
         // picker) if present, else the global RAG mode. FirstTurnOnly injects
         // only when the thread has no prior assistant turn yet (this user
         // message is the first). Off never injects; On always. A shell
-        // AGENTTY_RAG_PROACTIVE override still wins inside proactive_enabled().
+        // AGENTTY_RAG_PROACTIVE override (Model::env) beats the global mode.
         bool proactive_on = false;
         {
             const bool first_turn = std::none_of(

@@ -469,9 +469,9 @@ std::pair<Model, Cmd> init() {
     // shared_retriever() runs its function-local static ctor, which
     // apply_config()s and re-probes the embedder — a network dial with a
     // multi-second timeout. That first call otherwise happens INSIDE
-    // submit_message() on the very first turn (the proactive gate evaluates
-    // tools::proactive_enabled() → shared_retriever() for every send, even a
-    // 2-char "hi"), so a slow/unreachable embed endpoint stalls the reducer
+    // submit_message() on the very first turn (the proactive gate used to
+    // call into shared_retriever() for every send, even a 2-char "hi";
+    // it reads the Model now), so a slow/unreachable embed endpoint stalled the reducer
     // ~1.2 s between Enter and the stream launch — the real first-Enter hang
     // (measured: submit.stage pre_launch_stream ms=1202 next to a
     // rag.embed:unavailable on the SAME thread). Forcing the static init

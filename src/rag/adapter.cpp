@@ -743,8 +743,8 @@ Config Config::from_env() {
     // Proactive / "fork" behaviour (consumed by the tools backend).
     // Pre-turn injection is an EXPLICIT opt-in: it spends model-context
     // tokens before every knowledge-shaped turn without the user asking,
-    // so it defaults OFF (matching the docs + proactive_enabled()'s
-    // "explicit opt-in" contract + the mcp_tools_backends header). The
+    // so it defaults OFF (matching the docs and the submit gate, which
+    // reads Model::env / m.d.persisted.rag). The
     // user turns it on via the Ctrl+K → RAG picker (persisted, which sets
     // configured=true so this env default no longer governs) or
     // AGENTTY_RAG_PROACTIVE=1 for a one-off run.

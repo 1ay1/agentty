@@ -188,7 +188,6 @@ failure mode:
 
 | Feature | Site | What it now guarantees |
 |---------|------|------------------------|
-| `std::source_location` | `util/isolated_thread.hpp` | Worker-panic breadcrumbs auto-capture `file:line function` at the spawn site — the "where" tag can no longer drift from the actual code, at zero call-site cost. |
 | `std::span` | `rag/simd.hpp` + hnsw/bm25 callers | The SIMD dot/L2 hot path's `(ptr, ptr, n)` triple — which silently trusts both buffers are ≥ n — is replaced by a length-carrying `span` overload; a mismatched embedding dim returns 0 instead of reading past the end. |
 | `std::to_underlying` + `static_assert` | `io/persistence.cpp` `render()` | The error-kind string table is pinned to the enum: adding a `DeserializeErrorKind` arm without a matching row is a **compile error**, not a silent out-of-bounds read. |
 
@@ -211,7 +210,7 @@ is the C++ analogue of a Rust trait bound like `F: Fn(&mut ToolUse)`.)
 | `wire::LineSink` | `provider/wire.hpp` `LineFramer::feed` | callback is `on_line(std::string_view)` |
 | `wire::EventSink` | `provider/wire.hpp` `SseFramer::feed` | callback is `on_event(name, data, char* padded)` |
 | `app::detail::ToolMutator` | `runtime/app/update/internal.hpp` `with_live_tool` | callback is `f(ToolUse&)` |
-| `util::WorkerBody` | `util/isolated_thread.hpp` spawn helpers | body is nullary-invocable |
+| `util::JobBody` | `util/background.hpp` spawn helpers | body is captureless, `body(stop_token, args...)`, args Sendable |
 | `pick::PickerState` | `runtime/picker.hpp` `is_open` | variant carries the `Closed` alternative |
 
 That every one of these compiled with zero changes at the call sites is itself
