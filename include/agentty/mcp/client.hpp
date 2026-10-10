@@ -151,8 +151,8 @@ void release_servers() noexcept;
 // MCP servers an ACP client (Zed, JetBrains) sent with session/new, in
 // mcp.json shape: {"name": {"command": ..., "args": [...], "env": {...}}} or
 // {"name": {"type": "http", "url": ..., "headers": {...}}}. They join the
-// pool alongside mcp.json and win on a name clash. Reconnects only when the
-// set actually changed.
+// pool alongside mcp.json and win on a name clash. Merged across sessions
+// (one editor, one list); reconnects only when something changed.
 void set_client_servers(const nlohmann::json& servers);
 [[nodiscard]] std::vector<std::string> configured_server_names_from_client();
 

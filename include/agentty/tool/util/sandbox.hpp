@@ -225,8 +225,11 @@ void reset_config_for_test() noexcept;
 // worked.
 //
 // Returns started=false with a reason when no claybin backend is active.
+// `extra_roots` are writable on top of the workspace (an editor session's
+// additional folders).
 [[nodiscard]] claybin_backend::SpawnResult spawn_in_sandbox(
-    const std::vector<std::string>& argv, std::string_view cwd, int out_fd);
+    const std::vector<std::string>& argv, std::string_view cwd, int out_fd,
+    const std::vector<std::string>& extra_roots = {});
 
 // Testing hook: the REAL claybin posture this process would build from the
 // sealed config snapshot right now, including the non-configurable masks and

@@ -60,6 +60,7 @@ using StreamToFn =
 struct Session {
     std::string id;
     std::string cwd;
+    std::vector<std::string> extra_roots;   // additionalDirectories from the editor
     Thread      thread;
     Profile     profile = Profile::Ask;
     std::string model;   // empty = use server default
@@ -175,6 +176,7 @@ private:
     struct TurnCtx {
         std::string id, cwd, msg_id;
         std::shared_ptr<http::CancelToken> cancel;
+        std::vector<std::string> extra_roots;
         [[nodiscard]] bool cancelled() const { return cancel && cancel->is_cancelled(); }
     };
     std::optional<TerminalRun> run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc);
@@ -270,6 +272,15 @@ private:
     std::atomic<bool>         client_terminal_meta_{false};    // terminal_output
     std::atomic<bool>         client_terminal_delta_{false};   // terminal_output_delta (appends)
     std::atomic<bool>         client_terminal_auth_{false};    // terminal-auth login methods
+    // JetBrains AIR (clientCapabilities._meta.jetbrains.air). air_ = the
+    // client is AIR at all; the rest are the capabilities it declared.
+    std::atomic<bool>         air_{false};
+    std::atomic<bool>         air_diff_patch_{false};
+    std::atomic<bool>         client_elicit_form_{false};      // elicitation.form
+    nlohmann::json elicit_via_client(const std::string& session_id, const std::string& tool_id,
+                                     const nlohmann::json& mcp_params);
+    // {"jetbrains":{"air":{"version":1, ...payload}}} for AIR, else {}.
+    [[nodiscard]] nlohmann::json air_meta(nlohmann::json payload) const;
 
     // A user-facing notice: a `notice` update when the client renders them,
     // otherwise nothing (the turn's own text already says what happened).

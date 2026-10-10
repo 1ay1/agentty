@@ -122,6 +122,15 @@ struct CallContext {
     // deadline any of them set (a nested run can only shorten it).
     int depth = 0;
     std::optional<std::chrono::steady_clock::time_point> deadline;
+    // Workspace scope for a call that serves a particular folder (an ACP
+    // session). Empty: the process-wide workspace and cwd.
+    std::string              workspace;     // access boundary
+    std::vector<std::string> extra_roots;   // more roots the call may touch
+    std::string              project;       // where relative paths and shells start
+    // Ask the user for structured input (an MCP server's elicitation/create),
+    // through whatever UI the host has. Params and result are MCP-shaped
+    // JSON. Empty: no UI to ask, the request is declined.
+    std::function<nlohmann::json(const nlohmann::json&)> elicit;
 
     void emit(std::string_view snapshot) const { if (progress) progress(snapshot); }
     [[nodiscard]] bool cancelled() const noexcept {

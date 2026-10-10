@@ -18,6 +18,7 @@
 #include <cstring>
 #include <exception>
 #include <format>
+#include <sstream>
 #include <fstream>
 #include <stop_token>
 
@@ -51,6 +52,7 @@
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/background.hpp"
@@ -77,10 +79,119 @@ typename M::result call(rpc::Peer& peer, const typename M::params& p) {
     return std::move(*r);
 }
 
+// The editor's additionalDirectories, checked: each must be absolute and an
+// existing directory (the spec requires absolute; a missing one is an error
+// the user should see, not a root that silently grants nothing).
+std::vector<std::string> extra_roots_of(const a::Maybe<a::List<std::string>>& dirs) {
+    std::vector<std::string> out;
+    if (!dirs) return out;
+    for (const auto& d : *dirs) {
+        std::filesystem::path p{d};
+        std::error_code ec;
+        if (!p.is_absolute())
+            throw a::RpcError(a::errc::InvalidParams,
+                              "additionalDirectories: '" + d + "' is not absolute");
+        if (!std::filesystem::is_directory(p, ec))
+            throw a::RpcError(a::errc::InvalidParams,
+                              "additionalDirectories: '" + d + "' is not a directory");
+        out.push_back(std::filesystem::weakly_canonical(p, ec).string());
+    }
+    return out;
+}
+
 // Unix seconds as an ISO 8601 UTC timestamp, the format SessionInfo.updatedAt wants.
 std::string iso8601(std::int64_t unix_s) {
     const auto tp = std::chrono::sys_seconds{std::chrono::seconds{unix_s}};
     return std::format("{:%FT%TZ}", tp);
+}
+
+// One exact git-style patch for a change, for JetBrains AIR's diffPatch.
+// nullopt when it can't be exact (a CR byte, no hunks), so the caller sends
+// the plain diff instead, as the AIR contract asks.
+std::optional<std::string> air_git_patch(const FileChange& ch) {
+    if (ch.hunks.empty()) return std::nullopt;
+    if (ch.original_contents.find('\r') != std::string::npos ||
+        ch.new_contents.find('\r') != std::string::npos)
+        return std::nullopt;
+    // Path: no leading slash, forward slashes, git's default quoting.
+    std::string rel = ch.path;
+    std::replace(rel.begin(), rel.end(), '\\', '/');
+    while (!rel.empty() && rel.front() == '/') rel.erase(rel.begin());
+    if (rel.empty()) return std::nullopt;
+    const auto quote = [](const std::string& prefix, const std::string& p) {
+        bool needs = false;
+        for (unsigned char c : p)
+            if (c == '"' || c == '\\' || c < 0x20 || c >= 0x7f) { needs = true; break; }
+        const std::string full = prefix + p;
+        if (!needs) return full;
+        std::string q = "\"";
+        for (unsigned char c : full) {
+            if (c == '"' || c == '\\') { q += '\\'; q += static_cast<char>(c); }
+            else if (c == '\n') q += "\\n";
+            else if (c == '\t') q += "\\t";
+            else if (c < 0x20 || c >= 0x7f) {
+                char buf[5]; std::snprintf(buf, sizeof buf, "\\%03o", c); q += buf;
+            } else q += static_cast<char>(c);
+        }
+        return q + "\"";
+    };
+    const bool added = ch.original_contents.empty();
+    const std::string a = quote("a/", rel), b = quote("b/", rel);
+    const std::string tab = rel.find(' ') != std::string::npos ? "\t" : "";
+    std::string out = "diff --git " + a + " " + b + "\n";
+    if (added) out += "new file mode 100644\n";
+    out += added ? "--- /dev/null\n" : "--- " + a + tab + "\n";
+    out += "+++ " + b + tab + "\n";
+    const bool old_nl = ch.original_contents.empty() || ch.original_contents.back() == '\n';
+    const bool new_nl = ch.new_contents.empty() || ch.new_contents.back() == '\n';
+    // A missing final newline needs a "\ No newline" marker placed exactly;
+    // rather than risk a wrong patch, send the plain diff (AIR's fallback).
+    if (!old_nl || !new_nl) return std::nullopt;
+    // Git-exact lines: content ends in '\n', so drop the empty piece after
+    // it (the display diff keeps it as a phantom line).
+    auto lines = [](const std::string& s) {
+        std::vector<std::string> out;
+        std::size_t pos = 0;
+        while (pos < s.size()) {
+            const auto nl = s.find('\n', pos);
+            out.push_back(s.substr(pos, nl - pos));
+            pos = nl + 1;
+        }
+        return out;
+    };
+    const auto fc = diff::compute(rel, ch.original_contents, ch.new_contents);
+    const auto a_lines = lines(ch.original_contents);
+    const auto b_lines = lines(ch.new_contents);
+    for (const auto& h : fc.hunks) {
+        // Rebuild each hunk's body from its ranges, clamped to real lines.
+        std::string body;
+        int old_len = 0, new_len = 0;
+        std::istringstream in(h.patch);
+        std::string ln;
+        int ai = h.old_start - 1, bi = h.new_start - 1;
+        while (std::getline(in, ln)) {
+            if (ln.empty()) continue;
+            const char tag = ln[0];
+            if (tag == ' ') {
+                if (ai >= static_cast<int>(a_lines.size()) || bi >= static_cast<int>(b_lines.size())) break;
+                body += " " + a_lines[ai++] + "\n"; ++bi; ++old_len; ++new_len;
+            } else if (tag == '-') {
+                if (ai >= static_cast<int>(a_lines.size())) continue;   // the phantom line
+                body += "-" + a_lines[ai++] + "\n"; ++old_len;
+            } else if (tag == '+') {
+                if (bi >= static_cast<int>(b_lines.size())) continue;   // the phantom line
+                body += "+" + b_lines[bi++] + "\n"; ++new_len;
+            }
+        }
+        if (old_len == 0 && new_len == 0) continue;
+        const int old_start = old_len == 0 ? h.old_start - 1 : h.old_start;
+        const int new_start = new_len == 0 ? h.new_start - 1 : h.new_start;
+        out += "@@ -" + std::to_string(added ? 0 : old_start) + "," + std::to_string(old_len) +
+               " +" + std::to_string(new_start) + "," + std::to_string(new_len) + " @@\n";
+        out += body;
+    }
+    if (out.find("\n@@ ") == std::string::npos) return std::nullopt;
+    return out;
 }
 
 // Construct a text ContentBlock.
@@ -1052,6 +1163,32 @@ bool AgentServer::terminal_channel() const noexcept {
     return client_terminal_meta_.load(std::memory_order_relaxed);
 }
 
+json AgentServer::air_meta(json payload) const {
+    if (!air_.load(std::memory_order_relaxed)) return json::object();
+    payload["version"] = 1;
+    return json{{"jetbrains", {{"air", std::move(payload)}}}};
+}
+
+// Relay an MCP server's elicitation/create (form mode) to the editor. The two
+// share the restricted JSON Schema, so the form passes through; ACP adds the
+// session and tool call scope. Anything we can't relay is declined.
+json AgentServer::elicit_via_client(const std::string& session_id,
+                                    const std::string& tool_id, const json& mcp) {
+    const json decline{{"action", "decline"}};
+    if (!mcp.is_object() || mcp.value("mode", std::string{"form"}) != "form") return decline;
+    if (!mcp.contains("requestedSchema") || !mcp["requestedSchema"].is_object()) return decline;
+    json req{{"mode", "form"},
+             {"message", mcp.value("message", std::string{"The tool needs some input."})},
+             {"requestedSchema", mcp["requestedSchema"]},
+             {"sessionId", session_id},
+             {"toolCallId", tool_id}};
+    auto got = peer_->call<a::to_client::ElicitationCreate>(req);
+    if (!got || !got->is_object() || !got->contains("action")) return decline;
+    json out{{"action", (*got)["action"]}};
+    if ((*got)["action"] == "accept" && got->contains("content")) out["content"] = (*got)["content"];
+    return out;
+}
+
 bool AgentServer::is_command_tool(std::string_view name) {
     const auto* spec = tools::spec::lookup(name);
     return spec && spec->kind == tools::spec::Kind::Bash;
@@ -1384,6 +1521,7 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
                              std::memory_order_relaxed);
     client_bool_config_.store(p.clientCapabilities.session.booleanConfig,
                               std::memory_order_relaxed);
+    client_elicit_form_.store(p.clientCapabilities.elicitForm, std::memory_order_relaxed);
     // Zed's terminal channel: a command tool call carries _meta.terminal_info,
     // its output streams as _meta.terminal_output and ends with terminal_exit,
     // and the editor renders a real terminal in the card. Works with our own
@@ -1397,6 +1535,19 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
                                     std::memory_order_relaxed);
         client_terminal_delta_.store(flag("terminal_output_delta"), std::memory_order_relaxed);
         client_terminal_auth_.store(flag("terminal-auth"), std::memory_order_relaxed);
+        // JetBrains AIR declares {jetbrains:{air:{version>=1, capabilities:[...]}}}.
+        // A malformed declaration enables nothing.
+        if (cm.is_object() && cm.contains("jetbrains") && cm["jetbrains"].is_object()) {
+            const json& air = cm["jetbrains"].value("air", json{});
+            const bool ok = air.is_object() && air.contains("version")
+                         && air["version"].is_number_integer() && air["version"].get<int>() >= 1
+                         && air.contains("capabilities") && air["capabilities"].is_array();
+            if (ok) {
+                air_.store(true, std::memory_order_relaxed);
+                for (const auto& c : air["capabilities"])
+                    if (c == "diffPatch") air_diff_patch_.store(true, std::memory_order_relaxed);
+            }
+        }
     }
     // Negotiate to min(what we support, what the client offered). We advertise
     // up to kMaxProtocolVersion (v1 by default; v2 only if the acp-cpp build
@@ -1428,6 +1579,11 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     caps.sessionCapabilities.resume    = a::Just(a::Unit{});
     caps.sessionCapabilities.close     = a::Just(a::Unit{});
     caps.sessionCapabilities.fork      = a::Just(a::Unit{});   // unstable, used by Zed
+    caps.sessionCapabilities.additionalDirectories = a::Just(a::Unit{});
+    // JetBrains AIR: say which of its extensions we speak. Only to AIR.
+    if (air_.load(std::memory_order_relaxed))
+        r.meta = json{{"jetbrains", {{"air", {{"version", 1},
+                       {"capabilities", json::array({"diffPatch"})}}}}}};
 #if AGENTTY_MCP
     // The MCP bridge speaks stdio, Streamable HTTP and SSE, so the editor's
     // servers of every kind can be handed over.
@@ -1484,6 +1640,7 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
 }
 
 a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
+    auto extra = extra_roots_of(p.additionalDirectories);   // throws on a bad path
     adopt_client_mcp(p.mcpServers);
     ThreadId tid = persistence::new_id();
     const std::string sid = tid.value;
@@ -1492,6 +1649,7 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
         Session s;
         s.id  = sid;
         s.cwd = p.cwd;
+        s.extra_roots = std::move(extra);
         s.profile = profile_;
         s.thread.id = tid;
         s.thread.title = p.cwd.empty() ? std::string{"ACP session"}
@@ -1525,6 +1683,7 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
 // editor's "fork from here". The source can be live or only on disk; the
 // copy keeps its model, thinking and mode, and gets a fresh id and title.
 a::NewSessionResult AgentServer::on_fork_session(const a::ForkSessionParams& p) {
+    auto extra = extra_roots_of(p.additionalDirectories);
     adopt_client_mcp(p.mcpServers);
     const std::string src = p.sessionId.value;
     if (src.empty()) throw a::RpcError(a::errc::InvalidParams, "session/fork: missing sessionId");
@@ -1547,6 +1706,7 @@ a::NewSessionResult AgentServer::on_fork_session(const a::ForkSessionParams& p) 
         Session s;
         s.id       = sid;
         s.cwd      = p.cwd;
+        s.extra_roots = std::move(extra);
         s.profile  = copy->profile;
         s.model    = std::move(copy->model);
         s.provider = std::move(copy->provider);
@@ -1596,11 +1756,14 @@ a::LoadSessionResult AgentServer::on_load_session(const a::LoadSessionParams& p)
     bool   from_memory = false;
     Profile profile = profile_;
 
-    // Live session: adopt the new cwd and copy the thread out.
-    if (auto live = with_session(sid, [](Session& s, std::string new_cwd) {
+    auto extra = extra_roots_of(p.additionalDirectories);
+    // Live session: adopt the new cwd and roots, and copy the thread out.
+    if (auto live = with_session(sid, [](Session& s, std::string new_cwd,
+                                         std::vector<std::string> roots) {
             if (!new_cwd.empty()) s.cwd = std::move(new_cwd);
+            s.extra_roots = std::move(roots);
             return std::pair{s.thread, s.profile};
-        }, cwd)) {
+        }, cwd, extra)) {
         thread      = std::move(live->first);
         profile     = live->second;
         from_memory = true;
@@ -1619,6 +1782,7 @@ a::LoadSessionResult AgentServer::on_load_session(const a::LoadSessionParams& p)
 
         Session s;
         s.id = sid; s.cwd = cwd; s.profile = profile; s.thread = thread;
+        s.extra_roots = std::move(extra);
         sessions_.with([](Sessions& ss, Session v) {
             std::string k = v.id;
             ss.by_id.insert_or_assign(std::move(k), std::move(v));
@@ -2674,7 +2838,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         if (s.thread.messages.empty()) return std::nullopt;
         const Message& last = s.thread.messages.back();
         if (last.role != Role::Assistant || last.tool_calls.empty()) return std::nullopt;
-        return Batch{TurnCtx{s.id, s.cwd, last.id.value, s.cancel},
+        return Batch{TurnCtx{s.id, s.cwd, last.id.value, s.cancel, s.extra_roots},
                      s.profile, last.tool_calls, s.grants};
     });
     if (!batch || !*batch) return false;
@@ -2788,6 +2952,21 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         // The session's cancel reaches the running tool itself (a shell is
         // stopped), not only this wait.
         if (ctx.cancel) call_ctx.cancel.push_back(ctx.cancel->token());
+        // This session's folders: relative paths and shells start in its cwd,
+        // and it may reach its cwd plus the editor's extra roots, even when
+        // the agent process was started somewhere else.
+        if (!ctx.cwd.empty()) {
+            call_ctx.project = ctx.cwd;
+            if (!tools::util::is_within_workspace(ctx.cwd))
+                call_ctx.extra_roots.push_back(ctx.cwd);
+        }
+        for (const auto& r : ctx.extra_roots) call_ctx.extra_roots.push_back(r);
+        // An MCP server asking the user something mid-call goes to the
+        // editor's form UI, tied to this session and tool card.
+        if (client_elicit_form_.load(std::memory_order_relaxed))
+            call_ctx.elicit = [this, sid = ctx.id, tid = tc.id.value](const json& mcp) {
+                return elicit_via_client(sid, tid, mcp);
+            };
         // Zed's terminal channel: a shell command's output streams into a real
         // terminal in the card while it runs. progress hands us the whole
         // buffer each time; we send what's new.
@@ -2886,6 +3065,17 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
                 diff.newText = ch.new_contents;
                 if (!ch.original_contents.empty())
                     diff.oldText = a::Just<std::string>(ch.original_contents);
+                // AIR clients that asked for it get one exact git patch; the
+                // text fields become the placeholders its contract specifies.
+                if (air_diff_patch_.load(std::memory_order_relaxed)) {
+                    if (auto patch = air_git_patch(ch)) {
+                        diff.oldText = a::Nothing;
+                        diff.newText.clear();
+                        diff.meta = air_meta(json{{"diffPatch", {{"version", 1},
+                                                    {"format", "git_patch"},
+                                                    {"text", *patch}}}});
+                    }
+                }
                 content.push_back(a::ToolCallContent{std::move(diff)});
 
                 // Anchor the card at the first changed line so Zed can jump to

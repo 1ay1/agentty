@@ -87,7 +87,8 @@ using namespace ::clay::literals;
     // separate because granting write is a different decision from granting
     // read, and one combined list would make the dangerous one the easy one.
     for (const auto& r : p.read_paths) d = std::move(d).bind_try(r, r);
-    for (const auto& w : p.write_paths) d = std::move(d).bind_try(w, w, false);
+    // write_paths are bound after the /tmp tmpfs below, like the workspace:
+    // one under /tmp would otherwise be covered by it.
 
     // ── secrets, masked with MOUNTS ──────────────────────────────────────
     //
@@ -120,6 +121,13 @@ using namespace ::clay::literals;
     // it as a mount option, so a runaway build hits ENOSPC inside the sandbox
     // instead of filling the host's memory. bwrap cannot express this.
     d = std::move(d).tmpfs("/tmp", Bytes{p.tmp_bytes});
+    for (const auto& w : p.write_paths) {
+        d = std::move(d).bind_try(w, w, false);
+        // Same ordering rule as the workspace below: masks under a fresh
+        // bind have to be applied again or the bind uncovers them.
+        for (const auto& m : p.masked)
+            if (m.starts_with(w)) d = std::move(d).mask(m);
+    }
     if (!p.workspace.empty()) {
         d = std::move(d).bind(p.workspace, p.workspace);
         d = std::move(d).workdir(p.cwd.empty() ? p.workspace : p.cwd);

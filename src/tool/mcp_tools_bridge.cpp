@@ -620,7 +620,8 @@ std::vector<ToolDef> build_mcp_tool_defs() {
             tools::util::handoff::TrustedSnapshot before;
             if (watchable)
                 before = tools::util::handoff::snapshot_trusted(
-                    tools::util::workspace_root().string());
+                    ctx.workspace.empty() ? tools::util::workspace_root().string()
+                                          : ctx.workspace);
 
             // The call's context rides along: mcp-cpp hands `host` back to
             // agentty's Exec / SkillResolver / SubagentRunner untouched.
@@ -628,6 +629,9 @@ std::vector<ToolDef> build_mcp_tool_defs() {
             req.progress = ctx.progress;
             req.reader   = ctx.reader;
             req.host     = &ctx;
+            req.scope_workspace   = ctx.workspace;
+            req.scope_extra_roots = ctx.extra_roots;
+            req.scope_project     = ctx.project;
             const auto merged = ctx.merged_stop();
             req.stop      = merged->get_token();
             req.cancelled = [&ctx] { return ctx.cancelled(); };

@@ -678,9 +678,10 @@ tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t,
             // Registry dispatch resolves a provider through its own
             // generation-safe route snapshot; independent servers may run in
             // parallel and each provider serializes only its own transport.
-            r = pool->registry.dispatch(::mcp::cap::Request{
-                exposed, args, ctx.progress,
-                [&ctx] { return ctx.cancelled(); }});
+            ::mcp::cap::Request req{exposed, args, ctx.progress,
+                                    [&ctx] { return ctx.cancelled(); }};
+            req.elicit = ctx.elicit;   // the server may ask the user mid-call
+            r = pool->registry.dispatch(req);
             if (r.is_error)
                 return std::unexpected(tools::ToolError::subprocess(
                     r.text.empty() ? "MCP tool reported an error"
@@ -1065,9 +1066,10 @@ tools::ToolDef make_call_tool(PoolHandle pool) {
                     "Plugins pane, or remove it from tools.exclude in "
                     "mcp.json."));
         }
-        auto result = pool->registry.dispatch(::mcp::cap::Request{
-            *route, call_args, ctx.progress,
-            [&ctx] { return ctx.cancelled(); }});
+        ::mcp::cap::Request req{*route, call_args, ctx.progress,
+                                [&ctx] { return ctx.cancelled(); }};
+        req.elicit = ctx.elicit;
+        auto result = pool->registry.dispatch(req);
         if (result.is_error)
             return std::unexpected(tools::ToolError::subprocess(
                 result.text.empty() ? "MCP tool reported an error"
@@ -1333,12 +1335,20 @@ std::vector<ServerLaunch> configured_servers_for_delegation() {
 }
 
 void set_client_servers(const json& servers) {
+    // A union over sessions: an editor normally sends the same list each
+    // time, and a session that sends fewer must not unplug another's.
+    // A server sent again with a new spec replaces the old one.
     const bool changed = client_servers().with([](json& s, json n) {
-        if (s == n) return false;
-        s = std::move(n);
-        return true;
+        if (!n.is_object()) return false;
+        bool diff = false;
+        for (auto it = n.begin(); it != n.end(); ++it) {
+            auto cur = s.find(it.key());
+            if (cur == s.end() || *cur != it.value()) { s[it.key()] = it.value(); diff = true; }
+        }
+        return diff;
     }, servers.is_object() ? servers : json::object());
-    if (changed) (void)mcp_reload();
+    // Through the registry, so the tool catalog the model sees is rebuilt too.
+    if (changed) (void)::agentty::tools::reload_mcp_plugins();
 }
 
 std::vector<std::string> configured_server_names_from_client() {

@@ -34,6 +34,7 @@ class Client:
         self.permission_answer = "allow_once"
         self.client_requests = []
         self.files = {}          # path -> text, for fs/* callbacks
+        self.elicitations = []
         self.schema = None
         if jsonschema is None and schema_path:
             print("  note: python jsonschema not installed, schema checks skipped")
@@ -140,6 +141,11 @@ class Client:
             with open(p["path"], "w") as f:
                 f.write(p["content"])
             self.send({"jsonrpc": "2.0", "id": rid, "result": {}})
+        elif meth == "elicitation/create":
+            self.check("CreateElicitationRequest", p, meth)
+            self.elicitations.append(p)
+            self.send({"jsonrpc": "2.0", "id": rid,
+                       "result": {"action": "accept", "content": {"name": "Ayush"}}})
         else:
             self.send({"jsonrpc": "2.0", "id": rid,
                        "error": {"code": -32601, "message": f"client does not implement {meth}"}})
@@ -169,6 +175,7 @@ def expect(cond, what):
 
 ZED_CAPS = {"fs": {"readTextFile": True, "writeTextFile": True}, "terminal": False,
             "session": {"notices": {}, "compaction": {}, "configOptions": {"boolean": {}}},
+            "elicitation": {"form": {}},
             "_meta": {"terminal_output": True, "terminal-auth": True}}
 
 
@@ -349,6 +356,126 @@ def scenario_mcp(c, cwd, agentty):
     expect(seen, "the editor's MCP server tools are offered to the model")
 
 
+def scenario_extra_dirs(c, cwd):
+    print("dirs: a session's cwd and additionalDirectories are its workspace")
+    other = tempfile.mkdtemp(prefix="agentty_acp_other_")
+    extra = tempfile.mkdtemp(prefix="agentty_acp_extra_")
+    outside = tempfile.mkdtemp(prefix="agentty_acp_outside_")
+    _, err = c.request("session/new", {"cwd": other, "mcpServers": [],
+                                       "additionalDirectories": ["relative/dir"]})
+    expect(err is not None and err.get("code") == -32602, "relative additionalDirectories rejected")
+    r, err = c.request("session/new", {"cwd": other, "mcpServers": [],
+                                       "additionalDirectories": [extra]}, "NewSessionResponse")
+    expect(err is None, f"session/new with additionalDirectories {err or ''}")
+    sid = r["sessionId"]
+    c.request("session/set_mode", {"sessionId": sid, "modeId": "write"})
+    for target, should in ((os.path.join(extra, "x.txt"), True),
+                           (os.path.join(other, "y.txt"), True),
+                           (os.path.join(outside, "z.txt"), False)):
+        c.request("session/prompt", {"sessionId": sid,
+                  "prompt": [{"type": "text", "text": f"write to {target}"}]}, timeout=90)
+        exists = os.path.exists(target)
+        expect(exists == should, f"write to {os.path.basename(os.path.dirname(target))[:22]} "
+               f"{'allowed' if should else 'refused'} ({exists})")
+    c.request("session/prompt", {"sessionId": sid,
+              "prompt": [{"type": "text", "text": "run pwd"}]}, timeout=90)
+    outs = [u for s, u in c.updates if s == sid and u.get("sessionUpdate") == "tool_call_update"
+            and u.get("toolCallId") == "call_pwd" and u.get("rawOutput")]
+    text = outs[-1]["rawOutput"].get("text", "") if outs else ""
+    if os.path.realpath(other) not in text:
+        print("  debug pwd output:", text[:600])
+    expect(os.path.realpath(other) in text, f"shell runs in the session's cwd ({text.strip()[:60]!r})")
+
+
+def scenario_air(agentty, schema, cwd):
+    print("air: JetBrains AIR gets one git patch per edit, and it applies")
+    c = Client([agentty, "acp"], schema, cwd)
+    try:
+        caps = dict(ZED_CAPS)
+        caps["_meta"] = dict(caps["_meta"])
+        caps["_meta"]["jetbrains"] = {"air": {"version": 1, "capabilities": ["diffPatch"]}}
+        r = initialize(c, caps)
+        air = ((r or {}).get("_meta") or {}).get("jetbrains", {}).get("air", {})
+        expect("diffPatch" in air.get("capabilities", []), f"agent advertises AIR diffPatch ({air})")
+        r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
+        sid = r["sessionId"]
+        c.request("session/set_mode", {"sessionId": sid, "modeId": "write"})
+        target = os.path.join(cwd, "air.txt")
+        c.request("session/prompt", {"sessionId": sid,
+                  "prompt": [{"type": "text", "text": f"write to {target}"}]}, timeout=90)
+        # An edit in the middle of a longer file, and one at each end.
+        long_file = os.path.join(cwd, "air_long.txt")
+        body = "".join(f"line {i}\n" for i in range(1, 41))
+        open(long_file, "w").write(body)
+        originals = {}
+        for old, new in (("line 20", "LINE TWENTY"), ("line 1\n", "first\n"), ("line 40", "last")):
+            originals[len(originals)] = open(long_file).read()
+            c.request("session/prompt", {"sessionId": sid,
+                      "prompt": [{"type": "text", "text": f"edit file {long_file}|{old}|{new}"}]}, timeout=90)
+        patches = []
+        for s, u in c.updates:
+            if s != sid or u.get("sessionUpdate") != "tool_call_update":
+                continue
+            for x in u.get("content") or []:
+                p = ((x.get("_meta") or {}).get("jetbrains", {}).get("air", {})
+                     .get("diffPatch", {}).get("text"))
+                if p:
+                    patches.append(p)
+        expect(len(patches) >= 4, f"each edit carries _meta.jetbrains.air.diffPatch ({len(patches)})")
+        # Each patch must apply to the file as it was before that edit.
+        befores = [None] + [originals[i] for i in range(len(originals))]
+        ok = True
+        for i, p in enumerate(patches[:4]):
+            scratch = tempfile.mkdtemp()
+            path = p.split("\n", 1)[0].split(" b/", 1)[1]
+            if befores[i] is not None:
+                os.makedirs(os.path.dirname(os.path.join(scratch, path)), exist_ok=True)
+                open(os.path.join(scratch, path), "w").write(befores[i])
+            pf = os.path.join(scratch, "p.diff")
+            open(pf, "w").write(p)
+            rc = subprocess.run(["git", "apply", pf], cwd=scratch, capture_output=True, text=True)
+            if rc.returncode != 0:
+                ok = False
+                print("  patch", i, "failed:", rc.stderr.strip()[:160], repr(p[:300]))
+        expect(ok, "every patch applies with git apply")
+    finally:
+        c.close()
+    return c
+
+
+def scenario_elicit(c, cwd):
+    print("elicit: an MCP server's question becomes the editor's form")
+    here = os.path.dirname(os.path.abspath(__file__))
+    srv = {"name": "elicit", "command": sys.executable,
+           "args": [os.path.join(here, "elicit_mcp_server.py")], "env": []}
+    r, err = c.request("session/new", {"cwd": cwd, "mcpServers": [srv]}, "NewSessionResponse")
+    sid = r["sessionId"]
+    c.request("session/set_mode", {"sessionId": sid, "modeId": "write"})
+    got = ""
+    for _ in range(30):           # the server connects in the background
+        c.request("session/prompt", {"sessionId": sid,
+                  "prompt": [{"type": "text", "text": "ask my name"}]}, timeout=60)
+        outs = [u for s, u in c.updates if s == sid and u.get("toolCallId") == "call_ask"
+                and u.get("rawOutput")]
+        got = outs[-1]["rawOutput"].get("text", "") if outs else ""
+        if "hello" in got:
+            break
+        time.sleep(0.5)
+    expect(bool(c.elicitations), "agent sent elicitation/create to the editor")
+    if not c.elicitations:
+        print("  debug last tool output:", got[:300])
+        log = os.path.join(os.environ.get("AGENTTY_HOME", ""), "logs", "agentty.log")
+        if os.path.exists(log):
+            for line in open(log).read().splitlines()[-400:]:
+                if "mcp." in line and ("elicit" in line or "reload" in line):
+                    print("  log:", line[:200])
+    if c.elicitations:
+        e = c.elicitations[-1]
+        expect(e.get("sessionId") == sid and e.get("toolCallId") == "call_ask",
+               "scoped to the session and tool card")
+    expect("hello Ayush" in got, f"the answer reached the MCP server ({got[:60]!r})")
+
+
 def scenario_commands(c, cwd):
     print("commands: /compact reports a compaction entity, /new clears context")
     r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
@@ -492,13 +619,16 @@ def main():
         scenario_user_command(c, cwd)
         scenario_fork(c, cwd, sid)
         scenario_mcp(c, cwd, agentty)
+        scenario_extra_dirs(c, cwd)
+        scenario_elicit(c, cwd)
         scenario_commands(c, cwd)
         scenario_failure(c, cwd)
     finally:
         c.close()
     c2 = scenario_reload(agentty, schema, cwd, os.environ, sid)
     c3 = scenario_auth(agentty, schema, cwd)
-    for cl in (c, c2, c3):
+    c4 = scenario_air(agentty, schema, cwd)
+    for cl in (c, c2, c3, c4):
         for v in cl.violations:
             print("  SCHEMA " + v)
             FAILS.append(v)

@@ -26,7 +26,12 @@ def until(i):
         m = json.loads(line)
         if m.get("method") == "session/update":
             u = m["params"]["update"]
-            print("  update", u.get("sessionUpdate"), json.dumps(u)[:160])
+            print("  update", u.get("sessionUpdate"), json.dumps(u)[:int(os.environ.get("TRACE_WIDTH", "160"))])
+        elif m.get("method") == "session/request_permission":
+            opts = m["params"]["options"]
+            pick = next((o for o in opts if o["kind"] == "allow_once"), opts[0])
+            send({"jsonrpc": "2.0", "id": m["id"],
+                  "result": {"outcome": {"outcome": "selected", "optionId": pick["optionId"]}}})
         elif m.get("method"):
             print("  request", m["method"])
             send({"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": "no"}})
@@ -38,7 +43,9 @@ caps = {"session": {"compaction": {}, "notices": {}, "configOptions": {"boolean"
 send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
       "params": {"protocolVersion": 1, "clientCapabilities": caps}})
 until(1)
-send({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": cwd, "mcpServers": []}})
+send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+      "params": {"cwd": cwd, "mcpServers": [],
+                 "additionalDirectories": [d for d in os.environ.get("TRACE_DIRS", "").split(":") if d]}})
 sid = until(2)["result"]["sessionId"]
 for i, t in enumerate(prompts):
     send({"jsonrpc": "2.0", "id": 10 + i, "method": "session/prompt",

@@ -138,6 +138,9 @@ editor's controls always match what agentty will actually use.
 - **Reopening a chat** — `session/load` works from a fresh agent process and from any `cwd`, and replays the conversation (messages, thinking, tool cards, compactions) before returning the session's mode and controls.
 - **Live titles** — the first message names the chat, and each turn bumps its last-active time.
 - **Sign-in** — with no credentials agentty offers a terminal login: the editor opens a terminal running `agentty login`, and once you finish, agentty picks up the new credentials without a restart. Editors without terminal login get a "run `agentty login`" prompt instead.
+- **Every session in its own folder** — tools work in the session's folder, not wherever the agent was started: relative paths, shell commands and the sandbox all follow the session's `cwd`. Extra workspace folders the editor sends (`additionalDirectories`, for multi-root workspaces) are readable and writable too; anything else stays refused.
+- **Questions from MCP servers** — when an MCP server asks the user for input mid-call (elicitation), the editor shows it as a form tied to the tool card, and your answer goes back to the server.
+- **JetBrains AIR** — JetBrains' AIR client gets edits as one exact git patch each (`diffPatch`), the format it renders natively. Other editors get the plain diff.
 - **Your editor's MCP servers** — servers you configured in Zed (context servers) or JetBrains are passed to agentty with each session and their tools show up for the model, alongside your `mcp.json`. stdio, HTTP and SSE are all supported.
 - **Cancellation** — stop a turn and the in-flight stream tears down; `$/cancel_request` is honoured too.
 - **Workspace sandbox** — file tools stay inside the session's `cwd`; `bash` runs in the same OS sandbox as the TUI.
@@ -157,7 +160,9 @@ ACP v1 as of 1.11:
 
 Notices, compaction entries and toggle options are only sent when the editor
 advertises them in `clientCapabilities.session`; live terminals only when it
-advertises `_meta.terminal_output` (Zed) or `terminal_output_delta`. Diagnostics go to stderr;
+advertises `_meta.terminal_output` (Zed) or `terminal_output_delta`; MCP
+elicitations only when it advertises `elicitation.form`; AIR patches only when
+it declares `_meta.jetbrains.air` with `diffPatch`. Diagnostics go to stderr;
 stdout is only the protocol.
 
 `tests/acp/run_acp_client.sh` drives the real binary the way Zed and JetBrains

@@ -44,6 +44,8 @@ struct Connection::Live {
     // Who to tell about a tool call's progress. One call at a time per
     // connection, so one slot is enough.
     maya::published<const std::function<void(std::string_view)>> progress;
+    // Who answers the server's elicitation/create for the in-flight call.
+    maya::published<const std::function<m::Json(const m::Json&)>> elicit;
 
     ~Live() {
         if (peer) peer->stop();
@@ -118,6 +120,14 @@ m::ClientHandlers Connection::handlers(std::weak_ptr<Live> weak) {
     };
     h.on_resource_updated = cfg_.on_resource_updated;
     h.on_log              = cfg_.on_log;
+    // A server asking the user something mid-call: pass it to whatever UI
+    // the call came from (an editor's form). Nobody to ask: decline.
+    h.on_elicit = [weak](const m::ElicitParams& p) -> m::ElicitResult {
+        auto l = weak.lock();
+        auto ask = l ? l->elicit.current() : nullptr;
+        if (!ask || !*ask) return m::ElicitResult{m::ElicitAction::Decline, m::Nothing, m::Json::object()};
+        return m::from_json<m::ElicitResult>((*ask)(m::to_json(p)));
+    };
     // list_changed only marks the cache stale (and tells the host); the next
     // host-side read refreshes. Refreshing here, on the reader, would wait
     // for a reply only the reader can deliver.
@@ -151,6 +161,9 @@ std::shared_ptr<Connection::Live> Connection::connect() {
 
     m::ClientCapabilities client_caps;
     if (!cfg_.roots.empty()) client_caps.roots = m::RootsCapability{true};
+    // Form elicitation is relayed to the editor when one is attached; the
+    // handler declines otherwise, which the spec allows.
+    client_caps.elicitation = m::ElicitationCapability{m::Json::object(), m::Nothing};
 
     // 2026-07-28 servers read the protocol metadata from every request; older
     // ones ignore it. Then: server/discover if the server has it, else the
@@ -321,7 +334,9 @@ m::cap::Result Connection::execute(const m::cap::Request& req) {
     Turn turn(l->busy);
 
     l->progress.publish(std::make_shared<const std::function<void(std::string_view)>>(req.progress));
-    struct Clear { Live& l; ~Clear() { l.progress.publish(nullptr); } } clear{*l};
+    l->elicit.publish(req.elicit
+        ? std::make_shared<const std::function<m::Json(const m::Json&)>>(req.elicit) : nullptr);
+    struct Clear { Live& l; ~Clear() { l.progress.publish(nullptr); l.elicit.publish(nullptr); } } clear{*l};
 
     // A cancel mid-call closes the connection (the server can't be trusted
     // to be in a clean state) and fails the call; the next call reconnects.

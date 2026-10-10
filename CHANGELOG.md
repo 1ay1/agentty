@@ -24,6 +24,12 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 - **Sign in from the editor.** With no credentials agentty offers a terminal
   login; after `agentty login` finishes, it picks up the new credentials
   without restarting.
+- **Each ACP session works in its own folder,** plus the editor's extra
+  workspace folders (`additionalDirectories`): tools, shell commands and the
+  sandbox follow the session, not where the agent was launched.
+- **MCP elicitation reaches the editor.** A server asking the user for input
+  mid-call becomes the editor's form (ACP `elicitation/create`).
+- **JetBrains AIR `diffPatch`:** edits as one exact git patch each.
 - **`session/fork`**, user slash commands and skills as real `/` commands,
   and permission prompts with "always reject".
 - **`/compact` and `/new` work over ACP.** They used to be sent to the model

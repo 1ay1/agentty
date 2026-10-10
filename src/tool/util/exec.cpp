@@ -53,12 +53,13 @@ constexpr std::uint64_t kInToken   = 4;
 /// and run_child adopts the result. After that line the two paths are the
 /// same object with the same conformance suite behind it.
 [[nodiscard]] std::function<AdoptedChild(int)>
-sandbox_spawner(const std::vector<std::string>& argv, const std::string& cwd) {
+sandbox_spawner(const std::vector<std::string>& argv, const std::string& cwd,
+                std::vector<std::string> extra_roots = {}) {
 #if defined(__linux__)
     namespace sb = agentty::tools::util::sandbox;
     if (sb::is_active() && sb::detected_backend() == sb::Backend::Claybin) {
-        return [argv, cwd](int out_fd) {
-            auto r = sb::spawn_in_sandbox(argv, cwd, out_fd);
+        return [argv, cwd, extra_roots](int out_fd) {
+            auto r = sb::spawn_in_sandbox(argv, cwd, out_fd, extra_roots);
             AdoptedChild c;
             if (!r.started) { c.error = r.start_error; return c; }
             c.pid            = r.pid;
@@ -387,7 +388,13 @@ class JaalExec final : public mt::Exec {
         run.max_output_bytes = req.max_output_bytes.value_or(d_.max_output_bytes);
         if (req.stop_when)
             run.stop_when = [&req](std::string_view so_far) { return req.stop_when(so_far); };
-        run.spawn_adopted = sandbox_spawner(run.argv, run.cwd);
+        {
+            // The call's extra roots (an editor session's folders) are
+            // writable inside the sandbox too.
+            std::vector<std::string> roots;
+            for (const auto& r : call.scope_extra_roots) roots.push_back(r.string());
+            run.spawn_adopted = sandbox_spawner(run.argv, run.cwd, std::move(roots));
+        }
         // The tool call's live output and cancel: where its output goes and
         // whether its user hit Esc.
         if (call.progress)

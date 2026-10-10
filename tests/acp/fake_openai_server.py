@@ -68,6 +68,31 @@ class H(BaseHTTPRequestHandler):
         elif "summar" in (text or "").lower():
             events = [chunk({"role": "assistant", "content": "<summary>We said hello "}),
                       chunk({"content": "twice.</summary>"}), chunk({}, "stop")]
+        elif "ask my name" in (text or ""):
+            events = [chunk({"role": "assistant", "content": ""}),
+                      chunk({"tool_calls": [{"index": 0, "id": "call_ask", "type": "function",
+                                             "function": {"name": "mcp__elicit__ask_name", "arguments": "{}"}}]}),
+                      chunk({}, "tool_calls")]
+        elif "edit file " in (text or ""):
+            parts = (text or "").split("edit file ", 1)[1].split("|")
+            args = json.dumps({"path": parts[0].strip(), "old_text": parts[1], "new_text": parts[2].rstrip("\n")})
+            events = [chunk({"role": "assistant", "content": ""}),
+                      chunk({"tool_calls": [{"index": 0, "id": "call_e", "type": "function",
+                                             "function": {"name": "edit", "arguments": args}}]}),
+                      chunk({}, "tool_calls")]
+        elif "write to " in (text or ""):
+            target = (text or "").split("write to ", 1)[1].split()[0]
+            args = json.dumps({"path": target, "content": "extra-root\n"})
+            events = [chunk({"role": "assistant", "content": "Writing. "}),
+                      chunk({"tool_calls": [{"index": 0, "id": "call_x", "type": "function",
+                                             "function": {"name": "write", "arguments": args}}]}),
+                      chunk({}, "tool_calls")]
+        elif "run pwd" in (text or ""):
+            args = json.dumps({"command": "pwd"})
+            events = [chunk({"role": "assistant", "content": ""}),
+                      chunk({"tool_calls": [{"index": 0, "id": "call_pwd", "type": "function",
+                                             "function": {"name": "shell", "arguments": args}}]}),
+                      chunk({}, "tool_calls")]
         elif "run echo" in (text or ""):
             args = json.dumps({"command": "echo term-ok; echo second-line"})
             events = [chunk({"role": "assistant", "content": "Running. "}),
