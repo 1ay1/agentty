@@ -242,8 +242,20 @@ CallbackResult wait_for_callback(sock_t srv, int timeout_s) {
         sock_t cli = ::accept(srv, nullptr, nullptr);
         if (cli == kInvalid) continue;
 
+        // Wait for the request with select(), so a peer that connects and
+        // sends nothing (a browser preconnect) can't hang us past the deadline.
+        const auto read_until = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds(10));
         std::string reqbuf; char buf[4096];
-        for (int i = 0; i < 8; ++i) {
+        while (reqbuf.size() <= 16384) {
+            const auto rleft = read_until - std::chrono::steady_clock::now();
+            if (rleft <= std::chrono::steady_clock::duration::zero()) break;
+            fd_set cfds; FD_ZERO(&cfds); FD_SET(cli, &cfds);
+            const auto rus = std::chrono::duration_cast<std::chrono::microseconds>(rleft).count();
+            timeval rtv{static_cast<decltype(rtv.tv_sec)>(rus / 1000000),
+                        static_cast<decltype(rtv.tv_usec)>(rus % 1000000)};
+            const int ready = ::select(static_cast<int>(cli + 1), &cfds, nullptr, nullptr, &rtv);
+            if (ready < 0) break;
+            if (ready == 0) continue;
 #if defined(_WIN32)
             int n = ::recv(cli, buf, sizeof(buf), 0);
 #else
@@ -252,13 +264,14 @@ CallbackResult wait_for_callback(sock_t srv, int timeout_s) {
             if (n <= 0) break;
             reqbuf.append(buf, static_cast<std::size_t>(n));
             if (reqbuf.find("\r\n\r\n") != std::string::npos) break;
-            if (reqbuf.size() > 16384) break;
         }
         std::string target;
         if (const auto sp = reqbuf.find(' '); sp != std::string::npos) {
             const auto sp2 = reqbuf.find(' ', sp + 1);
             if (sp2 != std::string::npos) target = reqbuf.substr(sp + 1, sp2 - sp - 1);
         }
+        // Not the callback (empty preconnect, favicon): drop it and keep waiting.
+        if (target.find('?') == std::string::npos) { close_sock(cli); continue; }
         out.code  = query_param(target, "code");
         out.state = query_param(target, "state");
         out.iss   = query_param(target, "iss");

@@ -215,6 +215,41 @@ TEST_CASE("handoff: the shell path is watched by observation, not parsing") {
         }
     }
 
+    // ── 9. cached listings notice changes ───────────────────────────────
+    // Listings of old dirs are cached by mtime. Backdate everything so they
+    // are, then add files and check the next snapshot sees them.
+    {
+        const auto old = fs::last_write_time(g_root) - std::chrono::hours{1};
+        auto backdate = [&] {
+            fs::last_write_time(g_root, old);
+            for (auto& e : fs::recursive_directory_iterator(g_root))
+                if (e.is_directory()) fs::last_write_time(e.path(), old);
+        };
+        backdate();
+        auto warm = hg::snapshot_trusted(g_root.string());
+        auto warm2 = hg::snapshot_trusted(g_root.string());
+        CHECK(warm.entries.size() == warm2.entries.size());
+
+        write_file(g_root / "src" / "package.json", "{}\n");
+        write_file(g_root / "src" / "deep" / "Makefile", "all:\n");
+        auto after = hg::snapshot_trusted(g_root.string());
+        bool pkg = false, mk = false;
+        for (const auto& e : after.entries) {
+            if (e.path.ends_with("src/package.json")) pkg = true;
+            if (e.path.ends_with("deep/Makefile")) mk = true;
+        }
+        CHECK_MESSAGE(pkg, "a file added to a cached dir must be seen");
+        CHECK_MESSAGE(mk, "a file in a new subdir of a cached dir must be seen");
+
+        // A new hook in a cached root is still reported.
+        backdate();
+        (void)hg::snapshot_trusted(g_root.string());
+        hg::clear_handoff_feed();
+        auto before = hg::snapshot_trusted(g_root.string());
+        write_file(g_root / ".git" / "hooks" / "pre-push", "#!/bin/sh\n");
+        CHECK(hg::review_trusted(before, "echo > pre-push") >= 1);
+    }
+
     hg::clear_handoff_feed();
     fs::remove_all(g_root, ec);
 }

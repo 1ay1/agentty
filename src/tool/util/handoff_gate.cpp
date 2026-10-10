@@ -10,8 +10,11 @@
 #include <unordered_set>
 #include <chrono>
 #include <filesystem>
+#include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -227,13 +230,11 @@ constexpr std::string_view kSkipDirs[] = {
 // testbuild, fuzzbuild). A name prefix/suffix catches the common spellings and
 // a CMakeCache.txt catches the rest. These held ~7000 of the ~7500 entries the
 // walk visited on the agentty repo, on every shell call.
-[[nodiscard]] bool skip_dir(const fs::path& dir, std::string_view name) {
+// A dir holding CMakeCache.txt is skipped too, once its listing shows it.
+[[nodiscard]] bool skip_name(std::string_view name) {
     if (std::ranges::find(kSkipDirs, name) != std::ranges::end(kSkipDirs)) return true;
-    if (name.starts_with("build") || name.starts_with("cmake-build")
-        || name.ends_with("build"))
-        return true;
-    std::error_code ec;
-    return fs::exists(dir / "CMakeCache.txt", ec);
+    return name.starts_with("build") || name.starts_with("cmake-build")
+        || name.ends_with("build");
 }
 
 // Inside a .git directory, only these subtrees are worth watching.
@@ -285,13 +286,92 @@ constexpr int kMaxDepth = 8;
 // thing that makes a wall quietly stop working.
 constexpr std::size_t kMaxEntries = 20000;
 
-[[nodiscard]] std::int64_t mtime_ns(const fs::directory_entry& e) {
+// What the walk needs from one directory. Everything in it depends only on
+// the entry names and their paths, so it stays valid while the dir's mtime
+// does (adding, removing or renaming an entry bumps it). Trusted files are
+// still stat'ed fresh on every snapshot.
+struct Listing {
+    struct Sub {
+        std::string name;
+        bool link  = false;   // symlinked dir: never descended
+        bool noise = false;   // git_noise: never walked
+        bool root  = false;   // a new trusted file could appear in it
+    };
+    struct File { std::string path; sandbox_cfg::TrustKind kind{}; };
+    fs::file_time_type mtime{};
+    std::size_t entries = 0;
+    bool has_cmake_cache = false;
+    std::vector<Sub> dirs;
+    std::vector<File> trusted;   // trusted-shaped files, git noise dropped
+};
+using ListingPtr = std::optional<maya::shared<Listing>>;
+
+using ListingCache = std::unordered_map<std::string, maya::shared<Listing>>;
+maya::guarded<ListingCache>& listing_cache() {
+    static maya::guarded<ListingCache> c;
+    return c;
+}
+constexpr std::size_t kMaxCachedDirs = 200000;
+// A dir changed this recently may change again within the same mtime tick,
+// so its listing isn't cached (git's "racy" rule).
+constexpr auto kRacyWindow = std::chrono::seconds{2};
+
+[[nodiscard]] bool is_trusted_dir(const std::string& p) {
+    sandbox_cfg::TrustKind k{};
+    return sandbox_cfg::is_host_trusted(p + "/probe", &k);
+}
+
+// The listing of `dir`, from the cache when its mtime hasn't moved. One stat
+// on a hit. No lock is held while touching the filesystem.
+ListingPtr list_dir(const fs::path& dir) {
     std::error_code ec;
-    auto t = e.last_write_time(ec);
-    if (ec) return 0;
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               t.time_since_epoch())
-        .count();
+    const auto mtime = fs::last_write_time(dir, ec);
+    if (ec) return std::nullopt;
+    std::string key = dir.string();
+    auto hit = listing_cache().with(
+        [](ListingCache& m, std::string k) -> ListingPtr {
+            const auto it = m.find(k);
+            if (it == m.end()) return std::nullopt;
+            return it->second;
+        }, key);
+    if (hit && (*hit)->mtime == mtime) return hit;
+
+    Listing built;
+    Listing* l = &built;
+    l->mtime = mtime;
+    fs::directory_iterator it{dir, fs::directory_options::skip_permission_denied, ec};
+    if (ec) return std::nullopt;
+    while (it != fs::directory_iterator{}) {
+        const fs::directory_entry& e = *it;
+        ++l->entries;
+        std::error_code tec;
+        if (e.is_directory(tec)) {
+            const fs::path& p = e.path();
+            l->dirs.push_back({p.filename().string(), e.is_symlink(tec),
+                               git_noise(p, true), is_trusted_dir(p.string())});
+        } else {
+            const fs::path& p = e.path();
+            if (p.filename() == "CMakeCache.txt") l->has_cmake_cache = true;
+            std::string ps = p.string();
+            sandbox_cfg::TrustKind kind{};
+            if (sandbox_cfg::is_host_trusted(ps, &kind) && !git_noise(p))
+                l->trusted.push_back({std::move(ps), kind});
+        }
+        it.increment(ec);
+        if (ec) {
+            AGT_LOG(General, Warn, "handoff", "listing {} aborted: {}",
+                    key, ec.message());
+            return maya::shared<Listing>::make(std::move(built));   // partial: never cached
+        }
+    }
+    auto frozen = maya::shared<Listing>::make(std::move(built));
+    if (fs::file_time_type::clock::now() - mtime >= kRacyWindow) {
+        listing_cache().with([](ListingCache& m, std::string k, maya::shared<Listing> v) {
+            if (m.size() >= kMaxCachedDirs) m.clear();
+            m.insert_or_assign(std::move(k), std::move(v));
+        }, std::move(key), frozen);
+    }
+    return frozen;
 }
 
 }  // namespace
@@ -312,6 +392,7 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
 
     std::size_t seen = 0;
     bool truncated = false;
+    std::unordered_set<std::string> already;
 
     // Remember the directories we walked, so review() can re-scan them and
     // notice a trusted file that did not exist at snapshot time.
@@ -324,9 +405,10 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
 
     // Record one trusted file. Shared by the priority pass below and the
     // general walk, so the two cannot disagree about what an entry holds.
-    auto record = [&snap](const fs::path& p, sandbox_cfg::TrustKind kind) {
+    auto record = [&snap, &already](const std::string& p, sandbox_cfg::TrustKind kind) {
+        if (!already.insert(p).second) return;
         TrustedSnapshot::Entry entry;
-        entry.path    = p.string();
+        entry.path    = p;
         entry.kind    = kind;
         entry.existed = true;
         std::error_code sec;
@@ -370,68 +452,50 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
         ".git", ".vscode", ".claude", ".agentty", ".cursor", ".idea",
         ".direnv",
     };
+    const auto is_priority = [](std::string_view name) {
+        return std::ranges::find(kPriorityDirs, name) != std::ranges::end(kPriorityDirs);
+    };
     // Directories the priority pass walked in full. The general walk below
     // skips them, or it records their roots twice and walks .git again.
     std::unordered_set<std::string> walked;
     {
-        std::error_code pec;
-        fs::recursive_directory_iterator pit{
-            base, fs::directory_options::skip_permission_denied, pec};
         // Find the priority directories with a SHALLOW scan (they live at or
         // near the workspace root in every real layout), then walk each fully.
+        // Depth 3 is deep enough to find .vscode in a sub-package.
         std::vector<fs::path> targets;
-        if (!pec) {
-            std::size_t pseen = 0;
-            for (; pit != fs::recursive_directory_iterator{}; ) {
-                // Bounded discovery: deep enough to find .vscode in a
-                // sub-package, cheap enough not to be a second full walk.
-                if (pit.depth() >= 3) pit.disable_recursion_pending();
-                if (++pseen > kMaxEntries) break;
-                std::error_code dec;
-                if (pit->is_directory(dec) && !dec) {
-                    const std::string name = pit->path().filename().string();
-                    if (std::ranges::find(kPriorityDirs, name)
-                            != std::ranges::end(kPriorityDirs)) {
-                        targets.push_back(pit->path());
-                        pit.disable_recursion_pending();   // walked below
-                    } else if (skip_dir(pit->path(), name)) {
-                        pit.disable_recursion_pending();
-                    }
-                }
-                std::error_code iec;
-                pit.increment(iec);
-                if (iec) break;
+        std::vector<std::pair<fs::path, int>> stack{{base, 0}};
+        std::size_t pseen = 0;
+        while (!stack.empty() && pseen <= kMaxEntries) {
+            auto [dir, depth] = std::move(stack.back());
+            stack.pop_back();
+            const auto lp = list_dir(dir);
+            if (!lp) continue;
+            const Listing* l = &**lp;
+            if (depth > 0 && l->has_cmake_cache) continue;
+            pseen += l->entries;
+            for (const auto& s : l->dirs) {
+                fs::path p = dir / s.name;
+                if (is_priority(s.name)) { targets.push_back(std::move(p)); continue; }
+                if (depth < 3 && !s.link && !skip_name(s.name))
+                    stack.push_back({std::move(p), depth + 1});
             }
         }
-        for (const auto& dir : targets) {
-            std::error_code dec;
-            fs::recursive_directory_iterator dit{
-                dir, fs::directory_options::skip_permission_denied, dec};
-            if (dec) continue;
-            for (; dit != fs::recursive_directory_iterator{}; ) {
-                const fs::path p = dit->path();
-                std::error_code fec;
-                const bool is_dir = dit->is_directory(fec);
-                if (is_dir && !fec) {
-                    // .git/objects and friends are thousands of files that
-                    // carry no trust; pruning them is what keeps this pass
-                    // cheap enough to be uncapped.
-                    if (git_noise(p, true)) {
-                        // .git/objects and friends: not a root, not walked.
-                        dit.disable_recursion_pending();
-                    } else {
-                        sandbox_cfg::TrustKind dk{};
-                        if (sandbox_cfg::is_host_trusted(p.string() + "/probe", &dk))
-                            snap.roots.push_back(p.string());
-                    }
-                } else if (!git_noise(p)) {
-                    sandbox_cfg::TrustKind kind{};
-                    if (sandbox_cfg::is_host_trusted(p.string(), &kind))
-                        record(p, kind);
+        // Uncapped. Pruning .git/objects and friends is what keeps it cheap.
+        for (const auto& t : targets) {
+            std::vector<fs::path> st{t};
+            while (!st.empty()) {
+                const fs::path d = std::move(st.back());
+                st.pop_back();
+                const auto lp = list_dir(d);
+                if (!lp) continue;
+                const Listing* l = &**lp;
+                for (const auto& f : l->trusted) record(f.path, f.kind);
+                for (const auto& s : l->dirs) {
+                    if (s.noise) continue;
+                    fs::path p = d / s.name;
+                    if (s.root) snap.roots.push_back(p.string());
+                    if (!s.link) st.push_back(std::move(p));
                 }
-                std::error_code iec;
-                dit.increment(iec);
-                if (iec) break;
             }
         }
         if (!targets.empty())
@@ -443,115 +507,30 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
             snap.roots.push_back(t.string());   // a new file directly inside
         }
     }
-    // Everything the priority pass already recorded; the general walk skips
-    // these rather than double-recording (review() would report one write
-    // twice).
     const std::size_t priority_count = snap.entries.size();
-    std::unordered_set<std::string> already;
-    already.reserve(priority_count * 2);
-    for (const auto& e : snap.entries) already.insert(e.path);
 
-    fs::recursive_directory_iterator it{
-        base,
-        fs::directory_options::skip_permission_denied, ec};
-    if (ec) return snap;
-
-    for (; it != fs::recursive_directory_iterator{}; ) {
-        if (++seen > kMaxEntries) { truncated = true; break; }
-
-        const fs::directory_entry& e = *it;
-        std::error_code dec;
-        const bool is_dir = e.is_directory(dec);
-
-        if (is_dir && !dec) {
-            const std::string name = e.path().filename().string();
-            if (skip_dir(e.path(), name) || walked.contains(e.path().string())) {
-                it.disable_recursion_pending();
-                std::error_code iec;
-                it.increment(iec);
-                if (iec) {
-                    AGT_LOG(General, Warn, "handoff",
-                            "trusted snapshot walk aborted under {}: {}",
-                            std::string{root}, iec.message());
-                    break;
-                }
-                continue;
-            }
-            // Prune unwatched git subtrees rather than filtering them after the
-            // fact: .git/objects is thousands of files on any real repo, and
-            // walking it only to discard it is the cost without the benefit.
-            if (git_noise(e.path(), true)) {
-                it.disable_recursion_pending();
-                std::error_code iec;
-                it.increment(iec);
-                if (iec) {
-                    AGT_LOG(General, Warn, "handoff",
-                            "trusted snapshot walk aborted under {}: {}",
-                            std::string{root}, iec.message());
-                    break;
-                }
-                continue;
-            }
-            if (it.depth() >= kMaxDepth) it.disable_recursion_pending();
-            // A directory whose own path is trusted-shaped (.git/hooks,
-            // .vscode, .claude) is where a NEW trusted file would appear, so
-            // record it for the after-scan.
-            sandbox_cfg::TrustKind dk{};
-            if (sandbox_cfg::is_host_trusted(e.path().string() + "/probe", &dk))
-                snap.roots.push_back(e.path().string());
-            std::error_code iec;
-            it.increment(iec);
-            if (iec) {
-                AGT_LOG(General, Warn, "handoff",
-                        "trusted snapshot walk aborted under {}: {}",
-                        std::string{root}, iec.message());
-                break;
-            }
-            continue;   // directories are watched through the files inside them
-        }
-
-        const std::string p = e.path().string();
-        sandbox_cfg::TrustKind kind{};
-        if (!sandbox_cfg::is_host_trusted(p, &kind) || already.contains(p)) {
-            std::error_code iec;
-            it.increment(iec);
-            if (iec) {
-                AGT_LOG(General, Warn, "handoff",
-                        "trusted snapshot walk aborted under {}: {}",
-                        std::string{root}, iec.message());
-                break;
-            }
-            continue;
-        }
-        if (git_noise(e.path())) {
-            std::error_code iec;
-            it.increment(iec);
-            if (iec) {
-                AGT_LOG(General, Warn, "handoff",
-                        "trusted snapshot walk aborted under {}: {}",
-                        std::string{root}, iec.message());
-                break;
-            }
-            continue;
-        }   // .git/objects and friends
-
-        TrustedSnapshot::Entry entry;
-        entry.path = p;
-        entry.kind = kind;
-        entry.existed = true;
-        std::error_code sec;
-        entry.size = e.file_size(sec);
-        if (sec) entry.size = 0;
-        entry.mtime_ns = mtime_ns(e);
-        snap.entries.push_back(std::move(entry));
-
-        std::error_code iec;
-        it.increment(iec);
-        if (iec) {
-            AGT_LOG(General, Warn, "handoff",
-                    "trusted snapshot walk aborted under {}: {}",
-                    std::string{root}, iec.message());
-            break;
+    // General walk, capped. Visits whole directories, so the cap is checked
+    // per directory.
+    std::vector<std::pair<fs::path, int>> stack{{base, 0}};
+    while (!stack.empty()) {
+        auto [dir, depth] = std::move(stack.back());
+        stack.pop_back();
+        const auto lp = list_dir(dir);
+        if (!lp) continue;
+        const Listing* l = &**lp;
+        if (depth > 0 && l->has_cmake_cache) continue;
+        seen += l->entries;
+        if (seen > kMaxEntries) { truncated = true; break; }
+        for (const auto& f : l->trusted) record(f.path, f.kind);
+        for (const auto& s : l->dirs) {
+            if (skip_name(s.name) || s.noise) continue;
+            fs::path p = dir / s.name;
+            std::string ps = p.string();
+            if (walked.contains(ps)) continue;
+            // A trusted-shaped dir (.git/hooks, .vscode) is where a NEW
+            // trusted file would appear, so review() re-lists it.
+            if (s.root) snap.roots.push_back(ps);
+            if (depth < kMaxDepth && !s.link) stack.push_back({std::move(p), depth + 1});
         }
     }
 
