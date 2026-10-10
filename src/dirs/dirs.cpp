@@ -195,6 +195,14 @@ void warn_once(std::string_view env, const fs::path& bad,
             // process CWD: AGENTTY_LOGS_DIR=logs2 has to mean one
             // directory, not a different one per launch directory.
             chosen = given.is_absolute() ? std::move(given) : *root / given;
+            // An absolute override for PROJECT data is shared by every
+            // project, so each gets its own subfolder, the same way
+            // $AGENTTY_PROJECT_DIR does. Otherwise two repos fight over one
+            // index file and rebuild it on every switch.
+            if (spec.root == Root::Project && fs::path{v}.is_absolute()) {
+                const fs::path a = project_anchor();
+                if (!a.empty()) chosen /= a.filename().string() + "-" + path_tag(a);
+            }
             overridden = true;
         }
     }

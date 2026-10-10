@@ -840,6 +840,13 @@ add_test(NAME cli_arg_order_test
                  $<TARGET_FILE:agentty>)
 set_tests_properties(cli_arg_order_test PROPERTIES TIMEOUT 60)
 
+# `agentty config move` / doctor against the real binary in a scratch home.
+if(NOT WIN32)
+    add_test(NAME config_move_test
+             COMMAND sh ${CMAKE_SOURCE_DIR}/tests/config_move_test.sh $<TARGET_FILE:agentty>)
+    set_tests_properties(config_move_test PROPERTIES TIMEOUT 60)
+endif()
+
 # ── Finalize: build agentty_tests + derived aggregates ──────────────────────
 agentty_finalize_tests()
 

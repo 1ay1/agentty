@@ -35,4 +35,10 @@ struct DirKey {
 struct DirAssignment { std::string env, value; };
 [[nodiscard]] std::vector<DirAssignment> settings_dir_assignments();
 
+// The env var name main() set from settings.json, so a command can tell the
+// user's own variable from one we filled in. Marker: AGENTTY_DIRS_FROM_SETTINGS
+// holds a space-separated list of them.
+inline constexpr const char* kFromSettingsVar = "AGENTTY_DIRS_FROM_SETTINGS";
+[[nodiscard]] bool set_by_user(std::string_view env);
+
 }  // namespace agentty::util

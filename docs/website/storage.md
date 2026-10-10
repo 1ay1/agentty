@@ -9,7 +9,15 @@ slug: storage
 Everything agentty writes, where it goes, how long it stays, and how to move it.
 
 `agentty config` prints this for your machine, with real paths and sizes.
-`agentty config env` lists every override and which ones are set.
+
+| command | what it does |
+|---|---|
+| `agentty config` | every folder, where it is, how big |
+| `agentty config <name>` | one folder in detail: where it's read from, where it's written, how long things stay |
+| `agentty config env` | every override, and whether it's set by you or by settings.json |
+| `agentty config move <dir> <path>` | move a folder and its data, safely (below) |
+| `agentty config doctor` | check every folder is usable, secrets are private, no override is silently ignored |
+| `agentty config clean` | list files older versions left behind; `--yes` deletes them |
 
 ## Two roots
 
@@ -36,6 +44,7 @@ under it, named `<folder>-<hash>`, so two checkouts never share an index.
 |---|---|---|---|
 | `settings.json` | your settings | no | until you change them |
 | `settings.json.lock` | lock so two instances don't clobber each other | no | always |
+| `agentty.running.lock` | held shared by every running agentty, so `config move` can tell | no | always |
 | `credentials/` (0700) | sign-ins and API keys: `credentials.json` (Claude), `accounts.json`, `provider-keys.json`, `embed_keys.json`, copilot/codex/kimi files, each 0600 | no | until you sign out |
 | `threads/` (0700) | conversations: `<id>.jsonl` (the log), `<id>.ofs` (offsets), `<id>.meta.json`, `index.json` (picker cache), `<id>.transcript.md` (exports) | **yes** | until deleted, or `threads.keep_days` |
 | `threads/blobs/` | images and big tool outputs, shared between threads by content hash | **yes** | swept daily once no thread uses them (24 h grace) |
@@ -109,9 +118,32 @@ Rules, the same for all of them:
 - if the folder can't be made, you get one warning naming why, and the
   default is used
 - `credentials` and `threads` are forced to 0700 wherever they go
+- a search-index or project-state override pointed at one shared folder
+  gives each project its own `<name>-<hash>` subfolder inside it, so
+  projects never share an index
 
-Nothing is moved for you. To move existing data, quit agentty, move the
-folder, then set the override.
+### Moving existing data
+
+```sh
+agentty config move threads /mnt/big/agentty/threads
+agentty config move threads default        # and back
+```
+
+This moves the folder and records `dirs.threads` in settings.json. It:
+
+- refuses while any agentty is running (every session holds a shared lock
+  on `agentty.running.lock`; the kernel drops it if agentty crashes, so
+  there is never a stale one)
+- renames when the target is on the same disk, which is instant
+- otherwise copies, then checks the file count and byte total match before
+  touching the original. If they don't, the copy is removed and nothing changes
+- writes settings.json only after the data is in place, and removes the old
+  copy last
+- refuses a target that isn't empty, or that is inside the source
+- keeps `credentials` and `threads` at 0700
+
+If you set the variable yourself (`AGENTTY_THREADS_DIR=...`), it wins over
+settings.json, so `move` won't touch it; change the variable instead.
 
 ## Keeping it small
 

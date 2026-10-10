@@ -92,6 +92,10 @@ ExpireStats expire_threads(Io, int keep_days, const ThreadId& keep,
 // background sweep doesn't need the settings cache. 0 when unset.
 [[nodiscard]] int thread_keep_days(Io);
 
+// Set (or with an empty value, remove) settings.json "dirs".<key>, under the
+// settings lock. Used by `agentty config move`. False if the write failed.
+bool set_settings_dir(Io, std::string_view key, const std::string& value);
+
 // The per-message fingerprint the incremental save path uses to find what
 // changed. Exposed ONLY so the save bench can price that pass separately
 // from the rest of a save; nothing in the app should call it.

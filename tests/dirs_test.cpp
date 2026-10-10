@@ -311,8 +311,20 @@ int main() {
         auto over = resolve(rag);
         check(over.has_value(), "rag spec: override resolved");
         if (over) {
-            check(over->path == moved, "rag spec: $AGENTTY_RAG_DIR honoured");
+            check(over->path.parent_path() == moved, "rag spec: $AGENTTY_RAG_DIR honoured");
+            check(over->path.filename().string().starts_with("ragproj-"),
+                  "rag spec: each project gets its own subfolder under the override");
             check(over->origin == Origin::Override, "rag spec: origin is Override");
+        }
+        // A second project under the same override must not share it.
+        {
+            const fs::path other = g_sandbox / "otherproj";
+            fs::create_directories(other / ".git");
+            fs::current_path(other);
+            agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), other);
+            auto o = resolve(rag);
+            check(o && over && o->path != over->path,
+                  "rag spec: two projects never share one override folder");
         }
         ::unsetenv("AGENTTY_RAG_DIR");
 

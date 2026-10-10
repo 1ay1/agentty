@@ -117,6 +117,9 @@ Threads are the only thing that grows without limit. To expire old ones:
 { "threads": { "keep_days": 90 } }
 ```
 
+`agentty config move threads /mnt/big/threads` moves a folder with its data
+(refuses while agentty runs, verifies the copy before removing anything).
+`agentty config doctor` checks permissions and overrides.
 `agentty config clean` lists files older versions left behind, and
 `--yes` deletes them.
 

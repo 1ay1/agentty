@@ -10,6 +10,14 @@
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/logx.hpp"
 #include "agentty/util/storage_env.hpp"
+#include "agentty/util/storage_lock.hpp"
+#include "agentty/io/persistence.hpp"
+#include "agentty/util/io.hpp"
+
+#include <nlohmann/json.hpp>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 #if AGENTTY_MCP
 #include "agentty/mcp/import.hpp"   // foreign configs, named with their fix
 #endif
@@ -404,8 +412,10 @@ void print_env() {
     std::printf("\neach directory can also move on its own. set the variable, or the\n"
                 "key under \"dirs\" in settings.json (the variable wins):\n\n");
     for (const auto& k : util::dir_keys()) {
+        const char* tag = util::set_by_user(k.env) ? "(set)"
+                        : env_set(k.env)           ? "(from settings.json)" : "";
         std::printf("  %-27s dirs.%-15s%s\n", ("$" + std::string{k.env}).c_str(),
-                    std::string{k.key}.c_str(), env_set(k.env) ? "(set)" : "");
+                    std::string{k.key}.c_str(), tag);
     }
     std::printf("\nrelative paths resolve against the root, not the current dir.\n");
     std::printf("$AGENTTY_MCP_CONFIG is not storage — it names one file to read.%s\n",
@@ -442,6 +452,8 @@ struct Stale { fs::path path; const char* why; };
         add(p->path / "routing_memory.tsv", "old routing memory");
         add(p->path / "routing_memory.tsv.lock", "old routing memory lock");
     }
+    if (auto c = dirs::resolve_dry(kCredentialsSpec))
+        add(c->path / "copilot_model_support.json", "cache that now lives in cache/");
     if (!home.empty()) {
         add(home / ".cache" / "agentty", "old cache location");
         // Migration moves what it knows; anything left there may still matter.
@@ -449,6 +461,234 @@ struct Stale { fs::path path; const char* why; };
             add(c, "old config location, empty");
     }
     return out;
+}
+
+// ── move ────────────────────────────────────────────────────────────────────
+
+struct Tally { std::uintmax_t files = 0, bytes = 0; bool ok = true; };
+
+// Files and bytes under p, not following symlinks.
+[[nodiscard]] Tally tally(const fs::path& p) {
+    Tally t;
+    std::error_code ec;
+    if (!fs::exists(p, ec)) return t;
+    fs::recursive_directory_iterator it{p, fs::directory_options::skip_permission_denied, ec}, end;
+    if (ec) { t.ok = false; return t; }
+    for (; it != end; it.increment(ec)) {
+        if (ec) { t.ok = false; break; }
+        std::error_code fec;
+        if (it->is_symlink(fec)) { ++t.files; continue; }
+        if (it->is_regular_file(fec)) { ++t.files; t.bytes += it->file_size(fec); }
+    }
+    return t;
+}
+
+[[nodiscard]] fs::path absolute_clean(const fs::path& p) {
+    std::error_code ec;
+    auto a = fs::weakly_canonical(fs::absolute(p, ec), ec);
+    return ec ? fs::absolute(p) : a;
+}
+
+[[nodiscard]] bool inside(const fs::path& child, const fs::path& parent) {
+    auto c = child.begin();
+    for (auto p = parent.begin(); p != parent.end(); ++p, ++c)
+        if (c == child.end() || *c != *p) return false;
+    return true;
+}
+
+// `agentty config move <dir> <path>`: copy, verify, record, then remove.
+int cmd_move(Io io, std::span<const std::string> argv) {
+    auto usage = [] {
+        std::fprintf(stderr, "usage: agentty config move <dir> <path>\n       dirs:");
+        for (const auto& k : util::dir_keys()) std::fprintf(stderr, " %s", std::string{k.key}.c_str());
+        std::fprintf(stderr, "\n       a path of `default` moves it back.\n");
+        return 2;
+    };
+    if (argv.size() != 2) return usage();
+    const util::DirKey* key = nullptr;
+    for (const auto& k : util::dir_keys()) if (k.key == argv[0]) key = &k;
+    const Entry* entry = nullptr;
+    for (const Entry& e : kEntries) if (e.write && key && e.write->env == key->env) entry = &e;
+    if (!key) return usage();
+    if (!entry) {
+        std::fprintf(stderr, "agentty: %s is a root; set $%s instead.\n",
+                     std::string{key->key}.c_str(), std::string{key->env}.c_str());
+        return 2;
+    }
+    const std::string env{key->env};
+    if (util::set_by_user(env)) {
+        std::fprintf(stderr, "agentty: $%s is set, and it beats settings.json.\n"
+                             "unset it first, or move the folder yourself and change the variable.\n",
+                     env.c_str());
+        return 1;
+    }
+
+    const auto from_r = dirs::resolve_dry(*entry->write);
+    if (!from_r) { std::fprintf(stderr, "agentty: can't resolve %s\n", argv[0].c_str()); return 1; }
+    const fs::path from = absolute_clean(from_r->path);
+    const bool to_default = argv[1] == "default";
+    fs::path to;
+    if (to_default) {
+        auto d = dirs::resolve_dry(dirs::Spec{.root = entry->write->root, .leaf = entry->write->leaf});
+        if (!d) { std::fprintf(stderr, "agentty: no default for %s\n", argv[0].c_str()); return 1; }
+        to = absolute_clean(d->path);
+    } else {
+        std::string raw = argv[1];
+        if (raw == "~" || raw.starts_with("~/"))
+            raw = (util::home_dir() / raw.substr(raw.size() > 1 ? 2 : 1)).string();
+        to = absolute_clean(raw);
+    }
+
+    std::printf("move %s\n  from %s\n  to   %s\n\n", argv[0].c_str(),
+                from.string().c_str(), to.string().c_str());
+    if (to == from) { std::printf("already there.\n"); return 0; }
+    if (inside(to, from) || inside(from, to)) {
+        std::fprintf(stderr, "agentty: one path is inside the other; pick a separate folder.\n");
+        return 1;
+    }
+    std::error_code ec;
+    if (fs::exists(to, ec) && !(fs::is_directory(to, ec) && fs::is_empty(to, ec))) {
+        std::fprintf(stderr, "agentty: %s already exists and isn't empty.\n", to.string().c_str());
+        return 1;
+    }
+
+    // Nobody may be writing while we copy.
+    const auto lock = util::try_store_exclusive();
+    if (!lock) {
+        std::fprintf(stderr, "agentty: another agentty is running. quit it and try again.\n");
+        return 1;
+    }
+    const std::string value = to_default ? std::string{} : to.string();
+
+    if (fs::exists(from, ec)) {
+        const Tally before = tally(from);
+        if (!before.ok) { std::fprintf(stderr, "agentty: can't read all of %s\n", from.string().c_str()); return 1; }
+        std::printf("  %ju files, %s\n", before.files, human_bytes(before.bytes).c_str());
+        if (fs::exists(to, ec)) fs::remove(to, ec);   // the empty dir we checked above
+        fs::create_directories(to.parent_path(), ec);
+        // Same filesystem: a rename is instant and atomic. Otherwise copy.
+        ec.clear();
+        fs::rename(from, to, ec);
+        const bool renamed = !ec;
+        if (!renamed) {
+            ec.clear();
+            fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
+            const Tally after = tally(to);
+            if (ec || !after.ok || after.files != before.files || after.bytes != before.bytes) {
+                std::fprintf(stderr, "agentty: copy didn't verify (%s). nothing changed; removed the partial copy.\n",
+                             ec ? ec.message().c_str() : "size mismatch");
+                std::error_code rec;
+                fs::remove_all(to, rec);
+                return 1;
+            }
+            std::printf("  copied and verified\n");
+        } else {
+            std::printf("  renamed in place (same disk)\n");
+        }
+#ifndef _WIN32
+        if (entry->write->owner_only) fs::permissions(to, fs::perms::owner_all, ec);
+#endif
+        if (!persistence::set_settings_dir(io, key->key, value)) {
+            std::fprintf(stderr, "agentty: couldn't update settings.json. your data is now in %s;\n"
+                                 "set $%s to that to use it.\n", to.string().c_str(), env.c_str());
+            return 1;
+        }
+        if (!renamed) {
+            fs::remove_all(from, ec);
+            if (ec) std::printf("  couldn't remove the old copy (%s); it's safe to delete %s\n",
+                                ec.message().c_str(), from.string().c_str());
+            else    std::printf("  removed the old copy\n");
+        }
+    } else if (!persistence::set_settings_dir(io, key->key, value)) {
+        std::fprintf(stderr, "agentty: couldn't update settings.json\n");
+        return 1;
+    }
+    std::printf("\ndone. settings.json dirs.%s = %s\n", std::string{key->key}.c_str(),
+                to_default ? "(default)" : ("\"" + to.string() + "\"").c_str());
+    return 0;
+}
+
+// ── doctor ───────────────────────────────────────────────────────────────────
+
+// Checks the store is healthy: every dir usable, secrets private, no override
+// silently ignored. Exit 1 if anything needs fixing.
+int cmd_doctor() {
+    int problems = 0, notes = 0;
+    auto bad  = [&](const std::string& s) { ++problems; std::printf("  ✗ %s\n", s.c_str()); };
+    auto note = [&](const std::string& s) { ++notes;    std::printf("  ! %s\n", s.c_str()); };
+    auto good = [](const std::string& s)  { std::printf("  ✓ %s\n", s.c_str()); };
+
+    std::printf("storage doctor\n\n");
+    for (const Entry& e : kEntries) {
+        if (!e.write) continue;
+        const std::string name{e.name};
+        const auto r = dirs::resolve_dry(*e.write);
+        if (!r) { bad(name + ": " + r.error().detail); continue; }
+        if (r->origin == dirs::Origin::OverrideFellBack) {
+            bad(name + ": override is unusable, using " + r->path.string());
+            continue;
+        }
+        std::error_code ec;
+        const fs::path& p = r->path;
+        if (!fs::exists(p, ec)) { good(name + ": " + p.string() + " (made on first use)"); continue; }
+        if (!fs::is_directory(p, ec)) { bad(name + ": " + p.string() + " is not a folder"); continue; }
+#ifndef _WIN32
+        if (::access(p.c_str(), W_OK) != 0) { bad(name + ": " + p.string() + " is not writable"); continue; }
+        if (e.write->owner_only) {
+            const auto perms = fs::status(p, ec).permissions();
+            if ((perms & (fs::perms::group_all | fs::perms::others_all)) != fs::perms::none) {
+                bad(name + ": " + p.string() + " is readable by others; fix: chmod 700 '" + p.string() + "'");
+                continue;
+            }
+        }
+#endif
+        good(name + ": " + p.string() + (r->origin == dirs::Origin::Override ? "  (moved)" : ""));
+    }
+
+#ifndef _WIN32
+    // Secrets must be 0600 each, wherever the folder is.
+    if (auto c = dirs::resolve_dry(kCredentialsSpec)) {
+        std::error_code ec;
+        for (fs::directory_iterator it{c->path, ec}, end; !ec && it != end; it.increment(ec)) {
+            std::error_code fec;
+            if (!it->is_regular_file(fec) || it->path().extension() == ".lock") continue;
+            if (it->path().filename() == "copilot_model_support.json") continue;   // stale, see clean
+            const auto perms = it->status(fec).permissions();
+            if ((perms & (fs::perms::group_all | fs::perms::others_all)) != fs::perms::none)
+                bad("credentials: " + it->path().filename().string() +
+                    " is readable by others; fix: chmod 600 '" + it->path().string() + "'");
+        }
+    }
+#endif
+
+    // A settings key that does nothing is worth saying out loud.
+    if (auto u = dirs::resolve_dry(dirs::Spec{.root = dirs::Root::User})) {
+        std::ifstream in(u->path / "settings.json");
+        const auto j = in ? nlohmann::json::parse(in, nullptr, false) : nlohmann::json{};
+        if (j.is_object() && j.contains("dirs") && j["dirs"].is_object()) {
+            for (const auto& [k, v] : j["dirs"].items()) {
+                const util::DirKey* key = nullptr;
+                for (const auto& d : util::dir_keys()) if (d.key == k) key = &d;
+                if (!key) { note("settings.json: dirs." + k + " is not a known folder, ignored"); continue; }
+                if (!v.is_string()) { bad("settings.json: dirs." + k + " must be a path string"); continue; }
+                if (util::set_by_user(key->env))
+                    note("settings.json: dirs." + k + " is ignored because $" + std::string{key->env} + " is set");
+            }
+        }
+        if (j.is_object() && j.contains("threads") && j["threads"].is_object()) {
+            const auto& t = j["threads"];
+            if (t.contains("keep_days") && !t["keep_days"].is_number_integer())
+                bad("settings.json: threads.keep_days must be a whole number of days");
+            else if (t.contains("keep_days") && t["keep_days"].get<int>() > 0)
+                good("threads expire after " + std::to_string(t["keep_days"].get<int>()) + " days idle");
+        }
+    }
+
+    if (const auto stale = find_stale(); !stale.empty())
+        note(std::to_string(stale.size()) + " file(s) left by older versions; see `agentty config clean`");
+
+    std::printf("\n%s\n", problems ? "needs attention." : notes ? "healthy, with notes." : "healthy.");
+    return problems ? 1 : 0;
 }
 
 int print_clean(bool apply) {
@@ -508,14 +748,16 @@ void print_table() {
     }
     std::printf("  %s%s%s%s\n", pad("", 13).c_str(), pad("total", 23).c_str(),
                 pad("", 7).c_str(), human_bytes(total).c_str());
-    std::printf("\n`agentty config <concern>` for the full ladder,"
-                " `agentty config env` for the model,\n"
-                "`agentty config clean` for files old versions left behind.\n");
+    std::printf("\n`agentty config <concern>`  details for one row\n"
+                "`agentty config env`        every override and which are set\n"
+                "`agentty config move <dir> <path>`  move a folder, safely\n"
+                "`agentty config doctor`     check permissions and overrides\n"
+                "`agentty config clean`      files old versions left behind\n");
 }
 
 }  // namespace
 
-int cmd_config(std::span<const std::string> argv) {
+int cmd_config(Io io, std::span<const std::string> argv) {
     if (argv.empty()) {
         print_table();
         return 0;
@@ -529,11 +771,13 @@ int cmd_config(std::span<const std::string> argv) {
         const bool yes = argv.size() > 1 && (argv[1] == "--yes" || argv[1] == "-y");
         return print_clean(yes);
     }
+    if (want == "move")   return cmd_move(io, argv.subspan(1));
+    if (want == "doctor") return cmd_doctor();
     if (const Entry* e = find(want)) {
         print_one(describe(*e));
         return 0;
     }
-    std::fprintf(stderr, "unknown concern: %s\n\nknown: env clean", want.c_str());
+    std::fprintf(stderr, "unknown concern: %s\n\nknown: env clean move doctor", want.c_str());
     for (const Entry& e : kEntries)
         std::fprintf(stderr, " %s", std::string{e.name}.c_str());
     std::fprintf(stderr, "\n");

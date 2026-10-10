@@ -68,4 +68,20 @@ std::vector<DirAssignment> settings_dir_assignments() {
     return out;
 }
 
+bool set_by_user(std::string_view env) {
+    const char* v = std::getenv(std::string{env}.c_str());
+    if (!v || !*v) return false;
+    const char* from = std::getenv(kFromSettingsVar);
+    if (!from) return true;
+    const std::string_view list{from};
+    for (std::size_t i = 0; i < list.size();) {
+        const auto sp = list.find(' ', i);
+        const auto word = list.substr(i, sp == std::string_view::npos ? sp : sp - i);
+        if (word == env) return false;
+        if (sp == std::string_view::npos) break;
+        i = sp + 1;
+    }
+    return true;
+}
+
 }  // namespace agentty::util

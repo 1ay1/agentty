@@ -16,6 +16,7 @@
 
 #include "agentty/dirs/dirs.hpp"
 #include "agentty/scope/scope.hpp"
+#include "agentty/util/io.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -189,6 +190,6 @@ struct Report {
 //   agentty config          every concern, one line each
 //   agentty config mcp      one ladder, including what is NOT read
 //   agentty config env      the model
-int cmd_config(std::span<const std::string> argv);
+int cmd_config(Io, std::span<const std::string> argv);
 
 }  // namespace agentty::config

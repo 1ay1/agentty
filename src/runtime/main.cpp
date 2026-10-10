@@ -84,6 +84,7 @@
 #include "agentty/util/logx.hpp"   // flight recorder dump in crash handler
 #include "agentty/util/teardown.hpp"
 #include "agentty/util/storage_env.hpp"
+#include "agentty/util/storage_lock.hpp"
 #include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -1140,11 +1141,20 @@ int main(int argc, char** argv) {
 #endif
     }
     // settings.json "dirs" -> AGENTTY_<NAME>_DIR, before anything resolves a path.
-    for (const auto& a : util::settings_dir_assignments()) {
+    {
+        std::string from_settings;
+        for (const auto& a : util::settings_dir_assignments()) {
 #if defined(_WIN32)
-        _putenv_s(a.env.c_str(), a.value.c_str());
+            _putenv_s(a.env.c_str(), a.value.c_str());
 #else
-        ::setenv(a.env.c_str(), a.value.c_str(), /*overwrite=*/0);
+            ::setenv(a.env.c_str(), a.value.c_str(), /*overwrite=*/0);
+#endif
+            from_settings += (from_settings.empty() ? "" : " ") + a.env;
+        }
+#if defined(_WIN32)
+        _putenv_s(util::kFromSettingsVar, from_settings.c_str());
+#else
+        ::setenv(util::kFromSettingsVar, from_settings.c_str(), 1);
 #endif
     }
 
@@ -1345,7 +1355,7 @@ int main(int argc, char** argv) {
     if (args.subcommand == "logout") return auth::cmd_logout(IoAccess::grant());
     if (args.subcommand == "status") return auth::cmd_status(IoAccess::grant());
     if (args.subcommand == "skills") return tools::skills::cmd_skills(IoAccess::grant());
-    if (args.subcommand == "config") return config::cmd_config(args.plugin_argv);
+    if (args.subcommand == "config") return config::cmd_config(IoAccess::grant(), args.plugin_argv);
 #if defined(AGENTTY_MCP)
     if (args.subcommand == "mcp") {
         if (args.plugin_argv.empty() || args.plugin_argv.front() != "import") {
@@ -1371,6 +1381,9 @@ int main(int argc, char** argv) {
         return rag::bench::run(args.cli_bench_root);
     if (args.subcommand == "airgap")
         return airgap::cmd_airgap(args.airgap_argc, args.airgap_argv);
+    // From here on this is a session (TUI, run, acp, mcp-serve), and it
+    // writes the store. Held to exit so `agentty config move` waits for us.
+    const auto store_lock = util::hold_store_shared();
 
     // Missing creds is no longer a fatal error: we install with an empty
     // auth header, init.cpp opens the in-app login modal, and the user
