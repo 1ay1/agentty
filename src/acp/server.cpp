@@ -809,7 +809,7 @@ std::optional<a::ConfigOption> model_config_option(const std::string& current) {
         // list_models_for falls back to the provider's static seed when auth is
         // empty or the network is unreachable, so this never blocks on I/O in
         // the common case and is always non-empty for hosted providers.
-        models = provider::list_models_for(sel, {});
+        models = provider::list_models_for(IoAccess::grant(), sel, {});
     } catch (...) { /* leave empty → no option advertised */ }
     if (models.empty()) return std::nullopt;
 
@@ -967,7 +967,7 @@ int AgentServer::serve() {
 void AgentServer::persist(const std::string& id) {
     // Copy the thread out under the lock, write it outside.
     if (auto snapshot = with_session(id, [](Session& s) { return s.thread; }))
-        persistence::save_thread(*snapshot);
+        persistence::save_thread(IoAccess::grant(), *snapshot);
 }
 
 void AgentServer::send_update(const std::string& session_id, a::SessionUpdate update) {
@@ -1220,7 +1220,7 @@ void AgentServer::on_load_session(const a::LoadSessionParams& p) {
         // load_thread_by_id reads either on-disk format (the append log or
         // the legacy single document); a bare <id>.json read misses a thread
         // saved as a log.
-        auto loaded = persistence::load_thread_by_id(ThreadId{sid});
+        auto loaded = persistence::load_thread_by_id(IoAccess::grant(), ThreadId{sid});
         if (!loaded)
             throw a::RpcError(a::errc::InvalidParams,
                               "session/load: no such session: " + sid,
@@ -1395,7 +1395,7 @@ void write_session_index(const json& j) {
     // A session title/cwd derived from an untrusted ACP `cwd` can contain
     // invalid UTF-8; the default dump() throws type_error(316) on that.
     // Substitute U+FFFD instead so indexing can never crash the worker.
-    (void)persistence::write_json_atomic(
+    (void)persistence::write_json_atomic(IoAccess::grant(), 
         session_index_path(), j.dump(-1, ' ', false, json::error_handler_t::replace));
 }
 }  // namespace
@@ -1478,7 +1478,7 @@ void AgentServer::on_close_session(const a::CloseSessionParams& p) {
 
 void AgentServer::on_delete_session(const a::DeleteSessionParams& p) {
     sessions_.with([](Sessions& ss, std::string id) { ss.by_id.erase(id); }, p.sessionId.value);
-    persistence::delete_thread(ThreadId{p.sessionId.value});
+    persistence::delete_thread(IoAccess::grant(), ThreadId{p.sessionId.value});
     unindex_session(p.sessionId.value);
 }
 

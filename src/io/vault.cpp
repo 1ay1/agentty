@@ -32,14 +32,14 @@ std::string label_from_registry(Io io, const std::string& p) {
 // custom LOCAL host saves an empty value and is usable keylessly, but that
 // is Kind::None territory — provider_is_authed handles the nuance for
 // pickers; the vault's question is "is a secret SAVED here").
-bool key_signed_in(Io, const std::string& p) {
-    auto s = persistence::load_settings();
+bool key_signed_in(Io io, const std::string& p) {
+    auto s = persistence::load_settings(io);
     auto it = s.provider_keys.find(p);
     return it != s.provider_keys.end() && !it->second.empty();
 }
-void key_clear(Io, const std::string& p) {
-    auto s = persistence::load_settings();
-    if (s.provider_keys.erase(p) > 0) persistence::save_settings(s);
+void key_clear(Io io, const std::string& p) {
+    auto s = persistence::load_settings(io);
+    if (s.provider_keys.erase(p) > 0) persistence::save_settings(io, s);
 }
 
 void noop_after(Io, const std::string&) {}

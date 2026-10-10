@@ -77,7 +77,7 @@ TEST_CASE("transcript bound") {
                                + " TAIL_MARKER");
         t.messages.push_back(std::move(big));
 
-        auto path = persistence::write_thread_transcript_md(t);
+        auto path = persistence::write_thread_transcript_md(::agentty::IoAccess::grant(), t);
         check(!path.empty(), "huge thread: transcript written");
         std::string md = slurp(path);
 
@@ -119,7 +119,7 @@ TEST_CASE("transcript bound") {
         a.tool_calls.push_back(std::move(tc));
         t.messages.push_back(std::move(a));
 
-        auto path = persistence::write_thread_transcript_md(t);
+        auto path = persistence::write_thread_transcript_md(::agentty::IoAccess::grant(), t);
         std::string md = slurp(path);
         check(md.find("\xe2\x80\xba tool(shell)") != std::string::npos,
               "tool call collapses to one line");
@@ -139,7 +139,7 @@ TEST_CASE("transcript bound") {
         t.messages.push_back(std::move(card));
         t.messages.push_back(user_msg("real question"));
 
-        auto path = persistence::write_thread_transcript_md(t);
+        auto path = persistence::write_thread_transcript_md(::agentty::IoAccess::grant(), t);
         std::string md = slurp(path);
         check(md.find("ROUTING_CARD_NOISE") == std::string::npos,
               "smart_routing card is skipped");
@@ -154,7 +154,7 @@ TEST_CASE("transcript bound") {
         t.title = "utf8";
         // A lone continuation byte + a truncated 2-byte lead: invalid UTF-8.
         t.messages.push_back(user_msg(std::string("bad\x80\xC3 end", 8)));
-        auto path = persistence::write_thread_transcript_md(t);
+        auto path = persistence::write_thread_transcript_md(::agentty::IoAccess::grant(), t);
         std::string md = slurp(path);
         // to_valid_utf8 substitutes U+FFFD for the bad bytes; assert the
         // OUTPUT is well-formed UTF-8 (no lone continuation / truncated lead
@@ -184,7 +184,7 @@ TEST_CASE("transcript bound") {
         t.title = "small";
         t.messages.push_back(user_msg("hello"));
         t.messages.push_back(asst_msg("hi there"));
-        auto path = persistence::write_thread_transcript_md(t);
+        auto path = persistence::write_thread_transcript_md(::agentty::IoAccess::grant(), t);
         std::string md = slurp(path);
         check(md.find("hello") != std::string::npos
            && md.find("hi there") != std::string::npos,

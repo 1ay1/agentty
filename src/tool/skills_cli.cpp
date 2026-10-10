@@ -732,8 +732,8 @@ std::string content_sha_of(const Skill& s) {
     return scope::content_hash(s.body + "\n#effects:" + effects_to_frontmatter(s.effects));
 }
 
-scope::Trust trust_of(const Skill& s) noexcept {
-    return trust_of(s, load_approvals(IoAccess::grant()));
+scope::Trust trust_of(Io io, const Skill& s) noexcept {
+    return trust_of(s, load_approvals(io));
 }
 
 int cli(const std::vector<std::string>& argv) {

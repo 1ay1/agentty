@@ -265,7 +265,7 @@ struct Conn {
             return true;
         };
 
-        auto result = http::default_client().stream(req, std::move(handler), tos, cancel);
+        auto result = http::default_client(::agentty::IoAccess::grant()).stream(req, std::move(handler), tos, cancel);
 
         if (!result) {
             // Transport failure. If a response was expected, synthesise a

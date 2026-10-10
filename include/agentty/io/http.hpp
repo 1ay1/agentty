@@ -30,6 +30,7 @@
 #include <vector>
 
 #include <maya/runtime.hpp>
+#include "agentty/util/io.hpp"
 
 namespace agentty::http {
 
@@ -422,8 +423,9 @@ private:
 };
 
 // Process-wide default client — lazy, constructed on first access, shared
-// across all call sites. Equivalent to Zed's `GlobalHttpClient`.
-[[nodiscard]] Client& default_client();
+// across all call sites. Equivalent to Zed's `GlobalHttpClient`. Dialing out
+// is IO, so getting it takes an Io.
+[[nodiscard]] Client& default_client(Io);
 
 namespace test {
 // Pure incremental HTTP/1 chunk decoder seam used by framing regressions.

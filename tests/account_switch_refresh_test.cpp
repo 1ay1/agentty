@@ -138,7 +138,7 @@ TEST_CASE("account switch refreshes a stale token") {
     {
         provider::Selection sel;
         sel.kind = provider::Kind::Anthropic;
-        provider::select(sel);
+        provider::select(::agentty::IoAccess::grant(), sel);
     }
 
     // ── Switch to the long-idle account B → kick a background refresh ──
@@ -180,7 +180,7 @@ TEST_CASE("re-login reuses the derived-label slot, no proliferation") {
     {
         provider::Selection sel;
         sel.kind = provider::Kind::Anthropic;
-        provider::select(sel);
+        provider::select(::agentty::IoAccess::grant(), sel);
     }
 
     // Start from a clean anthropic registry: drop any slots a prior case

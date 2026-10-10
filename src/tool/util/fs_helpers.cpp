@@ -323,7 +323,7 @@ fs::path& mutable_workspace_root() {
 
 } // namespace
 
-void set_workspace_root(fs::path root) {
+void set_workspace_root(Io, fs::path root) {
     std::error_code ec;
     // On Windows, weakly_canonical can fail on junctions/reparse points.
     // If canonicalisation fails, use the path as-is (it's already absolute
@@ -432,7 +432,7 @@ namespace {
 
 } // namespace
 
-void allow_read_root(const fs::path& root) {
+void allow_read_root(Io, const fs::path& root) {
     std::error_code ec;
     auto canon = fs::weakly_canonical(root, ec);
     // On Windows, weakly_canonical can fail on junctions. If it fails,

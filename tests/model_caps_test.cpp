@@ -877,20 +877,20 @@ TEST_CASE("caps scope: provider::select publishes the SAME id lookups use") {
         provider::Selection s;
         s.kind = provider::Kind::ExternalAcp;
         s.acp_agent_id = "my-acp-agent";
-        provider::select(s);
+        provider::select(::agentty::IoAccess::grant(), s);
         CHECK(caps_provider_scope() == "my-acp-agent");
     }
     {
         provider::Selection s;
         s.kind = provider::Kind::OpenAI;
         s.openai_endpoint.label = "groq";
-        provider::select(s);
+        provider::select(::agentty::IoAccess::grant(), s);
         CHECK(caps_provider_scope() == "groq");
     }
     {
         provider::Selection s;
         s.kind = provider::Kind::Anthropic;
-        provider::select(s);
+        provider::select(::agentty::IoAccess::grant(), s);
         CHECK(caps_provider_scope() == std::string{provider::default_provider_id()});
     }
 }

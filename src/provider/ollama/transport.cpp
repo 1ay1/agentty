@@ -1747,7 +1747,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // finish_stream needs it to distinguish a user cancel from a transport
     // error at the post-loop.
     http::CancelTokenPtr cancel_for_end = cancel;
-    auto result = http::default_client().stream(hreq, std::move(handler),
+    auto result = http::default_client(::agentty::IoAccess::grant()).stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
     // Uniform end-of-turn pair via the scaffold — this transport previously

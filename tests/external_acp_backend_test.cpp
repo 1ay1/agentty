@@ -417,7 +417,7 @@ void test_default_sandbox_delegate_roundtrip() {
                 ("acp_ws_" + std::to_string(::getpid()) + "_" +
                  std::to_string(counter.fetch_add(1)));
     fs::create_directories(root);
-    agentty::tools::util::set_workspace_root(root);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
 
     auto del = P::default_sandbox_delegate();
     CHECK(static_cast<bool>(del.read_text_file));

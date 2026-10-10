@@ -382,7 +382,7 @@ std::size_t reload_mcp_plugins() {
     return n;
 }
 
-void invalidate_mcp_catalog() {
+void invalidate_mcp_catalog(Io) {
     // No re-spawn: bump the pool generation and mark the catalog stale.
     // project_tools re-reads tools.exclude on the rebuild, so an
     // enable/disable toggle lands on the next access with no server churn.

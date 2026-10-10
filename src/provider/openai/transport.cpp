@@ -1638,7 +1638,7 @@ void feed_ndjson(StreamCtx& ctx, const char* data, size_t len) {
 
 // Does this endpoint really speak Ollama's native /api/* protocol? See the
 // header. Unreachable counts as native so a busy daemon is not downgraded.
-bool endpoint_speaks_native(const Endpoint& ep) {
+bool endpoint_speaks_native(Io io, const Endpoint& ep) {
     if (!ep.native_api) return false;
 
     static maya::guarded<std::map<std::string, bool, std::less<>>> cache;
@@ -1660,7 +1660,7 @@ bool endpoint_speaks_native(const Endpoint& ep) {
     tos.connect = std::chrono::milliseconds(2'000);
     tos.total   = std::chrono::milliseconds(3'000);
 
-    auto resp = http::default_client().send(probe, tos);
+    auto resp = http::default_client(io).send(probe, tos);
     const bool native = !resp || resp->status == 200;
     if (!native)
         AGT_LOG(Wire, Info, "openai",
@@ -2244,7 +2244,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // finish_stream needs it to distinguish a user cancel from a transport
     // error at the post-loop.
     http::CancelTokenPtr cancel_for_end = cancel;
-    auto result = http::default_client().stream(hreq, std::move(handler),
+    auto result = http::default_client(::agentty::IoAccess::grant()).stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
     // One end-of-turn line + the raw error body on failure — the pair every
@@ -2439,7 +2439,7 @@ struct OllamaProbe {
     int context_window = 0;  // real model window from model_info.*.context_length
 };
 
-OllamaProbe probe_ollama_model(const AuthHeader& auth,
+OllamaProbe probe_ollama_model(Io io, const AuthHeader& auth,
                                const Endpoint& ep,
                                const std::string& model_name) {
     OllamaProbe out;
@@ -2457,7 +2457,7 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
     tos.connect = std::chrono::milliseconds(2'000);
     tos.total   = std::chrono::milliseconds(5'000);
 
-    auto resp = http::default_client().send(hreq, tos);
+    auto resp = http::default_client(io).send(hreq, tos);
     if (!resp || resp->status != 200) return out;
 
     try {
@@ -2637,7 +2637,7 @@ std::string HostProbe::explain() const {
     return "probe failed";
 }
 
-HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
+HostProbe probe_host(Io io, const AuthHeader& auth, const Endpoint& endpoint) {
     HostProbe out;
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(3'000);
@@ -2676,7 +2676,7 @@ HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
         r.headers        = build_request_headers(auth, endpoint);
         r.max_body_bytes = 2ull * 1024 * 1024;
         const auto t0   = std::chrono::steady_clock::now();
-        auto resp       = http::default_client().send(r, tos);
+        auto resp       = http::default_client(io).send(r, tos);
         const auto ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
         if (!resp) { note(HostProbe::Failure::Unreachable); return false; }
@@ -3153,7 +3153,7 @@ maya::guarded<std::set<std::string>>& probe_opt_in() {
             hreq.dial_host = ov.host;
             hreq.dial_port = ov.port;
         }
-        auto resp = http::default_client().send(hreq, tos);
+        auto resp = http::default_client(::agentty::IoAccess::grant()).send(hreq, tos);
         if (!resp || resp->status != 200) return std::nullopt;
         return resp->body;
     };
@@ -3486,7 +3486,7 @@ int router_declared_window(const nlohmann::json& row) {
     return detail::advertised_context_window(nlohmann::json{{"n_ctx", slot}});
 }
 
-int probe_loaded_window(const AuthHeader& auth, const Endpoint& endpoint,
+int probe_loaded_window(Io io, const AuthHeader& auth, const Endpoint& endpoint,
                         const std::string& model_id) {
     if (model_id.empty() || !detail::is_local_endpoint(endpoint)) return 0;
     const auto probe = detail::probe_endpoint_windows(auth, endpoint, {model_id});
@@ -3500,7 +3500,7 @@ int probe_loaded_window(const AuthHeader& auth, const Endpoint& endpoint,
     return probe.per_model.empty() ? probe.server_wide : 0;
 }
 
-std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpoint,
+std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth, const Endpoint& endpoint,
                                    bool force_probe) {
     std::vector<ModelInfo> result;
     if (endpoint.use_tls && is_empty(auth)) return result;
@@ -3522,7 +3522,7 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
     tos.connect = std::chrono::milliseconds(5'000);
     tos.total   = std::chrono::milliseconds(10'000);
 
-    auto resp = http::default_client().send(hreq, tos);
+    auto resp = http::default_client(io).send(hreq, tos);
     // PATH-PREFIX PROBE (custom hosts): a spec like http://host:8080/ derives
     // models_path "/models", but most local OpenAI-compatible servers
     // (llama.cpp, vLLM, LM Studio) only serve under "/v1". A 404 here — with
@@ -3544,7 +3544,7 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
         && !endpoint.models_path.starts_with("/v1/")) {
         http::Request retry = hreq;
         retry.path = "/v1/models";
-        auto second = http::default_client().send(retry, tos);
+        auto second = http::default_client(io).send(retry, tos);
         if (second && second->status == 200) {
             resp = std::move(second);
             // The body is now OpenAI-shaped whatever the preset said, so the
@@ -3573,7 +3573,7 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
             // supports structured tool calls (Ollama's capabilities[].
             // "tools") vs. just leaking tool JSON into content.
             for (const auto& id : names) {
-                auto probe = probe_ollama_model(auth, endpoint, id);
+                auto probe = probe_ollama_model(io, auth, endpoint, id);
                 ModelInfo info{
                     .id             = ModelId{id},
                     .display_name   = id,

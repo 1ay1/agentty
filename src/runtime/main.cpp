@@ -407,9 +407,9 @@ int cmd_diagnostics() {
         // this subsystem's most common invisible failure.
         namespace eb = agentty::rag::embed;
         eb::EmbedConfig ec;
-        eb::apply_env(ec);
+        eb::apply_env(::agentty::IoAccess::grant(), ec);
         try {
-            const auto s = agentty::persistence::load_settings();
+            const auto s = agentty::persistence::load_settings(::agentty::IoAccess::grant());
             if (!s.rag.embed_backend.empty()) {
                 ec.backend = eb::backend_from_id(s.rag.embed_backend);
                 if (!s.rag.embed_model.empty()) ec.model = s.rag.embed_model;
@@ -1180,7 +1180,7 @@ int main(int argc, char** argv) {
             // Order matters: stop the workers that LOG before running the
             // registry, because logx's own worker is one of the registered
             // teardowns.
-            http::default_client().join_prewarm();
+            http::default_client(::agentty::IoAccess::grant()).join_prewarm();
             modelsdev::join_background_refresh();
             blobs::join_background_gc();
             util::teardown::run();
@@ -1344,15 +1344,15 @@ int main(int argc, char** argv) {
                                  " [--dry-run] [--force]\n");
             return 1;
         }
-        return mcp::import_::cli({args.plugin_argv.begin() + 1,
+        return mcp::import_::cli(::agentty::IoAccess::grant(), {args.plugin_argv.begin() + 1,
                                   args.plugin_argv.end()});
     }
 #endif
     if (args.subcommand == "skill")  return tools::skills::cli(args.plugin_argv);
     if (args.subcommand == "hooks")  return tools::hooks::cli(args.cli_run_agent);
-    if (args.subcommand == "plugin") return tools::plugin::cli(args.plugin_argv);
+    if (args.subcommand == "plugin") return tools::plugin::cli(::agentty::IoAccess::grant(), args.plugin_argv);
     if (args.subcommand == "mcp-login")
-        return mcp::oauth::cmd_mcp_login(args.cli_mcp_server, args.cli_mcp_metadata,
+        return mcp::oauth::cmd_mcp_login(::agentty::IoAccess::grant(), args.cli_mcp_server, args.cli_mcp_metadata,
                                          args.cli_mcp_client_id);
     if (args.subcommand == "mcp-logout")
         return mcp::oauth::cmd_mcp_logout(args.cli_mcp_server);
@@ -1374,9 +1374,9 @@ int main(int argc, char** argv) {
     // is an ephemeral per-subprocess override (handled below) that must not
     // clobber the TUI's saved model.
     if (!args.cli_model.empty() && args.subcommand != "acp") {
-        auto s = persistence::load_settings();
+        auto s = persistence::load_settings(::agentty::IoAccess::grant());
         s.model_id = ModelId{args.cli_model};
-        persistence::save_settings(s);
+        persistence::save_settings(::agentty::IoAccess::grant(), s);
         // An explicit --model binds every role, not just the main turn. Set
         // here so the TUI's init() sees it too -- it takes no argv (#70).
         smart::tuning::model_pinned() = true;
@@ -1397,11 +1397,11 @@ int main(int argc, char** argv) {
                 args.cli_workspace.c_str());
             return 2;
         }
-        tools::util::set_workspace_root(std::move(req));
+        tools::util::set_workspace_root(::agentty::IoAccess::grant(), std::move(req));
     } else {
         std::error_code ec;
         auto cwd = std::filesystem::current_path(ec);
-        if (!ec) tools::util::set_workspace_root(std::move(cwd));
+        if (!ec) tools::util::set_workspace_root(::agentty::IoAccess::grant(), std::move(cwd));
     }
 
     // ── UI language ─────────────────────────────────────────────────────
@@ -1419,7 +1419,7 @@ int main(int argc, char** argv) {
     // the ids on screen are an unmissable bug report. Refusing to start over
     // a label table would be a worse trade.
     {
-        const auto saved = persistence::load_settings().ui.lang;
+        const auto saved = persistence::load_settings(::agentty::IoAccess::grant()).ui.lang;
         if (!i18n::init(args.cli_lang, saved)) {
             std::fprintf(stderr,
                 "agentty: the embedded English string catalog failed to "
@@ -1459,7 +1459,7 @@ int main(int argc, char** argv) {
         // so it has to run BEFORE the CLI flag or an explicit
         // --sandbox-backend would be silently overwritten by the saved one.
         // A flag the user typed this run beats a setting they saved once.
-        tools::util::sandbox::set_config(persistence::load_settings().sandbox);
+        tools::util::sandbox::set_config(persistence::load_settings(::agentty::IoAccess::grant()).sandbox);
 
         // --sandbox-backend is retained but no longer selects anything:
         // claybin is the only Linux engine. Kept rather than rejected so a
@@ -1592,7 +1592,7 @@ int main(int argc, char** argv) {
     // through the OpenAI-compatible transport.
     std::string provider_spec = args.cli_provider;
     if (provider_spec.empty()) {
-        auto s = persistence::load_settings();
+        auto s = persistence::load_settings(::agentty::IoAccess::grant());
         provider_spec = s.provider;          // empty → anthropic
     } else if (args.subcommand != "acp") {
         // Canonicalise BEFORE the spec becomes a settings key: two spellings
@@ -1612,7 +1612,7 @@ int main(int argc, char** argv) {
         // the same treatment (filed with the spec on proof).
         const bool is_preset = provider::preset_for(provider_spec) != nullptr;
         if (is_preset) {
-            auto s = persistence::load_settings();
+            auto s = persistence::load_settings(::agentty::IoAccess::grant());
             s.provider = provider_spec;
             if (args.cli_model.empty()) {
                 if (auto it = s.provider_models.find(provider_spec);
@@ -1623,20 +1623,20 @@ int main(int argc, char** argv) {
                 // provider's recall so a later bare relaunch restores it.
                 s.provider_models[provider_spec] = args.cli_model;
             }
-            persistence::save_settings(s);
+            persistence::save_settings(::agentty::IoAccess::grant(), s);
         } else {
             // Register for persist-on-success: the ModelsLoaded reducer
             // writes settings the moment this host answers a non-empty
             // model fetch. The -m recall (if any) is filed with it.
-            provider::set_unproven_spec(provider_spec, args.cli_model);
+            provider::set_unproven_spec(::agentty::IoAccess::grant(), provider_spec, args.cli_model);
         }
     }
     // Session-scoped --auth-header override; must be installed BEFORE
     // parse_selection so the initial Selection (and every live-switch
     // rebuild) stamps it onto the OpenAI-family Endpoint.
-    provider::set_custom_auth_header(args.cli_auth_header);
+    provider::set_custom_auth_header(::agentty::IoAccess::grant(), args.cli_auth_header);
     auto selection = provider::parse_selection(provider_spec);
-    provider::select(selection);
+    provider::select(::agentty::IoAccess::grant(), selection);
 
     // Auth header per provider, registry-driven. Anthropic uses the
     // OAuth/key creds resolved above; OpenAI-family backends read their
@@ -1682,7 +1682,7 @@ int main(int argc, char** argv) {
     auto copilot_provider =
         std::make_shared<provider::copilot::CopilotProvider>();
     auto kimi_provider = std::make_shared<provider::kimi::KimiProvider>();
-    io::FsStore                            store;
+    io::FsStore                            store{::agentty::IoAccess::grant()};
 
     // The seam: a single std::function the runtime calls. It dispatches on
     // provider::active() AT CALL TIME (not on a frozen branch), so the
@@ -1799,7 +1799,7 @@ int main(int argc, char** argv) {
     // provider::active() at call time), so subagents work on Anthropic,
     // OpenAI-compat, and Ollama alike — not just the Anthropic transport.
     {
-        auto sa_settings = persistence::load_settings();
+        auto sa_settings = persistence::load_settings(::agentty::IoAccess::grant());
         std::string sa_model =
             !args.cli_model.empty()       ? args.cli_model
           : !sa_settings.model_id.empty() ? sa_settings.model_id.value
@@ -1817,7 +1817,7 @@ int main(int argc, char** argv) {
         // second hand-written copy of the slot mapping, which is precisely how
         // the two drifted.
         smart::RoleConfig sa_smart = sa_settings.smart;
-        const auto sa_env = settings::registry::read_env();
+        const auto sa_env = settings::registry::read_env(::agentty::IoAccess::grant());
         if (sa_env.smart_enabled) sa_smart.enabled = *sa_env.smart_enabled;
         settings::registry::apply_env(sa_smart, sa_env);
         // An explicit --model is a contract, not a hint: every role runs on
@@ -1868,7 +1868,7 @@ int main(int argc, char** argv) {
             // floor. Wrapped anyway: a catalog fetch must never be the thing
             // that stops a headless run from starting.
             try {
-                sa_candidates = provider::list_models_for(provider::active(),
+                sa_candidates = provider::list_models_for(::agentty::IoAccess::grant(), provider::active(),
                                                           provider_auth);
             } catch (...) { /* fall through to the bundled floor below */ }
         }
@@ -1922,9 +1922,9 @@ int main(int argc, char** argv) {
     // wired above, so `bash`, `task`, the git_* family, etc. behave exactly
     // as they do in the TUI (filesystem tools stay sandboxed to --workspace).
     if (args.subcommand == "mcp-serve") {
-        provider::prewarm_active_provider();   // `task`/web tools reuse the warm session
+        provider::prewarm_active_provider(::agentty::IoAccess::grant());   // `task`/web tools reuse the warm session
         int rc = mcp::serve_stdio();
-        persistence::flush_pending_saves();
+        persistence::flush_pending_saves(::agentty::IoAccess::grant());
         return rc;
     }
 
@@ -2023,14 +2023,14 @@ int main(int argc, char** argv) {
         if (auto expanded = tools::commands::try_expand(IoAccess::grant(), prompt))
             prompt = std::move(*expanded);
 
-        provider::prewarm_active_provider();
+        provider::prewarm_active_provider(::agentty::IoAccess::grant());
         bool is_error = false;
         std::string report =
             tools::run_one_shot(prompt, args.cli_run_agent, is_error);
         std::fputs(report.c_str(), is_error ? stderr : stdout);
         if (!report.empty() && report.back() != '\n')
             std::fputc('\n', is_error ? stderr : stdout);
-        persistence::flush_pending_saves();
+        persistence::flush_pending_saves(::agentty::IoAccess::grant());
         return is_error ? 1 : 0;
     }
 
@@ -2039,7 +2039,7 @@ int main(int argc, char** argv) {
     // JSON-RPC; all diagnostics go to stderr so the protocol channel stays
     // clean. Reuses the same provider/tools/sandbox wired above.
     if (args.subcommand == "acp") {
-        auto settings = persistence::load_settings();
+        auto settings = persistence::load_settings(::agentty::IoAccess::grant());
         // -m wins for this subprocess WITHOUT persisting to settings (an ACP
         // agent shouldn't clobber the TUI's saved model). Otherwise fall back
         // to the saved model, then the built-in default.
@@ -2052,7 +2052,7 @@ int main(int argc, char** argv) {
         // reuses the SSL session + connection cache instead of paying the
         // ~150–300 ms handshake. Uniform for Anthropic and ChatGPT/Codex
         // alike. The TUI does the same before launching maya.
-        provider::prewarm_active_provider();
+        provider::prewarm_active_provider(::agentty::IoAccess::grant());
 
         // Permission profile gates which tools trigger a Zed approval prompt.
         // Default Ask: prompt for write/exec/net, auto-run reads. `minimal`
@@ -2087,7 +2087,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "agentty: ACP agent ready on stdio (profile=%s)\n",
                      std::string(to_string(profile)).c_str());
         int rc = server->serve();
-        persistence::flush_pending_saves();
+        persistence::flush_pending_saves(::agentty::IoAccess::grant());
         return rc;
     }
 
@@ -2096,7 +2096,7 @@ int main(int argc, char** argv) {
     // + connection cache, skipping ~150–300 ms of first-byte handshake.
     // Uniform: whether the user launched on Claude or ChatGPT/Codex, the
     // active backend gets the head start — no provider is privileged.
-    provider::prewarm_active_provider();
+    provider::prewarm_active_provider(::agentty::IoAccess::grant());
 
     // ── Keep diagnostics OFF the rendered terminal ──────────────────────
     // agentty's TUI runs in INLINE mode (not the alt-screen), so anything
@@ -2234,7 +2234,7 @@ int main(int argc, char** argv) {
     // Drain the async persistence queue. The Quit reducer arm enqueues
     // a final save_thread() right before maya returns; this blocks
     // until that (and any earlier-still-queued) write lands on disk.
-    persistence::flush_pending_saves();
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
     // Tear down any cached external ACP agent subprocesses (bounded even for a
     // wedged agent via ExternalAcpBackend's teardown watchdog).
     provider::release_acp_agents();

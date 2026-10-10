@@ -3152,7 +3152,7 @@ void Client::join_prewarm() noexcept {
     (void)impl_->prewarm_pool.shutdown();
 }
 
-Client& default_client() {
+Client& default_client(Io) {
     // Deliberately leaked: process lifetime.  Avoids destruction-order
     // races with maya's worker threads that may be mid-request at exit.
     static Client* c = new Client{};

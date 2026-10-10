@@ -54,7 +54,7 @@ agentty::Thread make_thread(int id, int gen) {
 
 int count_saved() {
     int n = 0;
-    for (const auto& t : agentty::persistence::load_all_threads())
+    for (const auto& t : agentty::persistence::load_all_threads(::agentty::IoAccess::grant()))
         if (t.id.value.starts_with("race-")) ++n;
     return n;
 }
@@ -86,13 +86,13 @@ int main() {
             ts.emplace_back([&, t] {
                 sync.arrive_and_wait();
                 for (int i = 0; i < kSaves; ++i) {
-                    try { agentty::persistence::save_thread(make_thread(t, i)); }
+                    try { agentty::persistence::save_thread(::agentty::IoAccess::grant(), make_thread(t, i)); }
                     catch (...) { threw.fetch_add(1); }
                 }
             });
         }
         for (auto& t : ts) t.join();
-        agentty::persistence::flush_pending_saves();
+        agentty::persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
         check(threw.load() == 0, "save_thread threw under concurrency");
         check(count_saved() == kThreads, "a thread id was lost in the storm");
@@ -105,10 +105,10 @@ int main() {
     // is not hypothetical: the Quit reducer issues one, and ACP sessions can
     // save after the TUI has flushed.
     {
-        agentty::persistence::save_thread(make_thread(999, 0));
-        agentty::persistence::flush_pending_saves();
+        agentty::persistence::save_thread(::agentty::IoAccess::grant(), make_thread(999, 0));
+        agentty::persistence::flush_pending_saves(::agentty::IoAccess::grant());
         const bool landed = std::ranges::any_of(
-            agentty::persistence::load_all_threads(),
+            agentty::persistence::load_all_threads(::agentty::IoAccess::grant()),
             [](const agentty::Thread& t) { return t.id.value == "race-999"; });
         check(landed, "a save issued after flush was dropped");
         std::printf("  post-flush save: %s\n", landed ? "persisted" : "DROPPED");

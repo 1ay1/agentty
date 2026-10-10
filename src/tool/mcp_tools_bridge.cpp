@@ -262,7 +262,7 @@ struct AgenttyHttpClient final : mt::HttpClient {
                 .connect = std::chrono::milliseconds(10'000),
                 .total   = std::chrono::milliseconds(30'000),
             };
-            auto r = http::default_client().send(req, tos);
+            auto r = http::default_client(::agentty::IoAccess::grant()).send(req, tos);
             if (!r) {
                 // A 4xx/5xx arrives as HttpError::Status — surface it as a
                 // real HttpResponse so the web tools can report the code.

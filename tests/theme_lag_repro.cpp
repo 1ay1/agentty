@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
         // A thread id, not a path: the store speaks the .jsonl log format
         // (load_thread_file is the LEGACY whole-document .json reader, which
         // silently returns nothing for a log file).
-        auto t = persistence::load_thread_by_id(ThreadId{thread_path});
+        auto t = persistence::load_thread_by_id(::agentty::IoAccess::grant(), ThreadId{thread_path});
         if (t) {
             m.d.current = std::move(*t);
             std::printf("loaded thread %s: %zu messages\n\n",

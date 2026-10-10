@@ -328,7 +328,7 @@ void enumerate_resources(const fs::path& dir, std::vector<std::string>& out) {
 // Appends each found SKILL.md's mtime into `sig` so an in-place edit
 // (same dir mtime) still invalidates the cache.
 // `shadows` collects the skills this pass hides behind an earlier root.
-void scan_root(const fs::path& root, const std::string& source,
+void scan_root(Io io, const fs::path& root, const std::string& source,
                std::size_t cap, std::vector<Skill>& out, std::string& sig,
                std::vector<Shadowed>& shadows) {
     std::error_code ec;
@@ -495,7 +495,7 @@ void scan_root(const fs::path& root, const std::string& source,
         // can fetch bundled scripts/references that live outside the
         // workspace (~/.agentty/skills/...) without tripping the
         // boundary. Read-only — the write/edit gate never consults it.
-        util::allow_read_root(s.dir);
+        util::allow_read_root(io, s.dir);
         out.push_back(std::move(s));
     }
 }
@@ -569,7 +569,7 @@ void scan_root_signature(const fs::path& root, std::string& sig) {
     }
 }
 
-std::vector<Skill> all(Io) {
+std::vector<Skill> all(Io io) {
     // Both passes run outside the lock; only the swap of the result is
     // locked. Two callers racing a change both scan, and the second's
     // identical result replaces the first's: wasted work, never a wrong one.
@@ -626,7 +626,7 @@ std::vector<Skill> all(Io) {
     Discovery fresh;
     std::string parse_sig;
     for (const scope::Source& src : sources) {
-        scan_root(src.base / layout.leaf, std::string{scope::to_string(src.locus)},
+        scan_root(io, src.base / layout.leaf, std::string{scope::to_string(src.locus)},
                   cap, fresh.skills, parse_sig, fresh.shadows);
     }
     fresh.sig = sig;

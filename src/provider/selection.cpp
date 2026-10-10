@@ -58,14 +58,14 @@ std::vector<ModelInfo> bundled_models_for(std::string_view label) {
 }
 } // namespace
 
-void set_unproven_spec(std::string spec, std::string model_recall) {
+void set_unproven_spec(Io, std::string spec, std::string model_recall) {
     g_unproven().with([](Unproven& u, std::string sp, std::string m) {
         u.spec  = std::move(sp);
         u.model = std::move(m);
     }, std::move(spec), std::move(model_recall));
 }
 
-std::optional<std::pair<std::string, std::string>> take_unproven_spec_at_launch() {
+std::optional<std::pair<std::string, std::string>> take_unproven_spec_at_launch(Io) {
     return g_unproven().with([](Unproven& u)
             -> std::optional<std::pair<std::string, std::string>> {
         if (u.spec.empty()) return std::nullopt;
@@ -75,7 +75,7 @@ std::optional<std::pair<std::string, std::string>> take_unproven_spec_at_launch(
     });
 }
 
-void set_custom_auth_header(std::string name) {
+void set_custom_auth_header(Io, std::string name) {
     g_auth_header().with([](std::string& h, std::string n) { h = std::move(n); },
                          std::move(name));
 }
@@ -187,7 +187,7 @@ auth::AuthHeader resolve_auth_for(std::string_view spec,
     return auth::AuthHeader{auth::ApiKeyHeader{std::move(key)}};
 }
 
-void select(Selection s) {
+void select(Io, Selection s) {
     // Publish the provider id as the capability-key scope BEFORE swapping the
     // selection in, so a resolved_caps() racing the switch sees, at worst,
     // the OLD scope with the OLD selection — never a mismatched pair.
@@ -345,18 +345,18 @@ PrewarmTarget prewarm_target(const Selection& s) {
     return t;
 }
 
-void prewarm_active_provider() {
+void prewarm_active_provider(Io io) {
     // Uniform across native backends: resolve the warm target from the active
     // selection (pure, registry-driven — see prewarm_target) and open the
     // socket. No provider is privileged; the routing table lives in one
     // testable function, not this side-effecting wrapper.
     const PrewarmTarget t = prewarm_target(active());
     if (!t.should_warm()) return;
-    http::default_client().prewarm(t.host, t.port, t.override_host,
+    http::default_client(io).prewarm(t.host, t.port, t.override_host,
                                    t.override_port);
 }
 
-std::vector<ModelInfo> list_models_for(const Selection& sel,
+std::vector<ModelInfo> list_models_for(Io io, const Selection& sel,
                                        const auth::AuthHeader& auth) {
     // Dispatch on the CARRIED provider id, not on a re-derived label. The
     // three OAuth-native backends fetch their own catalogs because their
@@ -368,12 +368,12 @@ std::vector<ModelInfo> list_models_for(const Selection& sel,
     // through to the generic /v1/models GET (Copilot serves /models), and the
     // picker came up empty with no error.
     if (sel.kind == Kind::ExternalAcp) return {};   // the agent picks its own
-    if (sel.is_copilot()) return copilot::list_models();
-    if (sel.is_kimi())    return kimi::list_models();
-    if (sel.is_chatgpt()) return chatgpt::list_models();
-    if (sel.kind == Kind::Anthropic) return anthropic::list_models(auth);
+    if (sel.is_copilot()) return copilot::list_models(io);
+    if (sel.is_kimi())    return kimi::list_models(io);
+    if (sel.is_chatgpt()) return chatgpt::list_models(io);
+    if (sel.kind == Kind::Anthropic) return anthropic::list_models(io, auth);
 
-    auto models = openai::list_models(auth, sel.openai_endpoint);
+    auto models = openai::list_models(io, auth, sel.openai_endpoint);
     // Hosted providers return nothing before a key is set (or when the fetch
     // fails). Seed from the bundled catalog so the picker is never stranded
     // empty; custom hosts have no seed and legitimately stay empty.

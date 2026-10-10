@@ -76,7 +76,7 @@ bool detect_remote() noexcept {
 
 }  // namespace
 
-Model::Env read_launch_env() noexcept {
+Model::Env read_launch_env(Io io) noexcept {
     Model::Env e;
     e.remote              = detect_remote();
     // Plain SSH only. The composer's clipboard paths key off this rather than
@@ -95,7 +95,7 @@ Model::Env read_launch_env() noexcept {
     e.painted_caret       = set("AGENTTY_PAINTED_CARET");
     e.host_integration    = ui::host::detect_integration();
     e.terminal            = ui_prefs::detect(/*tty=*/true);
-    e.settings            = settings::registry::read_env();
+    e.settings            = settings::registry::read_env(io);
     {
         std::error_code ec;
         const auto cwd = std::filesystem::current_path(ec);
@@ -107,8 +107,13 @@ Model::Env read_launch_env() noexcept {
     // its directory at all.
     if (!e.no_auto_update)
         e.self_update_ok = update::self_update_possible(e.self_update_reason);
-    rag::embed::apply_env(e.embed_defaults);
+    rag::embed::apply_env(io, e.embed_defaults);
     e.user_root = util::user_root().string();
+    if (const char* v = std::getenv("AGENTTY_RAG_PROACTIVE"); v && v[0]) {
+        std::string s{v};
+        for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        e.rag_proactive_override = (s == "1" || s == "true" || s == "on" || s == "yes");
+    }
     return e;
 }
 

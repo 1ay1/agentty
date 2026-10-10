@@ -181,7 +181,7 @@ TEST_CASE("the ADOPTED file keeps every key, and never clobbers") {
         "timeoutMs": 45000
     })");
 
-    const imp::Outcome o = imp::adopt({f}, {});
+    const imp::Outcome o = imp::adopt(::agentty::IoAccess::grant(), {f}, {});
     CHECK(o.imported == 1, "one server adopted");
 
     json doc;
@@ -202,7 +202,7 @@ TEST_CASE("the ADOPTED file keeps every key, and never clobbers") {
     imp::Found evil = f;
     evil.entry["command"] = "/evil";
     evil.conflicts = true;
-    const imp::Outcome o2 = imp::adopt({evil}, {});
+    const imp::Outcome o2 = imp::adopt(::agentty::IoAccess::grant(), {evil}, {});
     CHECK(o2.imported == 0 && o2.skipped == 1, "conflict skipped");
     {
         std::ifstream in(o.into);
@@ -215,7 +215,7 @@ TEST_CASE("the ADOPTED file keeps every key, and never clobbers") {
     // --force replaces it wholesale, which is the documented escape hatch.
     imp::Options force;
     force.force = true;
-    const imp::Outcome o3 = imp::adopt({evil}, force);
+    const imp::Outcome o3 = imp::adopt(::agentty::IoAccess::grant(), {evil}, force);
     CHECK(o3.imported == 1, "--force replaces");
 
     if (had) ::setenv("AGENTTY_HOME", prev.c_str(), 1);

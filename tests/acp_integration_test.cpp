@@ -62,7 +62,7 @@ TEST_CASE("acp integration end-to-end") {
     // so setting it here (before any persistence touch) is sufficient.
     setenv("HOME", tmp.string().c_str(), 1);
     setenv("USERPROFILE", tmp.string().c_str(), 1);   // win32 branch of data_dir
-    ag::tools::util::set_workspace_root(tmp);
+    ag::tools::util::set_workspace_root(::agentty::IoAccess::grant(), tmp);
     const fs::path target = tmp / "out.txt";
     fs::remove(target);
 

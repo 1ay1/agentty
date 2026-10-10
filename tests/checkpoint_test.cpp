@@ -57,7 +57,7 @@ int main() {
     // repo() must work without user identity configured (commit-tree gets
     // inline -c identity); leave user.name/email unset on purpose.
 
-    check(workspace::in_git_repo(), "scratch repo detected");
+    check(workspace::in_git_repo(::agentty::IoAccess::grant()), "scratch repo detected");
 
     // ── t0 content: nested dir, spaces in names, then checkpoint ────────
     put("a.txt", "original-a\n");

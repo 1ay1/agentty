@@ -37,6 +37,7 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include "agentty/util/io.hpp"
 
 namespace agentty::rag::embed {
 
@@ -224,6 +225,6 @@ using ProbeResult = std::variant<ProbeOk, ProbeErr>;
 // Legacy AGENTTY_OLLAMA_HOST / AGENTTY_EMBED_MODEL keep working; the new
 // AGENTTY_EMBED_* names win where both are set. Applied on top of `base`
 // so a persisted picker config can be layered over env defaults.
-void apply_env(EmbedConfig& c);
+void apply_env(Io, EmbedConfig& c);
 
 } // namespace agentty::rag::embed

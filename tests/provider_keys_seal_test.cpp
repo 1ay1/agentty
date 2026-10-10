@@ -70,7 +70,7 @@ TEST_CASE("provider keys seal: settings.json carries no plaintext key") {
         s.provider_keys["groq"] = "gsk-live-groq-secret-key-0000000000";
         s.provider_keys["https://chat.example.org/api"] = "sk-custom-host-key";
         s.provider_keys["localhost:8080"] = "";   // keyless localhost row
-        persistence::save_settings(s);
+        persistence::save_settings(::agentty::IoAccess::grant(), s);
     }
 
     // The settings body must be credential-free — not even an empty
@@ -90,7 +90,7 @@ TEST_CASE("provider keys seal: settings.json carries no plaintext key") {
     CHECK(auth::crypt::unseal(vault).has_value());
 
     // Round-trip: the map comes back byte-identical, keyless row included.
-    auto loaded = persistence::load_settings();
+    auto loaded = persistence::load_settings(::agentty::IoAccess::grant());
     CHECK(loaded.provider_keys.size() == 3);
     CHECK(loaded.provider_keys.at("groq")
           == "gsk-live-groq-secret-key-0000000000");
@@ -117,7 +117,7 @@ TEST_CASE("provider keys seal: legacy plaintext settings are migrated + stripped
     // is that no save need ever run for the plaintext to stop being the
     // only copy. (The reducers hold the cached settings for minutes; a
     // process exit before the next save must not leave the key unsealed.)
-    auto s = persistence::load_settings();
+    auto s = persistence::load_settings(::agentty::IoAccess::grant());
     CHECK(s.provider_keys.size() == 1);
     CHECK(s.provider_keys.at("groq") == "gsk-legacy-plaintext-key");
     REQUIRE(fs::exists(home.vault_file()));
@@ -125,7 +125,7 @@ TEST_CASE("provider keys seal: legacy plaintext settings are migrated + stripped
 
     // …and the first save reseals them (idempotent now) and strips the
     // plaintext object from settings.json entirely.
-    persistence::save_settings(s);
+    persistence::save_settings(::agentty::IoAccess::grant(), s);
 
     const std::string body = TmpHome::slurp(home.settings_file());
     CHECK(body.find("provider_keys") == std::string::npos);
@@ -137,7 +137,7 @@ TEST_CASE("provider keys seal: legacy plaintext settings are migrated + stripped
     CHECK(auth::crypt::unseal(vault).has_value());
     CHECK(vault.find("gsk-legacy-plaintext-key") == std::string::npos);
 
-    auto after = persistence::load_settings();
+    auto after = persistence::load_settings(::agentty::IoAccess::grant());
     CHECK(after.provider_keys.size() == 1);
     CHECK(after.provider_keys.at("groq") == "gsk-legacy-plaintext-key");
 }
@@ -148,16 +148,16 @@ TEST_CASE("provider keys seal: sign-out clears the vault at rest") {
     {
         store::Settings s;
         s.provider_keys["groq"] = "gsk-live-groq-secret-key-0000000000";
-        persistence::save_settings(s);
+        persistence::save_settings(::agentty::IoAccess::grant(), s);
     }
     REQUIRE(fs::exists(home.vault_file()));
 
     // An empty map saved is authoritative — a sign-out (or an in-app
     // key_clear) must leave no recoverable key at rest.
     store::Settings s;
-    persistence::save_settings(s);
+    persistence::save_settings(::agentty::IoAccess::grant(), s);
 
     CHECK(!fs::exists(home.vault_file()));
-    auto loaded = persistence::load_settings();
+    auto loaded = persistence::load_settings(::agentty::IoAccess::grant());
     CHECK(loaded.provider_keys.empty());
 }

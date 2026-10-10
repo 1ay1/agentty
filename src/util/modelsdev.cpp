@@ -240,7 +240,7 @@ int refresh() {
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(8'000);
     tos.total   = std::chrono::milliseconds(60'000);
-    auto resp = http::default_client().send(req, tos);
+    auto resp = http::default_client(::agentty::IoAccess::grant()).send(req, tos);
     if (!resp || resp->status != 200 || resp->body.empty()) {
         // Network down / endpoint moved: fall back to whatever is cached.
         load_cached();

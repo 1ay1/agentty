@@ -104,9 +104,9 @@ void the_index_records_a_unix_timestamp() {
     std::printf("the index records a real timestamp\n");
     Sandbox sb;
 
-    persistence::save_thread(make_thread("aaaa000000000001", "one"));
-    persistence::flush_pending_saves();
-    (void)persistence::load_all_threads();   // builds the index
+    persistence::save_thread(::agentty::IoAccess::grant(), make_thread("aaaa000000000001", "one"));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    (void)persistence::load_all_threads(::agentty::IoAccess::grant());   // builds the index
 
     const long long mt = indexed_mtime("aaaa000000000001");
     const long long now = std::chrono::duration_cast<std::chrono::seconds>(
@@ -128,10 +128,10 @@ void a_warm_index_is_reused() {
     std::printf("an unchanged thread is not re-parsed\n");
     Sandbox sb;
 
-    persistence::save_thread(make_thread("aaaa000000000002", "two"));
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), make_thread("aaaa000000000002", "two"));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
-    const auto first = persistence::load_all_threads();
+    const auto first = persistence::load_all_threads(::agentty::IoAccess::grant());
     CHECK(first.size() == 1);
     const long long mt1 = indexed_mtime("aaaa000000000002");
 
@@ -139,7 +139,7 @@ void a_warm_index_is_reused() {
     // verbatim: if the stamp does not match, the file is re-parsed and the
     // index rewritten, which is exactly the slow path that was always
     // taken.
-    const auto second = persistence::load_all_threads();
+    const auto second = persistence::load_all_threads(::agentty::IoAccess::grant());
     CHECK(second.size() == 1);
     CHECK(indexed_mtime("aaaa000000000002") == mt1);
     if (!second.empty()) CHECK(second[0].title == "two");
@@ -151,18 +151,18 @@ void a_changed_thread_is_re_read() {
     std::printf("a modified thread IS re-parsed\n");
     Sandbox sb;
 
-    persistence::save_thread(make_thread("aaaa000000000003", "before"));
-    persistence::flush_pending_saves();
-    (void)persistence::load_all_threads();
+    persistence::save_thread(::agentty::IoAccess::grant(), make_thread("aaaa000000000003", "before"));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    (void)persistence::load_all_threads(::agentty::IoAccess::grant());
 
     // Rewrite it with a different title. The cache must NOT serve the old
     // one — a stamp that never changes is as wrong as one that never
     // matches, just in the other direction.
     auto t = make_thread("aaaa000000000003", "after");
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
-    const auto again = persistence::load_all_threads();
+    const auto again = persistence::load_all_threads(::agentty::IoAccess::grant());
     CHECK(again.size() == 1);
     if (!again.empty()) CHECK(again[0].title == "after");
 
@@ -173,9 +173,9 @@ void an_index_from_an_older_version_is_discarded() {
     std::printf("an index written by an older version is dropped\n");
     Sandbox sb;
 
-    persistence::save_thread(make_thread("aaaa000000000004", "four"));
-    persistence::flush_pending_saves();
-    (void)persistence::load_all_threads();
+    persistence::save_thread(::agentty::IoAccess::grant(), make_thread("aaaa000000000004", "four"));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    (void)persistence::load_all_threads(::agentty::IoAccess::grant());
 
     // The thread file must be on disk before the forged index goes in —
     // the whole case is "a stale index is discarded and REBUILT FROM THE
@@ -195,7 +195,7 @@ void an_index_from_an_older_version_is_discarded() {
             << R"({"created_at":0,"mtime":-4650357762,"size":1,"title":"stale"}}})";
     }
 
-    const auto loaded = persistence::load_all_threads();
+    const auto loaded = persistence::load_all_threads(::agentty::IoAccess::grant());
     CHECK(loaded.size() == 1);
     // The title comes from the FILE, not from the forged entry.
     if (!loaded.empty()) CHECK(loaded[0].title == "four");

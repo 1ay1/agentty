@@ -100,15 +100,15 @@ struct Backend {
 };
 
 // Read the SettingsKey (custom-host) secret, or empty.
-std::string settings_key(const std::string& provider) {
-    auto s = agentty::persistence::load_settings();
+std::string settings_key(Io io, const std::string& provider) {
+    auto s = agentty::persistence::load_settings(io);
     auto it = s.provider_keys.find(provider);
     return it != s.provider_keys.end() ? it->second : std::string{};
 }
-void set_settings_key(const std::string& provider, const std::string& v) {
-    auto s = agentty::persistence::load_settings();
+void set_settings_key(Io io, const std::string& provider, const std::string& v) {
+    auto s = agentty::persistence::load_settings(io);
     s.provider_keys[provider] = v;
-    agentty::persistence::save_settings(s);
+    agentty::persistence::save_settings(io, s);
 }
 
 // Resolve the backend for a provider id.
@@ -184,7 +184,7 @@ std::string settings_key_label(const std::string& key) {
 bool snapshot_active(Io io, const std::string& provider, const std::string& label) {
     const Backend b = backend_for(provider);
     if (b.store == Store::SettingsKey) {
-        const std::string key = settings_key(provider);
+        const std::string key = settings_key(io, provider);
         if (key.empty()) return false;
         return upsert(provider, label, key);
     }
@@ -214,7 +214,7 @@ bool activate(Io io, const std::string& provider, const std::string& label) {
 
     const Backend b = backend_for(provider);
     if (b.store == Store::SettingsKey) {
-        set_settings_key(provider, slot->secret);   // the endpoint resolve() reads
+        set_settings_key(io, provider, slot->secret);   // the endpoint resolve() reads
         return set_active(provider, label);
     }
     if (!write_store(b.file, slot->secret)) return false;
@@ -227,7 +227,7 @@ bool activate(Io io, const std::string& provider, const std::string& label) {
 std::string derive_current_label(Io io, const std::string& provider) {
     const Backend b = backend_for(provider);
     if (b.store == Store::SettingsKey)
-        return settings_key_label(settings_key(provider));
+        return settings_key_label(settings_key(io, provider));
     auto blob = read_all(b.file);
     if (!blob) return {};
     auto body = body_of(*blob);

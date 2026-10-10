@@ -25,7 +25,7 @@ auth::AuthHeader live_auth() {
     return g_auth().read([](const auth::AuthHeader& a) { return a; });
 }
 
-const Deps& deps() {
+const Deps& deps(Io) {
     if (!g_deps) throw std::logic_error("agentty::app::deps() called before install_deps()");
     return *g_deps;
 }
@@ -68,10 +68,10 @@ auth::AuthHeader auth_snapshot(Io io) {
     return auth_snapshot(io, provider::active());
 }
 
-void update_auth(auth::AuthHeader auth) {
+void update_auth(Io io, auth::AuthHeader auth) {
     g_auth().with([](auth::AuthHeader& a, auth::AuthHeader v) { a = std::move(v); },
                   auth);
-    tools::subagent::set_auth(std::move(auth));
+    tools::subagent::set_auth(io, std::move(auth));
 }
 
 } // namespace agentty::app

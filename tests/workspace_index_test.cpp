@@ -128,7 +128,7 @@ TEST_CASE("filter_files: git-dirty files lead the working set") {
     auto prev = fs::current_path();
     const auto prev_ws = agentty::tools::util::project_root();
     fs::current_path(repo);
-    agentty::tools::util::set_workspace_root(repo);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), repo);
     agentty::refresh_git_signals();
 
     std::vector<std::string> files = {
@@ -145,7 +145,7 @@ TEST_CASE("filter_files: git-dirty files lead the working set") {
     // see the sibling test below for why leaving a deleted path in
     // project_root() breaks a LATER test's bwrap sandbox rather than this one.
     fs::current_path(prev);
-    agentty::tools::util::set_workspace_root(prev_ws);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), prev_ws);
     std::error_code ec;
     fs::remove_all(repo, ec);
 }
@@ -165,7 +165,7 @@ TEST_CASE("prewarm walk bails promptly when cancelled") {
     auto prev = fs::current_path();
     const auto prev_ws = agentty::tools::util::project_root();
     fs::current_path(root);
-    agentty::tools::util::set_workspace_root(root);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
 
     // Stop BEFORE kicking the walk: the loop's first check sees it and bails
     // almost immediately. It must not scan all 3000 files.
@@ -189,7 +189,7 @@ TEST_CASE("prewarm walk bails promptly when cancelled") {
     // but ONLY when run in-suite after this one — which is why it passed in
     // isolation and looked like an unrelated flake.
     fs::current_path(prev);
-    agentty::tools::util::set_workspace_root(prev_ws);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), prev_ws);
     std::error_code ec;
     fs::remove_all(root, ec);
 }

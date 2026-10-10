@@ -1005,7 +1005,7 @@ provider::StreamResult stream_started(const Site& site,
 
     http::Timeouts tos = provider::stream_timeouts();
 
-    auto result = http::default_client().stream(hr, sc.handler(), tos, req.cancel);
+    auto result = http::default_client(::agentty::IoAccess::grant()).stream(hr, sc.handler(), tos, req.cancel);
 
     // Uniform end-of-turn pair (Debug summary + Warn raw error body) with the
     // dialect-specific counters appended.

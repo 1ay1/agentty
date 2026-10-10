@@ -91,7 +91,7 @@ StreamResult dispatch_stream(const ProviderRouter& router, const Selection& sel,
     // 11434 is Ollama's PORT, not proof of its protocol: llama.cpp can be
     // told to serve there, and then /api/chat 404s every turn (#73). Ask the
     // host once; if it has no /api/tags, treat it as OpenAI-compatible.
-    if (openai::endpoint_speaks_native(sel.openai_endpoint)) {
+    if (openai::endpoint_speaks_native(::agentty::IoAccess::grant(), sel.openai_endpoint)) {
         ollama::OllamaProvider p{sel.openai_endpoint};
         return p.stream(std::move(req), std::move(sink));
     }

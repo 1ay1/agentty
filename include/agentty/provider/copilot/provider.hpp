@@ -19,6 +19,7 @@
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/openai/transport.hpp"  // openai::Endpoint
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider::copilot {
 
@@ -39,10 +40,10 @@ static_assert(provider::Provider<CopilotProvider>);
 // {endpoints.api}/models). The set depends on the account's entitlements
 // (gpt-4o, o-series, Claude, Gemini …), so it MUST be listed, not hardcoded.
 // Falls back to a small bundled list when offline / not signed in.
-[[nodiscard]] std::vector<ModelInfo> list_models();
+[[nodiscard]] std::vector<ModelInfo> list_models(Io);
 
 // The account's default model slug (first catalog entry) or a safe fallback.
-[[nodiscard]] std::string default_model();
+[[nodiscard]] std::string default_model(Io);
 
 // Drop the cached model catalog so the next list_models() re-ranks with any
 // freshly learned per-model support (after a turn's 400/200 outcome).

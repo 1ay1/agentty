@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
     fs::current_path(root);   // the agent runs with cwd = workspace
     ::setenv("AGENTTY_OLLAMA_HOST", "127.0.0.1:1", 1);
     ::unsetenv("AGENTTY_MCP_CONFIG");
-    tools::util::set_workspace_root(root);
+    tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
     (void)tools::registry();
 
     // Pick a real file in the tree for read/outline-style cases.

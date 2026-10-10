@@ -58,7 +58,7 @@ std::string put(const std::string& bytes) {
     // Reuses the atomic temp+fsync+rename writer: a blob is only ever
     // published complete, so a crash mid-write can't leave a reference
     // pointing at a truncated payload.
-    if (!persistence::write_json_atomic(out, bytes)) return {};
+    if (!persistence::write_json_atomic(::agentty::IoAccess::grant(), out, bytes)) return {};
     return n;
 }
 

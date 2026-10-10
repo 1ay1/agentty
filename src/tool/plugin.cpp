@@ -150,7 +150,7 @@ struct Loaded {
 
 } // namespace
 
-fs::path config_path(bool project) {
+fs::path config_path(Io, bool project) {
     return config_path(project, project ? fs::path{} : ::agentty::util::user_root());
 }
 
@@ -166,8 +166,8 @@ constexpr std::string_view kMcpApprovalsLeaf =
     ::agentty::config::kMcpApprovals;
 
 // The current project mcp.json's content hash, or empty if there's no file.
-[[nodiscard]] std::string project_config_hash() {
-    const fs::path cfg = config_path(/*project=*/true);
+[[nodiscard]] std::string project_config_hash(Io io) {
+    const fs::path cfg = config_path(io, /*project=*/true);
     // Same reason as load(): exists-and-opens is not the same as readable,
     // and a directory here would throw out of the slurp below.
     std::error_code ec;
@@ -180,18 +180,18 @@ constexpr std::string_view kMcpApprovalsLeaf =
 }
 }  // namespace
 
-bool is_project_config_trusted() {
+bool is_project_config_trusted(Io io) {
     if (const char* e = std::getenv("AGENTTY_MCP_ALLOW_PROJECT");
         e && (e[0] == '1' || e[0] == 't' || e[0] == 'T'
            || e[0] == 'y' || e[0] == 'Y'))
         return true;
-    const std::string h = project_config_hash();
+    const std::string h = project_config_hash(io);
     if (h.empty()) return false;
     return scope::load_approvals(kMcpApprovalsLeaf).approved(h);
 }
 
-bool approve_project_config() {
-    const std::string h = project_config_hash();
+bool approve_project_config(Io io) {
+    const std::string h = project_config_hash(io);
     if (h.empty()) return false;   // nothing to approve
     scope::Approvals a = scope::load_approvals(kMcpApprovalsLeaf);
     a.approve(h);
@@ -237,16 +237,16 @@ namespace {
 }
 }  // namespace
 
-bool is_server_trusted(const fs::path& path, const std::string& name) {
+bool is_server_trusted(Io io, const fs::path& path, const std::string& name) {
     // Blanket grants first: the env opt-in, then a whole-file approval — both
     // keep working, so nothing that trusted a config before regresses.
-    if (is_project_config_trusted()) return true;
+    if (is_project_config_trusted(io)) return true;
     const std::string h = server_hash_from_file(path, name);
     if (h.empty()) return false;   // http/no-command server — not gated here
     return scope::load_approvals(kMcpApprovalsLeaf).approved(h);
 }
 
-bool approve_server(const fs::path& path, const std::string& name) {
+bool approve_server(Io, const fs::path& path, const std::string& name) {
     const std::string h = server_hash_from_file(path, name);
     if (h.empty()) return false;   // nothing spawnable to vouch for
     scope::Approvals a = scope::load_approvals(kMcpApprovalsLeaf);
@@ -297,7 +297,7 @@ json* existing_entry(json& doc, const std::string& name) {
 }
 } // namespace
 
-EditResult add_server(const fs::path& path, const ServerSpec& spec,
+EditResult add_server(Io io, const fs::path& path, const ServerSpec& spec,
                       bool force) {
     return mutate(path, Need::Any, [](json& doc, ServerSpec spec, bool force) -> Edit {
     auto& servers = servers_of(doc);
@@ -327,7 +327,7 @@ EditResult add_server(const fs::path& path, const ServerSpec& spec,
     }, spec, force);
 }
 
-EditResult add_server_raw(const fs::path& path, const std::string& name,
+EditResult add_server_raw(Io, const fs::path& path, const std::string& name,
                           const json& entry, bool force) {
     return mutate(path, Need::Any, [](json& doc, std::string name, json entry, bool force) -> Edit {
     if (!entry.is_object()) return EditResult::ParseError;
@@ -342,7 +342,7 @@ EditResult add_server_raw(const fs::path& path, const std::string& name,
     }, name, entry, force);
 }
 
-EditResult update_server(const fs::path& path, const ServerSpec& spec) {
+EditResult update_server(Io, const fs::path& path, const ServerSpec& spec) {
     return mutate(path, Need::Existing, [](json& doc, ServerSpec spec) -> Edit {
     json* found = existing_entry(doc, spec.name);
     if (!found) return EditResult::NotFound;
@@ -375,7 +375,7 @@ EditResult update_server(const fs::path& path, const ServerSpec& spec) {
     }, spec);
 }
 
-EditResult remove_server(const fs::path& path, const std::string& name) {
+EditResult remove_server(Io, const fs::path& path, const std::string& name) {
     return mutate(path, Need::Existing, [](json& doc, std::string name) -> Edit {
         if (!existing_entry(doc, name)) return EditResult::NotFound;
         doc[servers_key(doc)].erase(name);
@@ -404,7 +404,7 @@ std::vector<ServerSpec> list_servers(const fs::path& path) {
     return out;
 }
 
-EditResult set_server_disabled(const fs::path& path, const std::string& name,
+EditResult set_server_disabled(Io, const fs::path& path, const std::string& name,
                               bool disabled) {
     return mutate(path, Need::Existing, [](json& doc, std::string name, bool disabled) -> Edit {
         json* entry = existing_entry(doc, name);
@@ -427,7 +427,7 @@ bool is_server_disabled(const fs::path& path, const std::string& name) {
     return entry_disabled(entry);
 }
 
-EditResult set_tool_enabled(const fs::path& path, const std::string& server,
+EditResult set_tool_enabled(Io, const fs::path& path, const std::string& server,
                             const std::string& bare, bool enabled) {
     return mutate(path, Need::Existing,
                   [](json& doc, std::string server, std::string bare, bool enabled) -> Edit {
@@ -523,7 +523,7 @@ int usage() {
 
 } // namespace
 
-int cli(const std::vector<std::string>& argv) {
+int cli(Io io, const std::vector<std::string>& argv) {
     if (argv.empty()) return usage();
     const std::string& verb = argv[0];
 
@@ -535,7 +535,7 @@ int cli(const std::vector<std::string>& argv) {
         else if (argv[i] == "--force")   force = true;
         else rest.push_back(argv[i]);
     }
-    const fs::path path = config_path(project);
+    const fs::path path = config_path(io, project);
 
     if (verb == "list") {
         auto servers = list_servers(path);
@@ -556,7 +556,7 @@ int cli(const std::vector<std::string>& argv) {
             // servers spawn nothing and aren't gated, so no mark either.
             const char* mark = "";
             if (project && !s.command.empty())
-                mark = is_server_trusted(path, s.name) ? "\u2713 " : "\u2014 ";
+                mark = is_server_trusted(io, path, s.name) ? "\u2713 " : "\u2014 ";
             std::printf("  %s%-16s %s\n", mark, s.name.c_str(), detail.c_str());
         }
         if (project)
@@ -576,11 +576,11 @@ int cli(const std::vector<std::string>& argv) {
                          "(pass --project); user servers are already trusted\n");
             return 1;
         }
-        if (is_server_trusted(path, rest[0])) {
+        if (is_server_trusted(io, path, rest[0])) {
             std::printf("'%s' is already trusted\n", rest[0].c_str());
             return 0;
         }
-        if (approve_server(path, rest[0])) {
+        if (approve_server(io, path, rest[0])) {
             std::printf("approved %s — restart agentty to connect it\n",
                         rest[0].c_str());
             return 0;
@@ -593,7 +593,7 @@ int cli(const std::vector<std::string>& argv) {
 
     if (verb == "remove") {
         if (rest.size() != 1) return usage();
-        switch (remove_server(path, rest[0])) {
+        switch (remove_server(io, path, rest[0])) {
         case EditResult::Ok:
             std::printf("removed %s from %s\n", rest[0].c_str(),
                         path.string().c_str());
@@ -683,7 +683,7 @@ int cli(const std::vector<std::string>& argv) {
             return usage();
         }
 
-        switch (add_server(path, spec, force)) {
+        switch (add_server(io, path, spec, force)) {
         case EditResult::Ok: {
             const std::string detail = spec.url.empty()
                 ? [&]{ std::string c = spec.command;

@@ -24,6 +24,7 @@
 #include "agentty/provider/registry.hpp"
 
 #include <maya/runtime.hpp>
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider {
 
@@ -146,21 +147,21 @@ struct Selection {
 // Model once; the ModelsLoaded reducer persists it when a NON-EMPTY catalog
 // lands for that provider — proof-gated stickiness. Known presets never
 // register (they persist at parse, as always).
-void set_unproven_spec(std::string spec, std::string model_recall);
+void set_unproven_spec(Io, std::string spec, std::string model_recall);
 // The registered (spec, model_recall), clearing it. Called once, by init().
-[[nodiscard]] std::optional<std::pair<std::string, std::string>> take_unproven_spec_at_launch();
+[[nodiscard]] std::optional<std::pair<std::string, std::string>> take_unproven_spec_at_launch(Io);
 
 // Session-wide custom auth header NAME (--auth-header) for OpenAI-family
 // backends whose gateway doesn't accept `Authorization: Bearer` (e.g.
 // `X-API-Key`). Stored process-globally so every parse_selection — startup
 // AND live provider switches from the picker — stamps it onto the resulting
 // Endpoint. Empty (the default) keeps the standard bearer header.
-void set_custom_auth_header(std::string name);
+void set_custom_auth_header(Io, std::string name);
 [[nodiscard]] std::string custom_auth_header();
 
 // Install the active selection (process-global). Called at startup and by
 // the provider-picker reducer for live switches (UI thread).
-void select(Selection s);
+void select(Io, Selection s);
 
 // Read the active selection. Defaults to Anthropic before select() runs.
 // Returns a BY-VALUE snapshot taken under the selection mutex: the stream
@@ -206,7 +207,7 @@ struct PrewarmTarget {
 // start. Locals (Ollama / llama.cpp) and ACP subprocesses are no-ops.
 // Idempotent per (host,port); safe to call fire-and-forget from any thread.
 // A thin wrapper over prewarm_target(active()) — the routing lives there.
-void prewarm_active_provider();
+void prewarm_active_provider(Io);
 
 // Resolve the AuthHeader for a provider spec, registry-driven.
 //   • Anthropic   → derived from `anthropic_creds` (OAuth / x-api-key from
@@ -231,7 +232,7 @@ void prewarm_active_provider();
 // (an ACP agent picks its own model and exposes no catalog). `auth` is the
 // active credential (used by the Anthropic / OpenAI-compat catalog endpoints;
 // ChatGPT reads its own in-process OAuth creds and ignores it).
-[[nodiscard]] std::vector<ModelInfo> list_models_for(
+[[nodiscard]] std::vector<ModelInfo> list_models_for(Io io, 
     const Selection& sel, const auth::AuthHeader& auth);
 
 // ── Provider-picker search filter (shared by the reducer + the view) ────────

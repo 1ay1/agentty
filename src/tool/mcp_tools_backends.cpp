@@ -402,7 +402,8 @@ static ::agentty::rag::Retriever& shared_retriever() {
     // Fold in persisted RAG picker settings exactly once, on first use.
     static const bool configured_once = [] {
         try {
-            auto s = persistence::load_settings();
+            // First use is always on a tool or retriever worker.
+            auto s = persistence::load_settings(IoAccess::grant());
             if (s.rag.configured)
                 r.apply_config(rag_config_from_settings(s.rag, r.snapshot_config()));
         } catch (...) { /* best-effort; env config stands */ }
@@ -451,7 +452,7 @@ RagProbeOutcome rag_probe_embedder(const store::RagConfig& s, const std::string&
         // user is testing a config they have not committed, and a failed probe
         // must not degrade the retrieval they currently have working.
         ::agentty::rag::Config base;
-        eb::apply_env(base.embed);
+        eb::apply_env(IoAccess::grant(), base.embed);
         auto cfg = rag_config_from_settings(s, base);
         if (!api_key.empty()) cfg.embed.api_key = api_key;
         // Never trust a carried-over dimension: measuring it is the point.
@@ -481,25 +482,6 @@ void rag_shutdown() {
     try { shared_retriever().shutdown(); } catch (...) { /* best-effort */ }
 }
 
-bool proactive_enabled() {
-    // Shell override wins for one-off runs; otherwise the live config (which
-    // folds in the persisted RAG picker) is the source of truth. Default off
-    // at the app level — proactive injection is an explicit opt-in.
-    if (const char* v = std::getenv("AGENTTY_RAG_PROACTIVE"); v && v[0]) {
-        std::string s{v};
-        for (auto& c : s) c = static_cast<char>(std::tolower((unsigned char)c));
-        return s == "1" || s == "true" || s == "on" || s == "yes";
-    }
-    try { return shared_retriever().snapshot_config().proactive; }
-    catch (...) { return false; }
-}
-
-bool proactive_first_turn_only() {
-    try {
-        auto s = persistence::load_settings();
-        return s.rag.configured && s.rag.mode == store::RagMode::FirstTurnOnly;
-    } catch (...) { return false; }
-}
 
 namespace {
 

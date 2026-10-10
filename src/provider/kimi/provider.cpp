@@ -39,7 +39,7 @@ maya::guarded<Models>& models_cache() { static maya::guarded<Models> c; return c
 // Query /coding/v1/usages. Returns a human message when the account is out of
 // credits (Kimi reports 429 resource_exhausted here even though /chat 500s),
 // or nullopt when usage looks fine / the probe is inconclusive.
-std::optional<std::string> quota_error_message(const std::string& access_token) {
+std::optional<std::string> quota_error_message(Io io, const std::string& access_token) {
     http::Request r;
     r.method = http::HttpMethod::Get;
     r.host   = kApiHost;
@@ -56,7 +56,7 @@ std::optional<std::string> quota_error_message(const std::string& access_token) 
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(5000);
     tos.total   = std::chrono::milliseconds(8000);
-    auto resp = http::default_client().send(r, tos);
+    auto resp = http::default_client(io).send(r, tos);
     if (!resp) return std::nullopt;
     // A 402/429 or a resource_exhausted / quota body = out of credits.
     const bool http_quota = resp->status == 402 || resp->status == 429;
@@ -102,6 +102,8 @@ provider::openai::Endpoint KimiProvider::make_endpoint() {
 
 provider::StreamResult KimiProvider::stream(provider::Request req,
                                             provider::EventSink sink) {
+    // A provider stream runs on the turn's worker (dispatch), never a reducer.
+    const Io io = IoAccess::grant();
     auto tok = fresh_token();
     if (!tok) {
         sink(StreamError{"Kimi is not signed in (or the token could not be "
@@ -130,7 +132,7 @@ provider::StreamResult KimiProvider::stream(provider::Request req,
     // (429 resource_exhausted). On a 500/429, probe /usages and surface a clear
     // "credits exhausted" message instead of the opaque server error.
     if (!result.ok() && (result.http_status == 500 || result.http_status == 429)) {
-        if (auto q = quota_error_message(tok->access_token)) {
+        if (auto q = quota_error_message(io, tok->access_token)) {
             sink(StreamError{*q});
             return provider::StreamResult::failed("kimi: " + *q);
         }
@@ -145,14 +147,14 @@ static std::vector<ModelInfo> bundled_models() {
     return catalog::bundled("kimi");
 }
 
-std::vector<ModelInfo> list_models() {
+std::vector<ModelInfo> list_models(Io io) {
     if (auto hit = models_cache().read([](const Models& c) { return c; }); !hit.empty())
         return hit;
     auto tok = fresh_token();
     if (!tok) return bundled_models();
 
     auto ep = KimiProvider::make_endpoint();
-    auto models = provider::openai::list_models(auth::BearerHeader{tok->access_token}, ep);
+    auto models = provider::openai::list_models(io, auth::BearerHeader{tok->access_token}, ep);
     if (models.empty()) return bundled_models();
     // Kimi's /models payload carries no context length, so the generic OpenAI
     // parser leaves every row on ModelInfo's 200k default — 56k short of K2's
@@ -169,8 +171,8 @@ std::vector<ModelInfo> list_models() {
     return models;
 }
 
-std::string default_model() {
-    auto ms = list_models();
+std::string default_model(Io io) {
+    auto ms = list_models(io);
     return ms.empty() ? std::string{"kimi-k2-turbo-preview"} : ms.front().id.value;
 }
 

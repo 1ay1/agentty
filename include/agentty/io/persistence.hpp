@@ -18,6 +18,7 @@
 
 #include "agentty/domain/conversation.hpp"
 #include "agentty/store/store.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::persistence {
 
@@ -51,7 +52,7 @@ struct DeserializeError {
 // the model reads THIS file on demand for earlier context, instead of the
 // whole transcript being carried forward.
 [[nodiscard]] std::filesystem::path
-write_thread_transcript_md(const Thread& t);
+write_thread_transcript_md(Io, const Thread& t);
 
 // Directory-walking loader: returns every thread we could deserialize,
 // **metadata only** (id, title, created_at, updated_at — `messages` is
@@ -64,28 +65,28 @@ write_thread_transcript_md(const Thread& t);
 // stderr and skipped — the per-file failure type is `DeserializeError`,
 // preserved internally; a caller that wants strict semantics can use
 // `load_thread_file` below.
-[[nodiscard]] std::vector<Thread> load_all_threads();
+[[nodiscard]] std::vector<Thread> load_all_threads(Io);
 
 // Strict per-file loader. Returns the typed error so callers can react
 // to specific kinds (e.g. surface MissingField as "schema upgrade needed",
 // JsonParse as "corrupt file, restore from backup").
 [[nodiscard]] std::expected<Thread, DeserializeError>
-load_thread_file(const std::filesystem::path& p);
+load_thread_file(Io, const std::filesystem::path& p);
 
-void save_thread(const Thread& t);
+void save_thread(Io, const Thread& t);
 // Block until every queued background save has hit disk. Call at
 // shutdown after the last reducer step (Quit handler issues a final
 // save_thread) so we don't lose the most-recent transcript on exit.
-void flush_pending_saves();
-void delete_thread(const ThreadId& id);
+void flush_pending_saves(Io);
+void delete_thread(Io, const ThreadId& id);
 
 // The per-message fingerprint the incremental save path uses to find what
 // changed. Exposed ONLY so the save bench can price that pass separately
 // from the rest of a save; nothing in the app should call it.
 [[nodiscard]] std::uint64_t debug_message_fingerprint(const Message& m);
 
-[[nodiscard]] store::Settings load_settings();
-void save_settings(const store::Settings& s);
+[[nodiscard]] store::Settings load_settings(Io);
+void save_settings(Io, const store::Settings& s);
 
 // Called after every save_settings() that goes DIRECTLY to disk.
 //
@@ -114,7 +115,7 @@ void on_settings_written(std::function<void()> observer);
 // I/O failure (the temp file is cleaned up). Use this for every JSON sidecar
 // the runtime persists — e.g. the ACP session index — so they share the same
 // crash-safety guarantee as threads/settings.
-bool write_json_atomic(const std::filesystem::path& target,
+bool write_json_atomic(Io, const std::filesystem::path& target,
                        const std::string& content);
 
 // ── Per-message codec ────────────────────────────────────────────────
@@ -164,29 +165,34 @@ void clamp_compactions(Thread& t);
 // This is the seam where the new format becomes load-bearing. Both
 // formats are read forever: a user's history predates the log, and
 // nothing is rewritten until that thread is next saved.
-[[nodiscard]] std::optional<Thread> load_thread_by_id(const ThreadId& id);
+[[nodiscard]] std::optional<Thread> load_thread_by_id(Io, const ThreadId& id);
 
 } // namespace agentty::persistence
 
 namespace agentty::io {
 
-// Filesystem-backed store satisfying agentty::store::Store.
+// Filesystem-backed store satisfying agentty::store::Store. Reached only
+// through app::deps(Io), so it holds the Io the host gave it.
 class FsStore {
 public:
+    explicit FsStore(Io io) : io_(io) {}
     [[nodiscard]] std::vector<Thread> load_threads() {
-        return persistence::load_all_threads();
+        return persistence::load_all_threads(io_);
     }
     [[nodiscard]] std::optional<Thread> load_thread(const ThreadId& id) {
-        return persistence::load_thread_by_id(id);
+        return persistence::load_thread_by_id(io_, id);
     }
-    void save_thread(const Thread& t)            { persistence::save_thread(t); }
-    void delete_thread(const ThreadId& id)         { persistence::delete_thread(id); }
-    [[nodiscard]] store::Settings load_settings()          { return persistence::load_settings(); }
-    void save_settings(const store::Settings& s) { persistence::save_settings(s); }
+    void save_thread(const Thread& t)            { persistence::save_thread(io_, t); }
+    void delete_thread(const ThreadId& id)         { persistence::delete_thread(io_, id); }
+    [[nodiscard]] store::Settings load_settings()          { return persistence::load_settings(io_); }
+    void save_settings(const store::Settings& s) { persistence::save_settings(io_, s); }
     [[nodiscard]] ThreadId new_id()              { return persistence::new_id(); }
     [[nodiscard]] std::string title_from(std::string_view text) {
         return persistence::title_from_first_message(text);
     }
+
+private:
+    Io io_;
 };
 
 static_assert(store::Store<FsStore>);

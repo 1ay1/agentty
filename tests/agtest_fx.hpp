@@ -103,18 +103,18 @@ inline void run(const agentty::Cmd& c, Store& s) {
         else if constexpr (std::same_as<U, agentty::WriteFile>)
             s.written_files.emplace_back(e.path, e.contents);
         else if constexpr (std::same_as<U, agentty::PublishSelection>)
-            agentty::provider::select(e.selection);
+            agentty::provider::select(::agentty::IoAccess::grant(), e.selection);
         else if constexpr (std::same_as<U, agentty::InstallAuth>) {
             // Only the clear is played here: resolving would read the
             // developer's real credential files.
-            if (e.clear) agentty::app::update_auth(agentty::auth::AuthHeader{});
+            if (e.clear) agentty::app::update_auth(::agentty::IoAccess::grant(), agentty::auth::AuthHeader{});
         }
         else if constexpr (std::same_as<U, agentty::PublishSubagent>) {
             namespace sa = agentty::tools::subagent;
-            sa::set_model(e.model);
-            sa::set_provider(e.provider);
-            sa::set_smart(e.smart);
-            sa::set_candidates(e.candidates);
+            sa::set_model(::agentty::IoAccess::grant(), e.model);
+            sa::set_provider(::agentty::IoAccess::grant(), e.provider);
+            sa::set_smart(::agentty::IoAccess::grant(), e.smart);
+            sa::set_candidates(::agentty::IoAccess::grant(), e.candidates);
         }
     });
 }

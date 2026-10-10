@@ -276,7 +276,7 @@ bool responses_available() {
 }
 
 // ── Live model catalog ────────────────────────────────────────────────────
-std::vector<CatalogModel> fetch_models() {
+std::vector<CatalogModel> fetch_models(Io io) {
     auto creds = codex_fresh_credentials();
     if (!creds || creds->access_token.empty()) return {};
 
@@ -304,7 +304,7 @@ std::vector<CatalogModel> fetch_models() {
     // (parity with Anthropic's list_models).
     hr.max_body_bytes = 1ull * 1024 * 1024;
 
-    auto result = http::default_client().send(hr, tos);
+    auto result = http::default_client(io).send(hr, tos);
     if (!result || result->status < 200 || result->status >= 300) return {};
 
     std::vector<CatalogModel> out;

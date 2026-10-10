@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
         std::printf("  io: %lld ms (%zu bytes)  json-dom: %lld ms\n",
                     (long long)io_ms, buf.size(), (long long)dom_ms);
         std::fflush(stdout);
-        if (auto r = persistence::load_thread_file(p)) loaded = std::move(*r);
+        if (auto r = persistence::load_thread_file(::agentty::IoAccess::grant(), p)) loaded = std::move(*r);
     }
     std::printf("stage: load returned\n"); std::fflush(stdout);
     if (!loaded) {
@@ -120,8 +120,8 @@ int main(int argc, char** argv) {
     // shrinks once and loads fast forever after.
     if (std::getenv("MIGRATE")) {
         const auto before = std::filesystem::file_size(p);
-        persistence::save_thread(m.d.current);
-        persistence::flush_pending_saves();
+        persistence::save_thread(::agentty::IoAccess::grant(), m.d.current);
+        persistence::flush_pending_saves(::agentty::IoAccess::grant());
         const auto after_path =
             persistence::threads_dir() / (m.d.current.id.value + ".json");
         std::error_code ec;

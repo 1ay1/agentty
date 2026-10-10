@@ -61,7 +61,7 @@ TEST_CASE("custom host key prompt transitions") {
     fs::create_directories(tmp_xdg, mkdir_ec);
     ::setenv("AGENTTY_HOME", tmp_xdg.c_str(), 1);
     // Ensure parse_selection's custom_auth_header() read is deterministic.
-    agentty::provider::set_custom_auth_header("");
+    agentty::provider::set_custom_auth_header(::agentty::IoAccess::grant(), "");
 
     // ── Case 1: TLS host, no saved key → ApiKeyInput with empty key field ──
     {

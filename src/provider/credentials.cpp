@@ -72,7 +72,7 @@ auth::AuthHeader resolve(Io io, std::string_view provider_id) {
     //   saved provider_keys[id]  >  env-var chain  >  OPENAI_API_KEY.
     std::string key;
     {
-        auto s = persistence::load_settings();
+        auto s = persistence::load_settings(io);
         if (auto it = s.provider_keys.find(std::string{provider_id});
             it != s.provider_keys.end())
             key = it->second;
@@ -132,15 +132,15 @@ void clear_active(Io io, std::string_view provider_id) {
     if (id == "copilot")           { copilot::clear_credentials(io); return; }
     if (id == "kimi")              { kimi::clear_credentials(io); return; }
     // Hosted key / custom host: the credential IS provider_keys[id].
-    auto s = persistence::load_settings();
+    auto s = persistence::load_settings(io);
     s.provider_keys.erase(id);
     s.provider_models.erase(id);
-    persistence::save_settings(s);
+    persistence::save_settings(io, s);
 }
 
 bool add_key(Io io, std::string_view provider_id, std::string_view key) {
     const std::string id{provider_id};
-    auto s = persistence::load_settings();
+    auto s = persistence::load_settings(io);
     // Preserve any existing key as a switchable account BEFORE overwriting,
     // so "add another account" adds rather than replaces.
     if (auto it = s.provider_keys.find(id);
@@ -150,7 +150,7 @@ bool add_key(Io io, std::string_view provider_id, std::string_view key) {
             auth::accounts::snapshot_active(io, id, prior);
     }
     s.provider_keys[id] = std::string{key};
-    persistence::save_settings(s);
+    persistence::save_settings(io, s);
     if (auto lbl = auth::accounts::derive_current_label(io, id); !lbl.empty())
         auth::accounts::snapshot_active(io, id, lbl);
     return true;

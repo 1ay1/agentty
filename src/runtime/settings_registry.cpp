@@ -227,7 +227,7 @@ void reset(smart::RoleConfig& s, const SettingDef& d) {
 
 // ── Environment ─────────────────────────────────────────────
 
-EnvSnapshot read_env() {
+EnvSnapshot read_env(Io) {
     EnvSnapshot e;
     for (const auto& d : kSettings) {
         if (d.env.empty()) continue;
@@ -250,8 +250,8 @@ void apply_env(smart::RoleConfig& s, const EnvSnapshot& env) {
     s.no_orchestrate = env.smart_no_orchestrate;
     s.no_subagents   = env.smart_no_subagents;
 }
-void apply_env(store::RagConfig& c) { apply_env(c, read_env()); }
-void apply_env(smart::RoleConfig& s) { apply_env(s, read_env()); }
+void apply_env(Io io, store::RagConfig& c) { apply_env(c, read_env(io)); }
+void apply_env(Io io, smart::RoleConfig& s) { apply_env(s, read_env(io)); }
 
 std::string env_override(const SettingDef& d, const EnvSnapshot& env) {
     if (d.env.empty()) return {};

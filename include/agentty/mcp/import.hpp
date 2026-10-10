@@ -50,6 +50,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "agentty/util/io.hpp"
 
 namespace agentty::mcp::import_ {
 
@@ -141,10 +142,10 @@ struct Outcome {
 // tool config, so it is theirs, not the repo's — writing it into a project
 // file would commit someone's personal setup into version control, and would
 // also land it in the locus that needs vouching to run.
-[[nodiscard]] Outcome adopt(const std::vector<Found>&, const Options&);
+[[nodiscard]] Outcome adopt(Io, const std::vector<Found>&, const Options&);
 
 // CLI: `agentty mcp import [--from <tool>] [--dry-run] [--force]`.
 // With no --from, scans every known tool and reports what it finds.
-int cli(const std::vector<std::string>& argv);
+int cli(Io, const std::vector<std::string>& argv);
 
 }  // namespace agentty::mcp::import_

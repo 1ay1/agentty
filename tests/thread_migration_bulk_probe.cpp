@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
     before.reserve(ids.size());
     std::size_t unreadable = 0;
     for (const auto& id : ids) {
-        auto t = persistence::load_thread_by_id(id);
+        auto t = persistence::load_thread_by_id(::agentty::IoAccess::grant(), id);
         if (!t) { ++unreadable; before.push_back({}); continue; }
         before.push_back(fingerprint(*t));
     }
@@ -151,12 +151,12 @@ int main(int argc, char** argv) {
     const auto t0 = std::chrono::steady_clock::now();
     std::size_t migrated = 0;
     for (const auto& id : ids) {
-        auto t = persistence::load_thread_by_id(id);
+        auto t = persistence::load_thread_by_id(::agentty::IoAccess::grant(), id);
         if (!t) continue;
-        persistence::save_thread(*t);
+        persistence::save_thread(::agentty::IoAccess::grant(), *t);
         ++migrated;
     }
-    persistence::flush_pending_saves();
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0).count();
     std::printf("migrated %zu threads in %lld ms -> %.0f MB\n",
@@ -166,7 +166,7 @@ int main(int argc, char** argv) {
     std::size_t lost = 0, mismatched = 0, still_legacy = 0;
     for (std::size_t i = 0; i < ids.size(); ++i) {
         if (before[i].messages == 0 && before[i].content == 0) continue; // skipped
-        auto t = persistence::load_thread_by_id(ids[i]);
+        auto t = persistence::load_thread_by_id(::agentty::IoAccess::grant(), ids[i]);
         if (!t) {
             ++lost;
             std::printf("  LOST: %s no longer loads\n", ids[i].value.c_str());
@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
     }
 
     // The picker must still list every thread, exactly once.
-    const auto listed = persistence::load_all_threads();
+    const auto listed = persistence::load_all_threads(::agentty::IoAccess::grant());
     std::size_t dupes = 0;
     for (const auto& id : ids) {
         std::size_t n = 0;

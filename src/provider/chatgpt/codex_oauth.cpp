@@ -113,7 +113,7 @@ PostResult post(std::string_view path, std::string body, bool json_body) {
     tos.connect = std::chrono::milliseconds(10'000);
     tos.total   = std::chrono::milliseconds(30'000);
 
-    auto resp = http::default_client().send(req, tos);
+    auto resp = http::default_client(::agentty::IoAccess::grant()).send(req, tos);
     if (!resp) { r.transport_error = resp.error().render(); return r; }
     r.status = resp->status;
     r.body   = std::move(resp->body);
@@ -767,14 +767,14 @@ codex_device_login(CodexDeviceCodeSink on_device_code, int timeout_s,
 }
 
 std::expected<CodexCredentials, OAuthError>
-codex_login(int timeout_s, CodexDeviceCodeSink on_device_code,
+codex_login(Io io, int timeout_s, CodexDeviceCodeSink on_device_code,
             CodexCancelProbe cancelled) {
     if (codex_device_auth_preferred())
         return codex_device_login(std::move(on_device_code), timeout_s,
                                   std::move(cancelled));
 
-    auth::PkceVerifier verifier{auth::random_urlsafe(64)};
-    auth::OAuthState   state{auth::random_urlsafe(32)};
+    auth::PkceVerifier verifier{auth::random_urlsafe(io, 64)};
+    auth::OAuthState   state{auth::random_urlsafe(io, 32)};
 
     const std::string url = codex_authorize_url(verifier, state);
     auth::open_browser(url);

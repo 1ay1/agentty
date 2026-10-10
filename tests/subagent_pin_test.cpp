@@ -82,7 +82,7 @@ TEST_CASE("subagent honours a pinned Smart Mode slot from the first turn") {
             .model = "gpt-5.3-codex",
             .installed = true,
         });
-        tools::subagent::set_candidates(candidates);
+        tools::subagent::set_candidates(::agentty::IoAccess::grant(), candidates);
 
         const auto cfg = tools::subagent::current();
         CHECK(!cfg.smart.enabled,
@@ -101,7 +101,7 @@ TEST_CASE("subagent honours a pinned Smart Mode slot from the first turn") {
 
     // ── THE FIX: startup pushes the rehydrated config down ───────────
     {
-        tools::subagent::set_smart(pinned_impl("luna-2"));
+        tools::subagent::set_smart(::agentty::IoAccess::grant(), pinned_impl("luna-2"));
         const auto cfg = tools::subagent::current();
         REQUIRE(cfg.smart.enabled);
 
@@ -118,7 +118,7 @@ TEST_CASE("subagent honours a pinned Smart Mode slot from the first turn") {
     // so it must not be the only thing keeping the router in sync. Candidates
     // going empty (a failed fetch) must not resurrect the auto-router.
     {
-        tools::subagent::set_candidates({});
+        tools::subagent::set_candidates(::agentty::IoAccess::grant(), {});
         const auto cfg = tools::subagent::current();
         const auto p = smart::resolve_role(smart::ModelRole::Implementation,
                                            cfg.model, Effort::None,
@@ -133,8 +133,8 @@ TEST_CASE("subagent honours a pinned Smart Mode slot from the first turn") {
     // catalog fetch hasn't landed (or landed without that id). This is the
     // exact shape of the Copilot report — pin present, catalog incomplete.
     {
-        tools::subagent::set_smart(pinned_impl("luna-2"));
-        tools::subagent::set_candidates({mi("gpt-5.3-codex")});   // pin absent
+        tools::subagent::set_smart(::agentty::IoAccess::grant(), pinned_impl("luna-2"));
+        tools::subagent::set_candidates(::agentty::IoAccess::grant(), {mi("gpt-5.3-codex")});   // pin absent
         const auto cfg = tools::subagent::current();
         const auto p = smart::resolve_role(smart::ModelRole::Implementation,
                                            cfg.model, Effort::None,
@@ -148,8 +148,8 @@ TEST_CASE("subagent honours a pinned Smart Mode slot from the first turn") {
     {
         smart::RoleConfig cfg;
         cfg.enabled = true;              // on, but no slot pinned
-        tools::subagent::set_smart(cfg);
-        tools::subagent::set_candidates(candidates);
+        tools::subagent::set_smart(::agentty::IoAccess::grant(), cfg);
+        tools::subagent::set_candidates(::agentty::IoAccess::grant(), candidates);
         const auto c = tools::subagent::current();
         const auto p = smart::resolve_role(smart::ModelRole::Utility,
                                            "gpt-5.3-codex", Effort::None,
@@ -171,7 +171,7 @@ TEST_CASE("subagent honours a pinned Smart Mode slot from the first turn") {
             .installed = true,
             .smart = pinned_impl("luna-2"),
         });
-        tools::subagent::set_candidates(candidates);
+        tools::subagent::set_candidates(::agentty::IoAccess::grant(), candidates);
         const auto cfg = tools::subagent::current();
         CHECK(cfg.smart.enabled,
               "install() carries Smart Mode for the Model-less entry points");

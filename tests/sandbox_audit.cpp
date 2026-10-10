@@ -72,7 +72,7 @@ void audit_cfg(const char* label, const cfgn::Config& cfg) {
 int main() {
     const char* ws = "/tmp/agentty-audit-ws";
     std::filesystem::create_directories(ws);
-    agentty::tools::util::set_workspace_root(ws);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), ws);
 
     // The host facts, per platform. Printing the Linux probe unconditionally
     // was actively misleading on a mac: every field reads 0 (there are no

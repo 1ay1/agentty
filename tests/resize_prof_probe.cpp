@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     if (p.extension() == ".jsonl") {
         if (auto log = ThreadLog::open_path(p)) loaded = log->load_thread();
     } else {
-        if (auto r = persistence::load_thread_file(p)) loaded = std::move(*r);
+        if (auto r = persistence::load_thread_file(::agentty::IoAccess::grant(), p)) loaded = std::move(*r);
     }
     if (!loaded) {
         std::fprintf(stderr, "load failed: %s\n", p.string().c_str());

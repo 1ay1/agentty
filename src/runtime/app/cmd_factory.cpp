@@ -1446,7 +1446,7 @@ Cmd launch_stream(Model& m) {
             // wrapping it in a second lambda that just forwards to it — the
             // wrapper added one extra std::function indirection on every
             // delta (the wire's hottest path) for no behavioural gain.
-            deps().stream(std::move(req), guarded);
+            deps(io).stream(std::move(req), guarded);
         } catch (const std::exception& e) {
             // The stream backend threw before producing a terminal event —
             // surface it as StreamError so the UI doesn't hang on the spinner.
@@ -2311,7 +2311,7 @@ Cmd fetch_models(provider::Selection sel,
                 // on the same axes as the stream path. No
                 // is_chatgpt/OpenAI/Anthropic ladder here — a new provider
                 // inherits its catalog from its row.
-                auto models = provider::list_models_for(sel, auth);
+                auto models = provider::list_models_for(io, sel, auth);
             // EMPTY catalog on a LOCAL host = the server didn't answer (down,
             // wrong port, wrong path) — list_models returns {} on any HTTP
             // failure rather than throwing. Attach the reason so the reducer
@@ -2377,7 +2377,7 @@ Cmd probe_model_window(const Model& m, std::string model_id) {
             const auto  auth     = auth_snapshot(io, sel);
             int w = 0;
             try {
-                w = provider::openai::probe_loaded_window(auth, endpoint,
+                w = provider::openai::probe_loaded_window(io, auth, endpoint,
                                                           model_id);
             } catch (...) {}
             AGT_LOG(Wire, Info, "models.window_probe", "provider={} model={} window={}",
@@ -2409,7 +2409,7 @@ Cmd fetch_models_for(std::string spec) {
                 sel.kind == provider::Kind::OpenAI
                     ? sel.openai_endpoint.label
                     : std::string{provider::default_provider_id()};
-            auto models = provider::list_models_for(
+            auto models = provider::list_models_for(io,
                 sel, provider::credentials::resolve(io, pid));
             out.send(Msg{FusedCatalogLoaded{spec, std::move(models), true}});
         } catch (...) {
@@ -2432,13 +2432,13 @@ Cmd open_browser_async(std::string url) {
 }
 
 Cmd mint_oauth_login() {
-    return Cmd::task([](maya::Sink<Msg> out, std::stop_token) {
+    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token) {
         LoginOAuthMinted r;
         // random_urlsafe throws if the CSPRNG is unavailable. Fail closed
         // into the modal's Failed state rather than mint a weak secret.
         try {
-            r.verifier      = auth::PkceVerifier{auth::random_urlsafe(128)};
-            r.state         = auth::OAuthState{auth::random_urlsafe(32)};
+            r.verifier      = auth::PkceVerifier{auth::random_urlsafe(io, 128)};
+            r.state         = auth::OAuthState{auth::random_urlsafe(io, 32)};
             r.authorize_url = auth::oauth_authorize_url(r.verifier, r.state);
         } catch (const std::exception& e) {
             r = LoginOAuthMinted{};
@@ -2477,9 +2477,9 @@ Cmd load_threads_async() {
     // `nlohmann::json::parse` per file). Isolating it keeps the shared
     // worker pool free for stream / tool tasks the user fires in the
     // meantime.
-    return Cmd::task_isolated([](maya::Sink<Msg> out, std::stop_token) {
+    return cmd::io_task_isolated([](Io io, maya::Sink<Msg> out, std::stop_token) {
         try {
-            auto threads = deps().load_threads();
+            auto threads = deps(io).load_threads();
             out.send(Msg{ThreadsLoaded{std::move(threads)}});
         } catch (...) {
             // Best-effort: a corrupt file is already logged + skipped
@@ -2522,11 +2522,11 @@ Cmd load_plugins_async(bool reconnect) {
 }
 
 Cmd settings_add(settings::Category concern, std::string line) {
-    return Cmd::task(
-        [](maya::Sink<Msg> out, std::stop_token, settings::Category c, std::string l) {
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg> out, std::stop_token, settings::Category c, std::string l) {
             const settings::AddResult r = (c == settings::Category::Plugins)
-                ? settings::add_plugin_from_line(l)
-                : settings::create_starter(c, l);
+                ? settings::add_plugin_from_line(io, l)
+                : settings::create_starter(io, c, l);
             out.send(Msg{SettingsAddDone{c, r.ok, r.message}});
         }, concern, std::move(line));
 }
@@ -2570,8 +2570,8 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
     // The path crosses as a std::string: jaal's Sendable check knows
     // std::string owns its bytes, and has no entry for filesystem::path. The
     // worker rebuilds the path, which is the same value either way.
-    return Cmd::task(
-        [](maya::Sink<Msg> out, std::stop_token, std::string path_str,
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg> out, std::stop_token, std::string path_str,
            PluginEdited r, tools::plugin::ServerSpec spec) {
             const std::filesystem::path path{path_str};
             namespace pl = tools::plugin;
@@ -2584,27 +2584,27 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
             try {
                 switch (r.kind) {
                 case K::SetServerDisabled:
-                    record(pl::set_server_disabled(path, r.server, r.flag));
+                    record(pl::set_server_disabled(io, path, r.server, r.flag));
                     break;
                 case K::SetToolEnabled:
-                    record(pl::set_tool_enabled(path, r.server, r.tool, r.flag));
+                    record(pl::set_tool_enabled(io, path, r.server, r.tool, r.flag));
                     // A tool's enabled state is baked into the cached MCP
                     // catalog, so the cache must drop it — here, on the
                     // worker, right after the write it depends on, rather
                     // than as a second global poke from the reducer.
-                    if (r.ok) tools::invalidate_mcp_catalog();
+                    if (r.ok) tools::invalidate_mcp_catalog(io);
                     break;
                 case K::Approve:
-                    r.ok = pl::approve_server(path, r.server);
+                    r.ok = pl::approve_server(io, path, r.server);
                     break;
                 case K::Remove:
-                    record(pl::remove_server(path, r.server));
+                    record(pl::remove_server(io, path, r.server));
                     break;
                 case K::Add:
-                    record(pl::add_server(path, spec, /*force=*/false));
+                    record(pl::add_server(io, path, spec, /*force=*/false));
                     break;
                 case K::Update:
-                    record(pl::update_server(path, spec));
+                    record(pl::update_server(io, path, spec));
                     break;
                 }
             } catch (...) {
@@ -2619,12 +2619,12 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
 }
 
 Cmd write_fork_transcript(Thread parent, fork_panel::Choice choice) {
-    return Cmd::task(
-        [](maya::Sink<Msg> out, std::stop_token, Thread t,
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg> out, std::stop_token, Thread t,
            fork_panel::Choice choice) {
             ForkTranscriptWritten r{.parent_id = t.id.value, .choice = choice};
             try {
-                r.path = persistence::write_thread_transcript_md(t).string();
+                r.path = persistence::write_thread_transcript_md(io, t).string();
             } catch (...) {
                 r.path.clear();
             }
@@ -2634,7 +2634,7 @@ Cmd write_fork_transcript(Thread parent, fork_panel::Choice choice) {
             // the file the fork note points at.
             if (!r.path.empty()) {
                 const auto dir = persistence::threads_dir();
-                tools::util::allow_read_root(dir);
+                tools::util::allow_read_root(io, dir);
             }
             out.send(Msg{msg::ForkMsg{std::move(r)}});
         },
@@ -2648,10 +2648,10 @@ Cmd prewarm_provider(const Model& m) {
     // client's own pool and returns, so this occupies a worker for
     // microseconds. The dial's lifetime is the client's, joined by its own
     // join_prewarm() at teardown.
-    return Cmd::task(
-        [](maya::Sink<Msg>, std::stop_token st, provider::PrewarmTarget t) {
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg>, std::stop_token st, provider::PrewarmTarget t) {
             if (st.stop_requested()) return;
-            http::default_client().prewarm(t.host, t.port, t.override_host,
+            http::default_client(io).prewarm(t.host, t.port, t.override_host,
                                            t.override_port);
         },
         std::move(t));
@@ -2663,10 +2663,10 @@ Cmd load_thread_async(ThreadId id) {
     // small enough to keep on the worker pool — but isolating matches
     // the load_threads_async policy and keeps the per-thread parse
     // off the same pool that tools/stream contend for.
-    return Cmd::task_isolated(
-        [](maya::Sink<Msg> out, std::stop_token, ThreadId id) {
+    return cmd::io_task_isolated(
+        [](Io io, maya::Sink<Msg> out, std::stop_token, ThreadId id) {
             try {
-                auto loaded = deps().load_thread(id);
+                auto loaded = deps(io).load_thread(id);
                 if (loaded) {
                     out.send(Msg{ThreadLoaded{std::move(*loaded)}});
                 } else {
@@ -2701,7 +2701,7 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id) {
             const auto sel = provider::parse_selection(spec);
             const auto auth = provider::credentials::resolve(io, spec);
             const auto probe =
-                provider::openai::probe_host(auth, sel.openai_endpoint);
+                provider::openai::probe_host(io, auth, sel.openai_endpoint);
             using D = provider::openai::HostProbe::Dialect;
             if (probe.dialect != D::None) {
                 r.ok          = true;
@@ -2732,7 +2732,7 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id) {
                 // on every background refresh — and the alternative is
                 // asking them a question the server can answer itself.
                 auto models = provider::openai::list_models(
-                    auth, sel.openai_endpoint, /*force_probe=*/true);
+                    io, auth, sel.openai_endpoint, /*force_probe=*/true);
                 for (const auto& mi : models)
                     if (mi.context_window > r.window_tokens)
                         r.window_tokens = mi.context_window;
@@ -2866,13 +2866,13 @@ Sub device_login_sub(std::string provider, std::string provider_label,
 Sub codex_login_sub(std::uint64_t attempt_id) {
     // Same shape as device_login_sub: a keyed stream, so Esc stops it. Either
     // OAuth mode blocks while the user signs in.
-    return Sub::stream(
+    return cmd::io_stream(
         "login/codex/" + std::to_string(attempt_id),
-        [](maya::Sink<Msg> out, std::stop_token stop, std::uint64_t attempt_id) {
+        [](Io io, maya::Sink<Msg> out, std::stop_token stop, std::uint64_t attempt_id) {
         const std::stop_token cancelled = stop;
         try {
             auto r = provider::chatgpt::codex_login(
-                900, [attempt_id, out](
+                io, 900, [attempt_id, out](
                          const provider::chatgpt::CodexDeviceCode& code) {
                     out.send(Msg{CodexDeviceCodeReady{
                         .attempt_id = attempt_id,

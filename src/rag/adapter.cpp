@@ -166,6 +166,10 @@ bool truthy_default_on(const char* var) {
     return !(v[0] == '0' || v[0] == 'f' || v[0] == 'F' || v[0] == 'n' || v[0] == 'N');
 }
 
+// The index only runs on the retriever's own workers and tool threads, never
+// in a reducer (the RAG pane reads it through cmd::read_rag_embed_status).
+inline Io index_io() { return IoAccess::grant(); }
+
 bool truthy_default_off(const char* var) {
     const char* v = std::getenv(var);
     if (!v || !v[0]) return false;                // unset ⇒ OFF
@@ -699,7 +703,7 @@ Config Config::from_env() {
     if (const char* d = std::getenv("AGENTTY_DOCS_DIR"); d && d[0]) c.docs_root = d;
     // Embedder selection + endpoint, including the legacy AGENTTY_OLLAMA_HOST /
     // AGENTTY_EMBED_MODEL names. One owner for the parsing.
-    ::agentty::rag::embed::apply_env(c.embed);
+    ::agentty::rag::embed::apply_env(index_io(), c.embed);
     c.skills        = truthy_default_on("AGENTTY_RAG_SKILLS");
     c.memory        = truthy_default_on("AGENTTY_RAG_MEMORY");
     c.mcp_resources = truthy_default_off("AGENTTY_RAG_MCP");
@@ -775,10 +779,6 @@ using DenseState = std::variant<dense::Unprobed, dense::Ready, dense::Unavailabl
 // maya::guarded: every method below runs inside index.with(), so the lock is
 // implied by the receiver. Held across whole rebuilds on purpose; the UI's
 // status row uses try_read so a frame never waits on one.
-// The index only runs on the retriever's own workers and tool threads, never
-// in a reducer (the RAG pane reads it through cmd::read_rag_embed_status).
-inline Io index_io() { return IoAccess::grant(); }
-
 struct Index {
     // The warm worker's cancel flag, owned by Impl (outside the lock, so
     // shutdown can trip it while a rebuild holds the index). refresh_docs()
@@ -879,7 +879,7 @@ struct Index {
                     ::agentty::http::Timeouts to;
                     to.connect = std::chrono::milliseconds(600);   // Ollama absent → fail fast
                     to.total   = std::chrono::milliseconds(4000);  // hard cap per hypothetical
-                    auto res = ::agentty::http::default_client().send(req, to);
+                    auto res = ::agentty::http::default_client(::agentty::IoAccess::grant()).send(req, to);
                     if (!res || res->status != 200) break;   // Ollama down → give up
                     auto j = ::rag::plugin::Json::parse(res->body, nullptr, false);
                     if (j.is_discarded() || !j.contains("response")) continue;

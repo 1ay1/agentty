@@ -106,7 +106,7 @@ int main() {
           + std::to_string(connected) + ")");
 
     // 2. Disable the whole server, reload (it no longer connects).
-    check(tools::plugin::set_server_disabled(cfg, "demo", true)
+    check(tools::plugin::set_server_disabled(::agentty::IoAccess::grant(), cfg, "demo", true)
               == tools::plugin::EditResult::Ok, "disable succeeds");
     (void)tools::reload_mcp_plugins();
 
@@ -118,7 +118,7 @@ int main() {
           + std::to_string(disabled) + ") — no vanishing tree");
 
     // 4. Re-enable → back to live, still kN.
-    check(tools::plugin::set_server_disabled(cfg, "demo", false)
+    check(tools::plugin::set_server_disabled(::agentty::IoAccess::grant(), cfg, "demo", false)
               == tools::plugin::EditResult::Ok, "re-enable succeeds");
     (void)tools::reload_mcp_plugins();
     const std::size_t reenabled = tool_count_for("demo");
@@ -131,7 +131,7 @@ int main() {
     //    count enabled vs disabled — disabling must DROP it by kN.
     {
         auto m_on = mcp::plugin_model();
-        (void)tools::plugin::set_server_disabled(cfg, "demo", true);
+        (void)tools::plugin::set_server_disabled(::agentty::IoAccess::grant(), cfg, "demo", true);
         (void)tools::reload_mcp_plugins();
         auto m_off = mcp::plugin_model();
         check(m_off.wire_tool_count + kN == m_on.wire_tool_count,
@@ -144,7 +144,7 @@ int main() {
             if (s.name == "demo")
                 for (const auto& t : s.tools) if (t.over_budget) any_ob = true;
         check(!any_ob, "budget: a disabled server's tools are never over_budget");
-        (void)tools::plugin::set_server_disabled(cfg, "demo", false);
+        (void)tools::plugin::set_server_disabled(::agentty::IoAccess::grant(), cfg, "demo", false);
         (void)tools::reload_mcp_plugins();
     }
 

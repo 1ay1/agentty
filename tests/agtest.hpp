@@ -100,7 +100,7 @@ public:
         else           ::unsetenv("HOME");
         std::error_code ec;
         std::filesystem::current_path(old_cwd_, ec);
-        if (!old_ws_.empty()) agentty::tools::util::set_workspace_root(old_ws_);
+        if (!old_ws_.empty()) agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), old_ws_);
     }
     ScopedEnvSandbox(const ScopedEnvSandbox&) = delete;
     ScopedEnvSandbox& operator=(const ScopedEnvSandbox&) = delete;

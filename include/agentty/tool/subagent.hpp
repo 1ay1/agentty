@@ -91,28 +91,28 @@ void install(Config cfg);
 // logout, account switching, or provider switching changes the runtime auth.
 // Empty is valid for local and native-OAuth providers whose transports resolve
 // credentials themselves.
-void set_auth(auth::AuthHeader auth);
+void set_auth(Io, auth::AuthHeader auth);
 
 // Update just the model the subagent loop uses, without disturbing auth
 // or the installed flag. Called when the user switches models mid-session
 // (model picker) so subagents track the live model instead of the stale
 // startup default. No-op if the config was never installed.
-void set_model(std::string model);
+void set_model(Io, std::string model);
 
 // Update the provider's available-models list the router picks cheap roles
 // from. Called alongside set_model whenever the model list is (re)loaded or
 // the provider changes, so routing always reflects the live provider.
-void set_candidates(std::vector<ModelInfo> candidates);
+void set_candidates(Io, std::vector<ModelInfo> candidates);
 
 // Update the Smart Mode role config the subagent router honours (Layer 3b).
 // Called alongside set_candidates whenever Smart Mode or the model list
 // changes. No-op if the config was never installed.
-void set_smart(smart::RoleConfig smart);
+void set_smart(Io, smart::RoleConfig smart);
 
 // Update the provider the parent turn runs on, so pinned slots stay scoped to
 // the endpoint that can actually serve them. Pushed alongside set_smart /
 // set_candidates whenever the active provider changes.
-void set_provider(std::string provider);
+void set_provider(Io, std::string provider);
 
 // Snapshot the installed config. `installed == false` until install() runs.
 [[nodiscard]] Config current();

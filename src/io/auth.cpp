@@ -251,7 +251,7 @@ void prewarm_anthropic() {
     }
     AGT_LOG(Perf, Debug, "prewarm.anthropic", "fire=1");
     const auto& ov = http::agentty_api_host_override();
-    http::default_client().prewarm("api.anthropic.com", 443,
+    http::default_client(::agentty::IoAccess::grant()).prewarm("api.anthropic.com", 443,
                                    ov.active() ? ov.host : std::string{},
                                    ov.active() ? ov.port : uint16_t{0});
 }
@@ -540,7 +540,7 @@ std::string base64url_no_pad(const unsigned char* data, size_t len) {
 // output char and fold it into the 64-char alphabet: 64 divides 256 evenly, so
 // the modulo is unbiased (each char equally likely). RAND_bytes failure is
 // treated as fatal — better to abort login than to emit low-entropy secrets.
-std::string random_urlsafe(size_t n) {
+std::string random_urlsafe(Io, size_t n) {
     static const char charset[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     // charset has 64 usable chars (sizeof-1 for the NUL); 256 % 64 == 0 so
@@ -691,7 +691,7 @@ FormPostResult http_post_form(const std::string& url,
     tos.connect = std::chrono::milliseconds(10'000);
     tos.total   = std::chrono::milliseconds(30'000);
 
-    auto resp = http::default_client().send(hreq, tos);
+    auto resp = http::default_client(::agentty::IoAccess::grant()).send(hreq, tos);
     if (!resp) { r.transport_error = resp.error().render(); return r; }
     r.status = resp->status;
     r.body   = std::move(resp->body);
@@ -1187,7 +1187,7 @@ int cmd_login(Io io) {
                       << std::flush;
         }
         auto r = provider::chatgpt::codex_login(
-            900, [](const provider::chatgpt::CodexDeviceCode& code) {
+            io, 900, [](const provider::chatgpt::CodexDeviceCode& code) {
                 std::cout << "\nOpen this link in a browser on any device:\n  "
                           << code.verification_url
                           << "\n\nEnter this one-time code (expires in 15 minutes):\n  "
@@ -1248,9 +1248,9 @@ int cmd_login(Io io) {
             // Make it the active provider too: a user who pasted a Groq key
             // meant to use Groq, and leaving the selection elsewhere would be
             // the same class of surprise in a quieter form.
-            auto s = persistence::load_settings();
+            auto s = persistence::load_settings(io);
             s.provider = std::string{detected};
-            persistence::save_settings(s);
+            persistence::save_settings(io, s);
             // "an OpenRouter key", "a Groq key" — the labels are a fixed set,
             // so a vowel check is the whole of the grammar needed here.
             const bool vowel = !label.empty()
@@ -1270,8 +1270,8 @@ int cmd_login(Io io) {
     }
 
     // OAuth PKCE flow
-    PkceVerifier verifier{random_urlsafe(128)};
-    OAuthState   state{random_urlsafe(32)};
+    PkceVerifier verifier{random_urlsafe(io, 128)};
+    OAuthState   state{random_urlsafe(io, 32)};
     std::string  auth_url = oauth_authorize_url(verifier, state);
 
     std::cout << "\nOpening browser to authorize agentty...\n"

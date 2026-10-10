@@ -174,7 +174,7 @@ int main() {
     // and mask /tmp/.env -- and then pass, because the canary it is looking
     // for lives somewhere else entirely. A check that passes for the wrong
     // reason is the failure mode this harness has already hit twice.
-    agentty::tools::util::set_workspace_root(kWorkspace);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), kWorkspace);
 
     // ── 1. realloc under the compiler profile ────────────────────────
     // The regression: mremap was absent from base(), so realloc() of a large
@@ -470,7 +470,7 @@ int main() {
     std::printf("\nthe REAL path (run_shell_command, production posture):\n");
     {
         namespace sb = agentty::tools::util::sandbox;
-        agentty::tools::util::set_workspace_root(kWorkspace);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), kWorkspace);
         sb::reset_config_for_test();
         agentty::sandbox_cfg::Config cfg;
         cfg.configured = true;            // defaults = the Balanced posture

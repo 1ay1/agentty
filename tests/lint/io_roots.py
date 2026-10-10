@@ -6,7 +6,7 @@ function that touches the world takes one, and reducers and views never get
 one. That only holds if nobody else can make one, so IoAccess, the one way to
 make one, is allowed only in the files listed in io_roots.txt.
 
-Fails on an unlisted file that names IoAccess, and on a listed file that no
+Tests are exempt (they stand in for the host). Fails on an unlisted file that names IoAccess, and on a listed file that no
 longer does (so the list can only shrink to what is true).
 """
 import pathlib
@@ -23,7 +23,8 @@ for line in (root / "tests/lint/io_roots.txt").read_text().splitlines():
 pat = re.compile(r"\bIoAccess\b")
 comment = re.compile(r"//.*")
 found = set()
-for top in ("src", "include", "tests"):
+# Tests may make one freely: they stand in for the host.
+for top in ("src", "include"):
     for p in (root / top).rglob("*"):
         if p.suffix not in (".cpp", ".hpp", ".h"):
             continue

@@ -15,6 +15,7 @@
 #include "agentty/util/sendable.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/tool/effects.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::tools {
 
@@ -288,7 +289,7 @@ struct ToolDef {
 // connected; only the projection filter (config tools.exclude, read live)
 // changes, so a re-spawn would be wasteful and — under rapid toggles —
 // race-prone. Cheap and synchronous; safe to call from the UI thread.
-void invalidate_mcp_catalog();
+void invalidate_mcp_catalog(Io);
 
 
 } // namespace agentty::tools

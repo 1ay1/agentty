@@ -425,7 +425,7 @@ static std::vector<ModelInfo> bundled_models() {
     return catalog::bundled("copilot");
 }
 
-std::vector<ModelInfo> list_models() {
+std::vector<ModelInfo> list_models(Io io) {
     if (auto hit = models_cache().read([](const Models& c) { return c; }); !hit.empty())
         return hit;
     auto tok = fresh_token();
@@ -461,7 +461,7 @@ std::vector<ModelInfo> list_models() {
     };
     req.max_body_bytes = 4ull * 1024 * 1024;
 
-    auto resp = http::default_client().send(req);
+    auto resp = http::default_client(io).send(req);
     if (!resp || resp->status < 200 || resp->status >= 300) {
         AGT_LOG(Net, Warn, "copilot.models.fetch_failed",
                 "host={} status={} err={} -> bundled catalog", host,
@@ -630,12 +630,12 @@ std::vector<ModelInfo> list_models() {
     return out;
 }
 
-std::string default_model() {
+std::string default_model(Io io) {
     // Prefer a base-allowlist model that works on every Copilot tier, so a
     // fresh sign-in never lands on a model that 400s on the first turn.
     for (const char* id : {"gpt-4o", "gpt-4.1", "gpt-4o-mini"})
         if (!is_unsupported_model(id)) return id;
-    auto ms = list_models();
+    auto ms = list_models(io);
     return ms.empty() ? std::string{"gpt-4o"} : ms.front().id.value;
 }
 

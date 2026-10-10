@@ -221,6 +221,13 @@ template <class Body, class... Args>
     return Cmd::task_isolated(&io_detail::run_io<Body, Args...>, std::move(args)...);
 }
 
+/// A Sub::stream whose body gets an Io: body(Io, Sink<Msg>, stop_token, args...).
+template <class Body, class... Args>
+    requires io_detail::IoBody<Body, Args...>
+[[nodiscard]] Sub io_stream(std::string key, Body, Args... args) {
+    return Sub::stream(std::move(key), &io_detail::run_io<Body, Args...>, std::move(args)...);
+}
+
 }  // namespace app::cmd
 
 }  // namespace agentty

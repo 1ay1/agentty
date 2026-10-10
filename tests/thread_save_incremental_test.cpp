@@ -52,12 +52,12 @@ void spit(const fs::path& p, const std::string& s) {
 }
 
 void save(const Thread& t) {
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 }
 
 Thread load(const Thread& t) {
-    auto got = persistence::load_thread_by_id(t.id);
+    auto got = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(got.has_value());
     return std::move(*got);
 }
@@ -87,7 +87,7 @@ bool head_marked(const Thread& t) {
 
 TEST_CASE("incremental save: a new message is appended, history untouched") {
     Thread t = make_thread("inc-append", 6);
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
     save(t);                         // first save of the process: full
     mark_head(t);
 
@@ -98,12 +98,12 @@ TEST_CASE("incremental save: a new message is appended, history untouched") {
     auto got = load(t);
     REQUIRE(got.messages.size() == 7u);
     CHECK(got.messages[6].text == "message 6");
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
 }
 
 TEST_CASE("incremental save: the open turn is replaced, not duplicated") {
     Thread t = make_thread("inc-open-turn", 4);
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
     save(t);
     mark_head(t);
 
@@ -116,48 +116,48 @@ TEST_CASE("incremental save: the open turn is replaced, not duplicated") {
     auto got = load(t);
     REQUIRE(got.messages.size() == 4u);
     CHECK(got.messages.back().text == "streaming 4");
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
 }
 
 TEST_CASE("incremental save: editing an old message rewrites from there") {
     Thread t = make_thread("inc-edit", 8);
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
     save(t);
 
     // Same length on purpose: a size-only fingerprint would miss this.
     t.messages[3].text = "MESSAGE 3";
     save(t);
     check_same(t, load(t));
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
 }
 
 TEST_CASE("incremental save: a shorter thread (rewind) truncates the log") {
     Thread t = make_thread("inc-shrink", 10);
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
     save(t);
 
     t.messages.resize(4);
     t.messages.push_back(make_msg(99));
     save(t);
     check_same(t, load(t));
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
 }
 
 TEST_CASE("incremental save: a replaced prefix (compaction/fork) still lands") {
     Thread t = make_thread("inc-replace", 6);
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
     save(t);
 
     Thread fresh = make_thread("inc-replace", 3);
     fresh.messages[0].text = "a completely different head";
     save(fresh);
     check_same(fresh, load(fresh));
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
 }
 
 TEST_CASE("incremental save: Smart Mode cards don't shift the log indices") {
     Thread t = make_thread("inc-smart-card", 4);
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
     save(t);
 
     Message card;
@@ -170,26 +170,26 @@ TEST_CASE("incremental save: Smart Mode cards don't shift the log indices") {
     REQUIRE(got.messages.size() == 5u);
     CHECK(got.messages[2].id.value == "m2");
     CHECK(got.messages[4].id.value == "m4");
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
 }
 
 TEST_CASE("incremental save: after delete, the next save is a full write") {
     Thread t = make_thread("inc-delete", 5);
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
     save(t);
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
     CHECK_FALSE(fs::exists(log_path(t)));
 
     // The writer must not think the (now missing) log still holds 5 lines.
     t.messages.push_back(make_msg(5));
     save(t);
     check_same(t, load(t));
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
 }
 
 TEST_CASE("incremental save: a log damaged behind the writer's back heals") {
     Thread t = make_thread("inc-damaged", 5);
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
     save(t);
 
     // Someone truncates the log to nothing. The tail save sees the log is
@@ -202,7 +202,7 @@ TEST_CASE("incremental save: a log damaged behind the writer's back heals") {
     t.messages.push_back(make_msg(6));
     save(t);
     check_same(t, load(t));
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
 }
 
 // The fingerprint is what decides which messages a save rewrites, so a

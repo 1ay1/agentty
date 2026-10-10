@@ -112,7 +112,7 @@ TEST_CASE("smart slot picker stack") {
     {
         provider::Selection sel;
         sel.kind = provider::Kind::Anthropic;
-        provider::select(sel);
+        provider::select(::agentty::IoAccess::grant(), sel);
     }
 
     // ── Esc in slot-assign pops back to Smart Mode, does NOT exit ──

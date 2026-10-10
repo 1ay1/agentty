@@ -108,7 +108,7 @@ TEST_CASE("turn provenance: the header names the model that served the turn") {
     {
         provider::Selection sel;
         sel.kind = provider::Kind::Anthropic;
-        provider::select(sel);
+        provider::select(::agentty::IoAccess::grant(), sel);
     }
 
     // ── StreamStarted stamps the routed model onto the assistant turn ──

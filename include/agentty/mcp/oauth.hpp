@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include "agentty/util/io.hpp"
 
 namespace agentty::mcp::oauth {
 
@@ -64,7 +65,7 @@ struct LoginResult {
 // — the 2026-07-28 preferred path — anything else as a pre-registered public
 // client_id. Blocks on the browser round-trip up to `timeout_s`. Persists the
 // token on success. Never throws.
-[[nodiscard]] LoginResult login(const std::string& server_name,
+[[nodiscard]] LoginResult login(Io, const std::string& server_name,
                                 const std::string& endpoint_url,
                                 const std::string& metadata_url,
                                 const std::string& client_id = {},
@@ -84,7 +85,7 @@ bool logout(const std::string& server_name);
 // CLI entry points (agentty mcp-login <server> / mcp-logout <server>). They
 // resolve the server's endpoint URL from .agentty/mcp.json themselves and
 // print human-readable progress. Return a process exit code (0 = success).
-int cmd_mcp_login(const std::string& server_name, const std::string& metadata_url = {},
+int cmd_mcp_login(Io, const std::string& server_name, const std::string& metadata_url = {},
                   const std::string& client_id = {});
 int cmd_mcp_logout(const std::string& server_name);
 int cmd_mcp_status();   // list servers + which have a stored token

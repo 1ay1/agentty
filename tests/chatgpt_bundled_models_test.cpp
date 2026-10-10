@@ -30,7 +30,7 @@ namespace cc = agentty::provider::chatgpt;
 TEST_CASE("chatgpt bundled model catalog") {
     const bool signed_in = cc::responses_available();
 
-    auto models = cc::list_models();
+    auto models = cc::list_models(::agentty::IoAccess::grant());
     CHECK(!models.empty());   // a model must ALWAYS be selectable
 
     // The retired, server-rejected slug must never surface — this is the exact
@@ -42,7 +42,7 @@ TEST_CASE("chatgpt bundled model catalog") {
     }
 
     // The default (catalog index 0) must be a live, selectable slug.
-    const std::string def = cc::default_model();
+    const std::string def = cc::default_model(::agentty::IoAccess::grant());
     CHECK(!def.empty());
     CHECK(def != "gpt-5.1-codex");
 

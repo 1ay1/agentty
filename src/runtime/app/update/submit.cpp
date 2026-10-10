@@ -394,8 +394,13 @@ Cmd submit_message(Model& m) {
                     case store::RagMode::FirstTurnOnly: proactive_on = first_turn; break;
                 }
             } else {
-                proactive_on = tools::proactive_enabled();
-                if (proactive_on && tools::proactive_first_turn_only())
+                // From the Model: the launch env override, else the saved
+                // RAG setting (default off until the pane is configured).
+                const auto& rag = m.d.persisted.rag;
+                proactive_on = m.env.rag_proactive_override.value_or(
+                    rag.configured && rag.proactive && rag.mode != store::RagMode::Off);
+                if (proactive_on && rag.configured
+                    && rag.mode == store::RagMode::FirstTurnOnly)
                     proactive_on = first_turn;
             }
         }

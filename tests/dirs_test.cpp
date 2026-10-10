@@ -209,11 +209,11 @@ int main() {
         const fs::path cwd_before = fs::current_path();
 
         fs::current_path(proj);
-        agentty::tools::util::set_workspace_root(proj);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), proj);
         const fs::path from_top = project_anchor();
 
         fs::current_path(deep);
-        agentty::tools::util::set_workspace_root(deep);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), deep);
         const fs::path from_deep = project_anchor();
 
         check(from_top == fs::weakly_canonical(proj), "anchor: found from top");
@@ -244,7 +244,7 @@ int main() {
         const fs::path cwd_before = fs::current_path();
 
         fs::current_path(bare);
-        agentty::tools::util::set_workspace_root(bare);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), bare);
         const fs::path a = project_anchor();
         check(a == fs::weakly_canonical(bare), "markerless: falls back to cwd");
 
@@ -290,11 +290,11 @@ int main() {
         const Spec rag{.root = Root::Project, .leaf = "", .env = "AGENTTY_RAG_DIR"};
 
         fs::current_path(proj);
-        agentty::tools::util::set_workspace_root(proj);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), proj);
         auto top = resolve(rag);
 
         fs::current_path(deep);
-        agentty::tools::util::set_workspace_root(deep);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), deep);
         auto sub = resolve(rag);
 
         check(top.has_value() && sub.has_value(), "rag spec: resolved from both");
@@ -325,7 +325,7 @@ int main() {
         fs::create_directories(proj / ".git");
         const fs::path cwd_before = fs::current_path();
         fs::current_path(proj);
-        agentty::tools::util::set_workspace_root(proj);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), proj);
 
         const Spec swept{
             .root = Root::Project, .leaf = "",
@@ -402,7 +402,7 @@ int main() {
         fs::create_directories(proj / ".git");
         const fs::path cwd_before = fs::current_path();
         fs::current_path(proj);
-        agentty::tools::util::set_workspace_root(proj);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), proj);
 
         const Spec precious{
             .root = Root::Project, .leaf = "",
@@ -433,7 +433,7 @@ int main() {
         fs::create_directories(proj / ".git");
         const fs::path cwd_before = fs::current_path();
         fs::current_path(proj);
-        agentty::tools::util::set_workspace_root(proj);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), proj);
 
         // keep_last must be >0 or sweeps() is false and this test would
         // pass vacuously -- it would be measuring the gate, not the grace
@@ -521,7 +521,7 @@ int main() {
         fs::create_directories(proj / ".git");
         const fs::path cwd_before = fs::current_path();
         fs::current_path(proj);
-        agentty::tools::util::set_workspace_root(proj);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), proj);
 
         const Spec s{.root = Root::Project, .leaf = ""};
         auto d = resolve(s);
@@ -579,11 +579,11 @@ int main() {
         ::setenv("AGENTTY_PROJECT_DIR", shared.string().c_str(), 1);
 
         fs::current_path(p1);
-        agentty::tools::util::set_workspace_root(p1);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), p1);
         auto a = resolve(s);
 
         fs::current_path(p2);
-        agentty::tools::util::set_workspace_root(p2);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), p2);
         auto b = resolve(s);
 
         ::unsetenv("AGENTTY_PROJECT_DIR");
@@ -598,7 +598,7 @@ int main() {
         // And the DEFAULT keeps no hash -- each project already has its own
         // .agentty, so there is nothing to disambiguate.
         fs::current_path(p1);
-        agentty::tools::util::set_workspace_root(p1);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), p1);
         if (auto d = resolve(s))
             check(d->path == p1 / ".agentty" / "cache",
                   "the default path is plain");

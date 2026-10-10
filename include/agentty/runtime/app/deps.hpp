@@ -70,7 +70,8 @@ struct Deps {
     auth::AuthHeader auth;
 };
 
-[[nodiscard]] const Deps& deps();
+// The seams do IO (stream, threads, settings), so reaching them takes an Io.
+[[nodiscard]] const Deps& deps(Io);
 void install_deps(Deps d);
 
 // Resolve the credential for the ACTIVE provider, as a value.
@@ -98,7 +99,7 @@ void install_deps(Deps d);
 // InstallAuth effect. Safe from any thread (a maya::guarded value); a copy
 // comes out, so a stream holds its own header for its whole life.
 [[nodiscard]] auth::AuthHeader live_auth();
-void update_auth(auth::AuthHeader auth);
+void update_auth(Io, auth::AuthHeader auth);
 
 // Convenience: bind a Provider + Store satisfying the concepts.
 template <provider::Provider P, store::Store S>

@@ -18,12 +18,13 @@
 #include <optional>
 #include <stop_token>
 #include <string>
+#include "agentty/util/io.hpp"
 
 namespace agentty::workspace {
 
 // True iff the workspace root is inside a git repository. Cached after
 // the first call (repo-ness doesn't change mid-session).
-[[nodiscard]] bool in_git_repo();
+[[nodiscard]] bool in_git_repo(Io);
 
 // Non-blocking variant for the UI/reducer thread. Returns the cached answer
 // only if repo discovery has ALREADY been forced (by prewarm_repo_info() or
@@ -31,7 +32,7 @@ namespace agentty::workspace {
 // so the caller can skip git work this turn instead of spawning `git` on the
 // hot path. The very first Enter after launch -- before the startup prewarm
 // lands -- takes this nullopt path, keeping the keystroke instant on Windows.
-[[nodiscard]] std::optional<bool> in_git_repo_if_ready();
+[[nodiscard]] std::optional<bool> in_git_repo_if_ready(Io);
 
 // Warm the cached repo discovery; run it on a background task at launch.
 // The first call to in_git_repo()/create_checkpoint() otherwise

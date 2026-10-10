@@ -64,14 +64,14 @@ std::vector<ModelInfo> list_models_cached() {
     return models_cache().read([](const Models& c) { return c; });
 }
 
-std::vector<ModelInfo> list_models() {
+std::vector<ModelInfo> list_models(Io io) {
     if (auto hit = list_models_cached(); !hit.empty()) return hit;
 
     // Ask the account for its real catalog (blocking, short timeout; empty on
     // any failure). Only attempted when we actually have a credential.
     std::vector<ModelInfo> resolved;
     if (responses_available()) {
-        auto catalog = fetch_models();
+        auto catalog = fetch_models(io);
         // The server lists the default first (or flags is_default); reorder so
         // the account's default is index 0 — that's what the picker preselects.
         std::stable_sort(catalog.begin(), catalog.end(),
@@ -94,8 +94,8 @@ std::vector<ModelInfo> list_models() {
 // The account's default model slug (catalog index 0), or a safe fallback when
 // the catalog can't be reached. This is what selection/defaulting should use
 // instead of any hardcoded "gpt-5.1-codex".
-std::string default_model() {
-    auto ms = list_models();
+std::string default_model(Io io) {
+    auto ms = list_models(io);
     return ms.empty() ? std::string{"gpt-5"} : ms.front().id.value;
 }
 

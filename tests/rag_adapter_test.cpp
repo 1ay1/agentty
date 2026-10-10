@@ -120,7 +120,7 @@ TEST_CASE("rag adapter") {
     // the boundary explicitly, or the anchor resolves into whatever directory
     // the last test left behind and the index lands there.
     const auto old_ws = ::agentty::tools::util::workspace_root();
-    ::agentty::tools::util::set_workspace_root(tmp);
+    ::agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), tmp);
 
 #if defined(_WIN32)
     _putenv_s("AGENTTY_DOCS_DIR", docs.string().c_str());
@@ -451,7 +451,7 @@ TEST_CASE("rag adapter") {
     // Hand the process-global workspace boundary back exactly as we found it:
     // leaving a deleted temp dir pinned is what broke the NEXT test, and this
     // test should not propagate the hazard it just worked around.
-    ::agentty::tools::util::set_workspace_root(old_ws);
+    ::agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), old_ws);
     fs::remove_all(tmp);
 }
 
@@ -480,7 +480,7 @@ TEST_CASE("rag shutdown interrupts warm promptly") {
     // the boundary explicitly, or the anchor resolves into whatever directory
     // the last test left behind and the index lands there.
     const auto old_ws = ::agentty::tools::util::workspace_root();
-    ::agentty::tools::util::set_workspace_root(tmp);
+    ::agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), tmp);
 
     // A large-ish corpus so a real warm has work to do (and thus a window in
     // which cancellation matters).
@@ -521,6 +521,6 @@ TEST_CASE("rag shutdown interrupts warm promptly") {
     // Hand the process-global workspace boundary back exactly as we found it:
     // leaving a deleted temp dir pinned is what broke the NEXT test, and this
     // test should not propagate the hazard it just worked around.
-    ::agentty::tools::util::set_workspace_root(old_ws);
+    ::agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), old_ws);
     fs::remove_all(tmp);
 }

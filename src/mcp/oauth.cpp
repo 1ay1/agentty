@@ -107,7 +107,7 @@ HttpOut do_http(http::HttpMethod method, const std::string& url,
     if (!bearer.empty()) req.headers.push_back({"authorization", bearer});
 
     http::Timeouts tos; tos.total = std::chrono::milliseconds(20'000);
-    auto res = http::default_client().send(req, tos);
+    auto res = http::default_client(::agentty::IoAccess::grant()).send(req, tos);
     // agentty's send() delivers ANY HTTP status — including a 401 — as a
     // successful Response with headers + body intact (only transport failures
     // become an unexpected HttpError). So a 401's WWW-Authenticate challenge is
@@ -424,7 +424,7 @@ std::optional<StoredToken> refresh(const StoredToken& tok) {
 
 std::int64_t StoredToken::now_ms() noexcept { return now_ms_impl(); }
 
-LoginResult login(const std::string& server_name, const std::string& endpoint_url,
+LoginResult login(Io io, const std::string& server_name, const std::string& endpoint_url,
                   const std::string& metadata_url_in, const std::string& client_id,
                   int timeout_s) {
     LoginResult r;
@@ -512,8 +512,8 @@ LoginResult login(const std::string& server_name, const std::string& endpoint_ur
     }
 
     // 6. Begin PKCE flow; open the browser; wait for the redirect.
-    const std::string verifier_seed = auth::random_urlsafe(48);   // >= 32 bytes entropy
-    const std::string state = auth::random_urlsafe(24);
+    const std::string verifier_seed = auth::random_urlsafe(io, 48);   // >= 32 bytes entropy
+    const std::string state = auth::random_urlsafe(io, 24);
     ::mcp::auth::AuthSession sess = ::mcp::auth::begin(
         as, client, redirect_uri, resource, verifier_seed, state);
     const std::string url = sess.authorize_url(as.authorization_endpoint);
@@ -647,7 +647,7 @@ std::string client_id_of(const json& servers, const std::string& name) {
 }
 } // namespace
 
-int cmd_mcp_login(const std::string& server_name, const std::string& metadata_url,
+int cmd_mcp_login(Io io, const std::string& server_name, const std::string& metadata_url,
                   const std::string& client_id) {
     if (server_name.empty()) {
         std::fprintf(stderr, "usage: agentty mcp-login <server> [--metadata <url>] [--client-id <id|https-url>]\n");
@@ -665,7 +665,7 @@ int cmd_mcp_login(const std::string& server_name, const std::string& metadata_ur
                  server_name.c_str(), endpoint.c_str());
     // --client-id wins; else the server's mcp.json "client_id"; else the env var.
     std::string cid = client_id.empty() ? client_id_of(servers, server_name) : client_id;
-    LoginResult res = login(server_name, endpoint, metadata_url, cid);
+    LoginResult res = login(io, server_name, endpoint, metadata_url, cid);
     if (res.ok) {
         std::fprintf(stderr, "\n\xE2\x9C\x93 %s\n", res.message.c_str());
         return 0;

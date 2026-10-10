@@ -69,7 +69,7 @@ static void write_file(const fs::path& p, std::string_view content) {
 
 static void test_missing_returns_empty() {
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     const std::string r = wire::agents_md_block("intro", workspace_root());
     CHECK(r.empty());
@@ -78,7 +78,7 @@ static void test_missing_returns_empty() {
 
 static void test_wraps_content() {
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     write_file(ws / "AGENTS.md",
                "## Build\n- cmake --build build\n## Tests\n- ctest\n");
@@ -99,7 +99,7 @@ static void test_wraps_content() {
 
 static void test_truncates_at_cap() {
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     // 64 KiB + 1000 bytes — must be clipped to the 64 KiB cap that
     // wire::read_capped_file enforces (same cap as CLAUDE.md).
@@ -141,7 +141,7 @@ static void test_uses_project_root_not_process_cwd() {
     const auto other = fs::temp_directory_path() / "agentty_agents_md_test_other";
     fs::remove_all(other);
     fs::create_directories(other);
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     write_file(ws / "AGENTS.md",    "workspace-root-AGENTS");
     write_file(other / "AGENTS.md", "should-not-be-read");
     // chdir OUTSIDE the workspace boundary so project_root() falls back to ws.
@@ -165,7 +165,7 @@ static void test_nested_overrides_root() {
     // subpackage dir. The helper should emit BOTH blocks: root <agents-md>
     // and nested <agents-md-package>.
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     write_file(ws / "AGENTS.md", "root-level guidance");
     const auto pkg = ws / "packages" / "auth";
@@ -185,7 +185,7 @@ static void test_nested_overrides_root() {
 static void test_no_nested_when_at_root() {
     // search_from == workspace_root → no nested block, only root.
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     write_file(ws / "AGENTS.md", "root-only guidance");
     const std::string r = wire::agents_md_block("intro", workspace_root(),
@@ -201,7 +201,7 @@ static void test_walk_stops_at_workspace_boundary() {
     // search_from is deep inside the workspace and the walk passes near
     // an external AGENTS.md.
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     write_file(ws / "AGENTS.md", "root guidance");
     // Create a nested dir but no AGENTS.md inside it.
@@ -220,7 +220,7 @@ static void test_walk_stops_at_workspace_boundary() {
 static void test_nested_truncates_at_cap() {
     // Nested AGENTS.md is also capped at 64 KiB.
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     write_file(ws / "AGENTS.md", "root");
     const auto pkg = ws / "packages" / "auth";
@@ -249,7 +249,7 @@ static void test_dedup_when_same_file() {
     // the walk would find the same AGENTS.md as the root file. The dedup
     // check (candidate_canon != root_agents) prevents a duplicate block.
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     write_file(ws / "AGENTS.md", "only-one-file");
     // search_from is a subdirectory that does NOT have its own AGENTS.md,
@@ -269,7 +269,7 @@ static void test_nearest_wins_not_deepest() {
     // Multiple nested AGENTS.md files in the path. The walk finds the
     // NEAREST one (closest to search_from), not the deepest or the root.
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     write_file(ws / "AGENTS.md", "root guidance");
     fs::create_directories(ws / "packages");
@@ -296,7 +296,7 @@ static void test_nearest_wins_not_deepest() {
 static void test_global_agents_md() {
     // A global AGENTS.md passed explicitly via global_path → <agents-md-global> block.
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     write_file(ws / "AGENTS.md", "root guidance");
     // Create a fake global file in a temp dir (simulates ~/.agentty/AGENTS.md).
@@ -322,7 +322,7 @@ static void test_global_agents_md() {
 static void test_global_only_no_root() {
     // Global exists but root AGENTS.md is missing → only <agents-md-global>.
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     // No AGENTS.md at workspace root.
     const auto fake_home = fs::temp_directory_path() / ("agentty_test_home_" +
@@ -344,7 +344,7 @@ static void test_global_only_no_root() {
 static void test_no_global_when_not_provided() {
     // global_path is empty → no <agents-md-global> block.
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     write_file(ws / "AGENTS.md", "root guidance");
     const std::string r = wire::agents_md_block("intro", workspace_root(),
@@ -358,7 +358,7 @@ static void test_no_global_when_not_provided() {
 static void test_global_truncated_at_cap() {
     // Global AGENTS.md is also capped at 64 KiB.
     const auto ws = make_workspace();
-    set_workspace_root(ws);
+    set_workspace_root(::agentty::IoAccess::grant(), ws);
     fs::current_path(ws);
     write_file(ws / "AGENTS.md", "root");
     const auto fake_home = fs::temp_directory_path() / ("agentty_test_home_" +

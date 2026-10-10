@@ -282,7 +282,7 @@ bool ThreadLog::write_index_() const {
     std::string buf(offsets_.size() * kOffsetWidth, '\0');
     for (std::size_t i = 0; i < offsets_.size(); ++i)
         put_u64_le(buf.data() + i * kOffsetWidth, offsets_[i]);
-    return persistence::write_json_atomic(idx_, buf);
+    return persistence::write_json_atomic(::agentty::IoAccess::grant(), idx_, buf);
 }
 
 bool ThreadLog::append_offset_(std::uint64_t at) const {
@@ -306,7 +306,7 @@ bool ThreadLog::set_meta(const Thread& t) {
     meta_thread_ = t;
     meta_thread_.messages.clear();
     try {
-        return persistence::write_json_atomic(
+        return persistence::write_json_atomic(::agentty::IoAccess::grant(), 
             meta_, persistence::thread_meta_to_json(meta_thread_).dump(2));
     } catch (const std::exception& e) {
         AGT_LOG(General, Error, "thread_log.meta",
@@ -500,7 +500,7 @@ bool ThreadLog::rewrite(const std::vector<Message>& msgs) {
     // Both files land atomically. write_json_atomic is temp+fsync+rename,
     // so an interrupted rewrite leaves the previous log AND its matching
     // index in place — never a new log with an old index.
-    if (!persistence::write_json_atomic(log_, body)) return false;
+    if (!persistence::write_json_atomic(::agentty::IoAccess::grant(), log_, body)) return false;
     offsets_ = std::move(offs);
     torn_tail_at_ = kNoTear;   // a full rewrite always ends cleanly
     if (!write_index_()) {

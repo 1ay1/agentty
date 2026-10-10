@@ -88,7 +88,7 @@ sc::Config read_saved_sandbox() {
 int main(int argc, char** argv) {
     const std::string ws = argc > 1 ? argv[1]
                                     : std::filesystem::current_path().string();
-    agentty::tools::util::set_workspace_root(ws);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), ws);
 
     // ── 1. what is ON DISK ──────────────────────────────────────────────
     const auto saved = read_saved_sandbox();

@@ -73,15 +73,15 @@ TEST_CASE("persistence proactive") {
     t.messages.push_back(fnote);
 
     // ── Round-trip through real disk ────────────────────────────────────
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
     // Through the store seam: a saved thread now lives in the log format
     // and <id>.json is retired once it verifies.
     auto log_path = persistence::threads_dir() / (t.id.value + ".jsonl");
     check(fs::exists(log_path), "thread written to disk");
 
-    auto loaded = persistence::load_thread_by_id(t.id);
+    auto loaded = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     check(loaded.has_value(), "thread reloaded without error");
     if (!loaded) { REQUIRE(loaded.has_value()); return; }
 
@@ -163,8 +163,8 @@ TEST_CASE("persistence: a tool in flight does not fail log verification") {
     asst.tool_calls.push_back(tc);
     t.messages.push_back(asst);
 
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
     const auto log_path    = persistence::threads_dir() / (t.id.value + ".jsonl");
     const auto legacy_path = persistence::threads_dir() / (t.id.value + ".json");
@@ -177,7 +177,7 @@ TEST_CASE("persistence: a tool in flight does not fail log verification") {
 
     // And the turn still reloads intact, with the call made terminal so a
     // reload never waits on a tool whose process is gone.
-    auto loaded = persistence::load_thread_by_id(t.id);
+    auto loaded = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(loaded.has_value());
     REQUIRE(loaded->messages.size() == 2u);
     REQUIRE(loaded->messages[1].tool_calls.size() == 1u);

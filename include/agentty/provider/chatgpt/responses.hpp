@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider::chatgpt {
 
@@ -34,7 +35,7 @@ struct CatalogModel {
 // account's live catalog, or an empty vector on any failure (offline, 401,
 // parse error) so the caller can fall back to a bundled list. Blocking; short
 // timeout — safe to call from the model-picker refresh path.
-[[nodiscard]] std::vector<CatalogModel> fetch_models();
+[[nodiscard]] std::vector<CatalogModel> fetch_models(Io);
 
 // True iff a saved ChatGPT credential exists (so the provider can pick the
 // direct transport over the app-server subprocess fallback).

@@ -38,7 +38,7 @@ public:
         http::Timeouts t;
         t.connect = std::min(r.timeout, std::chrono::milliseconds{10'000});
         t.total   = r.timeout;
-        auto res = http::default_client().send(req, t);
+        auto res = http::default_client(::agentty::IoAccess::grant()).send(req, t);
         if (!res) {
             if (res.error().kind == http::HttpErrorKind::Status)
                 return rd::HttpResponse{res.error().http_status, res.error().detail};

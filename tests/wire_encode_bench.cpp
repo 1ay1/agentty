@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
     std::optional<Thread> loaded;
     if (src.extension() == ".jsonl") {
         if (auto log = ThreadLog::open_path(src)) loaded = log->load_thread();
-    } else if (auto t = persistence::load_thread_file(src)) {
+    } else if (auto t = persistence::load_thread_file(::agentty::IoAccess::grant(), src)) {
         loaded = std::move(*t);
     }
     if (!loaded || loaded->messages.empty()) {

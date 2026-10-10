@@ -26,21 +26,29 @@ src/rag/adapter.cpp
 # caller's Io (not Sendable), so it re-mints the one the caller already had.
 src/io/auth.cpp
 
-# Tests.
-tests/toolset_e2e_test.cpp
-tests/anthropic_md_stream.cpp
-tests/catalog_cost_probe.cpp
-tests/dispatch_route_test.cpp
-tests/hooks_gate_test.cpp
-tests/sandbox_parity_test.cpp
-tests/skill_catalog_trust_test.cpp
-tests/skills_engine_test.cpp
-tests/skills_panel_test.cpp
-tests/subagent_report_test.cpp
-tests/slash_commands_test.cpp
-tests/accounts_registry_test.cpp
-tests/oauth_proactive_refresh_test.cpp
-tests/account_switch_refresh_test.cpp
-tests/agtest_fx.hpp
-tests/provider_model_switch_test.cpp
-tests/credentials_test.cpp
+# The persistence store's internals (async writer, settings lock, thread
+# log, blob store) run only under its Io-taking entry points.
+src/io/persistence.cpp
+src/io/thread_log.cpp
+src/io/blob_store.cpp
+
+# Network layer entry points. Each runs only off the UI thread: provider
+# streams (dispatch runs them on the turn's worker), OAuth device/browser
+# flows (CLI or a login stream), MCP transports (their own peer threads),
+# tool bodies, and the background update/catalog refreshers.
+src/provider/dispatch.cpp
+src/provider/anthropic/transport.cpp
+src/provider/openai/transport.cpp
+src/provider/ollama/transport.cpp
+src/provider/responses/codec.cpp
+src/provider/kimi/provider.cpp
+src/provider/chatgpt/codex_oauth.cpp
+src/provider/copilot/copilot_oauth.cpp
+src/provider/kimi/kimi_oauth.cpp
+src/mcp/bridge.cpp
+src/mcp/http_server.cpp
+src/mcp/oauth.cpp
+src/tool/mcp_tools_bridge.cpp
+src/rag/rag_host.cpp
+src/util/modelsdev.cpp
+src/util/update.cpp

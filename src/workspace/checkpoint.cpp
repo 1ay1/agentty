@@ -229,7 +229,7 @@ bool current_paths(std::vector<std::string>& out) {
 
 } // namespace
 
-bool in_git_repo() { return repo().in_repo; }
+bool in_git_repo(Io) { return repo().in_repo; }
 
 // Set true once repo() has been forced at least once (by the startup
 // prewarm OR by any earlier blocking caller). The submit path reads this to
@@ -240,7 +240,7 @@ namespace {
 std::atomic<bool> g_repo_ready{false};
 }
 
-std::optional<bool> in_git_repo_if_ready() {
+std::optional<bool> in_git_repo_if_ready(Io) {
     if (!g_repo_ready.load(std::memory_order_acquire)) return std::nullopt;
     return repo().in_repo;   // cache already built: this is a pure field read
 }

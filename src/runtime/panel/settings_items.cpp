@@ -403,7 +403,7 @@ std::vector<std::string> starter_segments(const std::string& name) {
 
 } // namespace
 
-AddResult add_plugin_from_line(const std::string& line) {
+AddResult add_plugin_from_line(Io io, const std::string& line) {
     auto tok = split_ws(line);
     // Pull an optional --project flag from anywhere in the line; the rest is
     // the <name> <recipe> [args…] spec.
@@ -485,8 +485,8 @@ AddResult add_plugin_from_line(const std::string& line) {
         spec.args = std::move(rest);
     }
 
-    const auto path = tools::plugin::config_path(project);
-    switch (tools::plugin::add_server(path, spec, /*force=*/false)) {
+    const auto path = tools::plugin::config_path(io, project);
+    switch (tools::plugin::add_server(io, path, spec, /*force=*/false)) {
         case tools::plugin::EditResult::Ok:
             return {true, "added " + std::string{project ? "project " : ""}
                           + "plugin '" + name + "'"};
@@ -499,7 +499,7 @@ AddResult add_plugin_from_line(const std::string& line) {
     }
 }
 
-AddResult create_starter(Category cat, const std::string& name) {
+AddResult create_starter(Io, Category cat, const std::string& name) {
     // Validate AND split on ':' into safe path segments. The command/agent
     // loaders map a `:`-namespaced name to a SUBDIRECTORY (git:fixup ->
     // git/fixup.md), so writing the colon verbatim into one filename both

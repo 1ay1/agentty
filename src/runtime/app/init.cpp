@@ -45,7 +45,9 @@ std::pair<Model, Cmd> init() {
     Model m;
     // The launch environment, captured once. Every reducer reads m.env;
     // none calls getenv (enforced by the elm_purity lint).
-    m.env = read_launch_env();
+    // init() is the host's one launch read: env, settings, credentials.
+    const Io io = IoAccess::grant();
+    m.env = read_launch_env(io);
     // Anchor the calendar to the steady clock, once. Every fold derives its
     // wall time (Model::wall_now) from this pair and the step time jaal
     // hands it, so no reducer reads system_clock. init() runs before the
@@ -56,7 +58,7 @@ std::pair<Model, Cmd> init() {
     m.now          = m.steady_epoch;
     // A custom --provider spec main() parked for persist-on-success. Read once
     // here; from now on the Model owns it.
-    m.ui.unproven_spec = provider::take_unproven_spec_at_launch();
+    m.ui.unproven_spec = provider::take_unproven_spec_at_launch(io);
     // The active provider. main() parsed the launch spec and installed it in
     // the process global before handing the program to jaal; this is the one
     // read of that global the Model makes. From here on the Model owns it and
@@ -77,12 +79,11 @@ std::pair<Model, Cmd> init() {
     m.s.threads_loading  = true;
     m.d.available_models = seed_models();
 
-    auto settings = deps().load_settings();
+    auto settings = deps(io).load_settings();
     // Credential state outside the record (token files, env, accounts),
     // read once here like the launch env; later changes arrive as
     // AuthViewLoaded.
-    // init() is the host's one launch read, so it may do IO.
-    m.d.auth = provider::load_auth_view(IoAccess::grant(), settings);
+    m.d.auth = provider::load_auth_view(io, settings);
 
     // Bake the seeded rows through the SAME ladder the refresh path uses.
     //
@@ -239,17 +240,17 @@ std::pair<Model, Cmd> init() {
     // Unconditional here: the paths that used to do it were both conditional,
     // so a user with pins from a previous session whose catalog fetch failed
     // delegated on the auto-router's pick instead.
-    tools::subagent::set_smart(m.d.smart);
+    tools::subagent::set_smart(io, m.d.smart);
     // The provider those pins are scoped to. Without it a pin rehydrated from
     // settings would be honoured under whatever provider happens to be active
     // at launch, which is exactly the cross-provider dispatch the scoping is
     // there to prevent.
-    tools::subagent::set_provider(detail::active_provider_id(m));
+    tools::subagent::set_provider(io, detail::active_provider_id(m));
     // Same reasoning for the candidate pool the auto-router ranks over: it is
     // otherwise only ever set from the ModelsLoaded arm, so a failed fetch
     // left workers ranking over an EMPTY list. Seed it with what we have now
     // (the bundled/seeded catalog); ModelsLoaded refreshes it on success.
-    tools::subagent::set_candidates(m.d.available_models);
+    tools::subagent::set_candidates(io, m.d.available_models);
     // …and the PARENT model, for the same reason. main() installs whatever
     // settings.json held, but the cross-provider guard above can REJECT that
     // id (a leftover "qwen2.5-coder:7b" relaunched on Anthropic) and fall back
@@ -257,7 +258,7 @@ std::pair<Model, Cmd> init() {
     // a write-role worker — which inherits the parent model — dispatches the
     // exact id the UI just refused to use. init() is the single source of
     // truth for the resolved model; make the router agree with it.
-    tools::subagent::set_model(m.d.model_id.value);
+    tools::subagent::set_model(io, m.d.model_id.value);
     // Review UI: whether the persistent changes strip renders after edits.
     m.d.show_changes_strip = settings.show_changes_strip;
     m.d.show_reasoning     = settings.show_reasoning;
@@ -293,7 +294,7 @@ std::pair<Model, Cmd> init() {
         for (const auto& fav : settings.favorite_models)
             if (mi.id == fav) mi.favorite = true;
 
-    m.d.current.id  = deps().new_thread_id();
+    m.d.current.id  = deps(io).new_thread_id();
     m.s.status = "ready";
 
     // Deferred startup Cmds (declared early: the first-run branch below may
@@ -484,10 +485,10 @@ std::pair<Model, Cmd> init() {
 
     // Is the workspace a git repo? Two `git rev-parse` spawns, so off the
     // reducer; the answer comes back as RepoProbed and lives on the Model.
-    cmds.push_back(Cmd::task_isolated(
-        [](maya::Sink<Msg> out, std::stop_token st) {
+    cmds.push_back(cmd::io_task_isolated(
+        [](Io io, maya::Sink<Msg> out, std::stop_token st) {
             workspace::prewarm_repo_info(st);
-            if (auto r = workspace::in_git_repo_if_ready())
+            if (auto r = workspace::in_git_repo_if_ready(io))
                 out.send(Msg{RepoProbed{*r}});
         }));
 

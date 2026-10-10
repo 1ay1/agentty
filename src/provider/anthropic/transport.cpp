@@ -557,7 +557,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // but finish_stream needs it to distinguish a user cancel from a transport
     // error at the post-loop.
     http::CancelTokenPtr cancel_for_end = cancel;
-    auto result = http::default_client().stream(hreq, std::move(handler),
+    auto result = http::default_client(::agentty::IoAccess::grant()).stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
     // Uniform end-of-turn pair via the scaffold; thinking_deltas appended so
@@ -636,7 +636,7 @@ std::vector<Msg> parse_sse_for_test(
     return out;
 }
 
-std::vector<ModelInfo> list_models(const AuthHeader& auth) {
+std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth) {
     const bool is_oauth = std::holds_alternative<BearerHeader>(auth);
 
     // Claude Code surfaces a 1M-context `[1m]` VARIANT per suffix-capable
@@ -678,7 +678,7 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
     tos.connect = std::chrono::milliseconds(5'000);
     tos.total   = std::chrono::milliseconds(10'000);
 
-    auto resp = http::default_client().send(hreq, tos);
+    auto resp = http::default_client(io).send(hreq, tos);
     if (!resp || resp->status != 200) return seed();
 
     try {

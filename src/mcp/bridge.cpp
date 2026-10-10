@@ -1136,7 +1136,7 @@ std::vector<tools::ToolDef> passthrough_tools() {
                 req.body      = args.is_null() ? "{}" : args.dump();
                 req.headers.push_back({"content-type", "application/json"});
                 req.headers.push_back({"accept", "application/json"});
-                auto res = http::default_client().send(req);
+                auto res = http::default_client(::agentty::IoAccess::grant()).send(req);
                 if (!res)
                     return std::unexpected(tools::ToolError::subprocess(
                         "passthrough '" + name + "' → " + url + " failed: "

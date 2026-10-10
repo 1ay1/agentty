@@ -1313,7 +1313,7 @@ TEST_CASE("bundled model seed when no key / fetch empty") {
 
     for (const char* id : {"xai", "mistral", "gemini", "fireworks",
                            "deepseek", "groq", "cerebras", "together"}) {
-        auto models = P::list_models_for(P::parse_selection(id), none);
+        auto models = P::list_models_for(::agentty::IoAccess::grant(), P::parse_selection(id), none);
         CHECK(!models.empty());
         // The seed stamps the provider label so the picker groups it right.
         if (!models.empty())
@@ -1322,12 +1322,12 @@ TEST_CASE("bundled model seed when no key / fetch empty") {
 
     // A couple of concrete slugs land where expected (newest first).
     {
-        auto xai = P::list_models_for(P::parse_selection("xai"), none);
+        auto xai = P::list_models_for(::agentty::IoAccess::grant(), P::parse_selection("xai"), none);
         CHECK(!xai.empty());
         if (!xai.empty()) CHECK(xai.front().id.value == "grok-4.6");
     }
     {
-        auto gem = P::list_models_for(P::parse_selection("gemini"), none);
+        auto gem = P::list_models_for(::agentty::IoAccess::grant(), P::parse_selection("gemini"), none);
         CHECK(!gem.empty());
         if (!gem.empty()) CHECK(gem.front().id.value == "gemini-2.5-pro");
     }
@@ -1335,7 +1335,7 @@ TEST_CASE("bundled model seed when no key / fetch empty") {
     // Providers WITHOUT a seed (openrouter, custom hosts, locals) legitimately
     // stay empty with no key rather than showing guessed models.
     {
-        auto orr = P::list_models_for(P::parse_selection("openrouter"), none);
+        auto orr = P::list_models_for(::agentty::IoAccess::grant(), P::parse_selection("openrouter"), none);
         CHECK(orr.empty());
     }
 }
@@ -1599,10 +1599,10 @@ TEST_CASE("test_build_request_headers") {
 
     // parse_selection stamps the session override onto the endpoint (and an
     // empty override leaves it clear).
-    agentty::provider::set_custom_auth_header("Api-Key");
+    agentty::provider::set_custom_auth_header(::agentty::IoAccess::grant(), "Api-Key");
     auto sel = agentty::provider::parse_selection("my.host:9000");
     CHECK(sel.openai_endpoint.auth_header_name == "Api-Key");
-    agentty::provider::set_custom_auth_header("");
+    agentty::provider::set_custom_auth_header(::agentty::IoAccess::grant(), "");
     sel = agentty::provider::parse_selection("my.host:9000");
     CHECK(sel.openai_endpoint.auth_header_name.empty());
 }
@@ -2311,8 +2311,8 @@ TEST_CASE("live: force_probe asks even when the address says otherwise") {
     // The stub at /tmp/fp_check.py logs each route; this asserts the
     // OBSERVABLE consequence instead — force must never return a smaller
     // window, and must still return one when the row declares nothing.
-    auto with    = oai::list_models(auth::AuthHeader{}, ep, /*force=*/true);
-    auto without = oai::list_models(auth::AuthHeader{}, ep, /*force=*/false);
+    auto with    = oai::list_models(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, /*force=*/true);
+    auto without = oai::list_models(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, /*force=*/false);
     REQUIRE(!with.empty());
     REQUIRE(with.size() == without.size());
     for (std::size_t i = 0; i < with.size(); ++i)
@@ -2345,7 +2345,7 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
     // routes regardless of what the address looks like, so a self-hosted
     // server on a public-looking name is detected rather than configured.
     const bool force = std::getenv("AGENTTY_LIVE_FORCE_PROBE") != nullptr;
-    auto models = oai::list_models(auth::AuthHeader{}, ep, force);
+    auto models = oai::list_models(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, force);
     REQUIRE(!models.empty());
 
     const std::string m{mode};
@@ -2394,9 +2394,9 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
 
         // One model resident at a time. The live probe only answers for the
         // loaded one, and never loads anything itself.
-        CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "qwen3-coder") == 32768);
-        CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "gemma3:27b") == 0);
-        CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "qwen3-coder") == 32768);
+        CHECK(oai::probe_loaded_window(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, "qwen3-coder") == 32768);
+        CHECK(oai::probe_loaded_window(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, "gemma3:27b") == 0);
+        CHECK(oai::probe_loaded_window(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, "qwen3-coder") == 32768);
 
         // A request for the other model swaps it in (router autoload).
         {
@@ -2408,12 +2408,12 @@ TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
             r.plaintext = true;
             r.headers   = {{"content-type", "application/json"}};
             r.body      = R"({"model":"gemma3:27b","messages":[]})";
-            auto resp = agentty::http::default_client().send(r, {});
+            auto resp = agentty::http::default_client(::agentty::IoAccess::grant()).send(r, {});
             REQUIRE(resp);
             REQUIRE(resp->status == 200);
         }
-        CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "gemma3:27b") == 131072);
-        CHECK(oai::probe_loaded_window(auth::AuthHeader{}, ep, "qwen3-coder") == 0);
+        CHECK(oai::probe_loaded_window(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, "gemma3:27b") == 131072);
+        CHECK(oai::probe_loaded_window(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, "qwen3-coder") == 0);
 
         // ── Capability, not window ──────────────────────────────────
         // Same asymmetry as the window above, for the same reason. On a

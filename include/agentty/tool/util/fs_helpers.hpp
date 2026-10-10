@@ -34,6 +34,7 @@
 #include <string_view>
 
 #include "agentty/tool/registry.hpp"   // ToolError + factories
+#include "agentty/util/io.hpp"
 
 namespace agentty::tools::util {
 
@@ -94,7 +95,7 @@ struct NormalizedPath {
 // fast path of "model casually `read`s ~/.ssh/id_rsa or `write`s to
 // /etc/hosts". Pair with bash gating + a future OS-native sandbox
 // (sandbox-exec / bwrap / firejail) for a defense-in-depth story.
-void set_workspace_root(fs::path root);
+void set_workspace_root(Io, fs::path root);
 
 [[nodiscard]] const fs::path& workspace_root();
 
@@ -179,7 +180,7 @@ make_workspace_path_checked(std::string_view raw, std::string_view tool_name);
 //
 // Registered by the skills scanner at discovery time. Idempotent;
 // bounded by the skill cap (≤ 64×2 roots per scope).
-void allow_read_root(const fs::path& root);
+void allow_read_root(Io, const fs::path& root);
 
 // True when `target` sits under a registered read-allowlist root
 // (post-canonicalisation, symlink-escape checked like the workspace).

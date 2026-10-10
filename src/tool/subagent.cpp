@@ -31,32 +31,32 @@ Config current() {
     return cfg().read([](const Config& c) { return c; });
 }
 
-void set_auth(auth::AuthHeader auth) {
+void set_auth(Io, auth::AuthHeader auth) {
     cfg().with([](Config& c, auth::AuthHeader a) {
         if (c.installed) c.auth = std::move(a);
     }, std::move(auth));
 }
 
-void set_model(std::string model) {
+void set_model(Io, std::string model) {
     if (model.empty()) return;
     // Only meaningful once a config exists; leave `installed` untouched.
     cfg().with([](Config& c, std::string m) { c.model = std::move(m); },
                std::move(model));
 }
 
-void set_candidates(std::vector<ModelInfo> candidates) {
+void set_candidates(Io, std::vector<ModelInfo> candidates) {
     cfg().with([](Config& c, std::vector<ModelInfo> v) {
         if (c.installed) c.candidates = std::move(v);
     }, std::move(candidates));
 }
 
-void set_smart(smart::RoleConfig smart) {
+void set_smart(Io, smart::RoleConfig smart) {
     cfg().with([](Config& c, smart::RoleConfig v) {
         if (c.installed) c.smart = std::move(v);
     }, std::move(smart));
 }
 
-void set_provider(std::string provider) {
+void set_provider(Io, std::string provider) {
     cfg().with([](Config& c, std::string p) {
         if (c.installed) c.provider = std::move(p);
     }, std::move(provider));

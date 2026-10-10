@@ -71,8 +71,8 @@ struct Host : maya::terminal_host<P> {
     //
     // The payloads were copied when the reducer built the effect, so there
     // is nothing here borrowing from a Model that has since moved on.
-    void handle(SaveThread e)   { persistence::save_thread(e.thread); }
-    void handle(DeleteThread e) { persistence::delete_thread(e.id); }
+    void handle(SaveThread e)   { persistence::save_thread(io_, e.thread); }
+    void handle(DeleteThread e) { persistence::delete_thread(io_, e.id); }
 
     // Publish the subagent router's view (see store_fx.hpp PublishSubagent).
     // A mutex-guarded copy into the registry — microseconds — so it runs here
@@ -81,15 +81,15 @@ struct Host : maya::terminal_host<P> {
     // Model had when it was dispatched, never a stale one.
     void handle(PublishSubagent e) {
         namespace sa = tools::subagent;
-        sa::set_model(std::move(e.model));
-        sa::set_provider(std::move(e.provider));
-        sa::set_smart(std::move(e.smart));
-        sa::set_candidates(std::move(e.candidates));
+        sa::set_model(io_, std::move(e.model));
+        sa::set_provider(io_, std::move(e.provider));
+        sa::set_smart(io_, std::move(e.smart));
+        sa::set_candidates(io_, std::move(e.candidates));
     }
 
     // Publish the Model's active provider (see store_fx.hpp PublishSelection).
     // The one writer of the process-global selection after launch.
-    void handle(PublishSelection e) { provider::select(std::move(e.selection)); }
+    void handle(PublishSelection e) { provider::select(io_, std::move(e.selection)); }
 
     // Credentials (see store_fx.hpp). Small local reads/writes, run in order
     // on the loop thread so the next fold's stream launch sees them.
@@ -97,14 +97,14 @@ struct Host : maya::terminal_host<P> {
     // InstallAuth, so the Model's view follows it without each reducer
     // having to remember a LoadAuthView.
     std::optional<Msg> handle(InstallAuth e) {
-        update_auth(e.clear ? auth::AuthHeader{}
+        update_auth(io_, e.clear ? auth::AuthHeader{}
                             : provider::credentials::resolve(io_, e.provider));
         return handle(LoadAuthView{});
     }
     std::optional<Msg> handle(LoadAuthView) {
         // Through the settings seam, so a key written by an AccountOp in
         // this same batch is seen.
-        auto s = deps().load_settings();
+        auto s = deps(io_).load_settings();
         auto view = provider::load_auth_view(io_, s);
         return Msg{msg::LoginMsg{AuthViewLoaded{
             std::move(view), std::move(s.provider_keys)}}};
@@ -157,7 +157,7 @@ struct Host : maya::terminal_host<P> {
     // This is the one effect that goes through Deps rather than straight to
     // persistence, and it is worth the asymmetry: the alternative is a
     // second write-behind implementation living in the host.
-    void handle(SaveSettings e) { deps().save_settings(e.settings); }
+    void handle(SaveSettings e) { deps(io_).save_settings(e.settings); }
 
     void handle(WriteFile e) {
         // Best-effort, exactly as the Deps seam was: diff-review reject

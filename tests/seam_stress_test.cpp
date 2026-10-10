@@ -90,7 +90,7 @@ void selection_race() {
     }
 
     sync.arrive_and_wait();
-    for (int i = 0; i < 4000; ++i) select((i & 1) ? a : b);
+    for (int i = 0; i < 4000; ++i) select(::agentty::IoAccess::grant(), (i & 1) ? a : b);
     stop.store(true, std::memory_order_relaxed);
     for (auto& t : readers) t.join();
 
@@ -128,7 +128,7 @@ void registry_race() {
     }
 
     sync.arrive_and_wait();
-    for (int i = 0; i < 2000; ++i) invalidate_mcp_catalog();
+    for (int i = 0; i < 2000; ++i) invalidate_mcp_catalog(::agentty::IoAccess::grant());
     stop.store(true, std::memory_order_relaxed);
     for (auto& t : readers) t.join();
 

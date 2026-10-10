@@ -177,7 +177,7 @@ int main() {
     {
         provider::Selection sel;
         sel.kind = provider::Kind::OpenAI;
-        provider::select(sel);
+        provider::select(::agentty::IoAccess::grant(), sel);
     }
 
     // ── A. Tool-only to the cap: never write prose. ─────────────────────

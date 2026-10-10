@@ -57,7 +57,7 @@ void seed_legacy(const Thread& t) {
     nlohmann::json msgs = nlohmann::json::array();
     for (const auto& m : t.messages) msgs.push_back(persistence::message_to_json(m));
     j["messages"] = std::move(msgs);
-    persistence::write_json_atomic(legacy_path(t), j.dump(2));
+    persistence::write_json_atomic(::agentty::IoAccess::grant(), legacy_path(t), j.dump(2));
 }
 
 void wipe(const Thread& t) {
@@ -75,8 +75,8 @@ TEST_CASE("migration: saving a legacy thread moves it to the log") {
     REQUIRE(fs::exists(legacy_path(t)));
     REQUIRE_FALSE(fs::exists(log_path(t)));
 
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
     CHECK_MESSAGE(fs::exists(log_path(t)),
                   "the save must write the log");
@@ -84,7 +84,7 @@ TEST_CASE("migration: saving a legacy thread moves it to the log") {
                   "and retire the legacy document once it verifies");
 
     // The thread must come back intact through the normal store seam.
-    auto back = persistence::load_thread_by_id(t.id);
+    auto back = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(back.has_value());
     CHECK(back->id.value  == t.id.value);
     CHECK(back->title     == t.title);
@@ -102,12 +102,12 @@ TEST_CASE("migration: a thread with no legacy file just writes the log") {
     auto t = make_thread("mig_fresh", 5);
     wipe(t);
 
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
     CHECK(fs::exists(log_path(t)));
     CHECK_FALSE(fs::exists(legacy_path(t)));
-    auto back = persistence::load_thread_by_id(t.id);
+    auto back = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(back.has_value());
     CHECK(back->messages.size() == t.messages.size());
     wipe(t);
@@ -120,8 +120,8 @@ TEST_CASE("migration: saving again is idempotent") {
     wipe(t);
     seed_legacy(t);
 
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
     REQUIRE(fs::exists(log_path(t)));
 
     t.messages.push_back([] {
@@ -131,10 +131,10 @@ TEST_CASE("migration: saving again is idempotent") {
         m.text = "one more turn";
         return m;
     }());
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
-    auto back = persistence::load_thread_by_id(t.id);
+    auto back = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(back.has_value());
     CHECK_MESSAGE(back->messages.size() == 11u,
                   "the second save must replace history, not append to it");
@@ -156,10 +156,10 @@ TEST_CASE("migration: Smart Mode routing cards are not persisted") {
     t.messages.insert(t.messages.begin() + 3, card);
     wipe(t);
 
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
-    auto back = persistence::load_thread_by_id(t.id);
+    auto back = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(back.has_value());
     CHECK_MESSAGE(back->messages.size() == 6u,
                   "the routing card must not be written to disk");
@@ -187,14 +187,14 @@ TEST_CASE("migration: an unwritable log keeps the legacy document") {
     fs::create_directories(log_path(t), ec);
     REQUIRE(fs::is_directory(log_path(t)));
 
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
     CHECK_MESSAGE(fs::exists(legacy_path(t)),
                   "a failed log write must leave the legacy document alone");
 
     // And the thread still loads, through the legacy path.
-    auto back = persistence::load_thread_by_id(t.id);
+    auto back = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(back.has_value());
     CHECK(back->messages.size() == t.messages.size());
 
@@ -205,16 +205,16 @@ TEST_CASE("migration: an unwritable log keeps the legacy document") {
 TEST_CASE("migration: deleting a migrated thread removes every file") {
     auto t = make_thread("mig_delete", 4);
     wipe(t);
-    persistence::save_thread(t);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
     REQUIRE(fs::exists(log_path(t)));
 
-    persistence::delete_thread(t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
 
     CHECK_FALSE(fs::exists(log_path(t)));
     CHECK_FALSE(fs::exists(persistence::threads_dir() / (t.id.value + ".ofs")));
     CHECK_FALSE(fs::exists(persistence::threads_dir() / (t.id.value + ".meta.json")));
-    CHECK_FALSE(persistence::load_thread_by_id(t.id).has_value());
+    CHECK_FALSE(persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id).has_value());
 }
 
 TEST_CASE("migration: the picker lists a migrated thread exactly once") {
@@ -224,10 +224,10 @@ TEST_CASE("migration: the picker lists a migrated thread exactly once") {
     auto a = make_thread("mig_listed", 3);
     wipe(a);
     seed_legacy(a);
-    persistence::save_thread(a);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), a);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant());
 
-    const auto all = persistence::load_all_threads();
+    const auto all = persistence::load_all_threads(::agentty::IoAccess::grant());
     std::size_t seen = 0;
     for (const auto& t : all) if (t.id.value == a.id.value) ++seen;
     CHECK_MESSAGE(seen == 1u, "a migrated thread must be listed exactly once");

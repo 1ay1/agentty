@@ -34,6 +34,7 @@
 #include "agentty/provider/openai/endpoint.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/runtime/msg.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider::openai {
 
@@ -116,7 +117,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 // host and a few extra milliseconds buy the difference between a real
 // window and a guess. Routine refreshes leave it false so a hosted API
 // never pays for routes it does not serve.
-[[nodiscard]] std::vector<ModelInfo> list_models(const AuthHeader& auth,
+[[nodiscard]] std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth,
                                                  const Endpoint& endpoint,
                                                  bool force_probe = false);
 
@@ -158,7 +159,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink,
 // but only returns a measured number. Never loads a model as a side effect.
 // Meant for re-checking one model after a switch or a turn, when a router
 // may have swapped which model is resident.
-[[nodiscard]] int probe_loaded_window(const AuthHeader& auth,
+[[nodiscard]] int probe_loaded_window(Io io, const AuthHeader& auth,
                                       const Endpoint& endpoint,
                                       const std::string& model_id);
 
@@ -192,7 +193,7 @@ void install_probe_hosts(std::set<std::string> hosts);
 // /v1/chat/completions works fine (#73). One GET of /api/tags, cached per
 // host:port. Unreachable counts as native, so a busy daemon is not
 // downgraded.
-[[nodiscard]] bool endpoint_speaks_native(const Endpoint& ep);
+[[nodiscard]] bool endpoint_speaks_native(Io io, const Endpoint& ep);
 
 // ── Custom-host dialect probe ───────────────────────────────────
 // One call answers "what is actually running at this endpoint?" before a
@@ -254,7 +255,7 @@ struct HostProbe {
     // and any future CLI surface read identically.
     [[nodiscard]] std::string explain() const;
 };
-[[nodiscard]] HostProbe probe_host(const AuthHeader& auth,
+[[nodiscard]] HostProbe probe_host(Io io, const AuthHeader& auth,
                                    const Endpoint& endpoint);
 
 // ── The request body, as a pure function ─────────────────────────────────

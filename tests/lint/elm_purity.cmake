@@ -45,35 +45,29 @@ set(ban_clock       "(steady_clock|system_clock|high_resolution_clock)::now[ \t]
 # The theme detectors read TERM/COLORTERM/COLORFGBG themselves, and the
 # settings helpers read AGENTTY_* vars, so they are env reads too: use
 # Model::env.terminal / Model::env.settings.
-set(ban_env         "(std::)?(getenv|setenv|unsetenv|secure_getenv)[ \t]*\\(|detect_(tier|polarity)[ \t]*\\(|ui_prefs::detect[ \t]*\\(|terminal_is_dumb[ \t]*\\(|registry::read_env[ \t]*\\(|apply_env[ \t]*\\([^,)]*\\)")
+set(ban_env         "(std::)?(getenv|setenv|unsetenv|secure_getenv)[ \t]*\\(|detect_(tier|polarity)[ \t]*\\(|ui_prefs::detect[ \t]*\\(|terminal_is_dumb[ \t]*\\(")
 # fileio: an operation that touches the disk. NOT the bare `std::filesystem::`
 # prefix: `std::filesystem::path` is a value type (string manipulation, no
 # syscall), and flagging it reported a reducer composing a path as IO. Only
 # the functions that actually read or write the filesystem count.
 set(ban_fileio      "std::(if|of|f)stream|(fs|std::filesystem)::(remove|rename|create_director|copy|exists|is_regular_file|is_directory|file_size|last_write_time|directory_iterator|recursive_directory_iterator|status|read_symlink|canonical|weakly_canonical|temp_directory_path|current_path|space|equivalent)\\b")
 set(ban_subprocess  "run_command|::system[ \t]*\\(|popen[ \t]*\\(")
-set(ban_net         "prewarm_active_provider|http::default_client|dial_new")
-set(ban_global      "provider::select[ \t]*\\(|tools::(subagent::set_|skills::(reset_activations|note_activated)|invalidate_mcp_catalog|plugin::(set_|remove_|approve_|add_|update_)|util::allow_read_root)")
-# Credentials and accounts are not listed: those functions take an agentty::Io,
-# which a reducer never has, so the compiler rejects the call (util/io.hpp).
-set(ban_auth        "auth::random_urlsafe")
+# Not listed: the network, credentials, accounts, persistence, provider and
+# subagent setters, plugin edits, the skills/commands/hooks lookups, git
+# probing and the env helpers. Those take an agentty::Io, which a reducer
+# never has, so the compiler rejects the call (util/io.hpp). What stays here
+# is the raw std/OS calls a token can't be attached to.
 set(ban_static      "^[ \t]+static[ \t]+(std::|auto[ \t]|bool[ \t]|int[ \t]|long[ \t]|unsigned[ \t]|double[ \t]|float[ \t]|size_t[ \t])[^(]*[=;{][ \t]*$")
 set(ban_thread      "std::j?thread([^_:]|$)|\\.detach\\(\\)|std::async[^_]")
 # tty: asking the terminal directly. The size arrives as a Msg
 # (TerminalResized, from maya's on_resize) and lives in Model::ui.
 set(ban_tty         "platform::(query_terminal_size|stdout_handle|stdin_handle)|isatty[ \t]*\\(|ioctl[ \t]*\\(")
-# diskhelper: helpers that LOOK like plain functions but write the disk,
-# found only by reading them. A name lint can't see through a call, so the
-# known ones are named here.
-set(ban_diskhelper  "(add_plugin_from_line|create_starter)[ \t]*\\(")
 # disk_lookup: helpers that walk the disk or a secure store to answer a
 # lookup. Reducers read the answer from the Model instead: m.ui.library
 # (skills, approvals, commands, hooks), m.ui.git_repo, m.env (embed
 # defaults, user root). A worker that needs them gets them in a cmd::.
-# skills/commands/hooks lookups and rag_embed_status take an Io now, so they
-# are checked by the compiler, not listed here.
-set(ban_disk_lookup "skills::trust_of[ \t]*\\([^,)]*\\)|workspace::in_git_repo(_if_ready)?[ \t]*\\(|eb::apply_env[ \t]*\\(|skills_panel::scan[ \t]*\\([ \t]*\\)|take_unproven_spec[ \t]*\\(|config_path[ \t]*\\([^,)]*\\)[^,]|util::(user_root|home_dir)[ \t]*\\(|shared_retriever[ \t]*\\(")
-set(ban_names clock env fileio subprocess net global auth static thread tty diskhelper disk_lookup)
+set(ban_disk_lookup "util::(user_root|home_dir)[ \t]*\\(")
+set(ban_names clock env fileio subprocess static thread tty disk_lookup)
 
 # Parse the allowlist: `path: name name ...`, `#` comments.
 file(STRINGS ${ALLOW} allow_lines)

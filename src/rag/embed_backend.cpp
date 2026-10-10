@@ -230,7 +230,7 @@ std::string describe(const EmbedConfig& c) {
 }
 
 // ── Environment ──────────────────────────────────────────────────────────
-void apply_env(EmbedConfig& c) {
+void apply_env(Io, EmbedConfig& c) {
     // Legacy names first so the new ones win when both are present.
     if (const char* m = env_or_null("AGENTTY_EMBED_MODEL")) c.model = m;
     if (const char* h = env_or_null("AGENTTY_OLLAMA_HOST")) {

@@ -880,6 +880,9 @@ struct Model {
         // agentty's per-user root (~/.agentty, or $AGENTTY_HOME), resolved
         // once. Paths the reducers name (the user mcp.json) derive from it.
         std::string user_root;
+        // AGENTTY_RAG_PROACTIVE, if set: forces proactive injection on/off
+        // for one run, over the saved RAG setting.
+        std::optional<bool> rag_proactive_override;
 
         // Where paths are shown relative to: the launch cwd ("src/x.cpp")
         // and the home dir ("~/notes"). Captured once so a tool card names a

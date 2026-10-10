@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
     // real session performs.
     const char* thread_path = argc > 4 ? argv[4] : std::getenv("AGENTTY_THREAD");
     if (thread_path && *thread_path) {
-        auto t = persistence::load_thread_file(thread_path);
+        auto t = persistence::load_thread_file(::agentty::IoAccess::grant(), thread_path);
         if (t) {
             m.d.current = std::move(*t);
             std::printf("loaded %s: %zu messages\n",

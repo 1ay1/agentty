@@ -96,9 +96,9 @@ TEST_CASE("settings: a stale instance does not revert another's theme") {
     {
         agentty::store::Settings s;
         s.ui.theme = "Harper";
-        ps::save_settings(s);
+        ps::save_settings(::agentty::IoAccess::grant(), s);
     }
-    auto a_view = ps::load_settings();
+    auto a_view = ps::load_settings(::agentty::IoAccess::grant());
     REQUIRE(a_view.ui.theme == "Harper");
 
     // Instance B (another process) picks a new theme and saves.
@@ -111,7 +111,7 @@ TEST_CASE("settings: a stale instance does not revert another's theme") {
     // Now A saves an UNRELATED setting, from its startup-era record. Before
     // the merge this wrote ui.theme=Harper straight back over B's pick.
     a_view.model_id = agentty::ModelId{"gpt-5"};
-    ps::save_settings(a_view);
+    ps::save_settings(::agentty::IoAccess::grant(), a_view);
 
     const auto after = read_raw(root);
     CHECK(after["ui"]["theme"] == "Sumi Phosphor");   // B's edit survived
@@ -129,13 +129,13 @@ TEST_CASE("settings: the writer's OWN edit still wins over a stale disk") {
     {
         agentty::store::Settings s;
         s.ui.theme = "Harper";
-        ps::save_settings(s);
+        ps::save_settings(::agentty::IoAccess::grant(), s);
     }
-    auto mine = ps::load_settings();
+    auto mine = ps::load_settings(::agentty::IoAccess::grant());
 
     // This process changes the theme deliberately.
     mine.ui.theme = "Sumi Linen";
-    ps::save_settings(mine);
+    ps::save_settings(::agentty::IoAccess::grant(), mine);
 
     CHECK(read_raw(root)["ui"]["theme"] == "Sumi Linen");
 
@@ -155,14 +155,14 @@ TEST_CASE("settings: reasoning off persists as off, not as unset") {
     // the sentinel the fix introduced. Writing Effort::None through the wire
     // spelling would give "", which is exactly the bug.
     s.effort = std::string{agentty::effort_to_wire_setting(agentty::Effort::None)};
-    ps::save_settings(s);
+    ps::save_settings(::agentty::IoAccess::grant(), s);
 
     const auto raw = read_raw(root);
     REQUIRE(raw.contains("effort"));
     CHECK(raw["effort"].get<std::string>() == "none");   // not ""
 
     // And it survives the round trip as off rather than degrading to auto.
-    const auto back = ps::load_settings();
+    const auto back = ps::load_settings(::agentty::IoAccess::grant());
     CHECK(agentty::effort_from_wire(back.effort) == agentty::Effort::None);
 
     fs::remove_all(root);

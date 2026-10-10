@@ -145,7 +145,7 @@ bool clear_credentials(Io);
 [[nodiscard]] bool anthropic_signed_in(Io);
 
 // ── PKCE helpers (exposed for tests) ─────────────────────────────────────
-[[nodiscard]] std::string random_urlsafe(std::size_t n);
+[[nodiscard]] std::string random_urlsafe(Io, std::size_t n);
 [[nodiscard]] std::string base64url_no_pad(const unsigned char* data, std::size_t len);
 [[nodiscard]] std::string sha256_hex(const std::string& s);
 [[nodiscard]] std::string code_challenge_s256(const std::string& verifier);

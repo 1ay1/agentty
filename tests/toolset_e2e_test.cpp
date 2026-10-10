@@ -107,7 +107,7 @@ int main() {
     ::unsetenv("AGENTTY_MCP_CONFIG");   // no external MCP servers
     ::unsetenv("AGENTTY_DOCS_DIR");
 
-    tools::util::set_workspace_root(root);
+    tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
 
     // ── Registry completeness: every catalog tool must be advertised. ──
     {
@@ -525,11 +525,11 @@ int main() {
         // Project memory must still anchor to the process cwd.
         const auto prior_cwd = fs::current_path();
         fs::current_path(root);
-        tools::util::set_workspace_root("/");
+        tools::util::set_workspace_root(::agentty::IoAccess::grant(), "/");
         check(tools::memory::path_for(tools::memory::Scope::Project)
                   == root / ".agentty" / "memory.jsonl",
               "remember: project scope uses cwd under --workspace /");
-        tools::util::set_workspace_root(root);
+        tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
         fs::current_path(prior_cwd);
 
         const auto* remember_def = tools::find("remember");
@@ -833,11 +833,11 @@ int main() {
 
         // A narrowed workspace inside a parent repository must not let Git
         // rediscover that parent and expose/commit sibling files.
-        tools::util::set_workspace_root(root / "src");
+        tools::util::set_workspace_root(::agentty::IoAccess::grant(), root / "src");
         auto escaped = run("git_status", {{"path", (root / "src").string()}});
         check(!escaped && escaped.error().kind == tools::ErrorKind::OutOfWorkspace,
               "git_status: refuses repository rooted above workspace");
-        tools::util::set_workspace_root(root);
+        tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
 
         write_file(root / "src" / "hello.txt", "changed content\n");
 

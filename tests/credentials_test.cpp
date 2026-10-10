@@ -55,9 +55,9 @@ struct TmpHome {
 };
 
 void set_key(const std::string& provider, const std::string& key) {
-    auto s = persistence::load_settings();
+    auto s = persistence::load_settings(::agentty::IoAccess::grant());
     s.provider_keys[provider] = key;
-    persistence::save_settings(s);
+    persistence::save_settings(::agentty::IoAccess::grant(), s);
 }
 
 } // namespace

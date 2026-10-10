@@ -71,7 +71,7 @@ TEST_CASE("skills engine") {
     unsetenv("AGENTTY_HOME");   // fall back to $HOME/.agentty (this test's home)
 #endif
     fs::current_path(work);
-    util::set_workspace_root(work);
+    util::set_workspace_root(::agentty::IoAccess::grant(), work);
 
     // ── Stage 1: discovery across roots + precedence ─────────────────
     // user native
@@ -504,7 +504,7 @@ TEST_CASE("skills catalog cap: AGENTTY_MAX_SKILLS override") {
     unsetenv("AGENTTY_HOME");
 #endif
     fs::current_path(work);
-    util::set_workspace_root(work);
+    util::set_workspace_root(::agentty::IoAccess::grant(), work);
 
     // The knob is read per discovery pass, and all() rescans only when its
     // mtime signature changes — so each sub-case below shifts the sig by

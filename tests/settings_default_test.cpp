@@ -56,7 +56,7 @@ TEST_CASE("settings defaults + persistence round-trip") {
 
     // (2) Fresh install: nothing persisted yet → load falls back to Write.
     check(!fs::exists(settings_json), "no settings.json present (fresh install)");
-    check(persistence::load_settings().profile == Profile::Write,
+    check(persistence::load_settings(::agentty::IoAccess::grant()).profile == Profile::Write,
           "load_settings() with no file -> Write");
 
     // (3) Legacy/partial config that predates the "profile" key → Write.
@@ -65,22 +65,22 @@ TEST_CASE("settings defaults + persistence round-trip") {
         std::ofstream ofs(settings_json, std::ios::trunc);
         ofs << R"({"model_id":"claude-x","favorite_models":[]})";
     }
-    check(persistence::load_settings().profile == Profile::Write,
+    check(persistence::load_settings(::agentty::IoAccess::grant()).profile == Profile::Write,
           "load_settings() with settings.json missing 'profile' -> Write");
 
     // (4) A non-default choice still round-trips — proves the Write default
     //     isn't masking a broken parser (Ask/Minimal persist and reload).
     {
         store::Settings s; s.profile = Profile::Ask;
-        persistence::save_settings(s);
+        persistence::save_settings(::agentty::IoAccess::grant(), s);
     }
-    check(persistence::load_settings().profile == Profile::Ask,
+    check(persistence::load_settings(::agentty::IoAccess::grant()).profile == Profile::Ask,
           "save/load round-trips a non-default profile (Ask)");
     {
         store::Settings s; s.profile = Profile::Minimal;
-        persistence::save_settings(s);
+        persistence::save_settings(::agentty::IoAccess::grant(), s);
     }
-    check(persistence::load_settings().profile == Profile::Minimal,
+    check(persistence::load_settings(::agentty::IoAccess::grant()).profile == Profile::Minimal,
           "save/load round-trips Minimal");
 
     fs::remove_all(tmp);
@@ -102,7 +102,7 @@ TEST_CASE("settings rows harden bad input") {
     // (git:fixup -> commands/git/fixup.md), matching the loader and never
     // writing a ':' into a filename (illegal on Windows).
     {
-        auto r = S::create_starter(S::Category::Commands, "git:fixup");
+        auto r = S::create_starter(::agentty::IoAccess::grant(), S::Category::Commands, "git:fixup");
         check(r.ok, "create_starter nests a colon name");
         check(fs::is_regular_file(tmp / ".agentty" / "commands" / "git" / "fixup.md"),
               "colon name written as git/fixup.md subdir tree");
@@ -111,37 +111,37 @@ TEST_CASE("settings rows harden bad input") {
     }
     // A plain name is a single file.
     {
-        auto r = S::create_starter(S::Category::Commands, "deploy");
+        auto r = S::create_starter(::agentty::IoAccess::grant(), S::Category::Commands, "deploy");
         check(r.ok && fs::is_regular_file(tmp / ".agentty" / "commands" / "deploy.md"),
               "plain name -> deploy.md");
     }
     // Duplicate is refused, not silently overwritten.
-    check(!S::create_starter(S::Category::Commands, "deploy").ok,
+    check(!S::create_starter(::agentty::IoAccess::grant(), S::Category::Commands, "deploy").ok,
           "create_starter refuses an existing file");
     // Path-escape and illegal shapes are rejected up front.
-    check(!S::create_starter(S::Category::Commands, "../evil").ok,
+    check(!S::create_starter(::agentty::IoAccess::grant(), S::Category::Commands, "../evil").ok,
           "'..' path escape rejected");
-    check(!S::create_starter(S::Category::Commands, "a/b").ok,
+    check(!S::create_starter(::agentty::IoAccess::grant(), S::Category::Commands, "a/b").ok,
           "raw slash rejected");
-    check(!S::create_starter(S::Category::Commands, ".hidden").ok,
+    check(!S::create_starter(::agentty::IoAccess::grant(), S::Category::Commands, ".hidden").ok,
           "leading-dot segment rejected");
-    check(!S::create_starter(S::Category::Commands, "").ok,
+    check(!S::create_starter(::agentty::IoAccess::grant(), S::Category::Commands, "").ok,
           "empty name rejected");
-    check(!S::create_starter(S::Category::Commands, std::string(200, 'x')).ok,
+    check(!S::create_starter(::agentty::IoAccess::grant(), S::Category::Commands, std::string(200, 'x')).ok,
           "over-long name rejected");
-    check(!S::create_starter(S::Category::Commands, "a:b:c:d").ok,
+    check(!S::create_starter(::agentty::IoAccess::grant(), S::Category::Commands, "a:b:c:d").ok,
           "too many nesting levels rejected");
 
     // add_plugin_from_line: a misplaced flag as the name is rejected, a
     // non-existent --python script is rejected, and a good spec is accepted.
-    check(!S::add_plugin_from_line("--http http://x").ok,
+    check(!S::add_plugin_from_line(::agentty::IoAccess::grant(), "--http http://x").ok,
           "leading-dash name (misplaced flag) rejected");
-    check(!S::add_plugin_from_line("tool --python /no/such/script_xyz.py").ok,
+    check(!S::add_plugin_from_line(::agentty::IoAccess::grant(), "tool --python /no/such/script_xyz.py").ok,
           "non-existent --python script rejected");
     {
         auto script = tmp / "srv.py";
         std::ofstream(script) << "print('hi')\n";
-        auto r = S::add_plugin_from_line("mysrv --python " + script.string());
+        auto r = S::add_plugin_from_line(::agentty::IoAccess::grant(), "mysrv --python " + script.string());
         check(r.ok, "valid --python plugin accepted");
     }
 

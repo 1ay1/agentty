@@ -379,7 +379,7 @@ inline constexpr std::string_view kApprovalsLeaf = "skills_approved.json";
 void                           save_approvals(const scope::Approvals&);
 
 // Convenience: resolve a skill's trust against the persisted store.
-[[nodiscard]] scope::Trust trust_of(const Skill& s) noexcept;
+[[nodiscard]] scope::Trust trust_of(Io, const Skill& s) noexcept;
 
 // The exact bytes an approval is keyed by: body + declared effects. Exposed
 // so the consent UI can show the user what they are approving, and so a

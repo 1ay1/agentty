@@ -216,14 +216,14 @@ std::vector<Scan> scan_all(const fs::path& home, const fs::path& project) {
     return out;
 }
 
-Outcome adopt(const std::vector<Found>& servers, const Options& opts) {
+Outcome adopt(Io io, const std::vector<Found>& servers, const Options& opts) {
     Outcome o;
     o.into = util::user_root() / "mcp.json";
     for (const Found& f : servers) {
         if (f.conflicts && !opts.force) { ++o.skipped; continue; }
         if (opts.dry_run) { ++o.imported; continue; }
         // Verbatim, not re-derived from a ServerSpec: see Found::entry.
-        const auto r = tools::plugin::add_server_raw(o.into, f.name, f.entry,
+        const auto r = tools::plugin::add_server_raw(io, o.into, f.name, f.entry,
                                                      opts.force);
         if (r == tools::plugin::EditResult::Ok) ++o.imported;
         else                                    ++o.failed;
@@ -260,7 +260,7 @@ void print_scan(const Scan& s) {
 
 }  // namespace
 
-int cli(const std::vector<std::string>& argv) {
+int cli(Io io, const std::vector<std::string>& argv) {
     Options opts;
     std::string want;
     for (std::size_t i = 0; i < argv.size(); ++i) {
@@ -315,7 +315,7 @@ int cli(const std::vector<std::string>& argv) {
     if (!s.error.empty()) return 1;
     if (s.servers.empty()) return 0;
 
-    const Outcome o = adopt(s.servers, opts);
+    const Outcome o = adopt(io, s.servers, opts);
     std::printf("\n%s %d server(s) %s %s\n",
                 opts.dry_run ? "would import" : "imported",
                 o.imported,

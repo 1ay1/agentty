@@ -20,6 +20,7 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/provider/chatgpt/oauth.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider::chatgpt {
 
@@ -71,7 +72,7 @@ using CodexCancelProbe = std::stop_token;
 // them. The caller must save only after it confirms the attempt is still
 // active. `on_device_code` fires once before polling begins.
 [[nodiscard]] std::expected<CodexCredentials, auth::OAuthError>
-codex_login(int timeout_s = 900, CodexDeviceCodeSink on_device_code = {},
+codex_login(Io, int timeout_s = 900, CodexDeviceCodeSink on_device_code = {},
             CodexCancelProbe cancelled = {});
 
 // Explicit device flow with the same side-effect-free completion contract.

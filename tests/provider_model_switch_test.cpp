@@ -110,7 +110,7 @@ TEST_CASE("provider model switch") {
     {
         provider::Selection sel;
         sel.kind = provider::Kind::Anthropic;
-        provider::select(sel);
+        provider::select(::agentty::IoAccess::grant(), sel);
     }
 
     // ── 1: a ModelsLoaded stamped for a DIFFERENT provider is dropped ──
@@ -188,7 +188,7 @@ TEST_CASE("model picker ^E toggles reasoning override + feedback") {
     // (which seeds provider_catalogs + fused_rows) rather than hand-placing
     // the overlay. Hermetic auth so the catalog seeds without on-disk creds.
     g_settings.provider_keys["mistral"] = "sk-test";
-    provider::select(provider::parse_selection("mistral"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("mistral"));
     Model m0 = seeded_model();
     m0.d.available_models = { mi("codestral-latest", "mistral") };
     m0.d.model_id = ModelId{"codestral-latest"};
@@ -243,7 +243,7 @@ TEST_CASE("model picker ^E on family-gated model is a hinted no-op") {
     agentty::clear_reasoning_overrides();
 
     g_settings.provider_keys["anthropic"] = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
     Model m0 = seeded_model();
     m0.d.available_models = { mi("claude-opus-4-5", "anthropic") };
     m0.d.model_id = ModelId{"claude-opus-4-5"};
@@ -518,7 +518,7 @@ TEST_CASE("fused picker open, merge, same-provider switch, MRU") {
     // Hermetic auth: don't depend on real on-disk Anthropic creds (absent on
     // CI). A provider_keys entry makes provider_is_authed("anthropic") true.
     g_settings.provider_keys["anthropic"] = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
@@ -574,7 +574,7 @@ TEST_CASE("fused catalog loaded merges by provider id") {
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-test";  // hermetic auth
     g_settings.provider_keys["openai"] = "sk-test";   // openai authed → catalog
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
@@ -606,7 +606,7 @@ TEST_CASE("fused picker caches rows and clears them on close") {
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-test";
     g_settings.provider_keys["xai"]       = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
@@ -661,7 +661,7 @@ TEST_CASE("fused picker digits type into the filter") {
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-test";
     g_settings.provider_keys["xai"]       = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
@@ -699,7 +699,7 @@ TEST_CASE("fused rows expose name match positions for highlight") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
@@ -733,7 +733,7 @@ TEST_CASE("^Tab cycles the MRU ring without reordering") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-a"};
@@ -773,7 +773,7 @@ TEST_CASE("classic model picker feeds the MRU ring") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-a"};
@@ -834,7 +834,7 @@ TEST_CASE("fused active catalog re-seeds when available_models grows") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-opus-4-5"};
@@ -875,7 +875,7 @@ TEST_CASE("ModelsLoaded refreshes the open fused picker") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-opus-4-5"};
@@ -914,7 +914,7 @@ TEST_CASE("fused open prioritizes active provider, defers others") {
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-a";
     g_settings.provider_keys["openai"]    = "sk-o";   // a second authed provider
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
@@ -947,7 +947,7 @@ TEST_CASE("fused refetches stale/failed catalogs, skips fresh") {
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-a";
     g_settings.provider_keys["openai"]    = "sk-o";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
@@ -990,7 +990,7 @@ TEST_CASE("fused ^L forces a full refresh") {
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-a";
     g_settings.provider_keys["openai"]    = "sk-o";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
@@ -1027,7 +1027,7 @@ TEST_CASE("fused browse view hides sign-in offers; query surfaces them") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-a";   // only ONE provider authed
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
@@ -1062,7 +1062,7 @@ TEST_CASE("fused prunes a signed-out provider's catalog") {
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-a";
     g_settings.provider_keys["openai"]    = "sk-o";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
@@ -1102,7 +1102,7 @@ TEST_CASE("^Tab skips a dead MRU entry") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-a";   // xai NOT authed
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-a"};
@@ -1128,7 +1128,7 @@ TEST_CASE("provider picker: ^D signs out of a keyed preset (two-press)") {
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"]  = "sk-a";
     g_settings.provider_keys["openrouter"] = "sk-or";   // keyed preset
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
@@ -1170,8 +1170,8 @@ TEST_CASE("provider picker: ^D on the ACTIVE provider zeroes live auth") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["openrouter"] = "sk-or";
-    provider::select(provider::parse_selection("openrouter"));
-    app::update_auth(auth::AuthHeader{auth::ApiKeyHeader{"sk-or"}});
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("openrouter"));
+    app::update_auth(::agentty::IoAccess::grant(), auth::AuthHeader{auth::ApiKeyHeader{"sk-or"}});
 
     Model m = seeded_model();
     auto [m1, c1] = app::update(std::move(m), Msg{OpenProviders{}});
@@ -1205,7 +1205,7 @@ TEST_CASE("provider picker: Enter opens accounts on active OAuth provider") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-a";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-5"};
@@ -1258,12 +1258,12 @@ TEST_CASE("custom host supports multiple accounts") {
     const std::string spec = "my-host:8080/v1";   // not a preset ⇒ custom host
 
     auto set_key = [&](const std::string& k) {
-        auto s = agentty::persistence::load_settings();
+        auto s = agentty::persistence::load_settings(::agentty::IoAccess::grant());
         s.provider_keys[spec] = k;
-        agentty::persistence::save_settings(s);
+        agentty::persistence::save_settings(::agentty::IoAccess::grant(), s);
     };
     auto get_key = [&]() {
-        return agentty::persistence::load_settings().provider_keys[spec];
+        return agentty::persistence::load_settings(::agentty::IoAccess::grant()).provider_keys[spec];
     };
 
     // Account A active: snapshot it into the registry.
@@ -1304,7 +1304,7 @@ TEST_CASE("fused picker cycles reasoning effort") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     // An effort-capable model (Claude Opus supports the reasoning ladder).
@@ -1353,7 +1353,7 @@ TEST_CASE("the model picker re-opens cleanly, never stacks") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["anthropic"] = "sk-test";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
@@ -1388,7 +1388,7 @@ TEST_CASE("SignOut falls back to another authed provider") {
     g_settings = store::Settings{};
     g_settings.provider_keys["openrouter"] = "sk-or";
     g_settings.provider_keys["groq"]       = "sk-gr";
-    provider::select(provider::parse_selection("openrouter"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("openrouter"));
 
     Model m = seeded_model();
     m.d.recent_models = { ModelRef{"groq", "llama-3.3-70b"} };  // MRU fallback
@@ -1413,7 +1413,7 @@ TEST_CASE("SignOut with no saved fallback opens sign-in") {
     install_stub_deps();
     g_settings = store::Settings{};
     g_settings.provider_keys["openrouter"] = "sk-or";
-    provider::select(provider::parse_selection("openrouter"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("openrouter"));
 
     Model m = seeded_model();
     auto [m1, c1] = app::update(std::move(m), Msg{LoginMsg{SignOut{}}});
@@ -1444,7 +1444,7 @@ TEST_CASE("fused picker shows an active custom host's models") {
     // A saved custom host (provider_keys key that is not a registry preset)
     // is the ACTIVE provider, with a live catalog already in hand.
     g_settings.provider_keys["my-box.lan:8080"] = "";   // keyless local host
-    provider::select(provider::parse_selection("my-box.lan:8080"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("my-box.lan:8080"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"qwen3:32b"};
@@ -1489,7 +1489,7 @@ TEST_CASE("fused picker gives a non-active saved custom host a mergeable catalog
     // source — Idle, empty, ready for cmd::fetch_models_for to fill.
     g_settings.provider_keys["anthropic"]     = "sk-test";
     g_settings.provider_keys["api.my-gw.com"] = "sk-gw";
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
 
     Model m = seeded_model();
     m.d.model_id = ModelId{"claude-sonnet-4-6"};
@@ -1610,7 +1610,7 @@ TEST_CASE("provider switch and sign-out return InstallAuth, not a resolved heade
     g_settings = store::Settings{};
     g_settings.provider_keys["openrouter"] = "sk-or";
     g_settings.provider_keys["groq"]       = "sk-gr";
-    provider::select(provider::parse_selection("openrouter"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("openrouter"));
 
     Model m = seeded_model();
     m.d.recent_models = { ModelRef{"groq", "llama-3.3-70b"} };
@@ -1661,7 +1661,7 @@ TEST_CASE("accounts: list from the view, removal promotes the newest other") {
     using namespace agentty::msg;
     install_stub_deps();
     g_settings = store::Settings{};
-    provider::select(provider::parse_selection("anthropic"));
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
     Model m = seeded_model();
     m.d.auth.loaded = true;
     m.d.auth.providers["anthropic"] = agentty::auth::ProviderAuth{

@@ -91,14 +91,6 @@ struct RagProbeOutcome {
 // main() returns, and blocks the exit on a multi-second embed pass. Idempotent.
 void rag_shutdown();
 
-// Whether the proactive pre-turn injection is enabled, per the live config
-// (persisted RAG picker), with AGENTTY_RAG_PROACTIVE as a shell override.
-[[nodiscard]] bool proactive_enabled();
-
-// Whether the GLOBAL RAG mode is "first turn only" (proactive injection only
-// on a thread's first turn). Consulted by the per-turn gate when a thread has
-// no per-thread override.
-[[nodiscard]] bool proactive_first_turn_only();
 
 // Smart Mode Innovation 3 (SPECULATIVE): kick a detached, best-effort code/
 // docs retrieval warm-up for `query` so the workspace index is hot and the

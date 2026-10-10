@@ -47,6 +47,7 @@
 #include "agentty/domain/smart_tuning.hpp"   // shipped defaults + ranges
 #include "agentty/runtime/panel/form.hpp"           // Builder (add_rows)
 #include "agentty/store/store.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::settings::registry {
 
@@ -453,14 +454,14 @@ struct EnvSnapshot {
 };
 
 // Reads the process environment.
-[[nodiscard]] EnvSnapshot read_env();
+[[nodiscard]] EnvSnapshot read_env(Io);
 
 // Apply environment overrides on top of `c`. Clamps to each row's range.
 void apply_env(store::RagConfig& c, const EnvSnapshot& env);
 void apply_env(smart::RoleConfig& c, const EnvSnapshot& env);
 // Same, reading the environment now. For CLI paths with no Model.
-void apply_env(store::RagConfig& c);
-void apply_env(smart::RoleConfig& c);
+void apply_env(Io, store::RagConfig& c);
+void apply_env(Io, smart::RoleConfig& c);
 
 // Read/write a row's value as a string — the shape `agentty config get/set`
 // and the JSON walkers both want. Returns false for an unknown id or a value

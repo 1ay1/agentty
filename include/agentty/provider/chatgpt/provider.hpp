@@ -22,6 +22,7 @@
 
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/stream_epilogue.hpp"  // StreamResult (complete type for the concept check)
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider::chatgpt {
 
@@ -41,7 +42,7 @@ private:
 // The Codex model line-up exposed when signed in with ChatGPT OAuth. Fetched
 // live from the account's `/models` catalog (mirrors codex-rs); cached for the
 // process. Falls back to a small bundled list when offline / not signed in.
-[[nodiscard]] std::vector<ModelInfo> list_models();
+[[nodiscard]] std::vector<ModelInfo> list_models(Io);
 
 // Snapshot of the already-fetched catalog — NEVER touches the network.
 // Empty until the first live list_models() succeeds. This is what UI-thread
@@ -53,7 +54,7 @@ private:
 // The account's default model slug (first catalog entry). Callers that need a
 // concrete model id — e.g. provider-switch defaulting — should use this instead
 // of hardcoding a slug the account may not offer.
-[[nodiscard]] std::string default_model();
+[[nodiscard]] std::string default_model(Io);
 
 static_assert(provider::Provider<ChatGptProvider>);
 

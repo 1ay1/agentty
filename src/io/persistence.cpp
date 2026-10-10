@@ -51,7 +51,12 @@ using json = nlohmann::json;
 // Binary mode avoids CRLF translation so the on-disk bytes match dump(2).
 // Public (declared in persistence.hpp) so other JSON sidecars (ACP session
 // index, etc.) share the same crash-safety guarantee.
-bool write_json_atomic(const fs::path& target, const std::string& content) {
+// persistence's own internals (the async writer, the settings lock) only run
+// under one of the Io-taking entry points below, so they re-mint it here
+// rather than threading it through every helper.
+static Io internal_io() { return IoAccess::grant(); }
+
+bool write_json_atomic(Io, const fs::path& target, const std::string& content) {
     fs::path tmp = target;
     tmp += ".tmp";
 #ifdef _WIN32
@@ -292,7 +297,7 @@ std::string render_message_md(const Message& m) {
 
 } // namespace
 
-fs::path write_thread_transcript_md(const Thread& t) {
+fs::path write_thread_transcript_md(Io io, const Thread& t) {
     // Clean, BOUNDED transcript: "## user" / "## assistant" headers + the
     // (clipped) text, tool calls collapsed to a single `› tool(name)` line.
     // None of the <id>.json noise. Small and greppable so a fork can `read`
@@ -347,7 +352,7 @@ fs::path write_thread_transcript_md(const Thread& t) {
 
     // Write next to the thread files under a stable, discoverable name.
     const fs::path out = threads_dir() / (t.id.value + ".transcript.md");
-    if (!write_json_atomic(out, md)) return {};
+    if (!write_json_atomic(io, out, md)) return {};
     return out;
 }
 
@@ -1179,7 +1184,7 @@ load_thread_meta_file(const fs::path& p) {
 }
 
 std::expected<Thread, DeserializeError>
-load_thread_file(const std::filesystem::path& p) {
+load_thread_file(Io, const std::filesystem::path& p) {
     std::ifstream ifs(p, std::ios::binary);
     if (!ifs) return std::unexpected(DeserializeError{
         DeserializeErrorKind::Io, "", "open failed: " + p.string()});
@@ -1396,7 +1401,7 @@ void write_thread_index_locked(const std::unordered_map<std::string, IndexEntry>
     json j;
     j["version"] = 4;
     j["threads"] = std::move(threads);
-    try { (void)write_json_atomic(thread_index_path(), j.dump()); }
+    try { (void)write_json_atomic(internal_io(), thread_index_path(), j.dump()); }
     catch (const std::exception&) { /* best-effort cache */ }
 }
 
@@ -1447,7 +1452,7 @@ void reindex_thread(const Thread& t) {
 
 } // namespace
 
-std::vector<Thread> load_all_threads() {
+std::vector<Thread> load_all_threads(Io) {
     // Metadata-only directory walk, index-accelerated (see the index
     // sidecar note above). A cached entry whose mtime still matches the
     // file's on-disk mtime is used verbatim — no open/parse. Only new or
@@ -1623,7 +1628,7 @@ static bool save_thread_legacy(const Thread& t) {
     // exception as a belt-and-suspenders guard against future regressions —
     // a silently-skipped save beats a process-terminating uncaught throw.
     try {
-        return write_json_atomic(threads_dir() / (t.id.value + ".json"),
+        return write_json_atomic(internal_io(), threads_dir() / (t.id.value + ".json"),
                                  j.dump(2));
     } catch (const nlohmann::json::exception& e) {
         AGT_LOG(Persist, Error, "thread.save", "result=json_error id={} err={}",
@@ -2362,7 +2367,7 @@ void AsyncWriter::run() {
     }
 }
 
-void save_thread(const Thread& t) {
+void save_thread(Io, const Thread& t) {
     if (t.id.empty() || t.messages.empty()) return;
     async_writer().enqueue(t);
 }
@@ -2373,7 +2378,7 @@ namespace {
 void forget_log_state(const ThreadId& id) { async_writer().forget(id.value); }
 } // namespace
 
-void flush_pending_saves() {
+void flush_pending_saves(Io) {
     async_writer().flush_and_stop();
 }
 
@@ -2381,7 +2386,7 @@ std::uint64_t debug_message_fingerprint(const Message& m) {
     return message_fingerprint(m);
 }
 
-std::optional<Thread> load_thread_by_id(const ThreadId& id) {
+std::optional<Thread> load_thread_by_id(Io io, const ThreadId& id) {
     if (id.value.empty()) return std::nullopt;
 
     // Prefer the log. A thread has one only after it has been saved since
@@ -2411,14 +2416,14 @@ std::optional<Thread> load_thread_by_id(const ThreadId& id) {
     }
 
     auto p = threads_dir() / (id.value + ".json");
-    auto loaded = load_thread_file(p);
+    auto loaded = load_thread_file(io, p);
     if (!loaded) return std::nullopt;
     AGT_LOG(Persist, Debug, "thread.load", "format=legacy id={} messages={}",
             id.value, loaded->messages.size());
     return std::move(*loaded);
 }
 
-void delete_thread(const ThreadId& id) {
+void delete_thread(Io, const ThreadId& id) {
     forget_log_state(id);
     std::error_code ec;
     fs::remove(threads_dir() / (id.value + ".json"), ec);
@@ -2460,7 +2465,7 @@ maya::guarded<json>& loaded_baseline() {
     return baseline;
 }
 
-store::Settings load_settings() {
+store::Settings load_settings(Io) {
     store::Settings s;
     std::ifstream ifs(settings_path());
     if (!ifs) return s;
@@ -2759,7 +2764,7 @@ store::Settings load_settings() {
         // config until the user changes something. Applied after the JSON so
         // an export beats a stored value — the layering the locked row in the
         // settings UI advertises.
-        settings::registry::apply_env(s.smart);
+        settings::registry::apply_env(internal_io(), s.smart);
     } catch (const std::exception& e) {
         util::dbglog("persistence.load_settings", e.what());
     } catch (...) {
@@ -2780,7 +2785,7 @@ namespace {
 void save_settings_locked(persistence::Held held, const store::Settings& s);
 }
 
-void save_settings(const store::Settings& s) {
+void save_settings(Io, const store::Settings& s) {
     // Held for the WHOLE read-modify-write, not just the write. Two instances
     // each serialise their own full in-memory record, so without this the
     // second writer silently reverts every field the first one changed --
@@ -3097,7 +3102,7 @@ void save_settings_locked(persistence::Held held, const store::Settings& s) {
     // A failed settings write silently discards the user's provider keys,
     // model choice and preferences — they simply "don't stick" across
     // restarts, with nothing to explain why. The result was discarded here.
-    if (!write_json_atomic(data_dir() / "settings.json", j.dump(2)))
+    if (!write_json_atomic(internal_io(), data_dir() / "settings.json", j.dump(2)))
         AGT_LOG(Persist, Error, "settings.save", "result=write_failed path={}",
                 (data_dir() / "settings.json").string());
     else {
