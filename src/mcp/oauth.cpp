@@ -7,6 +7,7 @@
 // an at-rest-encrypted per-server token store.
 
 #include "agentty/mcp/oauth.hpp"
+#include "agentty/util/lock_levels.hpp"
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 
@@ -588,7 +589,7 @@ std::optional<std::string> bearer_for(const std::string& server_name) {
     // One refresh at a time: two callers seeing the same expired token would
     // both refresh, and a server that rotates refresh tokens rejects the
     // second. A guarded<bool> is just the lock; the work runs inside it.
-    static maya::guarded<bool> one_at_a_time;
+    static maya::guarded<bool> one_at_a_time{lock_levels::kAuthRefresh};
     return one_at_a_time.with(
         [](bool&, std::string name) -> std::optional<std::string> {
             return bearer_for_locked(name);

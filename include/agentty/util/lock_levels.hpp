@@ -14,6 +14,10 @@ namespace agentty::lock_levels {
 // Serialises whole MCP connect+publish rounds; everything else runs inside.
 inline constexpr maya::lock_level kMcpConnecting{10, "mcp.connecting"};
 
+// One credential refresh at a time (Claude, Copilot, Kimi, Codex, MCP
+// OAuth). Its body reads and writes the credential store, a leaf or a lane.
+inline constexpr maya::lock_level kAuthRefresh{15, "auth.refresh"};
+
 // A shared-file lane: its body reads and writes the state it protects.
 inline constexpr maya::lock_level kFileLane{20, "persistence.file_lane"};
 

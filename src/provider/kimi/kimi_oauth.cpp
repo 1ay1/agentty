@@ -8,6 +8,7 @@
 //   /api/oauth/token (grant_type=refresh_token)
 
 #include "agentty/provider/kimi/kimi_oauth.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -486,7 +487,7 @@ std::optional<KimiToken> fresh_token_locked();
 std::optional<KimiToken> fresh_token() {
     // One refresh at a time; the store is never held across the network call.
     struct RefreshLane {};
-    static maya::guarded<RefreshLane> one_at_a_time;
+    static maya::guarded<RefreshLane> one_at_a_time{lock_levels::kAuthRefresh};
     return one_at_a_time.with([](RefreshLane&) { return fresh_token_locked(); });
 }
 

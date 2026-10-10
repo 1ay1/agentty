@@ -14,6 +14,7 @@
 //     call — but those live on the transport Endpoint, not here.
 
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 #include <chrono>
 #include <atomic>
@@ -536,7 +537,7 @@ std::optional<CopilotToken> fresh_token() {
     // One refresh at a time. The store is only held for the file IO, never
     // across the network call. Lock order is always refresh, then store.
     struct RefreshLane {};
-    static maya::guarded<RefreshLane> one_at_a_time;
+    static maya::guarded<RefreshLane> one_at_a_time{lock_levels::kAuthRefresh};
     return one_at_a_time.with([](RefreshLane&) { return fresh_token_locked(); });
 }
 

@@ -1,4 +1,5 @@
 #include "agentty/auth/auth.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 #include "agentty/util/logx.hpp"
 
@@ -1017,7 +1018,7 @@ AuthHeader fresh_auth_header(Io io, const AuthHeader& fallback) {
     // Serialize refreshes: several subagent worker threads can land here at
     // once when a captured OAuth token expires. The first in refreshes +
     // persists; the rest re-read the freshly-saved token.
-    static maya::guarded<bool> one_at_a_time;
+    static maya::guarded<bool> one_at_a_time{lock_levels::kAuthRefresh};
     return one_at_a_time.with(
         [](bool&, AuthHeader fb) {
             // guarded's body can't take the caller's Io (it isn't Sendable),

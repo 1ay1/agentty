@@ -1,4 +1,5 @@
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -811,7 +812,7 @@ std::optional<CodexCredentials> codex_fresh_credentials() {
     // across the network call, so sign-out and a new login stay responsive.
     // Lock order: refresh lane, then store.
     struct RefreshLane {};
-    static maya::guarded<RefreshLane> one_at_a_time;
+    static maya::guarded<RefreshLane> one_at_a_time{lock_levels::kAuthRefresh};
     return one_at_a_time.with([](RefreshLane&) { return codex_fresh_credentials_locked(); });
 }
 
