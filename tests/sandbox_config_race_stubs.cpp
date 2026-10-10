@@ -20,6 +20,8 @@
 // Declared by hand rather than by including fs_helpers.hpp, for the same
 // reason -- that header is what reaches into mcp.
 #include <filesystem>
+
+#include "agentty/util/io.hpp"
 #include <string_view>
 
 namespace agentty::tools::util {
@@ -35,7 +37,7 @@ const std::filesystem::path& workspace_root() { return stub_root(); }
 
 // Test-only setter, matching the real set_workspace_root's name so a reader
 // of sandbox.cpp does not have to wonder which one it got.
-void set_workspace_root(std::filesystem::path p) { stub_root() = std::move(p); }
+void set_workspace_root(Io, std::filesystem::path p) { stub_root() = std::move(p); }
 
 }  // namespace agentty::tools::util
 

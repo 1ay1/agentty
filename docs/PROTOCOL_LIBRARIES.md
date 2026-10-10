@@ -94,9 +94,13 @@ expired" is a pure function of the two. The caller owns the clock.
 **R5. No processes or blocking I/O.** A library never spawns a child, opens
 a pipe, or blocks reading one. It parses bytes it is given and produces bytes
 to send. Spawning, reading and writing are agentty's (maya's
-`platform::process` and the poll reactor). The one allowed I/O is reading a
-**file the caller named**, synchronously, on the caller's thread, when that
-is the library's whole job (rag-cpp loading a document). claybin is the one
+`platform::process` and the poll reactor). The protocol libraries (jsonrpc-cpp,
+mcp-cpp, acp-cpp) do no file IO at all: mcp-cpp's tools reach the disk only
+through the `FileSystem` the host passes in (`HostServices::files`), and its
+ready-made `NativeFileSystem` lives in a separate opt-in target. The storage
+library is the exception: rag-cpp may read and write the files its caller
+names (a document, its own index and WAL), synchronously, on the caller's
+thread, because that is its whole job. claybin is the one
 exception to spawning: building and starting a jailed child is what it is
 for, and agentty calls it from its own process code.
 
@@ -369,9 +373,13 @@ string literals first, and have **no allowlist**:
   R1's primitives (threads, locks, atomics, `thread_local`, futures,
   `stop_source`, latches, semaphores); R2 hooks (`set_runtime`,
   `set_executor`, a `Runtime`/`Executor` type); R3 mutable `static`s; R4
-  clock reads; R5 sleeps, process spawning, sockets and environment reads.
+  clock reads; R5 sleeps, process spawning, sockets and environment reads;
+  and file IO in jsonrpc-cpp, mcp-cpp and acp-cpp (fstreams,
+  `std::filesystem` queries and changes, directory walks, `open`/`fsync`).
   claybin is exempt from R5's process and environ rules only, because
-  spawning a jailed child is what it is for.
+  spawning a jailed child is what it is for. The file IO rule skips
+  mcp-cpp's `src/tools_native/` (the opt-in host FileSystem) and doesn't
+  apply to rag-cpp, a storage engine.
 - **`no_duplication`** — fails if mcp-cpp or acp-cpp redefines a name the
   core exports (`Engine`, `Codec`, `RpcError`, `RequestId`, `Newtype` ...)
   or shares a 12-line run of code with another of the three.

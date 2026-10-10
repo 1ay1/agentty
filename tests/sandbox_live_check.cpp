@@ -12,6 +12,7 @@
 #include "agentty/tool/util/sandbox_claybin.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/domain/sandbox_config.hpp"   // kAlwaysMasked*
+#include "agentty/util/io.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -31,7 +32,7 @@ namespace cb = agentty::tools::util::sandbox::claybin_backend;
 // The stub setter from sandbox_config_race_stubs.cpp. Declared here rather
 // than pulled from fs_helpers.hpp, because including that header is exactly
 // what this target avoids (it reaches into mcp and drags the tool layer in).
-namespace agentty::tools::util { void set_workspace_root(std::filesystem::path p); }
+namespace agentty::tools::util { void set_workspace_root(Io, std::filesystem::path p); }
 
 namespace {
 

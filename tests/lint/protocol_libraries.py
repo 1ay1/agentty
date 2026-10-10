@@ -44,6 +44,25 @@ RULES = {
     "R5 env":     r"\b(secure_)?getenv\b|\b_wgetenv\b|[^\w.>]environ\b",
 }
 
+# R6: the protocol libraries do no file IO. mcp-cpp's tools reach the disk only
+# through the host's FileSystem (mcp/tools/files.hpp). Not applied to rag-cpp
+# (a storage engine: its index files and WAL are its job) or claybin (a jail
+# that mounts things).
+FILE_IO = re.compile(
+    r"std::(i|o)?fstream\b|std::filesystem::(exists|status|symlink_status|is_regular_file|is_directory"
+    r"|is_symlink|is_empty|file_size|last_write_time|weakly_canonical|canonical|absolute|relative"
+    r"|current_path|temp_directory_path|read_symlink|create_director(y|ies)|remove(_all)?|rename|copy"
+    r"|copy_file|resize_file|permissions|space)\s*\(|std::filesystem::(recursive_)?directory_iterator\b"
+    # A C call: not a member (.x / ->x), and not a declaration's own name (a
+    # return type before it, as in `std::optional<Json> open(...)`).
+    r"|(^|[;{(,=!&|?:]|\breturn)\s*(fopen|open|creat|unlink|mkdir|rmdir|fsync|opendir)\s*\("
+    r"|(^|[^\w])::(open|unlink|mkdir|rmdir|fsync)\s*\("
+    r"|\bCreateFile[AW]?\b|\bFindFirstFile")
+FILE_IO_LIBS = {"mcp-cpp", "acp-cpp", "jsonrpc-cpp"}
+# The ready-made host FileSystem: opt-in, its own target, and the one place
+# mcp-cpp's tree touches the disk.
+FILE_IO_ALLOWED = ("mcp-cpp/src/tools_native/",)
+
 # claybin's job is to fork/exec into a jail, handing the guest an environment:
 # R5's process rule (and passing environ to exec) is its purpose.
 EXEMPT = {("claybin", "R5 process"), ("claybin", "R5 env")}
@@ -113,6 +132,9 @@ def purity(root):
                 for name, rx in rules.items():
                     if (lib, name) not in EXEMPT and rx.search(padded):
                         hits.append(f"{rel}:{no}: {name}: {line.strip()}")
+                if (lib in FILE_IO_LIBS and not rel.startswith(FILE_IO_ALLOWED)
+                        and FILE_IO.search(padded.replace(" fs::", " std::filesystem::"))):
+                    hits.append(f"{rel}:{no}: R6 file io: {line.strip()}")
                 if STATIC_RE.match(line):
                     head = re.split(r"[={]", line, maxsplit=1)[0]
                     if "(" not in head and re.search(r"[=;{]", line):

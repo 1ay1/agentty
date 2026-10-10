@@ -19,6 +19,7 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/home_dir.hpp"   // agentty workspace_root()
 
+#include <mcp/tools/native_files.hpp>
 #include <mcp/tools/toolset.hpp>
 #include <mcp/tools/host.hpp>
 #include <maya/runtime.hpp>
@@ -467,6 +468,8 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     mt::HostServices svc;
     svc.http = ka.http;
     svc.exec = ka.exec;
+    // Every file the tools touch: mcp-cpp does no IO itself, the host does.
+    svc.files = std::make_shared<mt::NativeFileSystem>();
     // search / repo map fan out on maya::scope.
     svc.split = util::make_splitter();
     svc.state    = ka.state;

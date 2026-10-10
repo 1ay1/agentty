@@ -13,7 +13,7 @@
 #include <thread>
 #include <vector>
 
-#if AGENTTY_HAVE_CHILD_PROCESS && !defined(_WIN32)
+#if AGENTTY_HAVE_CHILD_PROCESS
 
 namespace {
 int failures = 0;
@@ -23,7 +23,12 @@ void check(bool ok, const char* what) {
 
 agentty::util::ChildProcess::Spawn cat_spawn() {
     agentty::util::ChildProcess::Spawn s;
+#if defined(_WIN32)
+    s.command = "cmd";   // `more` echoes stdin and exits on EOF, like cat
+    s.args    = {"/c", "more"};
+#else
     s.command = "cat";   // echoes stdin; exits on EOF
+#endif
     return s;
 }
 

@@ -7,7 +7,8 @@
 //
 // Run it when touching the sandbox:
 //   cmake --build build --target sandbox_audit && ./build/sandbox_audit
-#include "agentty/tool/util/sandbox_claybin.hpp"
+#include "agentty/util/io.hpp"
+#include "agentty//tool/util/sandbox_claybin.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/domain/sandbox_config.hpp"
 
@@ -26,7 +27,7 @@ namespace cb = agentty::tools::util::sandbox::claybin_backend;
 namespace cfgn = agentty::sandbox_cfg;
 namespace sb = agentty::tools::util::sandbox;
 
-namespace agentty::tools::util { void set_workspace_root(std::filesystem::path p); }
+namespace agentty::tools::util { void set_workspace_root(Io, std::filesystem::path p); }
 
 namespace {
 

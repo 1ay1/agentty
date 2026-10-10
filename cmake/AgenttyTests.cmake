@@ -215,7 +215,7 @@ target_include_directories(sandbox_live_check PRIVATE
 target_link_libraries(sandbox_live_check PRIVATE
     claybin nlohmann_json::nlohmann_json Threads::Threads maya::app)
 if(TARGET mcp::tools)
-    target_link_libraries(sandbox_live_check PRIVATE mcp::tools)   # exec.cpp implements mcp-cpp's Exec
+    target_link_libraries(sandbox_live_check PRIVATE mcp::tools mcp::tools_native_files)   # exec.cpp implements mcp-cpp's Exec
 endif()
 if(TARGET maya::app)
     target_include_directories(sandbox_live_check SYSTEM PRIVATE
@@ -254,7 +254,7 @@ target_include_directories(ws_bind_probe PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(ws_bind_probe PRIVATE
     claybin nlohmann_json::nlohmann_json Threads::Threads maya::app)
 if(TARGET mcp::tools)
-    target_link_libraries(ws_bind_probe PRIVATE mcp::tools)   # exec.cpp implements mcp-cpp's Exec
+    target_link_libraries(ws_bind_probe PRIVATE mcp::tools mcp::tools_native_files)   # exec.cpp implements mcp-cpp's Exec
 endif()
 if(TARGET maya::app)
     target_include_directories(ws_bind_probe SYSTEM PRIVATE
@@ -288,6 +288,7 @@ add_executable(sandbox_audit EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/src/tool/util/handoff_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
     ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/exec.cpp   # run_child: subprocess.cpp spawns through it
     ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
     # logx: sandbox_claybin.cpp logs the broker's decisions, so the audit
     # needs the real logger rather than a stub -- a stubbed one would compile
@@ -299,7 +300,10 @@ add_executable(sandbox_audit EXCLUDE_FROM_ALL
     ${CMAKE_SOURCE_DIR}/src/util/teardown.cpp)
 target_include_directories(sandbox_audit PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(sandbox_audit PRIVATE claybin nlohmann_json::nlohmann_json
-    Threads::Threads)
+    Threads::Threads maya::app)
+if(TARGET mcp::tools)
+    target_link_libraries(sandbox_audit PRIVATE mcp::tools mcp::tools_native_files)   # exec.cpp implements mcp-cpp's Exec
+endif()
 if(TARGET maya::app)
     target_include_directories(sandbox_audit SYSTEM PRIVATE
         $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -624,7 +628,7 @@ target_include_directories(sandbox_config_race_test PRIVATE include)
 target_link_libraries(sandbox_config_race_test PRIVATE
     doctest::doctest nlohmann_json::nlohmann_json Threads::Threads claybin maya::app)
 if(TARGET mcp::tools)
-    target_link_libraries(sandbox_config_race_test PRIVATE mcp::tools)   # exec.cpp
+    target_link_libraries(sandbox_config_race_test PRIVATE mcp::tools mcp::tools_native_files)   # exec.cpp
 endif()
 # maya headers only (sandbox.cpp's transitive includes reach scroll_state /
 # anim_clock); no maya linking, so the TSan build stays small.
@@ -818,7 +822,7 @@ target_include_directories(dirs_test PRIVATE include
 # mirror the workspace root into it.
 target_link_libraries(dirs_test PRIVATE maya::maya nlohmann_json::nlohmann_json)
 if(TARGET mcp::tools)
-    target_link_libraries(dirs_test PRIVATE mcp::tools)
+    target_link_libraries(dirs_test PRIVATE mcp::tools mcp::tools_native_files)
 endif()
 add_test(NAME dirs_test COMMAND dirs_test)
 set_tests_properties(dirs_test PROPERTIES TIMEOUT 30)

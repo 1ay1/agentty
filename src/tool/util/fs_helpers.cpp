@@ -2,6 +2,7 @@
 #include "agentty/util/home_dir.hpp"
 
 #include <maya/runtime.hpp>
+#include <mcp/tools/native_files.hpp>
 #include <mcp/tools/util/fs_helpers.hpp>   // project_root(): one rule for both layers
 
 #include <algorithm>
@@ -351,8 +352,9 @@ fs::path project_root() {
     // mcp-cpp's rule (the cwd, clamped inside the boundary), over our
     // boundary, so agentty-native and mcp-served tools resolve relative paths
     // to the identical directory.
+    static ::mcp::tools::NativeFileSystem disk;   // stateless: one is enough
     return ::mcp::tools::util::project_root(
-        ::mcp::tools::util::bounds_from(workspace_root(), {}));
+        ::mcp::tools::util::bounds_from(disk, workspace_root(), {}));
 }
 
 bool is_within_workspace(const fs::path& target) {
