@@ -8,6 +8,11 @@ project(agentty
 # extracted toolchain/standalone/hardening includes) live under cmake/.
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+# No C++ modules anywhere in the tree. With scanning on, every target gets
+# ninja dyndep files, and ninja 1.13 can assert on those mid-build
+# (RefreshDyndepDependents). Off globally so no target is missed.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 # Toolchain: compiler cache, C++ standard + fallback, default build type,
 # MSVC Release flag normalization. See cmake/AgenttyToolchain.cmake.
 include(AgenttyToolchain)
