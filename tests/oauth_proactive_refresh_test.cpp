@@ -35,7 +35,7 @@ void save_oauth(std::int64_t expires_at_ms, const std::string& refresh) {
     o.access_token  = "at-xyz";
     o.refresh_token = refresh;
     o.expires_at_ms = expires_at_ms;
-    (void)auth::save_credentials(auth::Credentials{std::move(o)});
+    (void)auth::save_credentials(::agentty::IoAccess::grant(), auth::Credentials{std::move(o)});
 }
 
 void isolate_config_dir() {
@@ -62,46 +62,46 @@ TEST_CASE("oauth proactive refresh: window + negative cases") {
 
     SUBCASE("fresh token (30m out) → no proactive refresh") {
         save_oauth(t + 30 * 60 * 1000, "rt-fresh");
-        CHECK(!auth::oauth_proactive_refresh_token().has_value());
+        CHECK(!auth::oauth_proactive_refresh_token(::agentty::IoAccess::grant()).has_value());
     }
 
     SUBCASE("near-expiry token (2m out) → returns the refresh_token") {
         save_oauth(t + 2 * 60 * 1000, "rt-soon");
-        auto tok = auth::oauth_proactive_refresh_token();
+        auto tok = auth::oauth_proactive_refresh_token(::agentty::IoAccess::grant());
         REQUIRE(tok.has_value());
         CHECK(*tok == "rt-soon");
     }
 
     SUBCASE("already-expired token → still returns the refresh_token") {
         save_oauth(t - 60 * 1000, "rt-expired");
-        auto tok = auth::oauth_proactive_refresh_token();
+        auto tok = auth::oauth_proactive_refresh_token(::agentty::IoAccess::grant());
         REQUIRE(tok.has_value());
         CHECK(*tok == "rt-expired");
     }
 
     SUBCASE("near-expiry but empty refresh_token → nothing to refresh with") {
         save_oauth(t + 60 * 1000, "");
-        CHECK(!auth::oauth_proactive_refresh_token().has_value());
+        CHECK(!auth::oauth_proactive_refresh_token(::agentty::IoAccess::grant()).has_value());
     }
 
     SUBCASE("no expiry info (expires_at_ms == 0) → skip") {
         save_oauth(0, "rt-noexp");
-        CHECK(!auth::oauth_proactive_refresh_token().has_value());
+        CHECK(!auth::oauth_proactive_refresh_token(::agentty::IoAccess::grant()).has_value());
     }
 
     SUBCASE("custom window boundaries") {
         save_oauth(t + 4 * 60 * 1000, "rt-window");
         // 4 min out is fresh under a 1-min window …
-        CHECK(!auth::oauth_proactive_refresh_token(60 * 1000).has_value());
+        CHECK(!auth::oauth_proactive_refresh_token(::agentty::IoAccess::grant(), 60 * 1000).has_value());
         // … but stale under a 10-min window.
-        auto tok = auth::oauth_proactive_refresh_token(10 * 60 * 1000);
+        auto tok = auth::oauth_proactive_refresh_token(::agentty::IoAccess::grant(), 10 * 60 * 1000);
         REQUIRE(tok.has_value());
         CHECK(*tok == "rt-window");
     }
 
     SUBCASE("API-key credential is not refreshable") {
-        (void)auth::save_credentials(
+        (void)auth::save_credentials(::agentty::IoAccess::grant(), 
             auth::Credentials{auth::cred::ApiKey{"sk-key"}});
-        CHECK(!auth::oauth_proactive_refresh_token().has_value());
+        CHECK(!auth::oauth_proactive_refresh_token(::agentty::IoAccess::grant()).has_value());
     }
 }

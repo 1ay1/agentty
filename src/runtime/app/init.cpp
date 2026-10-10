@@ -81,7 +81,8 @@ std::pair<Model, Cmd> init() {
     // Credential state outside the record (token files, env, accounts),
     // read once here like the launch env; later changes arrive as
     // AuthViewLoaded.
-    m.d.auth = provider::load_auth_view(settings);
+    // init() is the host's one launch read, so it may do IO.
+    m.d.auth = provider::load_auth_view(IoAccess::grant(), settings);
 
     // Bake the seeded rows through the SAME ladder the refresh path uses.
     //

@@ -362,7 +362,7 @@ static bool write_private(const fs::path& p, const std::string& content) {
 #endif
 }
 
-std::optional<Credentials> load_credentials() {
+std::optional<Credentials> load_credentials(Io) {
     std::string raw;
     // Prefer the OS keystore when enabled — it holds the sealed envelope.
     // Fall back to the on-disk file when the keystore is off, empty, or the
@@ -428,7 +428,7 @@ std::optional<Credentials> load_credentials() {
 // login, logout (file removed), token refresh, and cross-process changes, since
 // save_credentials always (re)writes the encrypted file even when the keystore
 // is enabled. Mirrors provider::copilot::signed_in().
-bool anthropic_signed_in() {
+bool anthropic_signed_in(Io io) {
     struct Cache {
         bool           ok = false;
         std::int64_t   mtime = 0;   // file_time_type ticks: a Sendable key
@@ -452,12 +452,12 @@ bool anthropic_signed_in() {
             mtime, size))
         return *hit;
     // Changed: unseal + parse outside the lock, then publish.
-    const bool ok = load_credentials().has_value();
+    const bool ok = load_credentials(io).has_value();
     cache.with([](Cache& c, Cache v) { c = v; }, Cache{ok, mtime, size});
     return ok;
 }
 
-bool save_credentials(const Credentials& c) {
+bool save_credentials(Io, const Credentials& c) {
     json j;
     j["method"] = std::string{persist_tag(c)};
     std::visit([&](const auto& v) {
@@ -496,7 +496,7 @@ bool save_credentials(const Credentials& c) {
     return true;
 }
 
-bool clear_credentials() {
+bool clear_credentials(Io) {
     if (keystore::available())
         keystore::remove("credentials");
     std::error_code ec;
@@ -798,7 +798,7 @@ TokenResult exchange_code(const OAuthCode& code,
     return parse_token_json(r.body, r.status);
 }
 
-TokenResult refresh_access_token(const RefreshToken& refresh_token) {
+TokenResult refresh_access_token(Io io, const RefreshToken& refresh_token) {
     auto r = http_post_form(OAuthConfig::token_url, {
         {"grant_type",    "refresh_token"},
         {"client_id",     OAuthConfig::client_id},
@@ -840,7 +840,7 @@ TokenResult token_result_from(const cred::OAuth& o) {
 }
 } // namespace
 
-TokenResult refresh_access_token_locked(const RefreshToken& refresh_token) {
+TokenResult refresh_access_token_locked(Io io, const RefreshToken& refresh_token) {
     // Cross-process serialization + double-checked re-read. Blocking on the
     // file lock funnels every agentty instance through one refresh at a time.
     // After the lock is held we re-read credentials.json: if a peer already
@@ -850,7 +850,7 @@ TokenResult refresh_access_token_locked(const RefreshToken& refresh_token) {
     CrossProcessFileLock xlock(credentials_path());
     std::string rt = refresh_token.value;
     if (xlock.held()) {
-        if (auto loaded = load_credentials()) {
+        if (auto loaded = load_credentials(io)) {
             if (auto* o = std::get_if<cred::OAuth>(&*loaded)) {
                 if (!oauth_is_stale(*o) && !o->access_token.empty())
                     return token_result_from(*o);   // peer already refreshed
@@ -860,7 +860,7 @@ TokenResult refresh_access_token_locked(const RefreshToken& refresh_token) {
         }
     }
 
-    auto tr = refresh_access_token(RefreshToken{rt});
+    auto tr = refresh_access_token(io, RefreshToken{rt});
     if (!tr) return tr;
 
     // LINEAGE CHECK before persisting: an account switch (accounts::activate)
@@ -875,7 +875,7 @@ TokenResult refresh_access_token_locked(const RefreshToken& refresh_token) {
     // Skip the save AND report Superseded so the caller neither installs
     // the stale-account token nor shows a scary error for a benign race.
     if (xlock.held()) {
-        if (auto now_on_disk = load_credentials()) {
+        if (auto now_on_disk = load_credentials(io)) {
             if (auto* o = std::get_if<cred::OAuth>(&*now_on_disk)) {
                 if (!o->refresh_token.empty() && o->refresh_token != rt
                     && o->refresh_token != tr->refresh_token) {
@@ -902,7 +902,7 @@ TokenResult refresh_access_token_locked(const RefreshToken& refresh_token) {
         tr->refresh_token.empty() ? rt : tr->refresh_token,
         tr->expires_in_s ? now_ms() + tr->expires_in_s * 1000 : 0,
     }};
-    if (!save_credentials(refreshed))
+    if (!save_credentials(io, refreshed))
         util::dbglog("auth.refresh.save",
                      "failed to persist rotated OAuth token; next launch may "
                      "require re-login (keystore locked / disk full / perms?)");
@@ -932,7 +932,7 @@ std::optional<std::string> take_pending_refresh() {
 }
 
 std::optional<std::string>
-oauth_proactive_refresh_token(std::int64_t window_ms) {
+oauth_proactive_refresh_token(Io io, std::int64_t window_ms) {
     // Env-injected OAuth token (CLAUDE_CODE_OAUTH_TOKEN) carries no expiry or
     // refresh_token, and an env/CLI API key isn't refreshable at all — skip
     // the disk read for those so we never touch the network for them.
@@ -941,7 +941,7 @@ oauth_proactive_refresh_token(std::int64_t window_ms) {
      || env::get_or_null<env::Var::ClaudeOAuthToken>())
         return std::nullopt;
 
-    auto loaded = load_credentials();
+    auto loaded = load_credentials(io);
     if (!loaded) return std::nullopt;
     auto* o = std::get_if<cred::OAuth>(&*loaded);
     if (!o) return std::nullopt;                 // API-key / None: nothing to do
@@ -954,7 +954,7 @@ oauth_proactive_refresh_token(std::int64_t window_ms) {
     return o->refresh_token;
 }
 
-Credentials resolve(const std::string& cli_api_key) {
+Credentials resolve(Io io, const std::string& cli_api_key) {
     if (!cli_api_key.empty())
         return Credentials{cred::ApiKey{cli_api_key}};
     using namespace agentty::util;
@@ -963,7 +963,7 @@ Credentials resolve(const std::string& cli_api_key) {
     if (const char* t = env::get_or_null<env::Var::ClaudeOAuthToken>())
         return Credentials{cred::OAuth{std::string{t}, "", 0}};
 
-    auto loaded = load_credentials();
+    auto loaded = load_credentials(io);
     if (!loaded) return Credentials{cred::None{}};
 
     // Non-blocking: expired-with-refresh stashes the refresh token for
@@ -1001,10 +1001,10 @@ Credentials resolve(const std::string& cli_api_key) {
 // ---------------------------------------------------------------------------
 
 namespace {
-AuthHeader fresh_auth_header_locked(const AuthHeader& fallback);
+AuthHeader fresh_auth_header_locked(Io io, const AuthHeader& fallback);
 }
 
-AuthHeader fresh_auth_header(const AuthHeader& fallback) {
+AuthHeader fresh_auth_header(Io io, const AuthHeader& fallback) {
     using namespace agentty::util;
 
     // CLI/env API keys are static — nothing to refresh. The env OAuth token
@@ -1019,13 +1019,17 @@ AuthHeader fresh_auth_header(const AuthHeader& fallback) {
     // persists; the rest re-read the freshly-saved token.
     static maya::guarded<bool> one_at_a_time;
     return one_at_a_time.with(
-        [](bool&, AuthHeader fb) { return fresh_auth_header_locked(fb); },
+        [](bool&, AuthHeader fb) {
+            // guarded's body can't take the caller's Io (it isn't Sendable),
+            // but this runs under fresh_auth_header, which had one.
+            return fresh_auth_header_locked(IoAccess::grant(), fb);
+        },
         fallback);
 }
 
 namespace {
-AuthHeader fresh_auth_header_locked(const AuthHeader& fallback) {
-    auto loaded = load_credentials();
+AuthHeader fresh_auth_header_locked(Io io, const AuthHeader& fallback) {
+    auto loaded = load_credentials(io);
     if (!loaded) return fallback;
 
     auto* oauth = std::get_if<cred::OAuth>(&*loaded);
@@ -1049,7 +1053,7 @@ AuthHeader fresh_auth_header_locked(const AuthHeader& fallback) {
     // firing a redundant (refresh-token-rotating, hence mutually-invalidating)
     // refresh — the multi-instance refresh loop this guards against. It also
     // persists the new creds to disk.
-    auto tr = refresh_access_token_locked(RefreshToken{oauth->refresh_token});
+    auto tr = refresh_access_token_locked(io, RefreshToken{oauth->refresh_token});
     if (!tr) {
         // Refresh failed (network / revoked). Return whatever we have; the
         // transport will surface the eventual 401 with the login hint.
@@ -1105,7 +1109,7 @@ void open_browser(const std::string& url) {
 // Subcommands
 // ---------------------------------------------------------------------------
 
-int cmd_login() {
+int cmd_login(Io io) {
     // Surface what you're already signed into so switching accounts is
     // obvious — pick a different option to add/replace, `agentty logout`
     // to drop one.
@@ -1237,7 +1241,7 @@ int cmd_login() {
         if (!detected.empty() && detected != "anthropic") {
             const auto* row = provider::preset_for(detected);
             const std::string_view label = row ? row->label : detected;
-            if (!provider::credentials::add_key(detected, key)) {
+            if (!provider::credentials::add_key(io, detected, key)) {
                 std::cerr << "Failed to save the " << label << " key.\n";
                 return 1;
             }
@@ -1258,7 +1262,7 @@ int cmd_login() {
         }
 
         Credentials c{cred::ApiKey{std::move(key)}};
-        if (!save_credentials(c)) {
+        if (!save_credentials(io, c)) {
             std::cerr << "Failed to save credentials.\n"; return 1;
         }
         std::cout << "Saved API key to " << credentials_path().string() << "\n";
@@ -1292,14 +1296,14 @@ int cmd_login() {
         std::move(tr->refresh_token),
         tr->expires_in_s ? now_ms() + tr->expires_in_s * 1000 : 0
     }};
-    if (!save_credentials(c)) {
+    if (!save_credentials(io, c)) {
         std::cerr << "Failed to save credentials.\n"; return 1;
     }
     std::cout << "\n\xE2\x9C\x93 Logged in. Saved to " << credentials_path().string() << "\n";
     return 0;
 }
 
-int cmd_logout() {
+int cmd_logout(Io io) {
     namespace codex = provider::chatgpt;
     // One entry per signed-in account. Scales to N providers without the
     // 2-way special case (which didn't cover Copilot).
@@ -1314,13 +1318,13 @@ int cmd_logout() {
     std::error_code ec;
     if (fs::exists(p, ec))
         accounts.push_back({"claude.ai / Anthropic", p.string(),
-                            [] { return clear_credentials(); }});
+                            [io] { return clear_credentials(io); }});
     if (codex::load_codex_credentials())
         accounts.push_back({"ChatGPT / Codex", codex::codex_credentials_path().string(),
                             [] { return codex::clear_codex_credentials(); }});
     if (provider::copilot::signed_in())
         accounts.push_back({"GitHub Copilot", provider::copilot::credentials_path().string(),
-                            [] { return provider::copilot::clear_credentials(); }});
+                            [io] { return provider::copilot::clear_credentials(io); }});
 
     if (accounts.empty()) { std::cout << "No saved credentials.\n"; return 0; }
 
@@ -1359,7 +1363,7 @@ int cmd_logout() {
     return rc;
 }
 
-int cmd_status() {
+int cmd_status(Io io) {
     std::cout << "Credentials file: " << credentials_path().string() << "\n";
     using namespace agentty::util;
     if (env::get_or_null<env::Var::AnthropicApiKey>()) {
@@ -1370,7 +1374,7 @@ int cmd_status() {
         std::cout << env::name<env::Var::ClaudeOAuthToken>()
                   << ": set (OAuth via env)\n";
     }
-    auto loaded = load_credentials();
+    auto loaded = load_credentials(io);
     if (!loaded) {
         std::cout << "Saved credentials: (none)\n";
     } else {

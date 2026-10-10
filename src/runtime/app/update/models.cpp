@@ -205,7 +205,7 @@ void refresh_fused_sources(Model& m) {
     // catalog and its models simply never appeared. Splitting the list
     // across call sites is what let a whole source be forgotten, so the
     // list now lives in one place and every consumer reads it from there.
-    for (const auto& src : provider::catalog_sources(settings, &m.d.auth)) {
+    for (const auto& src : provider::catalog_sources(settings, m.d.auth)) {
         if (src.needs_signin) {
             // Un-authed preset → a QUERY-GATED sign-in offer: it never
             // clutters the browse view (build_fused_rows hides offers while

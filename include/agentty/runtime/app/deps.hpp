@@ -23,6 +23,7 @@
 #include "agentty/provider/provider.hpp"
 #include "agentty/runtime/app/settings_cache.hpp"
 #include "agentty/store/store.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::app {
 
@@ -90,8 +91,8 @@ void install_deps(Deps d);
 // global is only published after the fold, so mid-switch it still names the
 // provider being left. The no-argument form is for code off the loop, which
 // has no Model and reads the published copy.
-[[nodiscard]] auth::AuthHeader auth_snapshot(const provider::Selection& sel);
-[[nodiscard]] auth::AuthHeader auth_snapshot();
+[[nodiscard]] auth::AuthHeader auth_snapshot(Io, const provider::Selection& sel);
+[[nodiscard]] auth::AuthHeader auth_snapshot(Io);
 
 // The live auth header: installed by install_deps(), replaced by the host's
 // InstallAuth effect. Safe from any thread (a maya::guarded value); a copy

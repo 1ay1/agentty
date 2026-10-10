@@ -24,7 +24,7 @@ bool env_has(std::string_view name) {
 
 } // namespace
 
-bool provider_is_authed(const ProviderDescriptor& p,
+bool provider_is_authed(Io io, const ProviderDescriptor& p,
                         const store::Settings& settings) {
     // Local / no-auth backends are always usable.
     if (p.is_local || p.auth == AuthStyle::None) return true;
@@ -36,11 +36,11 @@ bool provider_is_authed(const ProviderDescriptor& p,
     // break that hermeticity and the DI discipline).
     switch (auth::vault::of(p.id).kind) {
         case auth::vault::Kind::AnthropicFile:
-            if (auth::anthropic_signed_in()) return true;
+            if (auth::anthropic_signed_in(io)) return true;
             // Pasted-key overlap: provider_keys["anthropic"].
             return settings.provider_keys.count(std::string{p.id}) != 0;
         case auth::vault::Kind::OAuthFile:
-            return auth::vault::signed_in(std::string{p.id});
+            return auth::vault::signed_in(io, std::string{p.id});
         case auth::vault::Kind::SettingsKey:
         case auth::vault::Kind::None:
             break;
@@ -54,28 +54,28 @@ bool provider_is_authed(const ProviderDescriptor& p,
     return false;
 }
 
-bool provider_is_authed(std::string_view id, const store::Settings& settings) {
+bool provider_is_authed(Io io, std::string_view id, const store::Settings& settings) {
     if (const ProviderDescriptor* p = preset_for(id))
-        return provider_is_authed(*p, settings);
+        return provider_is_authed(io, *p, settings);
     // Not a registry preset ⇒ a saved custom host. Authed iff it has a
     // provider_keys entry at all (a keyless local host is saved with an empty
     // value and is still usable).
     return settings.provider_keys.count(std::string{id}) != 0;
 }
 
-AuthSource auth_source(const ProviderDescriptor& p,
+AuthSource auth_source(Io io, const ProviderDescriptor& p,
                        const store::Settings& settings) {
     if (p.is_local || p.auth == AuthStyle::None) return AuthSource::Local;
     // Same dispatch discipline as provider_is_authed: vault kind selects
     // the store family; SettingsKey answers come from the INJECTED settings.
     switch (auth::vault::of(p.id).kind) {
         case auth::vault::Kind::AnthropicFile:
-            if (auth::anthropic_signed_in()
+            if (auth::anthropic_signed_in(io)
                 || settings.provider_keys.count(std::string{p.id}) != 0)
                 return AuthSource::Saved;
             return AuthSource::None;
         case auth::vault::Kind::OAuthFile:
-            return auth::vault::signed_in(std::string{p.id})
+            return auth::vault::signed_in(io, std::string{p.id})
                  ? AuthSource::Saved : AuthSource::None;
         case auth::vault::Kind::SettingsKey:
         case auth::vault::Kind::None:
@@ -135,7 +135,7 @@ bool signed_in(std::string_view id, const store::Settings& settings,
     return it != settings.provider_keys.end() && !it->second.empty();
 }
 
-auth::AuthView load_auth_view(const store::Settings& settings) {
+auth::AuthView load_auth_view(Io io, const store::Settings& settings) {
     auth::AuthView v;
     v.loaded = true;
     auto fill = [&](const std::string& id, const ProviderDescriptor* p) {
@@ -143,18 +143,18 @@ auth::AuthView load_auth_view(const store::Settings& settings) {
         switch (auth::vault::of(id).kind) {
             case auth::vault::Kind::AnthropicFile:
             case auth::vault::Kind::OAuthFile:
-                a.stored = auth::vault::signed_in(id);
+                a.stored = auth::vault::signed_in(io, id);
                 break;
             default: break;
         }
         if (p)
             for (auto env : p->auth_env)
                 if (env_has(env)) { a.env_var = std::string{env}; break; }
-        for (auto& acc : auth::accounts::list_for(id))
+        for (auto& acc : auth::accounts::list_for(io, id))
             a.accounts.push_back(std::move(acc.label));
-        a.active_account = auth::accounts::active_label(id);
+        a.active_account = auth::accounts::active_label(io, id);
         if (a.accounts.empty())
-            a.unregistered_label = auth::accounts::derive_current_label(id);
+            a.unregistered_label = auth::accounts::derive_current_label(io, id);
         v.providers.emplace(id, std::move(a));
     };
     for (const auto& p : providers()) fill(std::string{p.id}, &p);

@@ -98,14 +98,14 @@ struct Host : maya::terminal_host<P> {
     // having to remember a LoadAuthView.
     std::optional<Msg> handle(InstallAuth e) {
         update_auth(e.clear ? auth::AuthHeader{}
-                            : provider::credentials::resolve(e.provider));
+                            : provider::credentials::resolve(io_, e.provider));
         return handle(LoadAuthView{});
     }
     std::optional<Msg> handle(LoadAuthView) {
         // Through the settings seam, so a key written by an AccountOp in
         // this same batch is seen.
         auto s = deps().load_settings();
-        auto view = provider::load_auth_view(s);
+        auto view = provider::load_auth_view(io_, s);
         return Msg{msg::LoginMsg{AuthViewLoaded{
             std::move(view), std::move(s.provider_keys)}}};
     }
@@ -114,30 +114,30 @@ struct Host : maya::terminal_host<P> {
         namespace cr = provider::credentials;
         using K = AccountOp::Kind;
         switch (e.kind) {
-            case K::Activate:    (void)cr::activate(e.provider, e.label); break;
-            case K::Remove:      (void)cr::remove(e.provider, e.label); break;
+            case K::Activate:    (void)cr::activate(io_, e.provider, e.label); break;
+            case K::Remove:      (void)cr::remove(io_, e.provider, e.label); break;
             case K::Register:
-                (void)auth::accounts::snapshot_active(e.provider, e.label);
+                (void)auth::accounts::snapshot_active(io_, e.provider, e.label);
                 break;
-            case K::AddKey:      (void)cr::add_key(e.provider, e.key); break;
-            case K::SignOut:     auth::vault::sign_out(e.provider); break;
-            case K::ClearActive: cr::clear_active(e.provider); break;
+            case K::AddKey:      (void)cr::add_key(io_, e.provider, e.key); break;
+            case K::SignOut:     auth::vault::sign_out(io_, e.provider); break;
+            case K::ClearActive: cr::clear_active(io_, e.provider); break;
         }
     }
 
     void handle(SaveCredentials e) {
-        auth::save_credentials(e.creds);
+        auth::save_credentials(io_, e.creds);
         namespace acc = auth::accounts;
         const std::string provider = "anthropic";
         // Re-login of the same account reuses its label; "+ Add another"
         // picks the next free one.
-        std::string base = acc::derive_current_label(provider);
+        std::string base = acc::derive_current_label(io_, provider);
         if (base.empty()) base = "account";
         std::string label = base;
         if (e.as_new_account)
-            for (int n = 2; acc::get(provider, label).has_value() && n < 100; ++n)
+            for (int n = 2; acc::get(io_, provider, label).has_value() && n < 100; ++n)
                 label = base + " " + std::to_string(n);
-        acc::snapshot_active(provider, label);
+        acc::snapshot_active(io_, provider, label);
     }
 
     // Settings go through the write-behind seam, NOT straight to disk.
@@ -168,6 +168,10 @@ struct Host : maya::terminal_host<P> {
         (void)tools::util::write_file(std::filesystem::path{e.path},
                                       e.contents);
     }
+
+private:
+    // The host runs effects; that's what an Io is for.
+    Io io_ = IoAccess::grant();
 };
 
 }  // namespace agentty::app

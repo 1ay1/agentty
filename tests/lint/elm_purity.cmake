@@ -54,7 +54,9 @@ set(ban_fileio      "std::(if|of|f)stream|(fs|std::filesystem)::(remove|rename|c
 set(ban_subprocess  "run_command|::system[ \t]*\\(|popen[ \t]*\\(")
 set(ban_net         "prewarm_active_provider|http::default_client|dial_new")
 set(ban_global      "provider::select[ \t]*\\(|tools::(subagent::set_|skills::(reset_activations|note_activated)|invalidate_mcp_catalog|plugin::(set_|remove_|approve_|add_|update_)|util::allow_read_root)")
-set(ban_auth        "auth::(load_credentials|oauth_proactive_refresh_token|clear_credentials|save_credentials|random_urlsafe|anthropic_signed_in)|credentials::(resolve|add_key|clear_active|needs_login)|(acc|accounts)::(activate|remove|snapshot_active|get|list_for|active_label|derive_current_label)[ \t]*\\(|vault::(sign_out|signed_in)[ \t]*\\(")
+# Credentials and accounts are not listed: those functions take an agentty::Io,
+# which a reducer never has, so the compiler rejects the call (util/io.hpp).
+set(ban_auth        "auth::random_urlsafe")
 set(ban_static      "^[ \t]+static[ \t]+(std::|auto[ \t]|bool[ \t]|int[ \t]|long[ \t]|unsigned[ \t]|double[ \t]|float[ \t]|size_t[ \t])[^(]*[=;{][ \t]*$")
 set(ban_thread      "std::j?thread([^_:]|$)|\\.detach\\(\\)|std::async[^_]")
 # tty: asking the terminal directly. The size arrives as a Msg
@@ -68,7 +70,9 @@ set(ban_diskhelper  "(add_plugin_from_line|create_starter)[ \t]*\\(")
 # lookup. Reducers read the answer from the Model instead: m.ui.library
 # (skills, approvals, commands, hooks), m.ui.git_repo, m.env (embed
 # defaults, user root). A worker that needs them gets them in a cmd::.
-set(ban_disk_lookup "(skills|commands)::(all|find|shadowed|shadowed_within_scope|load_approvals)[ \t]*\\(|skills::trust_of[ \t]*\\([^,)]*\\)|commands::try_expand[ \t]*\\([^,)]*\\)|hooks::(active_file|pending_approval)[ \t]*\\(|workspace::in_git_repo(_if_ready)?[ \t]*\\(|eb::apply_env[ \t]*\\(|skills_panel::scan[ \t]*\\([ \t]*\\)|take_unproven_spec[ \t]*\\(|config_path[ \t]*\\([^,)]*\\)[^,]|util::(user_root|home_dir)[ \t]*\\(|(^|[^_a-z])rag_embed_status[ \t]*\\(|shared_retriever[ \t]*\\(")
+# skills/commands/hooks lookups and rag_embed_status take an Io now, so they
+# are checked by the compiler, not listed here.
+set(ban_disk_lookup "skills::trust_of[ \t]*\\([^,)]*\\)|workspace::in_git_repo(_if_ready)?[ \t]*\\(|eb::apply_env[ \t]*\\(|skills_panel::scan[ \t]*\\([ \t]*\\)|take_unproven_spec[ \t]*\\(|config_path[ \t]*\\([^,)]*\\)[^,]|util::(user_root|home_dir)[ \t]*\\(|shared_retriever[ \t]*\\(")
 set(ban_names clock env fileio subprocess net global auth static thread tty diskhelper disk_lookup)
 
 # Parse the allowlist: `path: name name ...`, `#` comments.

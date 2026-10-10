@@ -429,7 +429,7 @@ bool save_token(const KimiToken& tok) {
     return store().with([](CredsFile&, KimiToken t) { return save_unlocked(t); }, tok);
 }
 
-bool clear_credentials() {
+bool clear_credentials(Io) {
     return store().with([](CredsFile&) {
         std::error_code ec;
         return fs::remove(creds_path(), ec) || !ec;

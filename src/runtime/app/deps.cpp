@@ -38,7 +38,7 @@ void install_deps(Deps d) {
     g_deps = &storage;
 }
 
-auth::AuthHeader auth_snapshot(const provider::Selection& sel) {
+auth::AuthHeader auth_snapshot(Io io, const provider::Selection& sel) {
     // Resolve from the given provider through the central credential layer,
     // so the credential can never drift from the provider it is for. This is
     // the single source of truth for "what auth goes on the wire": if a switch
@@ -53,7 +53,7 @@ auth::AuthHeader auth_snapshot(const provider::Selection& sel) {
     const std::string pid =
         sel.kind == provider::Kind::OpenAI ? sel.openai_endpoint.label
                                            : std::string{provider::default_provider_id()};
-    auto resolved = provider::credentials::resolve(pid);
+    auto resolved = provider::credentials::resolve(io, pid);
     if (!auth::bearer_token(resolved).empty()
         || std::holds_alternative<auth::BearerHeader>(resolved))
         return resolved;
@@ -64,8 +64,8 @@ auth::AuthHeader auth_snapshot(const provider::Selection& sel) {
 
 // Off the loop (a worker with no Model): resolve against the PUBLISHED copy of
 // the selection, which the dispatch seam keeps equal to the Model's.
-auth::AuthHeader auth_snapshot() {
-    return auth_snapshot(provider::active());
+auth::AuthHeader auth_snapshot(Io io) {
+    return auth_snapshot(io, provider::active());
 }
 
 void update_auth(auth::AuthHeader auth) {

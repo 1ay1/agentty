@@ -1268,28 +1268,28 @@ TEST_CASE("custom host supports multiple accounts") {
 
     // Account A active: snapshot it into the registry.
     set_key("sk-aaaa1111");
-    CHECK(acc::snapshot_active(spec, "A"));
+    CHECK(acc::snapshot_active(::agentty::IoAccess::grant(), spec, "A"));
 
     // Switch the active key to B and snapshot that too.
     set_key("sk-bbbb2222");
-    CHECK(acc::snapshot_active(spec, "B"));
+    CHECK(acc::snapshot_active(::agentty::IoAccess::grant(), spec, "B"));
 
     // Both accounts are listed for this host.
-    CHECK(acc::list_for(spec).size() == 2);
+    CHECK(acc::list_for(::agentty::IoAccess::grant(), spec).size() == 2);
 
     // Activating A restores its key into provider_keys[spec]; then B.
-    CHECK(acc::activate(spec, "A"));
+    CHECK(acc::activate(::agentty::IoAccess::grant(), spec, "A"));
     CHECK(get_key() == "sk-aaaa1111");
-    CHECK(acc::activate(spec, "B"));
+    CHECK(acc::activate(::agentty::IoAccess::grant(), spec, "B"));
     CHECK(get_key() == "sk-bbbb2222");
 
     // Two keys that SHARE the same last-4 still derive DISTINCT labels (the
     // label mixes a prefix + suffix + length, not just the suffix) — so a
     // second key can't collide with / overwrite the first in the registry.
     set_key("sk-prefix1-SAME9999");
-    const std::string l1 = acc::derive_current_label(spec);
+    const std::string l1 = acc::derive_current_label(::agentty::IoAccess::grant(), spec);
     set_key("sk-prefix2-SAME9999");
-    const std::string l2 = acc::derive_current_label(spec);
+    const std::string l2 = acc::derive_current_label(::agentty::IoAccess::grant(), spec);
     CHECK(!l1.empty());
     CHECK(l1 != l2);
 
@@ -1573,7 +1573,7 @@ TEST_CASE("catalog_sources enumerates presets and custom hosts, once each") {
     // not a preset and does not adopt onto one, so the picker showed nothing.
     s.provider_keys["https://api.z.ai/api/coding/paas/v4"] = "zkey";
 
-    const auto srcs = provider::catalog_sources(s);
+    const auto srcs = provider::catalog_sources(s, agentty::auth::AuthView{});
 
     auto count_id = [&](std::string_view id) {
         int n = 0;

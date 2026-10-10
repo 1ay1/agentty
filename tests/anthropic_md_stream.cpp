@@ -84,7 +84,7 @@ int do_capture(const std::string& out_path,
                const std::string& prompt,
                const std::string& model) {
     // Resolve creds exactly like main.cpp does.
-    auth::Credentials creds = auth::resolve(/*cli_api_key=*/"");
+    auth::Credentials creds = auth::resolve(::agentty::IoAccess::grant(), /*cli_api_key=*/"");
     auth::AuthHeader  hdr   = auth::make_auth_header(creds);
     if (auth::is_empty(hdr)) {
         die("no credentials — set ANTHROPIC_API_KEY or run `agentty login`", 3);

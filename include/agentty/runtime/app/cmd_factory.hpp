@@ -217,8 +217,8 @@ struct LoopBreak {
 // Declared with the Selection itself: provider::active() already returns a
 // by-value snapshot taken under the selection mutex, so handing one to a
 // worker is exactly what it is for.
+// The credential is resolved on the worker, for `sel`.
 [[nodiscard]] Cmd fetch_models(provider::Selection sel,
-                                          auth::AuthHeader   auth,
                                           std::string        for_provider);
 
 // The common case: fetch for the MODEL's active provider. Resolves the

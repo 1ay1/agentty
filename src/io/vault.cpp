@@ -19,12 +19,12 @@ namespace {
 // The central credential resolver already dispatches correctly per provider
 // — every descriptor delegates to it, so the WIRE story stays single-source
 // (vault adds the storage/lifecycle story around it, it does not fork auth).
-auth::AuthHeader resolve_central(const std::string& p) {
-    return provider::credentials::resolve(p);
+auth::AuthHeader resolve_central(Io io, const std::string& p) {
+    return provider::credentials::resolve(io, p);
 }
 
-std::string label_from_registry(const std::string& p) {
-    return auth::accounts::derive_current_label(p);
+std::string label_from_registry(Io io, const std::string& p) {
+    return auth::accounts::derive_current_label(io, p);
 }
 
 // SettingsKey family (hosted API keys AND custom hosts): the credential is
@@ -32,45 +32,45 @@ std::string label_from_registry(const std::string& p) {
 // custom LOCAL host saves an empty value and is usable keylessly, but that
 // is Kind::None territory — provider_is_authed handles the nuance for
 // pickers; the vault's question is "is a secret SAVED here").
-bool key_signed_in(const std::string& p) {
+bool key_signed_in(Io, const std::string& p) {
     auto s = persistence::load_settings();
     auto it = s.provider_keys.find(p);
     return it != s.provider_keys.end() && !it->second.empty();
 }
-void key_clear(const std::string& p) {
+void key_clear(Io, const std::string& p) {
     auto s = persistence::load_settings();
     if (s.provider_keys.erase(p) > 0) persistence::save_settings(s);
 }
 
-void noop_after(const std::string&) {}
+void noop_after(Io, const std::string&) {}
 
 // ── Per-kind rows ────────────────────────────────────────────────────────
 constexpr Desc kAnthropic{
     .id           = "anthropic",
     .kind         = Kind::AnthropicFile,
-    .is_signed_in = [](const std::string&) { return auth::anthropic_signed_in(); },
-    .clear        = [](const std::string&) { (void)auth::clear_credentials(); },
+    .is_signed_in = [](Io io, const std::string&) { return auth::anthropic_signed_in(io); },
+    .clear        = [](Io io, const std::string&) { (void)auth::clear_credentials(io); },
     .resolve      = resolve_central,
     .current_label = label_from_registry,
-    .after_activate = [](const std::string&) {
+    .after_activate = [](Io io, const std::string&) {
         // Re-seal into the keystore so the next resolve() reads the
         // switched-to account, not a stale cache.
-        if (auto c = auth::load_credentials()) auth::save_credentials(*c);
+        if (auto c = auth::load_credentials(io)) auth::save_credentials(io, *c);
     },
 };
 
 constexpr Desc kChatGpt{
     .id           = "chatgpt",
     .kind         = Kind::OAuthFile,
-    .is_signed_in = [](const std::string&) {
+    .is_signed_in = [](Io io, const std::string&) {
         return provider::chatgpt::responses_available();
     },
-    .clear = [](const std::string&) {
+    .clear = [](Io io, const std::string&) {
         (void)provider::chatgpt::clear_codex_credentials();
     },
     .resolve      = resolve_central,   // empty: the transport owns the token
     .current_label = label_from_registry,
-    .after_activate = [](const std::string&) {
+    .after_activate = [](Io io, const std::string&) {
         if (auto c = provider::chatgpt::load_codex_credentials())
             provider::chatgpt::save_codex_credentials(*c);
     },
@@ -79,15 +79,15 @@ constexpr Desc kChatGpt{
 constexpr Desc kCopilot{
     .id           = "copilot",
     .kind         = Kind::OAuthFile,
-    .is_signed_in = [](const std::string&) {
+    .is_signed_in = [](Io io, const std::string&) {
         return provider::copilot::signed_in();
     },
-    .clear = [](const std::string&) {
-        (void)provider::copilot::clear_credentials();
+    .clear = [](Io io, const std::string&) {
+        (void)provider::copilot::clear_credentials(io);
     },
     .resolve      = resolve_central,
     .current_label = label_from_registry,
-    .after_activate = [](const std::string&) {
+    .after_activate = [](Io io, const std::string&) {
         provider::copilot::invalidate_cached_token();
     },
 };
@@ -95,15 +95,15 @@ constexpr Desc kCopilot{
 constexpr Desc kKimi{
     .id           = "kimi",
     .kind         = Kind::OAuthFile,
-    .is_signed_in = [](const std::string&) {
+    .is_signed_in = [](Io io, const std::string&) {
         return provider::kimi::signed_in();
     },
-    .clear = [](const std::string&) {
-        (void)provider::kimi::clear_credentials();
+    .clear = [](Io io, const std::string&) {
+        (void)provider::kimi::clear_credentials(io);
     },
     .resolve      = resolve_central,
     .current_label = label_from_registry,
-    .after_activate = [](const std::string&) {
+    .after_activate = [](Io io, const std::string&) {
         provider::kimi::invalidate_cached_token();
     },
 };

@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "agentty/auth/auth.hpp"   // OAuthError
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider::kimi {
 
@@ -74,7 +75,7 @@ login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled);
 [[nodiscard]] std::filesystem::path credentials_path();
 [[nodiscard]] std::optional<KimiToken> load_token();
 bool save_token(const KimiToken& tok);
-bool clear_credentials();
+bool clear_credentials(Io);
 
 // Cheap "is a Kimi credential present?" for the picker view (stat-cached).
 [[nodiscard]] bool signed_in();

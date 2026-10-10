@@ -22,6 +22,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "agentty/util/io.hpp"
 
 namespace agentty::auth::accounts {
 
@@ -41,14 +42,14 @@ struct Account {
 
 // Every account across all providers, newest-saved first. Reads accounts.json;
 // returns {} when none saved. Never throws.
-[[nodiscard]] std::vector<Account> list();
+[[nodiscard]] std::vector<Account> list(Io);
 
 // Accounts for one provider only.
-[[nodiscard]] std::vector<Account> list_for(const std::string& provider);
+[[nodiscard]] std::vector<Account> list_for(Io, const std::string& provider);
 
 // The label of the account currently marked active for `provider`, if the
 // registry knows one. Empty when the provider has no registered accounts.
-[[nodiscard]] std::string active_label(const std::string& provider);
+[[nodiscard]] std::string active_label(Io, const std::string& provider);
 
 // Insert or update the (provider, label) slot with a fresh secret, mark it
 // active for that provider, and persist. Used right after a successful login
@@ -57,12 +58,12 @@ bool upsert(const std::string& provider, const std::string& label,
             const std::string& secret);
 
 // Fetch a specific slot's secret. nullopt when absent.
-[[nodiscard]] std::optional<Account> get(const std::string& provider,
+[[nodiscard]] std::optional<Account> get(Io, const std::string& provider,
                                          const std::string& label);
 
 // Remove a slot. If it was the active one, the newest remaining account for
 // that provider (if any) becomes active. Returns true if a slot was removed.
-bool remove(const std::string& provider, const std::string& label);
+bool remove(Io, const std::string& provider, const std::string& label);
 
 // Record which label is active for a provider (without changing secrets).
 bool set_active(const std::string& provider, const std::string& label);
@@ -79,7 +80,7 @@ bool set_active(const std::string& provider, const std::string& label);
 // under `label` (marking it active). Call right after a successful login so
 // the just-authenticated account is captured by name. Returns false when the
 // provider has no live credential to snapshot.
-bool snapshot_active(const std::string& provider, const std::string& label);
+bool snapshot_active(Io, const std::string& provider, const std::string& label);
 
 // Install the saved (provider, label) credential as the provider's active
 // credential and mark it active in the registry. Does NOT touch the live
@@ -96,12 +97,12 @@ bool snapshot_active(const std::string& provider, const std::string& label);
 // switching back to it later would present a dead refresh token and every
 // refresh would be refused (invalid_grant). Re-snapshotting on the way out
 // keeps every slot as fresh as the last moment it was live.
-bool activate(const std::string& provider, const std::string& label);
+bool activate(Io, const std::string& provider, const std::string& label);
 
 // Best-effort human label for whatever credential is currently live in the
 // provider's active store but not yet registered (legacy single-login case).
 // Returns "" when nothing is signed in. Used to auto-register the pre-existing
 // login as "default" the first time the account picker opens.
-[[nodiscard]] std::string derive_current_label(const std::string& provider);
+[[nodiscard]] std::string derive_current_label(Io, const std::string& provider);
 
 } // namespace agentty::auth::accounts

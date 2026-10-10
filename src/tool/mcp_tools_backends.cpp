@@ -1137,15 +1137,15 @@ provider::StreamResult run_one_completion(Thread& thread,
             sel.kind == provider::Kind::OpenAI
                 ? sel.openai_endpoint.label
                 : std::string{provider::default_provider_id()};
-        auth::AuthHeader live = provider::credentials::resolve(pid);
+        auth::AuthHeader live = provider::credentials::resolve(IoAccess::grant(), pid);   // subagent, on a tool worker
         const bool live_real = !auth::bearer_token(live).empty()
             || std::holds_alternative<auth::BearerHeader>(live);
         req.auth = live_real
                  ? (sel.kind == provider::Kind::Anthropic
-                        ? auth::fresh_auth_header(live)
+                        ? auth::fresh_auth_header(IoAccess::grant(), live)
                         : std::move(live))
                  : (sel.kind == provider::Kind::Anthropic
-                        ? auth::fresh_auth_header(cfg.auth)
+                        ? auth::fresh_auth_header(IoAccess::grant(), cfg.auth)
                         : cfg.auth);
     }
     // A subagent's job is to investigate and return a CONCISE standalone

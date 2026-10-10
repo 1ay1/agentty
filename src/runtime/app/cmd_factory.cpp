@@ -896,15 +896,6 @@ Cmd launch_stream(Model& m) {
     const int  compaction_ceiling = m.s.compaction_ceiling;
     const int  context_max = m.s.context_max;
     std::string model_id   = m.d.model_id.value;
-    // auth_snapshot(), NOT deps().auth: the cached header is overwritten by
-    // background OAuth refreshes (token_refreshed → update_auth installs the
-    // ANTHROPIC bearer unconditionally), so reading the cache while e.g.
-    // Mistral is active ships Anthropic's OAuth token to api.mistral.ai →
-    // 401 "Invalid API Key". auth_snapshot resolves from the CURRENTLY-ACTIVE
-    // provider through the central credential layer (falling back to the
-    // cache only for oauth_native/local, whose transports own their tokens),
-    // so the wire credential can never drift from provider::active().
-    auth::AuthHeader auth  = auth_snapshot(m.d.selection);
     // Reasoning effort, resolved + clamped to this model's capability here on
     // the UI thread (where the live Model is readable). Empty = off; an
     // unsupported tier degrades (Xhigh/Max → high) instead of 400ing.
@@ -1087,7 +1078,6 @@ Cmd launch_stream(Model& m) {
         // reducers that write them. The answer can't change mid-turn anyway.
         bool                org_blocks_vision;
         int                 model_context_window;
-        auth::AuthHeader    auth;
         http::CancelTokenPtr cancel;
         // The provider this turn was launched against, from the MODEL — the
         // same reason as org_blocks_vision. Reading the process global here,
@@ -1115,7 +1105,9 @@ Cmd launch_stream(Model& m) {
         const auto model_supports_tools  = in.model_supports_tools;
         const auto model_supports_vision = in.model_supports_vision;
         const auto model_context_window  = in.model_context_window;
-        auto& auth                    = in.auth;
+        // Resolved here, for the provider the turn was launched against: it
+        // reads the credential store, which a reducer can't.
+        auto auth                     = auth_snapshot(io, in.selection);
         auto& cancel                  = in.cancel;
         // Build wire payload off the UI thread.
         provider::Request req;
@@ -1485,7 +1477,6 @@ Cmd launch_stream(Model& m) {
                                            domain::entitlement::Fact::VisionOrgPolicy,
                                            detail::active_provider_id(m)),
             .model_context_window    = model_context_window,
-            .auth                    = std::move(auth),
             .cancel                  = cancel,
             .selection               = m.d.selection,
         });
@@ -2301,20 +2292,20 @@ Cmd fetch_models(const Model& m) {
     // the body. Reading the process global instead was the bug a switch could
     // hit: the reducer changes m.d.selection, the global is only published
     // after the fold, so this would have fetched the OLD provider's catalog.
-    return fetch_models(m.d.selection, auth_snapshot(m.d.selection),
+    return fetch_models(m.d.selection,
                         detail::active_provider_id(m));
 }
 
-Cmd fetch_models(provider::Selection sel, auth::AuthHeader auth,
+Cmd fetch_models(provider::Selection sel,
                  std::string for_provider) {
     // Captureless body + args by value: jaal's rule (D7/D19) is that a task
     // body captures NOTHING, so everything it reads is either an argument
     // or a global it owns. A capture is a lifetime you have to reason about
     // on another thread; an argument is a copy the runtime made for you.
-    return Cmd::task(
-        [](maya::Sink<Msg> out, std::stop_token,
-           provider::Selection sel, auth::AuthHeader auth,
-           std::string for_provider) {
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg> out, std::stop_token,
+           provider::Selection sel, std::string for_provider) {
+            const auto auth = auth_snapshot(io, sel);
             try {
                 // ONE model-list router (provider/selection.cpp), dispatched
                 // on the same axes as the stream path. No
@@ -2367,7 +2358,7 @@ Cmd fetch_models(provider::Selection sel, auth::AuthHeader auth,
                                       "models fetch: unknown exception"}});
         }
         },
-        std::move(sel), std::move(auth), std::move(for_provider));
+        std::move(sel), std::move(for_provider));
 }
 
 Cmd probe_model_window(const Model& m, std::string model_id) {
@@ -2378,10 +2369,12 @@ Cmd probe_model_window(const Model& m, std::string model_id) {
         || sel.openai_endpoint.native_api
         || !provider::openai::detail::is_local_endpoint(sel.openai_endpoint))
         return Cmd::none();
-    return Cmd::task(
-        [](maya::Sink<Msg> out, std::stop_token,
-           std::string model_id, provider::openai::Endpoint endpoint,
-           auth::AuthHeader auth, std::string for_provider) {
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg> out, std::stop_token,
+           std::string model_id, provider::Selection sel,
+           std::string for_provider) {
+            const auto& endpoint = sel.openai_endpoint;
+            const auto  auth     = auth_snapshot(io, sel);
             int w = 0;
             try {
                 w = provider::openai::probe_loaded_window(auth, endpoint,
@@ -2391,11 +2384,9 @@ Cmd probe_model_window(const Model& m, std::string model_id) {
                     for_provider, model_id, w);
             out.send(Msg{ModelWindowProbed{for_provider, model_id, w}});
         },
-        std::move(model_id), sel.openai_endpoint,
-        // Resolved on the UI thread from the Model, like every other input:
-        // the body used to call auth_snapshot() itself, which is a worker
-        // reading state the UI thread swaps on a provider switch.
-        auth_snapshot(sel), detail::active_provider_id(m));
+        // The selection comes from the Model; the credential is resolved for
+        // it on the worker (a reducer can't read the store).
+        std::move(model_id), sel, detail::active_provider_id(m));
 }
 
 Cmd fetch_models_for(std::string spec) {
@@ -2407,7 +2398,7 @@ Cmd fetch_models_for(std::string spec) {
     // against a provider signed out mid-fetch). list_models_for falls back to
     // the bundled seed on empty auth / unreachable host, so this is fast and
     // non-empty for hosted providers even before a live fetch succeeds.
-    return Cmd::task([](maya::Sink<Msg> out, std::stop_token, std::string spec) {
+    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token, std::string spec) {
         try {
             auto sel = provider::parse_selection(spec);
             // Resolve credentials for THIS spec — not auth_snapshot(), which
@@ -2419,7 +2410,7 @@ Cmd fetch_models_for(std::string spec) {
                     ? sel.openai_endpoint.label
                     : std::string{provider::default_provider_id()};
             auto models = provider::list_models_for(
-                sel, provider::credentials::resolve(pid));
+                sel, provider::credentials::resolve(io, pid));
             out.send(Msg{FusedCatalogLoaded{spec, std::move(models), true}});
         } catch (...) {
             out.send(Msg{FusedCatalogLoaded{spec, std::vector<ModelInfo>{}, false}});
@@ -2701,14 +2692,14 @@ Cmd probe_host_async(std::string spec, std::uint64_t attempt_id) {
     // (configured path → /v1/models → Ollama /api/tags) and report the
     // DETECTED dialect. Bounded by probe_host's own 3s/6s timeouts, so the
     // modal's "probing…" state resolves quickly either way.
-    return Cmd::task([](maya::Sink<Msg> out, std::stop_token,
+    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token,
                         std::string spec, std::uint64_t attempt_id) {
         HostProbed r;
         r.attempt_id = attempt_id;
         r.spec       = spec;
         try {
             const auto sel = provider::parse_selection(spec);
-            const auto auth = provider::credentials::resolve(spec);
+            const auto auth = provider::credentials::resolve(io, spec);
             const auto probe =
                 provider::openai::probe_host(auth, sel.openai_endpoint);
             using D = provider::openai::HostProbe::Dialect;
@@ -2917,11 +2908,11 @@ namespace {
 // the store after the worker saved, and installing the old account's bearer
 // would cross-wire them. That case reports Superseded, which the reducer
 // treats as benign.
-TokenRefreshed run_refresh(const std::string& refresh_token) {
+TokenRefreshed run_refresh(Io io, const std::string& refresh_token) {
     try {
-        auto r = auth::refresh_access_token_locked(auth::RefreshToken{refresh_token});
+        auto r = auth::refresh_access_token_locked(io, auth::RefreshToken{refresh_token});
         if (r) {
-            auto on_disk = auth::load_credentials();
+            auto on_disk = auth::load_credentials(io);
             const auto* o = on_disk ? std::get_if<auth::cred::OAuth>(&*on_disk)
                                     : nullptr;
             if (!o || o->access_token != r->access_token)
@@ -2943,22 +2934,22 @@ TokenRefreshed run_refresh(const std::string& refresh_token) {
 }  // namespace
 
 Cmd refresh_oauth_if_due() {
-    return Cmd::task([](maya::Sink<Msg> out, std::stop_token) {
+    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token) {
         std::optional<std::string> tok;
-        try { tok = auth::oauth_proactive_refresh_token(); } catch (...) {}
+        try { tok = auth::oauth_proactive_refresh_token(io); } catch (...) {}
         if (!tok) {
             out.send(Msg{msg::LoginMsg{OAuthRefreshNotDue{}}});
             return;
         }
-        out.send(Msg{run_refresh(*tok)});
+        out.send(Msg{run_refresh(io, *tok)});
     });
 }
 
 Cmd refresh_oauth_for_401() {
-    return Cmd::task([](maya::Sink<Msg> out, std::stop_token) {
+    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token) {
         std::string rt;
         try {
-            if (auto loaded = auth::load_credentials())
+            if (auto loaded = auth::load_credentials(io))
                 if (auto* o = std::get_if<auth::cred::OAuth>(&*loaded))
                     rt = o->refresh_token;
         } catch (...) {}
@@ -2969,14 +2960,14 @@ Cmd refresh_oauth_for_401() {
                 "no refresh token stored; sign in again with /login"})}});
             return;
         }
-        out.send(Msg{run_refresh(rt)});
+        out.send(Msg{run_refresh(io, rt)});
     });
 }
 
 Cmd refresh_oauth(std::string refresh_token) {
-    return Cmd::task(
-        [](maya::Sink<Msg> out, std::stop_token, std::string refresh_token) {
-            out.send(Msg{run_refresh(refresh_token)});
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg> out, std::stop_token, std::string refresh_token) {
+            out.send(Msg{run_refresh(io, refresh_token)});
         }, std::move(refresh_token));
 }
 

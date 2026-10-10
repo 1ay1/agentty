@@ -70,21 +70,21 @@ TEST_CASE("credentials::resolve returns the target provider's key") {
 
     // Resolving mistral must return the mistral key, NOT cerebras' or anything
     // else. (This is exactly the guarantee the 401 bug violated.)
-    CHECK(auth::bearer_token(cred::resolve("mistral"))
+    CHECK(auth::bearer_token(cred::resolve(::agentty::IoAccess::grant(), "mistral"))
           == "MISTRAL-KEY-32chars-xxxxxxxxDdmj");
-    CHECK(auth::bearer_token(cred::resolve("cerebras"))
+    CHECK(auth::bearer_token(cred::resolve(::agentty::IoAccess::grant(), "cerebras"))
           == "CEREBRAS-KEY-yyyyyyyyyyyyyyyyyyyy");
 }
 
 TEST_CASE("credentials: local providers need no login, hosted keys do") {
     TmpHome home;
     // A hosted provider with no saved key + no env var needs login.
-    CHECK(cred::needs_login("mistral"));
+    CHECK(cred::needs_login(::agentty::IoAccess::grant(), "mistral"));
     set_key("mistral", "sk-abc");
-    CHECK(!cred::needs_login("mistral"));
+    CHECK(!cred::needs_login(::agentty::IoAccess::grant(), "mistral"));
 
     // A local server (ollama) is keyless — never needs login.
-    CHECK(!cred::needs_login("ollama"));
+    CHECK(!cred::needs_login(::agentty::IoAccess::grant(), "ollama"));
     CHECK(cred::add_method("ollama") == cred::AddMethod::None);
 
     // Hosted key providers take an API key; Anthropic takes OAuth.
@@ -96,9 +96,9 @@ TEST_CASE("credentials::add_key preserves the prior account (no clobber)") {
     TmpHome home;
     set_key("mistral", "key-AAAA");
     // Adding a different key snapshots the old one as an account first.
-    cred::add_key("mistral", "key-BBBB");
-    CHECK(auth::bearer_token(cred::resolve("mistral")) == "key-BBBB");
-    CHECK(cred::list("mistral").size() >= 1);   // the prior key was preserved
+    cred::add_key(::agentty::IoAccess::grant(), "mistral", "key-BBBB");
+    CHECK(auth::bearer_token(cred::resolve(::agentty::IoAccess::grant(), "mistral")) == "key-BBBB");
+    CHECK(cred::list(::agentty::IoAccess::grant(), "mistral").size() >= 1);   // the prior key was preserved
 }
 
 TEST_CASE("a pasted key names its own provider") {

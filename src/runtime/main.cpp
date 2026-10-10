@@ -1332,9 +1332,9 @@ int main(int argc, char** argv) {
                     c.latest.c_str());
         return 0;
     }
-    if (args.subcommand == "login")  return auth::cmd_login();
-    if (args.subcommand == "logout") return auth::cmd_logout();
-    if (args.subcommand == "status") return auth::cmd_status();
+    if (args.subcommand == "login")  return auth::cmd_login(IoAccess::grant());
+    if (args.subcommand == "logout") return auth::cmd_logout(IoAccess::grant());
+    if (args.subcommand == "status") return auth::cmd_status(IoAccess::grant());
     if (args.subcommand == "skills") return tools::skills::cmd_skills(IoAccess::grant());
     if (args.subcommand == "config") return config::cmd_config(args.plugin_argv);
 #if defined(AGENTTY_MCP)
@@ -1368,7 +1368,7 @@ int main(int argc, char** argv) {
     // finishes signing in inside the TUI. The reducer's LoginExchanged /
     // LoginSubmit handlers call auth::update_auth() which live-swaps the
     // creds in the Deps without requiring a process restart.
-    auto creds = auth::resolve(args.cli_key);
+    auto creds = auth::resolve(IoAccess::grant(), args.cli_key);
 
     // Persist -m as the new default — but NOT in ACP mode, where the model
     // is an ephemeral per-subprocess override (handled below) that must not
@@ -1652,7 +1652,7 @@ int main(int argc, char** argv) {
     if (!args.cli_key.empty()) {
         provider_auth = auth::AuthHeader{auth::ApiKeyHeader{args.cli_key}};
     } else {
-        provider_auth = provider::credentials::resolve(provider_spec);
+        provider_auth = provider::credentials::resolve(IoAccess::grant(), provider_spec);
     }
 
     // ── Wire the Provider + Store seams ─────────────────────────────────
@@ -1759,12 +1759,12 @@ int main(int argc, char** argv) {
         [build_router](const std::string& provider_id, provider::Request req,
                        provider::EventSink sink) {
             const auto sel = provider::parse_selection(provider_id);
-            auto cred = provider::credentials::resolve(provider_id);
+            auto cred = provider::credentials::resolve(IoAccess::grant(), provider_id);   // stream entry: on a worker
             const bool have = !auth::bearer_token(cred).empty()
                 || std::holds_alternative<auth::BearerHeader>(cred);
             if (have)
                 req.auth = sel.kind == provider::Kind::Anthropic
-                             ? auth::fresh_auth_header(cred)
+                             ? auth::fresh_auth_header(IoAccess::grant(), cred)
                              : std::move(cred);
             AGT_LOG(Smart, Debug, "route.cross_provider",
                     "provider={} model={} auth={}", provider_id, req.model,

@@ -65,7 +65,7 @@ struct CatalogSource {
 // one entry per element here would produce two catalogs for one endpoint and
 // show its models twice.
 [[nodiscard]] inline std::vector<CatalogSource> catalog_sources(
-    const store::Settings& settings, const auth::AuthView* view = nullptr) {
+    const store::Settings& settings, const auth::AuthView& view) {
     std::vector<CatalogSource> out;
     const auto presets = providers();
     out.reserve(presets.size() + settings.provider_keys.size());
@@ -75,9 +75,7 @@ struct CatalogSource {
             .id           = std::string{p.id},
             .label        = std::string{p.label},
             .is_preset    = true,
-            .needs_signin = view
-                ? auth_source(p, settings, *view) == AuthSource::None
-                : !provider_is_authed(p, settings),
+            .needs_signin = auth_source(p, settings, view) == AuthSource::None,
         });
     }
     for (const auto& spec : saved_custom_hosts(settings.provider_keys)) {

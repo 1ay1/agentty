@@ -54,7 +54,7 @@ void save_oauth(std::int64_t expires_at_ms, const std::string& refresh) {
     o.access_token  = "at-" + refresh;
     o.refresh_token = refresh;
     o.expires_at_ms = expires_at_ms;
-    (void)auth::save_credentials(auth::Credentials{std::move(o)});
+    (void)auth::save_credentials(::agentty::IoAccess::grant(), auth::Credentials{std::move(o)});
 }
 
 // Point this process's config root at a FRESH temp dir.
@@ -109,20 +109,20 @@ void install_stub_deps() {
 ui::login::AccountList setup_two_accounts(const std::string& on_label) {
     // B first: capture a long-EXPIRED OAuth as account "B".
     save_oauth(/*expires*/ now_ms() - 60 * 60 * 1000, "rt-B");
-    acc::snapshot_active("anthropic", "B");
+    acc::snapshot_active(::agentty::IoAccess::grant(), "anthropic", "B");
     // A second: a token that is still comfortably fresh, active.
     save_oauth(/*expires*/ now_ms() + 60 * 60 * 1000, "rt-A");
-    acc::snapshot_active("anthropic", "A");
+    acc::snapshot_active(::agentty::IoAccess::grant(), "anthropic", "A");
 
     ui::login::AccountList al;
     al.provider       = "anthropic";
     al.provider_label = "Anthropic";
     int want = 0;
-    for (const auto& a : acc::list_for("anthropic")) {
+    for (const auto& a : acc::list_for(::agentty::IoAccess::grant(), "anthropic")) {
         ui::login::AccountRow row;
         row.provider = "anthropic";
         row.label    = a.label;
-        row.active   = (acc::active_label("anthropic") == a.label);
+        row.active   = (acc::active_label(::agentty::IoAccess::grant(), "anthropic") == a.label);
         if (a.label == on_label) want = static_cast<int>(al.rows.size());
         al.rows.push_back(std::move(row));
     }
@@ -152,7 +152,7 @@ TEST_CASE("account switch refreshes a stale token") {
         CHECK(m2.s.oauth_refresh_in_flight,
               "switching to a long-idle account with an expired token kicks "
               "a background refresh instead of installing the stale bearer");
-        CHECK(acc::active_label("anthropic") == "B",
+        CHECK(acc::active_label(::agentty::IoAccess::grant(), "anthropic") == "B",
               "the switch still activates account B");
         CHECK(std::holds_alternative<ui::login::Closed>(m2.ui.login),
               "the account picker closes after the switch");
@@ -160,7 +160,7 @@ TEST_CASE("account switch refreshes a stale token") {
 
     // ── Switch back to the fresh account A → NO refresh ──
     {
-        acc::activate("anthropic", "B");   // make A the inactive target
+        acc::activate(::agentty::IoAccess::grant(), "anthropic", "B");   // make A the inactive target
         Model m;
         m.ui.login = setup_two_accounts("A");
         auto [m2, cmd] = app::update(std::move(m),
@@ -170,7 +170,7 @@ TEST_CASE("account switch refreshes a stale token") {
         CHECK(!m2.s.oauth_refresh_in_flight,
               "switching to an account whose token is still fresh does NOT "
               "trigger a refresh");
-        CHECK(acc::active_label("anthropic") == "A", "switch activated A");
+        CHECK(acc::active_label(::agentty::IoAccess::grant(), "anthropic") == "A", "switch activated A");
     }
 }
 
@@ -185,18 +185,18 @@ TEST_CASE("re-login reuses the derived-label slot, no proliferation") {
 
     // Start from a clean anthropic registry: drop any slots a prior case
     // left (this test asserts on the exact count).
-    for (const auto& a : acc::list_for("anthropic"))
-        acc::remove("anthropic", a.label);
-    REQUIRE(acc::list_for("anthropic").empty());
+    for (const auto& a : acc::list_for(::agentty::IoAccess::grant(), "anthropic"))
+        acc::remove(::agentty::IoAccess::grant(), "anthropic", a.label);
+    REQUIRE(acc::list_for(::agentty::IoAccess::grant(), "anthropic").empty());
 
     // First OAuth login → one "OAuth login" slot (label derived from the
     // credential; OAuth has no per-account identity).
     save_oauth(now_ms() + 3'600'000, "rt-1");
-    acc::snapshot_active("anthropic", acc::derive_current_label("anthropic"));
-    REQUIRE(acc::list_for("anthropic").size() == 1);
-    CHECK(acc::derive_current_label("anthropic") == "OAuth login");
+    acc::snapshot_active(::agentty::IoAccess::grant(), "anthropic", acc::derive_current_label(::agentty::IoAccess::grant(), "anthropic"));
+    REQUIRE(acc::list_for(::agentty::IoAccess::grant(), "anthropic").size() == 1);
+    CHECK(acc::derive_current_label(::agentty::IoAccess::grant(), "anthropic") == "OAuth login");
     const std::string first_secret =
-        acc::get("anthropic", "OAuth login")->secret;
+        acc::get(::agentty::IoAccess::grant(), "anthropic", "OAuth login")->secret;
 
     // Re-login THREE more times — an expired-token refresh, or just
     // re-testing. Each derives the SAME "OAuth login" label, so the fix
@@ -205,25 +205,25 @@ TEST_CASE("re-login reuses the derived-label slot, no proliferation") {
     // reported accumulation.
     for (int i = 2; i <= 4; ++i) {
         save_oauth(now_ms() + 3'600'000, "rt-" + std::to_string(i));
-        acc::snapshot_active("anthropic", acc::derive_current_label("anthropic"));
-        CHECK(acc::list_for("anthropic").size() == 1,
+        acc::snapshot_active(::agentty::IoAccess::grant(), "anthropic", acc::derive_current_label(::agentty::IoAccess::grant(), "anthropic"));
+        CHECK(acc::list_for(::agentty::IoAccess::grant(), "anthropic").size() == 1,
               "re-login must not create a new slot");
     }
 
     // The single slot now holds a DIFFERENT (newer) credential than the
     // first login's — the secret is a sealed blob, so compare bytes
     // rather than looking for a plaintext token.
-    auto slot = acc::get("anthropic", "OAuth login");
+    auto slot = acc::get(::agentty::IoAccess::grant(), "anthropic", "OAuth login");
     REQUIRE(slot.has_value());
     CHECK(slot->secret != first_secret,
           "the reused slot carries the most recent login's credential");
-    CHECK(acc::active_label("anthropic") == "OAuth login", "reused slot is active");
+    CHECK(acc::active_label(::agentty::IoAccess::grant(), "anthropic") == "OAuth login", "reused slot is active");
 
     // A DELIBERATE second account (explicit label) still coexists — the
     // reuse rule keys on the label, so distinct labels never collide.
     save_oauth(now_ms() + 3'600'000, "rt-work");
-    acc::snapshot_active("anthropic", "work laptop");
-    CHECK(acc::list_for("anthropic").size() == 2,
+    acc::snapshot_active(::agentty::IoAccess::grant(), "anthropic", "work laptop");
+    CHECK(acc::list_for(::agentty::IoAccess::grant(), "anthropic").size() == 2,
           "a distinctly-labelled account is a separate slot");
 }
 
@@ -243,7 +243,7 @@ TEST_CASE("switch A→B→A returns A's FRESHEST token, not the login-day one") 
     // that ROTATED A's token in the live store (rt-A-v2) — the registry
     // slot still holds v1, exactly the staleness window.
     save_oauth(now_ms() + 3'600'000, "rt-A-v1");
-    acc::snapshot_active("anthropic", "A");
+    acc::snapshot_active(::agentty::IoAccess::grant(), "anthropic", "A");
     save_oauth(now_ms() + 3'600'000, "rt-A-v2");   // rotation post-snapshot
 
     // Log in as B and register it.
@@ -252,19 +252,19 @@ TEST_CASE("switch A→B→A returns A's FRESHEST token, not the login-day one") 
     // live store (capturing v2), THEN install B.
     {
         // Register B from a separate live credential.
-        auto keep_a = auth::load_credentials();
+        auto keep_a = auth::load_credentials(::agentty::IoAccess::grant());
         REQUIRE(keep_a.has_value());
         save_oauth(now_ms() + 3'600'000, "rt-B-v1");
-        acc::snapshot_active("anthropic", "B");
+        acc::snapshot_active(::agentty::IoAccess::grant(), "anthropic", "B");
         // Restore A live (as if A was the active account all along).
-        auth::save_credentials(*keep_a);
+        auth::save_credentials(::agentty::IoAccess::grant(), *keep_a);
         acc::set_active("anthropic", "A");
     }
 
-    REQUIRE(acc::activate("anthropic", "B"));
+    REQUIRE(acc::activate(::agentty::IoAccess::grant(), "anthropic", "B"));
     // Live store now carries B.
     {
-        auto c = auth::load_credentials();
+        auto c = auth::load_credentials(::agentty::IoAccess::grant());
         REQUIRE(c.has_value());
         auto* o = std::get_if<auth::cred::OAuth>(&*c);
         REQUIRE(o != nullptr);
@@ -274,9 +274,9 @@ TEST_CASE("switch A→B→A returns A's FRESHEST token, not the login-day one") 
     // Switch back to A: the token must be v2 (the rotated one), because
     // activate() re-snapshotted A on the way OUT. Pre-fix this was v1 —
     // server-invalidated, so every refresh failed until re-login.
-    REQUIRE(acc::activate("anthropic", "A"));
+    REQUIRE(acc::activate(::agentty::IoAccess::grant(), "anthropic", "A"));
     {
-        auto c = auth::load_credentials();
+        auto c = auth::load_credentials(::agentty::IoAccess::grant());
         REQUIRE(c.has_value());
         auto* o = std::get_if<auth::cred::OAuth>(&*c);
         REQUIRE(o != nullptr);
@@ -289,7 +289,7 @@ TEST_CASE("activate to the SAME label does not self-snapshot-clobber") {
     install_stub_deps();
 
     save_oauth(now_ms() + 3'600'000, "rt-same-v1");
-    acc::snapshot_active("anthropic", "solo");
+    acc::snapshot_active(::agentty::IoAccess::grant(), "anthropic", "solo");
     // Live store rotates…
     save_oauth(now_ms() + 3'600'000, "rt-same-v2");
 
@@ -298,8 +298,8 @@ TEST_CASE("activate to the SAME label does not self-snapshot-clobber") {
     // this is a genuine "restore from registry" and not a no-op — without
     // upserting v2 into the slot first (which would make restore-from-
     // registry impossible).
-    REQUIRE(acc::activate("anthropic", "solo"));
-    auto c = auth::load_credentials();
+    REQUIRE(acc::activate(::agentty::IoAccess::grant(), "anthropic", "solo"));
+    auto c = auth::load_credentials(::agentty::IoAccess::grant());
     REQUIRE(c.has_value());
     auto* o = std::get_if<auth::cred::OAuth>(&*c);
     REQUIRE(o != nullptr);

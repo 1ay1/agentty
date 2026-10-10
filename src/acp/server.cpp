@@ -1367,7 +1367,7 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
 }
 
 void AgentServer::on_logout() {
-    auth::clear_credentials();
+    auth::clear_credentials(IoAccess::grant());   // ACP handler, not a reducer
     auth_.with([](auth::AuthHeader& a) { a = auth::ApiKeyHeader{""}; });
 }
 

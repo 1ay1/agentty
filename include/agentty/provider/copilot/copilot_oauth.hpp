@@ -25,6 +25,7 @@
 #include <string_view>
 
 #include "agentty/auth/auth.hpp"   // OAuthError
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider::copilot {
 
@@ -149,7 +150,7 @@ void invalidate_auto_session();
 // ── Persistence ──────────────────────────────────────────────────────────
 [[nodiscard]] std::optional<GithubToken> load_github_token();
 bool save_github_token(const GithubToken&);
-bool clear_credentials();                 // wipes both the ghu_ token and cache
+bool clear_credentials(Io);                 // wipes both the ghu_ token and cache
 [[nodiscard]] std::filesystem::path credentials_path();
 
 // True when a GitHub token is on disk (i.e. the user has signed in). Cheap; no

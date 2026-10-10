@@ -377,7 +377,7 @@ bool save_github_token(const GithubToken& gh) {
     }, gh);
 }
 
-bool clear_credentials() {
+bool clear_credentials(Io) {
     return store().with([](CredsFile&) {
         std::error_code ec;
         return fs::remove(creds_path(), ec) || !ec;

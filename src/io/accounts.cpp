@@ -159,7 +159,7 @@ bool write_registry(const Registry& reg) {
 
 std::string path() { return registry_path().string(); }
 
-std::vector<Account> list() {
+std::vector<Account> list(Io) {
     auto reg = read_registry();
     // Newest-saved first for a stable, useful default ordering in the picker.
     std::stable_sort(reg.all.begin(), reg.all.end(),
@@ -169,18 +169,18 @@ std::vector<Account> list() {
     return std::move(reg.all);
 }
 
-std::vector<Account> list_for(const std::string& provider) {
+std::vector<Account> list_for(Io io, const std::string& provider) {
     std::vector<Account> out;
-    for (auto& a : list())
+    for (auto& a : list(io))
         if (a.provider == provider) out.push_back(std::move(a));
     return out;
 }
 
-std::string active_label(const std::string& provider) {
+std::string active_label(Io, const std::string& provider) {
     return read_registry().active_for(provider);
 }
 
-std::optional<Account> get(const std::string& provider, const std::string& label) {
+std::optional<Account> get(Io io, const std::string& provider, const std::string& label) {
     for (auto& a : read_registry().all)
         if (a.provider == provider && a.label == label) return a;
     return std::nullopt;
@@ -221,7 +221,7 @@ bool set_active(const std::string& provider, const std::string& label) {
     return write_registry(reg);
 }
 
-bool remove(const std::string& provider, const std::string& label) {
+bool remove(Io io, const std::string& provider, const std::string& label) {
     auto reg = read_registry();
     const auto before = reg.all.size();
     std::erase_if(reg.all, [&](const Account& a) {

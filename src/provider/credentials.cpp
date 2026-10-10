@@ -53,10 +53,10 @@ bool is_local(std::string_view id) {
 
 } // namespace
 
-auth::AuthHeader resolve(std::string_view provider_id) {
+auth::AuthHeader resolve(Io io, std::string_view provider_id) {
     // Anthropic: OAuth or x-api-key from its credential file.
     if (is_anthropic(provider_id)) {
-        if (auto c = auth::load_credentials())
+        if (auto c = auth::load_credentials(io))
             return auth::make_auth_header(*c);
         return auth::AuthHeader{};   // not signed in
     }
@@ -86,15 +86,15 @@ auth::AuthHeader resolve(std::string_view provider_id) {
     return auth::AuthHeader{auth::ApiKeyHeader{std::move(key)}};
 }
 
-bool needs_login(std::string_view provider_id) {
+bool needs_login(Io io, std::string_view provider_id) {
     if (is_local(provider_id)) return false;         // keyless
     if (is_oauth_native(provider_id)) {
         // Signed in iff the accounts registry has an active account for it
         // (the transport reads the file; empty registry ⇒ not signed in).
-        return auth::accounts::list_for(std::string{provider_id}).empty()
-            && auth::accounts::active_label(std::string{provider_id}).empty();
+        return auth::accounts::list_for(io, std::string{provider_id}).empty()
+            && auth::accounts::active_label(io, std::string{provider_id}).empty();
     }
-    return auth::bearer_token(resolve(provider_id)).empty();
+    return auth::bearer_token(resolve(io, provider_id)).empty();
 }
 
 AddMethod add_method(std::string_view provider_id) {
@@ -106,31 +106,31 @@ AddMethod add_method(std::string_view provider_id) {
     return AddMethod::ApiKey;   // hosted key + custom host
 }
 
-std::vector<auth::accounts::Account> list(std::string_view provider_id) {
-    return auth::accounts::list_for(std::string{provider_id});
+std::vector<auth::accounts::Account> list(Io io, std::string_view provider_id) {
+    return auth::accounts::list_for(io, std::string{provider_id});
 }
 
-std::string active_label(std::string_view provider_id) {
-    auto lbl = auth::accounts::active_label(std::string{provider_id});
+std::string active_label(Io io, std::string_view provider_id) {
+    auto lbl = auth::accounts::active_label(io, std::string{provider_id});
     if (!lbl.empty()) return lbl;
     // No registered account yet — derive a live label from the active cred.
-    return auth::accounts::derive_current_label(std::string{provider_id});
+    return auth::accounts::derive_current_label(io, std::string{provider_id});
 }
 
-bool activate(std::string_view provider_id, std::string_view label) {
-    return auth::accounts::activate(std::string{provider_id}, std::string{label});
+bool activate(Io io, std::string_view provider_id, std::string_view label) {
+    return auth::accounts::activate(io, std::string{provider_id}, std::string{label});
 }
 
-bool remove(std::string_view provider_id, std::string_view label) {
-    return auth::accounts::remove(std::string{provider_id}, std::string{label});
+bool remove(Io io, std::string_view provider_id, std::string_view label) {
+    return auth::accounts::remove(io, std::string{provider_id}, std::string{label});
 }
 
-void clear_active(std::string_view provider_id) {
+void clear_active(Io io, std::string_view provider_id) {
     const std::string id{provider_id};
-    if (is_anthropic(id))          { auth::clear_credentials(); return; }
+    if (is_anthropic(id))          { auth::clear_credentials(io); return; }
     if (id == "chatgpt")           { chatgpt::clear_codex_credentials(); return; }
-    if (id == "copilot")           { copilot::clear_credentials(); return; }
-    if (id == "kimi")              { kimi::clear_credentials(); return; }
+    if (id == "copilot")           { copilot::clear_credentials(io); return; }
+    if (id == "kimi")              { kimi::clear_credentials(io); return; }
     // Hosted key / custom host: the credential IS provider_keys[id].
     auto s = persistence::load_settings();
     s.provider_keys.erase(id);
@@ -138,7 +138,7 @@ void clear_active(std::string_view provider_id) {
     persistence::save_settings(s);
 }
 
-bool add_key(std::string_view provider_id, std::string_view key) {
+bool add_key(Io io, std::string_view provider_id, std::string_view key) {
     const std::string id{provider_id};
     auto s = persistence::load_settings();
     // Preserve any existing key as a switchable account BEFORE overwriting,
@@ -146,13 +146,13 @@ bool add_key(std::string_view provider_id, std::string_view key) {
     if (auto it = s.provider_keys.find(id);
         it != s.provider_keys.end() && !it->second.empty()
         && it->second != std::string{key}) {
-        if (auto prior = auth::accounts::derive_current_label(id); !prior.empty())
-            auth::accounts::snapshot_active(id, prior);
+        if (auto prior = auth::accounts::derive_current_label(io, id); !prior.empty())
+            auth::accounts::snapshot_active(io, id, prior);
     }
     s.provider_keys[id] = std::string{key};
     persistence::save_settings(s);
-    if (auto lbl = auth::accounts::derive_current_label(id); !lbl.empty())
-        auth::accounts::snapshot_active(id, lbl);
+    if (auto lbl = auth::accounts::derive_current_label(io, id); !lbl.empty())
+        auth::accounts::snapshot_active(io, id, lbl);
     return true;
 }
 

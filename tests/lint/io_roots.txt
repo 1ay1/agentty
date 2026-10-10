@@ -5,6 +5,10 @@
 include/agentty/util/io.hpp
 include/agentty/runtime/cmd.hpp
 
+# The effect host (it runs effects) and init(), the one launch read.
+include/agentty/runtime/app/host.hpp
+src/runtime/app/init.cpp
+
 # Process entry points: `agentty run`, the CLI verbs.
 src/runtime/main.cpp
 src/tool/skills_cli.cpp
@@ -18,6 +22,10 @@ src/tool/mcp_tools_backends.cpp
 # The retriever's index, built on its own workers and tool threads.
 src/rag/adapter.cpp
 
+# fresh_auth_header's one-at-a-time lock: a guarded body can't take the
+# caller's Io (not Sendable), so it re-mints the one the caller already had.
+src/io/auth.cpp
+
 # Tests.
 tests/toolset_e2e_test.cpp
 tests/anthropic_md_stream.cpp
@@ -30,3 +38,9 @@ tests/skills_engine_test.cpp
 tests/skills_panel_test.cpp
 tests/subagent_report_test.cpp
 tests/slash_commands_test.cpp
+tests/accounts_registry_test.cpp
+tests/oauth_proactive_refresh_test.cpp
+tests/account_switch_refresh_test.cpp
+tests/agtest_fx.hpp
+tests/provider_model_switch_test.cpp
+tests/credentials_test.cpp

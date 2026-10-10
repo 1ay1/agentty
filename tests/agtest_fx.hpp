@@ -130,15 +130,15 @@ inline void run_credentials(const agentty::Cmd& c) {
         if constexpr (std::same_as<U, agentty::AccountOp>) {
             using K = agentty::AccountOp::Kind;
             switch (e.kind) {
-                case K::Activate:    (void)cr::activate(e.provider, e.label); break;
-                case K::Remove:      (void)cr::remove(e.provider, e.label); break;
-                case K::Register:    (void)acc::snapshot_active(e.provider, e.label); break;
-                case K::AddKey:      (void)cr::add_key(e.provider, e.key); break;
-                case K::SignOut:     agentty::auth::vault::sign_out(e.provider); break;
-                case K::ClearActive: cr::clear_active(e.provider); break;
+                case K::Activate:    (void)cr::activate(::agentty::IoAccess::grant(), e.provider, e.label); break;
+                case K::Remove:      (void)cr::remove(::agentty::IoAccess::grant(), e.provider, e.label); break;
+                case K::Register:    (void)acc::snapshot_active(::agentty::IoAccess::grant(), e.provider, e.label); break;
+                case K::AddKey:      (void)cr::add_key(::agentty::IoAccess::grant(), e.provider, e.key); break;
+                case K::SignOut:     agentty::auth::vault::sign_out(::agentty::IoAccess::grant(), e.provider); break;
+                case K::ClearActive: cr::clear_active(::agentty::IoAccess::grant(), e.provider); break;
             }
         } else if constexpr (std::same_as<U, agentty::SaveCredentials>) {
-            agentty::auth::save_credentials(e.creds);
+            agentty::auth::save_credentials(::agentty::IoAccess::grant(), e.creds);
         }
     });
 }

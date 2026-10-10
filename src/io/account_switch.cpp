@@ -96,7 +96,7 @@ struct Backend {
     Store           store;
     fs::path        file;                 // when store == File
     std::function<std::string(const json&)> label_body;   // File: label from JSON body
-    std::function<void()> after_activate;  // File: keystore re-seal / cache bust
+    std::function<void(Io)> after_activate;  // File: keystore re-seal / cache bust
 };
 
 // Read the SettingsKey (custom-host) secret, or empty.
@@ -128,9 +128,9 @@ Backend backend_for(const std::string& provider) {
             if (!method.empty())     return method;
             return "signed in";
         };
-        b.after_activate = [] {
-            if (auto c = agentty::auth::load_credentials())
-                agentty::auth::save_credentials(*c);   // re-seal to keystore
+        b.after_activate = [](Io io) {
+            if (auto c = agentty::auth::load_credentials(io))
+                agentty::auth::save_credentials(io, *c);   // re-seal to keystore
         };
     } else if (provider == "chatgpt") {
         b.file = chatgpt::codex_credentials_path();
@@ -138,7 +138,7 @@ Backend backend_for(const std::string& provider) {
             std::string acct = j.value("account_id", "");
             return acct.empty() ? "ChatGPT" : "ChatGPT " + acct.substr(0, 8);
         };
-        b.after_activate = [] {
+        b.after_activate = [](Io) {
             if (auto c = chatgpt::load_codex_credentials())
                 chatgpt::save_codex_credentials(*c);
         };
@@ -153,7 +153,7 @@ Backend backend_for(const std::string& provider) {
             std::string base = sku.empty() ? "Copilot" : "Copilot (" + sku + ")";
             return tag.empty() ? base : base + " \xe2\x80\xa6" + tag;
         };
-        b.after_activate = [] { copilot::invalidate_cached_token(); };
+        b.after_activate = [](Io) { copilot::invalidate_cached_token(); };
     } else if (provider == "kimi") {
         b.file = kimi::credentials_path();
         b.label_body = [](const json& j) -> std::string {
@@ -162,7 +162,7 @@ Backend backend_for(const std::string& provider) {
             std::string tag = rt.size() >= 4 ? rt.substr(rt.size() - 4) : "";
             return tag.empty() ? std::string{"Kimi"} : "Kimi \xe2\x80\xa6" + tag;
         };
-        b.after_activate = [] { kimi::invalidate_cached_token(); };
+        b.after_activate = [](Io) { kimi::invalidate_cached_token(); };
     }
     return b;
 }
@@ -181,7 +181,7 @@ std::string settings_key_label(const std::string& key) {
 
 } // namespace
 
-bool snapshot_active(const std::string& provider, const std::string& label) {
+bool snapshot_active(Io io, const std::string& provider, const std::string& label) {
     const Backend b = backend_for(provider);
     if (b.store == Store::SettingsKey) {
         const std::string key = settings_key(provider);
@@ -193,8 +193,8 @@ bool snapshot_active(const std::string& provider, const std::string& label) {
     return upsert(provider, label, *blob);
 }
 
-bool activate(const std::string& provider, const std::string& label) {
-    auto slot = get(provider, label);
+bool activate(Io io, const std::string& provider, const std::string& label) {
+    auto slot = get(io, provider, label);
     if (!slot) return false;
 
     // TOKEN-ROTATION SAFETY (see accounts.hpp): capture the LIVE credential
@@ -205,9 +205,9 @@ bool activate(const std::string& provider, const std::string& label) {
     // switching back to it later then FAILS EVERY REFRESH (invalid_grant)
     // until the user re-logs-in. Best-effort by design: if nothing is live
     // (fresh install, store wiped) there is nothing fresher to save.
-    if (const std::string outgoing = active_label(provider);
+    if (const std::string outgoing = active_label(io, provider);
         !outgoing.empty() && outgoing != label) {
-        if (!snapshot_active(provider, outgoing))
+        if (!snapshot_active(io, provider, outgoing))
             util::dbglog("accounts.activate.snapshot_outgoing",
                          provider + "/" + outgoing + ": no live credential");
     }
@@ -220,11 +220,11 @@ bool activate(const std::string& provider, const std::string& label) {
     if (!write_store(b.file, slot->secret)) return false;
     // Re-seal into the keystore / bust cached tokens so the next resolve()
     // reads the switched-to account, not a stale entry.
-    if (b.after_activate) b.after_activate();
+    if (b.after_activate) b.after_activate(io);
     return set_active(provider, label);
 }
 
-std::string derive_current_label(const std::string& provider) {
+std::string derive_current_label(Io io, const std::string& provider) {
     const Backend b = backend_for(provider);
     if (b.store == Store::SettingsKey)
         return settings_key_label(settings_key(provider));
