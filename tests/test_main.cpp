@@ -120,6 +120,24 @@ int main(int argc, char** argv) {
     // in its own main(); with one shared binary we do it once here.
     maya::testing::freeze_anim_clock();
 
+    // Tests make their own temp dirs with temp_directory_path(). Point it
+    // inside the sandbox so they all go when the sandbox does. Set after the
+    // sweep above, which must look at the real /tmp.
+#if !defined(_WIN32)
+    {
+        const fs::path tmp = sandbox / "tmp";
+        std::error_code ec;
+        fs::create_directories(tmp, ec);
+        if (!ec) ::setenv("TMPDIR", tmp.c_str(), 1);
+    }
+#endif
+    // Removed at exit, including a test that calls std::exit itself.
+    static fs::path g_sandbox = sandbox;
+    std::atexit([] {
+        std::error_code ec;
+        if (!g_sandbox.empty()) fs::remove_all(g_sandbox, ec);
+    });
+
     // Stand in for the kernel's loop thread, for the same reason the clock is
     // frozen above: these tests drive view() directly instead of running a
     // kernel, and view() legitimately touches loop-bound state (the render
@@ -139,11 +157,5 @@ int main(int argc, char** argv) {
     const maya::loop_identity loop_id;
 
     const int rc = doctest::Context(argc, argv).run();
-    // Best-effort: a leaked sandbox is a slow leak, a failed remove is not
-    // worth failing a green suite over.
-    if (!sandbox.empty()) {
-        std::error_code ec;
-        fs::remove_all(sandbox, ec);
-    }
-    return rc;
+    return rc;   // the atexit hook above removes the sandbox
 }

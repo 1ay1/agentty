@@ -83,6 +83,7 @@
 #include "agentty/airgap/airgap.hpp"
 #include "agentty/util/logx.hpp"   // flight recorder dump in crash handler
 #include "agentty/util/teardown.hpp"
+#include "agentty/util/storage_env.hpp"
 #include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -1136,6 +1137,14 @@ int main(int argc, char** argv) {
         _putenv_s("MAYA_GATE_ABORT", "1");
 #else
         setenv("MAYA_GATE_ABORT", "1", /*overwrite=*/0);
+#endif
+    }
+    // settings.json "dirs" -> AGENTTY_<NAME>_DIR, before anything resolves a path.
+    for (const auto& a : util::settings_dir_assignments()) {
+#if defined(_WIN32)
+        _putenv_s(a.env.c_str(), a.value.c_str());
+#else
+        ::setenv(a.env.c_str(), a.value.c_str(), /*overwrite=*/0);
 #endif
     }
 

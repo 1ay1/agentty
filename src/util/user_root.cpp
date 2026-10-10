@@ -96,18 +96,19 @@ void migrate_file(const fs::path& from, const fs::path& to_dir) {
 // legacy ~/.config/agentty split root. Secrets land in credentials/,
 // caches in cache/. Anything unrecognized is left where it is — this
 // migrates the files agentty itself wrote, nothing else.
+fs::path subdir_under(const fs::path& root, const char* env, const char* leaf,
+                      bool owner_only);
+
 void migrate_legacy_config(const fs::path& root) {
     std::error_code ec;
     const fs::path legacy = legacy_config_dir();
     if (legacy.empty() || !fs::is_directory(legacy, ec)) return;
 
-    const fs::path creds = root / "credentials";
-    const fs::path cache = root / "cache";
-    fs::create_directories(creds, ec);
-    fs::create_directories(cache, ec);
-#ifndef _WIN32
-    ::chmod(creds.c_str(), S_IRWXU);
-#endif
+    // The same dirs the accessors resolve, overrides included. Takes the
+    // root as given: calling user_root() here would re-enter its call_once.
+    const fs::path creds = subdir_under(root, "AGENTTY_CREDENTIALS_DIR", "credentials", true);
+    const fs::path cache = subdir_under(root, "AGENTTY_CACHE_DIR", "cache", false);
+    if (creds.empty() || cache.empty()) return;
 
     // Secrets + per-provider state → credentials/. The .lock companions
     // are advisory-lock inodes; migrating them keeps lock paths beside
@@ -128,8 +129,8 @@ void migrate_legacy_config(const fs::path& root) {
     // so move-if-absent is the right semantics here too). agentty.log is
     // the pre-consolidation root-level sink; stderr.log lived in the
     // legacy config dir.
-    const fs::path logs = root / "logs";
-    fs::create_directories(logs, ec);
+    const fs::path logs = subdir_under(root, "AGENTTY_LOGS_DIR", "logs", false);
+    if (logs.empty()) return;
     migrate_file(legacy / "stderr.log", logs);
     migrate_file(root / "agentty.log", logs);
 
@@ -153,7 +154,11 @@ void migrate_legacy_config(const fs::path& root) {
 // diagnostics entirely is worse than writing them to the default place,
 // but only if the user is told which happened.
 fs::path resolve_subdir(const char* env, const char* leaf, bool owner_only) {
-    fs::path root = user_root();
+    return subdir_under(user_root(), env, leaf, owner_only);
+}
+
+fs::path subdir_under(const fs::path& root, const char* env, const char* leaf,
+                      bool owner_only) {
     if (root.empty()) return root;
 
     fs::path p;
@@ -259,15 +264,11 @@ fs::path user_root() {
 }
 
 fs::path user_credentials_dir() {
-    fs::path p = user_root();
-    if (p.empty()) return p;
-    p /= "credentials";
-    std::error_code ec;
-    fs::create_directories(p, ec);
-#ifndef _WIN32
-    ::chmod(p.c_str(), S_IRWXU);
-#endif
-    return p;
+    return resolve_subdir("AGENTTY_CREDENTIALS_DIR", "credentials", /*owner_only=*/true);
+}
+
+fs::path user_state_dir() {
+    return resolve_subdir("AGENTTY_STATE_DIR", "state", /*owner_only=*/false);
 }
 
 fs::path user_cache_dir() {

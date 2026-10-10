@@ -141,7 +141,7 @@ struct HooksFile {
     if (root.empty()) return {};
     const fs::path leaf{::agentty::config::kHooksApprovals};
     std::error_code ec;
-    const fs::path in_state = root / "state" / leaf;
+    const fs::path in_state = ::agentty::util::user_state_dir() / leaf;
     if (fs::is_regular_file(in_state, ec)) return in_state;
     return root / leaf;
 }

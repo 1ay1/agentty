@@ -251,8 +251,19 @@ Order:
 Steps 2 and 3 are independently shippable and each closes an issue on its
 own.
 
+## Later: every directory overridable
+
+The table above said credentials were "not overridable (deliberate)", on the
+idea that a secret which moves is a secret nobody finds. In practice people
+want the opposite: tokens on an encrypted volume, threads on a big disk,
+logs in tmpfs. Every directory now has `AGENTTY_<NAME>_DIR` and the same
+key under `dirs` in settings.json, and `agentty config` always prints where
+each one went, which answers "where is my secret". `owner_only` still forces
+0700 on credentials and threads wherever they land.
+
 ## See also
 
+- [Storage](../website/storage.md): the user-facing map of every file.
 - [`scope-model.md`](./scope-model.md) — the config-*lookup* algebra this
   mirrors. Read it first; the `Layout`/`Spec` symmetry is intentional.
 - `include/agentty/util/user_root.hpp` — the long note on why ONE root and

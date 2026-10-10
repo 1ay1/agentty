@@ -82,11 +82,15 @@ namespace agentty::util {
 // categories below, and they are exactly the ones that grow without
 // bound.
 //
-// So each takes its own override:
+// So every directory takes its own override, as an env var or as a key
+// in settings.json's "dirs" object (main() turns the key into the env
+// var; a set env var wins):
 //
-//   $AGENTTY_THREADS_DIR   conversation history, the thread index
-//   $AGENTTY_CACHE_DIR     refetchable: models.dev, update stamps
-//   $AGENTTY_LOGS_DIR      diagnostics
+//   $AGENTTY_THREADS_DIR       dirs.threads       conversation history
+//   $AGENTTY_CACHE_DIR         dirs.cache         refetchable downloads
+//   $AGENTTY_LOGS_DIR          dirs.logs          diagnostics
+//   $AGENTTY_CREDENTIALS_DIR   dirs.credentials   secrets, forced 0700
+//   $AGENTTY_STATE_DIR         dirs.state         approval hashes
 //
 // This is NOT a retreat to the XDG four-root layout the rationale above
 // rejects, and the difference is the default. XDG scatters by default,
@@ -95,16 +99,14 @@ namespace agentty::util {
 // goes through this header, and an override is a deliberate per-install
 // choice that changes nothing for anyone who does not set it.
 //
-// Deliberately NOT overridable: credentials/ and settings.json. They are
-// small, they are the things a user is most likely to lose track of, and
-// a secret that moves because of an env var set in a shell profile is a
-// secret nobody can find later.
-//
 // Relative paths are resolved against the user root rather than the
 // process CWD — `AGENTTY_LOGS_DIR=logs2` means ~/.agentty/logs2, not
 // "wherever agentty happened to be launched from", which would scatter
 // logs across every directory you ever started it in.
+//
+// docs/website/storage.md is the user-facing map of all of this.
 [[nodiscard]] std::filesystem::path user_credentials_dir();  // secrets, 0700
+[[nodiscard]] std::filesystem::path user_state_dir();        // approvals
 [[nodiscard]] std::filesystem::path user_cache_dir();        // refetchable
 [[nodiscard]] std::filesystem::path user_logs_dir();         // diagnostics
 [[nodiscard]] std::filesystem::path user_threads_dir();      // conversation history

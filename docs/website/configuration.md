@@ -80,86 +80,53 @@ The Smart Mode *feature* toggles (which layers run) live in the `Ctrl+S` overlay
 
 ## On-disk paths
 
-Everything agentty stores for you lives under **one root**, `~/.agentty`.
-Override it with `$AGENTTY_HOME`.
-
-One root rather than the XDG split across config/data/state/cache, for two
-reasons. A four-root layout has four plausible answers to "where does this new
-file go", so files land by coin-flip — which is exactly what happened here
-before the consolidation (a cache file in `~/.config`, one log in `~/.config`
-and its sibling in `~/.agentty`). And `~/.config` is what people back up and
-sync as dotfiles; this directory holds OAuth refresh tokens and your full
-conversation history, which should not ride along by accident.
+agentty keeps everything in two places: `~/.agentty` for you, and
+`<project>/.agentty` for each repo. `agentty config` shows the real paths and
+sizes on your machine. The full map, with what every file is and how long it
+stays, is in [Storage](/docs/storage).
 
 ```
-~/.agentty/
-  settings.json  mcp.json  hooks.json  skills/   ← config, hand-editable
-  threads/  memory.jsonl                         ← your data
-  credentials/                                   ← secrets (0700)
-  cache/                                         ← refetchable, safe to delete
-  logs/                                          ← diagnostics
+~/.agentty/                       ($AGENTTY_HOME)
+  settings.json  mcp.json  hooks.json  skills/  AGENTS.md   hand-edited config
+  threads/     conversations, 0700           $AGENTTY_THREADS_DIR      dirs.threads
+  credentials/ sign-ins and keys, 0700       $AGENTTY_CREDENTIALS_DIR  dirs.credentials
+  state/       approval hashes               $AGENTTY_STATE_DIR        dirs.state
+  cache/       refetchable, safe to delete   $AGENTTY_CACHE_DIR        dirs.cache
+  logs/        rotates at 32 MB              $AGENTTY_LOGS_DIR         dirs.logs
+  memory.jsonl
+
+<project>/.agentty/               ($AGENTTY_PROJECT_DIR, dirs.project)
+  cache/   search indexes, rebuildable       $AGENTTY_RAG_DIR          dirs.rag
+  state/   search feedback                   $AGENTTY_PROJECT_STATE_DIR dirs.project_state
+  memory.jsonl  mcp.json  skills/
 ```
 
-### Relocating the parts that grow
+Every directory moves on its own, with the variable or with the same key in
+`settings.json` (the variable wins):
 
-| Variable | Moves |
-|---|---|
-| `AGENTTY_HOME` | the whole root |
-| `AGENTTY_THREADS_DIR` | conversation history |
-| `AGENTTY_CACHE_DIR` | refetchable data |
-| `AGENTTY_LOGS_DIR` | diagnostic logs |
-| `AGENTTY_RAG_DIR` | retrieval indexes (these are **per project**) |
+```json
+{ "dirs": { "threads": "/mnt/big/agentty/threads" } }
+```
 
-These exist for the categories that **grow with use**. On a working install
-settings is 4 KB and credentials 20 KB, against hundreds of MB of threads and
-tens of MB of logs — so those four are what you would ever want on another
-disk.
+Relative paths are relative to the root, never your current folder. Empty
+means unset. If a folder can't be made you get one warning and the default.
 
-Settings and credentials are deliberately **not** relocatable: they are small,
-easy to lose track of, and a secret that moves because of a line in a shell
-profile is a secret nobody can find later.
+Threads are the only thing that grows without limit. To expire old ones:
 
-> **Why not `~/.cache/agentty` for the cache, like other programs?**
->
-> A fair question, and the answer is that the cache is not independent of the
-> rest. It holds the model catalog that `settings.json` references by id and
-> the update stamp that gates the self-updater — so a cache cleared without
-> the settings beside it produces a config pointing at models agentty no
-> longer knows. Keeping them in one root means "back up `~/.agentty`" and
-> "move `~/.agentty`" are both complete operations, with no second directory
-> to remember.
->
-> If you want it on another disk — which is the real reason to care —
-> `AGENTTY_CACHE_DIR=~/.cache/agentty` does exactly that, and nothing stops
-> you pointing it at the XDG location. The difference is that it is your
-> choice rather than the default, so nobody inherits a split layout they did
-> not ask for.
+```json
+{ "threads": { "keep_days": 90 } }
+```
 
-Three rules every one of them follows:
+`agentty config clean` lists files older versions left behind, and
+`--yes` deletes them.
 
-- an **empty** value counts as unset, so an exported-but-blank variable moves
-  nothing
-- a **relative** value resolves against the root, not your current directory —
-  `AGENTTY_LOGS_DIR=logs2` always means `~/.agentty/logs2`, never a different
-  directory per shell
-- if the directory **cannot be created** you get one warning naming the reason
-  and the default is used, rather than a silent fallback
+Credentials are plaintext JSON by default, optionally sealed with AES-256-GCM
+(`AGENTTY_ENCRYPT_PASSPHRASE`) or kept in the OS keystore
+(`AGENTTY_USE_KEYSTORE`). See [Authentication](/docs/authentication).
 
-### The files
-
-- `~/.agentty/credentials/` — OAuth tokens, API keys and the saved-account
-  registry. Directory mode `0700`, files `0600`. Plaintext JSON by default;
-  optionally sealed with AES-256-GCM (`AGENTTY_ENCRYPT_PASSPHRASE`) and/or
-  stored in the OS keystore (`AGENTTY_USE_KEYSTORE`). See
-  [Authentication](/docs/authentication) for the hardening options.
-- `~/.agentty/settings.json` — persisted provider, model, per-provider models, reasoning effort, favourite models, permission profile, auto-compaction depth, and in-app-pasted provider keys.
-- `~/.agentty/threads/<id>.json` — one JSON file per thread (flat, keyed by thread id).
-- `~/.agentty/memory.jsonl` — user-scope `remember` facts (cross-workspace); `<project>/.agentty/memory.jsonl` holds project-scope facts. Which file a fact lands in is chosen by [memory scope](#memory-scope), below.
-- `~/.agentty/skills/`, `~/.agents/skills/`, `~/.claude/skills/` — personal [Agent Skills](/docs/skills); the same three dirs under `<project>/` shadow them.
-- `~/.agentty/mcp.json` (your servers, trusted) and `<project>/.agentty/mcp.json` (repo servers — command-spawning ones need [per-server approval](/docs/plugin-trust) or `AGENTTY_MCP_ALLOW_PROJECT`) — [MCP servers](/docs/mcp) to connect. `AGENTTY_MCP_CONFIG` overrides both.
-- `~/.agentty/mcp_approvals.json` — content hashes of the project MCP servers you've approved (see [Plugin Trust](/docs/plugin-trust)); hooks use the sibling `hooks_approved.json`. A repo can't write to either, so it can't approve itself.
-- `<project>/.agentty/rag_docs.ragdb` — the persisted [retrieval](/docs/retrieval) index (hybrid + dense vectors), so a later session opens warm without re-walking + re-embedding the docs folder. Rebuilt automatically when the corpus changes; delete to force a cold rebuild. Disable with `AGENTTY_RAG_PERSIST=0`.
-- `<project>/.agentty/rag_feedback.tsv` — the [retrieval](/docs/retrieval) learning loop's per-passage use/win counts (human-inspectable TSV). Delete to forget.
+A project `mcp.json` that starts processes only runs after you approve its
+exact bytes ([Plugin Trust](/docs/plugin-trust)). Approvals live in your
+`state/`, so a repo can't approve itself.
 
 ## Memory scope
 

@@ -55,19 +55,32 @@ inline constexpr scope::Layout kMemoryLayout{.leaf = "memory.jsonl"};
 }
 
 // ── Write: where bytes land, and for how long ────────────────────────────
+//
+// Every directory has its own variable, AGENTTY_<NAME>_DIR, and the same
+// override as `dirs.<name>` in settings.json. docs/website/storage.md lists them.
 
 inline constexpr dirs::Spec kThreadsSpec{
     .root = dirs::Root::User, .leaf = "threads",
-    .env = "AGENTTY_THREADS_DIR", .owner_only = true};
+    .env = "AGENTTY_THREADS_DIR", .owner_only = true,
+    .retention = "kept until deleted; set threads.keep_days to expire old ones"};
 inline constexpr dirs::Spec kCacheSpec{
-    .root = dirs::Root::User, .leaf = "cache", .env = "AGENTTY_CACHE_DIR"};
+    .root = dirs::Root::User, .leaf = "cache", .env = "AGENTTY_CACHE_DIR",
+    .retention = "refetchable, safe to delete"};
 inline constexpr dirs::Spec kLogsSpec{
-    .root = dirs::Root::User, .leaf = "logs", .env = "AGENTTY_LOGS_DIR"};
+    .root = dirs::Root::User, .leaf = "logs", .env = "AGENTTY_LOGS_DIR",
+    .retention = "agentty.log rotates at 32 MB, one old copy kept"};
+inline constexpr dirs::Spec kCredentialsSpec{
+    .root = dirs::Root::User, .leaf = "credentials",
+    .env = "AGENTTY_CREDENTIALS_DIR", .owner_only = true,
+    .retention = "kept until you sign out"};
+inline constexpr dirs::Spec kStateSpec{
+    .root = dirs::Root::User, .leaf = "state", .env = "AGENTTY_STATE_DIR",
+    .retention = "approval hashes, kept until revoked"};
 
 // Derived: a sweep may reclaim it. keep_last=1 spares the previous
 // embedder's index so switching backends doesn't force a full rebuild.
 inline constexpr dirs::Spec kRagSpec{
-    .root = dirs::Root::Project, .leaf = "cache",
+    .root = dirs::Root::Project, .leaf = "cache", .env = "AGENTTY_RAG_DIR",
     .life = {.rebuildable = true, .keep_last = 1,
              .min_age = std::chrono::seconds{3600}}};
 
@@ -75,7 +88,8 @@ inline constexpr dirs::Spec kRagSpec{
 // leaf from the indexes because the retention differs.
 inline constexpr dirs::Spec kFeedbackSpec{
     .root = dirs::Root::Project, .leaf = "state",
-    .life = {}};
+    .env = "AGENTTY_PROJECT_STATE_DIR",
+    .life = {}, .retention = "search learning tallies, delete to forget"};
 
 // Both roots resolve their anchor in dirs::root_for, so no Spec declares
 // one — which keeps a new category from advertising itself as an anchor.
@@ -88,10 +102,8 @@ inline constexpr dirs::Spec kFeedbackSpec{
 
 // ── Approval stores ──────────────────────────────────────────────────────
 //
-// Content hashes a human vouched for. Under the user root in state/, so a
-// cloned repo can never vouch for itself. Named here because
-// "mcp_approvals.json" used to be spelled in four files, and a store whose
-// readers and writer disagree silently trusts nothing.
+// Content hashes a human vouched for. In the user state dir, so a cloned
+// repo can never vouch for itself.
 inline constexpr std::string_view kSkillsApprovals = "skills_approved.json";
 inline constexpr std::string_view kHooksApprovals  = "hooks_approved.json";
 inline constexpr std::string_view kMcpApprovals    = "mcp_approvals.json";
@@ -151,6 +163,7 @@ struct WriteRow {
     bool             env_moves_root = false;
     bool             rebuildable = false;
     unsigned         keep_last = 0;
+    std::string_view retention;  // Spec::retention, for the printout
     std::string      error;      // non-empty when the spec would not resolve
 
     // Measured. Counted only for a leaf this spec owns, so two specs sharing

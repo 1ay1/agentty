@@ -205,6 +205,51 @@ void an_index_from_an_older_version_is_discarded() {
     std::printf("  v3 discarded; rebuilt from the files\n");
 }
 
+void old_threads_expire() {
+    std::printf("threads idle past keep_days are deleted, others kept\n");
+    Sandbox sb;
+    const auto io = ::agentty::IoAccess::grant();
+    const auto dir = persistence::threads_dir();
+    // Files as an older run would leave them; this process never saved them.
+    auto fake = [&](const std::string& id, int days_old) {
+        for (const char* ext : {".jsonl", ".ofs", ".meta.json", ".transcript.md"}) {
+            const auto p = dir / (id + ext);
+            std::ofstream(p) << "x";
+            fs::last_write_time(p, fs::file_time_type::clock::now() - std::chrono::days{days_old});
+        }
+    };
+    fake("bbbb000000000001", 40);   // old
+    fake("bbbb000000000002", 5);    // recent
+    fake("bbbb000000000003", 40);   // old but open
+    std::ofstream(dir / "index.json") << "{}";
+    fs::last_write_time(dir / "index.json", fs::file_time_type::clock::now() - std::chrono::days{90});
+
+    CHECK(persistence::expire_threads(io, 0, ThreadId{}).threads == 0);   // off
+    const auto dry = persistence::expire_threads(io, 30, ThreadId{"bbbb000000000003"}, true);
+    CHECK(dry.threads == 1);
+    CHECK(fs::exists(dir / "bbbb000000000001.jsonl"));                  // dry run deletes nothing
+
+    const auto st = persistence::expire_threads(io, 30, ThreadId{"bbbb000000000003"});
+    CHECK(st.threads == 1);
+    CHECK(!fs::exists(dir / "bbbb000000000001.jsonl"));
+    CHECK(!fs::exists(dir / "bbbb000000000001.meta.json"));
+    CHECK(!fs::exists(dir / "bbbb000000000001.transcript.md"));
+    CHECK(fs::exists(dir / "bbbb000000000002.jsonl"));
+    CHECK(fs::exists(dir / "bbbb000000000003.jsonl"));
+    CHECK(fs::exists(dir / "index.json"));                               // not a thread
+
+    // A thread this process saved is open somewhere: never expired.
+    persistence::save_thread(io, make_thread("bbbb000000000004", "live"));
+    persistence::flush_pending_saves(io);
+    for (const auto& e : fs::directory_iterator(dir))
+        if (e.path().filename().string().starts_with("bbbb000000000004"))
+            fs::last_write_time(e.path(), fs::file_time_type::clock::now() - std::chrono::days{90});
+    (void)persistence::expire_threads(io, 30, ThreadId{});
+    CHECK(fs::exists(dir / "bbbb000000000004.jsonl"));
+
+    std::printf("  deleted %zu, kept the recent, open and live ones\n", st.threads);
+}
+
 }  // namespace
 
 int main() {
@@ -213,6 +258,7 @@ int main() {
     a_warm_index_is_reused();
     a_changed_thread_is_re_read();
     an_index_from_an_older_version_is_discarded();
+    old_threads_expire();
     std::printf("\n%s\n", failures ? "FAILED" : "all passed");
     return failures ? 1 : 0;
 }

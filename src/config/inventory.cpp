@@ -9,6 +9,7 @@
 
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/logx.hpp"
+#include "agentty/util/storage_env.hpp"
 #if AGENTTY_MCP
 #include "agentty/mcp/import.hpp"   // foreign configs, named with their fix
 #endif
@@ -30,13 +31,15 @@ namespace {
 
 // The inventory. Each row points AT the constants in the header; it never
 // copies one, so there is exactly one definition per concern.
-constexpr std::array<Entry, 10> kEntries{{
+constexpr std::array<Entry, 12> kEntries{{
     {"mcp",      "MCP servers",          &kMcpLayout,      nullptr},
     {"skills",   "skills",               &kSkillsLayout,   nullptr},
     {"agents",   "subagent definitions", &kAgentsLayout,   nullptr},
     {"commands", "slash commands",       &kCommandsLayout, nullptr},
     {"memory",   "learned memory",       &kMemoryLayout,   nullptr},
     {"threads",  "conversation history", nullptr,          &kThreadsSpec},
+    {"credentials", "sign-ins and keys",  nullptr,          &kCredentialsSpec},
+    {"state",    "approvals",            nullptr,          &kStateSpec},
     {"cache",    "refetchable caches",   nullptr,          &kCacheSpec},
     {"logs",     "diagnostics",          nullptr,          &kLogsSpec},
     {"rag",      "retrieval indexes",    nullptr,          &kRagSpec},
@@ -74,6 +77,13 @@ constexpr scope::Dialect kAllDialects[] = {
     if (name.empty()) return false;
     const char* v = std::getenv(std::string{name}.c_str());
     return v && v[0];
+}
+
+// The settings.json key for an override variable.
+[[nodiscard]] std::string settings_key(std::string_view env) {
+    for (const auto& k : util::dir_keys())
+        if (k.env == env) return std::string{k.key};
+    return "?";
 }
 
 // The approvals leaf MCP vouches against. Same constant bridge.cpp uses;
@@ -245,6 +255,7 @@ Report describe(const Entry& e) {
         w.env_moves_root = moves_whole_root(*e.write);
         w.rebuildable   = e.write->life.rebuildable;
         w.keep_last     = e.write->life.keep_last;
+        w.retention     = e.write->retention;
         // resolve_dry: report a location without creating it or warning.
         // This command is an observer; asking where the logs go must not
         // make a logs directory.
@@ -363,51 +374,97 @@ void print_one(const Report& r) {
                 std::printf("  $%s moves the whole root\n",
                             std::string{r.write->anchor}.c_str());
             if (!r.write->env.empty() && !r.write->env_moves_root)
-                std::printf("  $%s moves just this%s\n",
+                std::printf("  $%s moves just this%s, or dirs.%s in settings.json\n",
                             std::string{r.write->env}.c_str(),
-                            r.write->anchor.empty() ? "" : " (narrower)");
-            // Lifecycle is on the Spec precisely so it cannot be forgotten;
-            // printing it turns an internal discipline into something a user
-            // can check.
+                            r.write->anchor.empty() ? "" : " (narrower)",
+                            settings_key(r.write->env).c_str());
             if (r.write->rebuildable && r.write->keep_last > 0)
                 std::printf("  rebuildable, keeps the newest %u\n",
                             r.write->keep_last);
             else if (r.write->rebuildable)
                 std::printf("  rebuildable — safe to delete\n");
+            else if (!r.write->retention.empty())
+                std::printf("  %s\n", std::string{r.write->retention}.c_str());
             else
-                std::printf("  kept indefinitely — nothing reclaims this\n");
+                std::printf("  kept until you delete it\n");
         }
     }
     std::printf("\n");
 }
 
-// The storage model on one screen. Two roots, one anchor each; everything
-// else is a leaf an anchor already moves.
+// The storage model on one screen: two roots, and a variable (or a
+// settings.json key) for every directory under them.
 void print_env() {
     std::printf("storage model\n\n");
     std::printf("  ~/.agentty           follows the HUMAN   $AGENTTY_HOME%s\n",
                 env_set("AGENTTY_HOME") ? "         (set)" : "");
     std::printf("  <project>/.agentty   follows the CODE    $AGENTTY_PROJECT_DIR%s\n",
                 env_set("AGENTTY_PROJECT_DIR") ? "  (set)" : "");
-    std::printf("\nthat is the whole model. every category is a leaf under one\n"
-                "of those two, so the anchor moves it.\n");
 
-    // The leftovers. Shipped in 0.9.19 before the anchors existed, kept
-    // because removing a released variable breaks a setup with no error.
-    bool any = false;
-    for (const Entry& e : kEntries) {
-        if (!e.write || e.write->env.empty()) continue;
-        if (!any) {
-            std::printf("\nalso accepted, from before the anchors — each moves one leaf\n");
-            any = true;
-        }
-        std::printf("  $%-22s %s%s\n", std::string{e.write->env}.c_str(),
-                    std::string{e.name}.c_str(),
-                    env_set(e.write->env) ? "   (set)" : "");
+    std::printf("\neach directory can also move on its own. set the variable, or the\n"
+                "key under \"dirs\" in settings.json (the variable wins):\n\n");
+    for (const auto& k : util::dir_keys()) {
+        std::printf("  %-27s dirs.%-15s%s\n", ("$" + std::string{k.env}).c_str(),
+                    std::string{k.key}.c_str(), env_set(k.env) ? "(set)" : "");
     }
-
-    std::printf("\n$AGENTTY_MCP_CONFIG is not storage — it names one file to read.%s\n",
+    std::printf("\nrelative paths resolve against the root, not the current dir.\n");
+    std::printf("$AGENTTY_MCP_CONFIG is not storage — it names one file to read.%s\n",
                 env_set("AGENTTY_MCP_CONFIG") ? "   (set)" : "");
+    std::printf("full map: https://agentty.org/docs/storage\n");
+}
+
+// Files older builds left behind that nothing reads now.
+struct Stale { fs::path path; const char* why; };
+
+[[nodiscard]] std::vector<Stale> find_stale() {
+    std::vector<Stale> out;
+    std::error_code ec;
+    auto add = [&](const fs::path& p, const char* why) {
+        if (!p.empty() && fs::exists(p, ec)) out.push_back({p, why});
+    };
+    const fs::path home = util::home_dir_or_empty();
+    if (auto u = dirs::resolve_dry(dirs::Spec{.root = dirs::Root::User})) {
+        const fs::path& r = u->path;
+        add(r / "settings.json~", "old settings backup");
+        add(r / ".settings.lock", "old settings lock");
+        for (fs::directory_iterator it{r, ec}, end; !ec && it != end; it.increment(ec)) {
+            const auto n = it->path().filename().string();
+            if (n.starts_with("rag_") && n.find(".ragdb") != std::string::npos)
+                add(it->path(), "index from a run in your home dir");
+        }
+    }
+    if (auto t = dirs::resolve_dry(kThreadsSpec)) {
+        for (fs::directory_iterator it{t->path, ec}, end; !ec && it != end; it.increment(ec))
+            if (it->path().filename().string().ends_with(".thread.ragdb"))
+                add(it->path(), "per-thread index, no longer used");
+    }
+    if (auto p = dirs::resolve_dry(dirs::Spec{.root = dirs::Root::Project})) {
+        add(p->path / "routing_memory.tsv", "old routing memory");
+        add(p->path / "routing_memory.tsv.lock", "old routing memory lock");
+    }
+    if (!home.empty()) {
+        add(home / ".cache" / "agentty", "old cache location");
+        // Migration moves what it knows; anything left there may still matter.
+        if (const auto c = home / ".config" / "agentty"; fs::is_empty(c, ec) && !ec)
+            add(c, "old config location, empty");
+    }
+    return out;
+}
+
+int print_clean(bool apply) {
+    const auto stale = find_stale();
+    if (stale.empty()) { std::printf("nothing stale.\n"); return 0; }
+    std::uintmax_t total = 0;
+    for (const auto& s : stale) {
+        bool partial = false;
+        const auto b = dir_bytes(s.path, partial);
+        total += b;
+        std::printf("  %-9s %s   (%s)\n", human_bytes(b).c_str(), s.path.string().c_str(), s.why);
+        if (apply) { std::error_code ec; fs::remove_all(s.path, ec); }
+    }
+    std::printf("\n%s %s\n", apply ? "removed" : "would remove", human_bytes(total).c_str());
+    if (!apply) std::printf("run `agentty config clean --yes` to delete them.\n");
+    return 0;
 }
 
 void print_table() {
@@ -423,7 +480,7 @@ void print_table() {
         return s;
     };
     std::printf("  %s%s%s%s%s\n",
-                pad("concern", 11).c_str(), pad("what", 23).c_str(),
+                pad("concern", 13).c_str(), pad("what", 23).c_str(),
                 pad("reads", 7).c_str(), pad("on disk", 10).c_str(), "writes");
     std::uintmax_t total = 0;
     for (const Entry& e : kEntries) {
@@ -444,15 +501,16 @@ void print_table() {
             r.write ? (r.write->error.empty() ? r.write->path : "unresolved")
                     : "—";
         std::printf("  %s%s%s%s%s\n",
-                    pad(std::string{e.name}, 11).c_str(),
+                    pad(std::string{e.name}, 13).c_str(),
                     pad(std::string{e.what}, 23).c_str(),
                     pad(reads, 7).c_str(), pad(size, 10).c_str(),
                     where.c_str());
     }
-    std::printf("  %s%s%s%s\n", pad("", 11).c_str(), pad("total", 23).c_str(),
+    std::printf("  %s%s%s%s\n", pad("", 13).c_str(), pad("total", 23).c_str(),
                 pad("", 7).c_str(), human_bytes(total).c_str());
     std::printf("\n`agentty config <concern>` for the full ladder,"
-                " `agentty config env` for the model.\n");
+                " `agentty config env` for the model,\n"
+                "`agentty config clean` for files old versions left behind.\n");
 }
 
 }  // namespace
@@ -467,11 +525,15 @@ int cmd_config(std::span<const std::string> argv) {
         print_env();
         return 0;
     }
+    if (want == "clean") {
+        const bool yes = argv.size() > 1 && (argv[1] == "--yes" || argv[1] == "-y");
+        return print_clean(yes);
+    }
     if (const Entry* e = find(want)) {
         print_one(describe(*e));
         return 0;
     }
-    std::fprintf(stderr, "unknown concern: %s\n\nknown: env", want.c_str());
+    std::fprintf(stderr, "unknown concern: %s\n\nknown: env clean", want.c_str());
     for (const Entry& e : kEntries)
         std::fprintf(stderr, " %s", std::string{e.name}.c_str());
     std::fprintf(stderr, "\n");

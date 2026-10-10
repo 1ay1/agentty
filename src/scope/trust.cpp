@@ -60,12 +60,10 @@ namespace {
     const fs::path root = util::user_root();
     if (root.empty()) return {};
 
-    // state/: machine-written, accumulated, never hand-edited -- the same
-    // category the project root uses for its feedback TSV. Keeps the user
-    // root from growing one loose *_approved.json per subsystem.
+    // state/ (or $AGENTTY_STATE_DIR): machine-written, never hand-edited.
     std::error_code ec;
-    const fs::path dir = root / "state";
-    fs::create_directories(dir, ec);
+    const fs::path dir = util::user_state_dir();
+    if (dir.empty()) return {};
     const fs::path dest = dir / leaf;
 
     // Adopt an approval list from the old flat location. Losing one means a

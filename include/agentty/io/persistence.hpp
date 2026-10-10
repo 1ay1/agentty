@@ -80,6 +80,18 @@ void save_thread(Io, const Thread& t);
 void flush_pending_saves(Io);
 void delete_thread(Io, const ThreadId& id);
 
+// Thread retention. Deletes threads with no activity (file mtime) in the
+// last `keep_days` days, skipping `keep` (the open one). keep_days <= 0
+// does nothing. Their blobs are left for blob gc. Returns what it deleted
+// (or would, with dry_run).
+struct ExpireStats { std::size_t threads = 0; std::uintmax_t bytes = 0; };
+ExpireStats expire_threads(Io, int keep_days, const ThreadId& keep,
+                           bool dry_run = false);
+
+// threads.keep_days from settings.json, read straight from the file so the
+// background sweep doesn't need the settings cache. 0 when unset.
+[[nodiscard]] int thread_keep_days(Io);
+
 // The per-message fingerprint the incremental save path uses to find what
 // changed. Exposed ONLY so the save bench can price that pass separately
 // from the rest of a save; nothing in the app should call it.

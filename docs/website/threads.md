@@ -6,26 +6,34 @@ nav_order: 40
 slug: threads
 ---
 
-Every conversation is a thread, stored as a single JSON file you can inspect, back up, or delete. Nothing is hidden in a database.
+Every conversation is a thread, stored as plain files you can inspect, back up, or delete. Nothing is hidden in a database.
 
 ## Where threads live
 
-Threads are written to `~/.agentty/threads/`, one JSON file per thread keyed by its id. They're plain files you can inspect, back up, or delete.
+Threads are written to `~/.agentty/threads/` (move it with `AGENTTY_THREADS_DIR` or `dirs.threads` in settings.json). Each thread is an append-only log plus two small sidecars:
 
 ```text
-~/.agentty/
-├── threads/
-│   ├── f24a29c6….json     # one file per conversation
-│   └── 86be6534….json
-├── settings.json          # provider, model, profile, favourites, compaction depth
-└── memory.jsonl           # user-scope remembered facts
+~/.agentty/threads/
+├── f24a29c6….jsonl        # the conversation, one event per line
+├── f24a29c6….ofs          # line offsets, so a long thread opens fast
+├── f24a29c6….meta.json    # title, dates
+├── index.json             # picker cache, rebuilt if missing
+└── blobs/                 # images and big tool outputs, shared by content hash
 ```
 
-Threads are global — the directory is flat and a thread isn't bound to the workspace you created it in, so [[Ctrl+J]] lists every conversation regardless of which project you launched from.
+Threads are global: the directory is flat and a thread isn't bound to the workspace you created it in, so [[Ctrl+J]] lists every conversation regardless of which project you launched from.
 
 ## Managing threads
 
-Press [[Ctrl+J]] to open the thread list and switch between past conversations. [[Ctrl+N]] starts a new thread. Since each thread is plain JSON, you can also `rm` one or copy it elsewhere as a backup.
+Press [[Ctrl+J]] to open the thread list and switch between past conversations. [[Ctrl+N]] starts a new thread. Deleting a thread removes all its files; its blobs go in the next daily sweep if no other thread uses them.
+
+Threads are kept until you delete them. To expire old ones automatically, set a retention in `~/.agentty/settings.json`:
+
+```json
+{ "threads": { "keep_days": 90 } }
+```
+
+Once a day, threads with no activity for that long are deleted. A thread open in a running agentty is never touched. See [Storage](/docs/storage) for everything else agentty keeps on disk.
 
 ## Forking a thread
 

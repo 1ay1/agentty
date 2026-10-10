@@ -43,6 +43,7 @@ set(AGENTTY_IO_SOURCES
     src/util/teardown.cpp
     src/util/home_dir.cpp
     src/util/user_root.cpp
+    src/util/storage_env.cpp
     src/util/update.cpp
     src/util/modelsdev.cpp
     src/domain/complexity.cpp

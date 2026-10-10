@@ -111,6 +111,13 @@ int main(int argc, char** argv) {
     _putenv_s("AGENTTY_NO_PREWARM", "1");
 #else
     ::setenv("AGENTTY_NO_PREWARM", "1", 1);
+    // Tests' own temp dirs go inside the sandbox, so cleanup takes them too.
+    {
+        const fs::path tmp = sandbox / "tmp";
+        std::error_code ec;
+        fs::create_directories(tmp, ec);
+        if (!ec) ::setenv("TMPDIR", tmp.c_str(), 1);
+    }
 #endif
     if (argc < 2) {
         std::fprintf(stderr,

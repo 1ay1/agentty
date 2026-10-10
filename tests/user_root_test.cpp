@@ -21,6 +21,7 @@
 #include <unistd.h>   // getpid
 #endif
 
+#include "agentty/util/storage_env.hpp"
 #include "agentty/util/user_root.hpp"
 
 namespace fs = std::filesystem;
@@ -184,6 +185,41 @@ int main() {
     ::setenv("AGENTTY_LOGS_DIR", "", 1);
     if (agentty::util::user_logs_dir() != override_root / "logs")
         return fail("empty override not treated as unset");
+
+    // 10: credentials and state move only with their own variable.
+    ::setenv("AGENTTY_CREDENTIALS_DIR", (drive2 / "secrets").c_str(), 1);
+    ::setenv("AGENTTY_STATE_DIR", (drive2 / "st").c_str(), 1);
+    if (agentty::util::user_credentials_dir() != drive2 / "secrets")
+        return fail("AGENTTY_CREDENTIALS_DIR ignored");
+    if (agentty::util::user_state_dir() != drive2 / "st")
+        return fail("AGENTTY_STATE_DIR ignored");
+#ifndef _WIN32
+    if (::stat((drive2 / "secrets").c_str(), &st) != 0 || (st.st_mode & 0777) != 0700)
+        return fail("overridden credentials dir not 0700");
+#endif
+    ::unsetenv("AGENTTY_CREDENTIALS_DIR");
+    ::unsetenv("AGENTTY_STATE_DIR");
+    if (agentty::util::user_state_dir() != override_root / "state")
+        return fail("state default not under the root");
+
+    // 11: settings.json "dirs" turns into variables; a set variable wins,
+    // unknown keys and non-strings are ignored, ~/ expands.
+    write_file(override_root / "settings.json",
+               R"({"dirs": {"threads": "/x/threads", "logs": "~/lg",
+                   "cache": 5, "bogus": "/nope", "rag": ""}})");
+    ::setenv("AGENTTY_THREADS_DIR", "/already", 1);
+    {
+        const auto as = agentty::util::settings_dir_assignments();
+        bool logs = false, other = false;
+        for (const auto& a : as) {
+            if (a.env == "AGENTTY_LOGS_DIR" && a.value == (home / "lg").string()) logs = true;
+            else other = true;
+        }
+        if (!logs) return fail("dirs.logs not turned into AGENTTY_LOGS_DIR");
+        if (other) return fail("dirs: set var, bad type, empty or unknown key was applied");
+    }
+    ::unsetenv("AGENTTY_THREADS_DIR");
+    fs::remove(override_root / "settings.json", ec);
 
     ::unsetenv("AGENTTY_CACHE_DIR");
     ::unsetenv("AGENTTY_LOGS_DIR");

@@ -135,10 +135,14 @@ common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
 | Variable | Effect |
 |----------|--------|
 | `AGENTTY_HOME` | Root for all agentty state (credentials, threads, settings, logs). Default `~/.agentty`. Point it at a scratch dir to sandbox a session. |
-| `AGENTTY_THREADS_DIR` | Conversation history. Default `<root>/threads`. |
-| `AGENTTY_CACHE_DIR` | Refetchable data — the model catalog, update stamps. Default `<root>/cache`. Safe to delete at any time. |
-| `AGENTTY_LOGS_DIR` | Diagnostic logs. Default `<root>/logs`. Usually the largest directory. |
-| `AGENTTY_RAG_DIR` | Retrieval indexes and feedback. Default `<project>/.agentty` — note this is **per project**, not under `AGENTTY_HOME`. Safe to delete at any time; worst case the next search rebuilds. |
+| `AGENTTY_THREADS_DIR` | Conversation history. Default `<root>/threads`. Kept 0700. Also `dirs.threads` in settings.json. |
+| `AGENTTY_CREDENTIALS_DIR` | Sign-ins and API keys. Default `<root>/credentials`. Kept 0700. Also `dirs.credentials`. |
+| `AGENTTY_STATE_DIR` | Approval hashes for project MCP servers, hooks and skills. Default `<root>/state`. Also `dirs.state`. |
+| `AGENTTY_CACHE_DIR` | Refetchable data, the model catalog and update stamps. Default `<root>/cache`. Safe to delete. Also `dirs.cache`. |
+| `AGENTTY_LOGS_DIR` | Diagnostic logs. Default `<root>/logs`. Also `dirs.logs`. |
+| `AGENTTY_PROJECT_DIR` | The per-project root. Default `<project>/.agentty`. Each project gets its own subfolder under it. Also `dirs.project`. |
+| `AGENTTY_RAG_DIR` | Search indexes. Default `<project root>/cache`. Safe to delete, the next search rebuilds. Also `dirs.rag`. |
+| `AGENTTY_PROJECT_STATE_DIR` | Search feedback. Default `<project root>/state`. Also `dirs.project_state`. |
 | `AGENTTY_ENCRYPT_PASSPHRASE` / `AGENTTY_PASSPHRASE` | Passphrase for the encrypted credential store — for headless machines where no prompt is possible. |
 | `AGENTTY_USE_KEYSTORE` | Use the OS keychain for credentials instead of the file store. |
 | `AGENTTY_KDF` | Key-derivation parameters for the credential store. Change only if you know why. |
@@ -152,20 +156,21 @@ common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
 
 ### Keeping config local and bulk elsewhere
 
-`AGENTTY_HOME` moves *everything*. The three variables above move only the
-parts that grow, which is the usual reason to care — on a working install the
-split is roughly 4 KB of settings and 8 KB of credentials against 4 MB of
-threads, 5 MB of cache and 38 MB of logs.
+`AGENTTY_HOME` moves everything. The per-directory variables move one thing
+each, usually the parts that grow:
 
 ```sh
 export AGENTTY_THREADS_DIR=/mnt/data/agentty/threads
-export AGENTTY_CACHE_DIR=/mnt/data/agentty/cache
 export AGENTTY_LOGS_DIR=/mnt/data/agentty/logs
 ```
 
-Settings and credentials stay in `~/.agentty`. That is deliberate and not
-configurable: they are small, and a secret that moves because of a variable in
-a shell profile is a secret nobody can find later.
+Or once, in `~/.agentty/settings.json` (a set variable still wins):
+
+```json
+{ "dirs": { "threads": "/mnt/data/agentty/threads", "logs": "/mnt/data/agentty/logs" } }
+```
+
+See [Storage](/docs/storage) for every file and how long it stays.
 
 ### Retrieval indexes are per-project
 
@@ -173,7 +178,7 @@ a shell profile is a secret nobody can find later.
 are keyed to the tree that produced them — they are meaningless away from it,
 and sharing one between unrelated checkouts would invalidate it constantly —
 so they default to `<project>/.agentty` rather than anywhere under
-`AGENTTY_HOME`. None of the three variables above moves them.
+`AGENTTY_HOME`. Only `AGENTTY_RAG_DIR` and `AGENTTY_PROJECT_DIR` move them.
 
 They are also the biggest thing agentty writes per project: on the agentty
 repo itself, 31 MB of code index and 7 MB of docs index. If your code already

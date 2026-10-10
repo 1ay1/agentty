@@ -227,6 +227,10 @@ std::optional<GcStats> collect_if_due(std::stop_token stop) {
     // sweep; a failed sweep simply retries tomorrow.
     { std::ofstream touch(stamp, std::ios::trunc); }
     fs::last_write_time(stamp, now, ec);
+    // Thread retention first, so the blobs of expired threads go in this sweep.
+    const Io io = IoAccess::grant();
+    if (const int days = persistence::thread_keep_days(io); days > 0 && !stop.stop_requested())
+        (void)persistence::expire_threads(io, days, ThreadId{});
     return collect_in(persistence::threads_dir(), /*dry_run=*/false, hours{24}, stop);
 }
 

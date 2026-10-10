@@ -31,6 +31,8 @@ src/io/auth.cpp
 src/io/persistence.cpp
 src/io/thread_log.cpp
 src/io/blob_store.cpp
+# The daily gc job (blob sweep + thread retention) runs on its own pool.
+src/io/blob_gc.cpp
 
 # Network layer entry points. Each runs only off the UI thread: provider
 # streams (dispatch runs them on the turn's worker), OAuth device/browser

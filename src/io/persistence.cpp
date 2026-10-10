@@ -2236,6 +2236,13 @@ struct AsyncWriter {
         st.with([](WriterState& s, std::string k) { s.known.erase(k); }, key);
     }
 
+    // Saved or queued by this process: a thread someone has open.
+    [[nodiscard]] bool live(const std::string& key) {
+        return st.with([](WriterState& s, std::string k) {
+            return s.known.contains(k) || s.pending.contains(k);
+        }, key);
+    }
+
     void flush_and_stop(bool restartable = true) {
         // Mark stopping (which wakes run()), take the worker out of its slot,
         // and join with no lock held. run() drains every queued save before
@@ -2438,27 +2445,66 @@ void delete_thread(Io, const ThreadId& id) {
     forget_log_state(id);
     std::error_code ec;
     fs::remove(threads_dir() / (id.value + ".json"), ec);
-    // The log format is three files (.jsonl, .ofs, .meta.json). A thread
-    // that has been saved since the migration lives in those and NOT in
-    // the .json above, so missing this would leave a deleted thread fully
-    // intact on disk — and it would come back on the next directory walk.
+    fs::remove(threads_dir() / (id.value + ".transcript.md"), ec);
+    // The log format: .jsonl, .ofs, .meta.json.
     if (auto log = ThreadLog::open(id)) log->remove();
-    // Blobs are deliberately NOT removed here. They are content-addressed
-    // and therefore SHARED: the same screenshot pasted in two threads, or
-    // an identical tool output, is one file referenced from both. Deleting
-    // this thread's blobs would silently blank images in threads that are
-    // still open. Reclaiming them needs a mark-and-sweep across every
-    // thread file, which belongs in a maintenance pass, not in the delete
-    // path — an orphaned blob costs disk, a wrongly-deleted one costs data.
-    // Drop the metadata index entry too so the picker list doesn't show
-    // a ghost row until the next full walk prunes it. Under the index
-    // lock: a concurrent reindex_thread() on the AsyncWriter worker, or
-    // in another agentty instance, would otherwise resurrect this id
-    // from its stale copy.
+    // Blobs are shared between threads (content-addressed), so they are
+    // left for blob gc's mark-and-sweep. The index entry goes now, under
+    // its lock, so the picker shows no ghost row.
     with_thread_index([](persistence::Held, std::string key) {
         auto idx = read_thread_index_locked();
         if (idx.erase(key) > 0) write_thread_index_locked(idx);
     }, id.value);
+}
+
+ExpireStats expire_threads(Io io, int keep_days, const ThreadId& keep, bool dry_run) {
+    ExpireStats st;
+    if (keep_days <= 0) return st;
+    const fs::path dir = threads_dir();
+    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::days{keep_days};
+
+    // A thread's files share its id as the stem; the newest of them is its
+    // last activity. Ids are hex, so anything else (index.json, blobs/) is skipped.
+    // file_time_type{} is the clock's epoch (year 2174 on libstdc++), not "oldest".
+    struct Seen { fs::file_time_type newest = fs::file_time_type::min(); std::uintmax_t bytes = 0; };
+    std::unordered_map<std::string, Seen> by_id;
+    std::error_code ec;
+    for (fs::directory_iterator it{dir, ec}, end; !ec && it != end; it.increment(ec)) {
+        std::error_code fec;
+        if (!it->is_regular_file(fec)) continue;
+        const std::string name = it->path().filename().string();
+        const auto dot = name.find('.');
+        if (dot == 0 || dot == std::string::npos) continue;
+        const std::string id = name.substr(0, dot);
+        if (!std::ranges::all_of(id, [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); }))
+            continue;
+        auto& s = by_id[id];
+        const auto mt = it->last_write_time(fec);
+        if (!fec && mt > s.newest) s.newest = mt;
+        const auto sz = it->file_size(fec);
+        if (!fec) s.bytes += sz;
+    }
+    for (const auto& [id, s] : by_id) {
+        if (id == keep.value || s.newest >= cutoff || async_writer().live(id)) continue;
+        ++st.threads;
+        st.bytes += s.bytes;
+        if (!dry_run) delete_thread(io, ThreadId{id});
+    }
+    if (st.threads > 0)
+        AGT_LOG(Persist, Info, "threads.expire", "{} {} thread(s) older than {}d, {} KB",
+                dry_run ? "would delete" : "deleted", st.threads, keep_days, st.bytes / 1024);
+    return st;
+}
+
+int thread_keep_days(Io) {
+    std::ifstream in(settings_path());
+    if (!in) return 0;
+    const auto j = json::parse(in, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object()) return 0;
+    const auto t = j.find("threads");
+    if (t == j.end() || !t->is_object()) return 0;
+    const auto k = t->find("keep_days");
+    return (k != t->end() && k->is_number_integer()) ? std::max(0, k->get<int>()) : 0;
 }
 
 // The raw JSON this process last LOADED from disk.
