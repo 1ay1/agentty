@@ -562,7 +562,8 @@ add_executable(persistence_race_test_narrow EXCLUDE_FROM_ALL
     src/io/persistence.cpp src/io/blob_store.cpp src/io/thread_log.cpp
     src/runtime/settings_registry.cpp src/tool/util/utf8.cpp
     src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp
-    src/util/user_root.cpp src/util/base64.cpp src/util/teardown.cpp)
+    src/util/user_root.cpp src/util/base64.cpp src/util/teardown.cpp
+    src/domain/web_search_config.cpp)
 target_include_directories(persistence_race_test_narrow PRIVATE include)
 # jaal's headers: user_root.cpp uses jaal::guarded for its warn-once set (the
 # concurrency banlist forbids a raw std::mutex). Header-only here -- guarded<T>

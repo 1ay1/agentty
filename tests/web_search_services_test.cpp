@@ -13,10 +13,12 @@
 
 #include "agtest.hpp"
 
+#include "agentty/auth/keystore.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/runtime/panel/web_search_form.hpp"
 #include "agentty/runtime/settings_registry.hpp"
 #include "agentty/tool/web_search_plan.hpp"
+#include "agentty/tool/web_search_policy.hpp"
 #include "agentty/tool/web_search_secret.hpp"
 
 #include <mcp/tools/web_search.hpp>
@@ -43,6 +45,12 @@ namespace {
 
 // A private AGENTTY_HOME with the OS keystore off, so the sealed FILE is what
 // the assertions read and nothing leaves the temp dir.
+//
+// "Off" has a catch: auth::keystore::available() caches its answer for the
+// life of the process, so if AGENTTY_USE_KEYSTORE was already set when an
+// earlier test asked, setting it to 0 here changes nothing and a store()
+// would land in the developer's REAL keyring. `real_keyring` reports that,
+// and the tests that write a key skip rather than touch it.
 struct TmpHome {
     fs::path    dir;
     std::string old_home, old_keystore, old_exa;
@@ -58,7 +66,9 @@ struct TmpHome {
         ::setenv("AGENTTY_HOME", (dir / "home").c_str(), 1);
         ::setenv("AGENTTY_USE_KEYSTORE", "0", 1);
         ::unsetenv("AGENTTY_WEB_SEARCH_KEY_EXA_API");
+        real_keyring = agentty::auth::keystore::available();
     }
+    bool real_keyring = false;
     ~TmpHome() {
         if (had_home) ::setenv("AGENTTY_HOME", old_home.c_str(), 1);
         else          ::unsetenv("AGENTTY_HOME");
@@ -229,12 +239,28 @@ TEST_CASE("web search plan: language 'auto' sends nothing, a code is passed on")
     CHECK(sp::build_plan(c, no_keys).language == "de");
     c.language = "garbage";
     CHECK(sp::build_plan(c, no_keys).language.empty());
+    // Two bytes are not a language: only two lower-case letters are sent.
+    for (const char* bad : {"A&", "EN", "\n\n", "e1"}) {
+        c.language = bad;
+        CHECK(sp::build_plan(c, no_keys).language.empty(), bad);
+    }
+}
+
+TEST_CASE("web search settings: a dial entry must look like <service>.<dial>") {
+    CHECK(sc::dial_entry_ok("brave-free.freshness", "pw"));
+    CHECK(!sc::dial_entry_ok("nodot", "pw"));
+    CHECK(!sc::dial_entry_ok(".freshness", "pw"));
+    CHECK(!sc::dial_entry_ok("brave-free.", "pw"));
+    CHECK(!sc::dial_entry_ok("brave-free.freshness", ""));
+    CHECK(!sc::dial_entry_ok("brave-free.freshness", "p\nw"));
+    CHECK(!sc::dial_entry_ok(std::string(65, 'a') + ".x", "pw"));
 }
 
 // ── The key store ────────────────────────────────────────────────────────
 
 TEST_CASE("web search secret: a key round-trips, sealed, and is never in plaintext") {
     TmpHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
     const std::string key = "exa-LIVE-0123456789abcdef";
     CHECK(!ss::has("exa-api"));
     CHECK(ss::origin("exa-api").empty());
@@ -255,6 +281,7 @@ TEST_CASE("web search secret: a key round-trips, sealed, and is never in plainte
 
 TEST_CASE("web search secret: the environment beats the store and is named, not shown") {
     TmpHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
     REQUIRE(ss::store("exa-api", "stored-key-0123456789"));
     ::setenv("AGENTTY_WEB_SEARCH_KEY_EXA_API", "env-key-9876543210", 1);
     CHECK(ss::load("exa-api") == "env-key-9876543210");
@@ -262,6 +289,25 @@ TEST_CASE("web search secret: the environment beats the store and is named, not 
     CHECK(ss::env_name("brave-api") == "AGENTTY_WEB_SEARCH_KEY_BRAVE_API");
     ::unsetenv("AGENTTY_WEB_SEARCH_KEY_EXA_API");
     CHECK(ss::load("exa-api") == "stored-key-0123456789");
+}
+
+TEST_CASE("web search secret: an unreadable key file is never overwritten") {
+    TmpHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
+    REQUIRE(ss::store("exa-api", "exa-FIRST-0123456789"));
+    // Find the sealed file and damage it, as a disk error or a machine-id
+    // change would: it exists but can no longer be opened.
+    fs::path file;
+    std::error_code ec;
+    for (const auto& e : fs::recursive_directory_iterator(home.dir, ec))
+        if (e.path().filename() == "web_search_keys.json") file = e.path();
+    REQUIRE(!file.empty());
+    { std::ofstream out(file, std::ios::binary | std::ios::trunc); out << "not a sealed envelope"; }
+    // Storing another service's key must not replace the file (which would
+    // lose exa-api's key for good if the damage is recoverable).
+    CHECK(!ss::store("serper-api", "serper-SECOND-0123456789"));
+    CHECK(TmpHome::slurp(file) == "not a sealed envelope");
+    CHECK(!ss::has("exa-api"));
 }
 
 TEST_CASE("web search secret: implausible keys are refused before they are stored") {
@@ -275,12 +321,36 @@ TEST_CASE("web search secret: implausible keys are refused before they are store
     CHECK(!ss::has("exa-api"));
 }
 
-TEST_CASE("web search secret: the live plan source reads the key per call") {
+TEST_CASE("web search secret: the live plan source reads policy and key per call") {
     TmpHome home;
+    // The policy slot is process-wide and other tests install into it, so
+    // install a known one here and put back what was there afterwards.
+    const auto saved = agentty::tools::web_search_policy::current();
+    struct Restore {
+        sc::Config c;
+        ~Restore() { agentty::tools::web_search_policy::install(c); }
+    } restore{saved};
+
     auto source = sp::make_plan_source();
     REQUIRE(source != nullptr);
-    // Defaults come from settings.json; with a fresh home they are the free three.
-    CHECK(source->plan().slots.size() == 3);
+
+    sc::Config c;
+    c.primary = "serper-api"; c.secondary = "tavily-free"; c.fallback = "none";
+    agentty::tools::web_search_policy::install(c);
+    ::setenv("AGENTTY_WEB_SEARCH_KEY_SERPER_API", "env-serper-0123456789", 1);
+    auto p = source->plan();
+    REQUIRE(p.slots.size() == 2);
+    CHECK(p.slots[0].service == "serper-api");
+    CHECK(p.slots[0].api_key == "env-serper-0123456789");
+
+    // A change is seen by the NEXT call, with no new source.
+    ::unsetenv("AGENTTY_WEB_SEARCH_KEY_SERPER_API");
+    c.primary = "firecrawl-free";
+    agentty::tools::web_search_policy::install(c);
+    p = source->plan();
+    REQUIRE(p.slots.size() == 2);
+    CHECK(p.slots[0].service == "firecrawl-free");
+    CHECK(p.slots[0].api_key.empty());
 }
 
 // ── The pane's rows ──────────────────────────────────────────────────────
@@ -409,6 +479,7 @@ TEST_CASE("web search form: off locks every service row too") {
 
 TEST_CASE("web search settings: dials and slots persist, and a key never does") {
     TmpHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
     store::Settings s;
     s.web_search.primary = "exa-api";
     s.web_search.secondary = "none";

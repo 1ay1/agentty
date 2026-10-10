@@ -21,8 +21,10 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
     their values for when you switch back.
   - **Results per search** (1–20) and **Most results allowed** (1–50). Locked
     in `auto`, where the model sets the count; they apply in `on`. A search
-    still returns at most one engine result page (20 on Brave), so a ceiling
-    above 20 limits nothing in practice.
+    returns at most one result page from the service that answers, and each
+    service caps it (20 on Brave, Tavily, Serper and Perplexity; 30 on
+    DuckDuckGo; 100 on Firecrawl and Exa), so a larger request is cut to that
+    service's cap.
   - **Never return** — domains separated by spaces or commas, as typed or
     pasted; URLs and `www.` are
     reduced to the host. They are sent as `-site:` operators, or as the
@@ -43,8 +45,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   - **Language** — sent to the services that take one.
 
   Each row has an environment variable (`AGENTTY_WEB_SEARCH`, `_COUNT`,
-  `_MAX`, `_EXCLUDE`) that wins over the saved value for the session and locks
-  the row, without ever being written to `settings.json`. `AGENTTY_WEB_SEARCH`
+  `_MAX`, `_EXCLUDE`, `_PRIMARY`, `_SECONDARY`, `_FALLBACK`, `_LANGUAGE`) that
+  wins over the saved value for the session and locks the row, without ever
+  being written to `settings.json`. `AGENTTY_WEB_SEARCH`
   takes `auto`, `on` or `off`, and the boolean spellings (`0` is `off`, `1` is
   `auto`). See
   the [configuration](/docs/configuration#web-search) page.
@@ -57,6 +60,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   catalog order, so the tools block (the head of the prompt-cache prefix)
   stays byte-stable once the setting is chosen. An MCP tool that happens to
   be called `web_search` is left alone.
+
+  The settings list row says who answers first (`auto · Brave Free`).
 
   The settings registry gains a third owner and a free-text row type to carry
   this; `owner()` now classifies by the member pointer's class, since the old

@@ -21,6 +21,7 @@
 #include "agentty/runtime/panel/web_search_form.hpp"
 #include "agentty/runtime/settings_registry.hpp"
 
+#include "agentty/auth/keystore.hpp"
 #include "agentty/tool/web_search_secret.hpp"
 
 #include <unistd.h>
@@ -93,20 +94,34 @@ TEST_CASE("web search pane: the General list has a door that opens the pane") {
     CHECK(se::opens_pane(door->action), "a door row wears the \xe2\x86\x92 affordance");
     CHECK(!door->secondary.empty(),
           "the row says what the policy does, so it reads as a state, not a bare name");
+    // ...and who answers first, by the name the pane's menu uses.
+    CHECK(door->secondary.find("Brave Free") != std::string::npos);
 
     // Open by action: the settings list descends into the pane.
     auto [m2, c2] = app::update(Model{}, Msg{OpenWebSearch{}});
-    // A header per registry group ("Search", "Services"), one row per
-    // web_search.* registry row, plus the dial rows the free defaults offer
-    // (Brave: 1, DuckDuckGo: 2, Tavily: 2) - and no key row, because none of
-    // the three needs one. The pane OPENS on the switch, not on a header.
+    // Two headers, from the registry groups ("Search", "Services"); every
+    // web_search.* registry row; the dials of the free defaults under their
+    // slots; and NO key row, because none of the three needs a key. The
+    // pane OPENS on the switch, not on a header.
+    //
+    // Rows are named rather than counted: an exact count is a test that fails
+    // for being right the first time a row is added (see the note in
+    // smart_tuning_settings_test).
     const auto& form = pane_of(m2).form;
-    int registry_rows = 0;
+    int headers = 0;
+    for (const auto& f : form.fields) if (f.is_header()) ++headers;
+    CHECK(headers == 2);
     for (const auto& d : reg::kSettings)
-        if (d.owner() == reg::Owner::WebSearch) ++registry_rows;
-    CHECK(registry_rows == 8, "mode, count, max, exclude + three slots + language");
-    CHECK(form.fields.size() == static_cast<std::size_t>(2 + registry_rows + 5),
-          "2 headers + registry rows + 5 dial rows");
+        if (d.owner() == reg::Owner::WebSearch)
+            CHECK(form.find(d.id) != nullptr, std::string{d.id});
+    for (const char* id : {"web_search.dial.brave-free.freshness",
+                           "web_search.dial.ddg-free.region",
+                           "web_search.dial.ddg-free.safe",
+                           "web_search.dial.tavily-free.topic",
+                           "web_search.dial.tavily-free.time_range"})
+        CHECK(form.find(id) != nullptr, id);
+    for (const auto& f : form.fields)
+        CHECK(f.id.rfind("web_search.key.", 0) != 0, f.id);
     CHECK(form.fields.front().is_header());
     const auto* first = form.focused();
     REQUIRE(first != nullptr);
@@ -403,7 +418,11 @@ struct KeyHome {
         ::setenv("AGENTTY_HOME", (dir / "home").c_str(), 1);
         ::setenv("AGENTTY_USE_KEYSTORE", "0", 1);
         ::unsetenv("AGENTTY_WEB_SEARCH_KEY_EXA_API");
+        // keystore::available() is cached per process; if it was armed before
+        // this ran, a store() would reach the developer's real keyring.
+        real_keyring = agentty::auth::keystore::available();
     }
+    bool real_keyring = false;
     ~KeyHome() {
         if (had_home) ::setenv("AGENTTY_HOME", old_home.c_str(), 1);
         else          ::unsetenv("AGENTTY_HOME");
@@ -414,10 +433,30 @@ struct KeyHome {
     }
 };
 
+// update(), then run the tasks it returned (on this thread, as the kernel
+// would on a worker) and feed their answers back -- until nothing is left.
+// The key store is IO, so the pane hands it to tasks; this is how a test
+// sees the whole round trip without a kernel.
+Model settle(Model m, Msg msg) {
+    std::vector<Msg> queue;
+    queue.push_back(std::move(msg));
+    for (int round = 0; !queue.empty(); ++round) {
+        REQUIRE(round < 32);   // a task that always starts another
+        std::vector<Msg> next;
+        for (auto& q : queue) {
+            auto [mm, cmd] = app::update(std::move(m), std::move(q));
+            m = std::move(mm);
+            for (auto& r : fx::run_tasks(std::move(cmd))) next.push_back(std::move(r));
+        }
+        queue = std::move(next);
+    }
+    return m;
+}
+
 Model with_exa_primary() {
     Model m;
     m.d.persisted.web_search.primary = "exa-api";
-    return opened(std::move(m));
+    return settle(std::move(m), Msg{OpenWebSearch{}});
 }
 
 void type_text(Model& m, std::string_view text) {
@@ -428,6 +467,7 @@ void type_text(Model& m, std::string_view text) {
 
 TEST_CASE("web search pane: a typed API key is stored, not kept in the Model") {
     KeyHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
     Model m = with_exa_primary();
     REQUIRE(pane_of(m).form.find("web_search.key.exa-api") != nullptr);
     CHECK(pane_of(m).form.find("web_search.key.exa-api")->origin == "not set");
@@ -438,7 +478,18 @@ TEST_CASE("web search pane: a typed API key is stored, not kept in the Model") {
     type_text(m, "exa-SECRET-0123456789");
     // Mid-edit the row holds the text, and the Model holds nothing.
     CHECK(wtf::key_row_service(pane_of(m).form.focused()->id) == "exa-api");
-    m = send(std::move(m), key(form::keys::Intent::LeaveField));
+    // Leaving the field: the reducer empties the row and returns a task that
+    // stores the key. It does no IO itself.
+    {
+        auto [m2, cmd] = app::update(std::move(m), key(form::keys::Intent::LeaveField));
+        CHECK(!agentty::tools::web_search_secret::has("exa-api"),
+              "the reducer stored nothing itself");
+        CHECK(std::get<form::field::Secret>(
+                  pane_of(m2).form.find("web_search.key.exa-api")->value).value.empty(),
+              "the typed key left the row at once");
+        m = std::move(m2);
+        for (auto& r : fx::run_tasks(std::move(cmd))) m = settle(std::move(m), std::move(r));
+    }
 
     CHECK(agentty::tools::web_search_secret::load("exa-api") == "exa-SECRET-0123456789");
     // The row was emptied and now says where the key lives, never what it is.
@@ -451,31 +502,101 @@ TEST_CASE("web search pane: a typed API key is stored, not kept in the Model") {
     CHECK(pane_of(m).form.find("web_search.keyclear.exa-api") != nullptr);
 }
 
+TEST_CASE("web search pane: opening reads key origins on a worker, not in the reducer") {
+    KeyHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
+    REQUIRE(agentty::tools::web_search_secret::store("exa-api", "exa-STORED-0123456789"));
+    Model m;
+    m.d.persisted.web_search.primary = "exa-api";
+    auto [m1, cmd] = app::update(std::move(m), Msg{OpenWebSearch{}});
+    // Before the read answers the pane does not claim either way.
+    const auto* row = pane_of(m1).form.find("web_search.key.exa-api");
+    REQUIRE(row != nullptr);
+    CHECK(row->origin != "stored");
+    CHECK(row->origin != "not set");
+    // The read is a task; its answer fills the origin in.
+    auto replies = fx::run_tasks(std::move(cmd));
+    REQUIRE(replies.size() == 1);
+    Model m2 = std::move(m1);
+    for (auto& r : replies) m2 = settle(std::move(m2), std::move(r));
+    CHECK(pane_of(m2).form.find("web_search.key.exa-api")->origin == "stored");
+    CHECK(pane_of(m2).form.find("web_search.keyclear.exa-api") != nullptr);
+}
+
+TEST_CASE("web search pane: a stale key read does not undo a newer change") {
+    KeyHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
+    Model m;
+    m.d.persisted.web_search.primary = "exa-api";
+    auto [opened_m, open_cmd] = app::update(std::move(m), Msg{OpenWebSearch{}});
+    Model m1 = std::move(opened_m);
+    // The opening read finishes, but its answer has not been folded yet...
+    auto stale = fx::run_tasks(std::move(open_cmd));
+    // ...when the pane starts a store, which bumps its generation.
+    m1.ui.panel.get<pn::WebSearch>()->keys_gen += 1;
+    // So the old answer is dropped rather than shown over the newer state.
+    for (auto& r : stale) {
+        auto [mm, cmd] = app::update(std::move(m1), std::move(r));
+        m1 = std::move(mm);
+        CHECK(fx::run_tasks(std::move(cmd)).empty());
+    }
+    CHECK(!pane_of(m1).keys_read);
+}
+
+TEST_CASE("web search pane: key origins that arrive mid-edit are shown when the edit ends") {
+    KeyHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
+    REQUIRE(agentty::tools::web_search_secret::store("exa-api", "exa-STORED-0123456789"));
+    Model m;
+    m.d.persisted.web_search.primary = "exa-api";
+    auto [m1, open_cmd] = app::update(std::move(m), Msg{OpenWebSearch{}});
+    Model mm = std::move(m1);
+    // Start editing a text row before the read answers...
+    focus_row(mm, "web_search.exclude_sites");
+    mm = send(std::move(mm), key(form::keys::Intent::Activate));
+    REQUIRE(pane_of(mm).form.editing());
+    for (auto& r : fx::run_tasks(std::move(open_cmd))) mm = settle(std::move(mm), std::move(r));
+    // ...the edit is not disturbed...
+    CHECK(pane_of(mm).form.editing());
+    // ...and leaving it unchanged (Esc: no commit) still shows the origins.
+    mm = send(std::move(mm), key(form::keys::Intent::LeaveField));
+    CHECK(!pane_of(mm).form.editing());
+    CHECK(pane_of(mm).form.find("web_search.key.exa-api")->origin == "stored");
+}
+
 TEST_CASE("web search pane: a key that does not look like one is refused, not stored") {
     KeyHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
     Model m = with_exa_primary();
     focus_row(m, "web_search.key.exa-api");
     m = send(std::move(m), key(form::keys::Intent::Activate));
     type_text(m, "nope");
-    m = send(std::move(m), key(form::keys::Intent::LeaveField));
+    m = settle(std::move(m), key(form::keys::Intent::LeaveField));
     CHECK(!agentty::tools::web_search_secret::has("exa-api"));
+    CHECK(std::get<form::field::Secret>(
+              pane_of(m).form.find("web_search.key.exa-api")->value).value.empty());
     CHECK(pane_of(m).form.find("web_search.key.exa-api")->origin == "not set");
 }
 
 TEST_CASE("web search pane: Remove key forgets a stored key") {
     KeyHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
     REQUIRE(agentty::tools::web_search_secret::store("exa-api", "exa-STORED-0123456789"));
     Model m = with_exa_primary();
     REQUIRE(pane_of(m).form.find("web_search.keyclear.exa-api") != nullptr);
     focus_row(m, "web_search.keyclear.exa-api");
-    m = send(std::move(m), key(form::keys::Intent::Activate));
+    m = settle(std::move(m), key(form::keys::Intent::Activate));
     CHECK(!agentty::tools::web_search_secret::has("exa-api"));
     CHECK(pane_of(m).form.find("web_search.keyclear.exa-api") == nullptr);
     CHECK(pane_of(m).form.find("web_search.key.exa-api")->origin == "not set");
+    // The Remove row is gone, so the cursor lands on the key row it served.
+    REQUIRE(pane_of(m).form.focused() != nullptr);
+    CHECK(pane_of(m).form.focused()->id == "web_search.key.exa-api");
 }
 
 TEST_CASE("web search pane: picking a keyed service for a slot brings its key row") {
     KeyHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
     Model m = opened();
     CHECK(pane_of(m).form.find("web_search.key.exa-api") == nullptr);
     // Primary dropdown: open, step to a keyed service, commit.
@@ -488,10 +609,15 @@ TEST_CASE("web search pane: picking a keyed service for a slot brings its key ro
     CHECK(pane_of(m).form.find("web_search.dial.exa-api.type") != nullptr);
     // The old service's rows are gone from the pane (its dials stay on record).
     CHECK(pane_of(m).form.find("web_search.dial.brave-free.freshness") == nullptr);
+    // The rebuild added and removed rows under Primary; the cursor stays ON
+    // Primary rather than on whatever row slid into its old position.
+    REQUIRE(pane_of(m).form.focused() != nullptr);
+    CHECK(pane_of(m).form.focused()->id == "web_search.primary");
 }
 
 TEST_CASE("web search pane: choosing a dial value persists it") {
     KeyHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
     Model m = opened();
     focus_row(m, "web_search.dial.brave-free.freshness");
     m = send(std::move(m), key(form::keys::Intent::Activate));

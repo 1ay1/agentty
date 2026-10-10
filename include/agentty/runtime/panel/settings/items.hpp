@@ -36,7 +36,7 @@ enum class Action : std::uint8_t {
     OpenAppearance,// General: open the Appearance pane (theme, density, motion)
     OpenSmart,     // General: open Smart Mode config
     OpenSandbox,   // General: open the Sandbox pane (walls, syscalls, limits)
-    OpenWebSearch, // General: open Web Search (web_search policy)
+    OpenWebSearch, // General: open Web Search (web_search policy and services)
 
     ToggleChangesStrip, // General: show/hide the persistent "N changes" banner
     // (No RemovePlugin: removal is the two-step `d` → SettingsListRemove

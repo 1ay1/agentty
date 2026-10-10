@@ -568,7 +568,7 @@ void reset(web_search_cfg::Config& c, const SettingDef& d);
 // BETWEEN registry rows (Web Search hangs each service's dials under its slot).
 template <class C>
 inline void add_row(form::Builder& b, const C& cfg, const SettingDef& d) {
-    {
+    {   // (scope kept from add_rows' loop body, so the diff stays a move)
         const std::string id{d.id};
         const std::string label{d.label};
         const std::string help{d.help};
@@ -638,8 +638,8 @@ inline void add_row(form::Builder& b, const C& cfg, const SettingDef& d) {
 // exactly the duplication the table exists to remove.
 //
 // `first` and `last_group` thread across calls so group headers stay correct
-// when a pane walks more than one owner.
-// Every row `owner` has, in table order, under a header per group.
+// when a pane walks more than one owner. A pane that must put rows of its own
+// BETWEEN registry rows walks the table itself and calls add_row (above).
 template <class C>
 inline void add_rows(form::Builder& b, const C& cfg, Owner owner, bool advanced,
                      bool& first, Group& last_group) {

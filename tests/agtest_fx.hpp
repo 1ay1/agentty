@@ -27,7 +27,11 @@
 #define AGENTTY_TESTS_AGTEST_FX_HPP
 
 #include <functional>
+#include <memory>
+#include <stop_token>
 #include <vector>
+
+#include <jaal/host/given.hpp>   // run_tasks: the collecting mailbox + sink_access
 
 #include "agentty/provider/selection.hpp"
 #include "agentty/auth/accounts.hpp"
@@ -144,6 +148,33 @@ inline void run_credentials(const agentty::Cmd& c) {
             agentty::auth::save_credentials(e.creds);
         }
     });
+}
+
+/// Run every TASK in `c` inline, the way the kernel would on a worker, and
+/// return the messages they sent, in order. Store effects and timers are not
+/// touched (see run() / run_credentials()). For reducers that hand their IO to
+/// Cmd::task / Cmd::task_isolated and fold the answer back as a Msg: a test
+/// feeds what this returns into update(), and asserts on the result.
+///
+/// Same mechanism jaal's own `given` host uses (host/given.hpp: a collecting
+/// mailbox and a Sink minted through sink_access).
+[[nodiscard]] inline std::vector<agentty::Msg> run_tasks(agentty::Cmd c) {
+    using Msg = agentty::Msg;
+    std::vector<Msg> got;
+    std::visit([&]<class X>(X&& x) {
+        using U = std::remove_cvref_t<X>;
+        if constexpr (std::same_as<U, typename agentty::Cmd::Batch>) {
+            for (auto& inner : x.cmds)
+                for (auto& m : run_tasks(std::move(inner))) got.push_back(std::move(m));
+        } else if constexpr (std::same_as<U, jaal::payload_t<jaal::fx::task, Msg>>) {
+            auto box = std::make_shared<jaal::detail::given::collect<Msg>>();
+            auto sink = jaal::sink_access::make<Msg>(
+                std::weak_ptr<jaal::detail::mailbox_iface<Msg>>(box));
+            std::move(x.thunk).run(std::move(sink), std::stop_token{});
+            for (auto& m : box->got) got.push_back(std::move(m));
+        }
+    }, std::move(c.inner));
+    return got;
 }
 
 }  // namespace agtest::fx

@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 
 namespace agentty::tools::web_search_secret {
@@ -29,9 +30,13 @@ namespace fs = std::filesystem;
     return "agentty:web_search:" + std::string{service};
 }
 
-[[nodiscard]] nlohmann::json read_all() {
-    std::ifstream in(secrets_path());
-    if (!in) return nlohmann::json::object();
+// The sealed file, opened. nullopt when a file IS there but cannot be read
+// back -- corrupt, truncated, or sealed on another machine. That is not the
+// same as "no keys": a store() that went ahead would rewrite the file with one
+// key and silently destroy every other service's. So callers refuse to write.
+[[nodiscard]] std::optional<nlohmann::json> read_all() {
+    std::ifstream in(secrets_path(), std::ios::binary);
+    if (!in) return nlohmann::json::object();          // no file: no keys yet
     std::ostringstream ss;
     ss << in.rdbuf();
     const std::string raw = ss.str();
@@ -45,7 +50,7 @@ namespace fs = std::filesystem;
             if (j.is_object()) return j;
         } catch (...) { }
     }
-    return nlohmann::json::object();
+    return std::nullopt;
 }
 
 bool write_all(const nlohmann::json& j) {
@@ -86,7 +91,8 @@ bool write_all(const nlohmann::json& j) {
             return out;
     }
     const auto all = read_all();
-    if (auto it = all.find(std::string{service}); it != all.end() && it->is_string())
+    if (!all) return {};
+    if (auto it = all->find(std::string{service}); it != all->end() && it->is_string())
         return it->get<std::string>();
     return {};
 }
@@ -134,13 +140,19 @@ bool store(std::string_view service, std::string_view key) {
         && auth::keystore::store(keystore_key(service), std::string{key})
                == auth::keystore::Status::Ok) {
         // One home for the secret: drop any stale sealed copy.
-        auto all = read_all();
-        if (all.erase(std::string{service}) > 0) (void)write_all(all);
+        if (auto all = read_all(); all && all->erase(std::string{service}) > 0)
+            (void)write_all(*all);
         return true;
     }
     auto all = read_all();
-    all[std::string{service}] = std::string{key};
-    return write_all(all);
+    if (!all) return false;   // unreadable file: never overwrite the other keys
+    (*all)[std::string{service}] = std::string{key};
+    if (!write_all(*all)) return false;
+    // The keystore is enabled but refused the write: an OLDER copy there would
+    // still win over the file (load() asks the keystore first), so drop it.
+    if (auth::keystore::available())
+        (void)auth::keystore::remove(keystore_key(service));
+    return true;
 }
 
 bool erase(std::string_view service) {
@@ -149,7 +161,7 @@ bool erase(std::string_view service) {
     if (auth::keystore::available())
         any = auth::keystore::remove(keystore_key(service)) == auth::keystore::Status::Ok;
     auto all = read_all();
-    if (all.erase(std::string{service}) > 0) any = write_all(all) || any;
+    if (all && all->erase(std::string{service}) > 0) any = write_all(*all) || any;
     return any;
 }
 

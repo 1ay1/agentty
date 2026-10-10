@@ -27,10 +27,12 @@
 //       longer forces stream/login/diff to recompile.
 
 #include <chrono>
+#include <cstdint>
 #include <expected>
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -699,6 +701,19 @@ struct WebSearchKey { form::keys::Action action; };
 // Bracketed paste while a Web Search text row is being edited (the exclusion
 // list is the field pasting exists for).
 struct WebSearchPaste { std::string text; };
+// The API-key store is IO (a sealed file, and `secret-tool` when the OS
+// keystore is on), so the pane never touches it from the reducer: it is read
+// and written on a worker, and these carry the outcome back. None of them
+// carries a key. `gen` is the pane's keys_gen when the read started; a reply
+// to an older read (one that a store or a removal has since overtaken) is
+// dropped.
+struct WebSearchKeysRead {
+    std::uint64_t gen = 0;
+    // service id -> "stored" | "env: AGENTTY_WEB_SEARCH_KEY_..." | "" (none)
+    std::vector<std::pair<std::string, std::string>> origins;
+};
+struct WebSearchKeySaved   { std::string service; bool ok = true; };
+struct WebSearchKeyRemoved { std::string service; bool ok = true; };
 
 // ── Plugin editor (detail / add form) ──────────────────────────
 // Opened from the Plugins settings list: `e` on a server row → detail form
@@ -1376,9 +1391,10 @@ using SmartModeMsg = std::variant<
     OpenSmartMode, CloseSmartMode, SmartModeKey, SmartModePaste,
     SmartModeAdvanced, SmartModeClearSlot>;
 
-// ── Web Search (web_search policy) ─────────────────────────────
+// ── Web Search (web_search policy and services) ─────────────
 using WebSearchMsg = std::variant<
-    OpenWebSearch, CloseWebSearch, WebSearchKey, WebSearchPaste>;
+    OpenWebSearch, CloseWebSearch, WebSearchKey, WebSearchPaste,
+    WebSearchKeysRead, WebSearchKeySaved, WebSearchKeyRemoved>;
 
 // ── Plugin editor (detail / add form) ──────────────────────────
 using PluginEditMsg = std::variant<

@@ -46,8 +46,14 @@ namespace agentty::tools::web_search_secret {
 
 // Persist. An empty key erases. Returns false if the secret could not be
 // secured — callers must treat that as "not saved", never write plaintext.
+// Also false when the sealed file exists but cannot be opened (corrupt, or
+// sealed on another machine): rewriting it would lose every other key.
 bool store(std::string_view service, std::string_view key);
 
+// Remove from the keystore (when enabled) and the sealed file. A key stored
+// while AGENTTY_USE_KEYSTORE was on and erased while it is off stays in the
+// OS keystore: that store is only consulted while the variable is set, and is
+// not ours to scan otherwise.
 bool erase(std::string_view service);
 
 } // namespace agentty::tools::web_search_secret

@@ -2732,10 +2732,11 @@ store::Settings load_settings_from_disk() {
             // hand-edited entry cannot put arbitrary text on the wire.
             if (se.contains("dials") && se["dials"].is_object()) {
                 for (const auto& [k, v] : se["dials"].items()) {
-                    if (!v.is_string() || s.web_search.dials.size() >= 64) continue;
-                    const std::string val = v.get<std::string>();
-                    if (k.empty() || k.size() > 64 || val.empty() || val.size() > 64) continue;
-                    s.web_search.dials[k] = val;
+                    if (!web_search_cfg::dial_entry_ok(k, v.is_string() ? v.get<std::string>()
+                                                                         : std::string{}))
+                        continue;
+                    if (s.web_search.dials.size() >= web_search_cfg::kMaxDials) break;
+                    s.web_search.dials[k] = v.get<std::string>();
                 }
             }
         }
@@ -3031,7 +3032,7 @@ void save_settings(const store::Settings& s) {
     }
 
     // web_search: written only when a row moved off its shipped default, so a
-    // config that never opened the pane carries no `search` key at all — and
+    // config that never opened the pane carries no `web_search` key at all — and
     // a future change to a default reaches everyone who never overrode it.
     //
     // A row whose env var is set is NOT written from `s.web_search`: that value
@@ -3072,24 +3073,27 @@ void save_settings(const store::Settings& s) {
             }
         }
         // Dials: only the ones moved off "the service's own default". Keys of
-        // an unknown service are kept (a newer build may know it) up to the
-        // same cap the loader applies.
+        // an unknown service are kept (a newer build may know it), under the
+        // same rules and cap the loader applies.
         if (!s.web_search.dials.empty()) {
             nlohmann::json dj = nlohmann::json::object();
-            for (const auto& [k, v] : s.web_search.dials)
-                if (!v.empty()) dj[k] = v;
+            for (const auto& [k, v] : s.web_search.dials) {
+                if (!web_search_cfg::dial_entry_ok(k, v)) continue;
+                if (dj.size() >= web_search_cfg::kMaxDials) break;
+                dj[k] = v;
+            }
             if (!dj.empty()) se["dials"] = std::move(dj);
         }
         if (!se.empty()) {
             j["web_search"] = std::move(se);
         } else if (base_web_search.is_object()) {
-            // We loaded a `search` block and now hold all defaults: the user
+            // We loaded a `web_search` block and now hold all defaults: the user
             // reset it. Write the empty object so the merge sees OUR change
             // and does not re-adopt the old block from disk.
             j["web_search"] = json::object();
         }
         // Else: never had one, still all default. Absent — and the merge
-        // adopts a sibling instance's newer `search` block from disk rather
+        // adopts a sibling instance's newer `web_search` block from disk rather
         // than deleting it (see adopt_disk_new below).
     }
 

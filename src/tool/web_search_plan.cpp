@@ -12,7 +12,10 @@ namespace agentty::tools::web_search_plan {
 mcp::tools::WebSearchPlan build_plan(const web_search_cfg::Config& c,
                                   const KeyLookup& key_of) {
     ::mcp::tools::WebSearchPlan plan;
-    if (c.language != "auto" && c.language.size() == 2) plan.language = c.language;
+    // Two lower-case letters or nothing: the value ends up in a request.
+    if (c.language.size() == 2 && c.language[0] >= 'a' && c.language[0] <= 'z'
+        && c.language[1] >= 'a' && c.language[1] <= 'z')
+        plan.language = c.language;
 
     for (const std::string* id : {&c.primary, &c.secondary, &c.fallback}) {
         if (id->empty() || *id == "none") continue;

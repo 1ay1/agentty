@@ -172,4 +172,18 @@ nlohmann::json rewrite_args(const Config& c, nlohmann::json args) {
     return args;
 }
 
+bool dial_entry_ok(std::string_view key, std::string_view value) noexcept {
+    if (key.empty() || key.size() > 64 || value.empty() || value.size() > 64) return false;
+    const auto dot = key.find('.');
+    if (dot == std::string_view::npos || dot == 0 || dot + 1 == key.size()) return false;
+    auto printable = [](std::string_view s) {
+        for (char ch : s) {
+            const auto u = static_cast<unsigned char>(ch);
+            if (u < 0x20 || u == 0x7f) return false;
+        }
+        return true;
+    };
+    return printable(key) && printable(value);
+}
+
 } // namespace agentty::web_search_cfg

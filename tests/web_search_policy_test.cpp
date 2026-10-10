@@ -188,9 +188,17 @@ TEST_CASE("web search policy: every web_search.* row round-trips through the reg
         reg::reset(c, d);
         CHECK(reg::is_default(c, d));
     }
-    // mode, count, max_count, exclude_sites; primary, secondary, fallback,
-    // language.
-    CHECK(seen == 8);
+    // Named, not counted (an exact count fails for being right when a row is
+    // added): the rows the pane and the plan depend on must all be here.
+    CHECK(seen >= 8);
+    for (const char* id : {"web_search.mode", "web_search.count", "web_search.max_count",
+                           "web_search.exclude_sites", "web_search.primary",
+                           "web_search.secondary", "web_search.fallback",
+                           "web_search.language"}) {
+        const auto* d = reg::find(id);
+        REQUIRE(d != nullptr);
+        CHECK(d->owner() == reg::Owner::WebSearch, id);
+    }
 }
 
 TEST_CASE("web search policy: the row a user sees first is the master switch") {

@@ -51,12 +51,12 @@ namespace agentty::web_search_cfg {
 // Bounds the registry clamps to, and the tool layer re-clamps to. Named here
 // so the table row and the clamp can never disagree.
 //
-// What a search can actually RETURN is lower than kMaxCountMax: mcp-cpp reads
-// one result page from whichever engine answers, and Brave (tried first)
-// serves at most 20 per page (observed live). So a ceiling or a request above
-// 20 is accepted and clamped correctly, but yields no more than one page.
-// The ceiling is a limit, not a promise; widening what a search returns
-// needs pagination in mcp-cpp.
+// What a search can actually RETURN is capped per service: mcp-cpp asks the
+// service that answers for one result page and clamps the count to that
+// service's documented maximum (WebSearchService::max_count: 20 for Brave, Tavily,
+// Serper and Perplexity, 30 for DuckDuckGo, 100 for Firecrawl and Exa). So a
+// ceiling above a service's cap is accepted and clamped correctly, but yields
+// no more than that service gives. The ceiling is a limit, not a promise.
 inline constexpr int kCountMin       = 1;
 inline constexpr int kCountMax       = 20;
 inline constexpr int kCountDefault   = 10;   // == mcp-cpp's own default
@@ -128,6 +128,13 @@ struct Config {
 
     [[nodiscard]] bool operator==(const Config&) const = default;
 };
+
+// What a stored dial entry must look like: key "<service>.<dial>" and a value,
+// both short and printable. Applied on load AND on save, so a hand-edited
+// settings.json cannot hold what the pane could not produce, and junk keys
+// cannot crowd real ones out of the cap.
+inline constexpr std::size_t kMaxDials = 64;
+[[nodiscard]] bool dial_entry_ok(std::string_view key, std::string_view value) noexcept;
 
 // The typed view of Config::mode_text. Anything unrecognised reads as Auto —
 // the registry only ever writes the three words, and a hand-edited typo must

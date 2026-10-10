@@ -51,9 +51,12 @@
 // opening a different overlay. (This was equally true with separate
 // fields: assigning pick::Closed{} destroyed the payload too.)
 
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <maya/core/scroll_state.hpp>   // WebSearch::scroll
 
@@ -164,6 +167,18 @@ struct WebSearch : WithFrom {
         s.auto_dispatch = false;   // the form layer owns movement
         return s;
     }();
+    // Where each keyed service's API key comes from, as read off the UI
+    // thread when the pane opened (WebSearchKeysRead): service id ->
+    // "stored", "env: ...", or "" for none. Never the key itself. Until the
+    // read answers, `keys_read` is false and the key rows say so.
+    std::vector<std::pair<std::string, std::string>> key_origins;
+    bool          keys_read = false;
+    // Bumped by every key read, store and removal, so only the newest read's
+    // answer is shown.
+    std::uint64_t keys_gen  = 0;
+    // Key origins arrived while a field was being edited; rebuild the rows as
+    // soon as the edit ends.
+    bool          rows_stale = false;
 };
 struct Palette  : agentty::palette::Open, WithFrom {};
 struct Mention         : agentty::mention::Open, WithFrom {};
