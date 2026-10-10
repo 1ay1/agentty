@@ -68,6 +68,7 @@ struct Session {
     bool show_reasoning = true;
     std::shared_ptr<http::CancelToken> cancel;
     std::set<std::string> grants;   // session-scoped "always allow", by tool
+    std::set<std::string> denials;  // session-scoped "always reject", by tool
     bool warned_context = false;    // "context nearly full" notice sent
 };
 
@@ -113,6 +114,7 @@ private:
     ::acp::ListSessionsResult   on_list_sessions(const ::acp::ListSessionsParams&);
     ::acp::LoadSessionResult    on_load_session(const ::acp::LoadSessionParams&);
     ::acp::ResumeSessionResult  on_resume_session(const ::acp::ResumeSessionParams&);
+    ::acp::NewSessionResult     on_fork_session(const ::acp::ForkSessionParams&);
     void                        on_close_session(const ::acp::CloseSessionParams&);
     void                        on_delete_session(const ::acp::DeleteSessionParams&);
     void                        on_set_mode(const ::acp::SetModeParams&);
@@ -155,7 +157,7 @@ private:
     ::acp::List<::acp::ConfigOption> config_options(const std::string& session_id,
                                                      const std::string& fallback_model);
 
-    enum class PermissionOutcome { Deny, AllowOnce, AllowAlways };
+    enum class PermissionOutcome { Deny, DenyAlways, AllowOnce, AllowAlways };
     PermissionOutcome ask_permission(const std::string& session_id, const ToolUse& tc);
 
     // Live-terminal execution of a `bash` tool call via the client's ACP
@@ -210,6 +212,7 @@ private:
     nlohmann::json        load_session_index();
 
     void                  persist(const std::string& id);
+    void                  adopt_client_mcp(const ::acp::List<::acp::McpServer>& servers);
     void                  replay_history(const std::string& session_id,
                                          const Thread& thread);
 
@@ -241,6 +244,13 @@ private:
     [[nodiscard]] auth::AuthHeader auth() const {
         return auth_.read([](const auth::AuthHeader& a) { return a; });
     }
+  public:
+    // Re-reads credentials (after a terminal login the editor ran for us).
+    // Set by main(); without it `authenticate` can only report the state.
+    void set_reauth(std::function<auth::AuthHeader()> f) { reauth_ = std::move(f); }
+  private:
+    std::function<auth::AuthHeader()> reauth_;
+    void on_authenticate(const ::acp::AuthenticateParams&);
 
     // Did the client advertise `terminal` support at initialize? When true
     // (and agentty's sandbox is NOT wrapping commands), a `bash` tool call is
@@ -256,11 +266,23 @@ private:
     std::atomic<bool>         client_notices_{false};
     std::atomic<bool>         client_compaction_{false};
     std::atomic<bool>         client_bool_config_{false};
+    // clientCapabilities._meta conventions (Zed, JetBrains).
+    std::atomic<bool>         client_terminal_meta_{false};    // terminal_output
+    std::atomic<bool>         client_terminal_delta_{false};   // terminal_output_delta (appends)
+    std::atomic<bool>         client_terminal_auth_{false};    // terminal-auth login methods
 
     // A user-facing notice: a `notice` update when the client renders them,
     // otherwise nothing (the turn's own text already says what happened).
     void notice(const std::string& session_id, std::string severity,
                 std::string title, std::string description = {});
+
+    // Zed's terminal channel for shell tools we run ourselves.
+    [[nodiscard]] bool terminal_channel() const noexcept;
+    [[nodiscard]] static bool is_command_tool(std::string_view name);
+    void send_terminal_output(const std::string& session_id, const std::string& tool_id,
+                              std::string_view data);
+    [[nodiscard]] static nlohmann::json terminal_exit_meta(const std::string& tool_id,
+                                                           std::string_view text, bool failed);
 
     // The ACP protocol version agreed at initialize (min of ours + theirs).
     // The clean-cut seam for v1-vs-v2 emission: a session's config surface is

@@ -5,7 +5,8 @@
 
 #include "agentty/util/update.hpp"
 
-#include "agentty/util/user_root.hpp"    // user_cache_dir()
+#include "agentty/util/user_root.hpp"   // user_cache_dir()
+#include "agentty/util/self_exe.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -40,20 +41,12 @@ constexpr auto kCacheTtl = std::chrono::hours{24};
 
 fs::path cache_path() { return util::user_cache_dir() / "update_check.json"; }
 
-// Where is the running binary?
+// Where is the running binary? (Windows self-replace isn't wired; MSI is the channel.)
 fs::path self_path() {
 #ifdef _WIN32
-    return {};   // Win self-replace not wired yet (MSI is the channel)
+    return {};
 #else
-    char buf[4096];
-    ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (n <= 0) {
-        // macOS: no /proc — _NSGetExecutablePath would go here; for now the
-        // PATH-resolved argv[0] fallback is handled by the caller messaging.
-        return {};
-    }
-    buf[n] = '\0';
-    return fs::path{buf};
+    return util::self_exe_path();
 #endif
 }
 

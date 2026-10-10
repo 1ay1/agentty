@@ -228,6 +228,127 @@ def scenario_tools(c, cwd):
            "completed update carries a diff")
 
 
+def scenario_terminal(c, cwd):
+    print("terminal: a shell call streams into an embedded terminal (Zed _meta)")
+    r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
+    sid = r["sessionId"]
+    c.request("session/set_mode", {"sessionId": sid, "modeId": "write"})
+    r, err = c.request("session/prompt", {"sessionId": sid,
+                       "prompt": [{"type": "text", "text": "run echo"}]}, "PromptResponse", timeout=90)
+    expect(err is None, f"shell turn {err or ''}")
+    ups = [u for s, u in c.updates if s == sid]
+    info = [u for u in ups if u.get("sessionUpdate") == "tool_call"
+            and (u.get("_meta") or {}).get("terminal_info")]
+    expect(bool(info), "tool_call carries _meta.terminal_info")
+    out = "".join((u.get("_meta") or {}).get("terminal_output", {}).get("data", "") for u in ups)
+    expect("term-ok" in out, f"output streamed as terminal_output ({out[:60]!r})")
+    exits = [(u.get("_meta") or {}).get("terminal_exit") for u in ups
+             if (u.get("_meta") or {}).get("terminal_exit")]
+    expect(exits and exits[-1].get("exit_code") == 0, f"terminal_exit with code 0 ({exits})")
+
+
+def scenario_permissions(c, cwd):
+    print("permissions: four options, and 'always reject' sticks for the session")
+    r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
+    sid = r["sessionId"]
+    seen_kinds = set()
+    before = len(c.client_requests)
+    c.permission_answer = "reject_always"
+    c.request("session/prompt", {"sessionId": sid,
+              "prompt": [{"type": "text", "text": "please write the file"}]}, timeout=90)
+    reqs = [m for m in c.client_requests[before:] if m["method"] == "session/request_permission"]
+    for m in reqs:
+        seen_kinds |= {o["kind"] for o in m["params"]["options"]}
+    expect(seen_kinds == {"allow_once", "allow_always", "reject_once", "reject_always"},
+           f"all four option kinds offered ({sorted(seen_kinds)})")
+    before = len(c.client_requests)
+    c.request("session/prompt", {"sessionId": sid,
+              "prompt": [{"type": "text", "text": "please write the file again"}]}, timeout=90)
+    again = [m for m in c.client_requests[before:] if m["method"] == "session/request_permission"]
+    expect(not again, "a tool rejected always is not asked about again")
+    c.permission_answer = "allow_once"
+
+
+def scenario_user_command(c, cwd):
+    print("slash: a user command shows in the menu and expands before the model sees it")
+    r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
+    sid = r["sessionId"]
+    c.pump(0.3)
+    menus = [u["availableCommands"] for s, u in c.updates
+             if s == sid and u.get("sessionUpdate") == "available_commands_update"]
+    names = {x["name"] for x in (menus[-1] if menus else [])}
+    expect("greet" in names, f"user command listed ({sorted(names)})")
+    r, err = c.request("session/prompt", {"sessionId": sid,
+                       "prompt": [{"type": "text", "text": "/greet world"}]}, "PromptResponse", timeout=60)
+    expect(err is None, f"/greet runs {err or ''}")
+    titles = [u.get("title") for s, u in c.updates
+              if s == sid and u.get("sessionUpdate") == "session_info_update" and u.get("title")]
+    expect(titles and titles[0].startswith("/greet"), f"title is what was typed ({titles[:1]})")
+
+
+def scenario_auth(agentty, schema, cwd):
+    print("auth: no credentials -> a terminal login method the editor can run")
+    env_home = os.environ["AGENTTY_HOME"]
+    empty = tempfile.mkdtemp()
+    os.environ["AGENTTY_HOME"] = empty
+    try:
+        c = Client([agentty, "acp"], schema, cwd)
+        caps = dict(ZED_CAPS)
+        caps["auth"] = {"terminal": True}
+        r = initialize(c, caps)
+        methods = r.get("authMethods") or []
+        term = [m for m in methods if m.get("type") == "terminal"]
+        expect(bool(term) and term[0].get("args") == ["login"], f"terminal auth method ({methods})")
+        _, err = c.request("authenticate", {"methodId": "agentty-login"})
+        expect(err is not None and err.get("code") == -32000, f"authenticate without login -> AuthRequired ({err})")
+        c.close()
+        return c
+    finally:
+        os.environ["AGENTTY_HOME"] = env_home
+
+
+def scenario_fork(c, cwd, src):
+    print("fork: a new session carries the history and keeps going on its own")
+    r, err = c.request("session/fork", {"sessionId": src, "cwd": cwd, "mcpServers": []},
+                       "NewSessionResponse")
+    expect(err is None and r.get("sessionId") and r["sessionId"] != src, f"fork returns a new id {err or ''}")
+    if err:
+        return
+    fid = r["sessionId"]
+    expect(config_option(r, "model") is not None, "fork result carries the controls")
+    r, err = c.request("session/prompt", {"sessionId": fid,
+                       "prompt": [{"type": "text", "text": "say hello"}]}, "PromptResponse", timeout=60)
+    expect(err is None, f"fork takes a prompt {err or ''}")
+    r, _ = c.request("session/list", {"cwd": cwd}, "ListSessionsResponse")
+    ids = [s["sessionId"] for s in r["sessions"]]
+    expect(fid in ids and src in ids, "both sessions listed")
+    _, err = c.request("session/fork", {"sessionId": "nope", "cwd": cwd, "mcpServers": []})
+    expect(err is not None and err.get("code") == -32602, "fork of an unknown session -> InvalidParams")
+
+
+def scenario_mcp(c, cwd, agentty):
+    print("mcp: a server the editor passes in session/new reaches the model")
+    if not os.environ.get("FAKE_TOOLS_LOG"):
+        print("  skip (no tool log)")
+        return
+    srv = {"name": "edsrv", "command": agentty, "args": ["mcp-serve", "-w", cwd], "env": []}
+    r, err = c.request("session/new", {"cwd": cwd, "mcpServers": [srv]}, "NewSessionResponse")
+    expect(err is None, f"session/new with mcpServers {err or ''}")
+    sid = r["sessionId"]
+    seen = False
+    for _ in range(30):          # connecting happens in the background
+        open(os.environ["FAKE_TOOLS_LOG"], "w").close()
+        c.request("session/prompt", {"sessionId": sid,
+                  "prompt": [{"type": "text", "text": "say hello"}]}, timeout=60)
+        lines = open(os.environ["FAKE_TOOLS_LOG"]).read().splitlines()
+        names = json.loads(lines[-1]) if lines else []
+        if any(n.startswith("mcp__edsrv__") for n in names):
+            seen = True
+            break
+        time.sleep(0.5)
+    expect(seen, "the editor's MCP server tools are offered to the model")
+
+
 def scenario_commands(c, cwd):
     print("commands: /compact reports a compaction entity, /new clears context")
     r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
@@ -289,7 +410,7 @@ def scenario_basic(c, cwd):
     caps = init["agentCapabilities"]
     expect(caps.get("loadSession") is True, "advertises loadSession")
     sc = caps.get("sessionCapabilities") or {}
-    for k in ("list", "resume", "close"):
+    for k in ("list", "resume", "close", "fork"):
         expect(k in sc, f"advertises sessionCapabilities.{k}")
 
     r, err = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
@@ -358,17 +479,26 @@ def main():
     agentty, schema = os.path.abspath(sys.argv[1]), sys.argv[2]
     cwd = tempfile.mkdtemp(prefix="agentty_acpc_")
     os.makedirs(os.path.join(cwd, ".git"), exist_ok=True)
+    os.makedirs(os.path.join(cwd, ".agentty", "commands"), exist_ok=True)
+    with open(os.path.join(cwd, ".agentty", "commands", "greet.md"), "w") as f:
+        f.write("---\ndescription: Say hi\nargument-hint: who\n---\nSay hello to $ARGUMENTS.\n")
     c = Client([agentty, "acp"], schema, cwd)
     try:
         sid = scenario_basic(c, cwd)
         scenario_config(c, cwd)
         scenario_tools(c, cwd)
+        scenario_terminal(c, cwd)
+        scenario_permissions(c, cwd)
+        scenario_user_command(c, cwd)
+        scenario_fork(c, cwd, sid)
+        scenario_mcp(c, cwd, agentty)
         scenario_commands(c, cwd)
         scenario_failure(c, cwd)
     finally:
         c.close()
     c2 = scenario_reload(agentty, schema, cwd, os.environ, sid)
-    for cl in (c, c2):
+    c3 = scenario_auth(agentty, schema, cwd)
+    for cl in (c, c2, c3):
         for v in cl.violations:
             print("  SCHEMA " + v)
             FAILS.append(v)

@@ -126,17 +126,19 @@ editor's controls always match what agentty will actually use.
 - **Streaming text and thinking** — the reply renders token by token, and the model's reasoning streams as a collapsible thought when thinking is on. Signed thinking blocks are kept, so Claude tool turns with thinking work over ACP.
 - **Images in prompts** — paste or attach a screenshot and it reaches the model as an image. A text-only model has the image withheld rather than the turn failed. Audio is not advertised; no provider agentty ships accepts it.
 - **Tool calls** — every `read` / `edit` / `bash` / `grep` / … shows up as a tool card with the right icon, the raw arguments, and live status (pending → running → done/failed). A `read` renders as a gutter-numbered excerpt; other output is markdown-escaped so file contents render verbatim.
+- **Live terminals** — in Zed, a shell command gets a real terminal inside its tool card: output streams in as it runs (colors included) and the card shows the exit code. The command still runs in agentty's own sandbox; only the display is the editor's.
 - **Inline diffs and follow-along** — `write` and `edit` emit ACP `diff` content, and file tools carry the path as a `location`, so the editor opens and highlights the file being touched.
-- **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`, network) trigger the editor's allow/reject dialog; the mode decides which tools prompt.
-- **Slash commands** — `/compact`, `/new`, and every installed skill as `/<skill-name>`. `/compact` summarises the conversation so later turns send the summary instead of the whole history (the transcript stays visible); `/new` clears the context and keeps the tab. Neither is sent to the model as a prompt.
+- **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`, network) trigger the editor's dialog with four choices: Allow, Always allow *tool*, Reject, Always reject *tool*. "Always" lasts for the session; a tool you always rejected is refused without asking again.
+- **Slash commands** — `/compact`, `/new`, your own commands from `.agentty/commands` or `.claude/commands` (with their argument hints), and every installed skill as `/<skill-name>`. A command expands into its prompt and a skill loads its instructions before the model sees them, the same as in the TUI; the chat title stays what you typed. `/compact` summarises the conversation so later turns send the summary instead of the whole history (the transcript stays visible); `/new` clears the context and keeps the tab.
 - **Compaction progress** — editors that render compactions (ACP 1.11) see `/compact` as an entry that streams its summary and ends completed, failed or cancelled. Others get a one-line note in the chat.
 - **Context usage** — after each turn a `usage_update` reports tokens in use and the model's window, for the editor's context meter.
 - **Notices** — editors that render notices (ACP 1.11) get a warning once the context window passes 85%, and the provider's error when a request fails. Notices are never sent to an editor that didn't ask for them.
 - **Errors with a reason** — a failed turn comes back as an error carrying the provider's message (`HTTP 400: …`), not as a silent `refusal`. Cancelling always comes back as `cancelled`.
-- **Sessions** — `session/new`, `load`, `resume`, `list`, `close`, `delete`, plus `logout`. `session/list` is newest first with titles and last-active times, paged. Every session lives in the same thread store as the TUI, so a chat started in the editor shows up in the TUI and the other way round.
+- **Sessions** — `session/new`, `load`, `resume`, `fork`, `list`, `close`, `delete`, plus `logout`. Fork copies a chat (history, model, thinking, mode) into a new one. `session/list` is newest first with titles and last-active times, paged. Every session lives in the same thread store as the TUI, so a chat started in the editor shows up in the TUI and the other way round.
 - **Reopening a chat** — `session/load` works from a fresh agent process and from any `cwd`, and replays the conversation (messages, thinking, tool cards, compactions) before returning the session's mode and controls.
 - **Live titles** — the first message names the chat, and each turn bumps its last-active time.
-- **Sign-in** — with no credentials agentty advertises an auth method, so the editor shows a "Sign in" prompt instead of failing the first turn.
+- **Sign-in** — with no credentials agentty offers a terminal login: the editor opens a terminal running `agentty login`, and once you finish, agentty picks up the new credentials without a restart. Editors without terminal login get a "run `agentty login`" prompt instead.
+- **Your editor's MCP servers** — servers you configured in Zed (context servers) or JetBrains are passed to agentty with each session and their tools show up for the model, alongside your `mcp.json`. stdio, HTTP and SSE are all supported.
 - **Cancellation** — stop a turn and the in-flight stream tears down; `$/cancel_request` is honoured too.
 - **Workspace sandbox** — file tools stay inside the session's `cwd`; `bash` runs in the same OS sandbox as the TUI.
 
@@ -149,12 +151,13 @@ The ACP agent is the *same* engine as the TUI — same provider, same tools, sam
 `agentty acp` speaks newline-delimited JSON-RPC 2.0 over stdio and implements
 ACP v1 as of 1.11:
 
-- **methods:** `initialize`, `authenticate`, `logout`, `session/new`, `load`, `resume`, `list`, `close`, `delete`, `set_mode`, `set_config_option`, `prompt`, `cancel`, and `$/cancel_request`
+- **methods:** `initialize`, `authenticate`, `logout`, `session/new`, `load`, `resume`, `fork`, `list`, `close`, `delete`, `set_mode`, `set_config_option`, `prompt`, `cancel`, and `$/cancel_request`
 - **updates:** `agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk` (replay), `tool_call`, `tool_call_update`, `plan`, `available_commands_update`, `current_mode_update`, `config_option_update`, `session_info_update`, `usage_update`, `notice`, `compaction_update`, `compaction_summary_chunk`
 - **calls to the editor:** `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*` when the editor offers them
 
 Notices, compaction entries and toggle options are only sent when the editor
-advertises them in `clientCapabilities.session`. Diagnostics go to stderr;
+advertises them in `clientCapabilities.session`; live terminals only when it
+advertises `_meta.terminal_output` (Zed) or `terminal_output_delta`. Diagnostics go to stderr;
 stdout is only the protocol.
 
 `tests/acp/run_acp_client.sh` drives the real binary the way Zed and JetBrains

@@ -300,6 +300,9 @@ struct ConfigServer {
 // `src`. First-writer-wins shadow: a server name already present (from a
 // higher-precedence source) is NOT overwritten — project shadows user, exactly
 // like skills/agents/commands. Missing/invalid file → no-op.
+void read_one_doc(const json& doc, const scope::Source& src, const fs::path& file,
+                  std::unordered_map<std::string, ConfigServer>& out);
+
 void read_one_config(const fs::path& file, const scope::Source& src,
                      std::unordered_map<std::string, ConfigServer>& out) {
     if (file.empty()) return;
@@ -318,6 +321,19 @@ void read_one_config(const fs::path& file, const scope::Source& src,
     std::ifstream in(file);
     if (!in) return;
     json doc = json::parse(in, nullptr, /*throw=*/false);
+    read_one_doc(doc, src, file, out);
+}
+
+// MCP servers the ACP client sent with session/new (Zed's context servers,
+// JetBrains' MCP settings), in mcp.json shape. Process-wide: one editor drives
+// one agent process.
+maya::guarded<json>& client_servers() {
+    static maya::guarded<json> s{json::object()};
+    return s;
+}
+
+void read_one_doc(const json& doc, const scope::Source& src, const fs::path& file,
+                  std::unordered_map<std::string, ConfigServer>& out) {
     if (!doc.is_object()) return;
     const json* servers = nullptr;
     if (doc.contains("mcpServers") && doc["mcpServers"].is_object())
@@ -379,6 +395,17 @@ void read_one_config(const fs::path& file, const scope::Source& src,
 [[nodiscard]] std::unordered_map<std::string, ConfigServer>
 read_config_servers() {
     std::unordered_map<std::string, ConfigServer> out;
+    // Servers the editor handed us over ACP come first: the user set them up
+    // in their editor, which is a stronger statement than a file we found.
+    {
+        const json extra = client_servers().read([](const json& j) { return j; });
+        if (extra.is_object() && !extra.empty()) {
+            scope::Source src;
+            src.locus = scope::Locus::Explicit;   // trusted: the editor vouches
+            json doc{{"mcpServers", extra}};
+            read_one_doc(doc, src, "(editor)", out);
+        }
+    }
     const scope::Env env = scope::current_env(mcp_layout());
     // scope::plan yields sources in precedence order, and mcp_layout() asks
     // for the native dialect ONLY (mcp.json isn't an .agents/.claude
@@ -1302,6 +1329,22 @@ std::vector<ServerLaunch> configured_servers_for_delegation() {
             continue;
         out.push_back(std::move(launch));
     }
+    return out;
+}
+
+void set_client_servers(const json& servers) {
+    const bool changed = client_servers().with([](json& s, json n) {
+        if (s == n) return false;
+        s = std::move(n);
+        return true;
+    }, servers.is_object() ? servers : json::object());
+    if (changed) (void)mcp_reload();
+}
+
+std::vector<std::string> configured_server_names_from_client() {
+    std::vector<std::string> out;
+    const json s = client_servers().read([](const json& j) { return j; });
+    for (auto it = s.begin(); it != s.end(); ++it) out.push_back(it.key());
     return out;
 }
 

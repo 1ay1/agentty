@@ -2099,6 +2099,11 @@ int main(int argc, char** argv) {
                                              provider::EventSink s) {
             (void)stream_to_fn(pid, std::move(r), std::move(s));
         });
+        // After the editor runs `agentty login` for us, `authenticate` re-reads
+        // the store with this.
+        server->set_reauth([provider_spec] {
+            return provider::credentials::resolve(IoAccess::grant(), provider_spec);
+        });
         std::fprintf(stderr, "agentty: ACP agent ready on stdio (profile=%s)\n",
                      std::string(to_string(profile)).c_str());
         int rc = server->serve();

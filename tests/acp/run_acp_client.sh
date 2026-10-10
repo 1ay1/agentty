@@ -8,6 +8,7 @@ A="$1"
 HERE=$(cd "$(dirname "$0")" && pwd)
 SCHEMA="${2:-$HERE/schema/v1/schema.json}"
 S=$(mktemp -d "${TMPDIR:-/tmp}/agentty_acp_XXXXXX")
+export FAKE_TOOLS_LOG="$S/tools.log"
 python3 "$HERE/fake_openai_server.py" 0 > "$S/port" 2>/dev/null </dev/null &
 SRV=$!
 trap 'kill $SRV 2>/dev/null; rm -rf "$S"' EXIT INT TERM

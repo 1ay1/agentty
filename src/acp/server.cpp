@@ -47,12 +47,17 @@
 #include "agentty/tool/registry.hpp"
 #include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
 #include "agentty/runtime/app/cmd_factory.hpp"        // wire_messages_for, compaction prompts
+#include "agentty/tool/commands.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/background.hpp"
+#include "agentty/util/self_exe.hpp"
+#if AGENTTY_MCP
+#include "agentty/mcp/client.hpp"
+#endif
 
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"
@@ -799,10 +804,18 @@ a::List<a::AvailableCommand> available_commands(Io io) {
     };
     add("compact", "Summarize the conversation to reclaim context window", nullptr);
     add("new",     "Start a fresh conversation, clearing prior context", nullptr);
-    // Every installed, model-invocable skill becomes a first-class /command.
+    std::set<std::string> seen{"compact", "new"};
+    // The user's own slash commands (.agentty/.claude/commands/*.md), with
+    // their argument hint, the same set the TUI's `/` picker shows.
+    for (const auto& c : tools::commands::all(io)) {
+        if (c.name.empty() || !seen.insert(c.name).second) continue;
+        add(c.name, c.description.empty() ? "Run /" + c.name : c.description,
+            c.argument_hint.empty() ? nullptr : c.argument_hint.c_str());
+    }
+    // Every installed skill. user_only ones are exactly the ones meant to be
+    // run by hand, so they are listed too; the model just never sees them.
     for (const auto& sk : tools::skills::all(io)) {
-        if (sk.user_only) continue;   // hidden from the model-facing catalog
-        if (sk.name.empty()) continue;
+        if (sk.name.empty() || !seen.insert(sk.name).second) continue;
         add(sk.name,
             sk.description.empty() ? std::string{"Run the "} + sk.name + " skill"
                                    : sk.description,
@@ -919,6 +932,7 @@ AgentServer::Router AgentServer::make_router() {
         return s.on_load_session(p);
     });
     r.on<m::SessionResume>([](AgentServer& s, const a::ResumeSessionParams& p) { return s.on_resume_session(p); });
+    r.on<m::SessionFork>([](AgentServer& s, const a::ForkSessionParams& p) { return s.on_fork_session(p); });
     r.on<m::SessionList>([](AgentServer& s, const a::ListSessionsParams& p) { return s.on_list_sessions(p); });
     r.on<m::SessionClose>([](AgentServer& s, const a::CloseSessionParams& p) {
         s.on_close_session(p); return a::Unit{};
@@ -932,10 +946,8 @@ AgentServer::Router AgentServer::make_router() {
     r.on<m::SessionSetConfig>([](AgentServer& s, const a::SetConfigOptionParams& p) {
         return s.on_set_config_option(p);
     });
-    r.on<m::Authenticate>([](AgentServer& s, const a::AuthenticateParams&) {
-        if (auth::is_empty(s.auth()))
-            throw a::RpcError(a::AuthRequired,
-                "agentty has no credentials — run `agentty login` first");
+    r.on<m::Authenticate>([](AgentServer& s, const a::AuthenticateParams& p) {
+        s.on_authenticate(p);
         return a::Unit{};
     });
     r.on<m::Logout>([](AgentServer& s, const a::Unit&) { s.on_logout(); return a::Unit{}; });
@@ -984,6 +996,41 @@ void AgentServer::persist(const std::string& id) {
         persistence::save_thread(IoAccess::grant(), *snapshot);
 }
 
+// The editor's MCP servers (session/new, load, resume, fork), turned into
+// mcp.json entries and handed to the MCP bridge. The bridge reconnects only
+// when the set changed, so sending the same list each session is free.
+void AgentServer::adopt_client_mcp(const a::List<a::McpServer>& servers) {
+#if AGENTTY_MCP
+    json out = json::object();
+    for (const auto& s : servers) {
+        a::match(s,
+            [&](const a::StdioMcpServer& v) {
+                json e{{"command", v.command}, {"args", v.args}};
+                json env = json::object();
+                for (const auto& kv : v.env) env[kv.name] = kv.value;
+                if (!env.empty()) e["env"] = std::move(env);
+                out[v.name] = std::move(e);
+            },
+            [&](const a::HttpMcpServer& v) {
+                json h = json::object();
+                for (const auto& kv : v.headers) h[kv.name] = kv.value;
+                out[v.name] = json{{"type", "http"}, {"url", v.url}, {"headers", std::move(h)}};
+            },
+            [&](const a::SseMcpServer& v) {
+                json h = json::object();
+                for (const auto& kv : v.headers) h[kv.name] = kv.value;
+                out[v.name] = json{{"type", "sse"}, {"url", v.url}, {"headers", std::move(h)}};
+            });
+    }
+    // Connecting can take seconds; don't hold up session/new for it.
+    util::run_isolated_detached("acp.mcp_servers",
+        [](std::stop_token, json servers) { ::agentty::mcp::set_client_servers(servers); },
+        std::move(out));
+#else
+    (void)servers;
+#endif
+}
+
 void AgentServer::send_update(const std::string& session_id, a::SessionUpdate update) {
     a::SessionUpdateMsg msg;
     msg.sessionId = a::SessionId{session_id};
@@ -999,6 +1046,48 @@ void AgentServer::notice(const std::string& session_id, std::string severity,
     n.title    = std::move(title);
     if (!description.empty()) n.description = a::Just(std::move(description));
     send_update(session_id, std::move(n));
+}
+
+bool AgentServer::terminal_channel() const noexcept {
+    return client_terminal_meta_.load(std::memory_order_relaxed);
+}
+
+bool AgentServer::is_command_tool(std::string_view name) {
+    const auto* spec = tools::spec::lookup(name);
+    return spec && spec->kind == tools::spec::Kind::Bash;
+}
+
+void AgentServer::send_terminal_output(const std::string& session_id,
+                                       const std::string& tool_id, std::string_view data) {
+    a::ToolCallUpdate u;
+    u.toolCallId = a::ToolCallId{tool_id};
+    // Zed replaces with terminal_output chunks; clients that ask for
+    // terminal_output_delta append. Same payload either way.
+    const char* key = client_terminal_delta_.load(std::memory_order_relaxed)
+                    ? "terminal_output_delta" : "terminal_output";
+    // progress text is already valid UTF-8 (exec converts it).
+    u.meta = json{{key, {{"terminal_id", tool_id}, {"data", std::string{data}}}}};
+    send_update(session_id, a::SU_ToolCallUpdate{std::move(u)});
+}
+
+// _meta.terminal_exit for a finished command. The shell tool's result says
+// "failed with exit code N" on a failure and nothing on success.
+json AgentServer::terminal_exit_meta(const std::string& tool_id, std::string_view text,
+                                     bool failed) {
+    json code = failed ? json(1) : json(0);
+    constexpr std::string_view kTag = "failed with exit code ";
+    if (const auto at = text.find(kTag); at != std::string_view::npos) {
+        int n = 0;
+        const char* p = text.data() + at + kTag.size();
+        const char* end = text.data() + text.size();
+        bool any = false;
+        while (p < end && *p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); ++p; any = true; }
+        if (any) code = n;
+    } else if (text.find("timed out after") != std::string_view::npos) {
+        code = nullptr;   // killed, no exit status
+    }
+    return json{{"terminal_exit", {{"terminal_id", tool_id}, {"exit_code", code},
+                                    {"signal", nullptr}}}};
 }
 
 void AgentServer::emit_session_config(const std::string& session_id,
@@ -1295,6 +1384,20 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
                              std::memory_order_relaxed);
     client_bool_config_.store(p.clientCapabilities.session.booleanConfig,
                               std::memory_order_relaxed);
+    // Zed's terminal channel: a command tool call carries _meta.terminal_info,
+    // its output streams as _meta.terminal_output and ends with terminal_exit,
+    // and the editor renders a real terminal in the card. Works with our own
+    // sandboxed execution, unlike client-hosted terminal/create.
+    {
+        const json& cm = p.clientCapabilities.meta;
+        const auto flag = [&](const char* k) {
+            return cm.is_object() && cm.contains(k) && cm[k].is_boolean() && cm[k].get<bool>();
+        };
+        client_terminal_meta_.store(flag("terminal_output") || flag("terminal_output_delta"),
+                                    std::memory_order_relaxed);
+        client_terminal_delta_.store(flag("terminal_output_delta"), std::memory_order_relaxed);
+        client_terminal_auth_.store(flag("terminal-auth"), std::memory_order_relaxed);
+    }
     // Negotiate to min(what we support, what the client offered). We advertise
     // up to kMaxProtocolVersion (v1 by default; v2 only if the acp-cpp build
     // opted into the Draft via -DACP_ENABLE_V2_DRAFT). A v1-only client still
@@ -1324,6 +1427,13 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     caps.sessionCapabilities.list      = a::Just(a::Unit{});
     caps.sessionCapabilities.resume    = a::Just(a::Unit{});
     caps.sessionCapabilities.close     = a::Just(a::Unit{});
+    caps.sessionCapabilities.fork      = a::Just(a::Unit{});   // unstable, used by Zed
+#if AGENTTY_MCP
+    // The MCP bridge speaks stdio, Streamable HTTP and SSE, so the editor's
+    // servers of every kind can be handed over.
+    caps.mcpCapabilities.http = true;
+    caps.mcpCapabilities.sse  = true;
+#endif
     caps.sessionCapabilities.deleteCap = a::Just(a::Unit{});
     // Advertise generic JSON-RPC request cancellation ($/cancel_request,
     // stabilized 2026-06-29) via _meta — the spec carries extension
@@ -1338,18 +1448,43 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     // agent's sign-in UX. When already authenticated we advertise nothing, so
     // Zed shows the agent as ready.
     if (auth::is_empty(auth())) {
-        a::AuthMethod m;
-        m.id          = "agentty-login";
-        m.name        = "Sign in to agentty";
-        m.description = a::Just<std::string>(
-            "Run `agentty login` in a terminal to authenticate your provider, "
-            "then reconnect.");
-        r.authMethods.push_back(std::move(m));
+        // A terminal method lets the editor run `agentty login` in its own
+        // terminal and then call authenticate, which re-reads what it saved.
+        // Zed advertises it as auth.terminal (standard) or _meta.terminal-auth.
+        if (p.clientCapabilities.authTerminal) {
+            a::AuthMethod m;
+            m.id          = "agentty-login";
+            m.name        = "Sign in to agentty";
+            m.description = a::Just<std::string>(
+                "Opens a terminal to sign in with Claude, ChatGPT, Copilot or an API key.");
+            m.type        = "terminal";
+            m.args        = {"login"};
+            r.authMethods.push_back(std::move(m));
+        } else if (client_terminal_auth_.load(std::memory_order_relaxed)) {
+            a::AuthMethod m;
+            m.id          = "agentty-login";
+            m.name        = "Sign in to agentty";
+            m.description = a::Just<std::string>(
+                "Opens a terminal to sign in with Claude, ChatGPT, Copilot or an API key.");
+            m.meta = json{{"terminal-auth", {{"command", util::self_exe_path().string()},
+                                             {"args", json::array({"login"})},
+                                             {"label", "agentty login"}}}};
+            r.authMethods.push_back(std::move(m));
+        } else {
+            a::AuthMethod m;
+            m.id          = "agentty-login";
+            m.name        = "Sign in to agentty";
+            m.description = a::Just<std::string>(
+                "Run `agentty login` in a terminal to authenticate your provider, "
+                "then reconnect.");
+            r.authMethods.push_back(std::move(m));
+        }
     }
     return r;
 }
 
 a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
+    adopt_client_mcp(p.mcpServers);
     ThreadId tid = persistence::new_id();
     const std::string sid = tid.value;
     const Profile session_profile = profile_;
@@ -1386,7 +1521,66 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
     return r;
 }
 
+// session/fork: a new session whose history is a copy of another's, the
+// editor's "fork from here". The source can be live or only on disk; the
+// copy keeps its model, thinking and mode, and gets a fresh id and title.
+a::NewSessionResult AgentServer::on_fork_session(const a::ForkSessionParams& p) {
+    adopt_client_mcp(p.mcpServers);
+    const std::string src = p.sessionId.value;
+    if (src.empty()) throw a::RpcError(a::errc::InvalidParams, "session/fork: missing sessionId");
+
+    struct Copy { Thread thread; Profile profile; std::string model, provider, effort; bool reasoning; };
+    std::optional<Copy> copy = with_session(src, [](Session& s) {
+        return Copy{s.thread, s.profile, s.model, s.provider, s.effort, s.show_reasoning};
+    });
+    if (!copy) {
+        auto loaded = persistence::load_thread_by_id(IoAccess::grant(), ThreadId{src});
+        if (!loaded)
+            throw a::RpcError(a::errc::InvalidParams, "session/fork: no such session: " + src,
+                              json{{"sessionId", src}});
+        copy = Copy{std::move(*loaded), profile_, "", "", "", true};
+    }
+
+    ThreadId tid = persistence::new_id();
+    const std::string sid = tid.value;
+    {
+        Session s;
+        s.id       = sid;
+        s.cwd      = p.cwd;
+        s.profile  = copy->profile;
+        s.model    = std::move(copy->model);
+        s.provider = std::move(copy->provider);
+        s.effort   = std::move(copy->effort);
+        s.show_reasoning = copy->reasoning;
+        s.thread   = std::move(copy->thread);
+        s.thread.id = tid;
+        s.thread.forked_from = src;
+        s.thread.title = s.thread.title.empty() ? std::string{"Fork"}
+                                                : "Fork of " + s.thread.title;
+        sessions_.with([](Sessions& ss, Session v) {
+            std::string k = v.id;
+            ss.by_id.emplace(std::move(k), std::move(v));
+        }, std::move(s));
+    }
+    persist(sid);
+    index_session(sid);
+
+    a::NewSessionResult r;
+    r.sessionId = a::SessionId{sid};
+    if (!v2_config())
+        r.modes = a::Just(mode_state(copy->profile));
+    if (auto opts = config_options(sid, model_id_); !opts.empty())
+        r.configOptions = a::Just(std::move(opts));
+    emit_session_config(sid, model_id_);
+    const std::string title = with_session(sid, [](Session& s) { return s.thread.title; })
+                                  .value_or(std::string{});
+    if (!title.empty())
+        send_update(sid, a::SU_SessionInfo{a::Just(title), a::Nothing, json::object()});
+    return r;
+}
+
 a::LoadSessionResult AgentServer::on_load_session(const a::LoadSessionParams& p) {
+    adopt_client_mcp(p.mcpServers);
     std::string sid = p.sessionId.value;
     std::string cwd = p.cwd;
     // InvalidParams, not InternalError. Zed's client branches on the code
@@ -1611,6 +1805,24 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
     return r;
 }
 
+// The editor calls this after running our terminal login method (or any time
+// it wants to check). Re-read the credential store: the login just wrote it
+// from another process, and our copy is from startup.
+void AgentServer::on_authenticate(const a::AuthenticateParams& p) {
+    if (p.methodId != "agentty-login")
+        throw a::RpcError(a::errc::InvalidParams,
+                          "authenticate: unknown methodId '" + p.methodId + "'");
+    if (auth::is_empty(auth()) && reauth_) {
+        auth::AuthHeader fresh = reauth_();
+        auth_.with([](auth::AuthHeader& a, auth::AuthHeader v) { a = std::move(v); }, fresh);
+        // The model list depends on which providers are signed in.
+        model_choices_.with([](std::vector<ModelChoice>& v) { v.clear(); });
+    }
+    if (auth::is_empty(auth()))
+        throw a::RpcError(a::AuthRequired,
+                          "still not signed in. Run `agentty login` and try again.");
+}
+
 void AgentServer::on_logout() {
     auth::clear_credentials(IoAccess::grant());   // ACP handler, not a reducer
     auth_.with([](auth::AuthHeader& a) { a = auth::ApiKeyHeader{""}; });
@@ -1751,6 +1963,7 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     std::string sid  = p.sessionId.value;
     auto parts = prompt_parts_from_blocks(p.prompt);
     std::string text = std::move(parts.text);
+    const std::string typed_raw = text;   // before any /command expansion
     std::string pending_title;   // title to push to Zed's sidebar (first msg only)
 
     // Local OpenAI-compatible backends (Ollama, llama.cpp) need no key, so
@@ -1809,7 +2022,35 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
                 std::move(resp));
             return;
         }
+        // A user slash command expands into its prompt template; a skill
+        // splices in its instructions, the same as the TUI's submit does.
+        if (t.starts_with('/')) {
+            const Io io = IoAccess::grant();
+            if (auto expanded = tools::commands::try_expand(io, t)) {
+                text = std::move(*expanded);
+            } else {
+                const auto sp  = t.find_first_of(" \t\n");
+                const auto tok = t.substr(1, sp == std::string_view::npos ? sp : sp - 1);
+                const std::string rest = sp == std::string_view::npos
+                                       ? std::string{} : std::string{t.substr(sp + 1)};
+                if (auto sk = tools::skills::find(io, tok)) {
+                    const Thread snap = with_session(sid, [](Session& s) {
+                        return s.thread;
+                    }).value_or(Thread{});
+                    if (!tools::skills::is_active_in(sk->name, ::agentty::visible_text(snap))) {
+                        text  = tools::skills::activation_payload(io, *sk);
+                        text += "\n\nFollow the skill instructions above";
+                        text += rest.empty() ? "." : " for this task: " + rest;
+                    } else {
+                        text = "Apply the already-loaded '" + sk->name + "' skill" +
+                               (rest.empty() ? "." : ": " + rest);
+                    }
+                }
+            }
+        }
     }
+    // Title from what the user typed ("/review src"), not the expanded template.
+    std::string typed = typed_raw;
     Message um;
     um.role   = Role::User;
     um.text   = std::move(text);
@@ -1819,19 +2060,19 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     // in one step. Returns the derived title on the first message, so Zed's
     // thread sidebar is named the moment it lands, like the native agent.
     const auto title = sessions_.with(
-        [](Sessions& ss, std::string id, Message m, std::string rid)
+        [](Sessions& ss, std::string id, Message m, std::string rid, std::string typed_text)
             -> std::optional<std::string> {
             auto it = ss.by_id.find(id);
             if (it == ss.by_id.end()) return std::nullopt;
             Session& s = it->second;
             const bool first_message = s.thread.messages.empty();
-            if (first_message && !m.text.empty())
-                s.thread.title = persistence::title_from_first_message(m.text);
+            if (first_message && !typed_text.empty())
+                s.thread.title = persistence::title_from_first_message(typed_text);
             s.thread.messages.push_back(std::move(m));
             s.cancel = std::make_shared<http::CancelToken>();
             ss.reqid_to_session[std::move(rid)] = id;
             return first_message ? s.thread.title : std::string{};
-        }, sid, std::move(um), jsonrpc::to_json(resp.id()).dump());
+        }, sid, std::move(um), jsonrpc::to_json(resp.id()).dump(), std::move(typed));
     if (!title) {   // closed between the check above and here
         resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
         return;
@@ -2288,6 +2529,11 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
                         call.name       = a::Just<std::string>(ev.name.value);
                         call.kind       = acp_tool_kind(ev.name.value);
                         call.status     = a::ToolCallStatus::Pending;
+                        // Zed creates the terminal from the FIRST tool_call;
+                        // output and exit then stream on later updates.
+                        if (is_command_tool(ev.name.value) && terminal_channel())
+                            call.meta = json{{"terminal_info",
+                                              {{"terminal_id", ev.id.value}, {"cwd", scwd}}}};
                         send_update(sid, a::SU_ToolCall{std::move(call)});
                     } else if constexpr (std::is_same_v<E, StreamToolUseDelta>) {
                         cur_tool_json += ev.partial_json;
@@ -2459,20 +2705,29 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         bool needs_perm =
             tool::DynamicDispatch::needs_permission_with(td, profile)
             && !grants.contains(tc.name.value);
+        // "Always reject" from earlier this session: refused without asking.
+        const bool denied_always = needs_perm && with_session(ctx.id, [](Session& s, std::string n) {
+            return s.denials.contains(n);
+        }, tc.name.value).value_or(false);
         if (needs_perm) {
-            a::ToolCallUpdate u;
-            u.toolCallId = a::ToolCallId{tc.id.value};
-            u.status     = a::Just(a::ToolCallStatus::Pending);
-            send_update(ctx.id, a::SU_ToolCallUpdate{std::move(u)});
-
-            auto outcome = ask_permission(ctx.id, tc);
+            PermissionOutcome outcome = PermissionOutcome::Deny;
+            if (!denied_always) {
+                a::ToolCallUpdate u;
+                u.toolCallId = a::ToolCallId{tc.id.value};
+                u.status     = a::Just(a::ToolCallStatus::Pending);
+                send_update(ctx.id, a::SU_ToolCallUpdate{std::move(u)});
+                outcome = ask_permission(ctx.id, tc);
+            }
             if (ctx.cancelled()) { out_cancelled = true; return false; }
             if (outcome == PermissionOutcome::AllowAlways) {
                 grants.insert(tc.name.value);
                 with_session(ctx.id, [](Session& s, std::string n) { s.grants.insert(std::move(n)); return true; },
                              tc.name.value);
             }
-            if (outcome == PermissionOutcome::Deny) {
+            if (outcome == PermissionOutcome::DenyAlways)
+                with_session(ctx.id, [](Session& s, std::string n) { s.denials.insert(std::move(n)); return true; },
+                             tc.name.value);
+            if (outcome == PermissionOutcome::Deny || outcome == PermissionOutcome::DenyAlways) {
                 set_status(tc, ToolUse::Rejected{});
                 a::ToolCallUpdate r;
                 r.toolCallId = a::ToolCallId{tc.id.value};
@@ -2533,6 +2788,18 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         // The session's cancel reaches the running tool itself (a shell is
         // stopped), not only this wait.
         if (ctx.cancel) call_ctx.cancel.push_back(ctx.cancel->token());
+        // Zed's terminal channel: a shell command's output streams into a real
+        // terminal in the card while it runs. progress hands us the whole
+        // buffer each time; we send what's new.
+        const bool term = is_command_tool(tc.name.value) && terminal_channel();
+        if (term) {
+            auto sent = std::make_shared<std::size_t>(0);
+            call_ctx.progress = [this, sid = ctx.id, tid = tc.id.value, sent](std::string_view all) {
+                if (all.size() <= *sent) return;
+                send_terminal_output(sid, tid, all.substr(*sent));
+                *sent = all.size();
+            };
+        }
         // The job gets its own copy of the definition it was gated against.
         auto fut = util::background_pool().submit_isolated(
             [](std::stop_token, std::optional<tools::ToolDef> def, std::string name,
@@ -2648,6 +2915,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
             upd.status    = a::Just(a::ToolCallStatus::Completed);
             upd.content   = a::Just(std::move(content));
             upd.rawOutput = a::Just<json>(json{{"text", result->text}});
+            if (term) upd.meta = terminal_exit_meta(tc.id.value, result->text, false);
             // tool_start, NOT tc.executing_since(). ACP never moves a tool
             // into Running, so executing_since() has nothing recorded to read
             // and ALWAYS returns its liveness fallback, card birth -- which
@@ -2670,6 +2938,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
             upd.status    = a::Just(a::ToolCallStatus::Failed);
             upd.content   = a::Just(std::move(content));
             upd.rawOutput = a::Just<json>(json{{"text", detail}, {"error", true}});
+            if (term) upd.meta = terminal_exit_meta(tc.id.value, detail, true);
             // Same as the Done branch: tool_start is the dispatch stamp.
             settle_tool(ctx, tc, ToolUse::Failed{{}, {}, detail}, tool_start);
         }
@@ -2897,10 +3166,14 @@ AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
     if (auto cc = command_content(tc))    c.push_back(std::move(*cc));
     if (auto pc = prompt_content(tc))     c.push_back(std::move(*pc));
     if (!c.empty()) req.toolCall.content = a::Just(std::move(c));
+    // Labels name the tool, so "always" says what it covers: this tool, for
+    // the rest of this session.
+    const std::string tool = tc.name.value;
     req.options = {
-        a::PermissionOption{"allow_once",   "Allow",        a::PermissionOptionKind::AllowOnce,   json::object()},
-        a::PermissionOption{"allow_always", "Always allow", a::PermissionOptionKind::AllowAlways, json::object()},
-        a::PermissionOption{"reject_once",  "Reject",       a::PermissionOptionKind::RejectOnce,  json::object()},
+        a::PermissionOption{"allow_once",    "Allow",                        a::PermissionOptionKind::AllowOnce,    json::object()},
+        a::PermissionOption{"allow_always",  "Always allow " + tool,         a::PermissionOptionKind::AllowAlways,  json::object()},
+        a::PermissionOption{"reject_once",   "Reject",                       a::PermissionOptionKind::RejectOnce,   json::object()},
+        a::PermissionOption{"reject_always", "Always reject " + tool,        a::PermissionOptionKind::RejectAlways, json::object()},
     };
 
     try {
@@ -2908,8 +3181,9 @@ AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
         return a::match(outcome.outcome,
             [](const a::PO_Cancelled&) { return PermissionOutcome::Deny; },
             [](const a::PO_Selected& s) {
-                if (s.optionId == "allow_always") return PermissionOutcome::AllowAlways;
-                if (s.optionId == "allow_once")   return PermissionOutcome::AllowOnce;
+                if (s.optionId == "allow_always")  return PermissionOutcome::AllowAlways;
+                if (s.optionId == "allow_once")    return PermissionOutcome::AllowOnce;
+                if (s.optionId == "reject_always") return PermissionOutcome::DenyAlways;
                 return PermissionOutcome::Deny;
             });
     } catch (const std::exception&) {

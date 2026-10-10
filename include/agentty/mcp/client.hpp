@@ -30,6 +30,8 @@
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "agentty/mcp/plugin_model.hpp"   // PluginModel value snapshot
 #include "agentty/tool/registry.hpp"   // ToolDef
 
@@ -145,6 +147,14 @@ void release_servers() noexcept;
 // the number of servers connected after the reload. Blocking (same
 // connect handshake + deadline as startup); call off the UI thread.
 [[nodiscard]] std::size_t mcp_reload();
+
+// MCP servers an ACP client (Zed, JetBrains) sent with session/new, in
+// mcp.json shape: {"name": {"command": ..., "args": [...], "env": {...}}} or
+// {"name": {"type": "http", "url": ..., "headers": {...}}}. They join the
+// pool alongside mcp.json and win on a name clash. Reconnects only when the
+// set actually changed.
+void set_client_servers(const nlohmann::json& servers);
+[[nodiscard]] std::vector<std::string> configured_server_names_from_client();
 
 // ── Resources (MCP resources/*) ──────────────────────────────────────────
 // A resource the agent can read by URI (file, db row, API doc, …).

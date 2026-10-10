@@ -16,6 +16,16 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 - **ACP 1.11:** `notice` updates (context nearly full, provider errors),
   `compaction_update` / `compaction_summary_chunk` for `/compact`, and
   boolean config options, each only for editors that advertise them.
+- **Zed: live terminals for shell commands.** Output streams into a real
+  terminal in the tool card with the exit code, while the command still runs
+  in agentty's sandbox.
+- **Editor MCP servers.** Servers configured in Zed or JetBrains are passed
+  in with each session and their tools reach the model (stdio, HTTP, SSE).
+- **Sign in from the editor.** With no credentials agentty offers a terminal
+  login; after `agentty login` finishes, it picks up the new credentials
+  without restarting.
+- **`session/fork`**, user slash commands and skills as real `/` commands,
+  and permission prompts with "always reject".
 - **`/compact` and `/new` work over ACP.** They used to be sent to the model
   as plain prompts. `/compact` records a summary so later turns send it
   instead of the full history; `/new` clears context in the same tab.

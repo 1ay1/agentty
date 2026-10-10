@@ -56,6 +56,10 @@ class H(BaseHTTPRequestHandler):
         text = last.get("content") if isinstance(last.get("content"), str) else json.dumps(last.get("content"))
         if os.environ.get("FAKE_DEBUG"):
             sys.stderr.write(f"REQ role={last.get('role')} text={(text or '')[:80]!r} n={len(msgs)} stream={body.get('stream')}\n")
+        if os.environ.get("FAKE_TOOLS_LOG"):
+            names = [t.get("function", {}).get("name", "") for t in body.get("tools") or []]
+            with open(os.environ["FAKE_TOOLS_LOG"], "a") as f:
+                f.write(json.dumps(names) + "\n")
         events = []
         if last.get("role") == "tool":
             events = [chunk({"role": "assistant", "content": "done"}), chunk({}, "stop")]
@@ -64,6 +68,12 @@ class H(BaseHTTPRequestHandler):
         elif "summar" in (text or "").lower():
             events = [chunk({"role": "assistant", "content": "<summary>We said hello "}),
                       chunk({"content": "twice.</summary>"}), chunk({}, "stop")]
+        elif "run echo" in (text or ""):
+            args = json.dumps({"command": "echo term-ok; echo second-line"})
+            events = [chunk({"role": "assistant", "content": "Running. "}),
+                      chunk({"tool_calls": [{"index": 0, "id": "call_sh", "type": "function",
+                                             "function": {"name": "shell", "arguments": args}}]}),
+                      chunk({}, "tool_calls")]
         elif "write" in (text or ""):
             args = json.dumps({"path": "out.txt", "content": "hi\n"})
             events = [chunk({"role": "assistant", "content": "Writing. "}),
