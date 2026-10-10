@@ -85,7 +85,7 @@ agentty's own log is independent and often more useful: `AGENTTY_LOG=debug` on t
 
 ## Model & permission profile
 
-Set the model per-subprocess in the `args`. In ACP mode `-m` is an *ephemeral* override — it does **not** clobber your TUI's saved model:
+The model and thinking level are picked per session from the editor (see below). `-m` in the `args` only sets the starting model, and does **not** change your TUI's saved model:
 
 ```json
 {
@@ -104,23 +104,41 @@ Set the model per-subprocess in the `args`. In ACP mode `-m` is an *ephemeral* o
 - **`minimal`** — prompt for *everything* that touches the outside world, reads included. Tightest leash.
 - **`write`** — fully autonomous: *every* tool (`write` / `edit` / `bash` / network included) runs without a prompt. Loosest leash — the same auto-approve-everything tier as the TUI's Write mode.
 
+## What you can set from the editor
+
+Everything below shows up in Zed's (and JetBrains') session controls. No
+relaunch, no `-m`; each session keeps its own choice.
+
+| Control | What it does |
+|---|---|
+| **Model** | Every model on every provider you're signed into, grouped by provider, the same list as the TUI's ctrl+/ picker. Picking a model on another provider routes that session there with that provider's own credential. |
+| **Thinking** | Reasoning effort for the selected model: Auto, Off, and the levels that model actually accepts (low / medium / high, plus xhigh or max where supported). The list changes with the model. |
+| **Show thinking** | Stream the model's reasoning into the chat as a collapsible thought, or keep it hidden. Shown to clients that support toggle options. |
+| **Mode** | The permission tier: Ask, Write or Minimal (below). |
+
+Bad values are errors, not silent fallbacks: an unknown model, an effort the
+model doesn't take, or an unknown option id come back as `InvalidParams` with
+the allowed values. The full new state comes back in the response, so the
+editor's controls always match what agentty will actually use.
+
 ## What works over ACP
 
-- **Streaming text** — the model's reply renders token-by-token in Zed's panel.
-- **Images in prompts** — paste or attach a screenshot and it reaches the model as an image, not a dropped block. Whether the *selected model* can see it is a separate question agentty already answers: a text-only model has the image withheld rather than the turn failed. Audio is deliberately not advertised — no provider agentty ships accepts it.
-- **Tool calls** — every `read` / `edit` / `bash` / `grep` / … shows up as a Zed tool card with the right icon, the raw arguments, and live status (pending → running → done/failed). Result bodies are shaped to match Zed's native agent: a `read` renders as a gutter-numbered file excerpt, and all other output is markdown-escaped so file contents render verbatim instead of being reparsed as formatting.
-- **Slash-command menu** — agentty populates Zed's composer `/` menu (`available_commands_update`) with `/compact`, `/new`, and every installed skill as `/<skill-name>`, the same way the native agent exposes its commands.
-- **Model picker** — agentty advertises a `model` config option (`config_option_update`) listing the provider's model catalog, so you can switch models from Zed's per-session dropdown instead of relaunching with `-m`.
-- **Sign-in affordance** — when agentty has no credentials it advertises an `authMethod` at `initialize`, so Zed shows a proper "Sign in" prompt instead of erroring on the first turn.
-- **Live thread titles** — the first message pushes a `session_info_update` with a derived title, so Zed's thread sidebar shows a meaningful name immediately (and restored sessions re-announce their title on load).
-- **Inline diffs** — `write` and `edit` emit ACP `diff` content, so Zed renders the file change inline and lets you review it in place.
-- **Follow-along** — read/edit/write/grep tool calls carry the file path as an ACP `location`, so Zed can open and highlight the file the agent is touching in real time.
-- **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`, network) trigger Zed's native allow/reject dialog before they run; `--profile` tunes exactly which tools prompt.
-- **Session modes** — the three permission tiers (`Ask` / `Write` / `Minimal`) surface as ACP session modes, so you can switch them live from Zed's mode picker (`session/set_mode`) without restarting the agent. The starting tier is the `--profile` flag.
-- **Cancellation** — stop a turn from Zed and the in-flight stream tears down.
-- **Full session lifecycle** — agentty advertises and implements the complete ACP v1 session surface: `session/new`, `session/load`, `session/resume`, `session/list`, `session/close`, `session/delete`, plus `logout`. Zed can enumerate past sessions, reopen any of them, and prune them — all backed by the on-disk thread store.
-- **Session persistence + reload** — every session is written to agentty's on-disk thread store after each turn (the *same* format the TUI uses), so it survives a subprocess restart. Zed can `session/load` to resume a past conversation: agentty replays the full transcript (user + assistant messages and tool cards) as `session/update` notifications, then hands back control. Sessions started in Zed also show up in the standalone TUI's thread picker, and vice versa.
-- **Workspace sandbox** — file tools stay inside the session's `cwd` (the folder you opened in Zed); `bash` runs in the same OS-enforced sandbox as the standalone TUI.
+- **Streaming text and thinking** — the reply renders token by token, and the model's reasoning streams as a collapsible thought when thinking is on. Signed thinking blocks are kept, so Claude tool turns with thinking work over ACP.
+- **Images in prompts** — paste or attach a screenshot and it reaches the model as an image. A text-only model has the image withheld rather than the turn failed. Audio is not advertised; no provider agentty ships accepts it.
+- **Tool calls** — every `read` / `edit` / `bash` / `grep` / … shows up as a tool card with the right icon, the raw arguments, and live status (pending → running → done/failed). A `read` renders as a gutter-numbered excerpt; other output is markdown-escaped so file contents render verbatim.
+- **Inline diffs and follow-along** — `write` and `edit` emit ACP `diff` content, and file tools carry the path as a `location`, so the editor opens and highlights the file being touched.
+- **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`, network) trigger the editor's allow/reject dialog; the mode decides which tools prompt.
+- **Slash commands** — `/compact`, `/new`, and every installed skill as `/<skill-name>`. `/compact` summarises the conversation so later turns send the summary instead of the whole history (the transcript stays visible); `/new` clears the context and keeps the tab. Neither is sent to the model as a prompt.
+- **Compaction progress** — editors that render compactions (ACP 1.11) see `/compact` as an entry that streams its summary and ends completed, failed or cancelled. Others get a one-line note in the chat.
+- **Context usage** — after each turn a `usage_update` reports tokens in use and the model's window, for the editor's context meter.
+- **Notices** — editors that render notices (ACP 1.11) get a warning once the context window passes 85%, and the provider's error when a request fails. Notices are never sent to an editor that didn't ask for them.
+- **Errors with a reason** — a failed turn comes back as an error carrying the provider's message (`HTTP 400: …`), not as a silent `refusal`. Cancelling always comes back as `cancelled`.
+- **Sessions** — `session/new`, `load`, `resume`, `list`, `close`, `delete`, plus `logout`. `session/list` is newest first with titles and last-active times, paged. Every session lives in the same thread store as the TUI, so a chat started in the editor shows up in the TUI and the other way round.
+- **Reopening a chat** — `session/load` works from a fresh agent process and from any `cwd`, and replays the conversation (messages, thinking, tool cards, compactions) before returning the session's mode and controls.
+- **Live titles** — the first message names the chat, and each turn bumps its last-active time.
+- **Sign-in** — with no credentials agentty advertises an auth method, so the editor shows a "Sign in" prompt instead of failing the first turn.
+- **Cancellation** — stop a turn and the in-flight stream tears down; `$/cancel_request` is honoured too.
+- **Workspace sandbox** — file tools stay inside the session's `cwd`; `bash` runs in the same OS sandbox as the TUI.
 
 :::tip
 The ACP agent is the *same* engine as the TUI — same provider, same tools, same wire-message shaping, same permission policy — just driven over JSON-RPC on stdio instead of a terminal. Any other ACP client (not just Zed) works the same way.
@@ -128,7 +146,20 @@ The ACP agent is the *same* engine as the TUI — same provider, same tools, sam
 
 ## The protocol surface
 
-`agentty acp` is a headless subcommand that speaks newline-delimited JSON-RPC 2.0 over stdio and implements the full ACP v1 agent surface: `initialize` (capability negotiation), `authenticate`, `session/new`, `session/load`, `session/resume`, `session/list`, `session/close`, `session/delete`, `session/set_mode`, `session/prompt` (drives a complete agent turn), and `session/cancel`. While a turn runs it streams `session/update` notifications — `agent_message_chunk` for model text, `tool_call` / `tool_call_update` for every tool — and calls back with `session/request_permission` before any side-effecting tool runs. There is no maya/UI dependency, so cold start is fast: ACP mode prewarms the TLS/DNS connection to Anthropic before serving, eliminating the first-prompt handshake latency.
+`agentty acp` speaks newline-delimited JSON-RPC 2.0 over stdio and implements
+ACP v1 as of 1.11:
+
+- **methods:** `initialize`, `authenticate`, `logout`, `session/new`, `load`, `resume`, `list`, `close`, `delete`, `set_mode`, `set_config_option`, `prompt`, `cancel`, and `$/cancel_request`
+- **updates:** `agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk` (replay), `tool_call`, `tool_call_update`, `plan`, `available_commands_update`, `current_mode_update`, `config_option_update`, `session_info_update`, `usage_update`, `notice`, `compaction_update`, `compaction_summary_chunk`
+- **calls to the editor:** `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*` when the editor offers them
+
+Notices, compaction entries and toggle options are only sent when the editor
+advertises them in `clientCapabilities.session`. Diagnostics go to stderr;
+stdout is only the protocol.
+
+`tests/acp/run_acp_client.sh` drives the real binary the way Zed and JetBrains
+do and checks every message against the official ACP v1 schema
+(`tests/acp/schema/v1`). It runs in ctest as `acp_client_test`.
 
 :::tip
 Run `agentty acp` by hand and it sits waiting for newline-delimited JSON-RPC on stdin (diagnostics go to stderr; stdout is the protocol channel). The repo ships two reference clients: `scripts/acp_smoke.py` drives a full initialize → prompt → tool → permission round-trip, and `scripts/acp_methods_test.py` exercises the rest of the v1 method surface (modes, list/resume/close/delete, logout) offline. The wire protocol itself lives in the `acp-cpp` submodule — agentty no longer hand-rolls JSON-RPC.

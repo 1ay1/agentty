@@ -844,6 +844,11 @@ if(NOT WIN32)
     add_test(NAME config_move_test
              COMMAND sh ${CMAKE_SOURCE_DIR}/tests/config_move_test.sh $<TARGET_FILE:agentty>)
     set_tests_properties(config_move_test PROPERTIES TIMEOUT 60)
+    # `agentty acp` driven like Zed / JetBrains drive it, every message
+    # checked against the official ACP v1 schema (tests/acp/schema/v1).
+    add_test(NAME acp_client_test
+             COMMAND sh ${CMAKE_SOURCE_DIR}/tests/acp/run_acp_client.sh $<TARGET_FILE:agentty>)
+    set_tests_properties(acp_client_test PROPERTIES TIMEOUT 180)
 endif()
 
 # ── Finalize: build agentty_tests + derived aggregates ──────────────────────

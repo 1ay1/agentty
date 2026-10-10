@@ -100,6 +100,13 @@ struct TurnRouting {
 // immediately after every compaction.
 [[nodiscard]] std::vector<Message> wire_messages_for(const Thread& t);
 
+// The request that asks the model to summarise `t` for /compact: the wire
+// view (trimmed to fit `context_max`) plus the default summarisation prompt.
+[[nodiscard]] std::vector<Message> compaction_request_messages(const Thread& t,
+                                                              int context_max);
+// The summary text out of the model's reply (strips <summary> tags).
+[[nodiscard]] std::string summary_from_reply(std::string_view reply);
+
 // Wire-only trim to fit `ceiling` estimated tokens. Keeps the head, the
 // latest User message and the newest message; drops the rest oldest-first,
 // and the head only as a last resort. The result always opens with a User.

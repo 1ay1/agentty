@@ -581,6 +581,21 @@ std::vector<Message> wire_messages_for_compaction(const Thread& t, int context_m
 
 } // namespace
 
+std::vector<Message> compaction_request_messages(const Thread& t, int context_max) {
+    return wire_messages_for_compaction(t, context_max, CompactionStyle{}, 0);
+}
+
+std::string summary_from_reply(std::string_view reply) {
+    std::string s{reply};
+    const auto open = s.find("<summary>");
+    const auto close = s.rfind("</summary>");
+    if (open != std::string::npos && close != std::string::npos && close > open)
+        s = s.substr(open + 9, close - open - 9);
+    const auto b = s.find_first_not_of(" \n\r\t");
+    const auto e = s.find_last_not_of(" \n\r\t");
+    return b == std::string::npos ? std::string{} : s.substr(b, e - b + 1);
+}
+
 std::vector<Message> wire_messages_for(const Thread& t) {
     return wire_messages_for_impl(t);
 }

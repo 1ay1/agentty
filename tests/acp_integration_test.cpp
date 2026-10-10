@@ -361,6 +361,9 @@ TEST_CASE("acp integration end-to-end") {
     auto ns = must(agent.call<to_agent::SessionNew>(nsp));
     CHECK(!ns.sessionId.value.empty());
     CHECK(ns.modes.has_value());
+    // The selectors ride on the result itself, not only on the update that
+    // follows: JetBrains builds its dropdown from the result.
+    REQUIRE(ns.configOptions.has_value());
     CHECK(ns.modes->currentModeId.value == "ask");
     CHECK(ns.modes->availableModes.size() == 3);
 
@@ -380,10 +383,36 @@ TEST_CASE("acp integration end-to-end") {
         CHECK(!saw_mode_option.load());
 
     // The MODEL option is version-agnostic. session/set_config_option applies
-    // it and echoes the complete config state.
-    must(agent.call<to_agent::SessionSetConfig>(
-        SetConfigOptionParams{ns.sessionId, "model", "claude-sonnet-4-20250514",
-                              Json::object()}));
+    // a value from the option's own list and echoes the complete config state.
+    {
+        auto model_opt = std::find_if(ns.configOptions->begin(), ns.configOptions->end(),
+                                      [](const ConfigOption& o) { return o.id == "model"; });
+        REQUIRE(model_opt != ns.configOptions->end());
+        std::string pick;
+        match(model_opt->options,
+              [&](const CSO_Ungrouped& u) { if (!u.items.empty()) pick = u.items.back().value; },
+              [&](const CSO_Grouped& g) {
+                  if (!g.items.empty() && !g.items[0].options.empty())
+                      pick = g.items[0].options.back().value;
+              });
+        REQUIRE(!pick.empty());
+        auto set = must(agent.call<to_agent::SessionSetConfig>(
+            SetConfigOptionParams{ns.sessionId, "model", Json(pick), Json::object()}));
+        bool reflected = false;
+        for (const auto& o : set.configOptions)
+            if (o.id == "model" && o.currentValue == pick) reflected = true;
+        CHECK(reflected);   // the result carries the new state
+    }
+    // A model that is on no signed-in provider is a client mistake.
+    {
+        int code = 0;
+        try {
+            must(agent.call<to_agent::SessionSetConfig>(
+                SetConfigOptionParams{ns.sessionId, "model", Json("no-such-model-xyz"),
+                                      Json::object()}));
+        } catch (const RpcError& e) { code = e.code; } catch (...) {}
+        CHECK(code == errc::InvalidParams);
+    }
     // An unknown configId is a hard error, not a silent no-op — and the
     // CODE matters, not just that it threw.
     //
@@ -399,7 +428,7 @@ TEST_CASE("acp integration end-to-end") {
         bool threw = false;
         try {
             must(agent.call<to_agent::SessionSetConfig>(
-                SetConfigOptionParams{ns.sessionId, "temperatuer", "9",
+                SetConfigOptionParams{ns.sessionId, "temperatuer", Json("9"),
                                       Json::object()}));
         } catch (const RpcError& e) {
             threw = true; code = e.code; data = e.data;

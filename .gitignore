@@ -59,3 +59,6 @@ docs/cpp-book/
 # opens, including the checked-in bench fixture. It is a regenerable cache, not
 # truth (see include/agentty/io/thread_log.hpp), so never commit it.
 tests/fixtures/*.ofs
+
+# local python venv for tests/acp schema checks
+.venv-acp

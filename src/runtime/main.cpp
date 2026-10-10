@@ -2093,6 +2093,12 @@ int main(int argc, char** argv) {
             provider_auth,
             std::move(model_id),
             profile);
+        // Lets a session pick a model on any signed-in provider, not just
+        // the active one (Zed's model dropdown lists them all).
+        server->set_stream_to([stream_to_fn](const std::string& pid, provider::Request r,
+                                             provider::EventSink s) {
+            (void)stream_to_fn(pid, std::move(r), std::move(s));
+        });
         std::fprintf(stderr, "agentty: ACP agent ready on stdio (profile=%s)\n",
                      std::string(to_string(profile)).c_str());
         int rc = server->serve();

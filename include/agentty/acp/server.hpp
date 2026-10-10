@@ -47,6 +47,11 @@ namespace agentty::acp {
 // provider::Provider::stream.
 using StreamFn =
     std::function<void(provider::Request, provider::EventSink)>;
+// Stream to a NAMED provider ("anthropic", "copilot", a custom host), with
+// that provider's own credential. Used when a session's model lives on a
+// provider other than the active one.
+using StreamToFn =
+    std::function<void(const std::string&, provider::Request, provider::EventSink)>;
 
 // Per-session state: one agentty Thread + the workspace cwd the client opened
 // the session against, plus the in-flight turn's cancel handle. `profile` is
@@ -58,8 +63,12 @@ struct Session {
     Thread      thread;
     Profile     profile = Profile::Ask;
     std::string model;   // empty = use server default
+    std::string provider;   // empty = the active provider; else route there
+    std::string effort;     // "" = default, "none" = off, else a wire level
+    bool show_reasoning = true;
     std::shared_ptr<http::CancelToken> cancel;
     std::set<std::string> grants;   // session-scoped "always allow", by tool
+    bool warned_context = false;    // "context nearly full" notice sent
 };
 
 // Every live session plus the in-flight prompt map, behind ONE lock. The turn
@@ -102,7 +111,7 @@ private:
     ::acp::InitializeResult     on_initialize(const ::acp::InitializeParams&);
     ::acp::NewSessionResult     on_new_session(const ::acp::NewSessionParams&);
     ::acp::ListSessionsResult   on_list_sessions(const ::acp::ListSessionsParams&);
-    void                        on_load_session(const ::acp::LoadSessionParams&);
+    ::acp::LoadSessionResult    on_load_session(const ::acp::LoadSessionParams&);
     ::acp::ResumeSessionResult  on_resume_session(const ::acp::ResumeSessionParams&);
     void                        on_close_session(const ::acp::CloseSessionParams&);
     void                        on_delete_session(const ::acp::DeleteSessionParams&);
@@ -124,6 +133,7 @@ private:
 
     // ── The headless turn loop ───────────────────────────────────────────
     void run_turn(Io io, std::string session_id, std::string req_id_dump, Responder resp);
+    void run_compact(Io io, std::string session_id, std::string req_id_dump, Responder resp);
 
     StopReason stream_completion(Io io, const std::string& session_id, bool& out_cancelled,
                                  std::string& out_error,
@@ -142,6 +152,8 @@ private:
     // post-change echo). Reads live session profile/model.
     void emit_config_state(const std::string& session_id,
                            const std::string& fallback_model);
+    ::acp::List<::acp::ConfigOption> config_options(const std::string& session_id,
+                                                     const std::string& fallback_model);
 
     enum class PermissionOutcome { Deny, AllowOnce, AllowAlways };
     PermissionOutcome ask_permission(const std::string& session_id, const ToolUse& tc);
@@ -206,6 +218,22 @@ private:
     // Set in the constructor, then only read; turn workers read them too.
     const std::unique_ptr<rpc::Peer> peer_;
     const StreamFn                   stream_;
+    // Optional: routes a session whose model lives on another provider. Set
+    // once before serve(); without it the model list is the active provider's.
+    StreamToFn                       stream_to_;
+  public:
+    void set_stream_to(StreamToFn f) { stream_to_ = std::move(f); }
+  private:
+    // Every model the session selector offers, across signed-in providers.
+    // Built lazily on first use and kept for the connection: listing catalogs
+    // can hit the network, and the dropdown shouldn't wait on it twice.
+    struct ModelChoice { std::string value, provider, model, name, group, group_name; };
+    maya::guarded<std::vector<ModelChoice>> model_choices_;
+    [[nodiscard]] std::vector<ModelChoice> model_choices();
+    [[nodiscard]] ::acp::List<::acp::ConfigOption> model_options(const std::string& provider,
+                                                                 const std::string& model,
+                                                                 const std::string& effort,
+                                                                 bool show_reasoning);
     const std::string                model_id_;
     const Profile                    profile_;
     // on_logout (reader thread) clears it while a turn may be reading it.
@@ -221,6 +249,18 @@ private:
     // widget — the same UX as claude-code-acp. Set once in on_initialize
     // (reader thread, before any prompt), read-only thereafter.
     std::atomic<bool>         client_supports_terminal_{false};
+
+    // clientCapabilities.session (v1.11), set once in on_initialize. The spec
+    // forbids notice / compaction updates and boolean config options to a
+    // client that didn't advertise them.
+    std::atomic<bool>         client_notices_{false};
+    std::atomic<bool>         client_compaction_{false};
+    std::atomic<bool>         client_bool_config_{false};
+
+    // A user-facing notice: a `notice` update when the client renders them,
+    // otherwise nothing (the turn's own text already says what happened).
+    void notice(const std::string& session_id, std::string severity,
+                std::string title, std::string description = {});
 
     // The ACP protocol version agreed at initialize (min of ours + theirs).
     // The clean-cut seam for v1-vs-v2 emission: a session's config surface is

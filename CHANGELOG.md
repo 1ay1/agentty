@@ -5,6 +5,23 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Zed / JetBrains: pick model and thinking per session.** The model
+  dropdown lists every model on every signed-in provider, grouped by
+  provider, and routes the session there. A Thinking control sets reasoning
+  effort from the levels the model actually takes, and a Show thinking toggle
+  hides or streams its reasoning. All of it comes back in every
+  session/new, load, resume and set_config_option result, so editors that
+  only read results (JetBrains) get it too.
+  ([#80](https://github.com/1ay1/agentty/issues/80))
+- **ACP 1.11:** `notice` updates (context nearly full, provider errors),
+  `compaction_update` / `compaction_summary_chunk` for `/compact`, and
+  boolean config options, each only for editors that advertise them.
+- **`/compact` and `/new` work over ACP.** They used to be sent to the model
+  as plain prompts. `/compact` records a summary so later turns send it
+  instead of the full history; `/new` clears context in the same tab.
+- `session/list` is newest first, with `updatedAt`, and pages.
+- `tests/acp/run_acp_client.sh` drives `agentty acp` the way Zed and
+  JetBrains do and checks every message against the official ACP v1 schema.
 - **Every storage folder can move, by environment variable.** Credentials
   (`AGENTTY_CREDENTIALS_DIR`), approvals (`AGENTTY_STATE_DIR`), search
   indexes (`AGENTTY_RAG_DIR`, documented before but never read) and search
@@ -48,6 +65,14 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   a log file gets the box drawing without the escape bytes.
 
 ### Fixed
+- **ACP: a failed turn came back as `refusal`** with the reason hidden in
+  `_meta`. It is now an error carrying the provider's message.
+- **ACP: `session/load` returned `{}`** without the session's mode and
+  model controls, so a reopened chat showed none. It now returns them, the
+  same as `session/new`.
+- **ACP: a compacted thread sent its full history** every turn, and thinking
+  signatures were dropped, which broke Claude tool turns with thinking on.
+- **ACP: reasoning effort was never sent,** so thinking was always off.
 - **`agentty airgap --setup` never found your credentials.** It copied from
   the pre-consolidation `~/.config/agentty` path.
 - **`agentty status` aborted** with a lock-order error when a Copilot token
