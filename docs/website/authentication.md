@@ -10,7 +10,7 @@ agentty is **bring-your-own-model**: point it at any provider with an API key �
 
 ## API key (recommended, zero ambiguity)
 
-Paste an `sk-ant-…` (or any provider's) key into the modal, or set the matching environment variable. Pay-as-you-go, unquestionably within each provider's terms, and the same key works headless/over SSH. Saved to `~/.agentty/credentials/credentials.json` at mode `0600`. For a fully local, no-account setup, use [Ollama](/docs/providers) — no key, no network, nothing to authorize.
+Paste an `sk-ant-…` (or any provider's) key into the modal, or set the matching environment variable. Pay-as-you-go, unquestionably within each provider's terms, and the same key works headless/over SSH. Saved to `~/.agentty/credentials/credentials.json` at mode `0600` (move the folder with `AGENTTY_CREDENTIALS_DIR`). For a fully local, no-account setup, use [Ollama](/docs/providers) — no key, no network, nothing to authorize.
 
 ## OAuth (Claude Pro/Max)
 

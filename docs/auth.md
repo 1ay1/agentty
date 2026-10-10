@@ -112,7 +112,8 @@ authenticated" message.
 - `expires_at` — Unix milliseconds; `0` means no expiration info (API keys never expire)
 
 `config_dir()` resolves to `<user-root>/credentials` — the single per-user
-root `~/.agentty` (override: `$AGENTTY_HOME`), NOT `$XDG_CONFIG_HOME`. See
+root `~/.agentty` (override: `$AGENTTY_HOME`), or `$AGENTTY_CREDENTIALS_DIR`
+when set. Never `$XDG_CONFIG_HOME`. See
 `include/agentty/util/user_root.hpp` for the full rationale (secrets and
 conversation data must not ride along when users sync `~/.config` as
 dotfiles) and the one-time migration that moves a legacy

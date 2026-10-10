@@ -726,9 +726,14 @@ void print_usage() {
                                "(build info, logs, config \u2014 no secrets)", kCmdGutter),
         entry("  skills", "List discovered skills with spec-lint diagnostics "
                           "(exit 1 on warnings \u2014 CI-friendly validate)", kCmdGutter),
-        entry("  config [what]", "Show where config is read from and bytes are written. "
-                                "`config <concern>` for one ladder (including what is "
-                                "NOT read), `config env` for the storage model", kCmdGutter),
+        entry("  config [what]", "Every folder agentty reads or writes, where it is and "
+                                "how big. `config <name>` for one, `config env` for the "
+                                "storage variables", kCmdGutter),
+        entry("  config move", "`config move <dir> <path>`: move a folder's data "
+                              "safely, then print the export line to add", kCmdGutter),
+        entry("  config doctor", "Check storage permissions and variables", kCmdGutter),
+        entry("  config clean", "List files old versions left behind (--yes deletes)",
+              kCmdGutter),
         entry("  hooks [list]", "Show configured lifecycle hooks + approval state", kCmdGutter),
         entry("  hooks approve", "Inspect + approve the active hooks file (hooks NEVER "
                                  "run unapproved; any change re-gates)", kCmdGutter),

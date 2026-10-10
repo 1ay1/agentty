@@ -52,7 +52,7 @@ Yes. `agentty acp` runs agentty as an [Agent Client Protocol](/docs/acp) agent i
 
 ## Where are my conversations stored?
 
-As plain JSON, one file per thread, under `~/.agentty/threads/`. Safe to inspect, back up, or delete.
+As plain files under `~/.agentty/threads/`: one append-only `.jsonl` log per thread plus small index sidecars. Safe to inspect, back up, or delete. Move them with `AGENTTY_THREADS_DIR`, expire old ones with `AGENTTY_THREADS_KEEP_DAYS`. `agentty config` shows every folder agentty uses and its size; [Storage](/docs/storage) has the full map.
 
 ## What happens when a conversation runs out of context?
 

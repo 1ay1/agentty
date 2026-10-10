@@ -60,24 +60,28 @@ cargo, rustup all use one app dotdir.
 ### Overrides, and the rule that keeps them from becoming XDG
 
 ```
-$AGENTTY_HOME         the whole root
-$AGENTTY_THREADS_DIR  conversation history
-$AGENTTY_CACHE_DIR    refetchable
-$AGENTTY_LOGS_DIR     diagnostics
-$AGENTTY_PROJECT_DIR  the whole <project>/.agentty root
-$AGENTTY_DOCS_DIR     which corpus to index (not where state goes)
+$AGENTTY_HOME               the whole user root
+$AGENTTY_THREADS_DIR        conversation history (0700)
+$AGENTTY_CREDENTIALS_DIR    secrets (0700)
+$AGENTTY_STATE_DIR          approval hashes
+$AGENTTY_CACHE_DIR          refetchable
+$AGENTTY_LOGS_DIR           diagnostics
+$AGENTTY_PROJECT_DIR        the whole <project>/.agentty root
+$AGENTTY_RAG_DIR            search indexes
+$AGENTTY_PROJECT_STATE_DIR  search feedback
+$AGENTTY_THREADS_KEEP_DAYS  thread retention (not a path)
+$AGENTTY_DOCS_DIR           which corpus to index (not where state goes)
 ```
 
-Note `$AGENTTY_RAG_DIR` in that list. Every other override relocates part of
-the **user** root; that one relocates part of the **project** root, and it had
-to be invented as a special case precisely because the project root has no
-categories to hang it off. §3 is largely about removing that asymmetry.
+Every directory has one, named `AGENTTY_<NAME>_DIR` and declared once on its
+`dirs::Spec` in `config/inventory.hpp`. Storage is set by environment only;
+the app never writes it.
 
 The distinction from XDG is **the default**. XDG scatters by default; here the
 default is one root and an override is a deliberate per-install choice that
 changes nothing for anyone who does not set it.
 
-Three semantics, inherited by every override via `dirs::resolve`:
+Four semantics, inherited by every override via `dirs::resolve`:
 
 - `$VAR` wins when set and **non-empty** (an exported-but-blank var is a
   common shell accident and must relocate nothing)
@@ -86,10 +90,14 @@ Three semantics, inherited by every override via `dirs::resolve`:
   launch directory
 - a failed override **warns once and falls back**; silently serving the
   default tells the user the wrong thing twice
+- an absolute override for **project** data gets a `<name>-<hash>`
+  subfolder per project, so two repos never share one index
 
-**Deliberately not overridable:** `credentials/` and `settings.json`. Small,
-easy to lose track of, and a secret that moves because of a line in a shell
-profile is a secret nobody can find later.
+Credentials used to be deliberately not overridable, on the idea that a
+secret which moves is a secret nobody finds. People wanted the opposite
+(tokens on an encrypted volume), and `agentty config` always prints where
+each folder is, which answers "where is my secret". `owner_only` still forces
+0700 wherever it lands. `settings.json` stays put: it lives at the root.
 
 ### What decides whether something gets an override
 
@@ -319,13 +327,12 @@ documented, and moving them would break something a user typed for no gain
 beyond tidiness.
 
 The leaf variables (`$AGENTTY_THREADS_DIR`, `$AGENTTY_CACHE_DIR`,
-`$AGENTTY_LOGS_DIR`) shipped in 0.9.19 before the anchors existed, and each
-moves one leaf its anchor now covers. They stay because removing a released
-variable breaks a working setup with no error message, but **nothing new goes
-on that axis** — a new category is a leaf under an existing root.
+`$AGENTTY_LOGS_DIR`) shipped in 0.9.19 before the anchors existed. Rather
+than freeze that axis, every leaf now has one: the anchor moves a whole root,
+a leaf variable moves one folder. Both are just `dirs::Spec::env`.
 
-`$AGENTTY_RAG_DIR` is gone. It existed only because the project root had no
-anchor, and it never shipped in a release.
+`$AGENTTY_RAG_DIR` was documented before anything read it; it is now the
+index Spec's variable like any other.
 
 `$AGENTTY_MCP_CONFIG` is not storage at all: it names one file to *read*,
 which is scope's Explicit locus.

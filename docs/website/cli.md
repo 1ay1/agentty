@@ -40,6 +40,11 @@ agentty --sandbox on                   # require an OS sandbox for bash/diagnost
 | `agentty hooks [list]` | Show configured lifecycle [hooks](/docs/hooks) + approval state. `agentty hooks approve` inspects and approves the active hooks file (hooks never run unapproved; any change re-gates). |
 | `agentty skills` | List discovered [Agent Skills](/docs/skills) with spec-lint diagnostics (exit 1 on warnings — CI-friendly). |
 | `agentty diagnostics` | Collect a redacted bug-report bundle (build info, provider, log tail) to `~/.agentty/logs/agentty-diagnostics.txt`. See [Logging](/docs/logging#reporting-a-bug). |
+| `agentty config` | Every folder agentty reads or writes, where it is, and how big. `agentty config <name>` (e.g. `threads`, `mcp`) shows one in detail. See [Storage](/docs/storage). |
+| `agentty config env` | Every storage variable and its current value. |
+| `agentty config move <dir> <path>` | Move a folder's data (refuses while agentty runs, verifies the copy), then print the `export` line to add. `default` moves it back. |
+| `agentty config doctor` | Check every folder is usable, secrets are private, and storage variables are valid. Exit 1 if something needs fixing. |
+| `agentty config clean [--yes]` | List files older versions left behind; `--yes` deletes them. |
 | `agentty rag-bench [dir]` | Benchmark [`search_docs` retrieval](/docs/retrieval#measure-it-agentty-rag-bench) on your own corpus — recall@k / MRR / nDCG per pipeline stage. Defaults to the auto-discovered docs folder; pass a directory to override. |
 | `agentty update` | Update agentty in place to the latest release. `--check` reports whether an update is available without installing it. |
 | `agentty --version` | Print `agentty <version>` and exit. |

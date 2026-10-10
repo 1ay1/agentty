@@ -108,6 +108,10 @@ On any other terminal, attach by path (`@shot.png`) or set
 the Linux `wl-clipboard` / `xclip` requirement and a troubleshooting table:
 [Clipboard & Images](/docs/clipboard).
 
+## agentty is using a lot of disk, or settings/history won't save
+
+Run `agentty config` to see every folder agentty uses and its size, and `agentty config doctor` to check each one is writable and private. Conversations are usually the bulk: move them with `agentty config move threads /some/big/disk` (then add the `export` line it prints), or expire old ones with `AGENTTY_THREADS_KEEP_DAYS=90`. `agentty config clean` lists files older versions left behind. See [Storage](/docs/storage).
+
 ## Garbled rendering
 
 Some terminals lag on DEC 2026 synchronized output. File a bug with your `$TERM`, the terminal emulator name, and a screenshot.

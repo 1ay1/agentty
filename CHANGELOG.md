@@ -5,6 +5,24 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Every storage folder can move, by environment variable.** Credentials
+  (`AGENTTY_CREDENTIALS_DIR`), approvals (`AGENTTY_STATE_DIR`), search
+  indexes (`AGENTTY_RAG_DIR`, documented before but never read) and search
+  feedback (`AGENTTY_PROJECT_STATE_DIR`) join threads, cache and logs.
+  Storage is set by environment only; nothing in the app changes it. An
+  index override shared by several projects gives each its own subfolder.
+- **Thread retention.** `AGENTTY_THREADS_KEEP_DAYS=90` deletes threads idle
+  that long, once a day, along with blobs no other thread uses. Threads open
+  in a running agentty are never touched. Unset keeps everything.
+- **`agentty config move <dir> <path>`** moves a folder's data and prints the
+  `export` line to add. Refuses while any agentty runs (sessions hold a
+  shared lock the kernel drops on crash), renames on the same disk, otherwise
+  copies and checks file count and bytes before removing the original.
+- **`agentty config doctor`** checks every folder is usable, credentials are
+  private, and storage variables are valid. **`agentty config clean`** lists
+  files old versions left behind (`--yes` deletes them).
+- [Storage](docs/website/storage.md): one page for every file agentty
+  writes, how long it stays, and how to move it.
 - **The trust-handoff gate now PREVENTS, not just reports.** Host-trusted
   paths that exist — `.vscode/tasks.json`, `.git/hooks/*`, `.git/config`,
   `hooks.json` — are bound read-only inside the sandbox, so a shell write to
@@ -30,6 +48,17 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   a log file gets the box drawing without the escape bytes.
 
 ### Fixed
+- **`agentty airgap --setup` never found your credentials.** It copied from
+  the pre-consolidation `~/.config/agentty` path.
+- **`agentty status` aborted** with a lock-order error when a Copilot token
+  needed refreshing. The refresh gates now sit at a declared lock level.
+- **The MCP OAuth callback could hang forever** on a connection that sent
+  nothing (a browser preconnect). Reads are now bounded by the deadline.
+- **Shell tool calls were 4x slower than they needed to be.** The trust
+  snapshot listed the whole workspace before every call; listings are now
+  cached per directory by mtime (34 ms to 8 ms on a large repo).
+- `agentty config` said logs are kept forever; they rotate at 32 MB.
+- The test suite no longer leaves directories in `/tmp`.
 - **Session stats ballooned on flaky providers.** Reported against the
   "where the time went" fix: precise with one model on a paid provider,
   wildly inflated on OpenRouter's free tier. Two separate bugs, both of
