@@ -60,6 +60,7 @@
 
 #include <nlohmann/json.hpp>
 #include "agentty/util/logx.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 
 
@@ -146,8 +147,16 @@ maya::published<ConnectionPool>& g_pool() {
 // abort message. One coarse mutex around the whole build makes connect+swap
 // strictly sequential; readers take current_pool() and are unaffected. Connects are rare (startup / explicit toggles), so serializing
 // them costs nothing on the hot path.
+// The pool a rebuild replaced. Destroying it stops its servers (joins their
+// peers), which must not happen under g_connecting(); it waits here and
+// mcp_tools() drops it after the lock.
+maya::published<ConnectionPool>& g_retired() {
+    static maya::published<ConnectionPool> r;
+    return r;
+}
+
 maya::guarded<bool>& g_connecting() {
-    static maya::guarded<bool> c;
+    static maya::guarded<bool> c{lock_levels::kMcpConnecting};
     return c;
 }
 
@@ -1309,6 +1318,8 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
         PoolHandle built;
         return build_pool(built);
     });
+    // The replaced pool dies here, with no lock held.
+    (void)g_retired().replace(nullptr);
     out_pool = current_pool();
     return defs;
 }
@@ -1524,7 +1535,7 @@ std::vector<tools::ToolDef> build_pool(PoolHandle& out_pool) {
 
     out_pool = pool;                       // keep providers alive (caller)
     // process-wide handle for accessors
-    g_pool().publish(pool);
+    g_retired().publish(g_pool().replace(pool));
     return project_tools(pool);
 }
 }  // namespace

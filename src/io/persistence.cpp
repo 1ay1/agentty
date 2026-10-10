@@ -5,6 +5,7 @@
 
 #include "agentty/util/logx.hpp"
 #include "agentty/util/background.hpp"   // util::WorkerGroup
+#include "agentty/util/lock_levels.hpp"
 
 #include "agentty/util/sendable.hpp"   // maya::guarded + the json opt-in
 #include <atomic>
@@ -2118,19 +2119,23 @@ struct WriterState {
 };
 
 maya::guarded<WriterState>& async_writer_state() {
-    static maya::guarded<WriterState> s;
+    static maya::guarded<WriterState> s{lock_levels::kWriterState};
     return s;
 }
 
 struct AsyncWriter {
+    // Reached in the constructor, so the state static is built first and
+    // destroyed after this one.
     maya::guarded<WriterState>& st = async_writer_state();
 
     // The drain worker: a jaal-backed group, joined with no deadline on stop
     // so every queued save lands. Recreated if saves arrive again. Its own
     // lock, taken before `st` and never inside it, so stop() can wait for
     // run() (which only takes `st`) without a cycle.
-    struct Worker { std::optional<util::WorkerGroup> group; };
-    maya::guarded<Worker> worker;
+    // A level above the writer state: worker may be taken first, state
+    // inside it, never the reverse. The group is joined with no lock held.
+    struct Worker { std::unique_ptr<util::WorkerGroup> group; };
+    maya::guarded<Worker> worker{lock_levels::kWorkerSlot};
 
     // Build the job on the CALLER's thread, copying only what changed.
     // Fingerprinting is one pass of hashing with no allocation or I/O —
@@ -2231,26 +2236,32 @@ struct AsyncWriter {
         st.with([](WriterState& s, std::string k) { s.known.erase(k); }, key);
     }
 
-    void flush_and_stop() {
-        // Take the worker under its own lock, mark stopping (which wakes
-        // run()), and join outside both. run() drains every queued save
-        // before it sees `stopping` and exits, so nothing enqueued before
-        // this call is dropped.
-        // Lock order: worker, then st. stop() waits for run(), which only
-        // takes st, so holding the worker lock across it is safe.
-        worker.with([](Worker& w) {
-            async_writer_state().with([](WriterState& s) { s.stopping = true; s.started = false; });
-            if (w.group) w.group->stop();
-            w.group.reset();
+    void flush_and_stop(bool restartable = true) {
+        // Mark stopping (which wakes run()), take the worker out of its slot,
+        // and join with no lock held. run() drains every queued save before
+        // it sees `stopping` and exits, so nothing enqueued before this call
+        // is dropped. `started` stays true until the join is done, so a save
+        // racing this queues onto the draining worker instead of starting a
+        // second one; then it's cleared, and a later save starts a fresh one.
+        async_writer_state().with([](WriterState& s) { s.stopping = true; });
+        auto g = worker.with([](Worker& w) { return std::exchange(w.group, nullptr); });
+        if (g) g->stop();
+        if (!restartable) return;   // process exit: nothing runs after this
+        const bool leftover = async_writer_state().with([](WriterState& s) {
+            s.stopping = false;
+            s.started  = !s.pending.empty();
+            return s.started;
         });
+        // A save that queued after run() drained and exited: give it a worker.
+        if (leftover) start_worker();
     }
 
-    ~AsyncWriter() { flush_and_stop(); }
+    ~AsyncWriter() { flush_and_stop(/*restartable=*/false); }
 
 private:
     void start_worker() {
         worker.with([](Worker& w) {
-            w.group.emplace("persistence.async_writer");
+            w.group = std::make_unique<util::WorkerGroup>("persistence.async_writer");
             w.group->post([](std::stop_token) { run(); });
         });
     }

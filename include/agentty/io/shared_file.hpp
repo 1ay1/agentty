@@ -52,13 +52,18 @@
 
 #include <maya/runtime.hpp>
 
+#include "agentty/util/lock_levels.hpp"
+
 namespace agentty::persistence {
 
 /// The in-process half, one per shared file: a static the caller owns (one
 /// keyed off the path would need its own lock to look up). Only
 /// with_shared_file can enter it.
 struct FileLane {};
-using Lane = maya::guarded<FileLane>;
+// A lane is the outer lock: its body may take the state it protects.
+struct Lane : maya::guarded<FileLane> {
+    Lane() : maya::guarded<FileLane>(lock_levels::kFileLane) {}
+};
 
 /// What the body of with_shared_file sees.
 struct Held {

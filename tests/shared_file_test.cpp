@@ -116,6 +116,8 @@ int main() {
                 if (::pipe(pipefd) != 0) return -2;
                 const pid_t pid = ::fork();
                 if (pid == 0) {
+                    // The child continues running C++ under our lane.
+                    maya::forget_held_after_fork();
                     ::close(pipefd[0]);
                     const auto t0 = std::chrono::steady_clock::now();
                     // Our copy of the lane is inherited locked; the child

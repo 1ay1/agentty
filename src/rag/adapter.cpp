@@ -56,6 +56,7 @@
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 namespace fs = std::filesystem;
 
@@ -1559,7 +1560,7 @@ struct Index {
 struct WarmState {
     std::atomic<bool>    warming{false};
     std::atomic<bool>    warm_stop{false};
-    maya::guarded<Index> index{&warm_stop};
+    maya::guarded<Index> index{lock_levels::kRagIndex, &warm_stop};
 };
 using WarmRef = maya::co_owned<WarmState>;
 

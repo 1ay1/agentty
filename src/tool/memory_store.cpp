@@ -18,6 +18,7 @@
 #include "agentty/config/inventory.hpp"   // kMemoryLayout — the one declaration
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/utf8.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -51,7 +52,7 @@ using json = nlohmann::json;
 // Contention is at most "the agent fired remember + forget back-to-back".
 // Helpers that need the lock take the Files token, which only exists inside.
 struct Files {};
-maya::guarded<Files>& store() { static maya::guarded<Files> f; return f; }
+maya::guarded<Files>& store() { static maya::guarded<Files> f{lock_levels::kMemoryStore}; return f; }
 
 [[nodiscard]] fs::path home_dir() noexcept {
     if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};

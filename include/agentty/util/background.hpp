@@ -190,3 +190,7 @@ class WorkerGroup {
 };
 
 } // namespace agentty::util
+
+// An owner moves its group out of a guarded slot to stop() it with no lock
+// held. The pointer owns the group outright, and moving it hands that over.
+MAYA_SENDABLE(std::unique_ptr<agentty::util::WorkerGroup>);

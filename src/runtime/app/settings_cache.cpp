@@ -11,6 +11,7 @@
 
 #include "agentty/io/persistence.hpp"
 #include "agentty/util/background.hpp"   // util::WorkerGroup
+#include "agentty/util/lock_levels.hpp"
 #include "agentty/util/teardown.hpp"
 
 namespace agentty::app::settings_cache {
@@ -40,7 +41,7 @@ struct State {
 };
 
 maya::guarded<State>& state() {
-    static maya::guarded<State> s;
+    static maya::guarded<State> s{lock_levels::kSettingsCache};
     return s;
 }
 
@@ -56,15 +57,15 @@ maya::published<const Disk>& disk() {
 }
 
 // The drain worker: a jaal-backed group (one isolated job, joined without a
-// deadline on stop) so queued saves always land. Its own lock, taken BEFORE
-// state() when both are needed and never inside it, so stop() can wait for
-// run() (which only takes state()) without a cycle.
+// deadline on stop) so queued saves always land. Its lock is a level above
+// state()'s: it may be taken first and state() inside it, never the reverse
+// (jaal checks). The group is joined with NO lock held: it's moved out first.
 struct Worker {
-    std::optional<util::WorkerGroup> group;
+    std::unique_ptr<util::WorkerGroup> group;
     bool registered = false;   // teardown hook installed
 };
 maya::guarded<Worker>& worker() {
-    static maya::guarded<Worker> w;
+    static maya::guarded<Worker> w{lock_levels::kWorkerSlot};
     return w;
 }
 
@@ -113,7 +114,7 @@ void start_worker() {
             w.registered = true;
             util::teardown::on_shutdown("settings_cache", [] { shutdown(); });
         }
-        if (!w.group) w.group.emplace("settings_cache.drain");
+        if (!w.group) w.group = std::make_unique<util::WorkerGroup>("settings_cache.drain");
         w.group->post([](std::stop_token) { run(); });
     });
 }
@@ -222,8 +223,10 @@ void shutdown() noexcept {
         return was;
     });
     if (!was_started) return;
-    // run() exits on `stopping` (the with() above woke it); the group joins it.
-    worker().with([](Worker& w) { if (w.group) w.group->stop(); });
+    // run() exits on `stopping` (the with() above woke it); the group joins
+    // it, outside every lock.
+    auto g = worker().with([](Worker& w) { return std::exchange(w.group, nullptr); });
+    if (g) g->stop();
 }
 
 } // namespace agentty::app::settings_cache
