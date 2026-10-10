@@ -513,6 +513,7 @@ Cmd  todo_update          (Model& m, msg::TodoMsg           tm);
 Cmd  login_update         (Model& m, msg::LoginMsg          lm);
 Cmd  diff_review_update   (Model& m, msg::DiffReviewMsg     dm);
 Cmd  smart_mode_update    (Model& m, msg::SmartModeMsg      sm);
+Cmd  web_search_update    (Model& m, msg::WebSearchMsg      wm);
 Cmd  plugin_edit_update   (Model& m, msg::PluginEditMsg     pm);
 // The edit pane's half of a PluginEdited reply (its writes are cmd::
 // edit_plugin effects). settings_list owns the leaf and routes EditPane

@@ -2,6 +2,7 @@
 
 #include "agentty/mcp/client.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
+#include "agentty/tool/web_search_policy.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -310,13 +311,26 @@ std::vector<ToolDef> wire_tools_snapshot() {
     return snapshot->tools;   // deep copy while snapshot keeps it alive
 }
 
+bool withheld_by_policy(const ToolDef& tool, bool web_search_enabled) {
+    return !web_search_enabled && tool.origin == ToolOrigin::Native
+        && tool.name.value == "web_search";
+}
+
+bool withheld_by_policy(const ToolDef& tool) {
+    return withheld_by_policy(
+        tool, web_search_cfg::mode(web_search_policy::current()) != web_search_cfg::Mode::Off);
+}
+
 std::vector<const ToolDef*> select_wire_tools(
     std::string_view query, std::size_t max_external) {
-    return select_wire_tools_from(wire_tools(), query, max_external);
+    return select_wire_tools_from(wire_tools(), query, max_external,
+                                  web_search_cfg::mode(web_search_policy::current())
+                                      != web_search_cfg::Mode::Off);
 }
 
 std::vector<const ToolDef*> select_wire_tools_from(
-    const std::vector<ToolDef>& catalog, std::string_view query, std::size_t max_external) {
+    const std::vector<ToolDef>& catalog, std::string_view query, std::size_t max_external,
+    bool web_search_enabled) {
     std::vector<const ToolDef*> selected;
     std::vector<std::pair<int, const ToolDef*>> candidates;
     selected.reserve(catalog.size());
@@ -338,6 +352,14 @@ std::vector<const ToolDef*> select_wire_tools_from(
         // schema) never enter the wire list — the proxy already injected
         // their schema into the request; ours would collide with it.
         if (!tool.advertise) continue;
+        // Settings → Web Search can switch web_search off. Dropped here, by
+        // name and before the native fast path, so it leaves the wire in every
+        // mode that builds a request through this function. Removing it keeps
+        // the remaining tools in catalog order, so the tools block stays
+        // byte-stable from one turn to the next once the setting is chosen.
+        // The same predicate gates `agentty mcp-serve` (mcp/serve.cpp).
+        if (withheld_by_policy(tool, web_search_enabled))
+            continue;
         if (tool.origin == ToolOrigin::Native || tool.always_expose) {
             selected.push_back(&tool);
             continue;

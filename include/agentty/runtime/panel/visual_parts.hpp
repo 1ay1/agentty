@@ -240,6 +240,12 @@ inline auto visual_parts(const SmartMode& p) {
 }
 static_assert(visual::parts_cover_all<SmartMode>);
 
+inline auto visual_parts(const WebSearch& p) {
+    return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
+                           visual::ref(p.form), visual::ref(p.scroll));
+}
+static_assert(visual::parts_cover_all<WebSearch>);
+
 inline auto visual_parts(const PluginEdit& p) {
     return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
                            visual::ref(p.form), visual::ref(p.server),

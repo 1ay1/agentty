@@ -47,6 +47,7 @@ set(AGENTTY_IO_SOURCES
     src/util/modelsdev.cpp
     src/domain/complexity.cpp
     src/domain/sandbox_provenance.cpp
+    src/domain/web_search_config.cpp
     src/i18n/i18n.cpp
     src/i18n/startup.cpp
     src/domain/model_name.cpp
@@ -142,6 +143,7 @@ set(AGENTTY_RAG_SOURCES
 
 set(AGENTTY_TOOL_SOURCES
     src/tool/registry.cpp
+    src/tool/web_search_policy.cpp
     src/scope/scope.cpp
     src/scope/trust.cpp
     # The app-level inventory: the ONE declaration of every Layout/Spec, read
@@ -193,6 +195,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/update/stream.cpp
     src/runtime/app/update/stream_preview.cpp
     src/runtime/app/update/smart_mode.cpp
+    src/runtime/app/update/web_search.cpp
     src/runtime/app/update/appearance.cpp
     src/runtime/app/update/sandbox.cpp
     src/runtime/app/update/plugin_edit.cpp
@@ -222,6 +225,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/panel/rag_form.cpp
     src/runtime/settings_registry.cpp
     src/runtime/panel/smart_form.cpp
+    src/runtime/panel/web_search_form.cpp
     src/runtime/panel/plugin_form.cpp
     src/runtime/app/update/fork.cpp
     src/runtime/app/update/diff_review.cpp
@@ -270,6 +274,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/panels/mention.cpp
     src/runtime/view/panels/symbol.cpp
     src/runtime/view/panels/smart_mode.cpp
+    src/runtime/view/panels/web_search.cpp
     src/runtime/view/panels/appearance.cpp
     src/runtime/view/panels/sandbox.cpp
     src/runtime/view/panels/plugin_edit.cpp

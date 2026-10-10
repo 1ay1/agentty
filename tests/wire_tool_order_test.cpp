@@ -56,3 +56,60 @@ TEST_CASE("wire tool order is catalog order, not score order") {
     check(c[1] == "beta_pages" && c[2] == "gamma_logs",
           "kept pair in catalog order, not by score");
 }
+
+// Settings → Web Search can switch web_search off. It must leave the wire
+// WITHOUT disturbing the order of what remains (the tools block is the cache
+// prefix), and it must only ever remove the NATIVE tool — an MCP server that
+// happens to expose a tool named web_search is the user's own choice and is
+// governed by mcp.json, not by this switch.
+TEST_CASE("web_search switch removes only the native tool, order intact") {
+    std::vector<tools::ToolDef> cat;
+    for (const char* n : {"read", "web_fetch", "web_search", "grep"}) {
+        tools::ToolDef t;
+        t.name = ToolName{n};
+        cat.push_back(t);
+    }
+    cat.push_back(mcp_tool("web_search", "a plugin's own search"));
+
+    const auto on  = names(tools::select_wire_tools_from(cat, "", 16, true));
+    const auto off = names(tools::select_wire_tools_from(cat, "", 16, false));
+
+    check(on == std::vector<std::string>{"read", "web_fetch", "web_search",
+                                         "grep", "web_search"},
+          "on: everything ships, catalog order");
+    check(off == std::vector<std::string>{"read", "web_fetch", "grep",
+                                          "web_search"},
+          "off: the native web_search is gone, the rest keep their order, "
+          "and the MCP tool of the same name is untouched");
+
+    // Stable across queries while the setting holds — the property that
+    // keeps the prompt cache warm.
+    check(names(tools::select_wire_tools_from(cat, "search the web", 16, false)) == off,
+          "off is byte-stable whatever the user asked");
+}
+
+// `agentty mcp-serve` registers native_registry() minus withheld_by_policy():
+// the SAME predicate the wire uses, so another MCP client is never offered a
+// tool agentty's settings switched off for its own model. Pinned on the
+// predicate because serve_stdio owns a stdio transport and cannot run here.
+TEST_CASE("mcp-serve and the wire withhold exactly the same tools") {
+    std::vector<tools::ToolDef> cat;
+    for (const char* n : {"read", "web_fetch", "web_search", "grep"}) {
+        tools::ToolDef t;
+        t.name = ToolName{n};
+        cat.push_back(t);
+    }
+    cat.push_back(mcp_tool("web_search", "a plugin's own search"));
+
+    for (bool enabled : {true, false}) {
+        std::vector<std::string> served;
+        for (const auto& t : cat)
+            if (!tools::withheld_by_policy(t, enabled)) served.push_back(t.name.value);
+        check(served == names(tools::select_wire_tools_from(cat, "", 16, enabled)),
+              "mcp-serve's list and the wire agree, on and off");
+    }
+    check(tools::withheld_by_policy(cat[2], false), "off withholds native web_search");
+    check(!tools::withheld_by_policy(cat[2], true), "on/auto serve it");
+    check(!tools::withheld_by_policy(cat[1], false), "web_fetch is never governed");
+    check(!tools::withheld_by_policy(cat[4], false), "nor a plugin's tool of the same name");
+}

@@ -2394,7 +2394,24 @@ std::mutex& baseline_mu() {
     return mu;
 }
 
+namespace {
+store::Settings load_settings_from_disk();
+} // namespace
+
 store::Settings load_settings() {
+    store::Settings s = load_settings_from_disk();
+    // The search policy's env overrides must hold on EVERY path — a first
+    // run with no settings.json, an unreadable or malformed file — not only
+    // after a clean parse. The pane locks a row whenever its env var is set
+    // (registry::env_override reads the environment directly), so an
+    // override skipped here would show as locked-and-in-force while the tool
+    // ran on the default. Applied last, so an export beats a stored value.
+    settings::registry::apply_env(s.web_search);
+    return s;
+}
+
+namespace {
+store::Settings load_settings_from_disk() {
     store::Settings s;
     std::ifstream ifs(settings_path());
     if (!ifs) return s;
@@ -2687,6 +2704,30 @@ store::Settings load_settings() {
                 (void)settings::registry::set(s.smart, d, as_text);
             }
         }
+        // web_search policy (Settings → Web Search). Read by WALKING the
+        // registry, so each value is clamped to its row's range on the way in
+        // and a hand-edited settings.json cannot hold what the pane could not
+        // produce. Keys are the row ids without the "web_search." prefix, the
+        // same shape the `smart` block uses. An absent key keeps the default.
+        if (j.contains("web_search") && j["web_search"].is_object()) {
+            const auto& se = j["web_search"];
+            for (const auto& d : settings::registry::kSettings) {
+                if (d.owner() != settings::registry::Owner::WebSearch) continue;
+                const auto dot = d.id.find('.');
+                const std::string key{d.id.substr(dot + 1)};
+                if (!se.contains(key)) continue;
+                const auto& v = se[key];
+                std::string as_text;
+                if      (v.is_boolean())        as_text = v.get<bool>() ? "true" : "false";
+                else if (v.is_number_integer()) as_text = std::to_string(v.get<long long>());
+                else if (v.is_number())         as_text = std::to_string(v.get<double>());
+                else if (v.is_string())         as_text = v.get<std::string>();
+                else continue;
+                (void)settings::registry::set(s.web_search, d, as_text);
+            }
+        }
+        // (web_search's env overrides: applied by load_settings() on every path.)
+
         // Environment overrides, applied by WALKING the registry. This is what
         // makes a row's env alias real for every Settings-owned knob at once,
         // and it clamps to each row's range on the way in.
@@ -2704,6 +2745,7 @@ store::Settings load_settings() {
     }
     return s;
 }
+} // namespace
 
 // The observer registered by on_settings_written(), if any. A plain
 // function-local static: registration happens once, during startup, before
@@ -2894,7 +2936,8 @@ void save_settings(const store::Settings& s) {
                     case settings::registry::Type::Real:
                         try { r[key] = std::stod(val); } catch (...) {}
                         break;
-                    case settings::registry::Type::Enum: r[key] = val; break;
+                    case settings::registry::Type::Enum:
+                    case settings::registry::Type::Text: r[key] = val; break;
                 }
             }
         }
@@ -2968,9 +3011,64 @@ void save_settings(const store::Settings& s) {
                 case settings::registry::Type::Real:
                     sm[key] = std::atof(val.c_str()); break;
                 case settings::registry::Type::Enum: sm[key] = val; break;
+                case settings::registry::Type::Text: sm[key] = val; break;
             }
         }
         j["smart"] = std::move(sm);
+    }
+
+    // web_search: written only when a row moved off its shipped default, so a
+    // config that never opened the pane carries no `search` key at all — and
+    // a future change to a default reaches everyone who never overrode it.
+    //
+    // A row whose env var is set is NOT written from `s.web_search`: that value
+    // is the export, applied by load_settings(), and saving it would turn a
+    // one-session override into a permanent setting the user never chose.
+    // Such a row keeps whatever settings.json held for it (the baseline), or
+    // stays absent. The pane locks these rows, so nothing else can move them.
+    {
+        json base_web_search;
+        {
+            std::lock_guard<std::mutex> lk(baseline_mu());
+            const auto& b = loaded_baseline();
+            if (b.contains("web_search") && b["web_search"].is_object())
+                base_web_search = b["web_search"];
+        }
+        nlohmann::json se = nlohmann::json::object();
+        for (const auto& d : settings::registry::kSettings) {
+            if (d.owner() != settings::registry::Owner::WebSearch) continue;
+            const auto dot = d.id.find('.');
+            const std::string key{d.id.substr(dot + 1)};
+            if (!settings::registry::env_override(d).empty()) {
+                if (base_web_search.is_object() && base_web_search.contains(key))
+                    se[key] = base_web_search[key];
+                continue;
+            }
+            if (settings::registry::is_default(s.web_search, d)) continue;
+            const std::string val = settings::registry::get(s.web_search, d);
+            switch (d.type) {
+                case settings::registry::Type::Bool: se[key] = (val == "true"); break;
+                case settings::registry::Type::Int:
+                    try { se[key] = std::stoll(val); } catch (...) {}
+                    break;
+                case settings::registry::Type::Real:
+                    try { se[key] = std::stod(val); } catch (...) {}
+                    break;
+                case settings::registry::Type::Enum:
+                case settings::registry::Type::Text: se[key] = val; break;
+            }
+        }
+        if (!se.empty()) {
+            j["web_search"] = std::move(se);
+        } else if (base_web_search.is_object()) {
+            // We loaded a `search` block and now hold all defaults: the user
+            // reset it. Write the empty object so the merge sees OUR change
+            // and does not re-adopt the old block from disk.
+            j["web_search"] = json::object();
+        }
+        // Else: never had one, still all default. Absent — and the merge
+        // adopts a sibling instance's newer `search` block from disk rather
+        // than deleting it (see adopt_disk_new below).
     }
 
     // ── Merge, rather than replace ──────────────────────────────────
@@ -3006,6 +3104,18 @@ void save_settings(const store::Settings& s) {
             }
             for (auto it = disk.begin(); it != disk.end(); ++it) {
                 const auto& key = it.key();
+                // Absent from what we LOADED and from what we are WRITING:
+                // we never had an opinion on this key, so a sibling instance
+                // added it after our load. Keep theirs. (Previously this fell
+                // into "appeared/vanished for us" and the key was dropped —
+                // a block such as `search`, absent by design until changed,
+                // was deleted by any other instance's next save.)
+                if (!base.contains(key) && !j.contains(key)) {
+                    AGT_LOG(Persist, Info, "settings.save",
+                            "merge=adopt_disk_new key={}", key);
+                    j[key] = it.value();
+                    continue;
+                }
                 const bool we_changed =
                     !base.contains(key) || !j.contains(key)
                         ? true                       // appeared/vanished for us

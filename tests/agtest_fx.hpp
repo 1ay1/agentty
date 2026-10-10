@@ -38,6 +38,7 @@
 #include "agentty/runtime/store_fx.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/tool/subagent.hpp"
+#include "agentty/tool/web_search_policy.hpp"
 
 namespace agtest::fx {
 
@@ -104,6 +105,8 @@ inline void run(const agentty::Cmd& c, Store& s) {
             s.written_files.emplace_back(e.path, e.contents);
         else if constexpr (std::same_as<U, agentty::PublishSelection>)
             agentty::provider::select(e.selection);
+        else if constexpr (std::same_as<U, agentty::PublishWebSearchPolicy>)
+            agentty::tools::web_search_policy::install(e.policy);
         else if constexpr (std::same_as<U, agentty::InstallAuth>) {
             // Only the clear is played here: resolving would read the
             // developer's real credential files.

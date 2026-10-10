@@ -6,6 +6,7 @@
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/domain/profile.hpp"
+#include "agentty/domain/web_search_config.hpp"   // Web Search row summary
 #include "agentty/domain/ui_theme.hpp"
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/registry.hpp"
@@ -121,6 +122,33 @@ std::vector<Item> general(const Model& m) {
         }
         i.hint      = "Enter: configure";
         i.action    = Action::OpenSandbox;
+        out.push_back(std::move(i));
+    }
+    // Web Search: the web_search tool's policy. The secondary line says
+    // what the policy currently DOES, so "why didn't it search?" is answered
+    // from the list without opening the pane. Read from the persisted record —
+    // the same value the pane edits and the tool layer is handed.
+    {
+        const auto& s = m.d.persisted.web_search;
+        Item i;
+        i.primary = "Web Search";
+        const auto mode = web_search_cfg::mode(s);
+        if (mode == web_search_cfg::Mode::Off) {
+            i.secondary = "web search off";
+        } else {
+            // Auto names itself rather than a count: the count rows are not
+            // applied there, so showing one would describe a setting that
+            // does nothing.
+            i.secondary = mode == web_search_cfg::Mode::Auto
+                ? std::string{"web search auto"}
+                : "web search \xc2\xb7 " + std::to_string(s.count) + " results";
+            const auto n = web_search_cfg::exclude_list(s.exclude_sites).size();
+            if (n == 1)      i.secondary += " \xc2\xb7 1 site excluded";
+            else if (n > 1)  i.secondary += " \xc2\xb7 " + std::to_string(n)
+                                          + " sites excluded";
+        }
+        i.hint   = "Enter: configure";
+        i.action = Action::OpenWebSearch;
         out.push_back(std::move(i));
     }
     return out;

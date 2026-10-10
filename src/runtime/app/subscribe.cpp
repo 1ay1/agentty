@@ -599,6 +599,12 @@ std::optional<Msg> on_smart_mode(const FormFocus& f, const KeyEvent& ev) {
     return on_form(f, ev, [](form::keys::Action a) { return Msg{SmartModeKey{a}}; });
 }
 
+// Web Search. Pure form pane — no pane-specific chords. Esc at the outer
+// level closes back to the settings list it was opened from.
+std::optional<Msg> on_web_search(const FormFocus& f, const KeyEvent& ev) {
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{WebSearchKey{a}}; });
+}
+
 // Plugin editor. Pure form pane — no pane-specific chords; Esc routes
 // through the nav close so the settings list underneath is restored.
 std::optional<Msg> on_plugin_edit(const FormFocus& f, const KeyEvent& ev) {
@@ -1182,12 +1188,14 @@ Sub subscribe(const Model& m) {
     // Which mode each form-backed pane is in. Three bools per pane — NOT the
     // pane's rows, which would be a per-frame deep copy on the input path.
     FormFocus rag_form, smart_form_snap, plugin_form_snap, appearance_form_snap;
-    FormFocus sandbox_form_snap;
+    FormFocus sandbox_form_snap, web_search_form_snap;
     bool appearance_picking = false;
     if (const auto* o = m.ui.panel.get<ui::panel::Rag>())
         rag_form = focus_of(o->embed.form);
     if (const auto* o = m.ui.panel.get<ui::panel::SmartMode>())
         smart_form_snap = focus_of(o->form);
+    if (const auto* o = m.ui.panel.get<ui::panel::WebSearch>())
+        web_search_form_snap = focus_of(o->form);
     if (const auto* o = m.ui.panel.get<ui::panel::PluginEdit>())
         plugin_form_snap = focus_of(o->form);
     if (const auto* o = m.ui.panel.get<ui::panel::Appearance>()) {
@@ -1282,6 +1290,7 @@ Sub subscribe(const Model& m) {
                     case OK::Providers: return on_provider_picker(ev);
                     case OK::ThreadList:     return on_thread_list(ev);
                     case OK::SmartMode:      return on_smart_mode(smart_form_snap, ev);
+                    case OK::WebSearch:      return on_web_search(web_search_form_snap, ev);
                     case OK::PluginEdit:     return on_plugin_edit(plugin_form_snap, ev);
                     case OK::Appearance:
                         return on_appearance(appearance_form_snap,
@@ -1393,6 +1402,7 @@ Sub subscribe(const Model& m) {
         [in_login, settings_list_adding,
          rag_editing   = rag_form.editing,
          smart_editing = smart_form_snap.editing,
+         web_search_editing = web_search_form_snap.editing,
          plugin_editing = plugin_form_snap.editing,
          filter_open   = active_panel == ui::panel::Kind::Palette
                       || active_panel == ui::panel::Kind::Models
@@ -1416,6 +1426,7 @@ Sub subscribe(const Model& m) {
         if (settings_list_adding) return SettingsListPaste{std::move(s)};
         if (rag_editing)   return RagEmbedPaste{std::move(s)};
         if (smart_editing) return SmartModePaste{std::move(s)};
+        if (web_search_editing) return WebSearchPaste{std::move(s)};
         if (plugin_editing) return PluginEditPaste{std::move(s)};
         //   • a FILTER panel open (palette/models/providers/mention/symbol)
         //     → its query. Without this the paste dropped into the composer
@@ -1573,6 +1584,10 @@ SubsKey subs_key(const Model& m) noexcept {
     // subscribe() and subs_key().
     if (const auto* o = m.ui.panel.get<ui::panel::SandboxList>())
         modes |= pack(focus_of(o->pane.form)) << 15;
+    // Web Search: its own three bits, so entering/leaving a text row changes
+    // the key and the router never translates against a stale focus.
+    if (const auto* o = m.ui.panel.get<ui::panel::WebSearch>())
+        modes |= pack(focus_of(o->form)) << 18;
     k.form_modes = modes;
 
     // Turn gates. animation_demand is what arms the Tick subscription, so a

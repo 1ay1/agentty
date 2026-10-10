@@ -30,6 +30,7 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/store_fx.hpp"
 #include "agentty/tool/subagent.hpp"            // PublishSubagent's target
+#include "agentty/tool/web_search_policy.hpp"       // PublishWebSearchPolicy's target
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/workspace/files.hpp"      // request_prewarm_cancel
 #include "agentty/workspace/checkpoint.hpp" // cancel_repo_info_prewarm
@@ -92,6 +93,13 @@ struct Host : maya::terminal_host<P> {
     // Publish the Model's active provider (see store_fx.hpp PublishSelection).
     // The one writer of the process-global selection after launch.
     void handle(PublishSelection e) { provider::select(std::move(e.selection)); }
+
+    // Publish the Model's web_search policy (see store_fx.hpp
+    // PublishWebSearchPolicy). The one writer of the tool layer's copy once the
+    // app is running; one atomic store.
+    void handle(PublishWebSearchPolicy e) {
+        tools::web_search_policy::install(std::move(e.policy));
+    }
 
     // Credentials (see store_fx.hpp). Small local reads/writes, run in order
     // on the loop thread so the next fold's stream launch sees them.

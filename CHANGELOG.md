@@ -5,6 +5,51 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **`Ctrl+K → Settings → Web Search`: control over `web_search`.** The tool
+  had one knob, the per-call `count`, and the model chose it. There was no way
+  to keep searches off for good, to stop a model asking for 0 or 500 results,
+  or to keep a content farm out of every result list. The new pane has four
+  rows:
+
+  - **Web search** — `auto` (the default) is how agentty behaved before the
+    pane: the tool is offered and the model chooses the count. `on` applies
+    your counts below. `off` removes the tool from the request and refuses any
+    call to it (a replayed thread, an ACP client, a model that remembers it).
+    It is not offered to other MCP clients through `agentty mcp-serve`
+    either: agentty's settings govern the tools it serves.
+    Rows a mode does not use are shown locked, with the reason, and keep
+    their values for when you switch back.
+  - **Results per search** (1–20) and **Most results allowed** (1–50). Locked
+    in `auto`, where the model sets the count; they apply in `on`. A search
+    still returns at most one engine result page (20 on Brave), so a ceiling
+    above 20 limits nothing in practice.
+  - **Never return** — domains separated by spaces or commas, as typed or
+    pasted; URLs and `www.` are
+    reduced to the host. They are sent as `-site:` operators, so the engine
+    never returns an excluded site and its slot goes to another result — which
+    filtering afterwards could not do. DuckDuckGo documents the operator and
+    Brave (the first engine tried) honours it; Startpage, the last resort, is
+    unverified, so an exclusion may not apply on a failover that reaches it.
+
+  Each row has an environment variable (`AGENTTY_WEB_SEARCH`, `_COUNT`,
+  `_MAX`, `_EXCLUDE`) that wins over the saved value for the session and locks
+  the row, without ever being written to `settings.json`. `AGENTTY_WEB_SEARCH`
+  takes `auto`, `on` or `off`, and the boolean spellings (`0` is `off`, `1` is
+  `auto`). See
+  the [configuration](/docs/configuration#web-search) page.
+
+  This is policy on *when* and *how much* to search. The engine chain and its
+  region live in mcp-cpp, a separate repository, and are not configurable
+  from here.
+
+  Turning search off removes only the native tool; the remaining tools keep
+  catalog order, so the tools block (the head of the prompt-cache prefix)
+  stays byte-stable once the setting is chosen. An MCP tool that happens to
+  be called `web_search` is left alone.
+
+  The settings registry gains a third owner and a free-text row type to carry
+  this; `owner()` now classifies by the member pointer's class, since the old
+  "Rag, otherwise Smart" test would have filed every search row under Smart.
 - **The trust-handoff gate now PREVENTS, not just reports.** Host-trusted
   paths that exist — `.vscode/tasks.json`, `.git/hooks/*`, `.git/config`,
   `hooks.json` — are bound read-only inside the sandbox, so a shell write to

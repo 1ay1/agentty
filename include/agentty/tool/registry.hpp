@@ -222,9 +222,23 @@ struct ToolDef {
 // pinned tools always; the top `max_external` other tools by query score,
 // emitted in CATALOG order so the wire tools block (the head of the prompt
 // cache prefix) stays byte-stable while the chosen set is unchanged.
+//
+// `web_search_enabled` = false drops the native web_search (Settings → Web
+// Search). select_wire_tools() passes the live policy; tests pass it
+// directly.
 [[nodiscard]] std::vector<const ToolDef*> select_wire_tools_from(
     const std::vector<ToolDef>& catalog, std::string_view query,
-    std::size_t max_external = 16);
+    std::size_t max_external = 16, bool web_search_enabled = true);
+
+// agentty's settings decide which of its native tools exist for ANY consumer:
+// the model on the wire (select_wire_tools) and other MCP clients through
+// `agentty mcp-serve`. One predicate, so the two can never disagree. Today the
+// only rule is Settings → Web Search: web_search off withholds the NATIVE
+// web_search (an external MCP tool that happens to share the name is not
+// agentty's to govern). The pure overload takes the switch; the other reads
+// the live policy.
+[[nodiscard]] bool withheld_by_policy(const ToolDef& tool, bool web_search_enabled);
+[[nodiscard]] bool withheld_by_policy(const ToolDef& tool);
 
 // The MCP tool-list generation counter, surfaced through the tools namespace
 // so callers (ACP server, wire walks) don't need to link the mcp TU or know

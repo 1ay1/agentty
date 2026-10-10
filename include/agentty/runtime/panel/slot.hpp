@@ -55,6 +55,8 @@
 #include <utility>
 #include <variant>
 
+#include <maya/core/scroll_state.hpp>   // WebSearch::scroll
+
 #include "agentty/runtime/panel/common.hpp"
 #include "agentty/domain/smart_mode.hpp"   // smart::OverlayRow
 #include "agentty/runtime/panel/palette.hpp"
@@ -147,6 +149,22 @@ struct SmartMode : WithFrom {
     // rows would vanish the moment the user pinned a model.
     bool advanced = false;
 };
+// Settings → Web Search. Carries its FORM, like Smart Mode: rows, cursor,
+// the env lock and text editing all come from the shared form layer. The
+// rows are the settings registry's web_search.* rows, so this pane holds no
+// config of its own — it is rebuilt from the Model after every commit.
+//
+// The scroll offset lives HERE, not in Model::UI's scroll bag: the slot walk
+// hashes it (so the frame gate sees a scroll), and it dies with the pane (so
+// reopening starts at the top). The shape pn::Stats established.
+struct WebSearch : WithFrom {
+    agentty::form::Form form;
+    mutable maya::ScrollState scroll = [] {
+        maya::ScrollState s;
+        s.auto_dispatch = false;   // the form layer owns movement
+        return s;
+    }();
+};
 struct Palette  : agentty::palette::Open, WithFrom {};
 struct Mention         : agentty::mention::Open, WithFrom {};
 struct Symbol          : agentty::symbol::Open, WithFrom {};
@@ -205,7 +223,7 @@ struct Skills          : agentty::skills_panel::Open, WithFrom {};
 
 using Variant = std::variant<
     None,
-    Models, Providers, ThreadList, SmartMode,
+    Models, Providers, ThreadList, SmartMode, WebSearch,
     Palette, Mention, Symbol,
     CodeBlocks, CodeBlockResult, ToolOutput, Checkpoints,
     Rag, SettingsList, PluginEdit, Appearance, Sandbox, SandboxList, Fork,
@@ -431,6 +449,7 @@ enum class Kind {
     Providers,
     ThreadList,
     SmartMode,
+    WebSearch,
     DiffReview,
     Todo,
     Stats,
@@ -446,6 +465,7 @@ enum class Kind {
         Kind operator()(const Providers&)  const { return Kind::Providers; }
         Kind operator()(const ThreadList&)      const { return Kind::ThreadList; }
         Kind operator()(const SmartMode&)       const { return Kind::SmartMode; }
+        Kind operator()(const WebSearch&)       const { return Kind::WebSearch; }
         Kind operator()(const Palette&)  const { return Kind::Palette; }
         Kind operator()(const Mention&)         const { return Kind::Mention; }
         Kind operator()(const Symbol&)          const { return Kind::Symbol; }

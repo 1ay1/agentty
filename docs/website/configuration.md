@@ -78,6 +78,19 @@ The Smart Mode *feature* toggles (which layers run) live in the `Ctrl+S` overlay
 | `AGENTTY_SMART_DEEP_MARGIN` | How far *into* a tier (score margin) a turn must sit to earn the extra **continuous effort** step — a genuinely hard Complex turn reaches +2 immediately instead of waiting for the session bias to drift. Lower ⇒ eager; higher ⇒ stays close to the discrete tier. Default `3`; range 1–8. |
 | `AGENTTY_SMART_BIAS_CLAMP` | Symmetric cap (±N steps) on the **session cascade bias** — how far this session's self-correction can drift effort from baseline. Default `2`; range 1–4. |
 
+### Web search
+
+`Ctrl+K → Settings → Web Search` edits these and saves them to `settings.json` under `"web_search"`. A variable wins over a saved value for that session only: it locks the matching row in the pane (naming the variable) and is never written to `settings.json`, so unsetting it restores what you saved.
+
+| Variable | Meaning |
+|----------|---------|
+| `AGENTTY_WEB_SEARCH` | `auto` (default), `on`, or `off`. `auto` advertises `web_search` and leaves the result count to the model, as agentty did before the Web Search pane. `on` applies your `AGENTTY_WEB_SEARCH_COUNT` and `_MAX`. `off` removes `web_search` from every request, from the tool list `agentty mcp-serve` offers to other MCP clients, and refuses any call to it (a replayed thread, a call injected by an ACP client). `0`/`false`/`no` mean `off`; `1`/`true`/`yes` mean `auto` (search available, the model picks the count). |
+| `AGENTTY_WEB_SEARCH_COUNT` | Results when the model does not say how many. Applies only in `on`. Default `10`; range 1–20. |
+| `AGENTTY_WEB_SEARCH_MAX` | Most results the model may ask for in one search; a larger request is clamped, and `0` or a negative count becomes `1`. Applies only in `on`. Default `20`; range 1–50. A search returns at most one result page from the engine that answers — 20 on Brave — so a value above 20 limits nothing in practice. |
+| `AGENTTY_WEB_SEARCH_EXCLUDE` | Domains never to return, space- or comma-separated (`pinterest.com w3schools.com`). Pasted URLs and `www.` are reduced to the host. Applied as `-site:` operators, so the engine never returns an excluded site and its slot goes to another result. Brave (tried first) and DuckDuckGo honour them; Startpage, the last-resort engine, is unverified, so on a failover that reaches it an exclusion may not apply. |
+
+This is policy on *when* and *how much* to search. Which engine answers, and in what order, is part of the search tool itself and is not configurable here.
+
 ## On-disk paths
 
 Everything agentty stores for you lives under **one root**, `~/.agentty`.

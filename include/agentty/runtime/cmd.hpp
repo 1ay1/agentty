@@ -170,6 +170,7 @@ AGENTTY_MSG_GROUP(TodoMsg)
 AGENTTY_MSG_GROUP(LoginMsg)
 AGENTTY_MSG_GROUP(DiffReviewMsg)
 AGENTTY_MSG_GROUP(SmartModeMsg)
+AGENTTY_MSG_GROUP(WebSearchMsg)
 AGENTTY_MSG_GROUP(PluginEditMsg)
 AGENTTY_MSG_GROUP(AppearanceMsg)
 AGENTTY_MSG_GROUP(MetaMsg)
@@ -205,6 +206,7 @@ using Cmd = jaal::Cmd<Msg,
     // published_subagent for why syncing isn't a step a reducer performs.
     publish_subagent,
     publish_selection,
+    publish_web_search_policy,
     // ── agentty's own: credentials ───────────────────────────────
     install_auth,
     save_credentials,

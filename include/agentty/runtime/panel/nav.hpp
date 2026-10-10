@@ -241,6 +241,7 @@ namespace agentty::ui::panel {
         case Kind::Providers:  return Msg{CloseProviders{}};
         case Kind::ThreadList:      return Msg{CloseThreadList{}};
         case Kind::SmartMode:       return Msg{CloseSmartMode{}};
+        case Kind::WebSearch:       return Msg{CloseWebSearch{}};
         case Kind::DiffReview:      return Msg{CloseDiffReview{}};
         // Ambient: never swallows, so it never needs rescuing.
         case Kind::Todo:            return Msg{NoOp{}};

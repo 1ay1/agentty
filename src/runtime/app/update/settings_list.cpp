@@ -251,6 +251,9 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                 case se::Action::OpenSandbox: {
                     return reenter(m, Msg{OpenSandbox{}});
                 }
+                case se::Action::OpenWebSearch: {
+                    return reenter(m, Msg{OpenWebSearch{}});
+                }
                 case se::Action::ToggleChangesStrip: {
                     return reenter(m, Msg{ToggleChangesStrip{}});
                 }

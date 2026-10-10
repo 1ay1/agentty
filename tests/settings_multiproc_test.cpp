@@ -167,3 +167,74 @@ TEST_CASE("settings: reasoning off persists as off, not as unset") {
 
     fs::remove_all(root);
 }
+
+// ── web_search policy (Settings → Web Search) ─────────────────────────────
+// `search` is absent from settings.json until a row moves off its default,
+// which made it the first block a sibling could ADD after another instance
+// loaded. These pin the three ways that interacts with the merge.
+
+TEST_CASE("settings: a sibling's new web_search block survives an unrelated save") {
+    const auto root = scratch("search-sibling");
+    use_store(root);
+    ps::save_settings(agentty::store::Settings{});   // no `search` key
+    auto a = ps::load_settings();                     // A's baseline: no `search`
+
+    // B turns web search off.
+    {
+        auto doc = read_raw(root);
+        doc["web_search"] = {{"mode", "off"}};
+        other_instance_writes(root, doc);
+    }
+
+    // A saves something else; it never had an opinion on `search`.
+    a.model_id = agentty::ModelId{"gpt-5"};
+    ps::save_settings(a);
+
+    const auto after = read_raw(root);
+    REQUIRE(after.contains("web_search"));
+    CHECK(after["web_search"]["mode"] == "off");   // B's choice kept
+    CHECK(after["model_id"] == "gpt-5");
+    fs::remove_all(root);
+}
+
+TEST_CASE("settings: resetting web search to defaults persists") {
+    const auto root = scratch("search-reset");
+    use_store(root);
+    {
+        agentty::store::Settings s;
+        s.web_search.count = 5;
+        ps::save_settings(s);
+    }
+    auto mine = ps::load_settings();
+    REQUIRE(mine.web_search.count == 5);
+
+    mine.web_search = agentty::web_search_cfg::Config{};   // every row back on its default
+    ps::save_settings(mine);
+
+    CHECK(ps::load_settings().web_search.count == 10);   // not re-adopted from disk
+    fs::remove_all(root);
+}
+
+TEST_CASE("settings: a web search env override is never written to settings.json") {
+    const auto root = scratch("search-env");
+    use_store(root);
+#ifdef _WIN32
+    _putenv_s("AGENTTY_WEB_SEARCH_COUNT", "4");
+#else
+    ::setenv("AGENTTY_WEB_SEARCH_COUNT", "4", 1);
+#endif
+    auto s = ps::load_settings();
+    CHECK(s.web_search.count == 4);                // the export is in force
+    s.model_id = agentty::ModelId{"gpt-5"};
+    ps::save_settings(s);                      // any save at all
+#ifdef _WIN32
+    _putenv_s("AGENTTY_WEB_SEARCH_COUNT", "");
+#else
+    ::unsetenv("AGENTTY_WEB_SEARCH_COUNT");
+#endif
+
+    const auto after = read_raw(root);
+    CHECK((!after.contains("web_search") || !after["web_search"].contains("count")));
+    CHECK(ps::load_settings().web_search.count == 10);   // gone with the export
+    fs::remove_all(root);
+}

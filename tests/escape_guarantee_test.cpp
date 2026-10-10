@@ -21,6 +21,7 @@
 #include "agentty/runtime/app/subscribe.hpp"
 #include "agentty/runtime/panel/nav.hpp"
 #include "agentty/runtime/panel/smart_form.hpp"
+#include "agentty/runtime/panel/web_search_form.hpp"
 
 #include <string>
 #include <vector>
@@ -75,6 +76,10 @@ const std::vector<Case>& cases() {
          [](Model& m) {
              smart_form::Inputs in;
              m.ui.panel.descend(pn::SmartMode{{}, smart_form::build_form(in)});
+         }},
+        {pn::Kind::WebSearch, "web search",
+         [](Model& m) {
+             m.ui.panel.descend(pn::WebSearch{{}, web_search_form::build_form(m.d.persisted.web_search)});
          }},
         {pn::Kind::Stats, "stats viewer",
          [](Model& m) { m.ui.panel.descend(pn::Stats{}); }},

@@ -102,6 +102,10 @@ std::string get(const smart::RoleConfig& s, const SettingDef& d) {
     return get_impl(s, d);
 }
 
+std::string get(const web_search_cfg::Config& c, const SettingDef& d) {
+    return get_impl(c, d);
+}
+
 // ── Write ────────────────────────────────────────────────────────────────
 
 namespace {
@@ -134,6 +138,19 @@ bool set_impl(C& c, const SettingDef& d, std::string_view value) {
                 field = static_cast<M>(std::clamp(x, d.min, d.max));
                 ok = true;
             } catch (...) {}
+        }
+        else if (d.type == Type::Text) {
+            // Free text: any value is representable, so the write always
+            // lands. Control characters are dropped — a pasted newline would
+            // otherwise round-trip into settings.json and onto the pane as a
+            // second line the single-line field cannot show.
+            std::string clean;
+            clean.reserve(value.size());
+            for (char ch : value)
+                if (static_cast<unsigned char>(ch) >= 0x20 && ch != 0x7f)
+                    clean.push_back(ch);
+            field = std::move(clean);
+            ok = true;
         }
         else {
             // Enum: the value must be one of the declared options, or a typo
@@ -205,6 +222,10 @@ bool set(smart::RoleConfig& s, const SettingDef& d, std::string_view value) {
     return set_impl(s, d, value);
 }
 
+bool set(web_search_cfg::Config& c, const SettingDef& d, std::string_view value) {
+    return set_impl(c, d, value);
+}
+
 // ── Defaults ─────────────────────────────────────────────────
 
 bool is_default(const store::RagConfig& c, const SettingDef& d) {
@@ -216,6 +237,11 @@ bool is_default(const smart::RoleConfig& s, const SettingDef& d) {
     return is_default_impl(s, kDefaults, d);
 }
 
+bool is_default(const web_search_cfg::Config& c, const SettingDef& d) {
+    static const web_search_cfg::Config kDefaults{};
+    return is_default_impl(c, kDefaults, d);
+}
+
 void reset(store::RagConfig& c, const SettingDef& d) {
     reset_impl(c, defaults(), d);
 }
@@ -225,10 +251,29 @@ void reset(smart::RoleConfig& s, const SettingDef& d) {
     reset_impl(s, kDefaults, d);
 }
 
+void reset(web_search_cfg::Config& c, const SettingDef& d) {
+    static const web_search_cfg::Config kDefaults{};
+    reset_impl(c, kDefaults, d);
+}
+
 // ── Environment ─────────────────────────────────────────────
 
 void apply_env(store::RagConfig& c) { apply_env_impl(c); }
 void apply_env(smart::RoleConfig& s) { apply_env_impl(s); }
+void apply_env(web_search_cfg::Config& c) {
+    apply_env_impl(c);
+    // AGENTTY_WEB_SEARCH also takes the boolean spellings people reach for
+    // (0/1/true/false/yes/no). A false value is Off; a true value means
+    // "search available", which is Auto -- NOT On, which would start clamping
+    // counts for someone who only asked for search to be there. auto|on|off
+    // are handled by the Enum parse above.
+    if (const char* raw = std::getenv("AGENTTY_WEB_SEARCH"); raw && raw[0]) {
+        const std::string v = lower(raw);
+        bool b{};
+        if (v != "on" && v != "off" && parse_bool(v, b))
+            c.mode_text = b ? "auto" : "off";
+    }
+}
 
 std::string env_override(const SettingDef& d) {
     if (d.env.empty()) return {};

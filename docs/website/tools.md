@@ -24,7 +24,7 @@ Each tool gets a purpose-built widget: diffs render as diffs with a real line-nu
 | `find_definition` | Read | Locate a symbol's definition across the codebase (curated per-language patterns). To find USES, use `grep` with `word=true`; for a ranked overview use `repo_map`. |
 | `search_structural` | Read | Structural (AST-shape) code search on a nested-document model (like Semgrep-generic / ast-grep) — the layer between `grep` (text) and `search_code` (meaning). **Never matches inside comments or string literals.** Metavariables: `$X` matches exactly **one node** (an atom or a balanced `(…)`/`[…]`/`{…}` group) and binds it; `$$$X` matches **many** nodes (arg lists, multi-token conditions). Recurses into nested groups. Dep-free (lexer + nested-tree matcher, no tree-sitter). e.g. `foo($$$)`, `if ($$$C) return $X;`, `catch ($$$) {}`, `$X = $X`. |
 | `web_fetch` | Network | Fetch a URL (capped output) for docs and APIs. |
-| `web_search` | Network | Search the web and return result snippets. |
+| `web_search` | Network | Search the web and return result snippets. Set it to auto (the model picks the result count), on (your count and ceiling apply) or off, and exclude sites, in `Ctrl+K → Settings → Web Search` ([details](/docs/configuration#web-search)). |
 | `todo` | Pure | Maintain a session todo / plan list, rendered as a checklist. |
 | `diagnostics` | Shell | Run the project's build/lint and surface errors and warnings. |
 | `test` | Shell | Run focused project tests (CTest/Cargo/Go/npm/Make auto-detected) with structured pass/fail output. |

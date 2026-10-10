@@ -788,6 +788,12 @@ struct Model {
     // comparison is against Model state and replays.
     provider::Selection published_selection;
 
+    // The web_search policy as LAST PUBLISHED to the tool layer. Same rule as
+    // published_selection. Starts as nullopt so the FIRST fold always
+    // publishes: until then the tool layer runs on its own lazy read of
+    // settings.json, which can disagree with what init() loaded.
+    std::optional<web_search_cfg::Config> published_web_search;
+
     // The process's launch environment, read ONCE by init() and never again.
     //
     // Elm has no getenv: a reducer that reads the environment is a function

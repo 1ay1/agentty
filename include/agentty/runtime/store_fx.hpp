@@ -94,6 +94,19 @@ using publish_subagent = jaal::pure_fx<PublishSubagent, "publish_subagent">;
 struct PublishSelection { provider::Selection selection; };
 using publish_selection = jaal::pure_fx<PublishSelection, "publish_selection">;
 
+/// Publish the Model's web_search policy (Settings → Web Search) to the
+/// process-wide copy the tool layer reads off the loop: the request builder
+/// that decides whether web_search goes on the wire, and the dispatch closure
+/// that clamps counts and appends exclusions (tools::web_search_policy).
+///
+/// Same rule as PublishSelection: the Model owns the value, only the dispatch
+/// seam returns this, and only when it changed — including on the very first
+/// fold, which is what makes the tool layer agree with the Model from startup
+/// on instead of with whatever its own lazy disk read happened to see.
+struct PublishWebSearchPolicy { web_search_cfg::Config policy; };
+using publish_web_search_policy =
+    jaal::pure_fx<PublishWebSearchPolicy, "publish_web_search_policy">;
+
 /// Re-install the live auth header the stream and subagents use.
 ///
 /// Reducers used to resolve the credential themselves (a read of the

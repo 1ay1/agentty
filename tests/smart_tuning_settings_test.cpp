@@ -138,9 +138,14 @@ TEST_CASE("smart tuning: rows bind to the config struct that owns them") {
     REQUIRE(rag_row != nullptr);
     CHECK(rag_row->owner() == reg::Owner::Rag);
 
-    int settings_rows = 0, rag_rows = 0;
-    for (const auto& d : reg::kSettings)
-        (d.owner() == reg::Owner::Smart ? settings_rows : rag_rows)++;
+    int settings_rows = 0, rag_rows = 0, web_search_rows = 0;
+    for (const auto& d : reg::kSettings) {
+        switch (d.owner()) {
+            case reg::Owner::Smart:  ++settings_rows; break;
+            case reg::Owner::Rag:    ++rag_rows;      break;
+            case reg::Owner::WebSearch: ++web_search_rows;   break;
+        }
+    }
     // Both halves non-empty is the actual invariant — an owner() that
     // answered `Rag` for everything would still compile and would silently
     // drop every routing row from save, load and apply_env. The exact count
@@ -149,6 +154,7 @@ TEST_CASE("smart tuning: rows bind to the config struct that owns them") {
     // being right. Name the rows that must exist instead.
     CHECK(settings_rows > 0);
     CHECK(rag_rows > 0);
+    CHECK(web_search_rows > 0);
     for (auto id : {"smart.complex_threshold", "smart.deep_margin",
                     "smart.bias_clamp", "smart.route_main_turn",
                     "smart.main_turn_floor"}) {
