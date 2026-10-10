@@ -39,6 +39,7 @@
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/auth_state.hpp"
 #include "agentty/provider/catalog_sources.hpp"
+#include "agentty/provider/error_class.hpp"
 #include "agentty/provider/credentials.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/selection.hpp"
@@ -54,6 +55,7 @@
 #include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/sandbox.hpp"
+#include "agentty/tool/util/utf8.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/background.hpp"
 #include "agentty/util/self_exe.hpp"
@@ -192,6 +194,42 @@ std::optional<std::string> air_git_patch(const FileChange& ch) {
     }
     if (out.find("\n@@ ") == std::string::npos) return std::nullopt;
     return out;
+}
+
+// "/name a b c" where name is an MCP server prompt: render it, filling its
+// arguments in order from the words after the name (the last one takes the
+// rest of the line). nullopt when it isn't one.
+std::optional<std::string> expand_mcp_prompt(std::string_view t) {
+#if AGENTTY_MCP
+    if (!t.starts_with('/')) return std::nullopt;
+    const auto sp = t.find_first_of(" \t\n");
+    const std::string name{t.substr(1, sp == std::string_view::npos ? sp : sp - 1)};
+    std::string_view rest = sp == std::string_view::npos ? std::string_view{} : t.substr(sp + 1);
+    std::vector<::agentty::mcp::PromptInfo> prompts;
+    try { prompts = ::agentty::mcp::mcp_prompts(); } catch (...) { return std::nullopt; }
+    const auto it = std::ranges::find_if(prompts, [&](const auto& p) { return p.name == name; });
+    if (it == prompts.end()) return std::nullopt;
+    std::vector<std::pair<std::string, std::string>> args;
+    for (std::size_t i = 0; i < it->arguments.size(); ++i) {
+        while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+        if (rest.empty()) break;
+        std::string_view v;
+        if (i + 1 == it->arguments.size()) { v = rest; rest = {}; }
+        else {
+            const auto e = rest.find(' ');
+            v = rest.substr(0, e);
+            rest = e == std::string_view::npos ? std::string_view{} : rest.substr(e + 1);
+        }
+        args.emplace_back(it->arguments[i].name, std::string{v});
+    }
+    std::string err;
+    auto out = ::agentty::mcp::mcp_get_prompt(name, args, err);
+    if (!out) return "The /" + name + " prompt failed: " + err;
+    return out;
+#else
+    (void)t;
+    return std::nullopt;
+#endif
 }
 
 // Construct a text ContentBlock.
@@ -915,6 +953,8 @@ a::List<a::AvailableCommand> available_commands(Io io) {
     };
     add("compact", "Summarize the conversation to reclaim context window", nullptr);
     add("new",     "Start a fresh conversation, clearing prior context", nullptr);
+    // Zed groups and runs these as agent actions, not prompts it echoes.
+    for (auto& c : cmds) c.meta = json{{"command_category", "native"}};
     std::set<std::string> seen{"compact", "new"};
     // The user's own slash commands (.agentty/.claude/commands/*.md), with
     // their argument hint, the same set the TUI's `/` picker shows.
@@ -932,6 +972,24 @@ a::List<a::AvailableCommand> available_commands(Io io) {
                                    : sk.description,
             "optional arguments");
     }
+#if AGENTTY_MCP
+    // MCP server prompts. Zed groups commands tagged "mcp".
+    try {
+        for (const auto& pr : ::agentty::mcp::mcp_prompts()) {
+            if (pr.name.empty() || !seen.insert(pr.name).second) continue;
+            std::string hint;
+            for (const auto& arg : pr.arguments) {
+                if (!hint.empty()) hint += ' ';
+                hint += arg.required ? arg.name : "[" + arg.name + "]";
+            }
+            const std::string desc = !pr.description.empty() ? pr.description
+                                   : !pr.title.empty()       ? pr.title
+                                                             : "Prompt from " + pr.server;
+            add(pr.name, desc, hint.empty() ? nullptr : hint.c_str());
+            cmds.back().meta = json{{"command_category", "mcp"}};
+        }
+    } catch (...) {}
+#endif
     return cmds;
 }
 
@@ -1133,13 +1191,31 @@ void AgentServer::adopt_client_mcp(const a::List<a::McpServer>& servers) {
                 out[v.name] = json{{"type", "sse"}, {"url", v.url}, {"headers", std::move(h)}};
             });
     }
-    // Connecting can take seconds; don't hold up session/new for it.
+    // Connecting can take seconds; don't hold up session/new for it. When it
+    // lands, re-send every live session's / menu so the servers' prompts show.
     util::run_isolated_detached("acp.mcp_servers",
-        [](std::stop_token, json servers) { ::agentty::mcp::set_client_servers(servers); },
-        std::move(out));
+        [](std::stop_token, json servers, maya::co_owned<AgentServer> self) {
+            ::agentty::mcp::set_client_servers(servers);
+            self->refresh_command_menus();
+        },
+        std::move(out), maya::co_owned<AgentServer>::of(*this));
 #else
     (void)servers;
 #endif
+}
+
+// The / menu changed under every session (an MCP server connected and
+// brought prompts): send each live session the new list.
+void AgentServer::refresh_command_menus() {
+    const auto ids = sessions_.read([](const Sessions& ss) {
+        std::vector<std::string> out;
+        for (const auto& [id, s] : ss.by_id) out.push_back(id);
+        return out;
+    });
+    if (ids.empty()) return;
+    a::SU_AvailableCommands ac;
+    ac.availableCommands = available_commands(IoAccess::grant());
+    for (const auto& id : ids) send_update(id, ac);
 }
 
 void AgentServer::send_update(const std::string& session_id, a::SessionUpdate update) {
@@ -2192,6 +2268,8 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
             const Io io = IoAccess::grant();
             if (auto expanded = tools::commands::try_expand(io, t)) {
                 text = std::move(*expanded);
+            } else if (auto rendered = expand_mcp_prompt(t)) {
+                text = std::move(*rendered);
             } else {
                 const auto sp  = t.find_first_of(" \t\n");
                 const auto tok = t.substr(1, sp == std::string_view::npos ? sp : sp - 1);
@@ -2622,6 +2700,9 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
     std::string cur_tool_json;
     StreamUsage last_usage;
     bool have_usage = false;
+    int last_err_status = 0;
+    std::optional<std::chrono::seconds> last_retry_after;
+    bool last_err_replayable = true;
     const std::string sid = session_id;
     const std::string scwd = snap->cwd;
     const std::string msg_id = assistant.id.value;
@@ -2748,6 +2829,9 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
                         stop = ev.stop_reason;
                     } else if constexpr (std::is_same_v<E, StreamError>) {
                         out_error = ev.message;
+                        last_err_status = ev.http_status;
+                        last_retry_after = ev.retry_after;
+                        last_err_replayable = !ev.non_replayable;
                     } else if constexpr (std::is_same_v<E, StreamUsage>) {
                         last_usage = ev; have_usage = true;
                     }
@@ -2756,13 +2840,45 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
         }, m);
     };
 
-    try {
-        if (!snap->provider.empty() && stream_to_)
-            stream_to_(snap->provider, std::move(req), sink);
-        else
-            stream_(std::move(req), sink);
-    } catch (const std::exception& e) {
-        out_error = std::string{"stream backend: "} + e.what();
+    // Retry a request that failed before anything reached the editor, when
+    // the failure is the kind that passes (overload, rate limit, a dropped
+    // connection) and resending can't duplicate work. Same rule as the TUI:
+    // once text or a tool call streamed, the turn is the user's to retry.
+    constexpr int kMaxAttempts = 4;
+    for (int attempt = 1;; ++attempt) {
+        provider::Request this_req = req;
+        try {
+            if (!snap->provider.empty() && stream_to_)
+                stream_to_(snap->provider, std::move(this_req), sink);
+            else
+                stream_(std::move(this_req), sink);
+        } catch (const std::exception& e) {
+            out_error = std::string{"stream backend: "} + e.what();
+        }
+        if (out_error.empty() || attempt >= kMaxAttempts) break;
+        if (snap->cancel && snap->cancel->is_cancelled()) break;
+        const bool streamed = !assistant.text.empty() || !assistant.thinking.empty()
+                           || !assistant.tool_calls.empty();
+        const auto cls = provider::classify_stream_error(out_error, last_err_status);
+        if (streamed || !last_err_replayable
+            || (cls != provider::ErrorClass::Transient && cls != provider::ErrorClass::RateLimit))
+            break;
+        auto wait = std::chrono::seconds{1 << (attempt - 1)};   // 1, 2, 4 s
+        if (last_retry_after) wait = std::clamp(*last_retry_after, std::chrono::seconds{1},
+                                                std::chrono::seconds{60});
+        notice(sid, "warning",
+               cls == provider::ErrorClass::RateLimit ? "Rate limited, retrying"
+                                                      : "Provider error, retrying",
+               out_error + " (attempt " + std::to_string(attempt + 1) + " of " +
+                   std::to_string(kMaxAttempts) + " in " + std::to_string(wait.count()) + "s)");
+        // Wait on the cancel itself: a stop ends the wait at once.
+        if (snap->cancel ? maya::delay_for(snap->cancel->token(), wait)
+                         : maya::delay_for(std::stop_token{}, wait))
+            break;
+        out_error.clear();
+        last_err_status = 0;
+        last_retry_after.reset();
+        stop = StopReason::Unspecified;
     }
 
     if (snap->cancel && snap->cancel->is_cancelled()) out_cancelled = true;
@@ -2977,6 +3093,31 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
                 if (all.size() <= *sent) return;
                 send_terminal_output(sid, tid, all.substr(*sent));
                 *sent = all.size();
+            };
+        } else {
+            // Any other tool that reports progress (a subagent's live log, a
+            // test run, a shell in an editor without terminals): show the
+            // latest snapshot in the card while it runs. At most ~6 updates a
+            // second; the final result replaces it when the tool settles.
+            struct Throttle { std::chrono::steady_clock::time_point last{}; std::size_t sent = 0; };
+            auto th = std::make_shared<Throttle>();
+            call_ctx.progress = [this, sid = ctx.id, tid = tc.id.value, th](std::string_view all) {
+                const auto now = std::chrono::steady_clock::now();
+                if (all.size() == th->sent || now - th->last < std::chrono::milliseconds(150)) return;
+                th->last = now;
+                th->sent = all.size();
+                // Tail only: a card is not a log viewer, and a 1 MB snapshot
+                // per update would swamp the pipe.
+                constexpr std::size_t kTail = 8 * 1024;
+                std::string_view tail = all.size() > kTail ? all.substr(all.size() - kTail) : all;
+                a::ToolCallUpdate u;
+                u.toolCallId = a::ToolCallId{tid};
+                u.status = a::Just(a::ToolCallStatus::InProgress);
+                a::List<a::ToolCallContent> c;
+                c.push_back(a::ToolCallContent{a::TCC_Content{
+                    text_block("```\n" + tools::util::sanitize_utf8(tail) + "\n```"), json::object()}});
+                u.content = a::Just(std::move(c));
+                send_update(sid, a::SU_ToolCallUpdate{std::move(u)});
             };
         }
         // The job gets its own copy of the definition it was gated against.

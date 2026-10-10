@@ -60,9 +60,16 @@ class H(BaseHTTPRequestHandler):
             names = [t.get("function", {}).get("name", "") for t in body.get("tools") or []]
             with open(os.environ["FAKE_TOOLS_LOG"], "a") as f:
                 f.write(json.dumps(names) + "\n")
+            with open(os.environ["FAKE_TOOLS_LOG"] + ".user", "w") as f:
+                f.write(text or "")
         events = []
         if last.get("role") == "tool":
             events = [chunk({"role": "assistant", "content": "done"}), chunk({}, "stop")]
+        elif "flaky" in (text or ""):
+            H.flaky = getattr(H, "flaky", 0) + 1
+            if H.flaky == 1:
+                return self._json({"error": {"message": "overloaded", "type": "server_error"}}, 503)
+            events = [chunk({"role": "assistant", "content": "recovered"}), chunk({}, "stop")]
         elif "fail" in (text or ""):
             return self._json({"error": {"message": "upstream exploded", "type": "server_error"}}, 400)
         elif "summar" in (text or "").lower():
@@ -86,6 +93,12 @@ class H(BaseHTTPRequestHandler):
             events = [chunk({"role": "assistant", "content": "Writing. "}),
                       chunk({"tool_calls": [{"index": 0, "id": "call_x", "type": "function",
                                              "function": {"name": "write", "arguments": args}}]}),
+                      chunk({}, "tool_calls")]
+        elif "run slow" in (text or ""):
+            args = json.dumps({"command": "for i in 1 2 3 4; do echo tick$i; sleep 0.3; done"})
+            events = [chunk({"role": "assistant", "content": ""}),
+                      chunk({"tool_calls": [{"index": 0, "id": "call_slow", "type": "function",
+                                             "function": {"name": "shell", "arguments": args}}]}),
                       chunk({}, "tool_calls")]
         elif "run pwd" in (text or ""):
             args = json.dumps({"command": "pwd"})

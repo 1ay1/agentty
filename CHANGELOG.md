@@ -30,6 +30,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 - **MCP elicitation reaches the editor.** A server asking the user for input
   mid-call becomes the editor's form (ACP `elicitation/create`).
 - **JetBrains AIR `diffPatch`:** edits as one exact git patch each.
+- **ACP:** live progress in every tool card, automatic retries for overloaded
+  or rate-limited providers before anything streamed, and MCP server prompts
+  as `/` commands.
 - **`session/fork`**, user slash commands and skills as real `/` commands,
   and permission prompts with "always reject".
 - **`/compact` and `/new` work over ACP.** They used to be sent to the model

@@ -474,6 +474,42 @@ def scenario_elicit(c, cwd):
         expect(e.get("sessionId") == sid and e.get("toolCallId") == "call_ask",
                "scoped to the session and tool card")
     expect("hello Ayush" in got, f"the answer reached the MCP server ({got[:60]!r})")
+    # The same server's prompt shows in the / menu and expands on use.
+    menus = [u["availableCommands"] for s, u in c.updates
+             if s == sid and u.get("sessionUpdate") == "available_commands_update"]
+    cmds = {x["name"]: x for x in (menus[-1] if menus else [])}
+    g = next((v for v in cmds.values()
+              if (v.get("_meta") or {}).get("command_category") == "mcp" and v["name"].endswith("greet")), None)
+    expect(g is not None and (g.get("_meta") or {}).get("command_category") == "mcp",
+           f"MCP prompt listed as an mcp command ({sorted(cmds)[:8]})")
+    expect((cmds.get("compact", {}).get("_meta") or {}).get("command_category") == "native",
+           "/compact tagged native")
+    if g:
+        c.request("session/prompt", {"sessionId": sid,
+                  "prompt": [{"type": "text", "text": f"/{g['name']} world"}]}, timeout=60)
+        sent = open(os.environ["FAKE_TOOLS_LOG"] + ".user").read() if os.environ.get("FAKE_TOOLS_LOG") else ""
+        expect("PROMPT-OK greet world" in sent, f"prompt rendered with its argument ({sent[:60]!r})")
+
+
+def scenario_progress(agentty, schema, cwd):
+    print("progress: without a terminal channel, a running tool's output still streams")
+    c = Client([agentty, "acp"], schema, cwd)
+    try:
+        caps = {k: v for k, v in ZED_CAPS.items() if k != "_meta"}   # no terminal_output
+        initialize(c, caps)
+        r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
+        sid = r["sessionId"]
+        c.request("session/set_mode", {"sessionId": sid, "modeId": "write"})
+        c.request("session/prompt", {"sessionId": sid,
+                  "prompt": [{"type": "text", "text": "run slow"}]}, timeout=90)
+        live = [u for s, u in c.updates if s == sid and u.get("toolCallId") == "call_slow"
+                and u.get("status") == "in_progress" and u.get("content")]
+        texts = [x["content"].get("text", "") for u in live for x in u["content"]
+                 if x.get("type") == "content"]
+        expect(len(texts) >= 2 and "tick1" in texts[0], f"{len(texts)} live updates before the result")
+    finally:
+        c.close()
+    return c
 
 
 def scenario_commands(c, cwd):
@@ -507,6 +543,15 @@ def scenario_failure(c, cwd):
            f"error carries the reason ({err})")
     c.pump(0.3)
     expect("notice" in c.kinds(sid), "notice sent to a client that renders them")
+    # A transient 503 before anything streamed is retried, not surfaced.
+    r, err = c.request("session/prompt", {"sessionId": sid,
+                       "prompt": [{"type": "text", "text": "flaky one"}]}, "PromptResponse", timeout=60)
+    text = "".join(u["content"].get("text", "") for s, u in c.updates
+                   if s == sid and u.get("sessionUpdate") == "agent_message_chunk")
+    expect(err is None and "recovered" in text, f"503 retried and the turn finished ({err})")
+    retry_notes = [u for s, u in c.updates if s == sid and u.get("sessionUpdate") == "notice"
+                   and "retrying" in u.get("title", "")]
+    expect(bool(retry_notes), "the retry was announced as a notice")
 
 
 def initialize(c, caps=ZED_CAPS):
@@ -628,7 +673,8 @@ def main():
     c2 = scenario_reload(agentty, schema, cwd, os.environ, sid)
     c3 = scenario_auth(agentty, schema, cwd)
     c4 = scenario_air(agentty, schema, cwd)
-    for cl in (c, c2, c3, c4):
+    c5 = scenario_progress(agentty, schema, cwd)
+    for cl in (c, c2, c3, c4, c5):
         for v in cl.violations:
             print("  SCHEMA " + v)
             FAILS.append(v)

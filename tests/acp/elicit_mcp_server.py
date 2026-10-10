@@ -43,8 +43,16 @@ while True:
     if meth == "initialize":
         send({"jsonrpc": "2.0", "id": rid, "result": {
             "protocolVersion": m["params"].get("protocolVersion", "2025-06-18"),
-            "capabilities": {"tools": {}},
+            "capabilities": {"tools": {}, "prompts": {}},
             "serverInfo": {"name": "elicit-test", "version": "1"}}})
+    elif meth == "prompts/list":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"prompts": [{
+            "name": "greet", "description": "Greet someone",
+            "arguments": [{"name": "who", "required": True}]}]}})
+    elif meth == "prompts/get":
+        who = (m["params"].get("arguments") or {}).get("who", "?")
+        send({"jsonrpc": "2.0", "id": rid, "result": {"messages": [
+            {"role": "user", "content": {"type": "text", "text": f"PROMPT-OK greet {who}"}}]}})
     elif meth == "tools/list":
         send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [TOOL]}})
     elif meth == "tools/call":

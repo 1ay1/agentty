@@ -215,6 +215,9 @@ private:
 
     void                  persist(const std::string& id);
     void                  adopt_client_mcp(const ::acp::List<::acp::McpServer>& servers);
+  public:
+    void                  refresh_command_menus();
+  private:
     void                  replay_history(const std::string& session_id,
                                          const Thread& thread);
 
