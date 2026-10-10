@@ -143,6 +143,8 @@ TEST_CASE("logx: real vendor key shapes are redacted") {
         {R"(AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIbKxKEY0123456789EXAMPLEKEY)", "wJalrXUtnFEM"},
         {R"({"anthropic_api_key":"sk-ant-VALUE9876543210abc"})", "VALUE9876543210"},
         {R"(gsk_GroqKeyLooksLikeThis0123456789abcd)", "GroqKeyLooksLike"},
+        // Brave's Search API header: a bare token, no vendor prefix to match.
+        {R"(X-Subscription-Token: BSAk1234567890abcdefghijKEYBODY)", "BSAk1234567890"},
         {R"(export ANTHROPIC_API_KEY=sk-ant-api03-abcdefghij0123456789)", "abcdefghij0123"},
         // A key pasted into the CONVERSATION, not a header — the path that
         // actually reaches the log, since headers are never logged.

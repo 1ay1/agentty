@@ -21,6 +21,10 @@
 #include "agentty/runtime/panel/web_search_form.hpp"
 #include "agentty/runtime/settings_registry.hpp"
 
+#include "agentty/tool/web_search_secret.hpp"
+
+#include <unistd.h>
+
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -92,10 +96,17 @@ TEST_CASE("web search pane: the General list has a door that opens the pane") {
 
     // Open by action: the settings list descends into the pane.
     auto [m2, c2] = app::update(Model{}, Msg{OpenWebSearch{}});
-    // One header ("Search", from the registry group) + one row per web_search.*
-    // registry row, and the pane OPENS on the switch, not on the header.
+    // A header per registry group ("Search", "Services"), one row per
+    // web_search.* registry row, plus the dial rows the free defaults offer
+    // (Brave: 1, DuckDuckGo: 2, Tavily: 2) - and no key row, because none of
+    // the three needs one. The pane OPENS on the switch, not on a header.
     const auto& form = pane_of(m2).form;
-    CHECK(form.fields.size() == 5, "Search header + 4 rows");
+    int registry_rows = 0;
+    for (const auto& d : reg::kSettings)
+        if (d.owner() == reg::Owner::WebSearch) ++registry_rows;
+    CHECK(registry_rows == 8, "mode, count, max, exclude + three slots + language");
+    CHECK(form.fields.size() == static_cast<std::size_t>(2 + registry_rows + 5),
+          "2 headers + registry rows + 5 dial rows");
     CHECK(form.fields.front().is_header());
     const auto* first = form.focused();
     REQUIRE(first != nullptr);
@@ -209,7 +220,7 @@ TEST_CASE("web search pane: Esc closes back out, and close_msg names it") {
     (void)_;
 }
 
-TEST_CASE("web search pane: auto locks the two count rows; on unlocks them") {
+TEST_CASE("web search pane: auto locks the two count rows, and on unlocks them") {
     Model m = opened();   // defaults are auto
     for (const char* id : {"web_search.count", "web_search.max_count"}) {
         const auto* row = pane_of(m).form.find(id);
@@ -368,4 +379,127 @@ TEST_CASE("web search pane: the exclusion row says what separates domains") {
     const std::string help{d->help};
     CHECK(help.find("space") != std::string::npos);
     CHECK(help.find("comma") != std::string::npos);
+}
+
+// ── Services: keys and slots, through the real reducer ───────────────────
+//
+// The registry rows above are plain settings. These are the parts that are
+// not: a typed API key goes to the key store and NOT to the Model, and a
+// slot change rebuilds the rows under it.
+
+namespace {
+
+struct KeyHome {
+    std::filesystem::path dir;
+    std::string old_home, old_ks;
+    bool had_home = false, had_ks = false;
+    KeyHome() {
+        dir = std::filesystem::temp_directory_path()
+            / ("agentty_wt_keys_" + std::to_string(::getpid()));
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir / "home");
+        if (const char* h = ::getenv("AGENTTY_HOME")) { had_home = true; old_home = h; }
+        if (const char* k = ::getenv("AGENTTY_USE_KEYSTORE")) { had_ks = true; old_ks = k; }
+        ::setenv("AGENTTY_HOME", (dir / "home").c_str(), 1);
+        ::setenv("AGENTTY_USE_KEYSTORE", "0", 1);
+        ::unsetenv("AGENTTY_WEB_SEARCH_KEY_EXA_API");
+    }
+    ~KeyHome() {
+        if (had_home) ::setenv("AGENTTY_HOME", old_home.c_str(), 1);
+        else          ::unsetenv("AGENTTY_HOME");
+        if (had_ks) ::setenv("AGENTTY_USE_KEYSTORE", old_ks.c_str(), 1);
+        else        ::unsetenv("AGENTTY_USE_KEYSTORE");
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+};
+
+Model with_exa_primary() {
+    Model m;
+    m.d.persisted.web_search.primary = "exa-api";
+    return opened(std::move(m));
+}
+
+void type_text(Model& m, std::string_view text) {
+    for (char c : text) m = send(std::move(m), ins(static_cast<char32_t>(c)));
+}
+
+} // namespace
+
+TEST_CASE("web search pane: a typed API key is stored, not kept in the Model") {
+    KeyHome home;
+    Model m = with_exa_primary();
+    REQUIRE(pane_of(m).form.find("web_search.key.exa-api") != nullptr);
+    CHECK(pane_of(m).form.find("web_search.key.exa-api")->origin == "not set");
+
+    focus_row(m, "web_search.key.exa-api");
+    m = send(std::move(m), key(form::keys::Intent::Activate));      // start editing
+    REQUIRE(pane_of(m).form.editing());
+    type_text(m, "exa-SECRET-0123456789");
+    // Mid-edit the row holds the text, and the Model holds nothing.
+    CHECK(wtf::key_row_service(pane_of(m).form.focused()->id) == "exa-api");
+    m = send(std::move(m), key(form::keys::Intent::LeaveField));
+
+    CHECK(agentty::tools::web_search_secret::load("exa-api") == "exa-SECRET-0123456789");
+    // The row was emptied and now says where the key lives, never what it is.
+    const auto* row = pane_of(m).form.find("web_search.key.exa-api");
+    REQUIRE(row != nullptr);
+    CHECK(std::get<form::field::Secret>(row->value).value.empty());
+    CHECK(row->origin == "stored");
+    // The Model (and so settings.json) never saw it.
+    CHECK(m.d.persisted.web_search.primary == "exa-api");
+    CHECK(pane_of(m).form.find("web_search.keyclear.exa-api") != nullptr);
+}
+
+TEST_CASE("web search pane: a key that does not look like one is refused, not stored") {
+    KeyHome home;
+    Model m = with_exa_primary();
+    focus_row(m, "web_search.key.exa-api");
+    m = send(std::move(m), key(form::keys::Intent::Activate));
+    type_text(m, "nope");
+    m = send(std::move(m), key(form::keys::Intent::LeaveField));
+    CHECK(!agentty::tools::web_search_secret::has("exa-api"));
+    CHECK(pane_of(m).form.find("web_search.key.exa-api")->origin == "not set");
+}
+
+TEST_CASE("web search pane: Remove key forgets a stored key") {
+    KeyHome home;
+    REQUIRE(agentty::tools::web_search_secret::store("exa-api", "exa-STORED-0123456789"));
+    Model m = with_exa_primary();
+    REQUIRE(pane_of(m).form.find("web_search.keyclear.exa-api") != nullptr);
+    focus_row(m, "web_search.keyclear.exa-api");
+    m = send(std::move(m), key(form::keys::Intent::Activate));
+    CHECK(!agentty::tools::web_search_secret::has("exa-api"));
+    CHECK(pane_of(m).form.find("web_search.keyclear.exa-api") == nullptr);
+    CHECK(pane_of(m).form.find("web_search.key.exa-api")->origin == "not set");
+}
+
+TEST_CASE("web search pane: picking a keyed service for a slot brings its key row") {
+    KeyHome home;
+    Model m = opened();
+    CHECK(pane_of(m).form.find("web_search.key.exa-api") == nullptr);
+    // Primary dropdown: open, step to a keyed service, commit.
+    focus_row(m, "web_search.primary");
+    m = send(std::move(m), key(form::keys::Intent::Activate));
+    for (int i = 0; i < 7; ++i) m = send(std::move(m), key(form::keys::Intent::MenuNext));
+    m = send(std::move(m), key(form::keys::Intent::MenuCommit));
+    CHECK(m.d.persisted.web_search.primary == "exa-api");
+    CHECK(pane_of(m).form.find("web_search.key.exa-api") != nullptr);
+    CHECK(pane_of(m).form.find("web_search.dial.exa-api.type") != nullptr);
+    // The old service's rows are gone from the pane (its dials stay on record).
+    CHECK(pane_of(m).form.find("web_search.dial.brave-free.freshness") == nullptr);
+}
+
+TEST_CASE("web search pane: choosing a dial value persists it") {
+    KeyHome home;
+    Model m = opened();
+    focus_row(m, "web_search.dial.brave-free.freshness");
+    m = send(std::move(m), key(form::keys::Intent::Activate));
+    m = send(std::move(m), key(form::keys::Intent::MenuNext));      // Any time -> Past day
+    m = send(std::move(m), key(form::keys::Intent::MenuNext));      // -> Past week
+    auto [m2, cmd] = app::update(std::move(m), key(form::keys::Intent::MenuCommit));
+    CHECK(m2.d.persisted.web_search.dials.at("brave-free.freshness") == "pw");
+    const auto* saved = fx::find<agentty::SaveSettings>(cmd);
+    REQUIRE(saved != nullptr);
+    CHECK(saved->settings.web_search.dials.at("brave-free.freshness") == "pw");
 }

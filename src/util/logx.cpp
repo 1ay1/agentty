@@ -153,6 +153,9 @@ std::atomic<unsigned long> g_redactions{0};
     // needing one entry per vendor spelling.
     static constexpr std::string_view kKeys[] = {
         "authorization", "x-api-key", "api_key", "apikey", "api-key",
+        // Brave's Search API authenticates with this header, and nothing else
+        // in the table would match its value (a bare token has no vendor prefix).
+        "x-subscription-token",
         "access_token", "refresh_token", "id_token", "session_token",
         // NOTE: no bare "secret" / "private_key" entry. A generic word
         // matches ordinary prose ("/etc/secrets/config.yaml", a doc

@@ -2725,6 +2725,19 @@ store::Settings load_settings_from_disk() {
                 else continue;
                 (void)settings::registry::set(s.web_search, d, as_text);
             }
+            // Per-service dials: { "<service>.<dial>": "<value>" }. Not registry
+            // rows (the set depends on which services exist), so read here.
+            // Shape-checked only: whether a value is one the service lists is
+            // mcp-cpp's call, made again on every request, so a stale or
+            // hand-edited entry cannot put arbitrary text on the wire.
+            if (se.contains("dials") && se["dials"].is_object()) {
+                for (const auto& [k, v] : se["dials"].items()) {
+                    if (!v.is_string() || s.web_search.dials.size() >= 64) continue;
+                    const std::string val = v.get<std::string>();
+                    if (k.empty() || k.size() > 64 || val.empty() || val.size() > 64) continue;
+                    s.web_search.dials[k] = val;
+                }
+            }
         }
         // (web_search's env overrides: applied by load_settings() on every path.)
 
@@ -3057,6 +3070,15 @@ void save_settings(const store::Settings& s) {
                 case settings::registry::Type::Enum:
                 case settings::registry::Type::Text: se[key] = val; break;
             }
+        }
+        // Dials: only the ones moved off "the service's own default". Keys of
+        // an unknown service are kept (a newer build may know it) up to the
+        // same cap the loader applies.
+        if (!s.web_search.dials.empty()) {
+            nlohmann::json dj = nlohmann::json::object();
+            for (const auto& [k, v] : s.web_search.dials)
+                if (!v.empty()) dj[k] = v;
+            if (!dj.empty()) se["dials"] = std::move(dj);
         }
         if (!se.empty()) {
             j["web_search"] = std::move(se);

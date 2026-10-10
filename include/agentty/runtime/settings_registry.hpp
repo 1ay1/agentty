@@ -56,6 +56,7 @@ enum class Group : std::uint8_t {
     Infra,        // persistence, tracing, feedback
     Routing,      // Smart Mode's numeric policy
     WebSearch,    // web_search: availability, result count, exclusions
+    WebSearchServices, // web_search: which services answer, in what order
 };
 
 [[nodiscard]] constexpr std::string_view label_of(Group g) noexcept {
@@ -67,6 +68,7 @@ enum class Group : std::uint8_t {
         case Group::Infra:     return "Infrastructure";
         case Group::Routing:   return "Routing";
         case Group::WebSearch: return "Search";
+        case Group::WebSearchServices: return "Services";
     }
     return "";
 }
@@ -340,6 +342,26 @@ inline constexpr std::array kSettings = std::to_array<SettingDef>({
     {"web_search.exclude_sites", "AGENTTY_WEB_SEARCH_EXCLUDE", "Never return",
      "domains to leave out, separated by spaces or commas: pinterest.com w3schools.com",
      Group::WebSearch, Tier::Basic, Type::Text, &web_search_cfg::Config::exclude_sites},
+
+    // Which services answer, first to succeed wins. The options are the ids of
+    // mcp-cpp's catalogue (mcp/tools/web_search.hpp); the pane shows its labels.
+    // tests/web_search_services_test.cpp pins this list to the catalogue.
+    {"web_search.primary", "AGENTTY_WEB_SEARCH_PRIMARY", "Primary",
+     "asked first. Free needs no account; API key needs one, stored encrypted",
+     Group::WebSearchServices, Tier::Basic, Type::Enum, &web_search_cfg::Config::primary,
+     0.0, 0.0, 0.0, web_search_cfg::kServiceIds},
+    {"web_search.secondary", "AGENTTY_WEB_SEARCH_SECONDARY", "Secondary",
+     "asked when the primary fails or is blocked",
+     Group::WebSearchServices, Tier::Basic, Type::Enum, &web_search_cfg::Config::secondary,
+     0.0, 0.0, 0.0, web_search_cfg::kOptionalServiceIds},
+    {"web_search.fallback", "AGENTTY_WEB_SEARCH_FALLBACK", "Fallback",
+     "asked last, when both of the above fail",
+     Group::WebSearchServices, Tier::Basic, Type::Enum, &web_search_cfg::Config::fallback,
+     0.0, 0.0, 0.0, web_search_cfg::kOptionalServiceIds},
+    {"web_search.language", "AGENTTY_WEB_SEARCH_LANGUAGE", "Language",
+     "result language for the services that take one; auto leaves it to them",
+     Group::WebSearchServices, Tier::Basic, Type::Enum, &web_search_cfg::Config::language,
+     0.0, 0.0, 0.0, web_search_cfg::kLanguages},
 });
 
 inline constexpr int kCount = static_cast<int>(kSettings.size());
@@ -541,41 +563,12 @@ void reset(store::RagConfig& c, const SettingDef& d);
 void reset(smart::RoleConfig& c, const SettingDef& d);
 void reset(web_search_cfg::Config& c, const SettingDef& d);
 
-// ── Rows ───────────────────────────────────────────────────
-//
-// Project this table's rows onto a form. THE way a pane renders settings —
-// label, help, control kind, range, group header, env lock and provenance all
-// come from the row, so a pane contributes only WHICH rows it owns.
-//
-// This lives here rather than in one pane's .cpp because both panes need it.
-// It was private to the RAG pane, so the Smart Mode pane hand-rolled its three
-// rows instead: labels, help strings and ranges retyped from the table they
-// were already declared in, and the env-lock/provenance handling quietly
-// reimplemented and subtly different. Two panes rendering settings two ways is
-// exactly the duplication the table exists to remove.
-//
-// `first` and `last_group` thread across calls so group headers stay correct
-// when a pane walks more than one owner.
+// One row: label, help, control kind, range, env lock and provenance, all from
+// the table. Split out of add_rows for a pane that must put its own rows
+// BETWEEN registry rows (Web Search hangs each service's dials under its slot).
 template <class C>
-inline void add_rows(form::Builder& b, const C& cfg, Owner owner, bool advanced,
-                     bool& first, Group& last_group) {
-    for (const auto& d : kSettings) {
-        if (d.owner() != owner) continue;
-
-        // Advanced rows are hidden, not disabled: a knob whose effect a user
-        // cannot judge is noise on the main screen, but it still has to be
-        // reachable (`a`) rather than env-only.
-        if (d.tier == Tier::Advanced && !advanced) continue;
-
-        // A group header separates sections. It is a real field kind, not a
-        // locked text row: faking it leaked a placeholder into the value
-        // column and let the cursor land on a label that does nothing.
-        if (first || d.group != last_group) {
-            b.header(std::string{label_of(d.group)});
-            last_group = d.group;
-            first = false;
-        }
-
+inline void add_row(form::Builder& b, const C& cfg, const SettingDef& d) {
+    {
         const std::string id{d.id};
         const std::string label{d.label};
         const std::string help{d.help};
@@ -628,6 +621,45 @@ inline void add_rows(form::Builder& b, const C& cfg, Owner owner, bool advanced,
         // Provenance: a row still on its shipped value says so, which is the
         // difference between "I never touched this" and "I set it to that".
         else if (is_default(cfg, d)) b.origin("default");
+    }
+}
+
+// ── Rows ───────────────────────────────────────────────────
+//
+// Project this table's rows onto a form. THE way a pane renders settings —
+// label, help, control kind, range, group header, env lock and provenance all
+// come from the row, so a pane contributes only WHICH rows it owns.
+//
+// This lives here rather than in one pane's .cpp because both panes need it.
+// It was private to the RAG pane, so the Smart Mode pane hand-rolled its three
+// rows instead: labels, help strings and ranges retyped from the table they
+// were already declared in, and the env-lock/provenance handling quietly
+// reimplemented and subtly different. Two panes rendering settings two ways is
+// exactly the duplication the table exists to remove.
+//
+// `first` and `last_group` thread across calls so group headers stay correct
+// when a pane walks more than one owner.
+// Every row `owner` has, in table order, under a header per group.
+template <class C>
+inline void add_rows(form::Builder& b, const C& cfg, Owner owner, bool advanced,
+                     bool& first, Group& last_group) {
+    for (const auto& d : kSettings) {
+        if (d.owner() != owner) continue;
+
+        // Advanced rows are hidden, not disabled: a knob whose effect a user
+        // cannot judge is noise on the main screen, but it still has to be
+        // reachable (`a`) rather than env-only.
+        if (d.tier == Tier::Advanced && !advanced) continue;
+
+        // A group header separates sections. It is a real field kind, not a
+        // locked text row: faking it leaked a placeholder into the value
+        // column and let the cursor land on a label that does nothing.
+        if (first || d.group != last_group) {
+            b.header(std::string{label_of(d.group)});
+            last_group = d.group;
+            first = false;
+        }
+        add_row(b, cfg, d);
     }
 }
 

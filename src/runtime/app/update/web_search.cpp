@@ -18,12 +18,18 @@
 #include "agentty/runtime/app/update.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
 #include <maya/core/overload.hpp>
 
+#include <mcp/tools/web_search.hpp>
+
 #include "agentty/runtime/panel/web_search_form.hpp"
+#include "agentty/tool/web_search_secret.hpp"
 
 namespace pn = agentty::ui::panel;
 
@@ -44,6 +50,52 @@ void restore_cursor(form::Form& f, int cursor) {
         form::move_edge(f, /*last=*/false);
 }
 
+// What the pane may learn about a key: that it exists and where from. The
+// value never comes back out of the store into the Model.
+[[nodiscard]] web_search_form::KeyOrigin key_origin() {
+    return [](std::string_view service) {
+        return tools::web_search_secret::origin(service);
+    };
+}
+
+[[nodiscard]] form::Form build(const web_search_cfg::Config& c) {
+    return web_search_form::build_form(c, key_origin());
+}
+
+// A key typed into a Secret row goes to the key store, not to the Model and
+// not to settings.json (same rule as the embeddings key, rag.cpp). The row is
+// emptied by the rebuild that follows, so the text does not outlive the edit
+// on screen either. Returns the toast to show, or "" when no key was entered.
+[[nodiscard]] std::string take_typed_keys(form::Form& f) {
+    std::string note;
+    for (auto& row : f.fields) {
+        const auto service = web_search_form::key_row_service(row.id);
+        if (service.empty() || row.locked) continue;
+        auto* sec = std::get_if<form::field::Secret>(&row.value);
+        if (!sec || sec->value.empty()) continue;
+        // Trim what a paste drags along: a trailing newline, a "Bearer " the
+        // vendor's docs show in front of the key.
+        std::string key = sec->value;
+        while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) key.pop_back();
+        while (!key.empty() && std::isspace(static_cast<unsigned char>(key.front()))) key.erase(0, 1);
+        if (key.rfind("Bearer ", 0) == 0) key.erase(0, 7);
+        const auto* svc = ::mcp::tools::find_web_search_service(service);
+        const std::string name = svc ? svc->label : std::string{service};
+        if (!tools::web_search_secret::plausible(key))
+            note = name + ": that does not look like an API key (8+ characters, no spaces)";
+        else if (!tools::web_search_secret::store(service, key))
+            note = name + ": key not saved \xe2\x80\x94 no secure store available";
+        else
+            note = name + ": key saved";
+        // Overwrite before dropping: the typed text should not linger in freed
+        // memory any longer than the edit itself.
+        std::fill(sec->value.begin(), sec->value.end(), '\0');
+        sec->value.clear();
+        sec->cursor = 0;
+    }
+    return note;
+}
+
 // Persist `cfg` and rebuild the pane around it, cursor kept (clamped: a
 // rebuild may lock or unlock rows, never add or remove them today, but the
 // cursor must not be able to land past the end if that changes).
@@ -53,7 +105,7 @@ void restore_cursor(form::Form& f, int cursor) {
     Cmd out = save_record(m);
 
     const int cursor = o.form.cursor;
-    o.form = web_search_form::build_form(m.d.persisted.web_search);
+    o.form = build(m.d.persisted.web_search);
     restore_cursor(o.form, cursor);
 
     // The one change worth a toast: the mode itself. Auto is the quiet
@@ -74,7 +126,7 @@ Cmd web_search_update(Model& m, msg::WebSearchMsg wm) {
     return std::visit(overload{
         [&](OpenWebSearch) -> Cmd {
             pn::WebSearch o;
-            o.form = web_search_form::build_form(m.d.persisted.web_search);
+            o.form = build(m.d.persisted.web_search);
             // Open on the master switch, not on the group header above it.
             restore_cursor(o.form, 0);
             m.ui.panel.descend(std::move(o));
@@ -97,6 +149,23 @@ Cmd web_search_update(Model& m, msg::WebSearchMsg wm) {
             if (applied.close)
                 return web_search_update(m, msg::WebSearchMsg{CloseWebSearch{}});
 
+            // "Remove key" is an Action row; Enter on it fires it.
+            if (applied.fired) {
+                if (const auto* row = o->form.focused()) {
+                    const auto service = web_search_form::key_clear_service(row->id);
+                    if (!service.empty()) {
+                        (void)tools::web_search_secret::erase(service);
+                        const auto* svc = ::mcp::tools::find_web_search_service(service);
+                        const int cursor = o->form.cursor;
+                        o->form = build(m.d.persisted.web_search);
+                        restore_cursor(o->form, cursor);
+                        return set_status_toast(m, (svc ? svc->label : std::string{service})
+                                                   + ": key removed");
+                    }
+                }
+                return Cmd::none();
+            }
+
             const bool settled = applied.left_field
                               || (applied.changed && !o->form.editing());
             // Mid-edit keystrokes (Insert, Backspace, Delete, caret moves)
@@ -109,6 +178,11 @@ Cmd web_search_update(Model& m, msg::WebSearchMsg wm) {
             // web_search_pane_test pins this.
             if (!settled) return Cmd::none();
 
+            // A typed API key is stored (and the row emptied) before anything
+            // else reads the form. The key store is not part of the Model, so
+            // this is not a settings change and is not compared below.
+            const std::string key_note = take_typed_keys(o->form);
+
             web_search_cfg::Config cfg = m.d.persisted.web_search;
             web_search_form::apply_form(o->form, cfg);
             // Settled on the value already on record (typed and put back, a
@@ -117,11 +191,14 @@ Cmd web_search_update(Model& m, msg::WebSearchMsg wm) {
             // its provenance column is current.
             if (cfg == m.d.persisted.web_search) {
                 const int cursor = o->form.cursor;
-                o->form = web_search_form::build_form(m.d.persisted.web_search);
+                o->form = build(m.d.persisted.web_search);
                 restore_cursor(o->form, cursor);
-                return Cmd::none();
+                if (key_note.empty()) return Cmd::none();
+                return set_status_toast(m, key_note);
             }
-            return commit(m, *o, std::move(cfg));
+            Cmd saved = commit(m, *o, std::move(cfg));
+            if (key_note.empty()) return saved;
+            return Cmd::batch(std::move(saved), set_status_toast(m, key_note));
         },
     }, wm);
 }

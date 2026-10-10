@@ -5,8 +5,8 @@
 // pinned here directly rather than through a live search: the three modes
 // (auto leaves the count to the model, on applies the user's default and
 // ceiling, off is refused), count resolution in on, and the
-// -site: exclusions (documented by DuckDuckGo, observed on Brave, unverified on
-// Startpage — see domain/web_search_config.hpp).
+// -site: exclusions (documented by DuckDuckGo, observed on Brave; services with a
+// native domain filter get the list as a field instead - see domain/web_search_config.hpp).
 
 #include "agtest.hpp"
 
@@ -15,8 +15,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cctype>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace sc  = agentty::web_search_cfg;
@@ -153,18 +155,32 @@ TEST_CASE("web search policy: every web_search.* row round-trips through the reg
                 CHECK(reg::set(c, d, ""));
                 CHECK(reg::is_default(c, d));
                 break;
-            case reg::Type::Enum:
-                // web_search.mode: each option round-trips; case is folded to
-                // the canonical word; anything else is refused, unchanged.
-                for (const char* v : {"on", "off", "auto"}) {
+            case reg::Type::Enum: {
+                // Every declared option round-trips (web_search.mode, the three
+                // service slots, language); case is folded to the canonical
+                // word; anything else is refused and leaves the row unchanged.
+                INFO(d.id);
+                std::vector<std::string> opts;
+                for (std::string_view rest = d.options; !rest.empty();) {
+                    const auto bar = rest.find('|');
+                    opts.emplace_back(rest.substr(0, bar));
+                    if (bar == std::string_view::npos) break;
+                    rest.remove_prefix(bar + 1);
+                }
+                REQUIRE(opts.size() >= 2);
+                for (const auto& v : opts) {
                     CHECK(reg::set(c, d, v));
                     CHECK(reg::get(c, d) == v);
                 }
-                CHECK(reg::set(c, d, "OFF"));
-                CHECK(reg::get(c, d) == "off");
+                std::string upper = opts.back();
+                for (char& ch : upper)
+                    ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+                CHECK(reg::set(c, d, upper));
+                CHECK(reg::get(c, d) == opts.back());
                 CHECK_FALSE(reg::set(c, d, "sometimes"));
-                CHECK(reg::get(c, d) == "off");
+                CHECK(reg::get(c, d) == opts.back());
                 break;
+            }
             case reg::Type::Real:
                 CHECK(false);   // no search row uses this today
                 break;
@@ -172,7 +188,9 @@ TEST_CASE("web search policy: every web_search.* row round-trips through the reg
         reg::reset(c, d);
         CHECK(reg::is_default(c, d));
     }
-    CHECK(seen == 4);
+    // mode, count, max_count, exclude_sites; primary, secondary, fallback,
+    // language.
+    CHECK(seen == 8);
 }
 
 TEST_CASE("web search policy: the row a user sees first is the master switch") {

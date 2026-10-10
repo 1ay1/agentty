@@ -87,9 +87,20 @@ The Smart Mode *feature* toggles (which layers run) live in the `Ctrl+S` overlay
 | `AGENTTY_WEB_SEARCH` | `auto` (default), `on`, or `off`. `auto` advertises `web_search` and leaves the result count to the model, as agentty did before the Web Search pane. `on` applies your `AGENTTY_WEB_SEARCH_COUNT` and `_MAX`. `off` removes `web_search` from every request, from the tool list `agentty mcp-serve` offers to other MCP clients, and refuses any call to it (a replayed thread, a call injected by an ACP client). `0`/`false`/`no` mean `off`; `1`/`true`/`yes` mean `auto` (search available, the model picks the count). |
 | `AGENTTY_WEB_SEARCH_COUNT` | Results when the model does not say how many. Applies only in `on`. Default `10`; range 1–20. |
 | `AGENTTY_WEB_SEARCH_MAX` | Most results the model may ask for in one search; a larger request is clamped, and `0` or a negative count becomes `1`. Applies only in `on`. Default `20`; range 1–50. A search returns at most one result page from the engine that answers — 20 on Brave — so a value above 20 limits nothing in practice. |
-| `AGENTTY_WEB_SEARCH_EXCLUDE` | Domains never to return, space- or comma-separated (`pinterest.com w3schools.com`). Pasted URLs and `www.` are reduced to the host. Applied as `-site:` operators, so the engine never returns an excluded site and its slot goes to another result. Brave (tried first) and DuckDuckGo honour them; Startpage, the last-resort engine, is unverified, so on a failover that reaches it an exclusion may not apply. |
+| `AGENTTY_WEB_SEARCH_EXCLUDE` | Domains never to return, space- or comma-separated (`pinterest.com w3schools.com`). Pasted URLs and `www.` are reduced to the host. Sent as `-site:` operators to Brave, DuckDuckGo, Serper and Perplexity, and as the service's own domain filter to Tavily, Firecrawl and Exa, so an excluded site never comes back and its slot goes to another result. |
+| `AGENTTY_WEB_SEARCH_PRIMARY`, `_SECONDARY`, `_FALLBACK` | Which service answers first, second and last; the first to succeed wins. A service id: `brave-free`, `ddg-free`, `tavily-free`, `firecrawl-free` (no account, card or key) or `brave-api`, `tavily-api`, `firecrawl-api`, `exa-api`, `serper-api`, `perplexity-api` (need an API key). `_SECONDARY` and `_FALLBACK` also take `none`. Defaults: `brave-free`, `ddg-free`, `tavily-free`. |
+| `AGENTTY_WEB_SEARCH_LANGUAGE` | `auto` (default) or a two-letter code (`en`, `de`, `ja`, ...) sent to the services that take one: Tavily, Brave API, Serper, Perplexity. The others ignore it. |
+| `AGENTTY_WEB_SEARCH_KEY_<SERVICE>` | An API key, taken from the environment instead of the key store: `AGENTTY_WEB_SEARCH_KEY_EXA_API`, `_BRAVE_API`, `_TAVILY_API`, `_FIRECRAWL_API`, `_SERPER_API`, `_PERPLEXITY_API`. Wins over a stored key and locks that row in the pane. Never written to disk. |
 
-This is policy on *when* and *how much* to search. Which engine answers, and in what order, is part of the search tool itself and is not configurable here.
+#### Choosing the services
+
+The **Free** services need no account, card or key, but they are best effort: Brave Free and DuckDuckGo Free read a public results page, and Tavily Free and Firecrawl Free use the vendors' key-less tiers. Any of them can be blocked, rate-limited or withdrawn without notice. In particular, many networks are served a captcha by DuckDuckGo and Brave answers `429` after a burst of roughly ten searches. The report from a failed search names each service and why it did not answer (blocked, rate limited, quota used up, key refused, unreadable reply) rather than a bare error.
+
+The **API key** services are the vendors' documented interfaces and do not depend on a page layout. Paste a key into the row under the slot that uses it and press Enter. It is stored encrypted (the OS keystore when `AGENTTY_USE_KEYSTORE` is set, otherwise a machine-bound sealed file) and is never written to `settings.json`; the pane shows only `stored`. *Remove key* forgets it. A keyed service chosen with no key is reported as such in the search result and the next slot is tried.
+
+Each service offers up to three extra settings (freshness, region, category, ...) which appear under its slot, and none for a service that has none. They are saved per service in `settings.json` under `web_search.dials`, so a choice survives moving the service between slots.
+
+Kagi, Mojeek and Linkup are not offered yet: their request and response formats could not be verified against documentation or a real reply.
 
 ## On-disk paths
 

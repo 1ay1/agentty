@@ -8,7 +8,7 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 - **`Ctrl+K → Settings → Web Search`: control over `web_search`.** The tool
   had one knob, the per-call `count`, and the model chose it. There was no way
   to keep searches off for good, to stop a model asking for 0 or 500 results,
-  or to keep a content farm out of every result list. The new pane has four
+  or to keep a content farm out of every result list. The new pane has these
   rows:
 
   - **Web search** — `auto` (the default) is how agentty behaved before the
@@ -25,11 +25,22 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
     above 20 limits nothing in practice.
   - **Never return** — domains separated by spaces or commas, as typed or
     pasted; URLs and `www.` are
-    reduced to the host. They are sent as `-site:` operators, so the engine
-    never returns an excluded site and its slot goes to another result — which
-    filtering afterwards could not do. DuckDuckGo documents the operator and
-    Brave (the first engine tried) honours it; Startpage, the last resort, is
-    unverified, so an exclusion may not apply on a failover that reaches it.
+    reduced to the host. They are sent as `-site:` operators, or as the
+    service's own domain filter where it has one, so the engine never returns
+    an excluded site and its slot goes to another result — which filtering
+    afterwards could not do.
+  - **Primary, Secondary, Fallback** — which services answer, in order; the
+    first to succeed wins. Free services need no account, card or key
+    (**Brave Free**, **DuckDuckGo Free**, **Tavily Free**, **Firecrawl Free**);
+    **API key** services are the vendors' documented interfaces (Brave,
+    Tavily, Firecrawl, Exa, Serper, Perplexity). Defaults are Brave Free,
+    DuckDuckGo Free, Tavily Free. A key is pasted into the row under its slot
+    and stored encrypted — never in `settings.json` — or supplied as
+    `AGENTTY_WEB_SEARCH_KEY_<SERVICE>`. Each service shows up to three extra
+    settings under its slot (freshness, region, category, ...), and none when
+    it has none. A search that fails now says why for every service: blocked,
+    rate limited, quota used up, key refused.
+  - **Language** — sent to the services that take one.
 
   Each row has an environment variable (`AGENTTY_WEB_SEARCH`, `_COUNT`,
   `_MAX`, `_EXCLUDE`) that wins over the saved value for the session and locks
@@ -38,9 +49,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   `auto`). See
   the [configuration](/docs/configuration#web-search) page.
 
-  This is policy on *when* and *how much* to search. The engine chain and its
-  region live in mcp-cpp, a separate repository, and are not configurable
-  from here.
+  Startpage is gone: it now sends every automated request to a captcha.
+  Kagi, Mojeek and Linkup are not offered yet, because their request and
+  response formats could not be verified.
 
   Turning search off removes only the native tool; the remaining tools keep
   catalog order, so the tools block (the head of the prompt-cache prefix)

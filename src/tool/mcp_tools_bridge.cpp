@@ -14,6 +14,7 @@
 #include "agentty/io/http.hpp"
 #include "agentty/rag/rag_adapter.hpp"   // rag::feedback::note_file_opened (learning loop)
 #include "agentty/tool/registry.hpp"   // tools::progress::emit
+#include "agentty/tool/web_search_plan.hpp"     // web_search: which services, in order
 #include "agentty/tool/web_search_policy.hpp"   // web_search: Settings → Web Search
 #include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
 #include "agentty/tool/spec.hpp"       // spec catalog — effects authority
@@ -423,6 +424,10 @@ std::vector<ToolDef> build_mcp_tool_defs() {
 
     mt::HostServices svc;
     svc.http = ka.http;
+    // Which services web_search tries is the user's choice (Settings → Wire
+    // Tools); the source is read on every call, so an edit reaches the next
+    // search with no restart and no re-registration.
+    svc.web_search_plan = tools::web_search_plan::make_plan_source();
     svc.exec = ka.exec;
     // Inject the host-coupled backends (memory/skill/retriever/subagent).
     // todo stays null — its shell renders identical text with no host state.
