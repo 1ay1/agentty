@@ -44,6 +44,15 @@
 
 namespace agentty::util {
 
+// The child itself, and what it ended with. Only reachable under a
+// maya::guarded, so stop(), reap() and close_stdin() never race each other:
+// a stop that ran after another thread's reap could signal a reused pid.
+struct child_proc {
+    maya::platform::native_process proc;
+    bool                           reaped = false;
+    std::optional<int>             exit_code;
+};
+
 
 // The child's stdout as a streambuf. A reader parked in underflow() can be
 // woken by interrupt() without closing the handle under it.
@@ -103,7 +112,8 @@ private:
 // the fd to that writer, which closes it as it leaves.
 class child_in_buf final : public std::streambuf {
 public:
-    explicit child_in_buf(maya::platform::native_process& p) : p_(p) { setp(out_, out_ + sizeof(out_)); }
+    child_in_buf(maya::guarded<child_proc>& p, std::optional<maya::platform::borrowed_handle> h)
+        : p_(p), h_(h) { setp(out_, out_ + sizeof(out_)); }
     void close() noexcept {
         // Decide under the lock, act outside it. The writer, if any, sees
         // `closed` when it leaves and closes the fd itself.
@@ -112,7 +122,7 @@ public:
             s.closed = true;
             return !s.writing;
         });
-        if (close_now) p_.close_stdin();
+        if (close_now) close_fd();
     }
 
 protected:
@@ -135,16 +145,20 @@ protected:
             return true;
         });
         if (!mine) return -1;
-        const auto h = p_.stdin_handle();   // only close_stdin() changes it, and it can't run now
-        if (!h) { st_.with([](State& s) { s.writing = false; }); return -1; }
-        const int rc = write_all(*h, p, left);
+        // Copied at spawn; valid until close_fd(), which can't run now.
+        if (!h_) { st_.with([](State& s) { s.writing = false; }); return -1; }
+        const int rc = write_all(*h_, p, left);
         const bool closed = st_.with([](State& s) { s.writing = false; return s.closed; });
-        if (closed) { p_.close_stdin(); return -1; }   // close() left it to us
+        if (closed) { close_fd(); return -1; }   // close() left it to us
         if (rc == 0) setp(out_, out_ + sizeof(out_));
         return rc;
     }
 
 private:
+    void close_fd() noexcept {
+        p_.with([](child_proc& c) { c.proc.close_stdin(); });
+    }
+
     static int write_all(maya::platform::borrowed_handle h, const char* p, std::size_t left) {
         while (left > 0) {
 #if defined(_WIN32)
@@ -169,7 +183,8 @@ private:
         bool closed  = false;
         bool writing = false;   // a write is in flight; it owns the fd
     };
-    maya::platform::native_process& p_;
+    maya::guarded<child_proc>&                       p_;
+    const std::optional<maya::platform::borrowed_handle> h_;
     maya::guarded<State> st_;
     char out_[4096]{};
 };
@@ -208,12 +223,16 @@ public:
         if (!p) throw std::runtime_error("cannot start '" + s.command + "': "
                                      + std::string{p.error().what} + " ("
                                      + std::to_string(p.error().native) + ")");
-        proc_.emplace(std::move(*p));
-
-        const auto out = proc_->stdout_handle();
+        // Handles are copied out before the process goes behind the lock.
+        // They stay valid as long as the process object lives (this does).
+        exit_h_ = p->exit_handle();
+        pid_    = static_cast<int>(p->id());
+        const auto out = p->stdout_handle();
+        const auto in  = p->stdin_handle();
         if (!out) throw std::runtime_error("child_process: no stdout pipe");
+        proc_ = std::make_unique<maya::guarded<child_proc>>(child_proc{std::move(*p)});
         out_buf_    = std::make_unique<child_out_buf>(*out);
-        in_buf_     = std::make_unique<child_in_buf>(*proc_);
+        in_buf_     = std::make_unique<child_in_buf>(*proc_, in);
         out_stream_ = std::make_unique<std::istream>(out_buf_.get());
         in_stream_  = std::make_unique<std::ostream>(in_buf_.get());
     }
@@ -225,7 +244,7 @@ public:
 
     [[nodiscard]] std::istream& out() noexcept { return *out_stream_; }   // child stdout
     [[nodiscard]] std::ostream& in()  noexcept { return *in_stream_; }    // child stdin
-    [[nodiscard]] int pid() const noexcept { return static_cast<int>(proc_->id()); }
+    [[nodiscard]] int pid() const noexcept { return pid_; }
 
     [[nodiscard]] bool alive() noexcept {
         if (exited()) return false;
@@ -234,7 +253,7 @@ public:
 
     // 0..255 for an exit, 128+N for death by signal N; nullopt while running.
     [[nodiscard]] std::optional<int> exit_code() const noexcept {
-        return state_.read([](const State& s) { return s.exit_code; });
+        return proc_->read([](const child_proc& c) { return c.exit_code; });
     }
 
     // EOF on the child's stdin: a well-behaved server starts exiting. The
@@ -251,9 +270,9 @@ public:
         namespace pf = maya::platform;
         close_stdin();
         if (wait_exit(grace)) return;
-        (void)proc_->stop(pf::stop_mode::graceful, pf::stop_scope::tree);
+        stop(pf::stop_mode::graceful);
         if (wait_exit(std::chrono::milliseconds{2000})) return;
-        (void)proc_->stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+        stop(pf::stop_mode::forceful);
         (void)wait_exit(std::chrono::milliseconds{2000});
     }
 
@@ -263,50 +282,50 @@ public:
     }
 
 private:
-    struct State {
-        bool reaping = false;
-        bool reaped = false;
-        std::optional<int> exit_code;
-    };
-
     [[nodiscard]] bool exited() const noexcept {
-        return state_.read([](const State& s) { return s.reaping; });
+        return proc_->read([](const child_proc& c) { return c.reaped; });
+    }
+
+    // Under the lock, so it can't land after a reap.
+    void stop(maya::platform::stop_mode m) noexcept {
+        proc_->with([](child_proc& c, maya::platform::stop_mode mode) {
+            if (!c.reaped) (void)c.proc.stop(mode, maya::platform::stop_scope::tree);
+        }, m);
     }
 
     // Is the exit handle signalled within `d`? Level-triggered, so any
     // thread may ask without a shared reactor.
     [[nodiscard]] bool exit_ready(std::chrono::milliseconds d) noexcept {
 #if defined(_WIN32)
-        return ::WaitForSingleObject(static_cast<HANDLE>(proc_->exit_handle().get()),
+        return ::WaitForSingleObject(static_cast<HANDLE>(exit_h_.get()),
                                      static_cast<DWORD>(d.count())) == WAIT_OBJECT_0;
 #else
-        pollfd pfd{proc_->exit_handle().get(), POLLIN, 0};
+        pollfd pfd{exit_h_.get(), POLLIN, 0};
         int rc;
         do rc = ::poll(&pfd, 1, static_cast<int>(d.count())); while (rc < 0 && errno == EINTR);
         return rc > 0;
 #endif
     }
 
-    // Wait up to `d` for the exit, and reap once it fires. True when the
-    // child is gone. The reap runs under the guard so it happens once.
+    // Wait up to `d` for the exit, and reap once it fires (under the lock,
+    // so exactly once). True when the child is gone.
     bool wait_exit(std::chrono::milliseconds d) noexcept {
         if (exited()) return true;
         if (!exit_ready(d)) return false;
-        const bool mine = state_.with([](State& s) {
-            if (s.reaping) return false;
-            s.reaping = true;
-            return true;
+        proc_->with([](child_proc& c) {
+            if (c.reaped) return;
+            if (auto st = c.proc.reap())
+                c.exit_code = st->how == maya::platform::exit_status::kind::exited
+                                ? st->code : 128 + st->code;
+            c.reaped = true;
         });
-        if (!mine) return true;
-        std::optional<int> code;
-        if (auto st = proc_->reap())
-            code = st->how == maya::platform::exit_status::kind::exited ? st->code : 128 + st->code;
-        state_.with([](State& s, std::optional<int> c) { s.exit_code = c; s.reaped = true; }, code);
         return true;
     }
 
-    std::optional<maya::platform::native_process> proc_;
-    mutable maya::guarded<State>                   state_;
+    // Behind a pointer: guarded can't move, and the in-buf holds a reference.
+    std::unique_ptr<maya::guarded<child_proc>> proc_;
+    maya::platform::borrowed_handle            exit_h_{};
+    int                                        pid_ = 0;
     std::unique_ptr<child_out_buf> out_buf_;
     std::unique_ptr<child_in_buf>  in_buf_;
     std::unique_ptr<std::istream>  out_stream_;

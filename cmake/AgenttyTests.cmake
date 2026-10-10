@@ -495,6 +495,15 @@ target_link_libraries(concurrency_primitives_test PRIVATE maya::app)
 add_test(NAME concurrency_primitives_test COMMAND concurrency_primitives_test)
 set_tests_properties(concurrency_primitives_test PROPERTIES TIMEOUT 30 LABELS sanitizer)
 
+# ChildProcess under concurrent writes, close_stdin, alive() and terminate().
+# Meant for the TSan tree; the plain build checks it doesn't hang or crash.
+agentty_test(child_process_race_test MODE raw LABELS sanitizer)
+add_executable(child_process_race_test EXCLUDE_FROM_ALL tests/child_process_race_test.cpp)
+target_include_directories(child_process_race_test PRIVATE include)
+target_link_libraries(child_process_race_test PRIVATE maya::app)
+add_test(NAME child_process_race_test COMMAND child_process_race_test)
+set_tests_properties(child_process_race_test PROPERTIES TIMEOUT 60 LABELS sanitizer)
+
 # subagent_lifetime: the provider seam must survive an ABANDONED worker.
 #
 # Subagents run on Cmd::task_isolated threads, which jaal detaches and never
