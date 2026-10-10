@@ -962,6 +962,23 @@ foreach(_pl purity duplication jsonrpc_leaf spawn_via_jaal no_sleep_poll setenv_
 endforeach()
 endif()
 
+add_test(NAME io_roots
+         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/io_roots.py ${CMAKE_SOURCE_DIR})
+set_tests_properties(io_roots PROPERTIES LABELS static TIMEOUT 60)
+
+# An Io can't be conjured: a reducer can neither call an IO function nor
+# build the token. Case 0 compiles, so a broken include can't pass as a fail.
+foreach(_io_case 0 1 2)
+    add_test(NAME io_token_case_${_io_case}
+             COMMAND ${CMAKE_CXX_COMPILER} -std=c++26 -fsyntax-only
+                     -DIO_CASE=${_io_case} -I${CMAKE_SOURCE_DIR}/include
+                     ${CMAKE_SOURCE_DIR}/tests/compile_fail/io_token.cpp)
+    set_tests_properties(io_token_case_${_io_case} PROPERTIES LABELS static TIMEOUT 60)
+    if(NOT _io_case EQUAL 0)
+        set_tests_properties(io_token_case_${_io_case} PROPERTIES WILL_FAIL TRUE)
+    endif()
+endforeach()
+
 add_test(NAME elm_purity
          COMMAND ${CMAKE_COMMAND}
                  -DROOT=${CMAKE_SOURCE_DIR}/src/runtime/app

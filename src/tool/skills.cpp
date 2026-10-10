@@ -569,7 +569,7 @@ void scan_root_signature(const fs::path& root, std::string& sig) {
     }
 }
 
-std::vector<Skill> all() {
+std::vector<Skill> all(Io) {
     // Both passes run outside the lock; only the swap of the result is
     // locked. Two callers racing a change both scan, and the second's
     // identical result replaces the first's: wasted work, never a wrong one.
@@ -638,29 +638,29 @@ std::vector<Skill> all() {
     return out;
 }
 
-std::vector<Shadowed> shadowed() {
-    (void)all();           // ensure a discovery has run
+std::vector<Shadowed> shadowed(Io io) {
+    (void)all(io);           // ensure a discovery has run
     return discovery().read([](const Discovery& d) { return d.shadows; });
 }
 
-bool shadowed_within_scope(std::string_view name) {
+bool shadowed_within_scope(Io io, std::string_view name) {
     // Cross-scope shadowing is the documented rule (project beats user),
     // so it is not a warning. Two directories in the SAME scope claiming
     // one name is the case that is either a mistake or a hiding place.
-    const auto winner = find(name);
+    const auto winner = find(io, name);
     if (!winner) return false;
-    for (const auto& sh : shadowed())
+    for (const auto& sh : shadowed(io))
         if (sh.name == name && sh.source == winner->source) return true;
     return false;
 }
 
-std::optional<Skill> find(std::string_view name) {
-    for (auto& s : all())
+std::optional<Skill> find(Io io, std::string_view name) {
+    for (auto& s : all(io))
         if (s.name == name) return std::move(s);
     return std::nullopt;
 }
 
-std::string catalog_block() {
+std::string catalog_block(Io io) {
     // CACHED. This runs on EVERY turn (provider::system_prompt_for →
     // default_system_prompt), and resolving trust made it expensive: a
     // JSON read of the approvals store plus a SHA-256 over every skill
@@ -679,7 +679,7 @@ std::string catalog_block() {
     };
     static maya::guarded<Built> built_cache;
 
-    const auto skills = all();
+    const auto skills = all(io);
     const std::uint64_t gen =
         discovery().read([](const Discovery& d) { return d.generation; });
 
@@ -715,7 +715,7 @@ std::string catalog_block() {
     // the activation path will refuse just burns a turn and reads as a
     // malfunction. `agentty skill list` shows it as PENDING, which is
     // where a human looks; the model is simply not told about it.
-    const auto approvals = load_approvals();
+    const auto approvals = load_approvals(io);
     auto eligible_for_model = [&](const Skill& s) {
         if (s.user_only) return false;
         // An oversized SKILL.md produced a reporting stub with no body to
@@ -765,8 +765,8 @@ std::string catalog_block() {
     return built;
 }
 
-std::string activation_payload(const Skill& s) {
-    return activation_payload(s, load_approvals());
+std::string activation_payload(Io io, const Skill& s) {
+    return activation_payload(s, load_approvals(io));
 }
 
 std::string activation_payload(const Skill& s, const scope::Approvals& approvals) {
@@ -997,8 +997,8 @@ std::vector<std::string> lint(const Skill& s) {
     return out;
 }
 
-int cmd_skills() {
-    const auto& sk = all();
+int cmd_skills(Io io) {
+    const auto sk = all(io);
     if (sk.empty()) {
         std::printf("no skills installed.\n"
                     "add one: <project>/.agentty/skills/<name>/SKILL.md "

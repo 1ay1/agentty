@@ -45,6 +45,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "agentty/util/io.hpp"
 
 namespace agentty::tools::commands {
 
@@ -61,10 +62,10 @@ struct Command {
 // process-wide keyed on the roots' + files' mtimes (edit → next lookup
 // re-scans). Bounded: kMaxCommands entries, kMaxBodyBytes per body.
 // Returned by value: the cache can be replaced by another thread's rescan.
-[[nodiscard]] std::vector<Command> all();
+[[nodiscard]] std::vector<Command> all(Io);
 
 // Exact-name lookup.
-[[nodiscard]] std::optional<Command> find(std::string_view name);
+[[nodiscard]] std::optional<Command> find(Io, std::string_view name);
 
 // Substitute $ARGUMENTS / $1..$9 / $$ in `body` using the raw argument
 // string `args` (everything the user typed after `/name `).
@@ -75,7 +76,7 @@ struct Command {
 // Otherwise std::nullopt — the text submits unchanged. A leading `/` that
 // matches NO command falls through (the user may legitimately start a
 // message with a path like /etc/hosts).
-[[nodiscard]] std::optional<std::string> try_expand(std::string_view text);
+[[nodiscard]] std::optional<std::string> try_expand(Io, std::string_view text);
 // The same against a list the caller already has (a reducer's snapshot):
 // no discovery, no disk.
 [[nodiscard]] std::optional<std::string> try_expand(std::string_view text,

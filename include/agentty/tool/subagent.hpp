@@ -16,6 +16,8 @@
 #include <optional>
 #include <string>
 
+#include "agentty/util/io.hpp"
+
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/smart_mode.hpp"
@@ -236,7 +238,7 @@ std::size_t shutdown_running(std::chrono::milliseconds grace
 // Returns "builtin" for an unknown name (the safe default — no tag shown).
 // A PROJECT agent's role prompt is attacker-controllable via a clone, so the
 // UI surfaces it; it is NOT blocked (its tools stay gated like any other).
-[[nodiscard]] std::string_view agent_origin(std::string_view name) noexcept;
+[[nodiscard]] std::string_view agent_origin(Io, std::string_view name) noexcept;
 
 } // namespace agentty::tools::subagent
 

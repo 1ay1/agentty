@@ -224,14 +224,14 @@ TEST_CASE("sandbox: the model is TOLD it is sandboxed") {
     ag::reset_config_for_test();
     ag::init(ag::Mode::Off);
     {
-        const auto p = agentty::provider::default_system_prompt();
+        const auto p = agentty::provider::default_system_prompt(::agentty::IoAccess::grant());
         CHECK(p.find("sandbox: ON") == std::string::npos);
     }
 
     ag::reset_config_for_test();
     ag::init(ag::Mode::Auto);
     if (ag::is_active()) {
-        const auto p = agentty::provider::default_system_prompt();
+        const auto p = agentty::provider::default_system_prompt(::agentty::IoAccess::grant());
         CHECK(p.find("sandbox: ON") != std::string::npos);
         // The three things that stop the misdiagnosis: where it can write,
         // that a denial is the sandbox, and that retrying is wrong.

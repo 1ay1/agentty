@@ -39,6 +39,7 @@
 #include "agentty/io/http.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/rpc/peer.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::acp {
 
@@ -122,9 +123,9 @@ private:
     void on_notification(const ::acp::Notification& n);
 
     // ── The headless turn loop ───────────────────────────────────────────
-    void run_turn(std::string session_id, std::string req_id_dump, Responder resp);
+    void run_turn(Io io, std::string session_id, std::string req_id_dump, Responder resp);
 
-    StopReason stream_completion(const std::string& session_id, bool& out_cancelled,
+    StopReason stream_completion(Io io, const std::string& session_id, bool& out_cancelled,
                                  std::string& out_error,
                                  bool suppress_tools = false);
     bool       run_tools(const std::string& session_id, bool& out_cancelled);

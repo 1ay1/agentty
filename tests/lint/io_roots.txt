@@ -1,0 +1,32 @@
+# Files allowed to mint an agentty::Io (IoAccess::grant). See io_roots.py.
+# Each is a place IO is supposed to start. Reducers and views are never here.
+
+# The type, and the effect wrapper reducers return (cmd::io_task).
+include/agentty/util/io.hpp
+include/agentty/runtime/cmd.hpp
+
+# Process entry points: `agentty run`, the CLI verbs.
+src/runtime/main.cpp
+src/tool/skills_cli.cpp
+
+# The ACP server: its handlers run on the RPC reader, not in a reducer.
+src/acp/server.cpp
+
+# Tool bodies and subagents, on tool workers.
+src/tool/mcp_tools_backends.cpp
+
+# The retriever's index, built on its own workers and tool threads.
+src/rag/adapter.cpp
+
+# Tests.
+tests/toolset_e2e_test.cpp
+tests/anthropic_md_stream.cpp
+tests/catalog_cost_probe.cpp
+tests/dispatch_route_test.cpp
+tests/hooks_gate_test.cpp
+tests/sandbox_parity_test.cpp
+tests/skill_catalog_trust_test.cpp
+tests/skills_engine_test.cpp
+tests/skills_panel_test.cpp
+tests/subagent_report_test.cpp
+tests/slash_commands_test.cpp

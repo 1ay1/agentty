@@ -772,7 +772,7 @@ a::ToolCall make_tool_call(const ToolUse& tc, a::ToolCallStatus status,
 // its own set here; agentty exposes the ones that map to real turn actions plus
 // every installed, model-invocable skill as `/<name>`. Sent on session new/load
 // so Zed's `/` menu is populated the same way it is for the native agent.
-a::List<a::AvailableCommand> available_commands() {
+a::List<a::AvailableCommand> available_commands(Io io) {
     a::List<a::AvailableCommand> cmds;
     auto add = [&](std::string name, std::string desc, const char* hint) {
         a::AvailableCommand c;
@@ -786,7 +786,7 @@ a::List<a::AvailableCommand> available_commands() {
     add("compact", "Summarize the conversation to reclaim context window", nullptr);
     add("new",     "Start a fresh conversation, clearing prior context", nullptr);
     // Every installed, model-invocable skill becomes a first-class /command.
-    for (const auto& sk : tools::skills::all()) {
+    for (const auto& sk : tools::skills::all(io)) {
         if (sk.user_only) continue;   // hidden from the model-facing catalog
         if (sk.name.empty()) continue;
         add(sk.name,
@@ -982,7 +982,7 @@ void AgentServer::emit_session_config(const std::string& session_id,
     // Slash-command menu (Zed's `/` composer menu).
     {
         a::SU_AvailableCommands ac;
-        ac.availableCommands = available_commands();
+        ac.availableCommands = available_commands(IoAccess::grant());   // ACP handler: not a reducer
         if (!ac.availableCommands.empty())
             send_update(session_id, std::move(ac));
     }
@@ -1550,7 +1550,7 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     util::run_isolated_detached("acp.turn_worker",
         [](std::stop_token, maya::co_owned<AgentServer> self, std::string sid,
            std::string rid, Responder r) {
-            self->run_turn(std::move(sid), std::move(rid), std::move(r));
+            self->run_turn(IoAccess::grant(), std::move(sid), std::move(rid), std::move(r));
         }, maya::co_owned<AgentServer>::of(*this), std::move(sid),
         std::move(req_id_dump), std::move(resp));
 }
@@ -1563,7 +1563,7 @@ bool is_salvaged_id(const std::string& id) {
 constexpr std::string_view kMemoryToolNames[] = {"remember", "forget", "wipe_memory"};
 }  // namespace
 
-void AgentServer::run_turn(std::string session_id, std::string req_id_dump,
+void AgentServer::run_turn(Io io, std::string session_id, std::string req_id_dump,
                            Responder resp) {
   // This runs on a DETACHED worker thread, entirely outside acp-cpp's
   // handle_request try/catch. An uncaught throw here would call
@@ -1594,7 +1594,7 @@ void AgentServer::run_turn(std::string session_id, std::string req_id_dump,
             errored = true; error_msg = "session vanished"; break;
         }
 
-        StopReason stop = stream_completion(session_id, cancelled, error_msg,
+        StopReason stop = stream_completion(io, session_id, cancelled, error_msg,
                                             force_text_retry);
         last_stop = stop;
         force_text_retry = false;
@@ -1694,7 +1694,7 @@ void AgentServer::run_turn(std::string session_id, std::string req_id_dump,
   }
 }
 
-StopReason AgentServer::stream_completion(const std::string& session_id,
+StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
                                           bool& out_cancelled,
                                           std::string& out_error,
                                           bool suppress_tools) {
@@ -1724,7 +1724,7 @@ StopReason AgentServer::stream_completion(const std::string& session_id,
     // local endpoints get the compact profile.
     {
         const auto sel = provider::active();
-        req.system_prompt = provider::system_prompt_for(sel);
+        req.system_prompt = provider::system_prompt_for(io, sel);
         // First-class weak-model support (agent-zero style): weak models on
         // the Ollama native endpoint use the JSON-protocol path (inline tool
         // catalog, single {tool_name,tool_args} object) instead of the native

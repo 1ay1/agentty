@@ -37,12 +37,12 @@ int main() {
     ::setenv("AGENTTY_HOME", (home / ".agentty").c_str(), 1);
 
     // Warm the skills cache so we measure the catalog, not discovery.
-    (void)catalog_block();
+    (void)catalog_block(::agentty::IoAccess::grant());
 
     constexpr int kRuns = 200;
     const auto t0 = std::chrono::steady_clock::now();
     std::size_t sink = 0;
-    for (int i = 0; i < kRuns; ++i) sink += catalog_block().size();
+    for (int i = 0; i < kRuns; ++i) sink += catalog_block(::agentty::IoAccess::grant()).size();
     const auto t1 = std::chrono::steady_clock::now();
 
     const auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();

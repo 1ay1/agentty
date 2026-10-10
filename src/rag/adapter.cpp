@@ -775,6 +775,10 @@ using DenseState = std::variant<dense::Unprobed, dense::Ready, dense::Unavailabl
 // maya::guarded: every method below runs inside index.with(), so the lock is
 // implied by the receiver. Held across whole rebuilds on purpose; the UI's
 // status row uses try_read so a frame never waits on one.
+// The index only runs on the retriever's own workers and tool threads, never
+// in a reducer (the RAG pane reads it through cmd::read_rag_embed_status).
+inline Io index_io() { return IoAccess::grant(); }
+
 struct Index {
     // The warm worker's cancel flag, owned by Impl (outside the lock, so
     // shutdown can trip it while a rebuild holds the index). refresh_docs()
@@ -1026,7 +1030,7 @@ struct Index {
     std::uint64_t skills_fingerprint() const {
         std::uint64_t h = 1469598103934665603ull;
         if (!cfg.skills) return h;
-        for (const auto& s : tools::skills::all()) {
+        for (const auto& s : tools::skills::all(index_io())) {
             hash_text(h, s.name);
             hash_text(h, s.body);
         }
@@ -1064,7 +1068,7 @@ struct Index {
         warm_engine = ::rag::Engine(make_engine_config());
         if (dense_ready()) (void)warm_engine.with_embedder_spec(embedder_spec(), ::agentty::rag::registries());
         if (cfg.skills)
-            for (const auto& s : tools::skills::all())
+            for (const auto& s : tools::skills::all(index_io()))
                 if (!s.body.empty())
                     (void)warm_engine.add("skill://" + s.name, s.body,
                                           {{"kind", "skill"}}, s.name);
@@ -1115,7 +1119,7 @@ struct Index {
 
         // Skills.
         if (cfg.skills) {
-            for (const auto& s : tools::skills::all()) {
+            for (const auto& s : tools::skills::all(index_io())) {
                 if (s.body.empty()) continue;
                 (void)engine.add("skill://" + s.name, s.body, {{"kind", "skill"}}, s.name);
             }

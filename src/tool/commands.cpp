@@ -187,7 +187,7 @@ maya::guarded<Cache>& cache() {
 
 } // namespace
 
-std::vector<Command> all() {
+std::vector<Command> all(Io) {
     // Scan outside the lock (directory walk + file reads), then keep the
     // fresh list only if the signature moved.
     std::string sig;
@@ -218,8 +218,8 @@ std::vector<Command> all() {
         std::move(sig), std::move(fresh));
 }
 
-std::optional<Command> find(std::string_view name) {
-    for (auto& c : all())
+std::optional<Command> find(Io io, std::string_view name) {
+    for (auto& c : all(io))
         if (c.name == name) return std::move(c);
     return std::nullopt;
 }
@@ -269,9 +269,9 @@ std::string expand(std::string_view body, std::string_view args) {
     return out;
 }
 
-std::optional<std::string> try_expand(std::string_view text) {
+std::optional<std::string> try_expand(Io io, std::string_view text) {
     if (text.empty() || text[0] != '/') return std::nullopt;
-    return try_expand(text, all());
+    return try_expand(text, all(io));
 }
 
 std::optional<std::string> try_expand(std::string_view text, const std::vector<Command>& known) {

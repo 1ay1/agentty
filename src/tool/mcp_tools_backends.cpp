@@ -292,11 +292,12 @@ class AgenttySkillResolver final : public mt::SkillResolver {
 public:
     std::optional<std::string> load(const mt::Call& call, const std::string& name,
                                     std::string& err) override {
-        const auto s = skills::find(name);
+        const Io io = IoAccess::grant();   // a tool body, on a tool worker
+        const auto s = skills::find(io, name);
         if (!s) {
             std::ostringstream avail;
             bool first = true;
-            for (const auto& sk : skills::all()) {
+            for (const auto& sk : skills::all(io)) {
                 avail << (first ? "" : ", ") << sk.name;
                 first = false;
             }
@@ -316,7 +317,7 @@ public:
                    "session — its instructions are in an earlier tool_result. "
                    "Refer to that instead of re-loading.";
         }
-        return skills::activation_payload(*s);
+        return skills::activation_payload(io, *s);
     }
 };
 
@@ -423,7 +424,7 @@ void rag_apply_settings_now(const store::RagConfig& s) {
     r.apply_config(rag_config_from_settings(s, r.snapshot_config()));
 }
 
-RagEmbedStatus rag_embed_status() {
+RagEmbedStatus rag_embed_status(Io) {
     RagEmbedStatus out;
     try {
         const auto s = shared_retriever().embed_status();
@@ -908,8 +909,8 @@ const AgentType& resolve_agent_type(std::string_view t) {
     return false;
 }
 
-std::string subagent_system_prompt(const AgentType& type) {
-    std::string base = provider::default_system_prompt(/*lean=*/true);
+std::string subagent_system_prompt(Io io, const AgentType& type) {
+    std::string base = provider::default_system_prompt(io, /*lean=*/true);
     base += "\n\n<subagent>\n";
     base += std::string{type.role};
     base +=
@@ -1097,7 +1098,7 @@ provider::StreamResult run_one_completion(Thread& thread,
     // the model's own known window instead of a hole.
     if (req.context_window <= 0)
         req.context_window = agentty::catalog_context_window_for(req.model);
-    req.system_prompt = subagent_system_prompt(type);
+    req.system_prompt = subagent_system_prompt(IoAccess::grant(), type);   // subagent runs on a tool worker
     // Smart-channel telemetry, the delegation half of the trace. Without this
     // a debug log showed ONLY the Strategic turn: subagents dispatch on a
     // worker thread through the same transport, so their requests appeared
@@ -2314,7 +2315,7 @@ namespace subagent {
 // type through the SAME lookup the runner uses, then maps its origin to a
 // stable label. Unknown → "builtin" (no tag shown). Defined at end-of-TU so
 // it doesn't shadow the subagent::current() calls used earlier in the file.
-std::string_view agent_origin(std::string_view name) noexcept {
+std::string_view agent_origin(Io, std::string_view name) noexcept {
     const AgentType& t = resolve_agent_type(name);
     switch (t.origin) {
         case AgentOrigin::User:    return "user";

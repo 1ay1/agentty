@@ -1096,8 +1096,8 @@ Cmd launch_stream(Model& m) {
         provider::Selection selection;
     };
 
-    return Cmd::task(
-        [](maya::Sink<Msg> out, std::stop_token, TurnInputs in) mutable {
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg> out, std::stop_token, TurnInputs in) {
         auto& thread                  = in.thread;
         const auto compacting         = in.compacting;
         const auto compaction_style   = in.compaction_style;
@@ -1148,7 +1148,7 @@ Cmd launch_stream(Model& m) {
         // and OpenAI-compatible models receive the same complete agent/tool/RAG
         // instructions; only constrained local endpoints use a compact profile.
         const auto sel_now = in.selection;
-        req.system_prompt = provider::system_prompt_for(sel_now);
+        req.system_prompt = provider::system_prompt_for(io, sel_now);
         // Layer 3a (orchestration): teach the Strategic model to keep the
         // thinking and DELEGATE mechanical work to subagents — the
         // orchestrator-workers pattern. Only on the main turn (never on the
@@ -2501,8 +2501,8 @@ Cmd load_threads_async() {
 }
 
 Cmd load_library() {
-    return Cmd::task_isolated([](maya::Sink<Msg> out, std::stop_token) {
-        out.send(Msg{LibraryLoaded{read_library()}});
+    return cmd::io_task_isolated([](Io io, maya::Sink<Msg> out, std::stop_token) {
+        out.send(Msg{LibraryLoaded{read_library(io)}});
     });
 }
 
@@ -2541,8 +2541,8 @@ Cmd settings_add(settings::Category concern, std::string line) {
 }
 
 Cmd read_rag_embed_status(std::uint64_t gen) {
-    return Cmd::task_isolated([](maya::Sink<Msg> out, std::stop_token, std::uint64_t g) {
-        const auto st = tools::rag_embed_status();
+    return cmd::io_task_isolated([](Io io, maya::Sink<Msg> out, std::stop_token, std::uint64_t g) {
+        const auto st = tools::rag_embed_status(io);
         RagEmbedStatusRead r;
         r.gen        = g;
         r.ready      = st.state == tools::RagEmbedStatus::State::Ready;

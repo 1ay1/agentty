@@ -73,6 +73,7 @@
 
 #include "agentty/scope/scope.hpp"
 #include "agentty/tool/effects.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::tools::skills {
 
@@ -127,12 +128,12 @@ struct Skill {
 // is cached process-wide keyed by the roots' AND each SKILL.md's mtime
 // (an in-place edit to a skill is picked up next turn). Project skills
 // shadow user skills with the same name.
-[[nodiscard]] std::vector<Skill> all();
+[[nodiscard]] std::vector<Skill> all(Io);
 
 // Look up one skill by exact name. nullptr if absent. Finds
 // `disable-model-invocation` skills too (explicit lookup is allowed;
 // only the catalog hides them).
-[[nodiscard]] std::optional<Skill> find(std::string_view name);
+[[nodiscard]] std::optional<Skill> find(Io, std::string_view name);
 
 // Render the compact tier-1 catalog block for the system prompt:
 //   <skills>
@@ -143,14 +144,14 @@ struct Skill {
 // Skills flagged `disable-model-invocation` are omitted entirely (hidden
 // beats listed-but-blocked: the model never wastes a turn on them).
 // Empty string when no eligible skills exist (no block emitted).
-[[nodiscard]] std::string catalog_block();
+[[nodiscard]] std::string catalog_block(Io);
 
 // Render one skill's tier-2 activation payload: the body wrapped in
 // <skill_content name="...">, the absolute skill directory (so the model
 // can resolve relative references), the compatibility note when present,
 // and the <skill_resources> listing of bundled files. This is what the
 // `skill` tool returns.
-[[nodiscard]] std::string activation_payload(const Skill& s);
+[[nodiscard]] std::string activation_payload(Io, const Skill& s);
 // The same against an approvals store the caller already has: pure.
 [[nodiscard]] std::string activation_payload(const Skill& s, const scope::Approvals& approvals);
 
@@ -289,11 +290,11 @@ struct Shadowed {
 
 // Every skill dropped for a name collision during the last discovery.
 // Empty in the overwhelming majority of installs.
-[[nodiscard]] std::vector<Shadowed> shadowed();
+[[nodiscard]] std::vector<Shadowed> shadowed(Io);
 
 // Is this name claimed by more than one directory in the SAME scope?
 // That is the case worth flagging — cross-scope shadowing is intended.
-[[nodiscard]] bool shadowed_within_scope(std::string_view name);
+[[nodiscard]] bool shadowed_within_scope(Io, std::string_view name);
 
 // Is this name safe to use as a directory name?
 //
@@ -374,7 +375,7 @@ inline constexpr std::string_view kApprovalsLeaf = "skills_approved.json";
 // Load / persist the skill approvals store (kApprovalsLeaf under the user
 // root). Separate from hooks' and MCP's stores on purpose: approving a
 // skill must not silently approve an MCP server.
-[[nodiscard]] scope::Approvals load_approvals();
+[[nodiscard]] scope::Approvals load_approvals(Io);
 void                           save_approvals(const scope::Approvals&);
 
 // Convenience: resolve a skill's trust against the persisted store.
@@ -403,7 +404,7 @@ int cli(const std::vector<std::string>& argv);
 // with lint diagnostics. Returns 0 when every skill is clean, 1 when
 // any diagnostic fired — usable in CI exactly like `skills-ref
 // validate`, with zero extra tooling.
-int cmd_skills();
+int cmd_skills(Io);
 
 inline constexpr std::size_t kMaxSkills     = 64;
 inline constexpr std::size_t kMaxBodyBytes  = 64 * 1024;

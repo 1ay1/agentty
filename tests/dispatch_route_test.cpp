@@ -250,10 +250,10 @@ TEST_CASE("hosted models share agent prompt policy") {
     const auto chatgpt   = provider::parse_selection("chatgpt");
     const auto local     = provider::parse_selection("llama.cpp");
 
-    const std::string full = provider::system_prompt_for(anthropic);
+    const std::string full = provider::system_prompt_for(::agentty::IoAccess::grant(), anthropic);
     CHECK(!full.empty());
-    CHECK(provider::system_prompt_for(chatgpt) == full);
-    CHECK(provider::system_prompt_for(local) != full);
+    CHECK(provider::system_prompt_for(::agentty::IoAccess::grant(), chatgpt) == full);
+    CHECK(provider::system_prompt_for(::agentty::IoAccess::grant(), local) != full);
 }
 
 

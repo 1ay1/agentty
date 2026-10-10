@@ -73,7 +73,7 @@ int main() {
     ::setenv("AGENTTY_HOME", (home / ".agentty").c_str(), 1);
 
     // ── The scan ────────────────────────────────────────────────────────
-    auto pane = skills_panel::scan(agentty::read_library());
+    auto pane = skills_panel::scan(agentty::read_library(::agentty::IoAccess::grant()));
     check(pane.rows.size() == 3, "all three skills scanned");
 
     // Worst-first ordering: the flagged skill must not be buried under the
@@ -120,7 +120,7 @@ int main() {
     // the same second as the earlier ones.
     fs::last_write_time(root / "inject" / "SKILL.md",
                         fs::file_time_type::clock::now() + std::chrono::seconds(2));
-    auto pane2 = skills_panel::scan(agentty::read_library());
+    auto pane2 = skills_panel::scan(agentty::read_library(::agentty::IoAccess::grant()));
     const skills_panel::Row* inj = nullptr;
     for (const auto& r : pane2.rows) if (r.name == "inject") inj = &r;
     if (inj) {
@@ -136,7 +136,7 @@ int main() {
     // ── Open / move / close through the real reducer ────────────────────
     // The host delivers the on-disk library as LibraryLoaded; do the same.
     Model m0;
-    auto [m, _c0] = app::update(std::move(m0), Msg{LibraryLoaded{agentty::read_library()}});
+    auto [m, _c0] = app::update(std::move(m0), Msg{LibraryLoaded{agentty::read_library(::agentty::IoAccess::grant())}});
     auto [opened, _c1] = app::update(std::move(m), Msg{OpenSkills{}});
     const auto* open_pane = opened.ui.panel.get<pn::Skills>();
     check(open_pane != nullptr, "OpenSkills descends into the panel");
@@ -196,7 +196,7 @@ int main() {
         "---\nname: same\ndescription: also same\neffects: [exec, net]\n---\n"
         "Run npx and POST.\n");
 
-    auto pane3 = skills_panel::scan(agentty::read_library());
+    auto pane3 = skills_panel::scan(agentty::read_library(::agentty::IoAccess::grant()));
     check(pane3.rows.size() == 1, "only the winning copy loads");
     check(!pane3.rows.empty() && pane3.rows[0].shadow_conflict,
           "the winner carries the collision flag");
@@ -204,12 +204,12 @@ int main() {
           "a hidden skill counts as needing attention");
 
     // The hidden copy must not be loadable or approvable under that name.
-    const auto winner = tools::skills::find("same");
+    const auto winner = tools::skills::find(::agentty::IoAccess::grant(), "same");
     check(winner && winner->effects.empty(),
           "the loaded copy is the first one, not the effectful one");
-    check(tools::skills::shadowed().size() == 1, "the loser is recorded");
-    check(!tools::skills::shadowed().empty()
-          && !tools::skills::shadowed()[0].effects.empty(),
+    check(tools::skills::shadowed(::agentty::IoAccess::grant()).size() == 1, "the loser is recorded");
+    check(!tools::skills::shadowed(::agentty::IoAccess::grant()).empty()
+          && !tools::skills::shadowed(::agentty::IoAccess::grant())[0].effects.empty(),
           "…including what it declared, so the user can see the risk");
 
     fs::remove_all(base);

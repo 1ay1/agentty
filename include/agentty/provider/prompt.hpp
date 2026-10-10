@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "agentty/provider/provider.hpp"   // provider::ToolSpec
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider {
 
@@ -30,7 +31,7 @@ using ToolSpec = provider::ToolSpec;
 // on-demand skills catalog — a subagent never calls remember/forget/wipe (not
 // in its allowlist) and doesn't persist facts, so that large block is pure
 // billed dead-weight on its prefix. Default (false) is the full parent prompt.
-[[nodiscard]] std::string default_system_prompt(bool lean = false);
+[[nodiscard]] std::string default_system_prompt(Io, bool lean = false);
 
 // Per-provider prompt OVERLAY — a small delta appended to the shared base so a
 // specific (usually "pedantic") model can get extra rules or tone tweaks
@@ -42,7 +43,7 @@ using ToolSpec = provider::ToolSpec;
 // The base prompt with the provider's overlay applied. Callers that know the
 // provider id should prefer this over default_system_prompt() so overlays take
 // effect; the policy layer (prompt_policy.cpp) uses it.
-[[nodiscard]] std::string system_prompt_with_overlay(std::string_view provider_id,
+[[nodiscard]] std::string system_prompt_with_overlay(Io, std::string_view provider_id,
                                                      bool lean = false);
 
 // Tool specs corresponding to our local tool implementations.

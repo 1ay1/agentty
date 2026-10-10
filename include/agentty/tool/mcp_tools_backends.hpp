@@ -12,6 +12,8 @@
 
 #include <mcp/tools/host.hpp>
 
+#include "agentty/util/io.hpp"
+
 #include <optional>
 #include <string>
 
@@ -69,7 +71,7 @@ struct RagEmbedStatus {
     std::string   reason;
     std::string   describe;
 };
-[[nodiscard]] RagEmbedStatus rag_embed_status();
+[[nodiscard]] RagEmbedStatus rag_embed_status(Io);
 
 // Probe an ARBITRARY embed configuration without disturbing the live
 // retriever — what the picker's "Test connection" row runs on a worker

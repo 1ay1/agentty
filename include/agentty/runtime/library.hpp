@@ -12,6 +12,7 @@
 #include "agentty/scope/scope.hpp"
 #include "agentty/tool/commands.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty {
 
@@ -49,6 +50,6 @@ struct Library {
 };
 
 // Read everything above from disk. Worker-side only.
-[[nodiscard]] Library read_library();
+[[nodiscard]] Library read_library(Io);
 
 }  // namespace agentty

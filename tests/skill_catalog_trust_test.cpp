@@ -40,18 +40,18 @@ int main() {
         if (!ok) ++failures;
     };
 
-    const auto block = catalog_block();
+    const auto block = catalog_block(::agentty::IoAccess::grant());
     check(block.find("prose") != std::string::npos,
           "prose skill IS advertised to the model");
     check(block.find("risky") == std::string::npos,
           "unapproved effectful skill is NOT advertised");
 
-    const auto risky = find("risky");
+    const auto risky = find(::agentty::IoAccess::grant(), "risky");
     if (!risky) {
         std::printf("FAIL risky skill did not load at all\n");
         return 1;
     }
-    const auto payload = activation_payload(*risky);
+    const auto payload = activation_payload(::agentty::IoAccess::grant(), *risky);
     check(payload.find("SECRET-BODY-MARKER") == std::string::npos,
           "refusal does not leak the skill body");
     check(payload.find("skill_blocked") != std::string::npos,
@@ -60,8 +60,8 @@ int main() {
           "refusal tells the model what the user should run");
 
     // A prose skill still activates normally.
-    const auto prose = find("prose");
-    check(prose && activation_payload(*prose).find("Short sentences")
+    const auto prose = find(::agentty::IoAccess::grant(), "prose");
+    check(prose && activation_payload(::agentty::IoAccess::grant(), *prose).find("Short sentences")
                    != std::string::npos,
           "prose skill activates unchanged");
 

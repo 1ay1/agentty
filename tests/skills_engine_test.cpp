@@ -91,15 +91,15 @@ TEST_CASE("skills engine") {
         "---\nname: beta\ndescription: project interop beta\n---\nBETA BODY\n");
 
     {
-        const auto a = skills::find("alpha");
+        const auto a = skills::find(::agentty::IoAccess::grant(), "alpha");
         CHECK(a.has_value());
         if (a) {
             CHECK(a->source == "project");          // project shadows user
             CHECK(a->body == "PROJECT BODY");
             CHECK(!a->dir.empty());
         }
-        CHECK(skills::find("claude-only").has_value());   // .claude compat
-        CHECK(skills::find("beta").has_value());          // .agents interop
+        CHECK(skills::find(::agentty::IoAccess::grant(), "claude-only").has_value());   // .claude compat
+        CHECK(skills::find(::agentty::IoAccess::grant(), "beta").has_value());          // .agents interop
     }
 
     // ── Stage 2: lenient parsing ─────────────────────────────────────
@@ -113,11 +113,11 @@ TEST_CASE("skills engine") {
     write_file_at(work / ".agentty/skills/bare/SKILL.md",
         "Just a bare instruction doc.\nMore text.\n");
     {
-        const auto c = skills::find("colons");
+        const auto c = skills::find(::agentty::IoAccess::grant(), "colons");
         CHECK(c && c->description == "Use when: things have colons");
-        CHECK(skills::find("othername").has_value());
-        CHECK(!skills::find("dirname-x").has_value());  // frontmatter name won
-        const auto b = skills::find("bare");
+        CHECK(skills::find(::agentty::IoAccess::grant(), "othername").has_value());
+        CHECK(!skills::find(::agentty::IoAccess::grant(), "dirname-x").has_value());  // frontmatter name won
+        const auto b = skills::find(::agentty::IoAccess::grant(), "bare");
         CHECK(b && b->description == "Just a bare instruction doc.");
     }
 
@@ -145,7 +145,7 @@ TEST_CASE("skills engine") {
         "  second folded line\n"
         "---\nFOLD BODY\n");
     {
-        const auto f = skills::find("full-meta");
+        const auto f = skills::find(::agentty::IoAccess::grant(), "full-meta");
         CHECK(f && f->compatibility == "Requires python3");
         CHECK(f && f->allowed_tools == "bash read");
         CHECK(f && f->license == "Apache-2.0");
@@ -156,14 +156,14 @@ TEST_CASE("skills engine") {
             CHECK(f->metadata[1].first == "version"
                   && f->metadata[1].second == "1.0");
         }
-        const auto fo = skills::find("folded");
+        const auto fo = skills::find(::agentty::IoAccess::grant(), "folded");
         CHECK(fo && fo->description ==
               "First folded line second folded line");
         CHECK(fo && fo->body == "FOLD BODY");
         // hidden: findable explicitly, absent from the catalog.
-        const auto h = skills::find("hidden");
+        const auto h = skills::find(::agentty::IoAccess::grant(), "hidden");
         CHECK(h && h->user_only);
-        auto cat = skills::catalog_block();
+        auto cat = skills::catalog_block(::agentty::IoAccess::grant());
         CHECK(cat.find("full-meta") != std::string::npos);
         CHECK(cat.find("hidden") == std::string::npos);
         // Catalog mentions the tier-3 contract.
@@ -179,14 +179,14 @@ TEST_CASE("skills engine") {
     write_file_at(work / ".agentty/skills/with-res/references/REF.md",
         "deep reference\n");
     {
-        const auto w = skills::find("with-res");
+        const auto w = skills::find(::agentty::IoAccess::grant(), "with-res");
         CHECK(w.has_value());
         if (w) {
             CHECK(w->resources.size() == 2);
             // Sorted, relative, forward slashes; SKILL.md excluded.
             CHECK(w->resources[0] == "references/REF.md");
             CHECK(w->resources[1] == "scripts/go.sh");
-            auto pay = skills::activation_payload(*w);
+            auto pay = skills::activation_payload(::agentty::IoAccess::grant(), *w);
             CHECK(pay.find("<skill_content name=\"with-res\">") == 0);
             CHECK(pay.find("Skill directory: ") != std::string::npos);
             CHECK(pay.find("<skill_resources>") != std::string::npos);
@@ -271,7 +271,7 @@ TEST_CASE("skills engine") {
     // ── Stage 5b: spec lint ───────────────────────────────────
     {
         // Clean skill → no diagnostics.
-        const auto f = skills::find("full-meta");
+        const auto f = skills::find(::agentty::IoAccess::grant(), "full-meta");
         CHECK(f && skills::lint(*f).empty());
         // Violations → diagnostics fire (loading stayed lenient).
         skills::Skill bad;
@@ -280,7 +280,7 @@ TEST_CASE("skills engine") {
         auto diags = skills::lint(bad);
         CHECK(diags.size() >= 3);   // charset + double hyphen + edge + desc
         // name/dir mismatch caught.
-        const auto mm = skills::find("othername");
+        const auto mm = skills::find(::agentty::IoAccess::grant(), "othername");
         bool has_mismatch = false;
         if (mm) for (const auto& d : skills::lint(*mm))
             if (d.find("does not match parent directory") != std::string::npos)
@@ -308,7 +308,7 @@ TEST_CASE("skills engine") {
     write_file_at(work / ".agentty/skills/x/pair/SKILL.md",
         "---\nname: pair\ndescription: deeper\n---\nDEEPER\n");
     {
-        const auto n = skills::find("embedded-startup");
+        const auto n = skills::find(::agentty::IoAccess::grant(), "embedded-startup");
         CHECK(n && n->body == "NESTED BODY");
         CHECK(n && n->source == "project");
         // Lint compares against the LEAF directory, not the joined name.
@@ -320,14 +320,14 @@ TEST_CASE("skills engine") {
             CHECK(!mismatch);
         }
         // Explicit `name:` missing → fallback is the joined path slug.
-        const auto impl = skills::find("perf-alloc");
+        const auto impl = skills::find(::agentty::IoAccess::grant(), "perf-alloc");
         CHECK(impl && impl->body == "IMPLICIT NAME BODY");
-        const auto deep = skills::find("deep-a-b-c");
+        const auto deep = skills::find(::agentty::IoAccess::grant(), "deep-a-b-c");
         CHECK(deep && deep->body == "BODY");
         // Hidden dirs never yield skills.
-        CHECK(!skills::find("cache-junk").has_value());
+        CHECK(!skills::find(::agentty::IoAccess::grant(), "cache-junk").has_value());
         // Shallower beats deeper on a joined-name collision.
-        const auto p = skills::find("pair");
+        const auto p = skills::find(::agentty::IoAccess::grant(), "pair");
         CHECK(p && p->description == "shallow");
         CHECK(p && p->body == "SHALLOW");
     }
@@ -346,7 +346,7 @@ TEST_CASE("skills engine") {
     write_file_at(work / ".agentty/skills/ambig/dup/SKILL.md",
         "---\ndescription: nested and deeper\n---\nNESTED\n");
     {
-        const auto a = skills::find("ambig-dup");
+        const auto a = skills::find(::agentty::IoAccess::grant(), "ambig-dup");
         CHECK(a.has_value());
         CHECK(a && a->body == "FLAT");
         CHECK(a && a->description == "flat and shallow");
@@ -361,12 +361,12 @@ TEST_CASE("skills engine") {
     write_file_at(work / ".agentty/skills/My Group/Sub_Dir/SKILL.md",
         "---\ndescription: charset\n---\nCHARSET\n");
     {
-        const auto c = skills::find("my-group-sub-dir");
+        const auto c = skills::find(::agentty::IoAccess::grant(), "my-group-sub-dir");
         CHECK(c.has_value());
         CHECK(c && c->body == "CHARSET");
         // The raw, unsanitized form must not exist under any spelling.
-        CHECK(!skills::find("My Group-Sub_Dir").has_value());
-        for (const auto& sk : skills::all()) {
+        CHECK(!skills::find(::agentty::IoAccess::grant(), "My Group-Sub_Dir").has_value());
+        for (const auto& sk : skills::all(::agentty::IoAccess::grant())) {
             bool clean = true;
             for (unsigned char ch : sk.name) {
                 const bool ok = (ch >= 'a' && ch <= 'z')
@@ -385,7 +385,7 @@ TEST_CASE("skills engine") {
     write_file_at(work / ".agentty/skills/-Odd  Name-/SKILL.md",
         "---\ndescription: collapse\n---\nCOLLAPSE\n");
     {
-        const auto c = skills::find("odd-name");
+        const auto c = skills::find(::agentty::IoAccess::grant(), "odd-name");
         CHECK(c && c->body == "COLLAPSE");
     }
 
@@ -406,12 +406,12 @@ TEST_CASE("skills engine") {
         fs::create_directory_symlink(
             target, work / ".agentty/skills/aliased", lec);
         if (!lec) {   // skip where symlinks are unavailable (some CI hosts)
-            const auto l = skills::find("aliased");
+            const auto l = skills::find(::agentty::IoAccess::grant(), "aliased");
             CHECK(l.has_value());
             CHECK(l && l->body == "LINKED");
             // The resolved path must never leak into the name.
-            CHECK(!skills::find("real-skill-dir").has_value());
-            for (const auto& sk : skills::all())
+            CHECK(!skills::find(::agentty::IoAccess::grant(), "real-skill-dir").has_value());
+            for (const auto& sk : skills::all(::agentty::IoAccess::grant()))
                 CHECK(sk.name.find("..") == std::string::npos);
         }
     }
@@ -428,11 +428,11 @@ TEST_CASE("skills engine") {
         write_file_at(deep / "SKILL.md",
             "---\ndescription: past the cap\n---\nTOODEEP\n");
         int past_cap = 0;
-        for (const auto& sk : skills::all())
+        for (const auto& sk : skills::all(::agentty::IoAccess::grant()))
             if (sk.description == "past the cap") ++past_cap;
         CHECK(past_cap == 0);
         // …and every name that IS discovered is typeable.
-        for (const auto& sk : skills::all())
+        for (const auto& sk : skills::all(::agentty::IoAccess::grant()))
             CHECK(sk.name.size() <= skills::kMaxSlugLen);
     }
 
@@ -443,18 +443,18 @@ TEST_CASE("skills engine") {
         "---\nname: host-nested-inner\ndescription: inside host\n---\nINNER\n");
     write_file_at(work / ".agentty/skills/host/refs/NOTE.md", "plain ref\n");
     {
-        const auto h = skills::find("host");
+        const auto h = skills::find(::agentty::IoAccess::grant(), "host");
         CHECK(h && h->resources.size() == 1);
         if (h && h->resources.size() == 1)
             CHECK(h->resources[0] == "refs/NOTE.md");
-        CHECK(skills::find("host-nested-inner").has_value());
+        CHECK(skills::find(::agentty::IoAccess::grant(), "host-nested-inner").has_value());
     }
 
     // Project shadows user with the same nested name.
     write_file_at(home / ".agentty/skills/embedded/startup/SKILL.md",
         "---\nname: embedded-startup\ndescription: user variant\n---\nUSER BODY\n");
     {
-        const auto n = skills::find("embedded-startup");
+        const auto n = skills::find(::agentty::IoAccess::grant(), "embedded-startup");
         CHECK(n && n->source == "project" && n->body == "NESTED BODY");
     }
 
@@ -466,7 +466,7 @@ TEST_CASE("skills engine") {
     write_file_at(home / ".agentty/skills/usr-res/references/SECRET-FREE.md",
         "outside-workspace resource\n");
     {
-        const auto u = skills::find("usr-res");   // discovery registers allowlist
+        const auto u = skills::find(::agentty::IoAccess::grant(), "usr-res");   // discovery registers allowlist
         CHECK(u.has_value());
         auto res = (home / ".agentty/skills/usr-res/references/SECRET-FREE.md").string();
         CHECK(util::is_read_allowlisted(res));
@@ -555,25 +555,25 @@ TEST_CASE("skills catalog cap: AGENTTY_MAX_SKILLS override") {
     // ── Default (unset): kMaxSkills entries survive the walk AND the
     // catalog slice — the cap applies to the WORK as well as the RESULT.
     unset_env();
-    CHECK(skills::all().size() == skills::kMaxSkills);
+    CHECK(skills::all(::agentty::IoAccess::grant()).size() == skills::kMaxSkills);
 
     // ── Raised: every discovered skill is catalogued, including the ones
     // the default-capped walk never even visited.
     set_env("200");
-    CHECK(skills::all().size() == kSkills);
-    CHECK(skills::find("cap-skill-79").has_value());
+    CHECK(skills::all(::agentty::IoAccess::grant()).size() == kSkills);
+    CHECK(skills::find(::agentty::IoAccess::grant(), "cap-skill-79").has_value());
 
     // ── Lowered: the catalog truncates to the override.
     set_env("10");
-    CHECK(skills::all().size() == 10);
+    CHECK(skills::all(::agentty::IoAccess::grant()).size() == 10);
 
     // ── Clamp floor: below the floor pins to it.
     set_env("2");
-    CHECK(skills::all().size() == 8);
+    CHECK(skills::all(::agentty::IoAccess::grant()).size() == 8);
 
     // ── Malformed: garbage keeps the default cap.
     set_env("not-a-number");
-    CHECK(skills::all().size() == skills::kMaxSkills);
+    CHECK(skills::all(::agentty::IoAccess::grant()).size() == skills::kMaxSkills);
 
     // ── ONE resolution per discovery pass ───────────────────────────
     // The cap bounds scan_root's WALK, so it used to be consulted per
@@ -594,7 +594,7 @@ TEST_CASE("skills catalog cap: AGENTTY_MAX_SKILLS override") {
             "---\nname: cap-skill-0\ndescription: touched\n---\nB\n");
         set_env("not-a-number");          // the path that used to spam
         const auto before = skills::debug_cap_resolutions();
-        (void)skills::all();
+        (void)skills::all(::agentty::IoAccess::grant());
         const auto after = skills::debug_cap_resolutions();
         CHECK_MESSAGE(after - before == 1,
             "a discovery pass resolved the cap " << (after - before)
@@ -641,7 +641,7 @@ TEST_CASE("skills: an oversized SKILL.md is reported, not dropped") {
         write_file_at(work / ".agentty/skills/toobig/SKILL.md", big);
     }
 
-    const auto& all = skills::all();
+    const auto& all = skills::all(::agentty::IoAccess::grant());
     const skills::Skill* fine = nullptr;
     const skills::Skill* big  = nullptr;
     for (const auto& s : all) {
@@ -668,7 +668,7 @@ TEST_CASE("skills: an oversized SKILL.md is reported, not dropped") {
 
     // And it must NOT reach the model: there is no body to activate, so
     // offering it would buy a wasted turn.
-    const std::string catalog = skills::catalog_block();
+    const std::string catalog = skills::catalog_block(::agentty::IoAccess::grant());
     CHECK(catalog.find("toobig") == std::string::npos,
           "an unloadable skill is never offered to the model");
     CHECK(catalog.find("fine") != std::string::npos,

@@ -476,8 +476,8 @@ std::pair<Model, Cmd> init() {
     // here moves that probe to a background thread; by the first turn the
     // retriever is warm (or has already cached its Unavailable verdict) and
     // the gate is a cheap snapshot read.
-    cmds.push_back(Cmd::task_isolated(
-        [](maya::Sink<Msg>, std::stop_token) { (void)tools::rag_embed_status(); }));
+    cmds.push_back(cmd::io_task_isolated(
+        [](Io io, maya::Sink<Msg>, std::stop_token) { (void)tools::rag_embed_status(io); }));
     cmds.push_back(Cmd::task_isolated(
         [](maya::Sink<Msg>, std::stop_token st) { prewarm_workspace_symbols(st); }));
 

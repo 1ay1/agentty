@@ -66,7 +66,7 @@ void unapproved_never_runs(const fs::path& sandbox) {
                                   {"run", "touch " + marker.string()}}}},
                }.dump());
 
-    check(hooks::pending_approval(), "unapproved file reports pending");
+    check(hooks::pending_approval(::agentty::IoAccess::grant()), "unapproved file reports pending");
     auto d = hooks::run_pre_tool("shell", "{}");
     check(!d.blocked, "unapproved hooks never block");
     check(!fs::exists(marker), "unapproved hook COMMAND NEVER EXECUTED");
@@ -90,7 +90,7 @@ void approved_runs_and_blocks(const fs::path& sandbox, const fs::path& home) {
                                    {"run", "touch " + marker.string()}}}},
                }.dump());
     approve_current(sandbox / ".agentty" / "hooks.json", home);
-    check(!hooks::pending_approval(), "approved file no longer pending");
+    check(!hooks::pending_approval(::agentty::IoAccess::grant()), "approved file no longer pending");
 
     // Benign call: allowed, post fires.
     auto ok = hooks::run_pre_tool("shell", R"({"command":"ls -la"})");
@@ -119,7 +119,7 @@ void byte_change_regates(const fs::path& sandbox) {
                        {"pre_tool", {{{"match", ""},
                                       {"run", "touch " + marker.string()}}}},
                    }.dump() + " ");
-    check(hooks::pending_approval(),
+    check(hooks::pending_approval(::agentty::IoAccess::grant()),
           "byte change to an approved file re-gates (pending again)");
     (void)hooks::run_pre_tool("shell", "{}");
     check(!fs::exists(marker), "re-gated hook did not execute");
@@ -138,7 +138,7 @@ void kill_switch(const fs::path& sandbox, const fs::path& home) {
 #ifndef _WIN32
     ::setenv("AGENTTY_NO_HOOKS", "1", 1);
 #endif
-    check(!hooks::pending_approval(), "kill switch silences pending notice");
+    check(!hooks::pending_approval(::agentty::IoAccess::grant()), "kill switch silences pending notice");
     (void)hooks::run_pre_tool("shell", "{}");
     check(!fs::exists(marker), "AGENTTY_NO_HOOKS=1 disables approved hooks");
 #ifndef _WIN32
@@ -167,7 +167,7 @@ void oversized_file_is_reported(const fs::path& sandbox) {
     check(fs::file_size(cfg) > 64u * 1024u, "fixture is past the cap");
 
     // The hook does NOT run -- that part was always true and stays true.
-    check(!hooks::pending_approval(),
+    check(!hooks::pending_approval(::agentty::IoAccess::grant()),
           "an unloadable file offers nothing to approve");
 
     // `agentty hooks` must SAY the file was too big rather than claim there

@@ -114,7 +114,7 @@ namespace {
 // cache_control breakpoint catches the result); the disk cost is
 // memoized through read_memory_cached so the per-turn footprint is
 // 3× stat() + memcpy of the cached body, not 3× full read.
-[[nodiscard]] std::string collect_memory_blocks() {
+[[nodiscard]] std::string collect_memory_blocks(Io) {
     std::string user    = read_memory_cached(home_dir() / "CLAUDE.md");
     std::string project = read_memory_cached(std::filesystem::path{"CLAUDE.md"});
     std::string local   = read_memory_cached(std::filesystem::path{"CLAUDE.local.md"});
@@ -187,7 +187,7 @@ namespace {
 // guidance stays visually distinct from the personal CLAUDE.md tiers and the
 // model can apply precedence correctly. Sits behind the same Anthropic
 // cache_control breakpoint as collect_memory_blocks.
-[[nodiscard]] std::string collect_agents_md_block() {
+[[nodiscard]] std::string collect_agents_md_block(Io) {
     // workspace_root() is the fixed access boundary (where the root AGENTS.md
     // lives); project_root() is the agent's cwd clamped inside that boundary
     // — the walk start point for finding the nearest nested AGENTS.md.
@@ -274,7 +274,7 @@ namespace {
 
 } // namespace
 
-std::string default_system_prompt(bool lean) {
+std::string default_system_prompt(Io io, bool lean) {
 #if defined(_WIN32)
     constexpr const char* os_name  = "Windows";
     constexpr const char* shell    = "cmd.exe (Windows Command Prompt)";
@@ -614,15 +614,15 @@ std::string default_system_prompt(bool lean) {
     // tiers. Standardized public project guidance lands first, personal
     // memory layers on top — same end-of-prompt position so the always-on
     // rules above still anchor first.
-    oss << collect_agents_md_block();
+    oss << collect_agents_md_block(io);
     // Append CLAUDE.md tiers (User + Project + Local) when present.
     // Lives at the END of the prompt so the always-on rules above
     // anchor first; user-authored memory then layers on top.
-    oss << collect_memory_blocks();
+    oss << collect_memory_blocks(io);
     // On-demand skills catalog (names + descriptions only). The full
     // bodies load lazily via the `skill` tool — progressive disclosure
     // keeps the per-request cost to one cheap line per skill.
-    oss << tools::skills::catalog_block();
+    oss << tools::skills::catalog_block(io);
     return oss.str();
 }
 
@@ -657,8 +657,8 @@ std::string prompt_overlay(std::string_view provider_id) {
     return {};
 }
 
-std::string system_prompt_with_overlay(std::string_view provider_id, bool lean) {
-    std::string base = default_system_prompt(lean);
+std::string system_prompt_with_overlay(Io io, std::string_view provider_id, bool lean) {
+    std::string base = default_system_prompt(io, lean);
     std::string overlay = prompt_overlay(provider_id);
     if (overlay.empty()) return base;
     // Ensure a clean seam between the base and the appended delta.

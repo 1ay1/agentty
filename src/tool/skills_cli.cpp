@@ -436,7 +436,7 @@ int verb_add(const std::vector<std::string>& argv) {
     // skill that silently never loads — the user would see a success
     // message and then never see the skill again. Refuse with the
     // conflicting path rather than writing a file that does nothing.
-    if (const auto clash = find(s.name);
+    if (const auto clash = find(IoAccess::grant(), s.name);
         clash && !clash->dir.empty()
               && fs::weakly_canonical(clash->dir) != fs::weakly_canonical(dest)) {
         std::fprintf(stderr,
@@ -554,14 +554,14 @@ int verb_add(const std::vector<std::string>& argv) {
     if (needs_trust_gate(s.effects)) {
         // all() re-scans when a root's mtime signature changes, which the
         // copy above just did — so find() sees the freshly installed file.
-        const auto installed = find(s.name);
+        const auto installed = find(IoAccess::grant(), s.name);
         if (!installed) {
             std::fprintf(stderr,
                 "installed, but %s did not load — run `agentty skills` to see why\n",
                 s.name.c_str());
             return 1;
         }
-        auto store = load_approvals();
+        auto store = load_approvals(IoAccess::grant());
         store.approve(content_sha_of(*installed));
         save_approvals(store);
     }
@@ -575,12 +575,12 @@ int verb_add(const std::vector<std::string>& argv) {
 // ── list ───────────────────────────────────────────────────────────────────
 
 int verb_list() {
-    const auto& all_skills = all();
+    const auto all_skills = all(IoAccess::grant());
     if (all_skills.empty()) {
         std::printf("no skills installed\n");
         return 0;
     }
-    const auto store = load_approvals();
+    const auto store = load_approvals(IoAccess::grant());
     for (const auto& s : all_skills) {
         const char* trust = "-";
         if (needs_trust_gate(s.effects)) {
@@ -602,11 +602,11 @@ int verb_list() {
     // — not in this list, not in the panel, not to `approve` — so if it is
     // never mentioned the user has no way to discover that something is
     // sitting on disk wearing a name another skill answers to.
-    const auto& shadows = shadowed();
+    const auto shadows = shadowed(IoAccess::grant());
     if (!shadows.empty()) {
         std::printf("\n");
         for (const auto& sh : shadows) {
-            const bool same_scope = shadowed_within_scope(sh.name);
+            const bool same_scope = shadowed_within_scope(IoAccess::grant(), sh.name);
             // Cross-scope is the documented override and gets a quiet
             // note; same-scope is a real problem and says so.
             std::printf("%s \"%s\" is also declared by %s%s\n",
@@ -644,7 +644,7 @@ int verb_remove(const std::vector<std::string>& argv) {
     // resolve by declared name.
     auto dest = install_dir_for(argv[0]);
     if (!fs::exists(dest)) {
-        if (const auto s = find(argv[0]);
+        if (const auto s = find(IoAccess::grant(), argv[0]);
             s && !s->dir.empty() && s->source == "user") {
             dest = s->dir;
         }
@@ -679,7 +679,7 @@ int verb_approve(const std::vector<std::string>& argv) {
         std::fprintf(stderr, "usage: agentty skill approve <name>\n");
         return 2;
     }
-    const auto s = find(argv[0]);
+    const auto s = find(IoAccess::grant(), argv[0]);
     if (!s) {
         std::fprintf(stderr, "no such skill: %s\n", argv[0].c_str());
         return 1;
@@ -689,7 +689,7 @@ int verb_approve(const std::vector<std::string>& argv) {
         return 0;
     }
     print_consent(*s, screen_body(s->body));
-    auto store = load_approvals();
+    auto store = load_approvals(IoAccess::grant());
     store.approve(content_sha_of(*s));
     save_approvals(store);
     std::printf("approved %s\n", argv[0].c_str());
@@ -720,7 +720,7 @@ bool path_inside(const std::filesystem::path& root,
 }
 
 
-scope::Approvals load_approvals() {
+scope::Approvals load_approvals(Io) {
     return scope::load_approvals(kApprovalsLeaf);
 }
 
@@ -733,7 +733,7 @@ std::string content_sha_of(const Skill& s) {
 }
 
 scope::Trust trust_of(const Skill& s) noexcept {
-    return trust_of(s, load_approvals());
+    return trust_of(s, load_approvals(IoAccess::grant()));
 }
 
 int cli(const std::vector<std::string>& argv) {

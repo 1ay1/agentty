@@ -344,13 +344,13 @@ void run_post_tool(std::string_view tool, const std::string& args_json,
     }
 }
 
-bool pending_approval() {
+bool pending_approval(Io) {
     if (hooks_disabled()) return false;
     HooksFile hf = load_hooks_file();
     return hf.ok && !is_approved(hf);
 }
 
-std::string active_file() {
+std::string active_file(Io) {
     return load_hooks_file().path;
 }
 

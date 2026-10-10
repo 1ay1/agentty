@@ -774,11 +774,11 @@ int main() {
         // check from inside the sandbox root, restored after.
         auto prev_cwd = fs::current_path();
         fs::current_path(root);
-        check(sub::agent_origin("helper") == "project",
+        check(sub::agent_origin(agentty::IoAccess::grant(), "helper") == "project",
               "agent provenance: a project-shipped agent is 'project'");
-        check(sub::agent_origin("explorer") == "builtin",
+        check(sub::agent_origin(agentty::IoAccess::grant(), "explorer") == "builtin",
               "agent provenance: a built-in agent is 'builtin' (no tag)");
-        check(sub::agent_origin("nonexistent") == "builtin",
+        check(sub::agent_origin(agentty::IoAccess::grant(), "nonexistent") == "builtin",
               "agent provenance: an unknown name is 'builtin' (safe default)");
         fs::current_path(prev_cwd);
     }

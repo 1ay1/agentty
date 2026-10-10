@@ -50,6 +50,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include "agentty/util/io.hpp"
 
 namespace agentty::tools::hooks {
 
@@ -71,10 +72,10 @@ void run_post_tool(std::string_view tool, const std::string& args_json,
 
 // True when a hooks file exists whose hash is NOT approved (drives the
 // one-line TUI notice). Cheap: stat + memoised hash.
-[[nodiscard]] bool pending_approval();
+[[nodiscard]] bool pending_approval(Io);
 
 // Path of the active hooks file (project first, then user), empty if none.
-[[nodiscard]] std::string active_file();
+[[nodiscard]] std::string active_file(Io);
 
 // The `agentty hooks` subcommand: `list` shows configured hooks + approval
 // state; `approve` prints the file and interactively approves it. Returns

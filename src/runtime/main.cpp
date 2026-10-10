@@ -1335,7 +1335,7 @@ int main(int argc, char** argv) {
     if (args.subcommand == "login")  return auth::cmd_login();
     if (args.subcommand == "logout") return auth::cmd_logout();
     if (args.subcommand == "status") return auth::cmd_status();
-    if (args.subcommand == "skills") return tools::skills::cmd_skills();
+    if (args.subcommand == "skills") return tools::skills::cmd_skills(IoAccess::grant());
     if (args.subcommand == "config") return config::cmd_config(args.plugin_argv);
 #if defined(AGENTTY_MCP)
     if (args.subcommand == "mcp") {
@@ -2020,7 +2020,7 @@ int main(int argc, char** argv) {
             return 2;
         }
         // Slash commands work here too: `agentty run "/review src/x.cpp"`.
-        if (auto expanded = tools::commands::try_expand(prompt))
+        if (auto expanded = tools::commands::try_expand(IoAccess::grant(), prompt))
             prompt = std::move(*expanded);
 
         provider::prewarm_active_provider();

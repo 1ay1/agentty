@@ -31,6 +31,7 @@
 #include "agentty/domain/conversation.hpp"   // ImageContent
 #include "agentty/domain/id.hpp"
 #include "agentty/util/sendable.hpp"       // Id<Tag>, fs::path, EffectSet
+#include "agentty/util/io.hpp"
 #include "agentty/io/http.hpp"               // http::CancelTokenPtr
 #include "agentty/provider/selection.hpp"    // provider::Selection
 #include "agentty/runtime/msg.hpp"
@@ -191,6 +192,33 @@ namespace app::cmd {
 /// so a reducer can't commit a row count that drifts from the wire.
 [[nodiscard]] inline Cmd commit_scrollback(maya::ScrollbackDebt debt) {
     return maya::commit_from<Cmd>(debt);
+}
+
+// ── effects that do IO ──────────────────────────────────────────────────────────
+// A task whose body gets an Io: body(Io, Sink<Msg>, stop_token, args...).
+// Same rules as Cmd::task (captureless, Sendable args). This is how a
+// reducer asks for IO: it returns the task, the worker gets the Io.
+namespace io_detail {
+template <class Body, class... Args>
+void run_io(maya::Sink<Msg> out, std::stop_token st, Args... args) {
+    Body{}(IoAccess::grant(), std::move(out), std::move(st), std::move(args)...);
+}
+template <class Body, class... Args>
+concept IoBody =
+    std::is_convertible_v<Body, void (*)(Io, maya::Sink<Msg>, std::stop_token, Args...)>;
+}  // namespace io_detail
+
+template <class Body, class... Args>
+    requires io_detail::IoBody<Body, Args...>
+[[nodiscard]] Cmd io_task(Body, Args... args) {
+    return Cmd::task(&io_detail::run_io<Body, Args...>, std::move(args)...);
+}
+
+/// io_task on a thread of its own, for work that may never return.
+template <class Body, class... Args>
+    requires io_detail::IoBody<Body, Args...>
+[[nodiscard]] Cmd io_task_isolated(Body, Args... args) {
+    return Cmd::task_isolated(&io_detail::run_io<Body, Args...>, std::move(args)...);
 }
 
 }  // namespace app::cmd
