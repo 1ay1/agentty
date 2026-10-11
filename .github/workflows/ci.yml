@@ -379,6 +379,7 @@ jobs:
           cmake --build build-tsan -j"$(nproc)" --target real_subsystem_race_test
           cmake --build build-tsan -j"$(nproc)" --target persistence_race_test_narrow
           cmake --build build-tsan -j"$(nproc)" --target sandbox_config_race_test
+          cmake --build build-tsan -j"$(nproc)" --target exec_session_race_test
       - name: Run under TSan
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1

@@ -7,7 +7,7 @@
 //
 // ── Why this is a SEPARATE binary that links nothing ────────────────────────
 //
-// JAAL_FORCE_PUBLISHED_MUTEX changes AtomicSnapshot's LAYOUT: one variant
+// MAYA_FORCE_PUBLISHED_MUTEX changes AtomicSnapshot's LAYOUT: one variant
 // holds a std::atomic<shared_ptr>, the other a mutex plus a plain shared_ptr.
 // Defining it in a TU that also links agentty's objects — which were compiled
 // with the atomic layout — is a one-definition-rule violation: the same class
@@ -43,9 +43,9 @@ void check(bool ok, const char* what) {
 } // namespace
 
 int main() {
-    static_assert(JAAL_ATOMIC_SHARED_PTR == 0,
+    static_assert(MAYA_ATOMIC_SHARED_PTR == 0,
                   "this test must compile the mutex fallback, not the atomic "
-                  "path — check JAAL_FORCE_PUBLISHED_MUTEX reached the "
+                  "path — check MAYA_FORCE_PUBLISHED_MUTEX reached the "
                   "compile (it is set in AgenttyTests.cmake, not in this file)");
 
     using Snap = agentty::util::AtomicSnapshot<std::vector<std::string>>;

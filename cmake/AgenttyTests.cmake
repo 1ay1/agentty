@@ -143,7 +143,7 @@ agentty_fold_test(catalog_cost_probe       TIMEOUT 60)
 # Compiles AtomicSnapshot over published<T>'s mutex fallback (the
 # libc++/Termux path) on a toolchain that HAS the atomic specialisation, so
 # it can't rot unnoticed. A BARE binary that links NO agentty objects:
-# JAAL_FORCE_PUBLISHED_MUTEX changes the slot's layout, so mixing it with
+# MAYA_FORCE_PUBLISHED_MUTEX changes the slot's layout, so mixing it with
 # objects built without it is an ODR violation (the program hangs in static
 # init). Header-only use of jaal, so its include dirs and nothing linked.
 add_executable(snapshot_mutex_fallback_test EXCLUDE_FROM_ALL
@@ -152,7 +152,7 @@ target_include_directories(snapshot_mutex_fallback_test PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
 target_compile_definitions(snapshot_mutex_fallback_test PRIVATE
-    JAAL_FORCE_PUBLISHED_MUTEX=1)
+    MAYA_FORCE_PUBLISHED_MUTEX=1)
 find_package(Threads REQUIRED)
 target_link_libraries(snapshot_mutex_fallback_test PRIVATE Threads::Threads)
 add_test(NAME snapshot_mutex_fallback_test
@@ -594,9 +594,9 @@ target_include_directories(persistence_race_test_narrow PRIVATE include)
 # exists to keep the TSan lane at ~11 TUs instead of 375.
 target_include_directories(persistence_race_test_narrow PRIVATE
     $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
-# jaal::jaal for SharedFile's cross-process lock (platform file_lock).
+# maya::runtime for SharedFile's cross-process lock (platform file_lock).
 target_link_libraries(persistence_race_test_narrow PRIVATE
-    nlohmann_json::nlohmann_json simdjson::simdjson Threads::Threads jaal::jaal)
+    nlohmann_json::nlohmann_json simdjson::simdjson Threads::Threads maya::runtime)
 target_compile_definitions(persistence_race_test_narrow PRIVATE
     AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
 add_test(NAME persistence_race_test_narrow COMMAND persistence_race_test_narrow)
@@ -642,6 +642,22 @@ target_compile_definitions(sandbox_config_race_test PRIVATE
     AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
 add_test(NAME sandbox_config_race_test COMMAND sandbox_config_race_test)
 set_tests_properties(sandbox_config_race_test PROPERTIES TIMEOUT 120 LABELS "race")
+
+# exec_session_race_test: the real Exec (src/tool/util/exec.cpp) driven from
+# several threads: background sessions started, polled, stopped and dropped
+# on other threads, beside foreground runs. Both lock_order_error crashes of
+# 2026-10 lived on this path. Small on purpose (exec.cpp + logging), so the
+# TSan lane can afford it; the sandbox is stubbed off in the test.
+if(TARGET mcp::tools)
+    agentty_test(exec_session_race_test MODE raw LABELS race)
+    add_executable(exec_session_race_test EXCLUDE_FROM_ALL
+        tests/exec_session_race_test.cpp src/tool/util/exec.cpp
+        src/util/teardown.cpp src/util/dbglog.cpp src/util/logx.cpp)
+    target_include_directories(exec_session_race_test PRIVATE include)
+    target_link_libraries(exec_session_race_test PRIVATE mcp::tools maya::runtime Threads::Threads)
+    add_test(NAME exec_session_race_test COMMAND exec_session_race_test)
+    set_tests_properties(exec_session_race_test PROPERTIES TIMEOUT 180 LABELS race)
+endif()
 
 # NOTE: seam_stress_test gets no narrow TSan target, on purpose.
 #
