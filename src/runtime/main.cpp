@@ -77,6 +77,7 @@
 
 #include <maya/maya.hpp>
 #include <maya/host/run.hpp>   // maya::run: the jaal host
+#include <maya/platform/io.hpp>   // query_terminal_size (sandbox banner)
 #include "agentty/runtime/app/host.hpp"   // agentty::app::Host
 
 #include "agentty/acp/server.hpp"
@@ -1536,10 +1537,9 @@ int main(int argc, char** argv) {
                     .border_text(" \xe2\x9a\xa0  SANDBOX IS OFF ",
                                  BorderTextPos::Top, BorderTextAlign::Center)(
                         text("Tool commands run UNCONFINED \xe2\x80\x94 "
-                             "they can read and write anything",
-                             ui::fg_bold(warn)),
-                        text("your user account can: every file, the "
-                             "network, your credentials.",
+                             "they can read and write anything your user "
+                             "account can: every file, the network, your "
+                             "credentials.",
                              ui::fg_bold(warn)),
                         text(""),
                         text("Re-enable with  --sandbox auto  "
@@ -1558,9 +1558,17 @@ int main(int argc, char** argv) {
             const char* no_color = std::getenv("NO_COLOR");
             const bool paint = ::isatty(fileno(stderr)) != 0
                             && !(no_color && no_color[0]);
+            // The terminal's width (stderr's, since that's where this goes),
+            // capped at 74 so it doesn't sprawl on a wide one; the text wraps
+            // inside the box on a narrow one.
+            int width = 74;
+            if (::isatty(fileno(stderr))) {
+                const auto sz = maya::platform::query_terminal_size(fileno(stderr));
+                if (sz.width.raw() > 0) width = std::clamp(sz.width.raw(), 24, 74);
+            }
             auto painted = paint
-                ? maya::render_to_string_ansi(std::move(banner), 74)
-                : maya::render_to_string(std::move(banner), 74);
+                ? maya::render_to_string_ansi(std::move(banner), width)
+                : maya::render_to_string(std::move(banner), width);
             // Both variants pad every row to `width`, so the final row is
             // blank. Cut from the last border glyph -- the box drawing is the
             // real end of the banner, and trailing-whitespace trimming misses
