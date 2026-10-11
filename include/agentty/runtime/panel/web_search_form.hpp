@@ -33,7 +33,9 @@ inline constexpr std::string_view kDialPrefix = "web_search.dial.";
 inline constexpr std::string_view kKeyPrefix  = "web_search.key.";
 
 // The pane for `c`. Cursor on the first row (the on/off switch). `key_origin`
-// may be empty, in which case every key row reads "not set".
+// may be empty, in which case every key row reads "not set" and is open for a
+// key. A key that is held ("stored" or "env: NAME") locks its row and says so
+// in the value column; see add_service_rows.
 [[nodiscard]] form::Form build_form(const web_search_cfg::Config& c,
                                     const settings::registry::EnvSnapshot& env,
                                     const KeyOrigin& key_origin = {});

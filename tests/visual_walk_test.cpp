@@ -85,6 +85,10 @@ TEST_CASE("visual walk: secret bytes never reach the hash") {
     { auto g = f; std::get<form::field::Secret>(
           g.fields[0].value).cursor = 7;
       CHECK(walk(g) != h0); }
+    // The placeholder is drawn text, not a credential: it must repaint.
+    { auto g = f; std::get<form::field::Secret>(
+          g.fields[0].value).placeholder = "\xe2\x9c\x93 key saved";
+      CHECK(walk(g) != h0); }
 
     // EmbedConfig::api_key: same rule at the config layer.
     rag::embed::EmbedConfig c;

@@ -154,6 +154,11 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   a log file gets the box drawing without the escape bytes.
 
 ### Fixed
+- **Settings → Web Search: the API key row.** A paste now lands on a focused,
+  empty key row without typing a character first. Unfocused, the row reads
+  `not set`, `✓ key saved`, or `● key from VAR` for an environment key (it
+  used to say `not set` twice, or `stored`). Once a key is stored the row is
+  locked until **Remove key** deletes it.
 - **ACP: a failed turn came back as `refusal`** with the reason hidden in
   `_meta`. It is now an error carrying the provider's message.
 - **ACP: `session/load` returned `{}`** without the session's mode and

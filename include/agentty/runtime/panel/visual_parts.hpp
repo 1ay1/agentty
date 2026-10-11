@@ -83,8 +83,10 @@ namespace agentty::form::field {
 // an information channel, and this projection is the type-level guarantee
 // the walk preserves. (Same-length overwrite is invisible to the gate;
 // unreachable from single edits, which also move the cursor below.)
+// The placeholder is NOT secret (it is drawn as-is, "✓ key saved") and is
+// walked whole: a row flipping from "not set" to "key saved" must repaint.
 inline auto visual_parts(const Secret& s) {
-    return std::make_tuple(s.value.size(), s.cursor);
+    return std::make_tuple(s.value.size(), s.cursor, visual::ref(s.placeholder));
 }
 static_assert(visual::parts_cover_all<Secret>);
 

@@ -85,14 +85,38 @@ void add_service_rows(form::Builder& b, const web_search_cfg::Config& c,
     if (!svc.needs_key) return;
 
     const std::string origin = key_origin ? key_origin(svc.id) : std::string{};
-    b.secret(std::string{kKeyPrefix} + svc.id, "  API key", "",
-             svc.label + " \xc2\xb7 paste a key and press Enter \xc2\xb7 stored encrypted, "
-             "never in settings.json \xc2\xb7 " + svc.signup);
-    b.origin(origin.empty() ? "not set" : origin);
-    if (origin.rfind("env:", 0) == 0) b.lock(origin);
+    const bool stored   = origin == "stored";
+    const bool from_env = origin.rfind("env: ", 0) == 0;
+    const std::string env_var = from_env ? origin.substr(5) : std::string{};
+
+    // The help line is what explains a locked row, so it names the way out.
+    std::string help = svc.label + " \xc2\xb7 ";
+    if (stored)
+        help += "key saved, stored encrypted \xc2\xb7 Remove key below to replace it";
+    else if (from_env)
+        help += "key from " + env_var + " \xc2\xb7 unset it to store one here";
+    else
+        help += "paste a key and press Enter \xc2\xb7 stored encrypted, never in "
+                "settings.json \xc2\xb7 " + svc.signup;
+    b.secret(std::string{kKeyPrefix} + svc.id, "  API key", "", std::move(help));
+
+    // What the row says is ONE phrase in the value column (the Secret's
+    // placeholder), never repeated in the origin column. The wording and
+    // glyphs are the Providers panel's: a key we hold reads
+    // "\xe2\x9c\x93 key saved", one from the environment "\xe2\x97\x8f key from VAR"
+    // (it is not saved, and there is no Remove row for it). No key: the
+    // widget's own "not set". Before the first read answers, "checking...",
+    // so the row claims neither way.
+    if (stored)               b.placeholder("\xe2\x9c\x93 key saved");
+    else if (from_env)        b.placeholder("\xe2\x97\x8f key from " + env_var);
+    else if (!origin.empty()) b.placeholder(origin);
+    // A held key locks its row: a stored one is changed by removing it first
+    // (Remove key, below), and an env key is not ours to change at all. The
+    // reason is left empty -- the value column already says it.
+    if (stored || from_env) b.lock("");
     // Only a key we hold can be removed. One from the environment is not ours
     // to delete, and the row above is locked for the same reason.
-    if (origin == "stored")
+    if (stored)
         b.action(std::string{kKeyClearPrefix} + svc.id, "  Remove key",
                  "forget the stored " + svc.label + " key", "press Enter");
 }
@@ -158,8 +182,10 @@ form::Form build_form(const web_search_cfg::Config& c, const reg::EnvSnapshot& e
     //   auto: the model sets the count, so the two count rows are inert.
     //   off:  nothing is searched, so every row but the switch is inert.
     // An env lock is left alone: its reason (the variable) is the truer one.
+    // A held key's lock has no reason of its own (its value says it), so it
+    // takes the mode's.
     auto lock = [](form::Field& row, const char* why) {
-        if (row.locked) return;
+        if (row.locked && !row.locked_reason.empty()) return;
         row.locked = true;
         row.locked_reason = why;
     };

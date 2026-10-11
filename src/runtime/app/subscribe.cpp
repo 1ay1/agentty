@@ -1402,7 +1402,7 @@ Sub subscribe(const Model& m) {
         [in_login, settings_list_adding,
          rag_editing   = rag_form.editing,
          smart_editing = smart_form_snap.editing,
-         web_search_editing = web_search_form_snap.editing,
+         web_search_open = web_search_form_snap.open,
          plugin_editing = plugin_form_snap.editing,
          filter_open   = active_panel == ui::panel::Kind::Palette
                       || active_panel == ui::panel::Kind::Models
@@ -1421,12 +1421,17 @@ Sub subscribe(const Model& m) {
         //     field — API keys and hosts are the fields pasting exists for;
         //     these panes' reducers re-verify the mode, so a stale snapshot
         //     degrades to a dropped paste, never a mis-target.
+        //   • the Web Search pane OPEN, editing or not → the pane. Its
+        //     reducer (form::paste_into_focused) lands it on the focused
+        //     text row as type-to-edit does and drops it anywhere else, so
+        //     a key pastes straight onto an empty key row; before, a paste
+        //     there fell through to the composer hidden behind the pane.
         //   • otherwise               → the composer.
         if (in_login) return LoginPaste{std::move(s)};
         if (settings_list_adding) return SettingsListPaste{std::move(s)};
         if (rag_editing)   return RagEmbedPaste{std::move(s)};
         if (smart_editing) return SmartModePaste{std::move(s)};
-        if (web_search_editing) return WebSearchPaste{std::move(s)};
+        if (web_search_open) return WebSearchPaste{std::move(s)};
         if (plugin_editing) return PluginEditPaste{std::move(s)};
         //   • a FILTER panel open (palette/models/providers/mention/symbol)
         //     → its query. Without this the paste dropped into the composer

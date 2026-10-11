@@ -59,7 +59,7 @@ namespace ff = agentty::form::field;
         }
         else if constexpr (std::is_same_v<T, ff::Secret>) {
             // LENGTH ONLY — the plaintext never reaches the widget.
-            return maya::panel::Secret{agentty::form::secret_filled(v), caret};
+            return maya::panel::Secret{agentty::form::secret_filled(v), caret, v.placeholder};
         }
         else if constexpr (std::is_same_v<T, ff::Path>) {
             return maya::panel::Path{v.value, caret, probe_path(v), {}};

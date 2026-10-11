@@ -470,7 +470,11 @@ TEST_CASE("web search pane: a typed API key is stored, not kept in the Model") {
     if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
     Model m = with_exa_primary();
     REQUIRE(pane_of(m).form.find("web_search.key.exa-api") != nullptr);
-    CHECK(pane_of(m).form.find("web_search.key.exa-api")->origin == "not set");
+    CHECK(pane_of(m).form.find("web_search.key.exa-api")->origin.empty(),
+          "no key: the widget's own \"not set\" speaks, nothing is repeated");
+    CHECK(std::get<form::field::Secret>(
+              pane_of(m).form.find("web_search.key.exa-api")->value).placeholder.empty());
+    CHECK(!pane_of(m).form.find("web_search.key.exa-api")->locked);
 
     focus_row(m, "web_search.key.exa-api");
     m = send(std::move(m), key(form::keys::Intent::Activate));      // start editing
@@ -496,10 +500,61 @@ TEST_CASE("web search pane: a typed API key is stored, not kept in the Model") {
     const auto* row = pane_of(m).form.find("web_search.key.exa-api");
     REQUIRE(row != nullptr);
     CHECK(std::get<form::field::Secret>(row->value).value.empty());
-    CHECK(row->origin == "stored");
+    CHECK(std::get<form::field::Secret>(row->value).placeholder == "\xe2\x9c\x93 key saved");
+    CHECK(row->origin.empty());
+    CHECK(row->locked, "a stored key locks its row until it is removed");
     // The Model (and so settings.json) never saw it.
     CHECK(m.d.persisted.web_search.primary == "exa-api");
     CHECK(pane_of(m).form.find("web_search.keyclear.exa-api") != nullptr);
+}
+
+TEST_CASE("web search pane: a paste on a focused, empty key row lands without a keystroke first") {
+    KeyHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
+    Model m = with_exa_primary();
+    focus_row(m, "web_search.key.exa-api");
+    REQUIRE(!pane_of(m).form.editing());
+    m = send(std::move(m), Msg{WebSearchPaste{"exa-PASTED-0123456789"}});
+    CHECK(pane_of(m).form.editing());
+    CHECK(std::get<form::field::Secret>(
+              pane_of(m).form.find("web_search.key.exa-api")->value).value
+          == "exa-PASTED-0123456789");
+
+    // ...and Enter alone stores it: the reported flow, end to end. The row
+    // then says so, is locked, and offers Remove key.
+    m = settle(std::move(m), key(form::keys::Intent::LeaveField));
+    CHECK(agentty::tools::web_search_secret::load("exa-api") == "exa-PASTED-0123456789");
+    const auto* row = pane_of(m).form.find("web_search.key.exa-api");
+    REQUIRE(row != nullptr);
+    CHECK(std::get<form::field::Secret>(row->value).value.empty());
+    CHECK(std::get<form::field::Secret>(row->value).placeholder == "\xe2\x9c\x93 key saved");
+    CHECK(row->locked);
+    CHECK(pane_of(m).form.find("web_search.keyclear.exa-api") != nullptr);
+}
+
+TEST_CASE("web search pane: a paste on a row that takes no text is dropped") {
+    // The pane now receives every paste while it is open, not only mid-edit,
+    // so the reducer is what keeps one off a Choice row (and out of the
+    // composer behind the pane).
+    Model m = opened();
+    focus_row(m, "web_search.primary");
+    const auto before = m.d.persisted.web_search;
+    m = send(std::move(m), Msg{WebSearchPaste{"exa-api"}});
+    CHECK(!pane_of(m).form.editing());
+    CHECK(!pane_of(m).form.choosing());
+    CHECK(m.d.persisted.web_search == before);
+}
+
+TEST_CASE("web search pane: a paste on a locked key row is dropped") {
+    KeyHome home;
+    if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
+    REQUIRE(agentty::tools::web_search_secret::store("exa-api", "exa-STORED-0123456789"));
+    Model m = with_exa_primary();
+    focus_row(m, "web_search.key.exa-api");
+    m = send(std::move(m), Msg{WebSearchPaste{"exa-PASTED-0123456789"}});
+    CHECK(!pane_of(m).form.editing());
+    CHECK(std::get<form::field::Secret>(
+              pane_of(m).form.find("web_search.key.exa-api")->value).value.empty());
 }
 
 TEST_CASE("web search pane: opening reads key origins on a worker, not in the reducer") {
@@ -512,14 +567,17 @@ TEST_CASE("web search pane: opening reads key origins on a worker, not in the re
     // Before the read answers the pane does not claim either way.
     const auto* row = pane_of(m1).form.find("web_search.key.exa-api");
     REQUIRE(row != nullptr);
-    CHECK(row->origin != "stored");
-    CHECK(row->origin != "not set");
+    CHECK(!row->locked);
+    CHECK(std::get<form::field::Secret>(row->value).placeholder == "checking\xe2\x80\xa6");
     // The read is a task; its answer fills the origin in.
     auto replies = fx::run_tasks(std::move(cmd));
     REQUIRE(replies.size() == 1);
     Model m2 = std::move(m1);
     for (auto& r : replies) m2 = settle(std::move(m2), std::move(r));
-    CHECK(pane_of(m2).form.find("web_search.key.exa-api")->origin == "stored");
+    CHECK(std::get<form::field::Secret>(
+              pane_of(m2).form.find("web_search.key.exa-api")->value).placeholder
+          == "\xe2\x9c\x93 key saved");
+    CHECK(pane_of(m2).form.find("web_search.key.exa-api")->locked);
     CHECK(pane_of(m2).form.find("web_search.keyclear.exa-api") != nullptr);
 }
 
@@ -561,7 +619,7 @@ TEST_CASE("web search pane: key origins that arrive mid-edit are shown when the 
     // ...and leaving it unchanged (Esc: no commit) still shows the origins.
     mm = send(std::move(mm), key(form::keys::Intent::LeaveField));
     CHECK(!pane_of(mm).form.editing());
-    CHECK(pane_of(mm).form.find("web_search.key.exa-api")->origin == "stored");
+    CHECK(pane_of(mm).form.find("web_search.key.exa-api")->locked);
 }
 
 TEST_CASE("web search pane: a key that does not look like one is refused, not stored") {
@@ -575,7 +633,7 @@ TEST_CASE("web search pane: a key that does not look like one is refused, not st
     CHECK(!agentty::tools::web_search_secret::has("exa-api"));
     CHECK(std::get<form::field::Secret>(
               pane_of(m).form.find("web_search.key.exa-api")->value).value.empty());
-    CHECK(pane_of(m).form.find("web_search.key.exa-api")->origin == "not set");
+    CHECK(!pane_of(m).form.find("web_search.key.exa-api")->locked);
 }
 
 TEST_CASE("web search pane: Remove key forgets a stored key") {
@@ -588,7 +646,10 @@ TEST_CASE("web search pane: Remove key forgets a stored key") {
     m = settle(std::move(m), key(form::keys::Intent::Activate));
     CHECK(!agentty::tools::web_search_secret::has("exa-api"));
     CHECK(pane_of(m).form.find("web_search.keyclear.exa-api") == nullptr);
-    CHECK(pane_of(m).form.find("web_search.key.exa-api")->origin == "not set");
+    CHECK(!pane_of(m).form.find("web_search.key.exa-api")->locked,
+          "removing the key unlocks the row for a new one");
+    CHECK(std::get<form::field::Secret>(
+              pane_of(m).form.find("web_search.key.exa-api")->value).placeholder.empty());
     // The Remove row is gone, so the cursor lands on the key row it served.
     REQUIRE(pane_of(m).form.focused() != nullptr);
     CHECK(pane_of(m).form.focused()->id == "web_search.key.exa-api");

@@ -289,6 +289,27 @@ bool paste_into(Form& f, std::string_view text) {
     return true;
 }
 
+bool paste_into_focused(Form& f, std::string_view text) {
+    if (f.editing()) return paste_into(f, text);
+    if (f.choosing()) return false;
+    auto* row = f.focused();
+    if (!row || !row->is_text_like() || !row->editable()) return false;
+    // Open the session only for a paste that will land something. paste()
+    // strips newlines/tabs from every single-line field and a Number row
+    // takes digits only; a paste with none of what the row accepts stays a
+    // no-op instead of leaving the row in an edit session with nothing typed
+    // (the half-state type-to-edit refuses for a letter on a Number row).
+    const bool numeric = std::holds_alternative<field::Number>(row->value);
+    const bool lands = std::any_of(text.begin(), text.end(), [&](char c) {
+        return numeric ? (c >= '0' && c <= '9')
+                       : (c != '\n' && c != '\r' && c != '\t');
+    });
+    if (!lands) return false;
+    f.focus = focus::Editing{};
+    f.edit_dirty = false;   // fresh session, as on the first typed key
+    return paste_into(f, text);
+}
+
 std::string text_of(const Form& f, std::string_view id) {
     const auto* row = f.find(id);
     if (!row) return {};
@@ -583,6 +604,13 @@ Builder& Builder::lock(std::string reason) {
         form_.fields.back().locked = true;
         form_.fields.back().locked_reason = std::move(reason);
     }
+    return *this;
+}
+
+Builder& Builder::placeholder(std::string text) {
+    if (!form_.fields.empty())
+        if (auto* s = std::get_if<field::Secret>(&form_.fields.back().value))
+            s->placeholder = std::move(text);
     return *this;
 }
 

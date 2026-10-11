@@ -389,14 +389,21 @@ TEST_CASE("web search form: a keyed service gets a Secret row that starts empty"
     const auto* sec = std::get_if<form::field::Secret>(&row->value);
     REQUIRE(sec != nullptr);
     CHECK(sec->value.empty());            // the pane is never given the key
-    CHECK(row->origin == "stored");
+    CHECK(sec->placeholder == "\xe2\x9c\x93 key saved");
+    CHECK(row->origin.empty());           // said once, in the value column
+    CHECK(row->locked);                   // remove it to replace it
     CHECK(wtf::key_row_service(row->id) == "exa-api");
     // A stored key can be removed.
     CHECK(f.find("web_search.keyclear.exa-api") != nullptr);
 
-    // No key yet: "not set", and nothing to remove.
+    // No key yet: the widget's own "not set" (no placeholder, no origin),
+    // open for a key, and nothing to remove.
     const auto g = wtf::build_form(c, kNoEnv);
-    CHECK(g.find("web_search.key.exa-api")->origin == "not set");
+    const auto* empty = g.find("web_search.key.exa-api");
+    REQUIRE(empty != nullptr);
+    CHECK(std::get<form::field::Secret>(empty->value).placeholder.empty());
+    CHECK(empty->origin.empty());
+    CHECK(!empty->locked);
     CHECK(g.find("web_search.keyclear.exa-api") == nullptr);
 }
 
@@ -408,7 +415,25 @@ TEST_CASE("web search form: a key from the environment locks its row") {
     const auto* row = f.find("web_search.key.exa-api");
     REQUIRE(row != nullptr);
     CHECK(row->locked);
+    // The Providers panel's wording: not "saved", it lives in the shell.
+    CHECK(std::get<form::field::Secret>(row->value).placeholder
+          == "\xe2\x97\x8f key from AGENTTY_WEB_SEARCH_KEY_EXA_API");
+    CHECK(row->origin.empty());
     CHECK(f.find("web_search.keyclear.exa-api") == nullptr);    // not ours to delete
+}
+
+TEST_CASE("web search form: off gives a held key's lock the mode's reason") {
+    // The key row's own lock carries no reason (its value already says
+    // "key saved"); with the switch off it must still say WHY it is inert,
+    // like every other row.
+    sc::Config c; c.mode_text = "off"; c.primary = "exa-api";
+    const auto f = wtf::build_form(c, kNoEnv, [](std::string_view s) {
+        return s == "exa-api" ? std::string{"stored"} : std::string{};
+    });
+    const auto* row = f.find("web_search.key.exa-api");
+    REQUIRE(row != nullptr);
+    CHECK(row->locked);
+    CHECK(!row->locked_reason.empty());
 }
 
 TEST_CASE("web search form: a service named twice shows its rows once") {

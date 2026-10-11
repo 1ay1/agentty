@@ -611,6 +611,95 @@ TEST_CASE("form view: a Secret is never painted in the clear") {
     CHECK(out.find("*")               != std::string::npos);   // masked instead
 }
 
+TEST_CASE("form: a Secret's placeholder is shown only while it is empty") {
+    // The placeholder is not secret: it is the one string a Secret may hand
+    // the widget, and it reports a key held elsewhere ("key saved").
+    auto f = Builder{"Keys"}
+        .secret("key", "API key", "").placeholder("held elsewhere")
+        .text("host", "Host", "x").placeholder("ignored")    // not a Secret: no-op
+        .build();
+    CHECK(std::get<field::Secret>(f.find("key")->value).placeholder == "held elsewhere");
+    f.cursor = 1;   // off the Secret: it is drawn unfocused
+    auto out = maya::render_to_string(
+        maya::Panel{agentty::ui::form_config(f, maya::Color::blue())}.build(), 80);
+    CHECK(out.find("held elsewhere") != std::string::npos);
+    CHECK(out.find("not set")        == std::string::npos);
+
+    // A typed value wins: the row shows the mask, never the placeholder.
+    std::get<field::Secret>(f.find("key")->value).value = "sk-typed-value";
+    out = maya::render_to_string(
+        maya::Panel{agentty::ui::form_config(f, maya::Color::blue())}.build(), 80);
+    CHECK(out.find("held elsewhere") == std::string::npos);
+    CHECK(out.find("sk-typed")       == std::string::npos);
+}
+
+TEST_CASE("form: paste_into_focused pastes the way typing types") {
+    // Browsing a text-like row: the paste opens the edit and lands.
+    {
+        auto f = demo();
+        f.cursor = 4;   // the Secret
+        REQUIRE(!f.editing());
+        CHECK(paste_into_focused(f, "sk-NEW"));
+        CHECK(f.editing());
+        CHECK(f.edit_dirty);   // leaving the field commits it
+        CHECK(std::get<field::Secret>(f.find("key")->value).value
+              == "sk-super-secretsk-NEW");   // at the caret, as typing would
+    }
+    // Already editing: exactly paste_into.
+    {
+        auto f = demo();
+        f.cursor = 1;   // Host
+        press(f, key(maya::SpecialKey::Enter));
+        REQUIRE(f.editing());
+        CHECK(paste_into_focused(f, ".lan"));
+        CHECK(std::get<field::Text>(f.find("host")->value).value == "127.0.0.1.lan");
+    }
+    // Nothing lands, and NO edit session is opened, on: a locked row...
+    {
+        auto f = demo();
+        f.cursor = 1;
+        f.fields[1].locked = true;
+        CHECK_FALSE(paste_into_focused(f, "x"));
+        CHECK_FALSE(f.editing());
+        CHECK(std::get<field::Text>(f.find("host")->value).value == "127.0.0.1");
+    }
+    // ...a row that is not text (a Choice, an Action)...
+    for (int row : {0, 5}) {
+        auto f = demo();
+        f.cursor = row;
+        CHECK_FALSE(paste_into_focused(f, "x"));
+        CHECK_FALSE(f.editing());
+    }
+    // ...an open dropdown (the menu owns the keys)...
+    {
+        auto f = demo();
+        f.cursor = 0;
+        press(f, key(maya::SpecialKey::Enter));
+        REQUIRE(f.choosing());
+        CHECK_FALSE(paste_into_focused(f, "x"));
+        CHECK(f.choosing());
+    }
+    // ...and a paste the row takes none of: letters on a Number, a bare
+    // newline anywhere. The half-state type-to-edit refuses for a letter.
+    {
+        auto f = demo();
+        f.cursor = 2;   // Port
+        CHECK_FALSE(paste_into_focused(f, "abc"));
+        CHECK_FALSE(f.editing());
+        CHECK(std::get<field::Number>(f.find("port")->value).value == 11434);
+        f.cursor = 1;   // Host
+        CHECK_FALSE(paste_into_focused(f, "\n"));
+        CHECK_FALSE(f.editing());
+    }
+    // A Number takes a pasted number whole, as typed digits would.
+    {
+        auto f = demo();
+        f.cursor = 2;
+        CHECK(paste_into_focused(f, "8080"));
+        CHECK(std::get<field::Number>(f.find("port")->value).value == 8080);
+    }
+}
+
 TEST_CASE("form: an open pane ALWAYS answers Esc") {
     // Regression (the "input stops getting through" freeze): the Retrieval
     // overlay was created holding no form, filled in by a deferred Cmd. For at

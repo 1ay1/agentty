@@ -370,7 +370,8 @@ member, so exemption is the explicit reviewable act and coverage is the
 default — the inversion that makes the old bug class unrepresentable.
 
 Secrets: `field::Secret` and `EmbedConfig::api_key` digest LENGTH-only via
-their parts lists; login's key/code buffers likewise. `visual_walk_test`
+their parts lists (a Secret's non-secret placeholder text is walked whole);
+login's key/code buffers likewise. `visual_walk_test`
 pins it: a same-length credential overwrite is hash-invisible, a length
 change is visible, and no non-secret facet can be mutated without moving
 the hash. The parent `From` snapshot is exempt (not rendered while its
