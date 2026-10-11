@@ -189,7 +189,8 @@ int main() {
         // Reading a 0-byte file gives an explicit heads-up, not a blank result
         // the model could mistake for a failed read.
         auto empty = root / "empty_e2e.txt";
-        run("write", {{"file_path", empty.string()}, {"content", ""}});
+        auto made = run("write", {{"file_path", empty.string()}, {"content", ""}});
+        check(made.has_value(), "read: 0-byte fixture written");
         auto r = run("read", {{"path", empty.string()}});
         check(has(r, "empty"), "read: 0-byte file is flagged as empty");
     }
