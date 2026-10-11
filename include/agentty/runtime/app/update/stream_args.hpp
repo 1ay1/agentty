@@ -24,13 +24,10 @@ namespace agentty::app::detail {
 
 // Keys models sometimes emit in place of our canonical field name.
 //
-// These predate the command family below and were described as mirroring
-// mcp-cpp's ArgReader. They do not: ArgReader has no alias mechanism (see
-// the note on kCommandAliases). A few of these strings happen to appear in
-// mcp-cpp for unrelated reasons -- `file_path` in cap/scheduler.hpp's own
-// take() list -- which is what made the claim look plausible. Treat every
-// list here as agentty's own host-side tolerance, honoured by canonify and
-// by salvage_args, and by nothing downstream.
+// These predate the command family below. mcp-cpp's ArgReader has its own
+// alias tables now (src/tools/util/arg_reader.cpp), and read/grep/shell tidy
+// more shapes there; these lists are agentty's host-side tolerance, used by
+// canonify, by salvage_args and by the required-field guard below.
 //
 // WIDENING ONE OF THESE HAS TWO CONSUMERS, not one. The required-field guard
 // only READS the table (an alias satisfies the check and nothing is rewritten),
@@ -293,8 +290,14 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
             // typed error is real but useless here -- it skips the
             // transparent retry, burns the turn, and tells the model it forgot
             // an argument when the truth is the wire cut mid-arguments.
-            if (!is_nonempty_string_any(kPathAliases)) return "path";
-            return {};
+            if (is_nonempty_string_any(kPathAliases)) return {};
+            // read also takes `file`/`filePath` and a paths:[...] array.
+            for (const char* k : {"file", "filePath"})
+                if (is_nonempty_string(k)) return {};
+            for (const char* k : {"paths", "files", "file_paths"})
+                if (auto it = args.find(k); it != args.end() && it->is_array() && !it->empty())
+                    return {};
+            return "path";
         case K::Glob:
             // Same reasoning: the pattern IS the query, and glob without one
             // has nothing to match. (`path` genuinely defaults to cwd.)
