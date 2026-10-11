@@ -867,6 +867,11 @@ if(NOT WIN32)
     add_test(NAME acp_client_test
              COMMAND sh ${CMAKE_SOURCE_DIR}/tests/acp/run_acp_client.sh $<TARGET_FILE:agentty>)
     set_tests_properties(acp_client_test PROPERTIES TIMEOUT 180)
+    # `agentty run` the way a script uses it: exit codes, --json, -o,
+    # --max-turns, --timeout, and Ctrl-C/SIGTERM killing the tool tree.
+    add_test(NAME run_cli_test
+             COMMAND sh ${CMAKE_SOURCE_DIR}/tests/run_cli_test.sh $<TARGET_FILE:agentty>)
+    set_tests_properties(run_cli_test PROPERTIES TIMEOUT 120)
 endif()
 
 # ── Finalize: build agentty_tests + derived aggregates ──────────────────────

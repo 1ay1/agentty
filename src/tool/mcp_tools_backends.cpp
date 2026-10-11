@@ -945,12 +945,31 @@ std::string summarize_call(const ToolUse& tc) {
     return s;
 }
 
+// What one run did, for `agentty run`. The task tool passes none.
+struct RunStats {
+    std::string model;          // wire id of the last request
+    int  max_turns = 0;         // overrides the role's budget when > 0
+    std::optional<std::chrono::seconds> wall;   // overrides the wall clock
+    int  turns = 0;
+    int  tool_calls = 0;
+    int  tool_errors = 0;
+    long long input_tokens = 0;
+    long long output_tokens = 0;
+    bool cancelled = false;
+    bool deadline_hit = false;
+    bool budget_exhausted = false;
+    bool doomed = false;
+    std::string last_error;     // provider/stream error, if the run ended on one
+    std::string answer;         // the model's final text, no banners
+};
+
 provider::StreamResult run_one_completion(Thread& thread,
                               const subagent::Config& cfg,
                               const AgentType& type,
                               std::string& log,
                               const CallContext& ctx,
-                              const subagent::RunRegistration* run_reg = nullptr) {
+                              const subagent::RunRegistration* run_reg = nullptr,
+                              RunStats* stats = nullptr) {
     // Provider-agnostic request — the generic shape every transport accepts.
     // fresh_auth_header refreshes the ANTHROPIC OAuth token from disk; on any
     // other backend it would CLOBBER the provider's key with Anthropic
@@ -1224,6 +1243,10 @@ provider::StreamResult run_one_completion(Thread& thread,
     Message asst;
     asst.role = Role::Assistant;
     StopReason stop = StopReason::Unspecified;
+    // Usage can arrive more than once per request (start + delta), each one
+    // cumulative, so keep the biggest and add it once at the end.
+    long long req_in = 0, req_out = 0;
+    if (stats) stats->model = req.model;
     std::unordered_map<std::string, std::string> tool_json;
     // A StreamError that arrives MID-STREAM, after a 200 and some content.
     //
@@ -1338,6 +1361,11 @@ provider::StreamResult run_one_completion(Thread& thread,
                     }
                 } else if constexpr (std::same_as<T, StreamFinished>) {
                     stop = e.stop_reason;
+                } else if constexpr (std::same_as<T, StreamUsage>) {
+                    const long long in = static_cast<long long>(e.input_tokens)
+                        + e.cache_read_input_tokens + e.cache_creation_input_tokens;
+                    req_in  = std::max(req_in, in);
+                    req_out = std::max(req_out, static_cast<long long>(e.output_tokens));
                 } else if constexpr (std::same_as<T, StreamError>) {
                     // StreamResult is authoritative for TRANSPORT failures
                     // (non-2xx, dropped connection) — but it cannot see an
@@ -1400,6 +1428,10 @@ provider::StreamResult run_one_completion(Thread& thread,
     // another thread has returned, so this is race-free by the standard.
     stop_cbs.clear();
     pump(/*force=*/true);   // flush the throttled tail
+    if (stats) {
+        stats->input_tokens  += req_in;
+        stats->output_tokens += req_out;
+    }
 
     // A provider that answered 200, streamed some deltas, then emitted
     // `{"error": …}` instead of a finish_reason leaves `result` OK — the
@@ -1460,6 +1492,11 @@ public:
 
     std::string run(const mt::Call& call, const mt::SubagentRequest& sreq,
                     bool& is_error) override {
+        return run_with_stats(call, sreq, is_error, nullptr);
+    }
+
+    std::string run_with_stats(const mt::Call& call, const mt::SubagentRequest& sreq,
+                               bool& is_error, RunStats* stats) {
         is_error = false;
         // The enclosing call's context: its progress card, cancel and the
         // depth/deadline of the subagents around it.
@@ -1546,7 +1583,8 @@ public:
         // suite, and an untested stop path is one that quietly stops
         // working — which is how the read-context scope regressed. The env
         // var is read once per run; unset or unparseable means the default.
-        const auto max_wall_clock = [] {
+        const auto max_wall_clock = [stats] {
+            if (stats && stats->wall) return *stats->wall;
             if (const char* s = std::getenv("AGENTTY_SUBAGENT_MAX_SECONDS")) {
                 char* end = nullptr;
                 const long v = std::strtol(s, &end, 10);
@@ -1608,7 +1646,9 @@ public:
         // implementation loop (edit → build → read errors → fix → re-run) is
         // structurally longer, and starving it produces the "ran out of
         // turns, made zero edits" report rather than the work.
-        const int max_turns = subagent::max_turns_for(type.read_only);
+        const int max_turns = (stats && stats->max_turns > 0)
+                                  ? stats->max_turns
+                                  : subagent::max_turns_for(type.read_only);
 
         while (turns < max_turns && !doomed) {
             // Wall-clock stop, checked at the top of every turn. Placed here
@@ -1669,7 +1709,7 @@ public:
             }
 
             provider::StreamResult stream_result =
-                run_one_completion(thread, cfg, type, log, ctx, &run_reg);
+                run_one_completion(thread, cfg, type, log, ctx, &run_reg, stats);
 
             if (!stream_result.ok()) {
                 const std::string err = stream_result.error.value_or("stream failed");
@@ -1739,6 +1779,11 @@ public:
                 ctx.emit(log);
                 if (ctx.wait(wait, run_reg.token())) {
                     is_error = true;
+                    if (stats) {
+                        stats->cancelled  = true;
+                        stats->turns      = turns;
+                        stats->last_error = err;
+                    }
                     return "subagent cancelled while waiting to retry: " + err;
                 }
                 --turns;
@@ -1755,10 +1800,12 @@ public:
                     if (child.cancelled()) {
                         is_error = true;
                         last_error = "subagent cancelled before local tool execution";
+                        if (stats) stats->cancelled = true;
                         doomed = true;
                         break;
                     }
                     if (tc.args.is_null()) {
+                        if (stats) { ++stats->tool_calls; ++stats->tool_errors; }
                         tc.status = ToolUse::Failed{now, now,
                             "tool args failed to parse \xe2\x80\x94 re-emit the call "
                             "with complete, valid JSON arguments"};
@@ -1818,6 +1865,10 @@ public:
                                     res ? std::string_view{}
                                         : std::string_view{err_text},
                                     tc.args.dump());
+                    if (stats) {
+                        ++stats->tool_calls;
+                        if (!res) ++stats->tool_errors;
+                    }
                     if (res) {
                         // ECONOMY: a subagent is a focused, tool-heavy burst
                         // (read/grep/repo_map outputs run to tens of KiB
@@ -1905,6 +1956,16 @@ public:
         // Observed exactly that. Treat hitting the cap as a reportable
         // condition in its own right.
         const bool budget_exhausted = turns >= max_turns || deadline_hit;
+        if (stats) {
+            const bool clean_finish = !report.empty() && !salvaged_stale;
+            stats->turns            = turns;
+            stats->deadline_hit     = deadline_hit && !clean_finish;
+            stats->budget_exhausted = turns >= max_turns && !clean_finish;
+            stats->doomed           = doomed;
+            stats->last_error       = last_error;
+            if (ctx.cancelled() || run_reg.cancelled()) stats->cancelled = true;
+            stats->answer = report;
+        }
 
         if (report.empty() || salvaged_stale) {
             std::string why;
@@ -2019,22 +2080,85 @@ std::string known_agent_types() {
     return out;
 }
 
-std::string run_one_shot(const std::string& prompt,
-                         const std::string& agent_type,
-                         bool& is_error) {
-    // The one-shot CLI is exactly one subagent run driven from main()
-    // instead of from the `task` tool: same loop, same toolset, same
-    // bounds. Instantiate the runner directly — no HostServices needed.
-    AgenttySubagentRunner runner;
-    const mt::Call top{};   // top level: depth 0, no card, no enclosing cancel
-    if (auto why = runner.unavailable_reason(top); !why.empty()) {
-        is_error = true;
-        return why;
+std::string_view status_name(OneShotResult::Status s) noexcept {
+    using S = OneShotResult::Status;
+    switch (s) {
+        case S::Ok:            return "ok";
+        case S::Failed:        return "failed";
+        case S::TurnLimit:     return "turn_limit";
+        case S::Timeout:       return "timeout";
+        case S::ProviderError: return "provider_error";
+        case S::Cancelled:     return "cancelled";
+        case S::Unavailable:   return "unavailable";
     }
+    return "failed";
+}
+
+OneShotResult run_one_shot(const OneShotOptions& opts) {
+    // Same loop as the task tool, driven from main() at depth 0.
+    using S = OneShotResult::Status;
+    const auto t0 = std::chrono::steady_clock::now();
+    OneShotResult out;
+    out.agent = opts.agent_type.empty() ? "general" : opts.agent_type;
+
+    CallContext ctx;
+    if (opts.cancel.stop_possible()) ctx.cancel.push_back(opts.cancel);
+    mt::Call top{};
+    top.host = &ctx;
+
+    AgenttySubagentRunner runner;
+    if (auto why = runner.unavailable_reason(top); !why.empty()) {
+        out.status = S::Unavailable;
+        out.error  = std::move(why);
+        return out;
+    }
+    RunStats st;
+    st.max_turns = opts.max_turns;
+    if (opts.timeout.count() > 0) st.wall = opts.timeout;
+
     mt::SubagentRequest sreq;
-    sreq.prompt     = prompt;
-    sreq.agent_type = agent_type.empty() ? "general" : agent_type;
-    return runner.run(top, sreq, is_error);
+    sreq.prompt     = opts.prompt;
+    sreq.agent_type = out.agent;
+    bool is_error = false;
+    std::string report = runner.run_with_stats(top, sreq, is_error, &st);
+
+    out.model         = st.model;
+    out.turns         = st.turns;
+    out.tool_calls    = st.tool_calls;
+    out.tool_errors   = st.tool_errors;
+    out.input_tokens  = st.input_tokens;
+    out.output_tokens = st.output_tokens;
+    out.text          = st.answer;
+    out.duration_ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+
+    // Most specific cause first: a cancel shows up as an error too.
+    if (st.cancelled || opts.cancel.stop_requested()) {
+        out.status = S::Cancelled;
+        out.error  = "cancelled";
+    } else if (st.deadline_hit) {
+        out.status = S::Timeout;
+        out.error  = "hit the time limit before finishing";
+    } else if (!st.last_error.empty()) {
+        out.status = S::ProviderError;
+        out.error  = st.last_error;
+    } else if (st.budget_exhausted) {
+        out.status = S::TurnLimit;
+        out.error  = "hit the turn limit (" + std::to_string(st.turns) + ") before finishing";
+    } else if (st.doomed) {
+        out.status = S::Failed;
+        out.error  = "the same tool call failed 3 times in a row";
+    } else if (is_error) {
+        out.status = S::Failed;
+        out.error  = "the agent reported it did not complete the task";
+    } else if (out.text.empty()) {
+        // Not an error by the runner's rules, but a script gets nothing.
+        out.status = S::Failed;
+        out.error  = "finished without a text answer";
+    }
+    // A run that never got into the loop (bad config) only has the report.
+    if (!out.ok() && out.error.empty()) out.error = report;
+    return out;
 }
 
 // ── Proactive retrieval (SOTA active-RAG / FLARE / Self-RAG) ────────────

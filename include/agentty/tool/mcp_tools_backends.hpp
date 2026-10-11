@@ -12,6 +12,7 @@
 
 #include <mcp/tools/host.hpp>
 
+#include "agentty/tool/one_shot.hpp"
 #include "agentty/util/io.hpp"
 
 #include <optional>
@@ -26,15 +27,7 @@ namespace agentty::tools {
 // state) and svc.http untouched (the bridge installs the HttpClient).
 void install_host_backends(::mcp::tools::HostServices& svc);
 
-// Headless one-shot: run `prompt` through the SAME agent loop the `task`
-// tool uses (full toolset, doom-loop breaker, retry/backoff, kMaxTurns
-// bound) and return the final report text. `agent_type` picks the system
-// prompt / model-routing role ("general" default). Requires the subagent
-// seam to be installed (main wires it before subcommand dispatch). On
-// failure returns the actionable error text and sets is_error.
-[[nodiscard]] std::string run_one_shot(const std::string& prompt,
-                                       const std::string& agent_type,
-                                       bool& is_error);
+// Headless one-shot (`agentty run`): see agentty/tool/one_shot.hpp.
 
 // True iff `name` resolves to a real agent role — a built-in (explorer,
 // reviewer, tester, coder, general) or a user-defined one from

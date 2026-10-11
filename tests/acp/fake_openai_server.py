@@ -63,7 +63,18 @@ class H(BaseHTTPRequestHandler):
             with open(os.environ["FAKE_TOOLS_LOG"] + ".user", "w") as f:
                 f.write(text or "")
         events = []
-        if last.get("role") == "tool":
+        first_user = next((m.get("content") for m in msgs if m.get("role") == "user"), "")
+        if not isinstance(first_user, str):
+            first_user = json.dumps(first_user)
+        if "LOOP" in first_user:
+            # Never finishes: a fresh harmless tool call every turn.
+            n = sum(1 for m in msgs if m.get("role") == "tool")
+            args = json.dumps({"command": f"echo loop{n}"})
+            events = [chunk({"role": "assistant", "content": ""}),
+                      chunk({"tool_calls": [{"index": 0, "id": f"call_loop{n}", "type": "function",
+                                             "function": {"name": "shell", "arguments": args}}]}),
+                      chunk({}, "tool_calls")]
+        elif last.get("role") == "tool":
             events = [chunk({"role": "assistant", "content": "done"}), chunk({}, "stop")]
         elif (text or "").startswith("CALL "):
             # "CALL <tool> <raw json args>": a scripted model call, args sent as-is.

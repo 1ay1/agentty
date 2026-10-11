@@ -129,13 +129,11 @@
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/subagent.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
+#include "agentty/runtime/run_cli.hpp"
 
 // Forward decl (mcp_tools_backends.hpp pulls in <mcp/tools/host.hpp>, whose
 // ::mcp namespace collides with agentty::mcp inside main.cpp's usings).
 namespace agentty::tools {
-std::string run_one_shot(const std::string& prompt,
-                         const std::string& agent_type,
-                         bool& is_error);
 // Validates `--agent` before any work happens (see the run subcommand).
 bool is_known_agent_type(std::string_view name);
 std::string known_agent_types();
@@ -707,11 +705,14 @@ void print_usage() {
                           "(`agentty airgap --help` for details)", kCmdGutter),
         entry("  acp", "Run as an ACP agent over stdio (for Zed et al.)", kCmdGutter),
         entry("  run [PROMPT]", "Headless one-shot: run PROMPT through the full agent "
-                                "loop (tools, sandbox) and print the final answer to "
+                                "loop (tools, sandbox) and print only the answer to "
                                 "stdout. PROMPT `-` or absent reads stdin: "
-                                "`git diff | agentty run \"review this\"`. --agent TYPE "
-                                "picks the role (general default, "
-                                "explorer/reviewer/tester/coder). Exit 1 on error.",
+                                "`git diff | agentty run \"review this\"`. Flags: "
+                                "--agent TYPE (general, explorer, reviewer, tester, "
+                                "coder), --json, -o FILE, --max-turns N, --timeout "
+                                "5m, -v (stats on stderr). Exit 0 ok, 1 failed or out "
+                                "of turns, 2 bad usage, 3 provider/auth, 124 timeout, "
+                                "130 Ctrl-C.",
               kCmdGutter),
         entry("  mcp-serve", "Serve agentty's native tools over MCP (stdio). Point any "
                              "MCP client at `agentty mcp-serve`.", kCmdGutter),
@@ -855,6 +856,11 @@ struct Args {
     bool cli_run_prompt_claimed = false;  // ...and whether the scan took one
                                           // (an empty prompt is still a claim)
     std::string cli_run_agent;     // run: --agent explorer|reviewer|…|general
+    std::string cli_run_output;    // run: -o FILE
+    std::string cli_run_max_turns; // run: --max-turns N (validated later)
+    std::string cli_run_timeout;   // run: --timeout 90s|5m|1h
+    bool cli_run_json = false;     // run: --json
+    bool cli_run_verbose = false;  // run: -v
     std::vector<std::string> plugin_argv;  // plugin: verb + tail, verbatim
     int         airgap_argc = 0;
     char**      airgap_argv = nullptr;   // borrowed from main's argv
@@ -938,6 +944,20 @@ Args parse_args(int argc, char** argv) {
                     out.cli_run_agent = argv[++j];
                     continue;
                 }
+                if ((opt == "-o" || opt == "--output") && j + 1 < argc) {
+                    out.cli_run_output = argv[++j];
+                    continue;
+                }
+                if (opt == "--max-turns" && j + 1 < argc) {
+                    out.cli_run_max_turns = argv[++j];
+                    continue;
+                }
+                if (opt == "--timeout" && j + 1 < argc) {
+                    out.cli_run_timeout = argv[++j];
+                    continue;
+                }
+                if (opt == "--json")              { out.cli_run_json = true;    continue; }
+                if (opt == "-v" || opt == "--verbose") { out.cli_run_verbose = true; continue; }
                 // A non-flag (or a bare "-", which means stdin) is the
                 // prompt. Only the FIRST one: a second positional is a
                 // mistake worth reporting, not a second prompt to silently
@@ -1053,7 +1073,9 @@ Args parse_args(int argc, char** argv) {
             // "unknown arg" — an invisible rule, since the error named the
             // prompt rather than the ordering.
             if (out.subcommand == "run") {
-                if (a == "--agent") { ++i; continue; }   // flag + its value
+                if (a == "--agent" || a == "-o" || a == "--output"
+                    || a == "--max-turns" || a == "--timeout") { ++i; continue; }
+                if (a == "--json" || a == "-v" || a == "--verbose") continue;
                 if (out.cli_run_prompt_claimed && a == out.cli_run_prompt)
                     continue;
             }
@@ -1967,6 +1989,29 @@ int main(int argc, char** argv) {
                          tools::known_agent_types().c_str());
             return 2;
         }
+        run_cli::Options ro;
+        ro.agent   = args.cli_run_agent;
+        ro.output  = args.cli_run_output;
+        ro.json    = args.cli_run_json;
+        ro.verbose = args.cli_run_verbose;
+        if (!args.cli_run_max_turns.empty()) {
+            const auto n = run_cli::parse_count(args.cli_run_max_turns);
+            if (!n) {
+                std::fprintf(stderr, "agentty run: --max-turns wants a number from 1 to 500, got '%s'\n",
+                             args.cli_run_max_turns.c_str());
+                return 2;
+            }
+            ro.max_turns = *n;
+        }
+        if (!args.cli_run_timeout.empty()) {
+            const auto t = run_cli::parse_duration(args.cli_run_timeout);
+            if (!t) {
+                std::fprintf(stderr, "agentty run: --timeout wants a duration like 90, 90s, 5m or 1h, got '%s'\n",
+                             args.cli_run_timeout.c_str());
+                return 2;
+            }
+            ro.timeout = *t;
+        }
         std::string prompt = args.cli_run_prompt;
         // `-` asks for stdin explicitly; so does giving no positional at all.
         // An EXPLICIT empty prompt (`agentty run ""`) does not: the scan
@@ -2044,14 +2089,10 @@ int main(int argc, char** argv) {
             prompt = std::move(*expanded);
 
         provider::prewarm_active_provider(::agentty::IoAccess::grant());
-        bool is_error = false;
-        std::string report =
-            tools::run_one_shot(prompt, args.cli_run_agent, is_error);
-        std::fputs(report.c_str(), is_error ? stderr : stdout);
-        if (!report.empty() && report.back() != '\n')
-            std::fputc('\n', is_error ? stderr : stdout);
+        ro.prompt = std::move(prompt);
+        const int code = run_cli::run(ro);
         persistence::flush_pending_saves(::agentty::IoAccess::grant());
-        return is_error ? 1 : 0;
+        return code;
     }
 
     // ── ACP mode: run as a headless agent over stdio (Zed et al.) ───────

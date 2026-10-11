@@ -431,6 +431,7 @@ endif()
 
 add_executable(agentty
     src/runtime/main.cpp
+    src/runtime/run_cli.cpp
     ${AGENTTY_SHARED_OBJECTS}
     $<TARGET_OBJECTS:agentty_acp_obj>
 )
