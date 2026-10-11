@@ -942,10 +942,10 @@ TEST_CASE("wire body golden") {
 
     const std::string wire = oll::build_messages(msgs, /*json_protocol=*/false).dump();
     CHECK(wire.find("FIRST_") == std::string::npos);      // superseded read collapsed
-    CHECK(wire.find("superseded") != std::string::npos);
+    CHECK(wire.find("content was dropped to save context") != std::string::npos);
     CHECK(wire.find("SECOND_") != std::string::npos);     // live read full
 
-    constexpr std::uint64_t kGolden = 0xd4bc14dd8fc53bb8ull;
+    constexpr std::uint64_t kGolden = 0x945cece785ad177full;
     const std::uint64_t got = oll_fnv1a(wire);
     if (kGolden == 0)
         std::fprintf(stderr, "OLLAMA wire golden = 0x%016llxull (len=%zu)\n",

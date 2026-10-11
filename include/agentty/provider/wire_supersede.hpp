@@ -40,8 +40,9 @@ namespace agentty::provider::wire {
 // byte counts / positions) so a given superseded read always serialises
 // identically — the prompt cache never churns on it.
 inline constexpr std::string_view kSupersededReadPointer =
-    "(earlier read of this file \u2014 superseded by a later read or edit of the "
-    "same file; refer to the more recent tool result for its current contents)";
+    "(this read's content was dropped to save context: a later read covers "
+    "these lines, or the file was edited since. If you need these lines and "
+    "they are not in a later result, read them again.)";
 
 // The file path a tool call targets, if any. Empty for non-file tools.
 // read/edit/write/remove/move all carry the target in `path` (or an alias).
@@ -205,6 +206,15 @@ read_span_from_output(std::string_view out) {
         && !out.starts_with(kUnchanged);
 }
 
+// Tools that change a file. Only these make an earlier read stale; a grep,
+// outline or read_filter of the same path reads it and changes nothing.
+[[nodiscard]] inline bool changes_file(std::string_view tool) noexcept {
+    for (std::string_view w : {"edit", "write", "remove", "move", "apply_patch",
+                               "multi_edit", "replace", "rewrite_structural"})
+        if (tool == w) return true;
+    return false;
+}
+
 // Identify earlier `read` results whose file was touched again LATER in the
 // thread (by another read/edit/write/remove/move of the same path). Returns
 // the set of ToolCallId strings to collapse. The MOST RECENT read of each
@@ -224,6 +234,9 @@ superseded_read_ids(const std::vector<Message>& msgs) {
             if (path.empty()) continue;
 
             const bool is_read = tc.name.value == "read";
+            // grep/outline/read_filter on the path neither cover a read's
+            // bytes nor change the file: leave the read alone.
+            if (!is_read && !changes_file(tc.name.value)) continue;
             const bool ok_read = is_read
                 && tc.is_terminal() && !tc.is_failed() && !tc.is_rejected();
             // A read that served only a sentinel is a pointer to an earlier

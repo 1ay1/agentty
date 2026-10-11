@@ -2074,10 +2074,10 @@ TEST_CASE("test_wire_body_golden") {
     const std::string wire = oai::build_messages(t).dump();
 
     CHECK(wire.find("FIRST_") == std::string::npos);      // superseded read collapsed
-    CHECK(wire.find("superseded") != std::string::npos);  // pointer text present
+    CHECK(wire.find("content was dropped to save context") != std::string::npos);  // pointer text present
     CHECK(wire.find("SECOND_") != std::string::npos);     // live read full
 
-    constexpr std::uint64_t kGolden = 0x60773f1adaf86e13ull;
+    constexpr std::uint64_t kGolden = 0x5cbfe9a39e038624ull;
     const std::uint64_t got = fnv1a(wire);
     if (kGolden == 0)
         std::fprintf(stderr, "OPENAI wire golden = 0x%016llxull (len=%zu)\n",

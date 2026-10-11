@@ -74,6 +74,21 @@ bool body_survives(const std::vector<Message>& msgs, std::string_view needle) {
 
 }  // namespace
 
+TEST_CASE("supersede: grep or outline of the same file never drops a read") {
+    // They neither change the file nor carry the read's lines, so the read
+    // is the only copy and must stay.
+    for (const char* tool : {"grep", "outline", "read_filter", "find_definition"}) {
+        ToolUse other;
+        other.id = ToolCallId{"c2"};
+        other.name = ToolName{tool};
+        other.args = {{"path", "/w/f.txt"}, {"pattern", "x"}};
+        other.status = ToolUse::Done{{}, {}, std::string{"Found 1 match"}};
+        auto msgs = thread_of({read_call("c1", "/w/f.txt", "line 1\nline 2\n"), other});
+        CHECK_FALSE(wire::superseded_read_ids(msgs).contains("c1"));
+        CHECK(body_survives(msgs, "line 2"));
+    }
+}
+
 TEST_CASE("supersede: a sentinel-only read never collapses the real one") {
     // THE BUG. Read #1 serves the body; read #2 is answered by the fs dedup
     // with a pointer back to #1. Collapsing #1 leaves the bytes nowhere.

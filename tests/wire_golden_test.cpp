@@ -130,7 +130,7 @@ TEST_CASE("wire_golden") {
     //    raw CompactionRecord on the thread is intentionally a no-op here.
     check(wire.find("FIRST_READ_") == std::string::npos,
           "superseded read body is collapsed (not shipped)");
-    check(wire.find("superseded") != std::string::npos,
+    check(wire.find("content was dropped to save context") != std::string::npos,
           "superseded read carries the pointer text");
     check(wire.find("SECOND_READ_") != std::string::npos,
           "live (newest) read of the file ships in full");
@@ -142,7 +142,7 @@ TEST_CASE("wire_golden") {
     // 3. Byte-identity: the exact serialization is pinned. A refactor that
     //    changes even one byte trips this. Update kGoldenHash ONLY after
     //    confirming the change is intentional.
-    const std::uint64_t kGoldenHash = 0xe611b19d855369f5ull;
+    const std::uint64_t kGoldenHash = 0x172e2b86aae44ee2ull;
     const std::uint64_t got = fnv1a(wire);
 
     if (kGoldenHash == 0) {
