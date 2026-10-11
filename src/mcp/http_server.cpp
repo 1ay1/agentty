@@ -132,7 +132,7 @@ struct Conn {
                 {"error", {{"code", -32003}, {"message",
                     std::string{"http transport worker: "} + std::string{reason}}}},
             };
-            feed(err.dump());
+            feed(jsonrpc::dump_frame(err));
         } catch (...) {
             // The transport is already marked dead; the engine deadline is the
             // final fallback if even constructing the error response fails.
@@ -279,7 +279,7 @@ struct Conn {
                     {"error", {{"code", -32003}, {"message",
                         std::string{"http transport: "} + result.error().render()}}},
                 };
-                feed(err.dump());
+                feed(jsonrpc::dump_frame(err));
             }
             return;
         }
@@ -311,7 +311,7 @@ struct Conn {
                 {"id", parsed.value("id", json(nullptr))},
                 {"error", {{"code", http_status_401_ ? -32020 : -32603}, {"message", msg}}},
             };
-            feed(err.dump());
+            feed(jsonrpc::dump_frame(err));
         }
         // notifications with a 202/empty body: nothing to feed — correct.
     }
@@ -361,7 +361,7 @@ struct Conn {
     // a pretty-printed body is compacted to one.
     void feed(const std::string& payload) {
         std::string line;
-        try { line = json::parse(payload).dump(); }
+        try { line = jsonrpc::dump_frame(json::parse(payload)); }
         catch (...) {
             util::dbglog("mcp.http_transport.feed", "unparseable frame");
             return;

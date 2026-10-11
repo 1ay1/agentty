@@ -336,16 +336,25 @@ void Peer::Core::close(std::string reason) {
 void Peer::Core::reader(std::stop_token st) {
     jsonrpc::LineSplitter lines;
     std::string buf(64 * 1024, '\0');
+    // One frame that throws while being handled must not take the reader
+    // with it: a dead reader leaves the peer deaf for good, with no error.
+    auto take = [this](std::string line) {
+        try {
+            if (dispatch.trace) dispatch.trace(true, line);
+            perform(step(jsonrpc::Received{std::move(line)}));
+        } catch (const std::exception& e) {
+            util::dbglog("rpc.reader", name + ": dropped a frame: " + e.what());
+        } catch (...) {
+            util::dbglog("rpc.reader", name + ": dropped a frame");
+        }
+    };
     while (!st.stop_requested()) {
         const std::size_t n = ch.read(buf.data(), buf.size());
         if (n == 0) break;   // EOF or error
-        for (auto& line : lines.feed(std::string_view{buf.data(), n})) {
-            if (dispatch.trace) dispatch.trace(true, line);
-            perform(step(jsonrpc::Received{std::move(line)}));
-        }
+        for (auto& line : lines.feed(std::string_view{buf.data(), n})) take(std::move(line));
     }
     if (!st.stop_requested())
-        if (auto last = lines.finish()) perform(step(jsonrpc::Received{std::move(*last)}));
+        if (auto last = lines.finish()) take(std::move(*last));
     close("eof");
 }
 

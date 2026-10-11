@@ -135,10 +135,15 @@ def purity(root):
                 if (lib in FILE_IO_LIBS and not rel.startswith(FILE_IO_ALLOWED)
                         and FILE_IO.search(padded.replace(" fs::", " std::filesystem::"))):
                     hits.append(f"{rel}:{no}: R6 file io: {line.strip()}")
-                if STATIC_RE.match(line):
-                    head = re.split(r"[={]", line, maxsplit=1)[0]
-                    if "(" not in head and re.search(r"[=;{]", line):
-                        hits.append(f"{rel}:{no}: R3 mutable static: {line.strip()}")
+                # R3: a mutable static anywhere on the line, statement by
+                # statement (`{ static int n = 0;` used to slip through).
+                for stmt in re.split(r"[;{}]", line):
+                    if STATIC_RE.match(stmt):
+                        head = re.split(r"[=({]", stmt, maxsplit=1)[0]
+                        is_fn = re.search(r"\w\s*\(", stmt) and "=" not in stmt.split("(")[0]
+                        if not is_fn and re.search(r"\w", head.replace("static", "", 1)):
+                            hits.append(f"{rel}:{no}: R3 mutable static: {line.strip()}")
+                            break
     if nfiles == 0:
         return ["scanned 0 files"]
     print(f"submodule_purity: {nfiles} files in {', '.join(LIBS)}")
