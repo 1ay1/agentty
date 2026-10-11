@@ -32,6 +32,7 @@ int exit_code_for(Status s, std::optional<maya::sig> got) {
         case Status::Unavailable:   return 3;
         case Status::ProviderError: return 3;
         case Status::Timeout:       return 124;   // same as timeout(1)
+        case Status::NotFound:      return 4;
         case Status::Cancelled:
             if (got == maya::sig::terminate) return 143;
             if (got == maya::sig::hangup)    return 129;
@@ -55,7 +56,24 @@ nlohmann::json to_json(const tools::OneShotResult& r, int code) {
         {"duration_ms", r.duration_ms},
     };
     if (!r.ok()) j["error"] = r.error;
+    if (!r.thread_id.empty()) j["thread_id"] = r.thread_id;
     return j;
+}
+
+tools::OneShotOptions to_one_shot(const Options& o, std::stop_token cancel) {
+    tools::OneShotOptions t;
+    t.prompt     = o.prompt;
+    t.agent_type = o.agent;
+    t.max_turns  = o.max_turns;
+    t.timeout    = o.timeout;
+    t.cancel     = std::move(cancel);
+    t.read_only  = o.read_only;
+    t.no_network = o.no_network;
+    t.effort     = o.effort;
+    t.events     = o.events;
+    t.resume     = o.resume;
+    t.save       = o.save;
+    return t;
 }
 
 bool write_file(const std::string& path, const std::string& body) {
@@ -77,10 +95,8 @@ tools::OneShotResult run_with_signals(const Options& o, std::optional<maya::sig>
     auto sigs = pf::native_signals::install(
         {maya::sig::interrupt, maya::sig::terminate, maya::sig::hangup});
     auto reactor = pf::native_reactor::create();
-    if (!sigs || !reactor) {
-        tools::OneShotOptions opts{o.prompt, o.agent, o.max_turns, o.timeout, {}};
-        return tools::run_one_shot(opts);
-    }
+    if (!sigs || !reactor)
+        return tools::run_one_shot(to_one_shot(o, {}));
     constexpr std::uint64_t kSigToken = 1;
     auto reg = reactor->watch(sigs->handle(), pf::interest::read, kSigToken);
     const auto waker = reactor->waker();
@@ -118,8 +134,7 @@ tools::OneShotResult run_with_signals(const Options& o, std::optional<maya::sig>
                 }
             }
         });
-        tools::OneShotOptions opts{o.prompt, o.agent, o.max_turns, o.timeout,
-                                   cancel.get_token()};
+        const auto opts = to_one_shot(o, cancel.get_token());
         try {
             result = tools::run_one_shot(opts);
         } catch (...) {
@@ -167,6 +182,17 @@ std::optional<std::chrono::seconds> parse_duration(std::string_view s) {
     return std::chrono::seconds{n * mult};
 }
 
+bool valid_resume(std::string_view s) {
+    if (s == "last") return true;
+    return s.size() == 16 && s.find_first_not_of("0123456789abcdef") == std::string_view::npos;
+}
+
+bool valid_effort(std::string_view s) {
+    for (auto e : {"low", "medium", "high", "xhigh", "max", "auto"})
+        if (s == e) return true;
+    return false;
+}
+
 int run(const Options& o) {
     std::optional<maya::sig> got;
     const tools::OneShotResult r = run_with_signals(o, got);
@@ -202,6 +228,9 @@ int run(const Options& o) {
                      r.agent.c_str(), r.model.empty() ? "?" : r.model.c_str(), r.turns,
                      r.tool_calls, r.tool_errors, r.input_tokens, r.output_tokens,
                      static_cast<double>(r.duration_ms) / 1000.0);
+        if (!r.thread_id.empty())
+            std::fprintf(stderr, "agentty run: saved as thread %s (--resume %s)\n",
+                         r.thread_id.c_str(), r.thread_id.c_str());
     }
     return code;
 }

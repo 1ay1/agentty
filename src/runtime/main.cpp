@@ -710,9 +710,11 @@ void print_usage() {
                                 "`git diff | agentty run \"review this\"`. Flags: "
                                 "--agent TYPE (general, explorer, reviewer, tester, "
                                 "coder), --json, -o FILE, --max-turns N, --timeout "
-                                "5m, -v (stats on stderr). Exit 0 ok, 1 failed or out "
-                                "of turns, 2 bad usage, 3 provider/auth, 124 timeout, "
-                                "130 Ctrl-C.",
+                                "5m, --effort LEVEL, --read-only, --no-network, "
+                                "--save, --resume ID|last, --events jsonl (tools, "
+                                "reasoning, text on stderr), -v. Exit 0 ok, 1 failed "
+                                "or out of turns, 2 bad usage, 3 provider/auth, 4 "
+                                "no such thread, 124 timeout, 130 Ctrl-C.",
               kCmdGutter),
         entry("  mcp-serve", "Serve agentty's native tools over MCP (stdio). Point any "
                              "MCP client at `agentty mcp-serve`.", kCmdGutter),
@@ -782,10 +784,11 @@ void print_usage() {
                                        "is AGENTTY_LOG (default: warnings and errors) \u2014 "
                                        "e.g. AGENTTY_LOG=debug, or AGENTTY_LOG=wire=trace "
                                        "for raw HTTP bytes.", kOptGutter),
-        entry("      --events jsonl", "Headless `run`: emit one JSON object per line to "
-                                      "stderr for each tool executed (tool, ms, ok, err, "
-                                      "args_sha). stdout keeps the report, so both can "
-                                      "be captured.", kOptGutter),
+        entry("      --events jsonl", "Headless `run`: one JSON object per line on stderr: "
+                                      "`turn` at each model turn, `reasoning` and `text` "
+                                      "as the model writes them, `tool` per tool call "
+                                      "(tool, ms, ok, err, args_sha). stdout keeps the "
+                                      "answer, so both can be captured.", kOptGutter),
         entry("  -p, --profile MODE", "ACP permission tier (Zed shows the prompts): "
                                       "ask (default: prompt write/exec/net), minimal "
                                       "(also prompt reads), write (never prompt reads).",
@@ -861,6 +864,11 @@ struct Args {
     std::string cli_run_timeout;   // run: --timeout 90s|5m|1h
     bool cli_run_json = false;     // run: --json
     bool cli_run_verbose = false;  // run: -v
+    bool cli_run_read_only = false;   // run: --read-only
+    bool cli_run_no_network = false;  // run: --no-network
+    bool cli_run_save = false;        // run: --save
+    std::string cli_run_effort;       // run: --effort LEVEL
+    std::string cli_run_resume;       // run: --resume ID|last
     std::vector<std::string> plugin_argv;  // plugin: verb + tail, verbatim
     int         airgap_argc = 0;
     char**      airgap_argv = nullptr;   // borrowed from main's argv
@@ -958,6 +966,17 @@ Args parse_args(int argc, char** argv) {
                 }
                 if (opt == "--json")              { out.cli_run_json = true;    continue; }
                 if (opt == "-v" || opt == "--verbose") { out.cli_run_verbose = true; continue; }
+                if (opt == "--read-only")  { out.cli_run_read_only = true;  continue; }
+                if (opt == "--no-network") { out.cli_run_no_network = true; continue; }
+                if (opt == "--save")       { out.cli_run_save = true;       continue; }
+                if (opt == "--effort" && j + 1 < argc) {
+                    out.cli_run_effort = argv[++j];
+                    continue;
+                }
+                if (opt == "--resume" && j + 1 < argc) {
+                    out.cli_run_resume = argv[++j];
+                    continue;
+                }
                 // A non-flag (or a bare "-", which means stdin) is the
                 // prompt. Only the FIRST one: a second positional is a
                 // mistake worth reporting, not a second prompt to silently
@@ -1074,8 +1093,10 @@ Args parse_args(int argc, char** argv) {
             // prompt rather than the ordering.
             if (out.subcommand == "run") {
                 if (a == "--agent" || a == "-o" || a == "--output"
-                    || a == "--max-turns" || a == "--timeout") { ++i; continue; }
-                if (a == "--json" || a == "-v" || a == "--verbose") continue;
+                    || a == "--max-turns" || a == "--timeout"
+                    || a == "--effort" || a == "--resume") { ++i; continue; }
+                if (a == "--json" || a == "-v" || a == "--verbose" || a == "--read-only"
+                    || a == "--no-network" || a == "--save") continue;
                 if (out.cli_run_prompt_claimed && a == out.cli_run_prompt)
                     continue;
             }
@@ -1492,7 +1513,16 @@ int main(int argc, char** argv) {
         // so it has to run BEFORE the CLI flag or an explicit
         // --sandbox-backend would be silently overwritten by the saved one.
         // A flag the user typed this run beats a setting they saved once.
-        tools::util::sandbox::set_config(persistence::load_settings(::agentty::IoAccess::grant()).sandbox);
+        {
+            auto sb = persistence::load_settings(::agentty::IoAccess::grant()).sandbox;
+            // `run --no-network`: no network for any command this run spawns.
+            // Only this process; the saved setting is untouched.
+            if (args.subcommand == "run" && args.cli_run_no_network) {
+                sb.net_mode   = sandbox_cfg::NetMode::None;
+                sb.configured = true;
+            }
+            tools::util::sandbox::set_config(sb);
+        }
 
         // --sandbox-backend is retained but no longer selects anything:
         // claybin is the only Linux engine. Kept rather than rejected so a
@@ -1515,6 +1545,17 @@ int main(int argc, char** argv) {
         if (!ok) {
             std::fprintf(stderr,
                 "agentty: --sandbox=on but no backend available. %s\n",
+                tools::util::sandbox::describe_state().c_str());
+            return 2;
+        }
+        // Only claybin can take the network away from a shell command. Without
+        // it --no-network would be a promise nobody keeps, so refuse.
+        if (args.subcommand == "run" && args.cli_run_no_network
+            && !(tools::util::sandbox::is_active()
+                 && tools::util::sandbox::detected_backend()
+                        == tools::util::sandbox::Backend::Claybin)) {
+            std::fprintf(stderr,
+                "agentty run: --no-network needs the claybin sandbox, which isn't active (%s)\n",
                 tools::util::sandbox::describe_state().c_str());
             return 2;
         }
@@ -1994,6 +2035,27 @@ int main(int argc, char** argv) {
         ro.output  = args.cli_run_output;
         ro.json    = args.cli_run_json;
         ro.verbose = args.cli_run_verbose;
+        ro.read_only  = args.cli_run_read_only;
+        ro.no_network = args.cli_run_no_network;
+        ro.save       = args.cli_run_save;
+        if (const char* ev = std::getenv("AGENTTY_EVENTS"); ev && std::string_view{ev} == "jsonl")
+            ro.events = true;
+        if (!args.cli_run_effort.empty()) {
+            if (!run_cli::valid_effort(args.cli_run_effort)) {
+                std::fprintf(stderr, "agentty run: --effort wants low, medium, high, xhigh, max or auto, got '%s'\n",
+                             args.cli_run_effort.c_str());
+                return 2;
+            }
+            ro.effort = args.cli_run_effort;
+        }
+        if (!args.cli_run_resume.empty()) {
+            if (!run_cli::valid_resume(args.cli_run_resume)) {
+                std::fprintf(stderr, "agentty run: --resume wants a thread id (16 hex digits) or 'last', got '%s'\n",
+                             args.cli_run_resume.c_str());
+                return 2;
+            }
+            ro.resume = args.cli_run_resume;
+        }
         if (!args.cli_run_max_turns.empty()) {
             const auto n = run_cli::parse_count(args.cli_run_max_turns);
             if (!n) {

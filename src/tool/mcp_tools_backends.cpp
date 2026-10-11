@@ -134,26 +134,67 @@ enum class EventFormat { Off, Jsonl };
 
 // One event line. Never throws: a diagnostic stream must not be able to
 // take down the run it is describing.
+void emit_event(nlohmann::json j) noexcept {
+    if (event_format() == EventFormat::Off) return;
+    try {
+        static std::atomic<unsigned long long> seq{0};
+        j["seq"] = seq.fetch_add(1, std::memory_order_relaxed);
+        const std::string line = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+        std::fprintf(stderr, "%s\n", line.c_str());
+    } catch (...) {
+        // Out of memory formatting a diagnostic line: drop the line.
+    }
+}
+
 void emit_tool_event(std::string_view tool, long long ms, bool ok,
                      std::string_view err, std::string_view args) noexcept {
     if (event_format() == EventFormat::Off) return;
     try {
-        static std::atomic<unsigned long long> seq{0};
         nlohmann::json j{
             {"ev",   "tool"},
-            {"seq",  seq.fetch_add(1, std::memory_order_relaxed)},
             {"tool", tool},
             {"ms",   ms},
             {"ok",   ok},
             {"args_sha", args_digest(args)},
         };
         if (!ok && !err.empty()) j["err"] = err;
-        const std::string line = j.dump();
-        std::fprintf(stderr, "%s\n", line.c_str());
-    } catch (...) {
-        // Out of memory formatting a diagnostic line: drop the line.
-    }
+        emit_event(std::move(j));
+    } catch (...) {}
 }
+
+// Model output for `agentty run --events jsonl`: reasoning and answer text as
+// it streams, batched per line so a harness isn't flooded with one-char
+// events. Only the top-level run emits these, not nested subagents.
+class TextEvents {
+public:
+    explicit TextEvents(bool on, int turn) : on_(on), turn_(turn) {}
+    TextEvents(const TextEvents&) = delete;
+    TextEvents& operator=(const TextEvents&) = delete;
+    ~TextEvents() { flush(); }
+    void reasoning(std::string_view s) { add(Kind::Reasoning, s); }
+    void text(std::string_view s)      { add(Kind::Text, s); }
+    void flush() noexcept {
+        if (!on_ || buf_.empty()) return;
+        try {
+            emit_event({{"ev", kind_ == Kind::Reasoning ? "reasoning" : "text"},
+                        {"turn", turn_}, {"text", buf_}});
+        } catch (...) {}
+        buf_.clear();
+    }
+private:
+    enum class Kind { Reasoning, Text };
+    void add(Kind k, std::string_view s) {
+        if (!on_ || s.empty()) return;
+        if (k != kind_) { flush(); kind_ = k; }
+        buf_ += s;
+        // A line per paragraph or ~2 KiB, whichever comes first.
+        if (buf_.size() >= 2048 || buf_.find('\n') != std::string::npos) flush();
+    }
+    bool on_;
+    int turn_;
+    Kind kind_ = Kind::Text;
+    std::string buf_;
+};
 
 // ── MemoryStore ────────────────────────────────────────────────────────
 //   Backs remember / forget / wipe. The shell owns the schema + dedup/pin/
@@ -950,6 +991,14 @@ struct RunStats {
     std::string model;          // wire id of the last request
     int  max_turns = 0;         // overrides the role's budget when > 0
     std::optional<std::chrono::seconds> wall;   // overrides the wall clock
+    bool read_only  = false;    // drop write/exec/net tools, refuse them if called
+    bool no_network = false;    // drop net tools, refuse them if called
+    std::optional<Effort> effort;   // --effort; unset keeps subagents' default (off)
+    bool events = false;        // stream reasoning/text as --events jsonl lines
+    // Earlier conversation to continue (--resume). The new prompt is appended.
+    std::vector<Message> history;
+    // The whole conversation when the run ends, to save it.
+    Thread final_thread;
     int  turns = 0;
     int  tool_calls = 0;
     int  tool_errors = 0;
@@ -962,6 +1011,30 @@ struct RunStats {
     std::string last_error;     // provider/stream error, if the run ended on one
     std::string answer;         // the model's final text, no banners
 };
+
+// Whether a run may use a tool. Used both for the list the model sees and
+// again when it calls one, so an unlisted tool can't run anyway.
+bool subagent_tool_allowed(const tools::ToolDef& t, const AgentType& type,
+                           const RunStats* stats) {
+    if (t.name.value == "task") return false;
+    if (!type.allow.empty()) {
+        bool listed = false;
+        for (auto n : type.allow)
+            if (n == t.name.value) { listed = true; break; }
+        if (!listed) return false;
+    }
+    const bool read_only  = type.read_only || (stats && stats->read_only);
+    const bool no_network = stats && stats->no_network;
+    if (read_only || no_network) {
+        tools::EffectSet eff = t.effects;
+        if (const auto* sp = tools::spec::lookup(t.name.value)) eff = sp->effects;
+        using tools::Effect;
+        if (read_only && (eff.has(Effect::WriteFs) || eff.has(Effect::Exec)))
+            return false;
+        if ((read_only || no_network) && eff.has(Effect::Net)) return false;
+    }
+    return true;
+}
 
 provider::StreamResult run_one_completion(Thread& thread,
                               const subagent::Config& cfg,
@@ -1068,6 +1141,18 @@ provider::StreamResult run_one_completion(Thread& thread,
     // returns a clean id when it finds a cheaper model; this also covers the
     // "kept the parent" fallback and the write-role (cfg.model) path.
     req.model         = agentty::wire_model_id(req.model);
+    // `agentty run --effort`: the user asked this run to think. Clamped to
+    // what the routed model takes; visible so --events can show it.
+    if (stats && stats->effort) {
+        req.effort = std::string(effort_wire_for(*stats->effort, resolved_caps(req.model)));
+        req.show_reasoning = !req.effort.empty();
+    }
+    // --events wants the reasoning a model produces even without --effort
+    // (deepseek-r1 and friends always think). Not on Anthropic: there it
+    // only means anything with effort on, which is handled above.
+    if (stats && stats->events && ctx.depth == 0
+        && provider::active().kind != provider::Kind::Anthropic)
+        req.show_reasoning = true;
     // The model's real context window, from the SAME catalog the model was
     // routed out of.
     //
@@ -1210,21 +1295,7 @@ provider::StreamResult run_one_completion(Thread& thread,
     }
 
     auto allowed = [&](const tools::ToolDef& t) -> bool {
-        if (t.name.value == "task") return false;
-        if (!type.allow.empty()) {
-            bool listed = false;
-            for (auto n : type.allow)
-                if (n == t.name.value) { listed = true; break; }
-            if (!listed) return false;
-        }
-        if (type.read_only) {
-            tools::EffectSet eff = t.effects;
-            if (const auto* sp = tools::spec::lookup(t.name.value)) eff = sp->effects;
-            using tools::Effect;
-            if (eff.has(Effect::WriteFs) || eff.has(Effect::Exec) || eff.has(Effect::Net))
-                return false;
-        }
-        return true;
+        return subagent_tool_allowed(t, type, stats);
     };
     std::string_view newest_user;
     for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
@@ -1286,6 +1357,9 @@ provider::StreamResult run_one_completion(Thread& thread,
         ctx.emit(snap);
     };
 
+    // Reasoning and answer text as --events lines; top-level run only.
+    TextEvents text_events(stats && stats->events && ctx.depth == 0,
+                           stats ? stats->turns + 1 : 0);
     auto sink = [&](Msg m) {
             auto* sm = std::get_if<msg::StreamMsg>(&m);
             if (!sm) return;
@@ -1293,7 +1367,10 @@ provider::StreamResult run_one_completion(Thread& thread,
                 using T = std::decay_t<decltype(e)>;
                 if constexpr (std::same_as<T, StreamTextDelta>) {
                     asst.text += e.text;
+                    text_events.text(e.text);
                     pump();
+                } else if constexpr (std::same_as<T, StreamThinkingDelta>) {
+                    text_events.reasoning(e.text);
                 } else if constexpr (std::same_as<T, StreamToolUseStart>) {
                     ToolUse tc;
                     tc.id     = e.id;
@@ -1428,6 +1505,7 @@ provider::StreamResult run_one_completion(Thread& thread,
     // another thread has returned, so this is race-free by the standard.
     stop_cbs.clear();
     pump(/*force=*/true);   // flush the throttled tail
+    text_events.flush();
     if (stats) {
         stats->input_tokens  += req_in;
         stats->output_tokens += req_out;
@@ -1517,6 +1595,7 @@ public:
         const AgentType& type = resolve_agent_type(sreq.agent_type);
 
         Thread thread;
+        if (stats) thread.messages = stats->history;
         {
             Message user;
             user.role = Role::User;
@@ -1666,6 +1745,11 @@ public:
             // starting one more completion that teardown then waits on.
             if (run_reg.cancelled()) break;
             ++turns;
+            if (stats) {
+                stats->turns = turns - 1;   // completed so far; the next is turns
+                if (stats->events && ctx.depth == 0)
+                    emit_event({{"ev", "turn"}, {"turn", turns}});
+            }
 
             // FINAL-TURN NUDGE: when the remaining budget is nearly spent,
             // inject a synthetic user message ordering the model to stop
@@ -1818,6 +1902,20 @@ public:
                         ran_a_tool = true;
                         continue;
                     }
+                    // Only tools this run was offered may run. A model can
+                    // still name one it wasn't given (read-only, --no-network).
+                    if (const auto* def = tools::find(tc.name.value);
+                        def && !subagent_tool_allowed(*def, type, stats)) {
+                        if (stats) { ++stats->tool_calls; ++stats->tool_errors; }
+                        tc.status = ToolUse::Failed{now, now,
+                            "tool '" + tc.name.value + "' is not available in this run"};
+                        log += "\n    \xe2\x9c\x97 " + tc.name.value + ": not allowed";
+                        ctx.emit(log);
+                        emit_tool_event(tc.name.value, 0, false, "not allowed in this run",
+                                        tc.args.dump());
+                        ran_a_tool = true;
+                        continue;
+                    }
                     ran_a_tool = true;
                     const auto t_start = std::chrono::steady_clock::now();
                     // The subagent's own context: deeper, its own reader and
@@ -1937,10 +2035,13 @@ public:
             // No final text (ran out of budget mid-tool, or last turn was
             // tool-only). Salvage the most recent EARLIER assistant text as a
             // partial, but mark it stale so the banner below tells the caller
-            // this is not a proper final report.
-            for (auto it = thread.messages.rbegin(); it != thread.messages.rend(); ++it) {
-                if (it->role == Role::Assistant && !it->text.empty()) {
-                    report = it->text;
+            // this is not a proper final report. Never reach into resumed
+            // history: that answer belongs to an earlier run.
+            const std::size_t first_new = stats ? stats->history.size() : 0;
+            for (std::size_t i = thread.messages.size(); i-- > first_new;) {
+                const auto& msg = thread.messages[i];
+                if (msg.role == Role::Assistant && !msg.text.empty()) {
+                    report = msg.text;
                     salvaged_stale = true;
                     break;
                 }
@@ -1965,6 +2066,7 @@ public:
             stats->last_error       = last_error;
             if (ctx.cancelled() || run_reg.cancelled()) stats->cancelled = true;
             stats->answer = report;
+            stats->final_thread = thread;
         }
 
         if (report.empty() || salvaged_stale) {
@@ -2090,6 +2192,7 @@ std::string_view status_name(OneShotResult::Status s) noexcept {
         case S::ProviderError: return "provider_error";
         case S::Cancelled:     return "cancelled";
         case S::Unavailable:   return "unavailable";
+        case S::NotFound:      return "not_found";
     }
     return "failed";
 }
@@ -2113,14 +2216,57 @@ OneShotResult run_one_shot(const OneShotOptions& opts) {
         return out;
     }
     RunStats st;
-    st.max_turns = opts.max_turns;
+    st.max_turns  = opts.max_turns;
     if (opts.timeout.count() > 0) st.wall = opts.timeout;
+    st.read_only  = opts.read_only;
+    st.no_network = opts.no_network;
+    st.events     = opts.events;
+    if (!opts.effort.empty()) st.effort = effort_from_wire(opts.effort);
+
+    // --resume: continue a saved thread. "last" is the newest one.
+    Thread prior;
+    if (!opts.resume.empty()) {
+        const Io io = IoAccess::grant();
+        std::optional<Thread> got;
+        if (opts.resume == "last") {
+            auto all = persistence::load_all_threads(io);
+            auto newest = std::max_element(all.begin(), all.end(),
+                [](const Thread& a, const Thread& b) { return a.updated_at < b.updated_at; });
+            if (newest != all.end()) got = persistence::load_thread_by_id(io, newest->id);
+        } else {
+            got = persistence::load_thread_by_id(io, ThreadId{opts.resume});
+        }
+        if (!got) {
+            out.status = S::NotFound;
+            out.error  = opts.resume == "last" ? "no saved thread to resume"
+                                                : "no thread with id " + opts.resume;
+            return out;
+        }
+        prior = std::move(*got);
+        st.history = prior.messages;
+    }
 
     mt::SubagentRequest sreq;
     sreq.prompt     = opts.prompt;
     sreq.agent_type = out.agent;
     bool is_error = false;
     std::string report = runner.run_with_stats(top, sreq, is_error, &st);
+
+    // Save what happened so it can be resumed, or opened in the TUI. A run
+    // that never reached the model has nothing new to keep.
+    if ((opts.save || !opts.resume.empty())
+        && st.final_thread.messages.size() > st.history.size()) {
+        Thread t = std::move(prior);
+        if (t.id.value.empty()) {
+            t.id         = persistence::new_id();
+            t.title      = persistence::title_from_first_message(opts.prompt);
+            t.created_at = std::chrono::system_clock::now();
+        }
+        t.messages   = std::move(st.final_thread.messages);
+        t.updated_at = std::chrono::system_clock::now();
+        persistence::save_thread(IoAccess::grant(), t);
+        out.thread_id = t.id.value;
+    }
 
     out.model         = st.model;
     out.turns         = st.turns;

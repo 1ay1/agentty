@@ -75,6 +75,56 @@ check "timeout: exit 124" "$rc" 124
 # bad flag values are usage errors (exit 2) before any work
 "$A" run --max-turns 0 "x" >/dev/null 2>&1; check "max-turns 0: exit 2" "$?" 2
 "$A" run --timeout 5x "x" >/dev/null 2>&1;  check "timeout 5x: exit 2" "$?" 2
+"$A" run --effort huge "x" >/dev/null 2>&1; check "effort huge: exit 2" "$?" 2
+"$A" run --resume ../etc "x" >/dev/null 2>&1; check "resume ../etc: exit 2" "$?" 2
+
+# --events jsonl streams reasoning and answer text, stdout stays the answer (#81)
+out=$("$A" run --events jsonl "please think" 2>"$S/ev"); rc=$?
+check "events: exit 0" "$rc" 0
+check "events: stdout is only the answer" "$out" "thought done"
+ev() { python3 - "$S/ev" "$1" <<'EOF'
+import json, sys
+kinds = {}
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line.startswith("{"): continue
+    d = json.loads(line)
+    kinds.setdefault(d["ev"], []).append(d.get("text", ""))
+print("".join(kinds.get(sys.argv[2], [])))
+EOF
+}
+check "events: reasoning line" "$(ev reasoning)" "let me think"
+check "events: text line" "$(ev text)" "thought done"
+
+# --save then --resume: the second run sees the first conversation
+out=$("$A" run --save --json "first question" 2>/dev/null)
+tid=$(j 'd.get("thread_id", "")')
+[ -n "$tid" ] && pass "save: thread id in json" || fail "save: thread id in json"
+out=$("$A" run --json --resume "$tid" "second question" 2>/dev/null); rc=$?
+check "resume: exit 0" "$rc" 0
+check "resume: same thread" "$(j 'd.get("thread_id")')" "$tid"
+out=$("$A" run --json --resume last "third" 2>/dev/null)
+check "resume last: same thread" "$(j 'd.get("thread_id")')" "$tid"
+"$A" run --resume 0123456789abcdef "x" >/dev/null 2>&1; check "resume missing: exit 4" "$?" 4
+
+# --read-only: a write the model asks for is refused, nothing written
+rm -f out.txt
+out=$("$A" run --json --read-only "please write a file" 2>/dev/null)
+check "read-only: write refused" "$(j 'd["tool_errors"]')" 1
+[ ! -e out.txt ] && pass "read-only: no file written" || fail "read-only: no file written"
+
+# --no-network: a shell command can't reach the network. Needs claybin; on a
+# host without it the flag must refuse instead (exit 2).
+"$A" run --no-network 'CALL shell {"command":"curl -sS -m 4 -o /dev/null https://example.com 2>/dev/null; echo $? > net_rc.txt"}' >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 2 ]; then
+    pass "no-network: refused without claybin"
+else
+    check "no-network: exit 0" "$rc" 0
+    nrc=$(cat net_rc.txt 2>/dev/null)
+    [ -n "$nrc" ] && [ "$nrc" != 0 ] && pass "no-network: curl blocked (rc $nrc)" \
+        || fail "no-network: curl blocked (rc '$nrc')"
+fi
+"$A" run --sandbox off --no-network "x" >/dev/null 2>&1; check "no-network + sandbox off: exit 2" "$?" 2
 
 # a signal mid-tool stops the run and kills the tool. python runs it so
 # SIGINT isn't pre-ignored the way sh does for background jobs.

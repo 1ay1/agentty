@@ -60,6 +60,8 @@ agentty run "add a --dry-run flag to the cli"
 git diff | agentty run "review this"          # piped input is added to the prompt
 agentty run --agent reviewer -o review.md "review src/"
 agentty run --json --timeout 10m --max-turns 40 "fix the failing test"
+agentty run --read-only --no-network "review this repo for secrets"   # safe on untrusted code
+agentty run --save "plan the migration" && agentty run --resume last "now do step 1"
 ```
 
 | Flag | Effect |
@@ -69,10 +71,33 @@ agentty run --json --timeout 10m --max-turns 40 "fix the failing test"
 | `-o`, `--output <file>` | Write the answer (or the JSON) to a file instead of stdout. |
 | `--max-turns <n>` | Stop after n model turns (default 80, or 32 for read-only roles). |
 | `--timeout <d>` | Stop after `90`, `90s`, `5m` or `1h` (default 15m). A running tool is killed when time is up. |
+| `--effort <level>` | Let the model think: `low`, `medium`, `high`, `xhigh`, `max` or `auto`. Clamped to what the model supports. Off by default. |
+| `--read-only` | Only tools that read. Writes, commands and network tools are hidden from the model and refused if it asks anyway. |
+| `--no-network` | Commands run with no network at all (an empty network namespace), and network tools are refused. Needs the claybin sandbox; without it the run won't start. |
+| `--save` | Save the conversation as a thread. The id is in `--json` output and in `-v`. |
+| `--resume <id\|last>` | Continue a saved thread with a new prompt. `last` is the newest. Saves the result back to the same thread. |
 | `-v`, `--verbose` | One stats line on stderr at the end. |
-| `--events jsonl` | One JSON line per tool call on stderr. |
+| `--events jsonl` | One JSON line per event on stderr (see below). |
 
 Ctrl-C or SIGTERM stops the run and kills the tool it's running; a second Ctrl-C exits at once.
+
+### Events
+
+With `--events jsonl` stderr gets one JSON object per line while the run goes, and stdout still gets only the answer:
+
+```json
+{"ev":"turn","turn":1,"seq":0}
+{"ev":"reasoning","turn":1,"text":"the test fails because…","seq":1}
+{"ev":"tool","tool":"read","ms":3,"ok":true,"args_sha":"1a2b3c4d","seq":2}
+{"ev":"text","turn":2,"text":"Fixed it by…","seq":3}
+```
+
+`reasoning` lines appear when the provider streams the model's thinking. Models that reason on their own (deepseek-r1 and similar, which send `reasoning_content`) show it without any flag; for Claude add `--effort` so it thinks at all. Text is batched per paragraph, so join the fields of one kind in order to get the whole thing.
+
+```bash
+agentty run --effort high --events jsonl "fix the flaky test" 2> events.jsonl
+jq -r 'select(.ev=="reasoning") | .text' events.jsonl
+```
 
 | Exit code | Meaning |
 |---|---|
@@ -80,6 +105,7 @@ Ctrl-C or SIGTERM stops the run and kills the tool it's running; a second Ctrl-C
 | 1 | The agent failed or ran out of turns. Any partial answer is still printed. |
 | 2 | Bad usage (unknown flag, bad value, no prompt). |
 | 3 | Provider or auth problem. |
+| 4 | `--resume` found no such thread. |
 | 124 | Hit `--timeout`. |
 | 130 / 143 | Stopped by Ctrl-C / SIGTERM. |
 

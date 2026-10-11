@@ -15,10 +15,17 @@ struct OneShotOptions {
     int max_turns = 0;                   // 0: the role's default
     std::chrono::seconds timeout{0};     // 0: the default wall clock
     std::stop_token cancel;              // stops the run (Ctrl-C, SIGTERM)
+    bool read_only = false;              // no write/exec/net tools
+    bool no_network = false;             // no net tools (shell net is the sandbox's job)
+    std::string effort;                  // "": off; else low|medium|high|xhigh|max|auto
+    bool events = false;                 // reasoning/text/turn lines on stderr
+    std::string resume;                  // thread id to continue; "" for a new thread
+    bool save = false;                   // save as a thread (always when resuming)
 };
 
 struct OneShotResult {
-    enum class Status { Ok, Failed, TurnLimit, Timeout, ProviderError, Cancelled, Unavailable };
+    enum class Status { Ok, Failed, TurnLimit, Timeout, ProviderError, Cancelled, Unavailable,
+                        NotFound };
     Status      status = Status::Ok;
     std::string text;       // the model's last answer; may be partial on failure
     std::string error;      // why it didn't succeed; empty when Ok
@@ -30,6 +37,7 @@ struct OneShotResult {
     long long   input_tokens = 0;    // summed over requests
     long long   output_tokens = 0;
     long long   duration_ms = 0;
+    std::string thread_id;   // where the conversation was saved; "" if not
 
     [[nodiscard]] bool ok() const noexcept { return status == Status::Ok; }
 };
