@@ -164,7 +164,7 @@ namespace {
         if (!d) continue;
         while (const dirent* e = ::readdir(d)) {
             if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
-            char cpath[128];
+            char cpath[320];
             std::snprintf(cpath, sizeof cpath, "/proc/%u/task/%s/children",
                           pid, e->d_name);
             const std::string kids = slurp(cpath);

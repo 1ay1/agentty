@@ -245,7 +245,7 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap, std::stop_token stop
     // which is what makes the [&] captures of `partials` and `next` safe.
     maya::scope(stop, [&](maya::nursery& n) {
         for (unsigned t = 0; t < nthreads; ++t) {
-            n.spawn([&, t] {
+            (void)n.spawn([&, t] {
                 // Lowest priority: this is a speculative cache for a picker
                 // that may never open, so it must only use cores nothing
                 // else wants.

@@ -297,7 +297,7 @@ json* existing_entry(json& doc, const std::string& name) {
 }
 } // namespace
 
-EditResult add_server(Io io, const fs::path& path, const ServerSpec& spec,
+EditResult add_server(Io /*io*/, const fs::path& path, const ServerSpec& spec,
                       bool force) {
     return mutate(path, Need::Any, [](json& doc, ServerSpec spec, bool force) -> Edit {
     auto& servers = servers_of(doc);

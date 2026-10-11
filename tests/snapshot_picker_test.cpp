@@ -234,14 +234,14 @@ TEST_CASE("FilteredPicker: the filter runs once per (query, snapshot)") {
         },
     };
 
-    p.filtered();
-    p.filtered();
-    p.filtered();
+    (void)p.filtered();
+    (void)p.filtered();
+    (void)p.filtered();
     CHECK(calls == 1);            // three reads, one pass
 
     p.type(U'a');
-    p.filtered();
-    p.filtered();
+    (void)p.filtered();
+    (void)p.filtered();
     CHECK(calls == 2);            // query changed once → exactly one more pass
 }
 

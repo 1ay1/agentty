@@ -244,6 +244,7 @@ std::string runtime_dir() {
 // forces the local tools back on, for the case this sniff gets wrong (a
 // remote session that really does own the display the user copied from — a
 // VNC/XRDP desktop, say).
+#if defined(__APPLE__)   // only the macOS readers consult it (see read_clipboard_image / pbpaste)
 bool session_is_remote() {
     if (const char* f = std::getenv("AGENTTY_LOCAL_CLIPBOARD"); f && *f == '1')
         return false;
@@ -251,6 +252,7 @@ bool session_is_remote() {
         if (const char* v = std::getenv(k); v && *v) return true;
     return false;
 }
+#endif // __APPLE__
 
 // Single-quote a value for safe inclusion in a shell command. Every
 // embedded quote is closed, escaped, and reopened ('\''). Paths from the

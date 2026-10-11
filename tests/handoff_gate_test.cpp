@@ -67,7 +67,7 @@ TEST_CASE("handoff: --sandbox off turns the gate off too") {
     cfg.configured = true;
     cfg.handoff = sandbox_cfg::HandoffPolicy::Refuse;   // the strictest setting
     sb::set_config(cfg);
-    sb::init(sb::Mode::Off);
+    (void)sb::init(sb::Mode::Off);
 
     auto v = hg::check("/work/.vscode/tasks.json", "write");
     CHECK(v.allowed);
@@ -187,9 +187,9 @@ TEST_CASE("handoff: the same path twice is one entry, not two") {
     // rewriting tasks.json three times in a turn is still "the agent authored
     // tasks.json". This differs from the broker's feed on purpose -- there the
     // order is the information, here the path is.
-    hg::check_with("/work/.vscode/tasks.json", "write", Policy::Allow);
-    hg::check_with("/work/.vscode/tasks.json", "edit", Policy::Allow);
-    hg::check_with("/work/.vscode/tasks.json", "write", Policy::Allow);
+    (void)hg::check_with("/work/.vscode/tasks.json", "write", Policy::Allow);
+    (void)hg::check_with("/work/.vscode/tasks.json", "edit", Policy::Allow);
+    (void)hg::check_with("/work/.vscode/tasks.json", "write", Policy::Allow);
 
     auto feed = hg::handoff_feed();
     CHECK(feed.size() == 1);
@@ -204,7 +204,7 @@ TEST_CASE("handoff: distinct paths are kept apart and bounded") {
     // rather than refusing new ones -- a feed that fills up and goes deaf would
     // hide the most recent handoff, which is the one being debugged.
     for (int i = 0; i < 80; ++i)
-        hg::check_with("/work/sub" + std::to_string(i) + "/.envrc", "write",
+        (void)hg::check_with("/work/sub" + std::to_string(i) + "/.envrc", "write",
                        Policy::Allow);
 
     auto feed = hg::handoff_feed();
@@ -229,7 +229,7 @@ TEST_CASE("handoff: concurrent writers do not corrupt the feed") {
         workers.emplace_back([t, &go] {
             while (!go.load()) { /* line them up */ }
             for (int i = 0; i < 100; ++i)
-                hg::check_with("/work/w" + std::to_string(t) + "_" +
+                (void)hg::check_with("/work/w" + std::to_string(t) + "_" +
                                    std::to_string(i) + "/.envrc",
                                "write", Policy::Allow);
         });
@@ -258,7 +258,7 @@ TEST_CASE("handoff: concurrent writers do not corrupt the feed") {
 TEST_CASE("handoff: clearing the feed empties it") {
     Fresh fresh;
 
-    hg::check_with("/work/.envrc", "write", Policy::Allow);
+    (void)hg::check_with("/work/.envrc", "write", Policy::Allow);
     CHECK_FALSE(hg::handoff_feed().empty());
     hg::clear_handoff_feed();
     CHECK(hg::handoff_feed().empty());

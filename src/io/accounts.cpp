@@ -180,7 +180,7 @@ std::string active_label(Io, const std::string& provider) {
     return read_registry().active_for(provider);
 }
 
-std::optional<Account> get(Io io, const std::string& provider, const std::string& label) {
+std::optional<Account> get(Io /*io*/, const std::string& provider, const std::string& label) {
     for (auto& a : read_registry().all)
         if (a.provider == provider && a.label == label) return a;
     return std::nullopt;
@@ -221,7 +221,7 @@ bool set_active(const std::string& provider, const std::string& label) {
     return write_registry(reg);
 }
 
-bool remove(Io io, const std::string& provider, const std::string& label) {
+bool remove(Io /*io*/, const std::string& provider, const std::string& label) {
     auto reg = read_registry();
     const auto before = reg.all.size();
     std::erase_if(reg.all, [&](const Account& a) {
