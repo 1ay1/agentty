@@ -2,6 +2,7 @@
 // connection.hpp.
 
 #include "agentty/mcp/connection.hpp"
+#include "agentty/mcp/client.hpp"
 
 #include <mcp/mrtr.hpp>
 #include <mcp/protocol.hpp>
@@ -53,6 +54,19 @@ struct Connection::Live {
         holder.reset();
     }
 };
+
+namespace {
+using ElicitDone = std::function<void(const std::string&)>;
+// Set by an ACP editor that can open URL elicitations. Empty: form only.
+maya::published<const ElicitDone>& url_elicit_done() {
+    static maya::published<const ElicitDone> d;
+    return d;
+}
+}  // namespace
+
+void set_url_elicitation(std::function<void(const std::string&)> done) {
+    url_elicit_done().publish(std::make_shared<const ElicitDone>(std::move(done)));
+}
 
 namespace {
 // One call at a time per connection, as the server sees it: progress is
@@ -120,6 +134,9 @@ m::ClientHandlers Connection::handlers(std::weak_ptr<Live> weak) {
     };
     h.on_resource_updated = cfg_.on_resource_updated;
     h.on_log              = cfg_.on_log;
+    h.on_elicitation_complete = [](const m::ElicitationCompleteParams& p) {
+        if (auto done = url_elicit_done().current(); done && *done) (*done)(p.elicitationId);
+    };
     // A server asking the user something mid-call: pass it to whatever UI
     // the call came from (an editor's form). Nobody to ask: decline.
     h.on_elicit = [weak](const m::ElicitParams& p) -> m::ElicitResult {
@@ -162,8 +179,12 @@ std::shared_ptr<Connection::Live> Connection::connect() {
     m::ClientCapabilities client_caps;
     if (!cfg_.roots.empty()) client_caps.roots = m::RootsCapability{true};
     // Form elicitation is relayed to the editor when one is attached; the
-    // handler declines otherwise, which the spec allows.
-    client_caps.elicitation = m::ElicitationCapability{m::Json::object(), m::Nothing};
+    // handler declines otherwise, which the spec allows. URL mode only when
+    // the editor can open one.
+    const auto url_done = url_elicit_done().current();
+    const bool url_ok = url_done && *url_done;
+    client_caps.elicitation = m::ElicitationCapability{
+        m::Json::object(), url_ok ? m::Maybe<m::Json>{m::Json::object()} : m::Nothing};
 
     // 2026-07-28 servers read the protocol metadata from every request; older
     // ones ignore it. Then: server/discover if the server has it, else the

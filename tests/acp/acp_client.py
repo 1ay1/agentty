@@ -35,6 +35,10 @@ class Client:
         self.client_requests = []
         self.files = {}          # path -> text, for fs/* callbacks
         self.elicitations = []
+        self.cancel_requests = []   # ids from $/cancel_request
+        self.elicit_done = []       # elicitation/complete ids
+        self.held = []              # permission requests left unanswered
+        self.responses = {}         # id -> response, for send_request
         self.schema = None
         if jsonschema is None and schema_path:
             print("  note: python jsonschema not installed, schema checks skipped")
@@ -94,10 +98,29 @@ class Client:
                 if result_def:
                     self.check(result_def, m["result"], method)
                 return m["result"], None
+            if "id" in m:
+                self.responses[m["id"]] = m
         raise TimeoutError(f"{method}: no response in {timeout}s")
 
     def notify(self, method, params):
         self.send({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def send_request(self, method, params):
+        """Fire a request without waiting; collect the answer with wait_response."""
+        self.next_id += 1
+        self.send({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params})
+        return self.next_id
+
+    def wait_response(self, rid, timeout=30):
+        deadline = time.time() + timeout
+        while rid not in self.responses and time.time() < deadline:
+            try:
+                m = self.q.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if not self._handle_incoming(m) and "id" in m:
+                self.responses[m["id"]] = m
+        return self.responses.get(rid)
 
     def pump(self, seconds):
         end = time.time() + seconds
@@ -106,7 +129,8 @@ class Client:
                 m = self.q.get(timeout=0.05)
             except queue.Empty:
                 continue
-            self._handle_incoming(m)
+            if not self._handle_incoming(m) and "id" in m:
+                self.responses[m["id"]] = m
 
     def _handle_incoming(self, m):
         """Notifications and agent->client requests. True if consumed."""
@@ -117,10 +141,24 @@ class Client:
             if meth == "session/update":
                 self.check("SessionNotification", m["params"], "session/update")
                 self.updates.append((m["params"]["sessionId"], m["params"]["update"]))
+            elif meth == "elicitation/complete":
+                self.check("CompleteElicitationNotification", m["params"], meth)
+                self.elicit_done.append(m["params"].get("elicitationId"))
+            elif meth == "$/cancel_request":
+                self.cancel_requests.append(m["params"].get("id"))
+                # Answer the withdrawn request the way the spec asks.
+                rid = m["params"].get("id")
+                if rid in self.held:
+                    self.held.remove(rid)
+                    self.send({"jsonrpc": "2.0", "id": rid,
+                               "error": {"code": -32800, "message": "Request cancelled"}})
             return True
         self.client_requests.append(m)
         rid, p = m["id"], m.get("params", {})
-        if meth == "session/request_permission":
+        if meth == "session/request_permission" and self.permission_answer == "hold":
+            self.check("RequestPermissionRequest", p, meth)
+            self.held.append(rid)   # the user hasn't clicked yet
+        elif meth == "session/request_permission":
             self.check("RequestPermissionRequest", p, meth)
             opts = p.get("options", [])
             pick = next((o for o in opts if o.get("kind") == self.permission_answer), opts[0] if opts else None)
@@ -144,8 +182,9 @@ class Client:
         elif meth == "elicitation/create":
             self.check("CreateElicitationRequest", p, meth)
             self.elicitations.append(p)
-            self.send({"jsonrpc": "2.0", "id": rid,
-                       "result": {"action": "accept", "content": {"name": "Ayush"}}})
+            res = {"action": "accept"} if p.get("mode") == "url" \
+                else {"action": "accept", "content": {"name": "Ayush"}}
+            self.send({"jsonrpc": "2.0", "id": rid, "result": res})
         else:
             self.send({"jsonrpc": "2.0", "id": rid,
                        "error": {"code": -32601, "message": f"client does not implement {meth}"}})
@@ -175,7 +214,7 @@ def expect(cond, what):
 
 ZED_CAPS = {"fs": {"readTextFile": True, "writeTextFile": True}, "terminal": False,
             "session": {"notices": {}, "compaction": {}, "configOptions": {"boolean": {}}},
-            "elicitation": {"form": {}},
+            "elicitation": {"form": {}, "url": {}},
             "_meta": {"terminal_output": True, "terminal-auth": True}}
 
 
@@ -399,6 +438,21 @@ def scenario_air(agentty, schema, cwd):
         expect("diffPatch" in air.get("capabilities", []), f"agent advertises AIR diffPatch ({air})")
         r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
         sid = r["sessionId"]
+        kinds = {m["modeId"] if "modeId" in m else m["id"]:
+                 ((m.get("_meta") or {}).get("jetbrains", {}).get("air", {})).get("kind")
+                 for m in (r.get("modes") or {}).get("availableModes", [])}
+        expect(kinds.get("write") == "auto_review" and kinds.get("ask") == "standard",
+               f"modes carry the AIR kind ({kinds})")
+        # The permission dialog gets AIR's heading record.
+        before = len(c.client_requests)
+        c.request("session/prompt", {"sessionId": sid,
+                  "prompt": [{"type": "text", "text": "run echo"}]}, timeout=90)
+        perms = [m["params"] for m in c.client_requests[before:]
+                 if m.get("method") == "session/request_permission"]
+        rec = ((perms[-1].get("_meta") or {}).get("jetbrains", {}).get("air", {}).get("permission")
+               if perms else None)
+        expect(bool(rec) and rec.get("version") == 1 and rec.get("title"),
+               f"permission request carries the AIR record ({rec})")
         c.request("session/set_mode", {"sessionId": sid, "modeId": "write"})
         target = os.path.join(cwd, "air.txt")
         c.request("session/prompt", {"sessionId": sid,
@@ -438,6 +492,15 @@ def scenario_air(agentty, schema, cwd):
                 ok = False
                 print("  patch", i, "failed:", rc.stderr.strip()[:160], repr(p[:300]))
         expect(ok, "every patch applies with git apply")
+        c.request("session/prompt", {"sessionId": sid,
+                  "prompt": [{"type": "text", "text": "/compact"}]}, timeout=60)
+        c.pump(0.2)
+        done = [u for s, u in c.updates if s == sid and u.get("sessionUpdate") == "compaction_update"
+                and u.get("status") == "completed"]
+        cc = (((done[-1].get("_meta") or {}).get("jetbrains", {}).get("air", {})
+               .get("contextCompaction")) if done else None)
+        expect(bool(cc) and cc.get("trigger") == "manual" and "preTokens" in cc,
+               f"compaction carries AIR facts ({cc})")
     finally:
         c.close()
     return c
@@ -474,6 +537,18 @@ def scenario_elicit(c, cwd):
         expect(e.get("sessionId") == sid and e.get("toolCallId") == "call_ask",
                "scoped to the session and tool card")
     expect("hello Ayush" in got, f"the answer reached the MCP server ({got[:60]!r})")
+    # URL mode: the editor gets the link, and the server's "done" is passed on.
+    c.request("session/prompt", {"sessionId": sid,
+              "prompt": [{"type": "text", "text": "open the link"}]}, timeout=60)
+    c.pump(0.5)
+    outs = [u for s, u in c.updates if s == sid and u.get("toolCallId") == "call_link"
+            and u.get("rawOutput")]
+    got_link = outs[-1]["rawOutput"].get("text", "") if outs else ""
+    urls = [e for e in c.elicitations if e.get("mode") == "url"]
+    expect(bool(urls) and urls[-1].get("url", "").startswith("https://example.com/")
+           and urls[-1].get("elicitationId") == "el-1", f"URL elicitation relayed ({got_link!r})")
+    expect("url accept" in got_link, f"consent reached the MCP server ({got_link!r})")
+    expect("el-1" in c.elicit_done, f"elicitation/complete forwarded ({c.elicit_done})")
     # The same server's prompt shows in the / menu and expands on use.
     menus = [u["availableCommands"] for s, u in c.updates
              if s == sid and u.get("sessionUpdate") == "available_commands_update"]
@@ -507,6 +582,62 @@ def scenario_progress(agentty, schema, cwd):
         texts = [x["content"].get("text", "") for u in live for x in u["content"]
                  if x.get("type") == "content"]
         expect(len(texts) >= 2 and "tick1" in texts[0], f"{len(texts)} live updates before the result")
+    finally:
+        c.close()
+    return c
+
+
+def scenario_cancel(agentty, schema, cwd):
+    print("cancel: prompts queue per session; cancel withdraws an open permission dialog")
+    c = Client([agentty, "acp"], schema, cwd)
+    try:
+        initialize(c)
+        r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
+        sid = r["sessionId"]
+        c.request("session/set_mode", {"sessionId": sid, "modeId": "write"})
+        # Two prompts back to back: the second waits for the first, no overlap.
+        a = c.send_request("session/prompt", {"sessionId": sid,
+                           "prompt": [{"type": "text", "text": "run slow"}]})
+        b = c.send_request("session/prompt", {"sessionId": sid,
+                           "prompt": [{"type": "text", "text": "say hello"}]})
+        ra, rb = c.wait_response(a, 60), c.wait_response(b, 60)
+        expect(ra and (ra.get("result") or {}).get("stopReason") == "end_turn", f"first prompt ends ({ra})")
+        expect(rb and (rb.get("result") or {}).get("stopReason") == "end_turn", f"queued prompt ends ({rb})")
+        order = [k for k in (u.get("sessionUpdate") for s, u in c.updates if s == sid)
+                 if k in ("tool_call", "agent_message_chunk")]
+        first_text = order.index("agent_message_chunk") if "agent_message_chunk" in order else -1
+        expect("tool_call" in order and first_text > order.index("tool_call"),
+               "queued prompt ran after the first turn")
+
+        # A queued prompt is cancelled with the running one.
+        a = c.send_request("session/prompt", {"sessionId": sid,
+                           "prompt": [{"type": "text", "text": "run slow"}]})
+        b = c.send_request("session/prompt", {"sessionId": sid,
+                           "prompt": [{"type": "text", "text": "say hello"}]})
+        c.pump(0.4)
+        c.notify("session/cancel", {"sessionId": sid})
+        ra, rb = c.wait_response(a, 30), c.wait_response(b, 30)
+        expect(ra and (ra.get("result") or {}).get("stopReason") == "cancelled", f"running turn cancelled ({ra})")
+        expect(rb and (rb.get("result") or {}).get("stopReason") == "cancelled", f"queued turn cancelled ({rb})")
+
+        # Cancel while the permission dialog is open: the agent withdraws it.
+        c.request("session/set_mode", {"sessionId": sid, "modeId": "ask"})
+        c.permission_answer = "hold"
+        a = c.send_request("session/prompt", {"sessionId": sid,
+                           "prompt": [{"type": "text", "text": "please write the file"}]})
+        deadline = time.time() + 20
+        while not c.held and time.time() < deadline:
+            c.pump(0.1)
+        expect(bool(c.held), "permission dialog opened")
+        held = list(c.held)
+        c.notify("session/cancel", {"sessionId": sid})
+        ra = c.wait_response(a, 30)
+        expect(ra and (ra.get("result") or {}).get("stopReason") == "cancelled", f"turn cancelled ({ra})")
+        expect(any(h in c.cancel_requests for h in held), f"$/cancel_request for the dialog ({c.cancel_requests})")
+        c.permission_answer = "allow_once"
+        r, err = c.request("session/prompt", {"sessionId": sid,
+                           "prompt": [{"type": "text", "text": "say hello"}]}, "PromptResponse", timeout=60)
+        expect(err is None and r.get("stopReason") == "end_turn", f"session usable after cancel {err or r}")
     finally:
         c.close()
     return c
@@ -674,7 +805,8 @@ def main():
     c3 = scenario_auth(agentty, schema, cwd)
     c4 = scenario_air(agentty, schema, cwd)
     c5 = scenario_progress(agentty, schema, cwd)
-    for cl in (c, c2, c3, c4, c5):
+    c6 = scenario_cancel(agentty, schema, cwd)
+    for cl in (c, c2, c3, c4, c5, c6):
         for v in cl.violations:
             print("  SCHEMA " + v)
             FAILS.append(v)

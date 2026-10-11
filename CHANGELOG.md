@@ -33,6 +33,13 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 - **ACP:** live progress in every tool card, automatic retries for overloaded
   or rate-limited providers before anything streamed, and MCP server prompts
   as `/` commands.
+- **ACP prompts queue per session.** A prompt sent mid-turn waits and then
+  runs; cancel stops the running turn and the queued ones, and withdraws an
+  open permission dialog or MCP form with `$/cancel_request`.
+- **URL elicitation:** an MCP server can send the user to a link (OAuth and
+  the like) through the editor, which asks before opening it.
+- **JetBrains AIR hints:** permission headings, mode kinds, command titles,
+  subagent and skill tags, and compaction token counts.
 - **`session/fork`**, user slash commands and skills as real `/` commands,
   and permission prompts with "always reject".
 - **`/compact` and `/new` work over ACP.** They used to be sent to the model

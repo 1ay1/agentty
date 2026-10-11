@@ -34,6 +34,9 @@ def call_client(method, params):
 
 TOOL = {"name": "ask_name", "description": "Ask the user their name.",
         "inputSchema": {"type": "object", "properties": {}}}
+LINK = {"name": "open_link", "description": "Send the user to a sign-in page.",
+        "inputSchema": {"type": "object", "properties": {}}}
+url_ok = [False]   # the client advertised elicitation.url
 
 while True:
     m = read()
@@ -41,6 +44,8 @@ while True:
         break
     meth, rid = m.get("method"), m.get("id")
     if meth == "initialize":
+        el = ((m["params"].get("capabilities") or {}).get("elicitation") or {})
+        url_ok[0] = isinstance(el.get("url"), dict)
         send({"jsonrpc": "2.0", "id": rid, "result": {
             "protocolVersion": m["params"].get("protocolVersion", "2025-06-18"),
             "capabilities": {"tools": {}, "prompts": {}},
@@ -54,7 +59,18 @@ while True:
         send({"jsonrpc": "2.0", "id": rid, "result": {"messages": [
             {"role": "user", "content": {"type": "text", "text": f"PROMPT-OK greet {who}"}}]}})
     elif meth == "tools/list":
-        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [TOOL]}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"tools": [TOOL, LINK]}})
+    elif meth == "tools/call" and m["params"].get("name") == "open_link":
+        if not url_ok[0]:
+            text = "no-url-support"
+        else:
+            res = call_client("elicitation/create", {
+                "mode": "url", "message": "Sign in to continue",
+                "elicitationId": "el-1", "url": "https://example.com/connect?e=el-1"})
+            text = "url " + (res or {}).get("action", "none")
+            send({"jsonrpc": "2.0", "method": "notifications/elicitation/complete",
+                  "params": {"elicitationId": "el-1"}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": text}]}})
     elif meth == "tools/call":
         res = call_client("elicitation/create", {
             "mode": "form", "message": "What is your name?",

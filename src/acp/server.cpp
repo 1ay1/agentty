@@ -940,7 +940,7 @@ a::ToolCall make_tool_call(const ToolUse& tc, a::ToolCallStatus status,
 // its own set here; agentty exposes the ones that map to real turn actions plus
 // every installed, model-invocable skill as `/<name>`. Sent on session new/load
 // so Zed's `/` menu is populated the same way it is for the native agent.
-a::List<a::AvailableCommand> available_commands(Io io) {
+a::List<a::AvailableCommand> available_commands(Io io, bool air = false) {
     a::List<a::AvailableCommand> cmds;
     auto add = [&](std::string name, std::string desc, const char* hint) {
         a::AvailableCommand c;
@@ -971,6 +971,10 @@ a::List<a::AvailableCommand> available_commands(Io io) {
             sk.description.empty() ? std::string{"Run the "} + sk.name + " skill"
                                    : sk.description,
             "optional arguments");
+        // AIR shows skills as skills, with the file behind them.
+        if (air)
+            cmds.back().meta = json{{"jetbrains", {{"air", {{"version", 1}, {"kind", "skill"},
+                {"skillPath", (sk.dir / "SKILL.md").string()}}}}}};
     }
 #if AGENTTY_MCP
     // MCP server prompts. Zed groups commands tagged "mcp".
@@ -1086,7 +1090,11 @@ AgentServer::AgentServer(rpc::Channel      channel,
     peer_->set_default_timeout(std::chrono::minutes(5));
 }
 
-AgentServer::~AgentServer() { if (peer_) peer_->stop(); }
+AgentServer::~AgentServer() {
+    if (client_elicit_url_.load(std::memory_order_relaxed))
+        ::agentty::mcp::set_url_elicitation({});
+    if (peer_) peer_->stop();
+}
 
 AgentServer::Router AgentServer::make_router() {
     namespace m = a::to_agent;
@@ -1214,7 +1222,7 @@ void AgentServer::refresh_command_menus() {
     });
     if (ids.empty()) return;
     a::SU_AvailableCommands ac;
-    ac.availableCommands = available_commands(IoAccess::grant());
+    ac.availableCommands = available_commands(IoAccess::grant(), air_.load(std::memory_order_relaxed));
     for (const auto& id : ids) send_update(id, ac);
 }
 
@@ -1245,20 +1253,71 @@ json AgentServer::air_meta(json payload) const {
     return json{{"jetbrains", {{"air", std::move(payload)}}}};
 }
 
+// AIR's per-tool hints: a command's own description as the card title, the
+// task tool marked as a subagent, a skill load named. Empty for other tools.
+json AgentServer::air_tool_meta(const ToolUse& tc) const {
+    if (!air_.load(std::memory_order_relaxed) || !tc.args.is_object()) return json::object();
+    json p = json::object();
+    const std::string& n = tc.name.value;
+    if (is_command_tool(n)) {
+        for (const char* k : {"display_description", "description"})
+            if (auto it = tc.args.find(k); it != tc.args.end() && it->is_string()
+                && !it->get<std::string>().empty()) {
+                p["commandTitle"] = *it;
+                break;
+            }
+    } else if (n == "task") {
+        p["subagent"] = true;
+    } else if (n == "skill") {
+        if (auto it = tc.args.find("name"); it != tc.args.end() && it->is_string())
+            p["skill"] = json{{"name", *it}};
+    }
+    return p.empty() ? json::object() : air_meta(std::move(p));
+}
+
+// Merge `extra` into `meta`, keeping other namespaces.
+static void merge_meta(json& meta, const json& extra) {
+    if (!extra.is_object() || extra.empty()) return;
+    if (!meta.is_object()) meta = json::object();
+    meta.merge_patch(extra);
+}
+
 // Relay an MCP server's elicitation/create (form mode) to the editor. The two
 // share the restricted JSON Schema, so the form passes through; ACP adds the
 // session and tool call scope. Anything we can't relay is declined.
 json AgentServer::elicit_via_client(const std::string& session_id,
-                                    const std::string& tool_id, const json& mcp) {
+                                    const std::string& tool_id, const json& mcp,
+                                    std::stop_token cancel) {
     const json decline{{"action", "decline"}};
-    if (!mcp.is_object() || mcp.value("mode", std::string{"form"}) != "form") return decline;
-    if (!mcp.contains("requestedSchema") || !mcp["requestedSchema"].is_object()) return decline;
-    json req{{"mode", "form"},
-             {"message", mcp.value("message", std::string{"The tool needs some input."})},
-             {"requestedSchema", mcp["requestedSchema"]},
-             {"sessionId", session_id},
-             {"toolCallId", tool_id}};
-    auto got = peer_->call<a::to_client::ElicitationCreate>(req);
+    if (!mcp.is_object()) return decline;
+    const std::string mode = mcp.value("mode", std::string{"form"});
+    json req;
+    if (mode == "url" && client_elicit_url_.load(std::memory_order_relaxed)) {
+        // The editor shows the URL and opens it only with the user's consent.
+        if (!mcp.contains("url") || !mcp["url"].is_string()
+            || !mcp.contains("elicitationId") || !mcp["elicitationId"].is_string())
+            return decline;
+        req = json{{"mode", "url"},
+                   {"message", mcp.value("message", std::string{"The tool needs you to open a link."})},
+                   {"url", mcp["url"]},
+                   {"elicitationId", mcp["elicitationId"]},
+                   {"sessionId", session_id},
+                   {"toolCallId", tool_id}};
+    } else if (mode == "form" && client_elicit_form_.load(std::memory_order_relaxed)
+               && mcp.contains("requestedSchema") && mcp["requestedSchema"].is_object()) {
+        req = json{{"mode", "form"},
+                   {"message", mcp.value("message", std::string{"The tool needs some input."})},
+                   {"requestedSchema", mcp["requestedSchema"]},
+                   {"sessionId", session_id},
+                   {"toolCallId", tool_id}};
+    } else {
+        return decline;
+    }
+    // A cancelled turn withdraws the form ($/cancel_request) and declines.
+    rpc::CallOptions o;
+    o.cancel      = cancel;
+    o.notify_peer = true;
+    auto got = peer_->call<a::to_client::ElicitationCreate>(req, std::move(o));
     if (!got || !got->is_object() || !got->contains("action")) return decline;
     json out{{"action", (*got)["action"]}};
     if ((*got)["action"] == "accept" && got->contains("content")) out["content"] = (*got)["content"];
@@ -1308,7 +1367,8 @@ void AgentServer::emit_session_config(const std::string& session_id,
     // Slash-command menu (Zed's `/` composer menu).
     {
         a::SU_AvailableCommands ac;
-        ac.availableCommands = available_commands(IoAccess::grant());   // ACP handler: not a reducer
+        ac.availableCommands = available_commands(IoAccess::grant(),   // ACP handler: not a reducer
+                                                  air_.load(std::memory_order_relaxed));
         if (!ac.availableCommands.empty())
             send_update(session_id, std::move(ac));
     }
@@ -1355,8 +1415,13 @@ a::List<a::ConfigOption> AgentServer::config_options(const std::string& session_
     // negotiated v2+. A v1 client renders it from SessionModeState (the
     // `modes` field on the session result) instead, one surface per
     // connection.
-    if (v2_config())
-        out.push_back(mode_config_option(mode_id_for(c.prof)));
+    if (v2_config()) {
+        auto opt = mode_config_option(mode_id_for(c.prof));
+        if (auto* u = std::get_if<a::CSO_Ungrouped>(&opt.options))
+            for (auto& o : u->items)
+                o.meta = air_meta(json{{"kind", o.value == "write" ? "auto_review" : "standard"}});
+        out.push_back(std::move(opt));
+    }
     for (auto& o : model_options(c.provider, c.model, c.effort, c.reasoning))
         out.push_back(std::move(o));
     return out;
@@ -1551,8 +1616,11 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
             std::size_t emitted = 0;
             for (const auto& tc : m.tool_calls) {
                 if (emitted++ >= kReplayToolsPerMsg) break;
-                send_update(session_id, a::SU_ToolCall{
-                    make_tool_call(tc, a::ToolCallStatus::Pending, scwd)});
+                {
+                    auto call = make_tool_call(tc, a::ToolCallStatus::Pending, scwd);
+                    merge_meta(call.meta, air_tool_meta(tc));
+                    send_update(session_id, a::SU_ToolCall{std::move(call)});
+                }
 
                 const auto status = (tc.is_failed() || tc.is_rejected())
                                   ? a::ToolCallStatus::Failed : a::ToolCallStatus::Completed;
@@ -1598,6 +1666,14 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     client_bool_config_.store(p.clientCapabilities.session.booleanConfig,
                               std::memory_order_relaxed);
     client_elicit_form_.store(p.clientCapabilities.elicitForm, std::memory_order_relaxed);
+    client_elicit_url_.store(p.clientCapabilities.elicitUrl, std::memory_order_relaxed);
+    // URL mode: MCP servers may ask for it, and their "done" goes to the editor.
+    if (p.clientCapabilities.elicitUrl)
+        ::agentty::mcp::set_url_elicitation([this](const std::string& id) {
+            try {
+                peer_->notify_raw("elicitation/complete", json{{"elicitationId", id}});
+            } catch (...) {}
+        });
     // Zed's terminal channel: a command tool call carries _meta.terminal_info,
     // its output streams as _meta.terminal_output and ends with terminal_exit,
     // and the editor renders a real terminal in the card. Works with our own
@@ -1744,7 +1820,7 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
     // v2+ clients get it as the `mode` config option (emit_config_state) and
     // NOT via `modes` — one surface per connection, never both.
     if (!v2_config())
-        r.modes = a::Just(mode_state(session_profile));
+        r.modes = a::Just(modes_for_client(session_profile));
     // The selectors ride on the result too: JetBrains builds its model
     // dropdown from it and never looks at the update that follows.
     if (auto opts = config_options(sid, model_id_); !opts.empty())
@@ -1804,7 +1880,7 @@ a::NewSessionResult AgentServer::on_fork_session(const a::ForkSessionParams& p) 
     a::NewSessionResult r;
     r.sessionId = a::SessionId{sid};
     if (!v2_config())
-        r.modes = a::Just(mode_state(copy->profile));
+        r.modes = a::Just(modes_for_client(copy->profile));
     if (auto opts = config_options(sid, model_id_); !opts.empty())
         r.configOptions = a::Just(std::move(opts));
     emit_session_config(sid, model_id_);
@@ -1876,17 +1952,89 @@ a::LoadSessionResult AgentServer::on_load_session(const a::LoadSessionParams& p)
 
     a::LoadSessionResult r;
     if (!v2_config())
-        r.modes = a::Just(mode_state(profile));
+        r.modes = a::Just(modes_for_client(profile));
     if (auto opts = config_options(sid, model_id_); !opts.empty())
         r.configOptions = a::Just(std::move(opts));
     return r;
 }
 
 void AgentServer::on_cancel(const a::CancelParams& p) {
-    // Copy the cancel handle out, then trip it unlocked: run_turn resets
-    // s.cancel concurrently.
-    auto tok = with_session(p.sessionId.value, [](Session& s) { return s.cancel; });
-    if (tok && *tok) (*tok)->cancel();
+    // Cancels the running turn and every prompt queued behind it. A prompt
+    // sent after this notification is not affected.
+    auto toks = with_session(p.sessionId.value, [](Session& s) {
+        std::vector<http::CancelTokenPtr> out;
+        for (const auto& [rid, tok] : s.queued) out.push_back(tok);
+        return out;
+    });
+    if (toks) cancel_tokens(std::move(*toks));
+}
+
+void AgentServer::cancel_tokens(std::vector<http::CancelTokenPtr> toks) {
+    for (auto& t : toks) if (t) t->cancel();
+    // Wake prompts waiting in acquire_turn so a cancelled one leaves the line.
+    sessions_.with([](Sessions&) {});
+}
+
+void AgentServer::register_prompt(const std::string& sid, const std::string& rid) {
+    sessions_.with([](Sessions& ss, std::string id, std::string r) {
+        auto it = ss.by_id.find(id);
+        if (it == ss.by_id.end()) return;
+        it->second.queued.emplace_back(r, std::make_shared<http::CancelToken>());
+        ss.reqid_to_session[std::move(r)] = std::move(id);
+    }, sid, rid);
+}
+
+std::optional<AgentServer::Acquired>
+AgentServer::acquire_turn(const std::string& sid, const std::string& rid,
+                          std::optional<Message> msg, std::string typed) {
+    return sessions_.wait_with(
+        [](const Sessions& ss, const std::string& id, const std::string& r,
+           const std::optional<Message>&, const std::string&) {
+            auto it = ss.by_id.find(id);
+            if (it == ss.by_id.end()) return true;
+            const auto& q = it->second.queued;
+            auto me = std::ranges::find(q, r, &std::pair<std::string, http::CancelTokenPtr>::first);
+            if (me == q.end() || me->second->is_cancelled()) return true;
+            return me == q.begin();
+        },
+        [](Sessions& ss, std::string id, std::string r, std::optional<Message> m,
+           std::string typed_text) -> std::optional<Acquired> {
+            auto it = ss.by_id.find(id);
+            if (it == ss.by_id.end()) return std::nullopt;
+            Session& s = it->second;
+            auto me = std::ranges::find(s.queued, r,
+                                        &std::pair<std::string, http::CancelTokenPtr>::first);
+            if (me == s.queued.end()) return std::nullopt;
+            if (me->second->is_cancelled()) {   // gave up while waiting
+                s.queued.erase(me);
+                ss.reqid_to_session.erase(r);
+                return std::nullopt;
+            }
+            Acquired out{me->second, {}};
+            s.cancel = me->second;
+            if (m) {
+                if (s.thread.messages.empty() && !typed_text.empty()) {
+                    s.thread.title = persistence::title_from_first_message(typed_text);
+                    out.title = s.thread.title;
+                }
+                s.thread.messages.push_back(std::move(*m));
+            }
+            return out;
+        }, sid, rid, std::move(msg), std::move(typed));
+}
+
+void AgentServer::release_turn(const std::string& sid, const std::string& rid) {
+    sessions_.with([](Sessions& ss, std::string id, std::string r) {
+        ss.reqid_to_session.erase(r);
+        auto it = ss.by_id.find(id);
+        if (it == ss.by_id.end()) return;
+        Session& s = it->second;
+        auto me = std::ranges::find(s.queued, r,
+                                    &std::pair<std::string, http::CancelTokenPtr>::first);
+        if (me == s.queued.end()) return;
+        if (s.cancel == me->second) s.cancel.reset();
+        s.queued.erase(me);
+    }, sid, rid);
 }
 
 void AgentServer::on_cancel_request(const a::RpcId& id) {
@@ -1900,9 +2048,11 @@ void AgentServer::on_cancel_request(const a::RpcId& id) {
         auto mit = ss.reqid_to_session.find(rid);
         if (mit == ss.reqid_to_session.end()) return nullptr;
         auto sit = ss.by_id.find(mit->second);
-        return sit == ss.by_id.end() ? nullptr : sit->second.cancel;
+        if (sit == ss.by_id.end()) return nullptr;
+        for (const auto& [r, t] : sit->second.queued) if (r == rid) return t;
+        return nullptr;
     }, id.dump());
-    if (tok) tok->cancel();
+    if (tok) cancel_tokens({tok});
 }
 
 // ── Session modes ───────────────────────────────────────────────────────────
@@ -1933,6 +2083,15 @@ a::SessionModeState AgentServer::mode_state(Profile current) {
         a::SessionMode{a::SessionModeId{"minimal"}, "Minimal",
             a::Just<std::string>("Prompt for everything, including file reads")},
     };
+    return st;
+}
+
+// mode_state plus AIR's mode kind: Write still asks for risky ops, so it is
+// auto_review; the others ask first.
+a::SessionModeState AgentServer::modes_for_client(Profile current) const {
+    auto st = mode_state(current);
+    for (auto& m : st.availableModes)
+        m.meta = air_meta(json{{"kind", m.id.value == "write" ? "auto_review" : "standard"}});
     return st;
 }
 
@@ -2204,7 +2363,6 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     auto parts = prompt_parts_from_blocks(p.prompt);
     std::string text = std::move(parts.text);
     const std::string typed_raw = text;   // before any /command expansion
-    std::string pending_title;   // title to push to Zed's sidebar (first msg only)
 
     // Local OpenAI-compatible backends (Ollama, llama.cpp) need no key, so
     // an empty auth is legitimate for them. Only demand credentials for a
@@ -2248,11 +2406,7 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
         }
         if (t == "/compact" || t.starts_with("/compact ")) {
             std::string rid = jsonrpc::to_json(resp.id()).dump();
-            sessions_.with([](Sessions& ss, std::string id, std::string r) {
-                if (auto it = ss.by_id.find(id); it != ss.by_id.end())
-                    it->second.cancel = std::make_shared<http::CancelToken>();
-                ss.reqid_to_session[std::move(r)] = id;
-            }, sid, rid);
+            register_prompt(sid, rid);
             util::run_isolated_detached("acp.compact",
                 [](std::stop_token, maya::co_owned<AgentServer> self, std::string sid,
                    std::string rid, Responder r) {
@@ -2297,37 +2451,12 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     um.role   = Role::User;
     um.text   = std::move(text);
     um.images = std::move(parts.images);
-    // Append the user message, arm a fresh cancel handle, and record this
-    // prompt's JSON-RPC id (so a generic $/cancel_request can find the turn),
-    // in one step. Returns the derived title on the first message, so Zed's
-    // thread sidebar is named the moment it lands, like the native agent.
-    const auto title = sessions_.with(
-        [](Sessions& ss, std::string id, Message m, std::string rid, std::string typed_text)
-            -> std::optional<std::string> {
-            auto it = ss.by_id.find(id);
-            if (it == ss.by_id.end()) return std::nullopt;
-            Session& s = it->second;
-            const bool first_message = s.thread.messages.empty();
-            if (first_message && !typed_text.empty())
-                s.thread.title = persistence::title_from_first_message(typed_text);
-            s.thread.messages.push_back(std::move(m));
-            s.cancel = std::make_shared<http::CancelToken>();
-            ss.reqid_to_session[std::move(rid)] = id;
-            return first_message ? s.thread.title : std::string{};
-        }, sid, std::move(um), jsonrpc::to_json(resp.id()).dump(), std::move(typed));
-    if (!title) {   // closed between the check above and here
-        resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
-        return;
-    }
-    pending_title = *title;
 
-    if (!pending_title.empty())
-        send_update(sid, a::SU_SessionInfo{
-            a::Just<std::string>(pending_title), a::Nothing, json::object()});
-
-    // Capture the request id before `resp` is moved into the worker; run_turn
-    // uses it to drop the reqid→session mapping when the turn settles.
+    // Get in line now, so a session/cancel or $/cancel_request that arrives
+    // before the worker starts still finds this prompt. The message joins the
+    // thread when its turn comes, so a queued prompt never lands mid-turn.
     std::string req_id_dump = jsonrpc::to_json(resp.id()).dump();
+    register_prompt(sid, req_id_dump);
 
     // Run the whole turn off the reader thread; the engine stays free to
     // deliver our outbound permission responses. The Responder resolves the
@@ -2335,10 +2464,11 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     // server, so a turn still running at exit can't outlive it.
     util::run_isolated_detached("acp.turn_worker",
         [](std::stop_token, maya::co_owned<AgentServer> self, std::string sid,
-           std::string rid, Responder r) {
-            self->run_turn(IoAccess::grant(), std::move(sid), std::move(rid), std::move(r));
+           std::string rid, Responder r, Message m, std::string typed) {
+            self->run_turn(IoAccess::grant(), std::move(sid), std::move(rid), std::move(r),
+                           std::move(m), std::move(typed));
         }, maya::co_owned<AgentServer>::of(*this), std::move(sid),
-        std::move(req_id_dump), std::move(resp));
+        std::move(req_id_dump), std::move(resp), std::move(um), std::move(typed));
 }
 
 namespace {
@@ -2354,7 +2484,20 @@ constexpr std::string_view kMemoryToolNames[] = {"remember", "forget", "wipe_mem
 // (the client still shows it), same as the TUI. Reported as a v1.11
 // compaction entity when the client renders those, as plain text otherwise.
 void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder resp) {
+  struct Release {
+      AgentServer& s; const std::string& sid; const std::string& rid;
+      ~Release() { s.release_turn(sid, rid); }
+  } release{*this, sid, rid};
   try {
+    const auto settle = [&] { release_turn(sid, rid); };
+    if (!acquire_turn(sid, rid)) {
+        settle();
+        if (with_session(sid, [](Session&) { return true; }))
+            resp.ok(a::PromptResult{a::StopReason::Cancelled, json::object()});
+        else
+            resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
+        return;
+    }
     struct Snap {
         Thread thread;
         std::string model, provider;
@@ -2363,12 +2506,6 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
     auto snap = with_session(sid, [](Session& s) {
         return Snap{s.thread, s.model, s.provider, s.cancel};
     });
-    const auto settle = [&] {
-        sessions_.with([](Sessions& ss, std::string id, std::string r) {
-            ss.reqid_to_session.erase(r);
-            if (auto it = ss.by_id.find(id); it != ss.by_id.end()) it->second.cancel.reset();
-        }, sid, rid);
-    };
     if (!snap) { settle(); resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid); return; }
     const std::size_t up_to = snap->thread.messages.size();
     if (up_to < 2) {
@@ -2381,7 +2518,16 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
 
     const bool entity = client_compaction_.load(std::memory_order_relaxed);
     const std::string cid = "cmp_" + sid + "_" + std::to_string(snap->thread.compactions.size() + 1);
-    if (entity) send_update(sid, a::SU_Compaction{cid, "in_progress", a::Nothing, a::Nothing, json::object()});
+    const auto started = std::chrono::steady_clock::now();
+    // AIR's compaction facts, sent with each status.
+    const auto facts = [&](json extra) {
+        extra["trigger"] = "manual";
+        extra["durationMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        return air_meta(json{{"contextCompaction", std::move(extra)}});
+    };
+    if (entity) send_update(sid, a::SU_Compaction{cid, "in_progress", a::Nothing, a::Nothing,
+                                                  air_meta(json{{"contextCompaction", {{"version", 1}, {"trigger", "manual"}}}})});
 
     provider::Request req;
     req.model      = snap->model.empty() ? model_id_ : snap->model;
@@ -2422,7 +2568,8 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
         if (entity)
             send_update(sid, a::SU_Compaction{cid, cancelled ? "cancelled" : "failed", a::Nothing,
                         cancelled ? a::Nothing : a::Just<std::string>(error.empty() ? "empty summary" : error),
-                        json::object()});
+                        facts(cancelled ? json{{"version", 1}}
+                                        : json{{"version", 1}, {"error", error.empty() ? "empty summary" : error}})});
         if (cancelled) { resp.ok(a::PromptResult{a::StopReason::Cancelled, json::object()}); return; }
         resp.error(a::errc::InternalError, "compaction failed: " + (error.empty() ? std::string{"empty summary"} : error));
         return;
@@ -2450,8 +2597,13 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
         // clean summary (the spec's authoritative replacement).
         a::List<a::ContentBlock> clean;
         clean.push_back(text_block(summary));
+        json f{{"version", 1}};
+        if (before_after) {
+            f["preTokens"]  = before_after->first;
+            f["postTokens"] = before_after->second;
+        }
         send_update(sid, a::SU_Compaction{cid, "completed", a::Just(std::move(clean)),
-                                          a::Nothing, json::object()});
+                                          a::Nothing, facts(std::move(f))});
     } else {
         std::string msg = "Compacted the conversation.";
         if (before_after && before_after->first > 0)
@@ -2468,7 +2620,12 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
 }
 
 void AgentServer::run_turn(Io io, std::string session_id, std::string req_id_dump,
-                           Responder resp) {
+                           Responder resp, Message user_msg, std::string typed) {
+  // Hand the session to the next queued prompt however this one ends.
+  struct Release {
+      AgentServer& s; const std::string& sid; const std::string& rid;
+      ~Release() { s.release_turn(sid, rid); }
+  } release{*this, session_id, req_id_dump};
   // This runs on a DETACHED worker thread, entirely outside acp-cpp's
   // handle_request try/catch. An uncaught throw here would call
   // std::terminate() and kill every session in the process; and a return
@@ -2478,6 +2635,20 @@ void AgentServer::run_turn(Io io, std::string session_id, std::string req_id_dum
   // InternalError. The ok/error done-latch makes the trailing resp.ok(...)
   // a no-op if we already errored, so exactly one reply is sent.
   try {
+    // Wait for any turn already running in this session, then add our
+    // message. Cancelled while queued: answer cancelled, never run.
+    auto got = acquire_turn(session_id, req_id_dump, std::move(user_msg), std::move(typed));
+    if (!got) {
+        if (with_session(session_id, [](Session&) { return true; }))
+            resp.ok(a::PromptResult{a::StopReason::Cancelled, json::object()});
+        else
+            resp.error(a::errc::InvalidParams, "unknown sessionId: " + session_id);
+        return;
+    }
+    if (!got->title.empty())
+        send_update(session_id, a::SU_SessionInfo{
+            a::Just<std::string>(got->title), a::Nothing, json::object()});
+
     bool cancelled = false;
     bool errored = false;
     std::string error_msg;
@@ -2569,16 +2740,9 @@ void AgentServer::run_turn(Io io, std::string session_id, std::string req_id_dum
         if (cancelled || !ran) break;
     }
 
-    // Disarm the cancel handle and drop the reqid mapping in one step (the
-    // turn is settling, so a later $/cancel_request for this id is a no-op),
-    // then persist if the session still exists.
-    const bool alive = sessions_.with([](Sessions& ss, std::string id, std::string rid) {
-        ss.reqid_to_session.erase(rid);
-        auto it = ss.by_id.find(id);
-        if (it == ss.by_id.end()) return false;
-        it->second.cancel.reset();
-        return true;
-    }, session_id, req_id_dump);
+    // Persist if the session still exists. The cancel handle and the reqid
+    // mapping go when the turn is released.
+    const bool alive = with_session(session_id, [](Session&) { return true; }).value_or(false);
     if (alive) {
         persist(session_id);
         index_session(session_id);
@@ -2816,6 +2980,7 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
                             if (auto cc = command_content(tc))    c.push_back(std::move(*cc));
                             if (auto pc = prompt_content(tc))     c.push_back(std::move(*pc));
                             if (!c.empty()) upd.content = a::Just(std::move(c));
+                            merge_meta(upd.meta, air_tool_meta(tc));
                             send_update(sid, a::SU_ToolCallUpdate{std::move(upd)});
 
                             // A `todo` write drives Zed's native plan/checklist
@@ -2996,7 +3161,8 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
                 u.toolCallId = a::ToolCallId{tc.id.value};
                 u.status     = a::Just(a::ToolCallStatus::Pending);
                 send_update(ctx.id, a::SU_ToolCallUpdate{std::move(u)});
-                outcome = ask_permission(ctx.id, tc);
+                outcome = ask_permission(ctx.id, tc,
+                                         ctx.cancel ? ctx.cancel->token() : std::stop_token{});
             }
             if (ctx.cancelled()) { out_cancelled = true; return false; }
             if (outcome == PermissionOutcome::AllowAlways) {
@@ -3079,9 +3245,11 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         for (const auto& r : ctx.extra_roots) call_ctx.extra_roots.push_back(r);
         // An MCP server asking the user something mid-call goes to the
         // editor's form UI, tied to this session and tool card.
-        if (client_elicit_form_.load(std::memory_order_relaxed))
-            call_ctx.elicit = [this, sid = ctx.id, tid = tc.id.value](const json& mcp) {
-                return elicit_via_client(sid, tid, mcp);
+        if (client_elicit_form_.load(std::memory_order_relaxed)
+            || client_elicit_url_.load(std::memory_order_relaxed))
+            call_ctx.elicit = [this, sid = ctx.id, tid = tc.id.value,
+                               tok = ctx.cancel ? ctx.cancel->token() : std::stop_token{}](const json& mcp) {
+                return elicit_via_client(sid, tid, mcp, tok);
             };
         // Zed's terminal channel: a shell command's output streams into a real
         // terminal in the card while it runs. progress hands us the whole
@@ -3481,7 +3649,8 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
 }
 
 AgentServer::PermissionOutcome
-AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
+AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc,
+                            std::stop_token cancel) {
     const std::string cwd =
         with_session(session_id, [](Session& s) { return s.cwd; }).value_or(std::string{});
     a::RequestPermissionParams req;
@@ -3506,9 +3675,26 @@ AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc) {
         a::PermissionOption{"reject_once",   "Reject",                       a::PermissionOptionKind::RejectOnce,   json::object()},
         a::PermissionOption{"reject_always", "Always reject " + tool,        a::PermissionOptionKind::RejectAlways, json::object()},
     };
+    // AIR's approval heading: the card title, plus the command's own summary.
+    if (air_.load(std::memory_order_relaxed)) {
+        json perm{{"version", 1}, {"title", tool_title(tc, cwd)}};
+        if (tc.args.is_object())
+            if (auto it = tc.args.find("display_description");
+                it != tc.args.end() && it->is_string() && !it->get<std::string>().empty())
+                perm["description"] = *it;
+        req.meta = air_meta(json{{"permission", std::move(perm)}});
+        merge_meta(req.toolCall.meta, air_tool_meta(tc));
+    }
 
+    // session/cancel withdraws the open dialog with $/cancel_request, as the
+    // spec's cancel cascade asks; the call then settles as Deny.
+    rpc::CallOptions o;
+    o.cancel      = cancel;
+    o.notify_peer = true;
     try {
-        auto outcome = call<a::to_client::RequestPermission>(*peer_, req);   // blocks worker, not reader
+        auto r = peer_->call<a::to_client::RequestPermission>(req, std::move(o));   // blocks worker, not reader
+        if (!r) return PermissionOutcome::Deny;
+        auto outcome = std::move(*r);
         return a::match(outcome.outcome,
             [](const a::PO_Cancelled&) { return PermissionOutcome::Deny; },
             [](const a::PO_Selected& s) {

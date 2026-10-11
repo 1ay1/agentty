@@ -24,6 +24,7 @@
 //     grafted onto the render/stream loop.
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -155,6 +156,10 @@ void release_servers() noexcept;
 // (one editor, one list); reconnects only when something changed.
 void set_client_servers(const nlohmann::json& servers);
 [[nodiscard]] std::vector<std::string> configured_server_names_from_client();
+
+// The editor can open URL-mode elicitations: advertise them to MCP servers
+// (connections made after this) and report each finished one to `done`.
+void set_url_elicitation(std::function<void(const std::string& elicitation_id)> done);
 
 // ── Resources (MCP resources/*) ──────────────────────────────────────────
 // A resource the agent can read by URI (file, db row, API doc, …).

@@ -142,10 +142,11 @@ editor's controls always match what agentty will actually use.
 - **Live titles** — the first message names the chat, and each turn bumps its last-active time.
 - **Sign-in** — with no credentials agentty offers a terminal login: the editor opens a terminal running `agentty login`, and once you finish, agentty picks up the new credentials without a restart. Editors without terminal login get a "run `agentty login`" prompt instead.
 - **Every session in its own folder** — tools work in the session's folder, not wherever the agent was started: relative paths, shell commands and the sandbox all follow the session's `cwd`. Extra workspace folders the editor sends (`additionalDirectories`, for multi-root workspaces) are readable and writable too; anything else stays refused.
-- **Questions from MCP servers** — when an MCP server asks the user for input mid-call (elicitation), the editor shows it as a form tied to the tool card, and your answer goes back to the server.
-- **JetBrains AIR** — JetBrains' AIR client gets edits as one exact git patch each (`diffPatch`), the format it renders natively. Other editors get the plain diff.
+- **Questions from MCP servers** — when an MCP server asks the user for input mid-call (elicitation), the editor shows it as a form tied to the tool card, and your answer goes back to the server. If the editor supports URL elicitation, a server can also send you to a link (say, an OAuth page); the editor asks before opening it, and agentty passes on the server's "done".
+- **JetBrains AIR** — JetBrains' AIR client gets edits as one exact git patch each (`diffPatch`), the format it renders natively. It also gets AIR's presentation hints: a permission heading, the mode kind (`standard` / `auto_review`), a shell command's own summary as its title, the task tool marked as a subagent, skills tagged with their `SKILL.md`, and the token counts of a compaction. Other editors get the plain diff and none of the extra keys.
 - **Your editor's MCP servers** — servers you configured in Zed (context servers) or JetBrains are passed to agentty with each session and their tools show up for the model, alongside your `mcp.json`. stdio, HTTP and SSE are all supported.
-- **Cancellation** — stop a turn and the in-flight stream tears down; `$/cancel_request` is honoured too.
+- **Cancellation** — stop a turn and the in-flight stream tears down; `$/cancel_request` is honoured too. An open permission dialog or MCP form is withdrawn with `$/cancel_request`, so the editor can close it.
+- **Queued prompts** — a prompt sent while a turn is running waits for it and then runs, in order. Cancelling stops the running turn and everything queued behind it.
 - **Workspace sandbox** — file tools stay inside the session's `cwd`; `bash` runs in the same OS sandbox as the TUI.
 
 :::tip
@@ -159,13 +160,14 @@ ACP v1 as of 1.11:
 
 - **methods:** `initialize`, `authenticate`, `logout`, `session/new`, `load`, `resume`, `fork`, `list`, `close`, `delete`, `set_mode`, `set_config_option`, `prompt`, `cancel`, and `$/cancel_request`
 - **updates:** `agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk` (replay), `tool_call`, `tool_call_update`, `plan`, `available_commands_update`, `current_mode_update`, `config_option_update`, `session_info_update`, `usage_update`, `notice`, `compaction_update`, `compaction_summary_chunk`
-- **calls to the editor:** `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*` when the editor offers them
+- **calls to the editor:** `session/request_permission`, `elicitation/create`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*` when the editor offers them; notifications `elicitation/complete` and `$/cancel_request`
 
 Notices, compaction entries and toggle options are only sent when the editor
 advertises them in `clientCapabilities.session`; live terminals only when it
 advertises `_meta.terminal_output` (Zed) or `terminal_output_delta`; MCP
-elicitations only when it advertises `elicitation.form`; AIR patches only when
-it declares `_meta.jetbrains.air` with `diffPatch`. Diagnostics go to stderr;
+elicitations only when it advertises `elicitation.form` (or `elicitation.url`
+for links); AIR extras only when it declares `_meta.jetbrains.air` (patches
+only with `diffPatch`). Diagnostics go to stderr;
 stdout is only the protocol.
 
 `tests/acp/run_acp_client.sh` drives the real binary the way Zed and JetBrains

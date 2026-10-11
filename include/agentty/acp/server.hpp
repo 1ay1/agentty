@@ -68,6 +68,9 @@ struct Session {
     std::string effort;     // "" = default, "none" = off, else a wire level
     bool show_reasoning = true;
     std::shared_ptr<http::CancelToken> cancel;
+    // Prompts in arrival order (request id, cancel handle). The front one owns
+    // the session; the rest wait their turn.
+    std::vector<std::pair<std::string, std::shared_ptr<http::CancelToken>>> queued;
     std::set<std::string> grants;   // session-scoped "always allow", by tool
     std::set<std::string> denials;  // session-scoped "always reject", by tool
     bool warned_context = false;    // "context nearly full" notice sent
@@ -135,8 +138,21 @@ private:
     void on_notification(const ::acp::Notification& n);
 
     // ── The headless turn loop ───────────────────────────────────────────
-    void run_turn(Io io, std::string session_id, std::string req_id_dump, Responder resp);
+    void run_turn(Io io, std::string session_id, std::string req_id_dump, Responder resp,
+                  Message user_msg, std::string typed);
     void run_compact(Io io, std::string session_id, std::string req_id_dump, Responder resp);
+    // Turn queue. register_prompt files a prompt in line; acquire_turn blocks
+    // until it is first, then appends its message (if any) and arms its
+    // cancel. Nothing back: cancelled while waiting, or the session closed.
+    // release_turn hands the session to the next prompt.
+    struct Acquired { std::shared_ptr<http::CancelToken> cancel; std::string title; };
+    void register_prompt(const std::string& sid, const std::string& rid);
+    std::optional<Acquired> acquire_turn(const std::string& sid, const std::string& rid,
+                                         std::optional<Message> msg = {},
+                                         std::string typed = {});
+    void release_turn(const std::string& sid, const std::string& rid);
+    // Trip these cancel handles, then wake anyone waiting in acquire_turn.
+    void cancel_tokens(std::vector<std::shared_ptr<http::CancelToken>> toks);
 
     StopReason stream_completion(Io io, const std::string& session_id, bool& out_cancelled,
                                  std::string& out_error,
@@ -159,7 +175,8 @@ private:
                                                      const std::string& fallback_model);
 
     enum class PermissionOutcome { Deny, DenyAlways, AllowOnce, AllowAlways };
-    PermissionOutcome ask_permission(const std::string& session_id, const ToolUse& tc);
+    PermissionOutcome ask_permission(const std::string& session_id, const ToolUse& tc,
+                                     std::stop_token cancel = {});
 
     // Live-terminal execution of a `bash` tool call via the client's ACP
     // terminal (terminal/create → wait_for_exit → output → release), so the
@@ -204,6 +221,7 @@ private:
 
     // ── Session modes ────────────────────────────────────────────────────
     static ::acp::SessionModeState mode_state(Profile current);
+    [[nodiscard]] ::acp::SessionModeState modes_for_client(Profile current) const;
     static Profile        profile_from_mode_id(const std::string& mode_id,
                                                Profile fallback);
     static const char*    mode_id_for(Profile p);
@@ -280,10 +298,13 @@ private:
     std::atomic<bool>         air_{false};
     std::atomic<bool>         air_diff_patch_{false};
     std::atomic<bool>         client_elicit_form_{false};      // elicitation.form
+    std::atomic<bool>         client_elicit_url_{false};       // elicitation.url
     nlohmann::json elicit_via_client(const std::string& session_id, const std::string& tool_id,
-                                     const nlohmann::json& mcp_params);
+                                     const nlohmann::json& mcp_params,
+                                     std::stop_token cancel = {});
     // {"jetbrains":{"air":{"version":1, ...payload}}} for AIR, else {}.
     [[nodiscard]] nlohmann::json air_meta(nlohmann::json payload) const;
+    [[nodiscard]] nlohmann::json air_tool_meta(const ToolUse& tc) const;
 
     // A user-facing notice: a `notice` update when the client renders them,
     // otherwise nothing (the turn's own text already says what happened).

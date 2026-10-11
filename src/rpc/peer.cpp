@@ -421,9 +421,12 @@ jsonrpc::Completed Peer::call_raw(std::string_view method, jsonrpc::Json params,
 
     // A stop on `cancel`: tell whoever asked, then fail the call now or once
     // the grace runs out. Either way it settles as Cancelled, which wakes us.
-    std::stop_callback on_cancel(o.cancel, [c = &core_.get(), id = started.id, &o] {
+    std::stop_callback on_cancel(o.cancel, [this, c = &core_.get(), id = started.id, &o] {
         if (o.on_cancel) {
             try { o.on_cancel(); } catch (...) {}
+        }
+        if (o.notify_peer) {
+            try { notify_raw("$/cancel_request", jsonrpc::Json{{"id", id}}); } catch (...) {}
         }
         if (o.cancel_grace.count() <= 0) {
             c->perform(c->step(jsonrpc::Cancel{jsonrpc::RequestId{id}}));

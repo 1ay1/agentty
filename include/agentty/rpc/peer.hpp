@@ -73,6 +73,9 @@ struct CallOptions {
     std::stop_token                          cancel;
     std::function<void()>                    on_cancel;
     std::chrono::milliseconds                cancel_grace{0};
+    // Also send $/cancel_request with this call's id, so the peer can drop
+    // the request (a permission dialog, a form).
+    bool                                     notify_peer = false;
 };
 
 // What the owner does with the peer's calls and notifications. Return the
