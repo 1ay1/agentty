@@ -147,6 +147,7 @@ editor's controls always match what agentty will actually use.
 - **Your editor's MCP servers** — servers you configured in Zed (context servers) or JetBrains are passed to agentty with each session and their tools show up for the model, alongside your `mcp.json`. stdio, HTTP and SSE are all supported.
 - **Cancellation** — stop a turn and the in-flight stream tears down; `$/cancel_request` is honoured too. An open permission dialog or MCP form is withdrawn with `$/cancel_request`, so the editor can close it.
 - **Queued prompts** — a prompt sent while a turn is running waits for it and then runs, in order. Cancelling stops the running turn and everything queued behind it.
+- **Subagents as sessions** — each `task` run is kept as its own session (under `threads/subagents/`, same retention as threads). The task card points at it with `_meta.subagent_session_info`, so Zed can open the subagent's transcript nested under the card.
 - **Workspace sandbox** — file tools stay inside the session's `cwd`; `bash` runs in the same OS sandbox as the TUI.
 
 :::tip

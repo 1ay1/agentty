@@ -1926,6 +1926,8 @@ a::LoadSessionResult AgentServer::on_load_session(const a::LoadSessionParams& p)
         // the legacy single document); a bare <id>.json read misses a thread
         // saved as a log.
         auto loaded = persistence::load_thread_by_id(IoAccess::grant(), ThreadId{sid});
+        // A subagent run, opened from its parent's card.
+        if (!loaded) loaded = persistence::load_subagent_thread(IoAccess::grant(), ThreadId{sid});
         if (!loaded)
             throw a::RpcError(a::errc::InvalidParams,
                               "session/load: no such session: " + sid,
@@ -3251,6 +3253,19 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
                                tok = ctx.cancel ? ctx.cancel->token() : std::stop_token{}](const json& mcp) {
                 return elicit_via_client(sid, tid, mcp, tok);
             };
+        // A subagent run is kept as its own session so Zed can show it
+        // nested under this card (_meta.subagent_session_info).
+        auto sub_sid = std::make_shared<maya::guarded<std::string>>();
+        if (tc.name.value == "task")
+            call_ctx.on_subagent_done = [sub_sid, parent = ctx.id](const Thread& t) {
+                Thread copy = t;
+                copy.id = persistence::new_id();
+                copy.forked_from = parent;
+                if (copy.title.empty()) copy.title = "Subagent";
+                if (persistence::save_subagent_thread(IoAccess::grant(), copy))
+                    sub_sid->with([](std::string& s, std::string id) { s = std::move(id); },
+                                  copy.id.value);
+            };
         // Zed's terminal channel: a shell command's output streams into a real
         // terminal in the card while it runs. progress hands us the whole
         // buffer each time; we send what's new.
@@ -3415,6 +3430,9 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
             upd.content   = a::Just(std::move(content));
             upd.rawOutput = a::Just<json>(json{{"text", result->text}});
             if (term) upd.meta = terminal_exit_meta(tc.id.value, result->text, false);
+            if (auto s = sub_sid->read([](const std::string& v) { return v; }); !s.empty())
+                merge_meta(upd.meta, json{{"subagent_session_info",
+                                           {{"session_id", s}, {"message_start_index", 0}}}});
             // tool_start, NOT tc.executing_since(). ACP never moves a tool
             // into Running, so executing_since() has nothing recorded to read
             // and ALWAYS returns its liveness fallback, card birth -- which

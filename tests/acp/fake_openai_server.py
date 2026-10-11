@@ -75,6 +75,12 @@ class H(BaseHTTPRequestHandler):
         elif "summar" in (text or "").lower():
             events = [chunk({"role": "assistant", "content": "<summary>We said hello "}),
                       chunk({"content": "twice.</summary>"}), chunk({}, "stop")]
+        elif "spawn a helper" in (text or ""):
+            args = json.dumps({"prompt": "SUBTASK-PING report back", "agent_type": "general"})
+            events = [chunk({"role": "assistant", "content": ""}),
+                      chunk({"tool_calls": [{"index": 0, "id": "call_task", "type": "function",
+                                             "function": {"name": "task", "arguments": args}}]}),
+                      chunk({}, "tool_calls")]
         elif "open the link" in (text or ""):
             events = [chunk({"role": "assistant", "content": ""}),
                       chunk({"tool_calls": [{"index": 0, "id": "call_link", "type": "function",

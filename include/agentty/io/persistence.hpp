@@ -178,6 +178,11 @@ void clamp_compactions(Thread& t);
 // nothing is rewritten until that thread is next saved.
 [[nodiscard]] std::optional<Thread> load_thread_by_id(Io, const ThreadId& id);
 
+// Subagent runs kept for an editor to open (threads/subagents/<id>.json).
+// Not in the thread list; the blob GC reads them.
+bool save_subagent_thread(Io, const Thread& t);
+[[nodiscard]] std::optional<Thread> load_subagent_thread(Io, const ThreadId& id);
+
 } // namespace agentty::persistence
 
 namespace agentty::io {

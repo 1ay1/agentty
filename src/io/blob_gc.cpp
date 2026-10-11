@@ -150,6 +150,19 @@ GcStats collect_in(const fs::path& threads_dir, bool dry_run,
                         "cannot read {} — aborting sweep", p.string());
             }
         }
+        // Subagent transcripts kept for editors (threads/subagents/) hold
+        // references too.
+        if (fs::is_directory(threads_dir / "subagents", ec)) {
+            std::error_code sec;
+            fs::directory_iterator sub{threads_dir / "subagents", sec};
+            if (sec) { ++st.unreadable; return st; }
+            for (const auto& e : sub) {
+                if (stop.stop_requested()) return st;
+                if (!e.is_regular_file(ec) || e.path().extension() != ".json") continue;
+                ++st.scanned_threads;
+                if (!refs_from_file(e.path(), referenced)) ++st.unreadable;
+            }
+        }
     }
 
     // ── The safety rule ───────────────────────────────────────────────

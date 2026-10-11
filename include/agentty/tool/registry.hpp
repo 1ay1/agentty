@@ -131,6 +131,9 @@ struct CallContext {
     // through whatever UI the host has. Params and result are MCP-shaped
     // JSON. Empty: no UI to ask, the request is declined.
     std::function<nlohmann::json(const nlohmann::json&)> elicit;
+    // A subagent run finished; here is its transcript (an editor can keep it
+    // as a session of its own). Empty: dropped.
+    std::function<void(const ::agentty::Thread&)> on_subagent_done;
 
     void emit(std::string_view snapshot) const { if (progress) progress(snapshot); }
     [[nodiscard]] bool cancelled() const noexcept {

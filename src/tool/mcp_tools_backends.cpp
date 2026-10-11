@@ -1874,6 +1874,9 @@ public:
         // 24-turn run returning its opening sentence instead of an answer.
         std::string report;
         bool salvaged_stale = false;
+        if (ctx.on_subagent_done) {
+            try { ctx.on_subagent_done(thread); } catch (...) {}
+        }
         if (!thread.messages.empty()
             && thread.messages.back().role == Role::Assistant
             && !thread.messages.back().text.empty()) {

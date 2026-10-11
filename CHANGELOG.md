@@ -40,6 +40,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   the like) through the editor, which asks before opening it.
 - **JetBrains AIR hints:** permission headings, mode kinds, command titles,
   subagent and skill tags, and compaction token counts.
+- **Subagent runs open in Zed.** Each `task` run is saved as its own session
+  and linked from its card, so Zed can show the subagent's transcript.
 - **`session/fork`**, user slash commands and skills as real `/` commands,
   and permission prompts with "always reject".
 - **`/compact` and `/new` work over ACP.** They used to be sent to the model

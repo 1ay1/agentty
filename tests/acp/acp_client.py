@@ -638,6 +638,25 @@ def scenario_cancel(agentty, schema, cwd):
         r, err = c.request("session/prompt", {"sessionId": sid,
                            "prompt": [{"type": "text", "text": "say hello"}]}, "PromptResponse", timeout=60)
         expect(err is None and r.get("stopReason") == "end_turn", f"session usable after cancel {err or r}")
+
+        # A subagent run becomes its own session, linked from the task card
+        # the way Zed nests subagents.
+        c.request("session/set_mode", {"sessionId": sid, "modeId": "write"})
+        c.request("session/prompt", {"sessionId": sid,
+                  "prompt": [{"type": "text", "text": "spawn a helper"}]}, timeout=90)
+        infos = [(u.get("_meta") or {}).get("subagent_session_info") for s, u in c.updates
+                 if s == sid and u.get("toolCallId") == "call_task"]
+        info = next((i for i in reversed(infos) if i), None)
+        expect(bool(info) and info.get("session_id") and info.get("message_start_index") == 0,
+               f"task card carries subagent_session_info ({info})")
+        if info:
+            child = info["session_id"]
+            r, err = c.request("session/load", {"sessionId": child, "cwd": cwd, "mcpServers": []},
+                               "LoadSessionResponse")
+            replayed = [u for s, u in c.updates if s == child
+                        and u.get("sessionUpdate") == "user_message_chunk"]
+            expect(err is None and any("SUBTASK-PING" in u["content"].get("text", "") for u in replayed),
+                   f"subagent session loads with its transcript {err or len(replayed)}")
     finally:
         c.close()
     return c

@@ -2400,6 +2400,39 @@ void flush_pending_saves(Io) {
     async_writer().flush_and_stop();
 }
 
+namespace {
+fs::path subagent_path(const ThreadId& id) {
+    return threads_dir() / "subagents" / (id.value + ".json");
+}
+}  // namespace
+
+bool save_subagent_thread(Io io, const Thread& t) {
+    if (t.id.value.empty()) return false;
+    std::error_code ec;
+    fs::create_directories(threads_dir() / "subagents", ec);
+    json j = thread_meta_to_json(t);
+    json msgs = json::array();
+    for (const auto& m : t.messages)
+        if (!m.smart_routing) msgs.push_back(message_to_json(m));
+    j["messages"] = std::move(msgs);
+    try {
+        return write_json_atomic(io, subagent_path(t.id), j.dump(2));
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
+}
+
+std::optional<Thread> load_subagent_thread(Io io, const ThreadId& id) {
+    // Ids are 16 hex digits; anything else never names a file here.
+    if (id.value.empty() || id.value.find_first_not_of("0123456789abcdef") != std::string::npos)
+        return std::nullopt;
+    std::error_code ec;
+    if (!fs::exists(subagent_path(id), ec)) return std::nullopt;
+    auto t = load_thread_file(io, subagent_path(id));
+    if (!t) return std::nullopt;
+    return std::move(*t);
+}
+
 std::uint64_t debug_message_fingerprint(const Message& m) {
     return message_fingerprint(m);
 }
@@ -2489,6 +2522,16 @@ ExpireStats expire_threads(Io io, int keep_days, const ThreadId& keep, bool dry_
         ++st.threads;
         st.bytes += s.bytes;
         if (!dry_run) delete_thread(io, ThreadId{id});
+    }
+    // Subagent runs kept for editors age out the same way.
+    std::error_code sec;
+    for (fs::directory_iterator it{dir / "subagents", sec}, end; !sec && it != end; it.increment(sec)) {
+        std::error_code fec;
+        if (!it->is_regular_file(fec)) continue;
+        const auto mt = it->last_write_time(fec);
+        if (fec || mt >= cutoff) continue;
+        st.bytes += it->file_size(fec);
+        if (!dry_run) fs::remove(it->path(), fec);
     }
     if (st.threads > 0)
         AGT_LOG(Persist, Info, "threads.expire", "{} {} thread(s) older than {}d, {} KB",
