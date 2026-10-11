@@ -13,6 +13,7 @@ namespace agentty::ui {
 [[nodiscard]] maya::Element providers_panel(const Model& m);
 [[nodiscard]] maya::Element thread_list_panel(const Model& m);
 [[nodiscard]] maya::Element smart_mode_panel(const Model& m);
+[[nodiscard]] maya::Element web_search_panel(const Model& m);
 [[nodiscard]] maya::Element plugin_edit_panel(const Model& m);
 [[nodiscard]] maya::Element appearance_panel(const Model& m);
 [[nodiscard]] maya::Element sandbox_panel(const Model& m);

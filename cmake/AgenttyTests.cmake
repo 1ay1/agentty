@@ -34,6 +34,7 @@ set(_AGENTTY_CONSOLIDATED
     teardown_test
     snapshot_picker_test
     dup_tool_call_id_test salvage_dedup_test compaction_wire_test shell_detour_streak_test wire_tool_order_test
+    web_search_policy_test web_search_pane_test web_search_services_test
     speculative_dispatch_args_test
     tool_definition_pin_test
     shell_env_floor_test
@@ -584,7 +585,8 @@ add_executable(persistence_race_test_narrow EXCLUDE_FROM_ALL
     src/runtime/settings_registry.cpp src/tool/util/utf8.cpp
     src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp
     src/util/user_root.cpp src/util/base64.cpp src/util/teardown.cpp
-    src/io/shared_file.cpp)
+    src/io/shared_file.cpp
+    src/domain/web_search_config.cpp)
 target_include_directories(persistence_race_test_narrow PRIVATE include)
 # The runtime's headers: user_root.cpp uses maya::guarded for its warn-once set
 # (the concurrency banlist forbids a raw std::mutex). Header-only here, so the

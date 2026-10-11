@@ -105,6 +105,7 @@ std::pair<Model, Cmd> update(Model m, Msg msg,
         [&](msg::LoginMsg lm)        { return detail::login_update        (m, std::move(lm)); },
         [&](msg::DiffReviewMsg dm)   { return detail::diff_review_update  (m, std::move(dm)); },
         [&](msg::SmartModeMsg sm)    { return detail::smart_mode_update   (m, std::move(sm)); },
+        [&](msg::WebSearchMsg wm)    { return detail::web_search_update   (m, std::move(wm)); },
         [&](msg::PluginEditMsg pm)   { return detail::plugin_edit_update  (m, std::move(pm)); },
         [&](msg::AppearanceMsg am)   { return detail::appearance_update   (m, std::move(am)); },
         [&](msg::SandboxMsg sm)      { return detail::sandbox_update      (m, std::move(sm)); },
@@ -168,11 +169,23 @@ Cmd publish_derived(Model& m, Cmd c) {
         });
     }
 
+    // The web_search policy. A pane commit writes m.d.persisted.web_search; this
+    // is the one place that tells the tool layer, so every path that changes
+    // the policy (the pane, a future CLI, a settings reload) reaches it the
+    // same way, and a reducer never has to remember to.
+    Cmd web_search_effect = Cmd::none();
+    if (!m.published_web_search || !(*m.published_web_search == m.d.persisted.web_search)) {
+        m.published_web_search = m.d.persisted.web_search;
+        web_search_effect = Cmd(PublishWebSearchPolicy{m.d.persisted.web_search});
+    }
+
     // Nothing moved — the common case, every keystroke — costs no batch.
-    if (sel_effect.is_none() && sub_effect.is_none()) return c;
+    if (sel_effect.is_none() && sub_effect.is_none() && web_search_effect.is_none())
+        return c;
     // The selection is published before the subagent view, so a worker that
     // reads both sees them describe the same provider.
-    return Cmd::batch(std::move(c), std::move(sel_effect), std::move(sub_effect));
+    return Cmd::batch(std::move(c), std::move(sel_effect), std::move(sub_effect),
+                      std::move(web_search_effect));
 }
 
 namespace {
@@ -237,6 +250,7 @@ AGENTTY_DOMAIN_UPDATE(TodoMsg,         todo_update)
 AGENTTY_DOMAIN_UPDATE(LoginMsg,        login_update)
 AGENTTY_DOMAIN_UPDATE(DiffReviewMsg,   diff_review_update)
 AGENTTY_DOMAIN_UPDATE(SmartModeMsg,    smart_mode_update)
+AGENTTY_DOMAIN_UPDATE(WebSearchMsg,    web_search_update)
 AGENTTY_DOMAIN_UPDATE(PluginEditMsg,   plugin_edit_update)
 AGENTTY_DOMAIN_UPDATE(AppearanceMsg,   appearance_update)
 AGENTTY_DOMAIN_UPDATE(SandboxMsg,      sandbox_update)

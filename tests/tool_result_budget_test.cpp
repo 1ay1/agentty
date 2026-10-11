@@ -363,7 +363,7 @@ TEST_CASE("tool result budget") {
         // The superseded turn-1 read collapses to the short pointer.
         check(foo1.size() < 512,
               "superseded earlier read is collapsed to a one-line pointer");
-        check(foo1.find("superseded") != std::string::npos,
+        check(foo1.find("content was dropped to save context") != std::string::npos,
               "collapsed read carries the superseded pointer text");
         check(foo1.find("FILE_HEAD_AAAA") == std::string::npos,
               "collapsed read does NOT ship the original body");

@@ -14,6 +14,7 @@
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/domain/sandbox_config.hpp"
+#include "agentty/domain/web_search_config.hpp"
 #include "agentty/domain/ui_prefs.hpp"
 #include "agentty/domain/smart_mode.hpp"
 
@@ -248,6 +249,11 @@ struct Settings {
     // User-configured RAG behaviour (the RAG settings picker). Defaults to
     // configured=false ⇒ the adapter keeps its env-derived config.
     RagConfig rag;
+
+    // web_search policy (Settings → Web Search). Every field is a registry
+    // row, so the shipped defaults ARE "never touched" — no `configured` flag;
+    // save writes only rows that moved off their default.
+    web_search_cfg::Config web_search;
 
     // Sandbox policy (what a shell command may reach). Composed whole for the
     // same reason RoleConfig is: a flat set of fields on Settings makes

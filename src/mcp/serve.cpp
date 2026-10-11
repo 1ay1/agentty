@@ -1,8 +1,9 @@
 // agentty::mcp::serve_stdio — expose agentty's native tools OVER MCP.
 //
 // The inverse of bridge.cpp. We build one mcp::Server (a table of what we
-// answer), register every tool in tools::registry() as an MCP tool, and serve
-// it over stdio on an rpc::Peer. A registered tool's
+// answer), register every tool in tools::native_registry() that agentty's
+// settings allow (tools::withheld_by_policy) as an MCP tool, and serve it over
+// stdio on an rpc::Peer. A registered tool's
 // handler round-trips through tool::DynamicDispatch::execute(name, args) — the
 // SAME dispatch the agent loop uses — so output budgets, the empty-args guard,
 // and crash isolation all apply identically. The result (an ExecResult =
@@ -126,10 +127,17 @@ int serve_stdio() {
     // per-request `_meta` reading come with mcp::Server.
     server.set_discover_cache(::mcp::CacheHint{3'600'000, "public"});
 
-    // Register every native tool. The handler routes through the very same
-    // DynamicDispatch the agent loop uses, so behaviour is identical.
-    std::size_t n = 0;
+    // Register every native tool agentty's own settings allow. agentty is the
+    // parent: a tool switched off for the model (Settings → Web Search) is
+    // not offered to another MCP client either — not listed, so not callable
+    // through this server. The policy is read once here (env overrides
+    // applied), matching the static catalog the discover cache advertises;
+    // the dispatch closure still refuses web_search when off, as a backstop.
+    // The handler routes through the very same DynamicDispatch the agent loop
+    // uses, so behaviour is identical.
+    std::size_t n = 0, withheld = 0;
     for (const auto& def : tools::native_registry()) {
+        if (tools::withheld_by_policy(def)) { ++withheld; continue; }
         const std::string name = def.name.value;
         server.register_tool(spec_for(def),
             [name](const Json& args) -> ::mcp::CallToolResult {
@@ -139,7 +147,12 @@ int serve_stdio() {
         ++n;
     }
 
-    std::fprintf(stderr, "agentty: MCP server ready on stdio (%zu tools)\n", n);
+    if (withheld)
+        std::fprintf(stderr,
+            "agentty: MCP server ready on stdio (%zu tools; %zu withheld by "
+            "settings)\n", n, withheld);
+    else
+        std::fprintf(stderr, "agentty: MCP server ready on stdio (%zu tools)\n", n);
 
     // Calls are answered on the reader, one at a time, in arrival order.
     rpc::Dispatch d;

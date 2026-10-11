@@ -162,6 +162,11 @@ public:
 
     void store(T value) { store(make_snapshot(std::move(value))); }
 
+    // Publish only if nothing has been published yet. True if this one won.
+    bool store_if_empty(T value) {
+        return cell_.publish_if(nullptr, make_snapshot(std::move(value)).share());
+    }
+
     // Has anything been published yet? Distinct from an empty payload — the
     // "indexing…" vs "workspace empty" distinction the pickers render.
     [[nodiscard]] bool has_value() const noexcept { return static_cast<bool>(cell_.current()); }

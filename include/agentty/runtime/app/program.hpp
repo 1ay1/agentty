@@ -98,6 +98,7 @@ struct AgenttyApp {
     AGENTTY_FWD_UPDATE(LoginMsg)
     AGENTTY_FWD_UPDATE(DiffReviewMsg)
     AGENTTY_FWD_UPDATE(SmartModeMsg)
+    AGENTTY_FWD_UPDATE(WebSearchMsg)
     AGENTTY_FWD_UPDATE(PluginEditMsg)
     AGENTTY_FWD_UPDATE(AppearanceMsg)
     AGENTTY_FWD_UPDATE(SandboxMsg)

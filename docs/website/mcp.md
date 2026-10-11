@@ -24,6 +24,8 @@ The served tools are the same native tools the TUI uses: file `read`/`write`/`ed
 
 `mcp-serve` is deliberately **native-only**. A configured external MCP server is never re-exported implicitly, preventing credential leaks and recursive MCP proxy loops.
 
+agentty's own settings decide what it serves: a native tool switched off for agentty's model is not offered to MCP clients either. Today that is `web_search` when `Ctrl+K → Settings → Web Search` (or `AGENTTY_WEB_SEARCH`) is `off`. The setting is read when `mcp-serve` starts; restart it after changing it.
+
 ## Point a client at it
 
 Any MCP client can launch agentty as a stdio server. For a client that reads a JSON config (Claude Desktop shown here):

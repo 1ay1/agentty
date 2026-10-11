@@ -68,6 +68,67 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   files old versions left behind (`--yes` deletes them).
 - [Storage](docs/website/storage.md): one page for every file agentty
   writes, how long it stays, and how to move it.
+- **`Ctrl+K → Settings → Web Search`: control over `web_search`.** The tool
+  had one knob, the per-call `count`, and the model chose it. There was no way
+  to keep searches off for good, to stop a model asking for 0 or 500 results,
+  or to keep a content farm out of every result list. The new pane has these
+  rows:
+
+  - **Web search** — `auto` (the default) is how agentty behaved before the
+    pane: the tool is offered and the model chooses the count. `on` applies
+    your counts below. `off` removes the tool from the request and refuses any
+    call to it (a replayed thread, an ACP client, a model that remembers it).
+    It is not offered to other MCP clients through `agentty mcp-serve`
+    either: agentty's settings govern the tools it serves.
+    Rows a mode does not use are shown locked, with the reason, and keep
+    their values for when you switch back.
+  - **Results per search** (1–20) and **Most results allowed** (1–50). Locked
+    in `auto`, where the model sets the count; they apply in `on`. A search
+    returns at most one result page from the service that answers, and each
+    service caps it (20 on Brave, Tavily, Serper and Perplexity; 30 on
+    DuckDuckGo; 100 on Firecrawl and Exa), so a larger request is cut to that
+    service's cap.
+  - **Never return** — domains separated by spaces or commas, as typed or
+    pasted; URLs and `www.` are
+    reduced to the host. They are sent as `-site:` operators, or as the
+    service's own domain filter where it has one, so the engine never returns
+    an excluded site and its slot goes to another result — which filtering
+    afterwards could not do.
+  - **Primary, Secondary, Fallback** — which services answer, in order; the
+    first to succeed wins. Free services need no account, card or key
+    (**Brave Free**, **DuckDuckGo Free**, **Tavily Free**, **Firecrawl Free**);
+    **API key** services are the vendors' documented interfaces (Brave,
+    Tavily, Firecrawl, Exa, Serper, Perplexity). Defaults are Brave Free,
+    DuckDuckGo Free, Tavily Free. A key is pasted into the row under its slot
+    and stored encrypted — never in `settings.json` — or supplied as
+    `AGENTTY_WEB_SEARCH_KEY_<SERVICE>`. Each service shows up to three extra
+    settings under its slot (freshness, region, category, ...), and none when
+    it has none. A search that fails now says why for every service: blocked,
+    rate limited, quota used up, key refused.
+  - **Language** — sent to the services that take one.
+
+  Each row has an environment variable (`AGENTTY_WEB_SEARCH`, `_COUNT`,
+  `_MAX`, `_EXCLUDE`, `_PRIMARY`, `_SECONDARY`, `_FALLBACK`, `_LANGUAGE`) that
+  wins over the saved value for the session and locks the row, without ever
+  being written to `settings.json`. `AGENTTY_WEB_SEARCH`
+  takes `auto`, `on` or `off`, and the boolean spellings (`0` is `off`, `1` is
+  `auto`). See
+  the [configuration](/docs/configuration#web-search) page.
+
+  Startpage is gone: it now sends every automated request to a captcha.
+  Kagi, Mojeek and Linkup are not offered yet, because their request and
+  response formats could not be verified.
+
+  Turning search off removes only the native tool; the remaining tools keep
+  catalog order, so the tools block (the head of the prompt-cache prefix)
+  stays byte-stable once the setting is chosen. An MCP tool that happens to
+  be called `web_search` is left alone.
+
+  The settings list row says who answers first (`auto · Brave Free`).
+
+  The settings registry gains a third owner and a free-text row type to carry
+  this; `owner()` now classifies by the member pointer's class, since the old
+  "Rag, otherwise Smart" test would have filed every search row under Smart.
 - **The trust-handoff gate now PREVENTS, not just reports.** Host-trusted
   paths that exist — `.vscode/tasks.json`, `.git/hooks/*`, `.git/config`,
   `hooks.json` — are bound read-only inside the sandbox, so a shell write to

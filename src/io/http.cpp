@@ -2651,9 +2651,14 @@ using PoolMap = std::unordered_map<Endpoint, std::vector<PooledConn>, EndpointHa
 class Pool {
 public:
     std::unique_ptr<Connection> acquire(const Endpoint& ep) {
-        return map_.with([](PoolMap& map, Endpoint e) -> std::unique_ptr<Connection> {
+        // Stale entries are moved out and freed AFTER the lock: freeing one
+        // runs SSL_shutdown, which can fire new_session_cb, which locks the
+        // ticket map. Two locks nested aborts (lock_order_error).
+        auto [got, stale] = map_.with([](PoolMap& map, Endpoint e)
+                -> std::pair<std::unique_ptr<Connection>, std::vector<PooledConn>> {
+            std::vector<PooledConn> dead;
             auto it = map.find(e);
-            if (it == map.end()) return nullptr;
+            if (it == map.end()) return {nullptr, std::move(dead)};
             auto& stack = it->second;
             const auto now = clock_t_::now();
             while (!stack.empty()) {
@@ -2664,33 +2669,45 @@ public:
                 // is cheap and catches a class of stale connections the
                 // previous one misses; lifetime in particular catches the
                 // proxy-drain case that no client-side check can detect.
-                if (now - p.created_at  > kMaxLifetime) continue;
-                if (now - p.released_at > idle_ttl())   continue;
-                if (!p.conn->is_alive())                continue;
-                if (!socket_is_alive(p.conn->fd()))     continue;
+                if (now - p.created_at  > kMaxLifetime
+                    || now - p.released_at > idle_ttl()
+                    || !p.conn->is_alive()
+                    || !socket_is_alive(p.conn->fd())) {
+                    dead.push_back(std::move(p));
+                    continue;
+                }
                 p.conn->set_pooled(true);   // reused socket — see was_pooled()
                 p.conn->set_idle_ms(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         now - p.released_at).count());
-                return std::move(p.conn);
+                return {std::move(p.conn), std::move(dead)};
             }
-            return nullptr;
+            return {nullptr, std::move(dead)};
         }, ep);
+        stale.clear();   // freed here, no lock held
+        return got;
     }
 
     void release(std::unique_ptr<Connection> c) {
         if (!c || !c->is_alive()) return;
         c->set_pooled(false);   // back in the pool — next acquirer re-marks
-        map_.with([](PoolMap& map, std::unique_ptr<Connection> conn) {
+        // The evicted oldest is freed after the lock, same reason as acquire().
+        auto evicted = map_.with([](PoolMap& map, std::unique_ptr<Connection> conn) {
             auto& stack = map[conn->endpoint()];
             // Full: drop the oldest (front), the likeliest to have been
             // closed by the peer by the time we'd reach for it.
-            if (stack.size() >= kMaxPoolEntriesPerEndpoint) stack.erase(stack.begin());
+            std::unique_ptr<Connection> out;
+            if (stack.size() >= kMaxPoolEntriesPerEndpoint) {
+                out = std::move(stack.front().conn);
+                stack.erase(stack.begin());
+            }
             // Release time stands in for dial time; the lifetime cap is
             // about pool tenure, not socket age.
             const auto now = clock_t_::now();
             stack.push_back({std::move(conn), now, now});
+            return out;
         }, std::move(c));
+        evicted.reset();
     }
 
 private:

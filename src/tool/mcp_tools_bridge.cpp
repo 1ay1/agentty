@@ -14,6 +14,8 @@
 #include "agentty/io/http.hpp"
 #include "agentty/rag/rag_adapter.hpp"   // rag::feedback::note_file_opened (learning loop)
 #include "agentty/tool/registry.hpp"   // tools::progress::emit
+#include "agentty/tool/web_search_plan.hpp"     // web_search: which services, in order
+#include "agentty/tool/web_search_policy.hpp"   // web_search: Settings → Web Search
 #include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
 #include "agentty/tool/spec.hpp"       // spec catalog — effects authority
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -467,6 +469,10 @@ std::vector<ToolDef> build_mcp_tool_defs() {
 
     mt::HostServices svc;
     svc.http = ka.http;
+    // Which services web_search tries is the user's choice (Settings → Wire
+    // Tools); the source is read on every call, so an edit reaches the next
+    // search with no restart and no re-registration.
+    svc.web_search_plan = tools::web_search_plan::make_plan_source();
     svc.exec = ka.exec;
     // Every file the tools touch: mcp-cpp does no IO itself, the host does.
     svc.files = std::make_shared<mt::NativeFileSystem>();
@@ -549,6 +555,22 @@ std::vector<ToolDef> build_mcp_tool_defs() {
             // key too. This is the backstop, not a replacement.
             nlohmann::json args = args_in;
             (void)::agentty::app::detail::canonify_tool_args(tool_name, args);
+
+            // Settings → Web Search. The wire seam already keeps web_search
+            // off the request when it is disabled; this is the backstop for
+            // every call that did not come from one — a replayed thread, a
+            // tool call an ACP client injects, a model that remembers the
+            // tool from earlier in the session. Read per call, so a pane edit
+            // reaches the next search with no catalog rebuild.
+            if (tool_name == "web_search") {
+                const auto policy = tools::web_search_policy::current();
+                if (web_search_cfg::mode(policy) == web_search_cfg::Mode::Off)
+                    return std::unexpected(ToolError::denied(
+                        "web_search is turned off (Settings \xe2\x86\x92 Web "
+                        "Search). Answer from what you already know, or ask "
+                        "the user to turn it back on."));
+                args = web_search_cfg::rewrite_args(policy, std::move(args));
+            }
 
             // LEARNING LOOP (win side): the agent ACTING on a file shortly
             // after search_docs surfaced a passage from it is the implicit

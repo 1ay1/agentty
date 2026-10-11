@@ -27,7 +27,11 @@
 #define AGENTTY_TESTS_AGTEST_FX_HPP
 
 #include <functional>
+#include <memory>
+#include <stop_token>
 #include <vector>
+
+#include <maya/runtime.hpp>   // run_tasks_inline
 
 #include "agentty/provider/selection.hpp"
 #include "agentty/auth/accounts.hpp"
@@ -38,6 +42,7 @@
 #include "agentty/runtime/store_fx.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/tool/subagent.hpp"
+#include "agentty/tool/web_search_policy.hpp"
 
 namespace agtest::fx {
 
@@ -104,6 +109,8 @@ inline void run(const agentty::Cmd& c, Store& s) {
             s.written_files.emplace_back(e.path, e.contents);
         else if constexpr (std::same_as<U, agentty::PublishSelection>)
             agentty::provider::select(::agentty::IoAccess::grant(), e.selection);
+        else if constexpr (std::same_as<U, agentty::PublishWebSearchPolicy>)
+            agentty::tools::web_search_policy::install(e.policy);
         else if constexpr (std::same_as<U, agentty::InstallAuth>) {
             // Only the clear is played here: resolving would read the
             // developer's real credential files.
@@ -141,6 +148,15 @@ inline void run_credentials(const agentty::Cmd& c) {
             agentty::auth::save_credentials(::agentty::IoAccess::grant(), e.creds);
         }
     });
+}
+
+/// Run every TASK in `c` inline, the way the kernel would on a worker, and
+/// return the messages they sent, in order. Store effects and timers are not
+/// touched (see run() / run_credentials()). For reducers that hand their IO to
+/// Cmd::task / Cmd::task_isolated and fold the answer back as a Msg: a test
+/// feeds what this returns into update(), and asserts on the result.
+[[nodiscard]] inline std::vector<agentty::Msg> run_tasks(agentty::Cmd c) {
+    return maya::run_tasks_inline(std::move(c));
 }
 
 }  // namespace agtest::fx

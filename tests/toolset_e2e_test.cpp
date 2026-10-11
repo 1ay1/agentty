@@ -504,6 +504,27 @@ int main() {
                                       && !has(stopped, "process-second"),
                   "process_stop: does not replay output delivered by polls");
         }
+
+        // A session that exited and was fully drained is dropped by the next
+        // process_start. Its destructor takes the session's own lock, so it
+        // must die outside the tool-state lock (this aborted with
+        // lock_order_error).
+        auto quick = run("process_start", {{"command", "sleep 0.3; printf quick-done"}});
+        if (quick) {
+            const auto m = quick->text.find("proc-");
+            const std::string qid = quick->text.substr(m, quick->text.find(' ', m) - m);
+            for (int i = 0; i < 20; ++i) {
+                auto r = run("process_poll", {{"id", qid}, {"wait_ms", 300}});
+                if (has(r, "exited")) break;
+            }
+        }
+        auto next = run("process_start", {{"command", "sleep 5"}});
+        check(next.has_value() && has(next, "proc-"),
+              "process_start: reaping a drained session does not abort");
+        if (next) {
+            const auto m = next->text.find("proc-");
+            (void)run("process_stop", {{"id", next->text.substr(m, next->text.find(' ', m) - m)}});
+        }
     }
 
     // ── workspace-root boundary: fs tools refuse escapes ─────────────────

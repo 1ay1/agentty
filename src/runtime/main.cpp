@@ -111,6 +111,7 @@
 #include "agentty/provider/dispatch.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
+#include "agentty/tool/web_search_policy.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/config/inventory.hpp"   // config::cmd_config
 #if defined(AGENTTY_MCP)
@@ -1872,6 +1873,8 @@ int main(int argc, char** argv) {
                            || args.subcommand == "acp"
                            || args.subcommand == "mcp-serve";
         if (headless) {
+            // No Model to publish the web_search policy: load it from settings.
+            tools::web_search_policy::seed(::agentty::IoAccess::grant());
             // Falls back to the provider's static seed when auth is empty or
             // the network is unreachable, so an offline run still gets a
             // floor. Wrapped anyway: a catalog fetch must never be the thing

@@ -240,6 +240,16 @@ inline auto visual_parts(const SmartMode& p) {
 }
 static_assert(visual::parts_cover_all<SmartMode>);
 
+inline auto visual_parts(const WebSearch& p) {
+    return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
+                           visual::ref(p.form), visual::ref(p.scroll),
+                           visual::exempt,   // key_origins: projected into form rows
+                           visual::exempt,   // keys_read:   same
+                           visual::exempt,   // keys_gen:    bookkeeping, never drawn
+                           visual::exempt);  // rows_stale:  bookkeeping, never drawn
+}
+static_assert(visual::parts_cover_all<WebSearch>);
+
 inline auto visual_parts(const PluginEdit& p) {
     return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
                            visual::ref(p.form), visual::ref(p.server),

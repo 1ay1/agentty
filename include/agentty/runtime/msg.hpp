@@ -27,10 +27,12 @@
 //       longer forces stream/login/diff to recompile.
 
 #include <chrono>
+#include <cstdint>
 #include <expected>
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -684,6 +686,34 @@ struct SmartModePaste { std::string text; };
 // overlay; the pane rebuilds. Not persisted.
 struct SmartModeAdvanced {};
 struct SmartModeClearSlot {};     // 'x' on a slot row: reset it to auto
+
+// ── Web Search (Settings → Web Search) ─────────────────────────
+// The web_search tool's policy: on/off, result count, ceiling, excluded
+// sites. One form pane, built from the settings registry's web_search.* rows;
+// every committed edit persists and is published to the tool layer as an
+// effect.
+//
+// ONE key message like Smart Mode and Retrieval: navigation, toggles and
+// text editing all come from the shared form layer.
+struct OpenWebSearch {};
+struct CloseWebSearch {};
+struct WebSearchKey { form::keys::Action action; };
+// Bracketed paste while a Web Search text row is being edited (the exclusion
+// list is the field pasting exists for).
+struct WebSearchPaste { std::string text; };
+// The API-key store is IO (a sealed file, and `secret-tool` when the OS
+// keystore is on), so the pane never touches it from the reducer: it is read
+// and written on a worker, and these carry the outcome back. None of them
+// carries a key. `gen` is the pane's keys_gen when the read started; a reply
+// to an older read (one that a store or a removal has since overtaken) is
+// dropped.
+struct WebSearchKeysRead {
+    std::uint64_t gen = 0;
+    // service id -> "stored" | "env: AGENTTY_WEB_SEARCH_KEY_..." | "" (none)
+    std::vector<std::pair<std::string, std::string>> origins;
+};
+struct WebSearchKeySaved   { std::string service; bool ok = true; };
+struct WebSearchKeyRemoved { std::string service; bool ok = true; };
 
 // ── Plugin editor (detail / add form) ──────────────────────────
 // Opened from the Plugins settings list: `e` on a server row → detail form
@@ -1392,6 +1422,11 @@ using SmartModeMsg = std::variant<
     OpenSmartMode, CloseSmartMode, SmartModeKey, SmartModePaste,
     SmartModeAdvanced, SmartModeClearSlot>;
 
+// ── Web Search (web_search policy and services) ─────────────
+using WebSearchMsg = std::variant<
+    OpenWebSearch, CloseWebSearch, WebSearchKey, WebSearchPaste,
+    WebSearchKeysRead, WebSearchKeySaved, WebSearchKeyRemoved>;
+
 // ── Plugin editor (detail / add form) ──────────────────────────
 using PluginEditMsg = std::variant<
     OpenPluginEdit, ClosePluginEdit, PluginEditKey, PluginEditPaste>;
@@ -1452,6 +1487,7 @@ using Msg = std::variant<
     msg::LoginMsg,
     msg::DiffReviewMsg,
     msg::SmartModeMsg,
+    msg::WebSearchMsg,
     msg::PluginEditMsg,
     msg::AppearanceMsg,
     msg::SandboxMsg,
@@ -1500,6 +1536,7 @@ consteval int leaf_domain_count() {
          + int{in_variant_v<L, msg::LoginMsg>}
          + int{in_variant_v<L, msg::DiffReviewMsg>}
          + int{in_variant_v<L, msg::SmartModeMsg>}
+         + int{in_variant_v<L, msg::WebSearchMsg>}
          + int{in_variant_v<L, msg::PluginEditMsg>}
          + int{in_variant_v<L, msg::AppearanceMsg>}
          + int{in_variant_v<L, msg::SandboxMsg>}
@@ -1558,12 +1595,14 @@ static_assert(leaf_domain_count<AcceptAllChanges>()          == 1,
               "AcceptAllChanges must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<Tick>()                      == 1,
               "Tick must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenWebSearch>()             == 1,
+              "OpenWebSearch must belong to exactly one Msg domain");
 
 // Pin the top-level Msg domain count too — if someone adds a new domain
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 24,
+static_assert(std::variant_size_v<Msg> == 25,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

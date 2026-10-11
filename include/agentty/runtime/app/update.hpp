@@ -51,6 +51,7 @@ Cmd update(Model& m, msg::TodoMsg         tm);
 Cmd update(Model& m, msg::LoginMsg        lm);
 Cmd update(Model& m, msg::DiffReviewMsg   dm);
 Cmd update(Model& m, msg::SmartModeMsg    sm);
+Cmd update(Model& m, msg::WebSearchMsg    wm);
 Cmd update(Model& m, msg::PluginEditMsg   pm);
 Cmd update(Model& m, msg::AppearanceMsg   am);
 Cmd update(Model& m, msg::SandboxMsg      sm);
