@@ -128,12 +128,9 @@ sniff_any(const std::string& raw,
 // (shell / diagnostics / test / process_start): Laguna S 2.1 and models
 // cross-trained on OpenAI-style specs emit `cmd` for shell.
 //
-// This rename is LOAD-BEARING, not a convenience. The dispatcher's ArgReader
-// has no alias table (see the note on kCommandAliases) -- it is str(key) /
-// require_str(key) -- so nothing downstream would find `cmd`. Relaxing the
-// required-field guard without canonifying would therefore trade a clear
-// "missing the required field" for an EMPTY command reaching the shell. Guard
-// and canonify ship together or not at all.
+// The tools read a few aliases themselves now (mcp-cpp ArgReader), but the
+// card, the permission prompt and the guard read the canonical key, so the
+// rename still matters here.
 //
 // Returns true when anything was renamed.
 [[nodiscard]] inline bool canonify_tool_args(std::string_view tool_name,
@@ -224,9 +221,13 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
         }
         case K::Bash:
         case K::Diagnostics:
-        case K::ProcessStart:
-            if (!is_nonempty_string_any(kCommandAliases)) return "command";
-            return {};
+        case K::ProcessStart: {
+            if (is_nonempty_string_any(kCommandAliases)) return {};
+            // shell also runs a command sent as an argv list.
+            auto it = args.find("command");
+            if (it != args.end() && it->is_array() && !it->empty()) return {};
+            return "command";
+        }
         case K::ProcessPoll:
         case K::ProcessStop:
             if (!is_nonempty_string("id")) return "id";
@@ -239,8 +240,10 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
             if (!is_nonempty_string_any(kPathAliases)) return "path";
             return {};
         case K::Grep:
-            if (!is_nonempty_string("pattern")) return "pattern";
-            return {};
+            // Same spellings the tool reads (mcp-cpp ArgReader's pattern aliases).
+            for (const char* k : {"pattern", "query", "q", "regex", "search", "term", "match", "pat"})
+                if (is_nonempty_string(k)) return {};
+            return "pattern";
         case K::FindDefinition:
             if (!is_nonempty_string("symbol")) return "symbol";
             return {};
@@ -291,8 +294,9 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
             // transparent retry, burns the turn, and tells the model it forgot
             // an argument when the truth is the wire cut mid-arguments.
             if (is_nonempty_string_any(kPathAliases)) return {};
-            // read also takes `file`/`filePath` and a paths:[...] array.
-            for (const char* k : {"file", "filePath"})
+            // read also takes these (mcp-cpp ArgReader's path aliases) and a
+            // paths:[...] array.
+            for (const char* k : {"file", "filePath", "dir", "directory", "target", "pathname"})
                 if (is_nonempty_string(k)) return {};
             for (const char* k : {"paths", "files", "file_paths"})
                 if (auto it = args.find(k); it != args.end() && it->is_array() && !it->empty())

@@ -65,6 +65,13 @@ class H(BaseHTTPRequestHandler):
         events = []
         if last.get("role") == "tool":
             events = [chunk({"role": "assistant", "content": "done"}), chunk({}, "stop")]
+        elif (text or "").startswith("CALL "):
+            # "CALL <tool> <raw json args>": a scripted model call, args sent as-is.
+            _, name, raw = text.split(" ", 2)
+            events = [chunk({"role": "assistant", "content": ""}),
+                      chunk({"tool_calls": [{"index": 0, "id": "call_raw", "type": "function",
+                                             "function": {"name": name, "arguments": raw}}]}),
+                      chunk({}, "tool_calls")]
         elif "flaky" in (text or ""):
             H.flaky = getattr(H, "flaky", 0) + 1
             if H.flaky == 1:

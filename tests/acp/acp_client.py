@@ -662,6 +662,47 @@ def scenario_cancel(agentty, schema, cwd):
     return c
 
 
+def scenario_messy_args(agentty, schema, cwd):
+    print("messy: the argument shapes weak models send, through the whole agent loop")
+    c = Client([agentty, "acp"], schema, cwd)
+    os.makedirs(os.path.join(cwd, "sub"), exist_ok=True)
+    open(os.path.join(cwd, "sub", "m.txt"), "w").write(
+        "".join(f"row {i}\n" for i in range(1, 41)) + "int run_turn(int x) {\n")
+    cases = [
+        ("read", {"path": "sub/m.txt:10-11"}, "row 10", "row 12\n"),
+        ("read", {"path": "sub/m.txt#L20-L21"}, "row 20", "row 22\n"),
+        ("read", {"file": "`sub/m.txt`", "lines": "30-31"}, "row 30", "row 32\n"),
+        ("read", {"paths": ["sub/m.txt"], "line_range": [5, 6]}, "row 5", "row 7\n"),
+        ("read", {"path": "sub"}, "m.txt", None),
+        ("grep", {"pattern": "run_turn(", "path": "sub"}, "m.txt", None),
+        ("grep", {"query": "row 33", "path": "sub/m.txt:3"}, "row 33", None),
+        ("shell", {"command": "pwd", "cwd": "sub"}, os.path.join(os.path.realpath(cwd), "sub"), None),
+        ("shell", {"cmd": ["echo", "argv ok"]}, "argv ok", None),
+        ("shell", {"command": "```bash\necho fenced ok\n```"}, "fenced ok", None),
+        ("shell", {"command": "$ echo prompt ok"}, "prompt ok", None),
+    ]
+    try:
+        initialize(c)
+        r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
+        sid = r["sessionId"]
+        c.request("session/set_mode", {"sessionId": sid, "modeId": "write"})
+        for tool, args, want, not_want in cases:
+            n = len(c.updates)
+            c.request("session/prompt", {"sessionId": sid, "prompt": [
+                {"type": "text", "text": f"CALL {tool} {json.dumps(args)}"}]}, timeout=60)
+            outs = [u for s, u in c.updates[n:] if s == sid and u.get("toolCallId") == "call_raw"
+                    and u.get("status") in ("completed", "failed")]
+            got = outs[-1] if outs else {}
+            text = (got.get("rawOutput") or {}).get("text", "") or json.dumps(got.get("content"))
+            ok = got.get("status") == "completed" and want in text \
+                and (not_want is None or not_want not in text) \
+                and "command not found" not in text and "failed with exit code" not in text
+            expect(ok, f"{tool} {json.dumps(args)[:60]} ({got.get('status')}: {text[:90]!r})")
+    finally:
+        c.close()
+    return c
+
+
 def scenario_commands(c, cwd):
     print("commands: /compact reports a compaction entity, /new clears context")
     r, _ = c.request("session/new", {"cwd": cwd, "mcpServers": []}, "NewSessionResponse")
@@ -825,7 +866,8 @@ def main():
     c4 = scenario_air(agentty, schema, cwd)
     c5 = scenario_progress(agentty, schema, cwd)
     c6 = scenario_cancel(agentty, schema, cwd)
-    for cl in (c, c2, c3, c4, c5, c6):
+    c7 = scenario_messy_args(agentty, schema, cwd)
+    for cl in (c, c2, c3, c4, c5, c6, c7):
         for v in cl.violations:
             print("  SCHEMA " + v)
             FAILS.append(v)
