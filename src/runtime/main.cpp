@@ -2283,6 +2283,14 @@ int main(int argc, char** argv) {
     // the process there, so the redirect costs us the whole binary to keep
     // the frame clean. Wine is a development/CI target, not a user-facing
     // one, and a slightly dirty frame beats not starting at all.
+    // The REAL stderr, kept across the redirect below. If maya can't take
+    // the terminal there is no frame to protect, and a reason that only
+    // lands in stderr.log is a silent exit 70 from the user's chair.
+#if defined(_WIN32)
+    const int real_stderr = _dup(_fileno(stderr));
+#else
+    const int real_stderr = ::dup(fileno(stderr));
+#endif
     if (!running_under_wine()) {
         if (const char* off = std::getenv("AGENTTY_NO_STDERR_REDIRECT");
             !(off && off[0] && off[0] != '0')) {
@@ -2369,8 +2377,22 @@ int main(int argc, char** argv) {
         maya::Options cfg{.title = "agentty", .fps = 0,
                           .mode = maya::Mode::Inline, .backend = backend};
         if (const int rc = maya::run<app::AgenttyApp, app::Host>(cfg);
-            rc == 70)
-            return 70;                         // couldn't take the terminal
+            rc == 70) {
+            // Couldn't take the terminal (or a fault stopped the program).
+            // The why went to stderr.log; say so where the user is looking.
+            if (real_stderr >= 0) {
+                const std::string msg =
+                    "agentty: couldn't start the terminal UI (exit 70). "
+                    "Is stdin/stdout a terminal? Details: "
+                    + (util::user_logs_dir() / "stderr.log").string() + "\n";
+#if defined(_WIN32)
+                (void)_write(real_stderr, msg.data(), static_cast<unsigned>(msg.size()));
+#else
+                (void)!::write(real_stderr, msg.data(), msg.size());
+#endif
+            }
+            return 70;
+        }
     }
 
     // Tear down connected MCP plugin servers FIRST — before the blocking
