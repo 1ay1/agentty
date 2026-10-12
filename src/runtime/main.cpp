@@ -1567,6 +1567,7 @@ int main(int argc, char** argv) {
         // with full network. Ask the compiled posture what it can actually
         // enforce and refuse unless the wall is strong. Fail closed.
         if (args.subcommand == "run" && args.cli_run_no_network) {
+#if defined(__linux__) || defined(__APPLE__)
             const auto rep = tools::util::sandbox::claybin_backend::describe(
                 tools::util::sandbox::claybin_posture_for_test());
             bool net_strong = false;
@@ -1585,6 +1586,7 @@ int main(int argc, char** argv) {
                     why.c_str());
                 return 2;
             }
+#endif  // claybin hosts; elsewhere the is_active() gate above already refused
         }
         // Status line so the user knows what they got. Stdout is fine —
         // maya runs after this returns, no clobbering.
