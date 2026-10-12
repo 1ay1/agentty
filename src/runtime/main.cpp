@@ -1560,6 +1560,32 @@ int main(int argc, char** argv) {
                 tools::util::sandbox::describe_state().c_str());
             return 2;
         }
+        // Claybin being ACTIVE is not the promise. It takes the network away
+        // with an empty netns, and a host that denies unprivileged user
+        // namespaces (Ubuntu 24.04's AppArmor default, many containers) gets
+        // no netns -- claybin degrades network.isolation and the command runs
+        // with full network. Ask the compiled posture what it can actually
+        // enforce and refuse unless the wall is strong. Fail closed.
+        if (args.subcommand == "run" && args.cli_run_no_network) {
+            const auto rep = tools::util::sandbox::claybin_backend::describe(
+                tools::util::sandbox::claybin_posture_for_test());
+            bool net_strong = false;
+            std::string why = rep.ok ? "no report" : rep.detail;
+            for (const auto& w : rep.walls)
+                if (w.name == "network.isolation") {
+                    net_strong = w.strength == "strong";
+                    why = w.strength + (w.mechanism.empty() ? "" : " via " + w.mechanism);
+                }
+            if (!net_strong) {
+                std::fprintf(stderr,
+                    "agentty run: --no-network can't be enforced on this host "
+                    "(network isolation: %s). Network namespaces are "
+                    "unavailable -- often unprivileged user namespaces are "
+                    "disabled (sysctl kernel.apparmor_restrict_unprivileged_userns).\n",
+                    why.c_str());
+                return 2;
+            }
+        }
         // Status line so the user knows what they got. Stdout is fine —
         // maya runs after this returns, no clobbering.
         //

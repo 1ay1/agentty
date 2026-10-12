@@ -127,11 +127,14 @@ out=$("$A" run --json --read-only "please write a file" 2>/dev/null)
 check "read-only: write refused" "$(j 'd["tool_errors"]')" 1
 [ ! -e out.txt ] && pass "read-only: no file written" || fail "read-only: no file written"
 
-# --no-network: a shell command can't reach the network. Needs claybin; on a
-# host without it the flag must refuse instead (exit 2).
+# --no-network: a shell command can't reach the network. Needs claybin AND
+# a network namespace; a host without either must refuse instead (exit 2),
+# never run the command with network.
 "$A" run --no-network 'CALL shell {"command":"curl -sS -m 4 -o /dev/null https://example.com 2>/dev/null; echo $? > net_rc.txt"}' >/dev/null 2>&1; rc=$?
 if [ "$rc" -eq 2 ]; then
-    pass "no-network: refused without claybin"
+    pass "no-network: refused (no claybin or no netns on this host)"
+    [ ! -e net_rc.txt ] && pass "no-network: refused before running anything" \
+        || fail "no-network: refused, but the command ran"
 else
     check "no-network: exit 0" "$rc" 0
     nrc=$(cat net_rc.txt 2>/dev/null)
