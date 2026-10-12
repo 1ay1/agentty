@@ -53,7 +53,7 @@ agentty --sandbox on                   # require an OS sandbox for bash/diagnost
 
 ## agentty run
 
-Runs one prompt through the agent loop (tools, sandbox, no UI) and prints the answer to stdout. Errors go to stderr, so stdout is safe to capture.
+Runs one prompt through the agent loop (tools, sandbox, no UI) and prints the answer to stdout. Errors go to stderr, so stdout is safe to capture. When a run fails, stderr ends with one `agentty run: <status>: <reason>` line saying why.
 
 ```bash
 agentty run "add a --dry-run flag to the cli"
@@ -67,7 +67,7 @@ agentty run --save "plan the migration" && agentty run --resume last "now do ste
 | Flag | Effect |
 |---|---|
 | `--agent <type>` | Role: `general` (default), `explorer`, `reviewer`, `tester`, `coder`, or one of your own [subagents](/docs/subagents). |
-| `--json` | Print one JSON object: `status`, `result`, `error`, `model`, `turns`, `tool_calls`, `tool_errors`, `usage`, `duration_ms`. |
+| `--json` | Print one JSON object: `status`, `result`, `error`, `model`, `turns`, `tool_calls`, `tool_errors`, `usage` (tokens, plus `last_input_tokens` and `context_window`), `duration_ms`. |
 | `-o`, `--output <file>` | Write the answer (or the JSON) to a file instead of stdout. |
 | `--max-turns <n>` | Stop after n model turns (default 80, or 32 for read-only roles). |
 | `--timeout <d>` | Stop after `90`, `90s`, `5m` or `1h` (default 15m). A running tool is killed when time is up. |
@@ -76,7 +76,7 @@ agentty run --save "plan the migration" && agentty run --resume last "now do ste
 | `--no-network` | Commands run with no network at all (an empty network namespace), and network tools are refused. Needs the claybin sandbox; without it the run won't start. |
 | `--save` | Save the conversation as a thread. The id is in `--json` output and in `-v`. |
 | `--resume <id\|last>` | Continue a saved thread with a new prompt. `last` is the newest. Saves the result back to the same thread. |
-| `-v`, `--verbose` | One stats line on stderr at the end. |
+| `-v`, `--verbose` | Stats on stderr at the end, including how full the context window got. |
 | `--events jsonl` | One JSON line per event on stderr (see below). |
 
 Ctrl-C or SIGTERM stops the run and kills the tool it's running; a second Ctrl-C exits at once.
@@ -106,6 +106,7 @@ jq -r 'select(.ev=="reasoning") | .text' events.jsonl
 | 2 | Bad usage (unknown flag, bad value, no prompt). |
 | 3 | Provider or auth problem. |
 | 4 | `--resume` found no such thread. |
+| 5 | The model's context window filled up. stderr says how big the window was and how big the last prompt got. |
 | 124 | Hit `--timeout`. |
 | 130 / 143 | Stopped by Ctrl-C / SIGTERM. |
 

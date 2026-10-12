@@ -1005,6 +1005,9 @@ struct RunStats {
     int  tool_errors = 0;
     long long input_tokens = 0;
     long long output_tokens = 0;
+    long long last_input_tokens = 0;   // prompt size of the last request
+    long long context_window = 0;      // what the request was sized for
+    bool context_full = false;         // the window ran out
     bool cancelled = false;
     bool deadline_hit = false;
     bool budget_exhausted = false;
@@ -1510,6 +1513,8 @@ provider::StreamResult run_one_completion(Thread& thread,
     if (stats) {
         stats->input_tokens  += req_in;
         stats->output_tokens += req_out;
+        if (req_in > 0) stats->last_input_tokens = req_in;
+        stats->context_window = req.context_window;
     }
 
     // A provider that answered 200, streamed some deltas, then emitted
@@ -1531,8 +1536,19 @@ provider::StreamResult run_one_completion(Thread& thread,
             "provider returned an empty completion");
     if (result.ok() && (result.stop == StopReason::MaxTokens
                         || stop == StopReason::MaxTokens)) {
+        // Cut off. Either the reply hit max_tokens, or prompt + reply ran
+        // into the context window (llama.cpp reports both as "length").
+        const long long used = req_in + req_out;
+        const bool window_full = req.context_window > 0
+            && req_out < req.max_tokens
+            && used >= static_cast<long long>(req.context_window) * 95 / 100;
+        if (window_full && stats) stats->context_full = true;
         result = provider::StreamResult::failed(
-            "provider hit the max-token limit before completing the subagent turn");
+            window_full
+                ? "context window full: " + std::to_string(used) + " of "
+                      + std::to_string(req.context_window) + " tokens used, reply cut off"
+                : "reply cut off at the " + std::to_string(req.max_tokens)
+                      + "-token output limit");
         result.stop = StopReason::MaxTokens;
     }
 
@@ -1799,6 +1815,7 @@ public:
             if (!stream_result.ok()) {
                 const std::string err = stream_result.error.value_or("stream failed");
                 last_error = err;
+                if (stats && provider::is_context_overflow(err)) stats->context_full = true;
                 const auto error_class = stream_result.cancelled()
                     ? provider::ErrorClass::Cancelled
                     : provider::classify_stream_error(err,
@@ -2194,6 +2211,7 @@ std::string_view status_name(OneShotResult::Status s) noexcept {
         case S::Cancelled:     return "cancelled";
         case S::Unavailable:   return "unavailable";
         case S::NotFound:      return "not_found";
+        case S::ContextFull:   return "context_full";
     }
     return "failed";
 }
@@ -2282,6 +2300,8 @@ OneShotResult run_one_shot(const OneShotOptions& opts) {
     out.tool_errors   = st.tool_errors;
     out.input_tokens  = st.input_tokens;
     out.output_tokens = st.output_tokens;
+    out.last_input_tokens = st.last_input_tokens;
+    out.context_window    = st.context_window;
     out.text          = st.answer;
     out.duration_ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - t0).count();
@@ -2293,6 +2313,19 @@ OneShotResult run_one_shot(const OneShotOptions& opts) {
     } else if (st.deadline_hit) {
         out.status = S::Timeout;
         out.error  = "hit the time limit before finishing";
+    } else if (st.context_full) {
+        out.status = S::ContextFull;
+        out.error  = "context window full";
+        if (st.context_window > 0)
+            out.error += " (" + std::to_string(st.context_window) + " tokens"
+                       + (st.last_input_tokens > 0
+                              ? ", last prompt " + std::to_string(st.last_input_tokens)
+                              : std::string{})
+                       + ")";
+        if (!st.last_error.empty()
+            && st.last_error.rfind("context window full", 0) != 0)
+            out.error += ": " + st.last_error;
+        out.error += ". give the model a bigger context, or a smaller task";
     } else if (!st.last_error.empty()) {
         out.status = S::ProviderError;
         out.error  = st.last_error;
@@ -2304,7 +2337,11 @@ OneShotResult run_one_shot(const OneShotOptions& opts) {
         out.error  = "the same tool call failed 3 times in a row";
     } else if (is_error) {
         out.status = S::Failed;
-        out.error  = "the agent reported it did not complete the task";
+        out.error  = "the agent said it did not finish the task (after "
+                   + std::to_string(st.turns) + " turns, "
+                   + std::to_string(st.tool_errors) + " of "
+                   + std::to_string(st.tool_calls) + " tool calls failed); its last "
+                     "message is on stdout";
     } else if (out.text.empty()) {
         // Not an error by the runner's rules, but a script gets nothing.
         out.status = S::Failed;

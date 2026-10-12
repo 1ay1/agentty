@@ -714,7 +714,8 @@ void print_usage() {
                                 "--save, --resume ID|last, --events jsonl (tools, "
                                 "reasoning, text on stderr), -v. Exit 0 ok, 1 failed "
                                 "or out of turns, 2 bad usage, 3 provider/auth, 4 "
-                                "no such thread, 124 timeout, 130 Ctrl-C.",
+                                "no such thread, 5 context full, 124 timeout, 130 "
+                                "Ctrl-C.",
               kCmdGutter),
         entry("  mcp-serve", "Serve agentty's native tools over MCP (stdio). Point any "
                              "MCP client at `agentty mcp-serve`.", kCmdGutter),

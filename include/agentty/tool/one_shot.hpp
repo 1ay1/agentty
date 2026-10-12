@@ -25,7 +25,7 @@ struct OneShotOptions {
 
 struct OneShotResult {
     enum class Status { Ok, Failed, TurnLimit, Timeout, ProviderError, Cancelled, Unavailable,
-                        NotFound };
+                        NotFound, ContextFull };
     Status      status = Status::Ok;
     std::string text;       // the model's last answer; may be partial on failure
     std::string error;      // why it didn't succeed; empty when Ok
@@ -36,6 +36,8 @@ struct OneShotResult {
     int         tool_errors = 0;
     long long   input_tokens = 0;    // summed over requests
     long long   output_tokens = 0;
+    long long   last_input_tokens = 0;  // prompt size of the last request
+    long long   context_window = 0;     // the model's window, 0 if unknown
     long long   duration_ms = 0;
     std::string thread_id;   // where the conversation was saved; "" if not
 

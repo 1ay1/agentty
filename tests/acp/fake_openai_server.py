@@ -21,6 +21,8 @@ MODELS = {"object": "list", "data": [
     {"id": "fake-large", "object": "model", "owned_by": "fake", "context_length": 131072},
     # Named so agentty's catalog infers it can reason (effort ladder).
     {"id": "o4-mini", "object": "model", "owned_by": "fake", "context_length": 200000},
+    # A small local model, like a llama.cpp server started with -c 25000.
+    {"id": "small-ctx", "object": "model", "owned_by": "fake", "context_length": 25000},
 ]}
 
 
@@ -63,10 +65,21 @@ class H(BaseHTTPRequestHandler):
             with open(os.environ["FAKE_TOOLS_LOG"] + ".user", "w") as f:
                 f.write(text or "")
         events = []
+        usage_override = None
         first_user = next((m.get("content") for m in msgs if m.get("role") == "user"), "")
         if not isinstance(first_user, str):
             first_user = json.dumps(first_user)
-        if "LOOP" in first_user:
+        if "CTX400" in first_user:
+            # llama.cpp when the prompt alone is bigger than n_ctx.
+            return self._json({"error": {"code": 400, "type": "exceed_context_size_error",
+                               "message": "the request exceeds the available context size, try increasing it",
+                               "n_prompt_tokens": 26000, "n_ctx": 25000}}, 400)
+        elif "CTXLEN" in first_user:
+            # llama.cpp when generation runs into n_ctx: the reply is cut and
+            # prompt + reply add up to the 25k window.
+            events = [chunk({"role": "assistant", "content": "I was about to"}), chunk({}, "length")]
+            usage_override = {"prompt_tokens": 24500, "completion_tokens": 500, "total_tokens": 25000}
+        elif "LOOP" in first_user:
             # Never finishes: a fresh harmless tool call every turn.
             n = sum(1 for m in msgs if m.get("role") == "tool")
             args = json.dumps({"command": f"echo loop{n}"})
@@ -166,7 +179,7 @@ class H(BaseHTTPRequestHandler):
         for e in events:
             self.wfile.write(b"data: " + json.dumps(e).encode() + b"\n\n")
         usage = {"id": "c1", "object": "chat.completion.chunk", "model": "fake", "choices": [],
-                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+                 "usage": usage_override or {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
         self.wfile.write(b"data: " + json.dumps(usage).encode() + b"\n\n")
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()

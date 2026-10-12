@@ -33,6 +33,7 @@ int exit_code_for(Status s, std::optional<maya::sig> got) {
         case Status::ProviderError: return 3;
         case Status::Timeout:       return 124;   // same as timeout(1)
         case Status::NotFound:      return 4;
+        case Status::ContextFull:   return 5;
         case Status::Cancelled:
             if (got == maya::sig::terminate) return 143;
             if (got == maya::sig::hangup)    return 129;
@@ -52,7 +53,9 @@ nlohmann::json to_json(const tools::OneShotResult& r, int code) {
         {"tool_calls",  r.tool_calls},
         {"tool_errors", r.tool_errors},
         {"usage",       {{"input_tokens", r.input_tokens},
-                         {"output_tokens", r.output_tokens}}},
+                         {"output_tokens", r.output_tokens},
+                         {"last_input_tokens", r.last_input_tokens},
+                         {"context_window", r.context_window}}},
         {"duration_ms", r.duration_ms},
     };
     if (!r.ok()) j["error"] = r.error;
@@ -228,6 +231,10 @@ int run(const Options& o) {
                      r.agent.c_str(), r.model.empty() ? "?" : r.model.c_str(), r.turns,
                      r.tool_calls, r.tool_errors, r.input_tokens, r.output_tokens,
                      static_cast<double>(r.duration_ms) / 1000.0);
+        if (r.context_window > 0 && r.last_input_tokens > 0)
+            std::fprintf(stderr, "agentty run: context %lld of %lld tokens (%lld%%)\n",
+                         r.last_input_tokens, r.context_window,
+                         r.last_input_tokens * 100 / r.context_window);
         if (!r.thread_id.empty())
             std::fprintf(stderr, "agentty run: saved as thread %s (--resume %s)\n",
                          r.thread_id.c_str(), r.thread_id.c_str());

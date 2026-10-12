@@ -26,7 +26,7 @@ struct Options {
 
 // Runs the prompt and returns the process exit code:
 //   0 ok, 1 task failed or out of turns, 3 provider/auth problem,
-//   4 --resume thread not found,
+//   4 --resume thread not found, 5 context window full,
 //   124 timed out, 130/143/129 stopped by SIGINT/SIGTERM/SIGHUP.
 [[nodiscard]] int run(const Options& o);
 

@@ -59,6 +59,20 @@ grep -q "provider_error: .*upstream exploded" "$S/err" && pass "provider error: 
 grep -q "Activity:" "$S/err" && fail "provider error: no internal activity dump" \
     || pass "provider error: no internal activity dump"
 
+# a small context window filling up says so (#85): exit 5, sizes on stderr
+SMALL="$S/home_small"; mkdir -p "$SMALL"
+printf '{"provider":"127.0.0.1:%s","model_id":"small-ctx"}\n' "$(cat "$S/port")" > "$SMALL/settings.json"
+AGENTTY_HOME="$SMALL" "$A" run "CTXLEN go" >/dev/null 2>"$S/err"; rc=$?
+check "context cut: exit 5" "$rc" 5
+grep -q "context_full: context window full (25000 tokens, last prompt 24500)" "$S/err" \
+    && pass "context cut: says window and prompt size" || fail "context cut: says why ($(cat "$S/err"))"
+AGENTTY_HOME="$SMALL" "$A" run "CTX400 go" >/dev/null 2>"$S/err"; rc=$?
+check "context 400: exit 5" "$rc" 5
+grep -q "context_full: .*exceeds the available context size" "$S/err" \
+    && pass "context 400: says why" || fail "context 400: says why ($(cat "$S/err"))"
+out=$(AGENTTY_HOME="$SMALL" "$A" run --json "CTXLEN go" 2>/dev/null)
+check "context: json window" "$(j 'd["usage"]["context_window"]')" 25000
+
 # --max-turns stops a run that never finishes: exit 1, status turn_limit
 out=$("$A" run --json --max-turns 3 "LOOP forever" 2>/dev/null); rc=$?
 check "max-turns: exit 1" "$rc" 1

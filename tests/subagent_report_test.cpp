@@ -479,7 +479,7 @@ int main() {
             emit_finish(sink, StopReason::MaxTokens);
         });
         auto out = run_task("produce an oversized report");
-        check(out.is_error && has(out.text, "max-token limit"),
+        check(out.is_error && has(out.text, "output limit"),
               "I: MaxTokens completion is reported as an error");
         check(!has(out.text, "\n\nPARTIAL_NOT_A_REPORT"),
               "I: partial MaxTokens prose is not returned as a clean report");

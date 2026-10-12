@@ -199,6 +199,30 @@ enum class ErrorClass {
         || lower_contains("context-1m");   // future error-shape drift
 }
 
+// Did the request not fit in the model's context window? Anthropic says
+// "prompt is too long", OpenAI "context_length_exceeded" / "maximum context
+// length", llama.cpp "exceeds the available context size".
+[[nodiscard]] inline bool is_context_overflow(std::string_view message) noexcept {
+    auto lower_contains = [&](std::string_view needle) noexcept -> bool {
+        if (needle.size() > message.size()) return false;
+        for (std::size_t i = 0; i + needle.size() <= message.size(); ++i) {
+            bool ok = true;
+            for (std::size_t j = 0; j < needle.size(); ++j) {
+                char a = message[i + j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                if (a != needle[j]) { ok = false; break; }
+            }
+            if (ok) return true;
+        }
+        return false;
+    };
+    return lower_contains("prompt is too long")
+        || lower_contains("context_length_exceeded")
+        || lower_contains("maximum context length")
+        || lower_contains("exceeds the available context size")
+        || lower_contains("exceed_context_size");
+}
+
 // ── Vision rejection → learned capability / entitlement ────────────────
 //
 // A request carrying images can be refused for FOUR different reasons, and
