@@ -184,7 +184,7 @@ TEST_CASE("sandbox: claybin is the default, and bwrap is still the fallback") {
     // And the engine actually selected is never None on a host that can run
     // EITHER backend. This is the fallback: whichever engine the preference
     // names, a usable host must still end up sandboxed.
-    ag::init(ag::Mode::Auto);
+    (void)ag::init(ag::Mode::Auto);
     if (ag::is_active())
         CHECK(ag::detected_backend() != ag::Backend::None);
 }
@@ -199,7 +199,7 @@ TEST_CASE("sandbox: asking for claybin on a host that refuses it yields bwrap, n
     // because the probe is a real fork+uid_map attempt and faking it would
     // test the fake.
     ag::reset_config_for_test();
-    ag::init(ag::Mode::Auto);
+    (void)ag::init(ag::Mode::Auto);
 
 #if defined(__linux__)
     if (ag::is_active()) {
@@ -222,14 +222,14 @@ TEST_CASE("sandbox: the model is TOLD it is sandboxed") {
     // user turned sandboxing off, because a prompt claiming walls that are not
     // there is the same lie in the other direction.
     ag::reset_config_for_test();
-    ag::init(ag::Mode::Off);
+    (void)ag::init(ag::Mode::Off);
     {
         const auto p = agentty::provider::default_system_prompt(::agentty::IoAccess::grant());
         CHECK(p.find("sandbox: ON") == std::string::npos);
     }
 
     ag::reset_config_for_test();
-    ag::init(ag::Mode::Auto);
+    (void)ag::init(ag::Mode::Auto);
     if (ag::is_active()) {
         const auto p = agentty::provider::default_system_prompt(::agentty::IoAccess::grant());
         CHECK(p.find("sandbox: ON") != std::string::npos);
@@ -249,7 +249,7 @@ TEST_CASE("sandbox: a denial is explained where the model is looking") {
     // Driven through the real runner so this covers the wiring, not just the
     // string: a command that cannot read a host path under any policy.
     ag::reset_config_for_test();
-    ag::init(ag::Mode::Auto);
+    (void)ag::init(ag::Mode::Auto);
     if (!ag::is_active()) return;   // no backend here; nothing to annotate
 
     auto r = ag::run_shell_command("cat /etc/shadow", 64 * 1024,
@@ -272,7 +272,7 @@ TEST_CASE("sandbox: a SUCCEEDING command is never annotated") {
     // or on every failure, denial or not -- is how an explanation becomes
     // noise the model learns to skip.
     ag::reset_config_for_test();
-    ag::init(ag::Mode::Auto);
+    (void)ag::init(ag::Mode::Auto);
     if (!ag::is_active()) return;
 
     auto r = ag::run_shell_command("echo hello", 64 * 1024,

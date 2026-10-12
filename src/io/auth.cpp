@@ -799,7 +799,7 @@ TokenResult exchange_code(const OAuthCode& code,
     return parse_token_json(r.body, r.status);
 }
 
-TokenResult refresh_access_token(Io io, const RefreshToken& refresh_token) {
+TokenResult refresh_access_token(Io /*io*/, const RefreshToken& refresh_token) {
     auto r = http_post_form(OAuthConfig::token_url, {
         {"grant_type",    "refresh_token"},
         {"client_id",     OAuthConfig::client_id},
@@ -1005,7 +1005,7 @@ namespace {
 AuthHeader fresh_auth_header_locked(Io io, const AuthHeader& fallback);
 }
 
-AuthHeader fresh_auth_header(Io io, const AuthHeader& fallback) {
+AuthHeader fresh_auth_header(Io /*io*/, const AuthHeader& fallback) {
     using namespace agentty::util;
 
     // CLI/env API keys are static — nothing to refresh. The env OAuth token

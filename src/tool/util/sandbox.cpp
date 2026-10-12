@@ -106,10 +106,10 @@ maya::published<const sandbox_cfg::Config> g_cfg;
 // through whenever the first happened to publish something falsy.
 std::atomic<bool> g_cfg_sealed{false};
 
-// Only the POSIX backends (Linux bwrap, macOS sandbox-exec) need the
-// "can we run this binary?" probe — the Windows/unsupported branch
-// just hard-codes Backend::None.
-#if defined(__linux__) || defined(__APPLE__)
+// Only the macOS sandbox-exec backend needs the "can we run this binary?"
+// probe: Linux asks bwrap for a real namespace instead (see below), and the
+// Windows/unsupported branch just hard-codes Backend::None.
+#if defined(__APPLE__)
 
 // One-shot probe: try to spawn `<exe> --version` and observe the
 // outcome. Replaces a fragile PATH walk with the actual semantic
@@ -124,7 +124,7 @@ std::atomic<bool> g_cfg_sealed{false};
     return r.started && r.exit_code == 0;
 }
 
-#endif // posix backends
+#endif // __APPLE__
 
 #if defined(__linux__)
 

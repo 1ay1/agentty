@@ -62,15 +62,15 @@ constexpr Desc kAnthropic{
 constexpr Desc kChatGpt{
     .id           = "chatgpt",
     .kind         = Kind::OAuthFile,
-    .is_signed_in = [](Io io, const std::string&) {
+    .is_signed_in = [](Io /*io*/, const std::string&) {
         return provider::chatgpt::responses_available();
     },
-    .clear = [](Io io, const std::string&) {
+    .clear = [](Io /*io*/, const std::string&) {
         (void)provider::chatgpt::clear_codex_credentials();
     },
     .resolve      = resolve_central,   // empty: the transport owns the token
     .current_label = label_from_registry,
-    .after_activate = [](Io io, const std::string&) {
+    .after_activate = [](Io /*io*/, const std::string&) {
         if (auto c = provider::chatgpt::load_codex_credentials())
             provider::chatgpt::save_codex_credentials(*c);
     },
@@ -79,7 +79,7 @@ constexpr Desc kChatGpt{
 constexpr Desc kCopilot{
     .id           = "copilot",
     .kind         = Kind::OAuthFile,
-    .is_signed_in = [](Io io, const std::string&) {
+    .is_signed_in = [](Io /*io*/, const std::string&) {
         return provider::copilot::signed_in();
     },
     .clear = [](Io io, const std::string&) {
@@ -87,7 +87,7 @@ constexpr Desc kCopilot{
     },
     .resolve      = resolve_central,
     .current_label = label_from_registry,
-    .after_activate = [](Io io, const std::string&) {
+    .after_activate = [](Io /*io*/, const std::string&) {
         provider::copilot::invalidate_cached_token();
     },
 };
@@ -95,7 +95,7 @@ constexpr Desc kCopilot{
 constexpr Desc kKimi{
     .id           = "kimi",
     .kind         = Kind::OAuthFile,
-    .is_signed_in = [](Io io, const std::string&) {
+    .is_signed_in = [](Io /*io*/, const std::string&) {
         return provider::kimi::signed_in();
     },
     .clear = [](Io io, const std::string&) {
@@ -103,7 +103,7 @@ constexpr Desc kKimi{
     },
     .resolve      = resolve_central,
     .current_label = label_from_registry,
-    .after_activate = [](Io io, const std::string&) {
+    .after_activate = [](Io /*io*/, const std::string&) {
         provider::kimi::invalidate_cached_token();
     },
 };

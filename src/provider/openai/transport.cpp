@@ -3486,7 +3486,7 @@ int router_declared_window(const nlohmann::json& row) {
     return detail::advertised_context_window(nlohmann::json{{"n_ctx", slot}});
 }
 
-int probe_loaded_window(Io io, const AuthHeader& auth, const Endpoint& endpoint,
+int probe_loaded_window(Io /*io*/, const AuthHeader& auth, const Endpoint& endpoint,
                         const std::string& model_id) {
     if (model_id.empty() || !detail::is_local_endpoint(endpoint)) return 0;
     const auto probe = detail::probe_endpoint_windows(auth, endpoint, {model_id});
