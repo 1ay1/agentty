@@ -13,15 +13,19 @@
 // above, and the previously-caret-holding row must be empty.
 //
 // Build: link against the agentty tests lib (see CMake agentty_test()).
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
 #include <clocale>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <fcntl.h>
+#include <poll.h>
 #if defined(__APPLE__)
 #include <util.h>
 #else
@@ -220,13 +224,17 @@ struct VtEmu {
     }
 };
 
+// Drain until the pty goes quiet (macOS delivers pty bytes asynchronously,
+// so the first EAGAIN is not the end of what was written).
 static std::string read_all(int fd) {
     std::string s;
     char buf[8192];
     for (;;) {
         ssize_t k = ::read(fd, buf, sizeof(buf));
         if (k > 0) { s.append(buf, static_cast<std::size_t>(k)); continue; }
-        break;
+        if (k < 0 && errno == EINTR) continue;
+        pollfd pfd{fd, POLLIN, 0};
+        if (::poll(&pfd, 1, 25) <= 0) break;
     }
     return s;
 }
@@ -423,9 +431,31 @@ int main() {
     auto frame = [&](const char* tag) {
         tick(20);
         maya::Element root = agentty::ui::view(m);
+        // Drain the master WHILE rendering. A macOS pty buffers only a few
+        // KB; a full-frame write larger than that stalls (or is deferred by
+        // a non-blocking writer) until someone reads, so draining after the
+        // fact sees a torn frame. Linux's 4K+ line discipline buffer hid it.
+        std::string got;
+        std::atomic<bool> done{false};
+        std::thread drain([&] {
+            char buf[8192];
+            for (;;) {
+                ssize_t k = ::read(master, buf, sizeof(buf));
+                if (k > 0) { got.append(buf, static_cast<std::size_t>(k)); continue; }
+                if (done.load()) {
+                    pollfd pfd{master, POLLIN, 0};
+                    if (::poll(&pfd, 1, 25) <= 0) break;   // quiet: frame complete
+                } else {
+                    pollfd pfd{master, POLLIN, 0};
+                    (void)::poll(&pfd, 1, 5);
+                }
+            }
+        });
         (void)rt.render(root);
         tick(20);
-        emu.feed(read_all(master));
+        done = true;
+        drain.join();
+        emu.feed(got);
         (void)tag;
     };
     auto type = [&](char32_t ch) {

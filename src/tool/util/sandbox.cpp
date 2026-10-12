@@ -970,6 +970,34 @@ claybin_backend::SpawnResult spawn_in_sandbox(
     return r;
 }
 
+#if defined(__APPLE__)
+std::expected<std::vector<std::string>, std::string>
+wrap_argv_for_exec(const std::vector<std::string>& argv, std::string_view cwd,
+                   const std::vector<std::string>& extra_roots) {
+    if (argv.empty()) return std::unexpected(std::string{"empty argv"});
+    std::string profile;
+    if (detected_backend() == Backend::Claybin) {
+        auto posture = build_claybin_posture();
+        if (!cwd.empty()) posture.cwd = std::string{cwd};
+        for (const auto& r : extra_roots)
+            if (!r.empty()) posture.write_paths.push_back(r);
+        std::string err;
+        profile = claybin_backend::compile_profile(posture, err);
+        if (profile.empty()) return std::unexpected(std::move(err));
+    } else {
+        profile = build_profile(workspace_root().string());
+        // The fixed profile has no notion of extra roots; append them the
+        // same way it writes the workspace (escaped, omitted if unsafe).
+        for (const auto& r : extra_roots)
+            if (std::string e = sbpl_escape(r); !e.empty())
+                profile += "(allow file-write* (subpath \"" + e + "\"))\n";
+    }
+    std::vector<std::string> out{"/usr/bin/sandbox-exec", "-p", std::move(profile)};
+    out.insert(out.end(), argv.begin(), argv.end());
+    return out;
+}
+#endif
+
 claybin_backend::Posture claybin_posture_for_test() {
 #if defined(__linux__) || defined(__APPLE__)
     return build_claybin_posture();

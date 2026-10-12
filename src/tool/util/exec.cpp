@@ -91,8 +91,18 @@ start_child(const ChildRun& run) {
 #if !defined(_WIN32)
     if (run.spawn_adopted) {
         int fds[2];
+#if defined(__linux__)
         if (::pipe2(fds, O_CLOEXEC) != 0)
             return std::unexpected(std::string{"pipe: "} + std::strerror(errno));
+#else
+        // No pipe2 on macOS/BSD: set CLOEXEC after the fact. The race with a
+        // concurrent fork is the same one every non-Linux spawner accepts;
+        // jaal closes every fd above stderr in the child anyway.
+        if (::pipe(fds) != 0)
+            return std::unexpected(std::string{"pipe: "} + std::strerror(errno));
+        ::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+        ::fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#endif
         auto a = run.spawn_adopted(fds[1]);
         ::close(fds[1]);
         if (!a.error.empty() || a.pid <= 0) {
@@ -393,7 +403,23 @@ class JaalExec final : public mt::Exec {
             // writable inside the sandbox too.
             std::vector<std::string> roots;
             for (const auto& r : call.scope_extra_roots) roots.push_back(r.string());
-            run.spawn_adopted = sandbox_spawner(run.argv, run.cwd, std::move(roots));
+            run.spawn_adopted = sandbox_spawner(run.argv, run.cwd, roots);
+#if defined(__APPLE__)
+            // darwin: jaal can't adopt a foreign child (no pidfd), so the
+            // sandbox goes into the argv instead -- sandbox-exec with the
+            // same compiled posture. Fail closed: a profile we can't build
+            // must not become an unconfined run.
+            namespace sb = agentty::tools::util::sandbox;
+            if (sb::is_active()) {
+                auto wrapped = sb::wrap_argv_for_exec(run.argv, run.cwd, roots);
+                if (!wrapped) {
+                    mt::ExecResult er;
+                    er.outcome = mt::StartFailed{"sandbox: " + wrapped.error()};
+                    return er;
+                }
+                run.argv = std::move(*wrapped);
+            }
+#endif
         }
         // The tool call's live output and cancel: where its output goes and
         // whether its user hit Esc.
@@ -429,6 +455,16 @@ class JaalExec final : public mt::Exec {
         run.cwd = req.cwd.value_or(std::string{});
         run.env = req.env;
         run.spawn_adopted = sandbox_spawner(run.argv, run.cwd);
+#if defined(__APPLE__)
+        {
+            namespace sb = agentty::tools::util::sandbox;
+            if (sb::is_active()) {
+                auto wrapped = sb::wrap_argv_for_exec(run.argv, run.cwd);
+                if (!wrapped) return std::unexpected("sandbox: " + wrapped.error());
+                run.argv = std::move(*wrapped);
+            }
+        }
+#endif
 
         auto st = start_child(run);
         if (!st) return std::unexpected(st.error());

@@ -386,6 +386,22 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
     return out;
 }
 
+std::string compile_profile(const Posture& p, std::string& error) {
+    auto sealed = build_policy(p);
+    ::clay::macos::Options opts;
+    opts.profile_name = "agentty";
+    auto compiled = ::clay::macos::compile(sealed, ::clay::macos::probe_host(), opts);
+    if (!compiled) {
+        error = "claybin: compile failed: " + std::string{compiled.error().mechanism};
+        return {};
+    }
+    if (!compiled->use_seatbelt || compiled->profile.empty()) {
+        error = "claybin: compiled policy has no seatbelt profile";
+        return {};
+    }
+    return std::move(compiled->profile);
+}
+
 #else  // __linux__
 
 bool available() {

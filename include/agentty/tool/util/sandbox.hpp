@@ -36,6 +36,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <expected>
 #include <memory>   // shared_ptr — config_snapshot's return type
 #include <string>
 #include <string_view>
@@ -230,6 +231,20 @@ void reset_config_for_test() noexcept;
 [[nodiscard]] claybin_backend::SpawnResult spawn_in_sandbox(
     const std::vector<std::string>& argv, std::string_view cwd, int out_fd,
     const std::vector<std::string>& extra_roots = {});
+
+#if defined(__APPLE__)
+// macOS counterpart of spawn_in_sandbox for the jaal exec path. jaal cannot
+// adopt a child someone else forked on darwin (no pidfd, so no watchable
+// exit), so instead of handing back a pid this hands back the argv to spawn:
+// `/usr/bin/sandbox-exec -p <profile> <argv...>`. The profile is claybin's
+// compiled posture when claybin is the backend -- same read/write paths,
+// masks and extra roots as spawn_shell -- and the legacy fixed profile when
+// sandbox-exec is. Error (never the bare argv) when no profile can be made:
+// the caller must fail closed.
+[[nodiscard]] std::expected<std::vector<std::string>, std::string>
+wrap_argv_for_exec(const std::vector<std::string>& argv, std::string_view cwd,
+                   const std::vector<std::string>& extra_roots = {});
+#endif
 
 // Testing hook: the REAL claybin posture this process would build from the
 // sealed config snapshot right now, including the non-configurable masks and

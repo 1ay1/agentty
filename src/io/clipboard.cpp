@@ -180,6 +180,35 @@ const char* pick_clipboard_image_type(std::string_view types) {
     return pick_clipboard_image_type(types) == nullptr;
 }
 
+#if defined(__linux__) || defined(__APPLE__)
+
+// True when this process is on the far side of an ssh/mosh hop, so the
+// clipboard the LOCAL tools can reach is not the one the user copied into.
+//
+// This matters on macOS specifically. On Linux a remote host usually has no
+// display at all, so wl-paste/xclip fail and the code falls through to the
+// terminal query by accident. A Mac always has a working pasteboard, so
+// pbpaste SUCCEEDS over ssh — it just answers about the wrong machine. The
+// read then returns that host's stale text and never asks the terminal,
+// which is the one path that can actually reach the laptop's clipboard.
+//
+// Env sniff, not a syscall: the question is "did someone ssh in", and
+// sshd/mosh-server answer it by exporting these. AGENTTY_LOCAL_CLIPBOARD=1
+// forces the local tools back on, for the case this sniff gets wrong (a
+// remote session that really does own the display the user copied from — a
+// VNC/XRDP desktop, say).
+//
+// Lives outside the Linux block below: the macOS arms are its main caller.
+[[maybe_unused]] bool session_is_remote() {
+    if (const char* f = std::getenv("AGENTTY_LOCAL_CLIPBOARD"); f && *f == '1')
+        return false;
+    for (const char* k : {"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"})
+        if (const char* v = std::getenv(k); v && *v) return true;
+    return false;
+}
+
+#endif
+
 #if defined(__linux__)
 
 // ---------------------------------------------------------------------------
@@ -227,29 +256,6 @@ const char* pick_clipboard_image_type(std::string_view types) {
 std::string runtime_dir() {
     if (const char* d = std::getenv("XDG_RUNTIME_DIR"); d && *d) return d;
     return "/run/user/" + std::to_string(static_cast<unsigned>(::getuid()));
-}
-
-// True when this process is on the far side of an ssh/mosh hop, so the
-// clipboard the LOCAL tools can reach is not the one the user copied into.
-//
-// This matters on macOS specifically. On Linux a remote host usually has no
-// display at all, so wl-paste/xclip fail and the code falls through to the
-// terminal query by accident. A Mac always has a working pasteboard, so
-// pbpaste SUCCEEDS over ssh — it just answers about the wrong machine. The
-// read then returns that host's stale text and never asks the terminal,
-// which is the one path that can actually reach the laptop's clipboard.
-//
-// Env sniff, not a syscall: the question is "did someone ssh in", and
-// sshd/mosh-server answer it by exporting these. AGENTTY_LOCAL_CLIPBOARD=1
-// forces the local tools back on, for the case this sniff gets wrong (a
-// remote session that really does own the display the user copied from — a
-// VNC/XRDP desktop, say).
-bool session_is_remote() {
-    if (const char* f = std::getenv("AGENTTY_LOCAL_CLIPBOARD"); f && *f == '1')
-        return false;
-    for (const char* k : {"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"})
-        if (const char* v = std::getenv(k); v && *v) return true;
-    return false;
 }
 
 // Single-quote a value for safe inclusion in a shell command. Every

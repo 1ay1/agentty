@@ -33,6 +33,13 @@ claybin_backend::SpawnResult spawn_in_sandbox(const std::vector<std::string>&, s
                                               int, const std::vector<std::string>&) {
     return {};
 }
+#if defined(__APPLE__)
+std::expected<std::vector<std::string>, std::string>
+wrap_argv_for_exec(const std::vector<std::string>& argv, std::string_view,
+                   const std::vector<std::string>&) {
+    return argv;   // unreachable: is_active() is false above
+}
+#endif
 }  // namespace agentty::tools::util::sandbox
 
 namespace {

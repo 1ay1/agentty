@@ -611,9 +611,14 @@ int main() {
         // .agentty, so there is nothing to disambiguate.
         fs::current_path(p1);
         agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), p1);
-        if (auto d = resolve(s))
-            check(d->path == p1 / ".agentty" / "cache",
-                  "the default path is plain");
+        if (auto d = resolve(s)) {
+            // Canonical on both sides: on macOS the temp dir lives under
+            // /var, a symlink to /private/var, and the resolver canonicalises.
+            std::error_code ec1, ec2;
+            const auto want = fs::weakly_canonical(p1 / ".agentty" / "cache", ec1);
+            const auto got  = fs::weakly_canonical(d->path, ec2);
+            check(got == want, "the default path is plain");
+        }
 
         fs::current_path(cwd_before);
     }

@@ -178,4 +178,13 @@ struct SpawnResult {
 [[nodiscard]] SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd,
                                       int stdout_fd, int stderr_fd);
 
+#if defined(__APPLE__)
+// The posture compiled to seatbelt profile text -- exactly what spawn_shell
+// hands sandbox_init(). For spawners that cannot use claybin's fork (jaal on
+// darwin has no pidfd to adopt a foreign child by), so they run the same
+// profile through /usr/bin/sandbox-exec instead. Empty + `error` on failure:
+// callers must fail closed, never fall back to running unconfined.
+[[nodiscard]] std::string compile_profile(const Posture& p, std::string& error);
+#endif
+
 }  // namespace agentty::tools::util::sandbox::claybin_backend

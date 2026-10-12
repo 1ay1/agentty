@@ -6,7 +6,12 @@
 set -u
 A="$1"
 S=$(mktemp -d "${TMPDIR:-/tmp}/agentty_cfgmove_XXXXXX")
+# Canonical: on macOS $TMPDIR is under /var -> /private/var, and agentty
+# prints the resolved path in its export line.
+S=$(cd "$S" && pwd -P)
 trap 'rm -rf "$S"' EXIT
+# GNU stat says -c, BSD/macOS stat says -f.
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 export AGENTTY_HOME="$S/home"
 unset AGENTTY_THREADS_DIR AGENTTY_LOGS_DIR AGENTTY_CACHE_DIR AGENTTY_STATE_DIR \
       AGENTTY_CREDENTIALS_DIR AGENTTY_THREADS_KEEP_DAYS
@@ -26,7 +31,7 @@ check "data arrived"              '[ -f "$S/big/threads/aaaa000000000002.jsonl" 
 check "old copy gone"             '[ ! -e "$AGENTTY_HOME/threads" ]'
 check "prints the export line"    'echo "$out" | grep -q "export AGENTTY_THREADS_DIR=.$S/big/threads."'
 check "settings.json untouched"   'cmp -s "$AGENTTY_HOME/settings.json" "$S/settings.before"'
-check "still 0700"                '[ "$(stat -c %a "$S/big/threads")" = 700 ]'
+check "still 0700"                '[ "$(mode_of "$S/big/threads")" = 700 ]'
 check "env var points agentty at it" 'AGENTTY_THREADS_DIR="$S/big/threads" "$A" config threads | grep -q "$S/big/threads"'
 
 echo "refusals"
