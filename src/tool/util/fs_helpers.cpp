@@ -610,7 +610,10 @@ namespace {
 // file_time_type, which jaal can't see inside, so the cache keeps the ticks
 // and rebuilds the snapshot on the way out.
 struct SeenFile {
-    std::int64_t   mtime = 0;
+    // The clock's own tick type, not int64_t: libstdc++ uses a 64-bit rep,
+    // libc++ (clang on macOS) uses __int128 -- narrowing that into int64_t
+    // in a brace-init is a hard error there.
+    fs::file_time_type::rep mtime = 0;
     std::uintmax_t size = 0;
     std::uint64_t  content_hash = 0;
 };
