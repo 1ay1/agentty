@@ -7,6 +7,7 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -60,6 +61,13 @@ namespace {
 // open/close transitions and makes the concurrent access well-defined
 // instead of a data race the compiler may assume away.
 std::atomic<int> g_fd{-1};           // O_APPEND fd, -1 = file logging off
+// Odd while rotate_locked() is re-pointing g_fd with dup2(). Linux makes
+// that swap atomic for a concurrent write(); darwin does not -- a write that
+// overlaps it fails with EBADF (measured: millions of times under a hammer)
+// and the line is gone. A writer that hits EBADF waits for this to go even
+// and retries, so the line lands in the new file. Writers never take a lock
+// and never wait unless they actually collided with a rotation.
+std::atomic<unsigned> g_rot_seq{0};
 std::string g_path;                  // resolved path for log_file()
 // Mid-run rotation: bytes written since open. Startup-only rotation is not
 // enough for the dev workflow (trace-by-default + long-lived sessions):
@@ -492,8 +500,10 @@ void rotate_locked(Rotation&, std::int64_t limit) noexcept {
         (void)::_dup2(nfd, g_fd.load(std::memory_order_relaxed));
         ::_close(nfd);
 #else
+        g_rot_seq.fetch_add(1, std::memory_order_acq_rel);   // odd: swapping
         while (::dup2(nfd, g_fd.load(std::memory_order_relaxed)) < 0
                && errno == EINTR) {}
+        g_rot_seq.fetch_add(1, std::memory_order_acq_rel);   // even: done
         ::close(nfd);
 #endif
     }
@@ -777,7 +787,26 @@ void emit(Channel ch, Level lv, std::string_view site,
         // (void)) marks the result used: glibc declares write() __wur under
         // _FORTIFY_SOURCE, and GCC ignores a plain void-cast for
         // warn_unused_result functions.
-        (void)!AGT_WRITE(g_fd.load(std::memory_order_relaxed), line, static_cast<unsigned>(n));
+        //
+        // Retried on EBADF: dup2() swapping the file under a live write() is
+        // atomic on Linux, but on darwin a write racing the swap fails with
+        // EBADF instead of landing in either file -- measured: 8 writers
+        // hammering one fd while it is dup2()'d 20,000 times see tens of
+        // millions of EBADF, and a bounded retry alone still dropped ~5%.
+        // The macOS CI runner lost 2 of ~450 log lines to it. So an EBADF
+        // that coincides with a rotation (g_rot_seq odd, or changed since we
+        // started) waits for the swap to finish and retries; an EBADF with
+        // no rotation in flight is a genuinely bad fd and is dropped.
+        const int fd = g_fd.load(std::memory_order_relaxed);
+        for (;;) {
+            const unsigned seq = g_rot_seq.load(std::memory_order_acquire);
+            if (AGT_WRITE(fd, line, static_cast<unsigned>(n)) >= 0) break;
+            if (errno != EBADF) break;
+            if ((seq & 1u) == 0
+                && g_rot_seq.load(std::memory_order_acquire) == seq) break;
+            while (g_rot_seq.load(std::memory_order_acquire) & 1u)
+                std::this_thread::yield();
+        }
         g_bytes.fetch_add(static_cast<std::int64_t>(n),
                           std::memory_order_relaxed);
         rotate_if_needed();
