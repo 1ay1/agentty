@@ -11,6 +11,12 @@
 #
 #   usage: cmake -DROOT=<src> -P i18n_lint.cmake
 
+# A `cmake -P` script starts with every policy unset, so the `IN_LIST`
+# below is parsed as a plain word under OLD CMP0057 and the `if` errors out --
+# turning the whole ctest entry red on every run. This sets the floor for the
+# script alone; it does not affect the project's own requirement.
+cmake_minimum_required(VERSION 3.25)
+
 if(NOT DEFINED ROOT)
     message(FATAL_ERROR "usage: -DROOT=<source dir> -P i18n_lint.cmake")
 endif()

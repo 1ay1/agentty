@@ -794,7 +794,7 @@ set_tests_properties(host_escape_test PROPERTIES TIMEOUT 30)
 # raw/standalone, not consolidated: the last case asserts a SIGABRT in a
 # forked child, which doctest cannot host. Header-only link (jaal + the test)
 # so it stays a ~3 s compile.
-agentty_test(loop_affinity_test MODE raw)
+agentty_test(loop_affinity_test MODE raw LABELS sanitizer)
 add_executable(loop_affinity_test EXCLUDE_FROM_ALL tests/loop_affinity_test.cpp)
 target_include_directories(loop_affinity_test PRIVATE include)
 # jaal directly, NOT maya: this test is about the runtime's loop-affinity

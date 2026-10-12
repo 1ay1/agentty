@@ -2685,7 +2685,9 @@ public:
             return {nullptr, std::move(dead)};
         }, ep);
         stale.clear();   // freed here, no lock held
-        return got;
+        // Explicit move: a structured binding is not an implicitly-movable
+        // entity on return, so MSVC tries the deleted copy (C2280).
+        return std::move(got);
     }
 
     void release(std::unique_ptr<Connection> c) {

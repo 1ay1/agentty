@@ -25,6 +25,10 @@
 #
 # Usage: cmake -DROOT=<repo root> -P project_dotdir.cmake
 
+# `-P` scripts start with every policy unset; without this, the IN_LIST
+# below is OLD-CMP0057 "Unknown arguments" and the check always fails.
+cmake_minimum_required(VERSION 3.25)
+
 if(NOT DEFINED ROOT)
     message(FATAL_ERROR "project_dotdir: -DROOT=<repo root> required")
 endif()

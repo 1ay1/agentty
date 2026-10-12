@@ -169,10 +169,15 @@ grep '"tool":"read"' "$S/fk" | grep -q '"ok":false' && pass "fork: other transcr
 # SIGINT isn't pre-ignored the way sh does for background jobs.
 sig_case() {
     python3 - "$A" "$1" "$2" <<'EOF'
-import os, signal, subprocess, sys, time
+import json, os, signal, subprocess, sys, time
 a, name, want = sys.argv[1], sys.argv[2], int(sys.argv[3])
 marker = "agentty_run_sig_%d" % os.getpid()
-p = subprocess.Popen([a, "run", 'CALL shell {"command":"exec -a %s sleep 40"}' % marker],
+# A symlink named after the marker, not `exec -a`: that is a bash extension,
+# and on Ubuntu /bin/sh is dash, where the tool failed instantly and the run
+# exited 0 before the signal was ever sent. argv[0] = ./marker puts the
+# marker in the cmdline for pgrep -f on every POSIX sh.
+cmd = 'ln -sf "$(command -v sleep)" ./%s && exec ./%s 40' % (marker, marker)
+p = subprocess.Popen([a, "run", 'CALL shell ' + json.dumps({"command": cmd})],
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
 time.sleep(2.0)
 t0 = time.time()

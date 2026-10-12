@@ -1627,7 +1627,14 @@ int main(int argc, char** argv) {
             // inside the box on a narrow one.
             int width = 74;
             if (::isatty(fileno(stderr))) {
-                const auto sz = maya::platform::query_terminal_size(fileno(stderr));
+                // NativeHandle is an fd on POSIX but a HANDLE on Windows, so
+                // fileno() doesn't convert there.
+#if defined(_WIN32)
+                const maya::platform::NativeHandle err_h = ::GetStdHandle(STD_ERROR_HANDLE);
+#else
+                const maya::platform::NativeHandle err_h = fileno(stderr);
+#endif
+                const auto sz = maya::platform::query_terminal_size(err_h);
                 if (sz.width.raw() > 0) width = std::clamp(sz.width.raw(), 24, 74);
             }
             auto painted = paint
