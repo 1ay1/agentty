@@ -491,6 +491,20 @@ SpawnResult spawn_argv(const Posture& p, const std::vector<std::string>& argv_in
         return out;
     }
 
+    // "No network" is a promise the user chose (the pane's None, the locked
+    // posture, `run --no-network`). claybin keeps it with an empty netns, and
+    // a host that denies unprivileged user namespaces gets none: compile()
+    // still succeeds, it just DEGRADES network.isolation, and the guest would
+    // run with the host's network. Refuse instead -- fail closed, and say why.
+    if (p.net_mode == 1 /* None */
+        && compiled->guarantees.strength(CapId::net_isolation) != Enforcement::strong) {
+        out.start_error =
+            "sandbox: network is set to None but this host can't isolate it "
+            "(no network namespace -- unprivileged user namespaces are likely "
+            "disabled); refusing to run with the network open";
+        return out;
+    }
+
     // The caller's argv reaches the child exactly as given. No `sh -c`
     // here: a commit message with quotes or a `$` in it must not be
     // re-parsed on the way in, which is the whole reason the argv form
