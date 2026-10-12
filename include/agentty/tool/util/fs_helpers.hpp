@@ -189,6 +189,13 @@ void allow_read_root(Io, const fs::path& root);
 // The read roots registered so far (canonical).
 [[nodiscard]] std::vector<fs::path> read_roots_now();
 
+// A forked thread points at its parent's transcript under the threads dir,
+// outside the workspace. Make exactly those files readable (not the dir),
+// so the fork still works when it is reopened in a later session. Only
+// files that exist directly in `threads_dir` and end in .transcript.md.
+void allow_fork_transcripts(Io, const fs::path& threads_dir,
+                            const std::vector<std::string>& paths);
+
 // Read-gate factory: passes when the path is within the workspace OR
 // under a read-allowlist root. Use ONLY in read-side tools (`read`).
 [[nodiscard]] std::expected<WorkspacePath, ToolError>

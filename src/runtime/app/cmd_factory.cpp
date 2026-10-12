@@ -2644,13 +2644,11 @@ Cmd write_fork_transcript(Thread parent, fork_panel::Choice choice) {
                 r.path.clear();
             }
             // The transcript sits under ~/.agentty/threads, outside the
-            // workspace the read tool is sandboxed to. Open that dir (the
-            // mcp-cpp tools see the same read roots) so the model can read
-            // the file the fork note points at.
-            if (!r.path.empty()) {
-                const auto dir = persistence::threads_dir();
-                tools::util::allow_read_root(io, dir);
-            }
+            // workspace the read tool is sandboxed to. Open just that file
+            // (the mcp-cpp tools see the same read roots) so the model can
+            // read what the fork note points at, and nothing else there.
+            if (!r.path.empty())
+                tools::util::allow_fork_transcripts(io, persistence::threads_dir(), {r.path});
             out.send(Msg{msg::ForkMsg{std::move(r)}});
         },
         std::move(parent), choice);
@@ -2683,6 +2681,16 @@ Cmd load_thread_async(ThreadId id) {
             try {
                 auto loaded = deps(io).load_thread(id);
                 if (loaded) {
+                    // A reopened fork still points at its parent's transcript
+                    // outside the workspace; the grant from fork time died
+                    // with that session (#83).
+                    std::vector<std::string> transcripts;
+                    for (const auto& msg : loaded->messages)
+                        if (msg.fork_note && !msg.fork_transcript.empty())
+                            transcripts.push_back(msg.fork_transcript);
+                    if (!transcripts.empty())
+                        tools::util::allow_fork_transcripts(
+                            io, persistence::threads_dir(), transcripts);
                     out.send(Msg{ThreadLoaded{std::move(*loaded)}});
                 } else {
                     // Disk read / parse failure: surface an empty

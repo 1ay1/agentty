@@ -464,6 +464,28 @@ std::vector<fs::path> read_roots_now() {
     });
 }
 
+void allow_fork_transcripts(Io io, const fs::path& threads_dir,
+                            const std::vector<std::string>& paths) {
+    std::error_code ec;
+    const auto dir = fs::weakly_canonical(threads_dir, ec);
+    if (ec || dir.empty()) return;
+    constexpr std::string_view kSuffix = ".transcript.md";
+    for (const auto& raw : paths) {
+        if (raw.empty()) continue;
+        std::error_code fec;
+        const auto file = fs::weakly_canonical(fs::path{raw}, fec);
+        if (fec || !fs::is_regular_file(file, fec)) continue;
+        // One level down in the threads dir, and only a transcript. A note
+        // edited to point anywhere else opens nothing.
+        if (file.parent_path() != dir) continue;
+        const auto name = file.filename().string();
+        if (name.size() <= kSuffix.size()
+            || name.compare(name.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0)
+            continue;
+        allow_read_root(io, file);
+    }
+}
+
 bool is_read_allowlisted(const fs::path& target) {
     if (target.empty()) return false;
     std::error_code ec;

@@ -126,6 +126,31 @@ else
 fi
 "$A" run --sandbox off --no-network "x" >/dev/null 2>&1; check "no-network + sandbox off: exit 2" "$?" 2
 
+# A fork reopened in a new process can still read its parent's transcript,
+# which lives outside the workspace (#83). Other files there stay closed.
+TD="$AGENTTY_HOME/threads"; mkdir -p "$TD"
+printf '# Transcript: parent\nPARENT_MARKER\n' > "$TD/bbbbbbbbbbbbbbbb.transcript.md"
+printf 'secret\n' > "$TD/cccccccccccccccc.transcript.md"
+python3 - "$TD" <<'EOF'
+import json, sys, time
+td = sys.argv[1]
+now = int(time.time())
+note = {"id": "1111111111111111", "role": "user", "timestamp": now, "tool_calls": [],
+        "text": "This conversation is a fork. Transcript: " + td + "/bbbbbbbbbbbbbbbb.transcript.md",
+        "fork_note": True, "fork_transcript": td + "/bbbbbbbbbbbbbbbb.transcript.md"}
+json.dump({"id": "aaaaaaaaaaaaaaaa", "title": "Fork: parent", "forked_from": "bbbbbbbbbbbbbbbb",
+           "created_at": now, "updated_at": now, "messages": [note]},
+          open(td + "/aaaaaaaaaaaaaaaa.json", "w"))
+EOF
+"$A" run --resume aaaaaaaaaaaaaaaa --events jsonl \
+    "CALL read {\"path\":\"$TD/bbbbbbbbbbbbbbbb.transcript.md\"}" >/dev/null 2>"$S/fk"
+grep '"tool":"read"' "$S/fk" | grep -q '"ok":true' && pass "fork: parent transcript readable after reopen" \
+    || fail "fork: parent transcript readable after reopen ($(grep '"tool"' "$S/fk"))"
+"$A" run --resume aaaaaaaaaaaaaaaa --events jsonl \
+    "CALL read {\"path\":\"$TD/cccccccccccccccc.transcript.md\"}" >/dev/null 2>"$S/fk"
+grep '"tool":"read"' "$S/fk" | grep -q '"ok":false' && pass "fork: other transcripts stay closed" \
+    || fail "fork: other transcripts stay closed ($(grep '"tool"' "$S/fk"))"
+
 # a signal mid-tool stops the run and kills the tool. python runs it so
 # SIGINT isn't pre-ignored the way sh does for background jobs.
 sig_case() {

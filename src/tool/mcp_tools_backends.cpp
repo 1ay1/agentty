@@ -40,6 +40,7 @@
 #include "agentty/rag/embed_secret.hpp"
 #include <thread>
 #include "agentty/io/persistence.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/store/store.hpp"
 
 #include "agentty/mcp/client.hpp"   // mcp_resources / mcp_read_resource seams
@@ -2244,6 +2245,13 @@ OneShotResult run_one_shot(const OneShotOptions& opts) {
         }
         prior = std::move(*got);
         st.history = prior.messages;
+        std::vector<std::string> transcripts;
+        for (const auto& msg : prior.messages)
+            if (msg.fork_note && !msg.fork_transcript.empty())
+                transcripts.push_back(msg.fork_transcript);
+        if (!transcripts.empty())
+            ::agentty::tools::util::allow_fork_transcripts(
+                IoAccess::grant(), persistence::threads_dir(), transcripts);
     }
 
     mt::SubagentRequest sreq;

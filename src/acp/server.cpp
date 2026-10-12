@@ -1944,6 +1944,17 @@ a::LoadSessionResult AgentServer::on_load_session(const a::LoadSessionParams& p)
     }
 
     replay_history(sid, thread);
+    // A fork made in the TUI points at its parent's transcript outside the
+    // workspace; let the read tools reach exactly that file (#83).
+    {
+        std::vector<std::string> transcripts;
+        for (const auto& msg : thread.messages)
+            if (msg.fork_note && !msg.fork_transcript.empty())
+                transcripts.push_back(msg.fork_transcript);
+        if (!transcripts.empty())
+            tools::util::allow_fork_transcripts(IoAccess::grant(), persistence::threads_dir(),
+                                                transcripts);
+    }
     // Re-advertise the slash-command menu + model picker for the restored
     // session, and push its title so Zed's sidebar entry is populated the same
     // as the native agent.
