@@ -234,7 +234,7 @@ static std::string read_all(int fd) {
         if (k > 0) { s.append(buf, static_cast<std::size_t>(k)); continue; }
         if (k < 0 && errno == EINTR) continue;
         pollfd pfd{fd, POLLIN, 0};
-        if (::poll(&pfd, 1, 25) <= 0) break;
+        if (::poll(&pfd, 1, 60) <= 0) break;
     }
     return s;
 }
@@ -443,8 +443,13 @@ int main() {
                 ssize_t k = ::read(master, buf, sizeof(buf));
                 if (k > 0) { got.append(buf, static_cast<std::size_t>(k)); continue; }
                 if (done.load()) {
+                    // render() has returned, so every byte of the frame has
+                    // been written; the wait is only for the pty to hand the
+                    // tail across. 60ms of silence, not 25: a shared CI VM
+                    // can stall that long, and a short window would feed the
+                    // emulator a torn frame -- the bug this test exists for.
                     pollfd pfd{master, POLLIN, 0};
-                    if (::poll(&pfd, 1, 25) <= 0) break;   // quiet: frame complete
+                    if (::poll(&pfd, 1, 60) <= 0) break;   // quiet: frame complete
                 } else {
                     pollfd pfd{master, POLLIN, 0};
                     (void)::poll(&pfd, 1, 5);

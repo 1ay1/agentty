@@ -12,7 +12,9 @@ export FAKE_TOOLS_LOG="$S/tools.log"
 python3 "$HERE/fake_openai_server.py" 0 > "$S/port" 2>/dev/null </dev/null &
 SRV=$!
 trap 'kill $SRV 2>/dev/null; rm -rf "$S"' EXIT INT TERM
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ -s "$S/port" ] && break; sleep 0.2; done
+# Up to 30s (see run_cli_test.sh): an empty port reads as "no credentials".
+for _ in $(seq 1 150); do [ -s "$S/port" ] && break; sleep 0.2; done
+if [ ! -s "$S/port" ]; then echo "FAIL fake server did not start"; exit 1; fi
 PORT=$(cat "$S/port")
 
 export AGENTTY_HOME="$S/home"

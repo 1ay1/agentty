@@ -11,7 +11,11 @@ S=$(mktemp -d "${TMPDIR:-/tmp}/agentty_run_XXXXXX")
 python3 "$HERE/acp/fake_openai_server.py" 0 > "$S/port" 2>/dev/null </dev/null &
 SRV=$!
 trap 'kill $SRV 2>/dev/null; rm -rf "$S"' EXIT INT TERM
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ -s "$S/port" ] && break; sleep 0.2; done
+# Up to 30s, not 3: a cold CI VM starting python under a parallel ctest can
+# take longer, and an empty port silently became "127.0.0.1:" -- every check
+# then failed with a misleading "not authenticated".
+for _ in $(seq 1 150); do [ -s "$S/port" ] && break; sleep 0.2; done
+if [ ! -s "$S/port" ]; then echo "FAIL fake server did not start"; exit 1; fi
 
 export AGENTTY_HOME="$S/home" AGENTTY_NO_PREWARM=1
 mkdir -p "$AGENTTY_HOME" "$S/ws/.git"
