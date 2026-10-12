@@ -57,9 +57,13 @@ TEST_CASE("subprocess timeout kills backgrounded children") {
     SubprocessOptions opts;
     // The background sleep holds the pipe open and never writes, so the
     // idle timeout fires. Before the fix the sleep outlived the timeout.
+    // 3s, not 1s: under a parallel ctest the shell can take longer than a
+    // second just to fork the sleep and write its pid, and a timeout that
+    // fires first leaves no pid to check (REQUIRE(bg > 0) -- a flake, not a
+    // finding). The assertion is about WHO dies, not how fast.
     opts.command = SubprocessOptions::Shell{
         "sleep 60 & echo $! > '" + pf.string() + "'; wait"};
-    opts.timeout = std::chrono::seconds{1};
+    opts.timeout = std::chrono::seconds{3};
     auto r = Subprocess::run(std::move(opts));
 
     const pid_t bg = read_pid(pf);

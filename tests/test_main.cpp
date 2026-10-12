@@ -18,6 +18,12 @@
 #include <filesystem>
 #include <string>
 
+#if defined(_WIN32)
+#  include <process.h>   // _getpid
+#else
+#  include <unistd.h>    // getpid
+#endif
+
 #include <maya/core/anim_clock.hpp>
 #include <maya/runtime.hpp>
 
@@ -52,8 +58,17 @@ int main(int argc, char** argv) {
     {
         const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
+        // pid + stamp: steady_clock is per-boot, not per-process, so two
+        // ctest workers starting in the same tick (coarse clocks, -j N on a
+        // busy box) got the SAME home and stomped each other's threads,
+        // images and indexes -- the source of a family of -j-only flakes.
+#if defined(_WIN32)
+        const auto pid = static_cast<long long>(_getpid());
+#else
+        const auto pid = static_cast<long long>(::getpid());
+#endif
         sandbox = fs::temp_directory_path() /
-            ("agentty_tests_home_" + std::to_string(stamp));
+            ("agentty_tests_home_" + std::to_string(pid) + "_" + std::to_string(stamp));
         std::error_code ec;
         fs::create_directories(sandbox, ec);
 #if defined(_WIN32)
