@@ -35,6 +35,8 @@ export AGENTTY_THREADS_KEEP_DAYS=90
 
 Once a day, threads with no activity for that long are deleted. A thread open in a running agentty is never touched. See [Storage](/docs/storage) for everything else agentty keeps on disk.
 
+Headless runs are threads too. `agentty run --save "…"` keeps the run as a thread (it shows up in [[Ctrl+J]]), and `agentty run --resume <id>` or `--resume last` continues one from a script. See [agentty run](/docs/cli#agentty-run).
+
 ## Forking a thread
 
 When a conversation fills the context window, open the command palette ([[Ctrl+K]]) and pick **Fork thread** to branch it into a *fresh* thread that carries **near-zero context**. The parent's full transcript is written to disk and the fork reads it on demand, so forking costs O(1) tokens no matter how large the parent grew — nothing is copied into the window and nothing is lost. The original thread is saved untouched, and the fork records where it came from. See **[Forking a Thread](/docs/fork)** for the full walkthrough.

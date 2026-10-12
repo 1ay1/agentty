@@ -183,7 +183,7 @@ agentty refuses those writes by default, and tells the model what to do instead 
 
 A boundary you can't see the edge of isn't one you can trust. So, plainly:
 
-- **Sending data out over a network you allowed.** If a command can read your files and the network is on, it can upload them. This is a real trade — blocking the network breaks `git push` and `npm install` — and it's exactly why `airgapped` exists.
+- **Sending data out over a network you allowed.** If a command can read your files and the network is on, it can upload them. This is a real trade — blocking the network breaks `git push` and `npm install` — and it's exactly why `airgapped` exists. For one headless run, `agentty run --no-network` takes the network away from every command it spawns without changing your saved setting.
 - **Secrets deeper than the scan depth,** or inside a skipped folder like `node_modules`.
 - **Credential files nobody would recognise.** A secret in `config.local.yaml` doesn't look like a secret.
 - **Kernel bugs.** The command shares your kernel. A flaw in the kernel itself defeats any sandbox of this kind — which is what the pane means when it reports kernel isolation as `none`.
@@ -194,6 +194,19 @@ A boundary you can't see the edge of isn't one you can trust. So, plainly:
 A model that doesn't know it's confined **misdiagnoses every wall it hits**. A permission error becomes "your corporate proxy is blocking this"; a failed connection becomes "check your firewall". It then either sends you chasing a problem that doesn't exist, or retries a command the kernel will never allow.
 
 agentty tells it twice: once in the system prompt — what's *allowed*, not just what's blocked, so it knows where to work on the first try — and again on the output of any command that got denied, which is where the model is actually looking when it decides what to do next.
+
+## Locking down a single run
+
+`agentty run` takes two flags for running on code you don't trust, like a pull request in CI:
+
+- `--read-only` gives the model only tools that read. Write, shell and network tools aren't offered, and if the model asks for one anyway the call is refused.
+- `--no-network` runs every command with no network at all (an empty network namespace, so not even DNS works) and refuses network tools. It needs the claybin sandbox; with the sandbox off or unavailable the run refuses to start instead of pretending.
+
+```sh
+agentty run --read-only --no-network "review this branch for anything that leaks secrets"
+```
+
+Both apply to that run only. Your saved sandbox setting is untouched.
 
 ## Modes
 

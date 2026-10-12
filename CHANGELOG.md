@@ -143,6 +143,23 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   edit, quietly making them read-only would be the setting lying to you.
 
 ### Changed
+- **`agentty run` is usable from scripts.** stdout is only the answer now
+  (no `Subagent report` header), failures print one `agentty run: <status>:
+  <reason>` line on stderr instead of an internal activity dump, and exit
+  codes say what happened: 0 ok, 1 failed or out of turns, 2 bad usage, 3
+  provider/auth, 4 no such thread, 5 context window full, 124 timeout,
+  130/143 Ctrl-C/SIGTERM. New flags: `--json`, `-o FILE`, `--max-turns`,
+  `--timeout`, `-v`. ([#85](https://github.com/1ay1/agentty/issues/85))
+- **`agentty run --events jsonl` shows what the model thought.** Besides tool
+  calls it now streams `turn`, `reasoning` and `text` lines, and `--effort`
+  turns thinking on for the run.
+  ([#81](https://github.com/1ay1/agentty/issues/81))
+- **`agentty run --save` / `--resume ID|last`** keep a run as a thread and
+  continue it later; **`--read-only`** and **`--no-network`** lock a run down
+  for untrusted code (`--no-network` needs claybin and refuses to start
+  without it).
+- **The sandbox-off banner fits the terminal** instead of drawing at a fixed
+  74 columns.
 - **`--sandbox off` now prints a banner, not a line.** It used to sit at the
   same visual weight as `sandbox: active (claybin)` and scroll past before the
   first prompt. Being wrong about which wall is up is a cosmetic bug; being
@@ -154,6 +171,25 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   a log file gets the box drawing without the escape bytes.
 
 ### Fixed
+- **`agentty run`: Ctrl-C or SIGTERM left the running tool alive.** agentty
+  died and the sandboxed command kept going. The first signal now cancels the
+  run and kills the tool; a second Ctrl-C exits at once. `--timeout` also
+  kills a tool that is still running when time is up.
+- **A small local model filling its context window gave no reason.**
+  `agentty run` now says `context window full (25000 tokens, last prompt
+  24500)` for both llama.cpp's 400 and a reply cut off by the window.
+  ([#85](https://github.com/1ay1/agentty/issues/85))
+- **A read-only subagent could still run a tool it wasn't offered** if the
+  model named it anyway. Tools are now checked when called, not only hidden
+  from the list.
+- **A reopened fork couldn't read its parent's transcript.** The read access
+  was only granted when the fork was made; it now comes back whenever the
+  thread is opened (new session, thread list, ACP, `run --resume`), and only
+  for that one file instead of the whole threads directory.
+  ([#83](https://github.com/1ay1/agentty/issues/83))
+- **ACP: reopening a chat saved by the CLI failed** with "no such session",
+  because `session/load` only read the old `.json` format.
+  ([#77](https://github.com/1ay1/agentty/issues/77))
 - **ACP: a failed turn came back as `refusal`** with the reason hidden in
   `_meta`. It is now an error carrying the provider's message.
 - **ACP: `session/load` returned `{}`** without the session's mode and

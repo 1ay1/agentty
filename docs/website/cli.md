@@ -141,7 +141,7 @@ These mirror `agentty --help` exactly.
 | `-w`, `--workspace <dir>` | Sandbox filesystem tools to this directory (default: cwd). Tools refuse paths outside it. Pass `--workspace /` to disable the gate. |
 | `--sandbox <mode>` | Wrap `bash`/`diagnostics` in an OS-native sandbox. `auto` (default) · `on` (require a backend) · `off` (disable). |
 | `--log-file <path>` | Write the diagnostic log here instead of `~/.agentty/logs/agentty.log`. *What* gets captured is `AGENTTY_LOG` (default: warnings and errors). See [Logging](/docs/logging). |
-| `--events jsonl` | Headless `run` only: emit one JSON object per line to **stderr** for each tool executed — `{"ev":"tool","seq":3,"tool":"read","ms":12,"ok":true,"args_sha":"a3f1c09d"}`. stdout keeps the answer, so a script can capture both. `args_sha` is a hash, not the arguments: it answers "were these two calls identical" without putting paths or command lines in your logs. |
+| `--events jsonl` | Headless `run` only: one JSON object per line on **stderr** while the run goes: `turn`, `reasoning` and `text` as the model writes them, and `tool` per tool call (`{"ev":"tool","seq":3,"tool":"read","ms":12,"ok":true,"args_sha":"a3f1c09d"}`). stdout keeps the answer, so a script can capture both. `args_sha` is a hash, not the arguments: it answers "were these two calls identical" without putting paths or command lines in your logs. See [Events](#events). |
 | `-V`, `--version` | Print the agentty version and exit. |
 | `-h`, `--help` | Show usage and exit. |
 

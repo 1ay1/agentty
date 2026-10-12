@@ -55,6 +55,8 @@ The export is **bounded**, so even a maxed-out, million-token parent produces a 
 
 Writes are atomic (temp file → `fsync` → `rename`), so a crash mid-fork never leaves a truncated transcript.
 
+The transcript sits outside your workspace, so agentty lets the fork read **that one file** and nothing else in `~/.agentty/threads`. The permission comes back whenever the fork is opened again, in a new session, from the thread list, over ACP or with `agentty run --resume`.
+
 :::note
 The transcript being large is fine — it lives on **disk**, not in the context window. The fork carries only the pointer. A 500 KB transcript that the model greps a 2 KB slice out of is exactly the point.
 :::

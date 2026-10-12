@@ -65,6 +65,9 @@ tools refuse paths outside your workspace. Deep dive:
 ### 🌐 Air-gapped mode
 Run on a box with no internet. Your laptop relays the bytes over SSH with TLS pinned end-to-end.
 
+### 🤖 Scripts and CI
+`agentty run "fix the failing test"` runs one prompt with tools and prints just the answer. `--json`, clear exit codes, `--timeout`, `--events jsonl` (tool calls and reasoning), and `--read-only --no-network` for untrusted code. [Docs ↗](https://agentty.org/docs/cli#agentty-run)
+
 ### 🔧 Full tool suite
 read · write · edit · bash · grep · glob · git · web · search_docs · search_code · task — each with a purpose-built widget.
 
