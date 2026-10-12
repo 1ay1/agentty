@@ -41,6 +41,8 @@
 // digest LENGTH ONLY — credential bytes never reach any hash. This is a
 // deliberate, asserted exemption, not an accident of enumeration
 // (visual_hash_walk_test pins it: same-length overwrite = same hash).
+// (A Secret's placeholder is not a credential — it is drawn as-is — and
+// is walked whole.)
 //
 // ELM FIT. subscribe(m) declares the input dependencies; view(m) declares
 // the pixels; both are pure over the Model. The frame gate needs "did the

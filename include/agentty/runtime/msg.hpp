@@ -698,8 +698,9 @@ struct SmartModeClearSlot {};     // 'x' on a slot row: reset it to auto
 struct OpenWebSearch {};
 struct CloseWebSearch {};
 struct WebSearchKey { form::keys::Action action; };
-// Bracketed paste while a Web Search text row is being edited (the exclusion
-// list is the field pasting exists for).
+// Bracketed paste while the Web Search pane is open. The reducer lands it on
+// the focused text row (starting the edit, as typing does) and drops it
+// anywhere else -- an API key is the field pasting exists for.
 struct WebSearchPaste { std::string text; };
 // The API-key store is IO (a sealed file, and `secret-tool` when the OS
 // keystore is on), so the pane never touches it from the reducer: it is read

@@ -246,7 +246,7 @@ Cmd web_search_update(Model& m, msg::WebSearchMsg wm) {
         },
         [&](WebSearchPaste& e) -> Cmd {
             if (auto* o = m.ui.panel.get<pn::WebSearch>())
-                (void)form::paste_into(o->form, e.text);   // SSOT: guard + dirty
+                (void)form::paste_into_focused(o->form, e.text);   // guard + dirty; starts the edit like typing
             return Cmd::none();
         },
         [&](WebSearchKey& e) -> Cmd {
