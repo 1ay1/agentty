@@ -171,6 +171,31 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   a log file gets the box drawing without the escape bytes.
 
 ### Fixed
+- **Groq and Gemini rejected every request** with HTTP 400 over
+  `prompt_cache_key`. The field is now sent only to hosts known to take it
+  (OpenAI, OpenRouter), and if any OpenAI-compatible host rejects an optional
+  field, agentty drops it, remembers that for the host, and retries the same
+  turn. ([#93](https://github.com/1ay1/agentty/issues/93))
+- **The agent re-read the same file over and over.** A repeat `read` of an
+  unchanged file returned only a pointer to the earlier result; once that
+  result had left the context the model had nothing, so it read again. It now
+  returns the content, tagged `[cached]`.
+  ([#92](https://github.com/1ay1/agentty/issues/92))
+- **A repeated failing tool call froze the run.** Three identical failures
+  ended the turn and left the agent idle until you typed. The first time, the
+  model is now warned in the tool result and keeps going; the run only stops
+  if it repeats the same call after the warning.
+  ([#90](https://github.com/1ay1/agentty/issues/90))
+- **Local models pasted code or refused big tasks** ("too large for a single
+  response"). Local prompts now say to act with tools, that many steps are
+  normal, and that a missing directory is not a reason to stop; llama.cpp or
+  vLLM on another machine you run gets the local prompt too. Removing a path
+  that is already gone now succeeds instead of showing a failure.
+  ([#91](https://github.com/1ay1/agentty/issues/91))
+- **The TUI didn't start on Windows**: agentty exited silently after
+  creating `.agentty`. It starts again, and if the terminal UI ever can't
+  start, agentty now prints why and where the log is instead of exiting
+  without a word. ([#86](https://github.com/1ay1/agentty/issues/86))
 - **`agentty run`: Ctrl-C or SIGTERM left the running tool alive.** agentty
   died and the sandboxed command kept going. The first signal now cancels the
   run and kills the tool; a second Ctrl-C exits at once. `--timeout` also
