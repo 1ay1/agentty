@@ -62,20 +62,20 @@ struct Observations {
     std::set<Key> rejected_responses;
     std::set<Key> rejected_chat;
 };
-maya::guarded<Observations>& observations() {
-    static maya::guarded<Observations> o;
+// Read on every routing decision, written only when a host rejects a
+// dialect: a lock-free snapshot, so routing needs no capability.
+maya::snapshot<Observations>& observations() {
+    static maya::snapshot<Observations> o;
     return o;
 }
 
 // Which of the two the host has rejected for this pair, as plain bools.
 struct Rejected { bool responses = false; bool chat = false; };
 [[nodiscard]] Rejected rejected_for(std::string_view p, std::string_view m) {
-    return observations().read(
-        [](const Observations& o, Key k) {
-            return Rejected{o.rejected_responses.count(k) > 0,
-                            o.rejected_chat.count(k) > 0};
-        },
-        Key{std::string{p}, std::string{m}});
+    const auto o = observations().load();
+    const Key k{std::string{p}, std::string{m}};
+    return Rejected{o->rejected_responses.count(k) > 0,
+                    o->rejected_chat.count(k) > 0};
 }
 
 } // namespace
@@ -254,10 +254,11 @@ void note_dialect_rejected(std::string_view provider_id,
                            std::string_view model, Dialect rejected) noexcept {
     if (model.empty()) return;
     try {
-        observations().with(
-            [](Observations& o, Key k, bool responses) {
-                (responses ? o.rejected_responses : o.rejected_chat)
-                    .insert(std::move(k));
+        (void)observations().update(
+            [](const Observations& old, const Key& k, const bool& responses) {
+                Observations o = old;
+                (responses ? o.rejected_responses : o.rejected_chat).insert(k);
+                return o;
             },
             Key{std::string{provider_id}, std::string{model}},
             rejected == Dialect::Responses);
@@ -270,7 +271,7 @@ void note_dialect_rejected(std::string_view provider_id,
 }
 
 void reset_dialect_observations() noexcept {
-    observations().with([](Observations& o) { o = Observations{}; });
+    observations().store(Observations{});
 }
 
 } // namespace agentty::provider

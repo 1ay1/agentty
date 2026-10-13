@@ -20,6 +20,7 @@
 // alone and would prove nothing about the half that was missing.
 
 #include "agentty/io/shared_file.hpp"
+#include "agtest_cap.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -75,7 +76,7 @@ int main() {
     // The lock must be real, not a silently-degraded no-op. A tmpfs/ext4
     // /tmp supports locks, so a false here means the policy layer failed to
     // reach jaal at all — which is the wiring bug this test exists to catch.
-    CHECK(sf::with_shared_file(test_mu(), target, [](sf::Held h) { return h.cross_process; }),
+    CHECK(sf::with_shared_file(agtest::cap(), test_mu(), target, [](const maya::held<agentty::lock_levels::file_lane>&, sf::Held h) { return h.cross_process; }),
           "with_shared_file took the cross-process lock (jaal is wired in)");
 
     // The lock lives on the SIDECAR, never on the target. This is the whole
@@ -83,8 +84,8 @@ int main() {
     // inode over the target, so a lock held on the target would guard a file
     // that is no longer the file.
     {
-        const auto [sidecar, touched] = sf::with_shared_file(test_mu(), target,
-            [](sf::Held, std::string t) {
+        const auto [sidecar, touched] = sf::with_shared_file(agtest::cap(), test_mu(), target,
+            [](const maya::held<agentty::lock_levels::file_lane>&, sf::Held, std::string t) {
                 return std::pair{fs::exists(fs::path(t + ".lock")), fs::exists(fs::path(t))};
             }, target.string());
         CHECK(sidecar, "the lock is held on <target>.lock");
@@ -109,8 +110,8 @@ int main() {
     {
         // The whole parent side runs inside the critical section: fork,
         // hold for kHold, then leave, and read the child's verdict after.
-        const auto child_waited = sf::with_shared_file(test_mu(), target,
-            [](sf::Held, std::string t) -> long long {
+        const auto child_waited = sf::with_shared_file(agtest::cap(), test_mu(), target,
+            [](const maya::held<agentty::lock_levels::file_lane>&, sf::Held, std::string t) -> long long {
                 constexpr auto kHold = std::chrono::milliseconds{400};
                 int pipefd[2] = {-1, -1};
                 if (::pipe(pipefd) != 0) return -2;
@@ -123,7 +124,7 @@ int main() {
                     // Our copy of the lane is inherited locked; the child
                     // needs its own.
                     static sf::Lane child_lane;
-                    sf::with_shared_file(child_lane, fs::path{t}, [](sf::Held) {});
+                    sf::with_shared_file(agtest::cap(), child_lane, fs::path{t}, [](const maya::held<agentty::lock_levels::file_lane>&, sf::Held) {});
                     long long v = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0).count();
                     (void)!::write(pipefd[1], &v, sizeof(v));

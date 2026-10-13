@@ -13,6 +13,7 @@
 // uses ranked locks any more: every shared lock is a maya::guarded, whose
 // captureless body cannot take a second lock at all.)
 
+#include "agtest_cap.hpp"
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -69,7 +70,7 @@ void test_background_work_is_owned() {
 
     // (b) shutdown REQUESTS STOP and WAITS. Returns how many were still
     // stuck at the grace deadline.
-    const std::size_t stuck = agentty::util::background_pool().shutdown();
+    const std::size_t stuck = agentty::util::background_pool().shutdown(agtest::cap());
 
     CHECK(c->ran.load() == 8,
           "every throwing body ran and was waited for (not detached)");

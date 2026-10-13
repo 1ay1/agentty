@@ -10,6 +10,7 @@
 // Run:   agentty_standalone_tests save_bench 1c6fff4258e07787 10
 
 #include <agentty/io/persistence.hpp>
+#include "agtest_cap.hpp"
 #include <agentty/io/thread_log.hpp>
 
 #include <chrono>
@@ -80,9 +81,9 @@ int main(int argc, char** argv) {
         t.messages.push_back(std::move(m));
 
         const auto a = clk::now();
-        persistence::save_thread(::agentty::IoAccess::grant(), t);            // reducer-side cost
+        persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);            // reducer-side cost
         const auto b = clk::now();
-        persistence::flush_pending_saves(::agentty::IoAccess::grant());     // + writer-side cost
+        persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());     // + writer-side cost
         const auto c = clk::now();
         auto ms_local = [](auto d) {
             return std::chrono::duration<double, std::milli>(d).count();
@@ -90,6 +91,6 @@ int main(int argc, char** argv) {
         std::printf("round %2d  %-4s  enqueue %8.2f ms   total %9.2f ms\n",
                     r, r == 0 ? "full" : "tail", ms_local(b - a), ms_local(c - a));
     }
-    persistence::delete_thread(::agentty::IoAccess::grant(), t.id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
     return 0;
 }

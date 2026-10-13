@@ -148,11 +148,13 @@ TEST_CASE("slash commands") {
     const fs::path home = sandbox / "home";
     fs::create_directories(home);
     fs::current_path(sandbox);
+    // home_dir() reads $HOME first, then $USERPROFILE: set both so an
+    // inherited $HOME (MSYS2/Git Bash) can't win, and clear AGENTTY_HOME.
+    ::setenv("HOME", home.string().c_str(), 1);
 #ifdef _WIN32
     _putenv_s("USERPROFILE", home.string().c_str());
-#else
-    ::setenv("HOME", home.string().c_str(), 1);
 #endif
+    ::unsetenv("AGENTTY_HOME");
 
     std::println("=== slash_commands_test ===");
     discovery_and_shadowing(sandbox, home);

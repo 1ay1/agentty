@@ -221,6 +221,11 @@ struct Settings {
     // arm in stream.cpp); hydrated into the catalog's learned-effort registry
     // at init so every later session's ladder/clamps/wire start correct.
     std::map<std::string, std::uint8_t> learned_effort_sets;
+    // LEARNED: host ("api.groq.com", "llm.corp:8443") → optional request
+    // fields it rejected with a 400 (provider::OptionalField bits). Written
+    // by the reject→learn→retry arm in stream.cpp (#93), hydrated at init
+    // so the transport never sends that host the field again.
+    std::map<std::string, std::uint8_t> rejected_fields;
     // Tool names the user granted "always allow" (PermissionApproveAlways).
     // Persisted so the grant survives restarts — Zed's always_allow rules.
     // Loaded into Model::session_grants at init; note CycleProfile still

@@ -18,6 +18,26 @@
 
 #include <string>
 
+#include <maya/runtime.hpp>
+
+// ── Lock-order capabilities in tests ────────────────────────────────────────
+//
+// A test body is a thread root, the same as main(): it holds no lock when it
+// starts. agtest::cap() is that root, the ONE place the suite mints a
+// capability (tests/ is outside the lint's scan; this header is the reviewed
+// root for all of it). Use it only from test-body code, never from a helper
+// that a lock body could call:
+//
+//     persistence::save_thread(io, agtest::cap(), t);
+//     DynamicDispatch::execute(agtest::cap(), "read", args);
+//
+// The returned reference is to a capability that lives for the program: a
+// capability is a zero-size proof with no state, and a test thread holds
+// nothing between statements. (jaal::cap_access is the sanctioned maker;
+// tests are exempt from the minting ban the lint enforces on src/.)
+// (Defined in agtest_cap.hpp so standalone, non-doctest tests can share it.)
+#include "agtest_cap.hpp"
+
 // Legacy two-arg CHECK(cond, msg) → doctest CHECK_MESSAGE; one-arg CHECK(cond)
 // → doctest CHECK. Both wrap the predicate in an extra paren pair so doctest
 // does NOT try to decompose it — the legacy suite freely uses `CHECK(a && b)`

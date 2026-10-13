@@ -243,10 +243,29 @@ int main() {
         fs::create_directories(bare);
         const fs::path cwd_before = fs::current_path();
 
+        // The premise is "no marker anywhere above". The sandbox lives in
+        // the temp dir, so a marker on one of ITS ancestors (a dev box with
+        // TEMP=C:\Develop\Temp next to C:\Develop\.agentty) makes the
+        // walk-up legitimately stop there; that's the environment, not a
+        // bug, so the case can't be built and is skipped.
+        fs::path marked_ancestor;
+        for (fs::path p = fs::weakly_canonical(bare); ; p = p.parent_path()) {
+            for (std::string_view m : project_markers()) {
+                std::error_code mec;
+                if (fs::exists(p / fs::path{m}, mec)) { marked_ancestor = p; break; }
+            }
+            if (!marked_ancestor.empty() || p == p.parent_path()) break;
+        }
+
         fs::current_path(bare);
         agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), bare);
         const fs::path a = project_anchor();
-        check(a == fs::weakly_canonical(bare), "markerless: falls back to cwd");
+        if (marked_ancestor.empty())
+            check(a == fs::weakly_canonical(bare), "markerless: falls back to cwd");
+        else
+            std::fprintf(stderr, "skip: markerless case -- %s carries a project "
+                                 "marker above the temp dir\n",
+                         marked_ancestor.string().c_str());
 
         fs::current_path(cwd_before);
     }

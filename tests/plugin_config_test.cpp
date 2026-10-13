@@ -53,7 +53,7 @@ void write_file(const fs::path& p, const std::string& body) {
 void creates_file_on_first_add(const fs::path& dir) {
     std::println("--- creates_file_on_first_add ---");
     const fs::path cfg = dir / "fresh" / "mcp.json";
-    auto r = plug::add_server(::agentty::IoAccess::grant(), cfg, {"weather", "uvx", {"mcp-weather"}},
+    auto r = plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"weather", "uvx", {"mcp-weather"}},
                               /*force=*/false);
     check(r == plug::EditResult::Ok, "add on a missing file succeeds");
     json j = read_json(cfg);
@@ -80,7 +80,7 @@ void round_trip_preserves_foreign_keys(const fs::path& dir) {
   },
   "my_custom_toplevel": { "keep": true }
 })");
-    auto r = plug::add_server(::agentty::IoAccess::grant(), cfg, {"weather", "uvx", {"mcp-weather"}},
+    auto r = plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"weather", "uvx", {"mcp-weather"}},
                               false);
     check(r == plug::EditResult::Ok, "add succeeds");
     json j = read_json(cfg);
@@ -93,7 +93,7 @@ void round_trip_preserves_foreign_keys(const fs::path& dir) {
     check(j["mcpServers"].contains("weather"), "new entry landed");
 
     // Remove the new entry: github + the custom key must still be intact.
-    r = plug::remove_server(::agentty::IoAccess::grant(), cfg, "weather");
+    r = plug::remove_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, "weather");
     check(r == plug::EditResult::Ok, "remove succeeds");
     j = read_json(cfg);
     check(!j["mcpServers"].contains("weather"), "entry removed");
@@ -106,7 +106,7 @@ void honours_servers_spelling(const fs::path& dir) {
     std::println("--- honours_servers_spelling ---");
     const fs::path cfg = dir / "sp" / "mcp.json";
     write_file(cfg, R"({"servers": {"a": {"command": "x"}}})");
-    auto r = plug::add_server(::agentty::IoAccess::grant(), cfg, {"b", "y", {}}, false);
+    auto r = plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"b", "y", {}}, false);
     check(r == plug::EditResult::Ok, "add succeeds");
     json j = read_json(cfg);
     check(j.contains("servers") && !j.contains("mcpServers"),
@@ -119,12 +119,12 @@ void honours_servers_spelling(const fs::path& dir) {
 void no_clobber_without_force(const fs::path& dir) {
     std::println("--- no_clobber_without_force ---");
     const fs::path cfg = dir / "cl" / "mcp.json";
-    (void)plug::add_server(::agentty::IoAccess::grant(), cfg, {"t", "cmd1", {}}, false);
-    auto r = plug::add_server(::agentty::IoAccess::grant(), cfg, {"t", "cmd2", {}}, false);
+    (void)plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"t", "cmd1", {}}, false);
+    auto r = plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"t", "cmd2", {}}, false);
     check(r == plug::EditResult::AlreadyExists, "duplicate add refused");
     check(read_json(cfg)["mcpServers"]["t"]["command"] == "cmd1",
           "original untouched after refusal");
-    r = plug::add_server(::agentty::IoAccess::grant(), cfg, {"t", "cmd2", {}}, /*force=*/true);
+    r = plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"t", "cmd2", {}}, /*force=*/true);
     check(r == plug::EditResult::Ok, "--force overwrites");
     check(read_json(cfg)["mcpServers"]["t"]["command"] == "cmd2",
           "forced entry stored");
@@ -134,10 +134,10 @@ void no_clobber_without_force(const fs::path& dir) {
 void distinct_not_found(const fs::path& dir) {
     std::println("--- distinct_not_found ---");
     const fs::path cfg = dir / "nf" / "mcp.json";
-    check(plug::remove_server(::agentty::IoAccess::grant(), cfg, "ghost") == plug::EditResult::NotFound,
+    check(plug::remove_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, "ghost") == plug::EditResult::NotFound,
           "remove on a missing FILE is NotFound");
-    (void)plug::add_server(::agentty::IoAccess::grant(), cfg, {"real", "x", {}}, false);
-    check(plug::remove_server(::agentty::IoAccess::grant(), cfg, "ghost") == plug::EditResult::NotFound,
+    (void)plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"real", "x", {}}, false);
+    check(plug::remove_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, "ghost") == plug::EditResult::NotFound,
           "remove of an absent NAME is NotFound");
     check(read_json(cfg)["mcpServers"].contains("real"),
           "failed remove left the file alone");
@@ -148,10 +148,10 @@ void refuses_broken_json(const fs::path& dir) {
     std::println("--- refuses_broken_json ---");
     const fs::path cfg = dir / "br" / "mcp.json";
     write_file(cfg, "{ this is not json");
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, {"x", "y", {}}, false)
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"x", "y", {}}, false)
               == plug::EditResult::ParseError,
           "add refuses to rewrite an unparseable file");
-    check(plug::remove_server(::agentty::IoAccess::grant(), cfg, "x") == plug::EditResult::ParseError,
+    check(plug::remove_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, "x") == plug::EditResult::ParseError,
           "remove refuses too");
     std::ifstream f(cfg);
     std::string body((std::istreambuf_iterator<char>(f)),
@@ -164,8 +164,8 @@ void refuses_broken_json(const fs::path& dir) {
 void list_reads_back(const fs::path& dir) {
     std::println("--- list_reads_back ---");
     const fs::path cfg = dir / "ls" / "mcp.json";
-    (void)plug::add_server(::agentty::IoAccess::grant(), cfg, {"a", "uvx", {"pkg-a"}}, false);
-    (void)plug::add_server(::agentty::IoAccess::grant(), cfg, {"b", "python3", {"/x/s.py", "--flag"}}, false);
+    (void)plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"a", "uvx", {"pkg-a"}}, false);
+    (void)plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"b", "python3", {"/x/s.py", "--flag"}}, false);
     auto servers = plug::list_servers(cfg);
     check(servers.size() == 2, "two entries listed");
     bool found_b = false;
@@ -184,9 +184,9 @@ void list_reads_back(const fs::path& dir) {
 void tool_enable_disable(const fs::path& dir) {
     std::println("--- tool_enable_disable ---");
     const fs::path cfg = dir / "tgl" / "mcp.json";
-    (void)plug::add_server(::agentty::IoAccess::grant(), cfg, {"date", "/x/date", {}}, false);
+    (void)plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"date", "/x/date", {}}, false);
     // disable one tool
-    check(plug::set_tool_enabled(::agentty::IoAccess::grant(), cfg, "date", "current_date", false)
+    check(plug::set_tool_enabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "date", "current_date", false)
               == plug::EditResult::Ok, "disable succeeds");
     check(plug::is_tool_disabled(cfg, "date", "current_date"),
           "tool recorded as disabled");
@@ -194,10 +194,10 @@ void tool_enable_disable(const fs::path& dir) {
               == json::array({"current_date"}),
           "tools.exclude holds the bare name");
     // idempotent disable
-    check(plug::set_tool_enabled(::agentty::IoAccess::grant(), cfg, "date", "current_date", false)
+    check(plug::set_tool_enabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "date", "current_date", false)
               == plug::EditResult::Ok, "double-disable is Ok no-op");
     // re-enable clears it (and prunes empty tools object)
-    check(plug::set_tool_enabled(::agentty::IoAccess::grant(), cfg, "date", "current_date", true)
+    check(plug::set_tool_enabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "date", "current_date", true)
               == plug::EditResult::Ok, "re-enable succeeds");
     check(!plug::is_tool_disabled(cfg, "date", "current_date"),
           "tool no longer disabled");
@@ -207,7 +207,7 @@ void tool_enable_disable(const fs::path& dir) {
     check(read_json(cfg)["mcpServers"]["date"]["command"] == "/x/date",
           "server command preserved across toggles");
     // toggling on a missing server is NotFound
-    check(plug::set_tool_enabled(::agentty::IoAccess::grant(), cfg, "ghost", "x", false)
+    check(plug::set_tool_enabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "ghost", "x", false)
               == plug::EditResult::NotFound, "toggle on absent server NotFound");
     std::println("PASS\n");
 }
@@ -221,7 +221,7 @@ void http_server_add(const fs::path& dir) {
     http.name = "remote";
     http.url  = "https://mcp.example.com/api";
     http.type = "http";
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, http, false) == plug::EditResult::Ok,
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, http, false) == plug::EditResult::Ok,
           "http server add succeeds");
     json e = read_json(cfg)["mcpServers"]["remote"];
     check(e["type"] == "http", "type is http");
@@ -232,7 +232,7 @@ void http_server_add(const fs::path& dir) {
     sse.name = "events";
     sse.url  = "https://x.example.com/sse";
     sse.type = "sse";
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, sse, false) == plug::EditResult::Ok, "sse add succeeds");
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, sse, false) == plug::EditResult::Ok, "sse add succeeds");
     check(read_json(cfg)["mcpServers"]["events"]["type"] == "sse", "type is sse");
 
     // list_servers reads the url back.
@@ -248,30 +248,30 @@ void http_server_add(const fs::path& dir) {
 void server_enable_disable(const fs::path& dir) {
     std::println("--- server_enable_disable ---");
     const fs::path cfg = dir / "srv" / "mcp.json";
-    (void)plug::add_server(::agentty::IoAccess::grant(), cfg, {"date", "/x/date", {}}, false);
+    (void)plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"date", "/x/date", {}}, false);
     check(!plug::is_server_disabled(cfg, "date"), "new server starts enabled");
     // Ecosystem portability: an added server is tagged type:stdio (the
     // emerging cross-client convention).
     check(read_json(cfg)["mcpServers"]["date"]["type"] == "stdio",
           "added server carries type:stdio");
     // disable the whole server
-    check(plug::set_server_disabled(::agentty::IoAccess::grant(), cfg, "date", true) == plug::EditResult::Ok,
+    check(plug::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "date", true) == plug::EditResult::Ok,
           "disable server succeeds");
     check(plug::is_server_disabled(cfg, "date"), "server recorded disabled");
     check(read_json(cfg)["mcpServers"]["date"]["disabled"] == true,
           "disabled:true persisted");
     // idempotent
-    check(plug::set_server_disabled(::agentty::IoAccess::grant(), cfg, "date", true) == plug::EditResult::Ok,
+    check(plug::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "date", true) == plug::EditResult::Ok,
           "double-disable is Ok no-op");
     // re-enable removes the flag (absent == enabled, clean file)
-    check(plug::set_server_disabled(::agentty::IoAccess::grant(), cfg, "date", false) == plug::EditResult::Ok,
+    check(plug::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "date", false) == plug::EditResult::Ok,
           "re-enable succeeds");
     check(!plug::is_server_disabled(cfg, "date"), "server enabled again");
     check(!read_json(cfg)["mcpServers"]["date"].contains("disabled"),
           "disabled key removed on re-enable (not left as false)");
     check(read_json(cfg)["mcpServers"]["date"]["command"] == "/x/date",
           "command preserved across server toggles");
-    check(plug::set_server_disabled(::agentty::IoAccess::grant(), cfg, "ghost", true)
+    check(plug::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "ghost", true)
               == plug::EditResult::NotFound, "disable absent server NotFound");
     std::println("PASS\n");
 }
@@ -293,7 +293,7 @@ void malformed_disabled_no_throw(const fs::path& dir) {
     // Toggling it must succeed and REPLACE the bad value with a real bool.
     threw = false;
     try {
-        check(plug::set_server_disabled(::agentty::IoAccess::grant(), cfg, "date", true) == plug::EditResult::Ok,
+        check(plug::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "date", true) == plug::EditResult::Ok,
               "toggle over a malformed flag succeeds");
     } catch (...) { threw = true; }
     check(!threw, "set_server_disabled does not throw on a string flag");
@@ -309,7 +309,7 @@ void non_object_entry_no_throw(const fs::path& dir) {
     write_file(cfg, R"({"mcpServers":{"date":"just a string"}})");
     bool threw = false;
     try {
-        check(plug::set_server_disabled(::agentty::IoAccess::grant(), cfg, "date", true)
+        check(plug::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "date", true)
                   == plug::EditResult::NotFound,
               "non-object entry → NotFound, no throw");
         check(!plug::is_server_disabled(cfg, "date"),
@@ -327,13 +327,13 @@ void concurrent_mutations_safe(const fs::path& dir) {
     // Seed N servers.
     constexpr int N = 24;
     for (int i = 0; i < N; ++i)
-        (void)plug::add_server(::agentty::IoAccess::grant(), cfg, {"s" + std::to_string(i), "/x", {}}, false);
+        (void)plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"s" + std::to_string(i), "/x", {}}, false);
 
     // Hammer: each thread disables a distinct server concurrently.
     std::vector<std::thread> ts;
     for (int i = 0; i < N; ++i)
         ts.emplace_back([&, i]{
-            (void)plug::set_server_disabled(::agentty::IoAccess::grant(), cfg, "s" + std::to_string(i), true);
+            (void)plug::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "s" + std::to_string(i), true);
         });
     for (auto& t : ts) t.join();
 
@@ -466,7 +466,7 @@ void cross_process_mutations_safe(const fs::path& dir) {
                 // teardown -- _exit skips atexit handlers and the parent's
                 // test state stays untouched.
                 const auto name = "r" + std::to_string(r) + "w" + std::to_string(w);
-                const auto rc = plug::add_server(::agentty::IoAccess::grant(), cfg, {name, "/bin/true", {}}, false);
+                const auto rc = plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {name, "/bin/true", {}}, false);
                 ::_exit(rc == plug::EditResult::Ok ? 0 : 1);
             }
             if (pid > 0) kids.push_back(pid);
@@ -513,7 +513,7 @@ void directory_shaped_config_is_not_fatal(const fs::path& dir) {
     // And no writer may clobber it. A directory in that position is exactly
     // the kind of thing we must refuse rather than replace -- load() reports
     // it as present-but-broken, which is what gates every mutation here.
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, {"x", "/bin/true", {}}, false)
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"x", "/bin/true", {}}, false)
               == plug::EditResult::ParseError,
           "add refuses to overwrite a directory");
     check(fs::is_directory(cfg), "the directory is still there, untouched");
@@ -606,7 +606,7 @@ void symlink_written_through(const fs::path& dir) {
     fs::create_symlink(real, link, ec);
     if (ec) { std::println("  (skip: symlinks unsupported here)\nPASS\n"); return; }
 
-    check(plug::add_server(::agentty::IoAccess::grant(), link, {"date", "/x", {}}, false) == plug::EditResult::Ok,
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), link, {"date", "/x", {}}, false) == plug::EditResult::Ok,
           "add via symlink succeeds");
     check(fs::is_symlink(link), "mcp.json is STILL a symlink after the write");
     check(read_json(real).contains("mcpServers")
@@ -625,13 +625,13 @@ void scope_edits_are_isolated(const fs::path& dir) {
     const fs::path proj = dir / "proj" / ".agentty" / "mcp.json";
     const fs::path user = dir / "user" / ".agentty" / "mcp.json";
     // Same server name in both scopes, different commands.
-    check(plug::add_server(::agentty::IoAccess::grant(), proj, {"date", "/project/date", {}}, false) == plug::EditResult::Ok,
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), proj, {"date", "/project/date", {}}, false) == plug::EditResult::Ok,
           "seed project-scope server");
-    check(plug::add_server(::agentty::IoAccess::grant(), user, {"date", "/user/date", {}}, false) == plug::EditResult::Ok,
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), user, {"date", "/user/date", {}}, false) == plug::EditResult::Ok,
           "seed user-scope server");
 
     // Disable ONLY the project server (mirrors a picker toggle on a project row).
-    check(plug::set_server_disabled(::agentty::IoAccess::grant(), proj, "date", true) == plug::EditResult::Ok,
+    check(plug::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), proj, "date", true) == plug::EditResult::Ok,
           "disable project server");
     check(plug::is_server_disabled(proj, "date"),  "project server now disabled");
     check(!plug::is_server_disabled(user, "date"), "USER server untouched by project edit");
@@ -639,7 +639,7 @@ void scope_edits_are_isolated(const fs::path& dir) {
           "user command preserved across a project-scope edit");
 
     // Remove ONLY the user server (mirrors `d` on a user row).
-    check(plug::remove_server(::agentty::IoAccess::grant(), user, "date") == plug::EditResult::Ok, "remove user server");
+    check(plug::remove_server(::agentty::IoAccess::grant(), agtest::cap(), user, "date") == plug::EditResult::Ok, "remove user server");
     check(!read_json(user)["mcpServers"].contains("date"), "user entry gone");
     check(read_json(proj)["mcpServers"].contains("date"),
           "PROJECT entry survives a user-scope removal");
@@ -670,7 +670,7 @@ void project_trust_gate(const fs::path& dir) {
     fs::current_path(work);
 
     // Seed a project stdio server.
-    check(plug::add_server(::agentty::IoAccess::grant(), plug::config_path(::agentty::IoAccess::grant(), true), {"date", "/bin/date", {}}, false)
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), plug::config_path(::agentty::IoAccess::grant(), true), {"date", "/bin/date", {}}, false)
               == plug::EditResult::Ok, "seed project server");
 
     // Untrusted by default — a clone can't auto-run its own commands.
@@ -682,9 +682,9 @@ void project_trust_gate(const fs::path& dir) {
 
     // MCPoison: swap the command under the same name. The bytes change, so
     // the hash changes, so the old approval no longer matches → re-gated.
-    check(plug::set_server_disabled(::agentty::IoAccess::grant(), plug::config_path(::agentty::IoAccess::grant(), true), "date", false)
+    check(plug::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), plug::config_path(::agentty::IoAccess::grant(), true), "date", false)
               == plug::EditResult::Ok, "touch the config");
-    check(plug::add_server(::agentty::IoAccess::grant(), plug::config_path(::agentty::IoAccess::grant(), true), {"date", "/evil/date", {}}, /*force=*/true)
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), plug::config_path(::agentty::IoAccess::grant(), true), {"date", "/evil/date", {}}, /*force=*/true)
               == plug::EditResult::Ok, "swap the command (attacker edit)");
     check(!plug::is_project_config_trusted(::agentty::IoAccess::grant()),
           "changed content RE-GATES trust (MCPoison fix)");
@@ -717,9 +717,9 @@ void per_server_trust(const fs::path& dir) {
     fs::current_path(work);
     const fs::path cfg = plug::config_path(::agentty::IoAccess::grant(), true);
 
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, {"alpha", "/bin/alpha", {}}, false) == plug::EditResult::Ok,
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"alpha", "/bin/alpha", {}}, false) == plug::EditResult::Ok,
           "seed alpha");
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, {"beta", "/bin/beta", {}}, false) == plug::EditResult::Ok,
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"beta", "/bin/beta", {}}, false) == plug::EditResult::Ok,
           "seed beta");
 
     // Approve only alpha.
@@ -730,23 +730,23 @@ void per_server_trust(const fs::path& dir) {
     check(!plug::is_project_config_trusted(::agentty::IoAccess::grant()), "whole-file gate still closed");
 
     // Add a third server later — alpha stays trusted, gamma is pending.
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, {"gamma", "/bin/gamma", {}}, false) == plug::EditResult::Ok,
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"gamma", "/bin/gamma", {}}, false) == plug::EditResult::Ok,
           "add gamma later");
     check(plug::is_server_trusted(::agentty::IoAccess::grant(), cfg, "alpha"), "alpha still trusted after a new add");
     check(!plug::is_server_trusted(::agentty::IoAccess::grant(), cfg, "gamma"), "gamma pending");
 
     // Edit alpha's command (MCPoison) — only alpha re-gates.
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, {"alpha", "/evil/alpha", {}}, /*force=*/true)
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"alpha", "/evil/alpha", {}}, /*force=*/true)
               == plug::EditResult::Ok, "swap alpha's command");
     check(!plug::is_server_trusted(::agentty::IoAccess::grant(), cfg, "alpha"),
           "alpha re-gated after its command changed");
 
     // args are part of identity: approve, then change args → re-gated.
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, {"delta", "/bin/delta", {"--safe"}}, false)
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"delta", "/bin/delta", {"--safe"}}, false)
               == plug::EditResult::Ok, "seed delta with args");
     check(plug::approve_server(::agentty::IoAccess::grant(), cfg, "delta"), "approve delta");
     check(plug::is_server_trusted(::agentty::IoAccess::grant(), cfg, "delta"), "delta trusted with its args");
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, {"delta", "/bin/delta", {"--evil"}}, /*force=*/true)
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"delta", "/bin/delta", {"--evil"}}, /*force=*/true)
               == plug::EditResult::Ok, "change delta's args");
     check(!plug::is_server_trusted(::agentty::IoAccess::grant(), cfg, "delta"), "delta re-gated on args change");
 
@@ -767,7 +767,7 @@ void passthrough_server_add(const fs::path& dir) {
     pt.url  = "http://127.0.0.1:8787/v1/retrieve";
     pt.type = "passthrough";
     pt.passthrough = {"headroom_retrieve"};
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, pt, false) == plug::EditResult::Ok,
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, pt, false) == plug::EditResult::Ok,
           "passthrough add succeeds");
     json e = read_json(cfg)["mcpServers"]["headroom"];
     check(e["type"] == "passthrough", "type is passthrough");
@@ -781,7 +781,7 @@ void passthrough_server_add(const fs::path& dir) {
     // the passthrough block byte-for-byte.
     plug::ServerSpec other;
     other.name = "today"; other.command = "python3";
-    check(plug::add_server(::agentty::IoAccess::grant(), cfg, other, false) == plug::EditResult::Ok,
+    check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, other, false) == plug::EditResult::Ok,
           "sibling add ok");
     json again = read_json(cfg)["mcpServers"]["headroom"];
     check(again == e, "passthrough entry survives sibling edits");

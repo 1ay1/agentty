@@ -58,9 +58,19 @@ std::shared_ptr<mt::Exec> exec() {
 }
 
 mt::ExecResult sh(std::string script, mt::Budgets b) {
+#if defined(_WIN32)
+    // The platform shell on Windows is cmd.exe (what the shell tool and
+    // process_start use), so the scripts below have cmd.exe spellings there:
+    // `ping -n N 127.0.0.1 >nul` sleeps ~N-1 s, `for /l %i in (0,0,1)` loops
+    // forever, `<nul set /p "=x"` prints without a newline.
+    return exec()->run(mt::Call{}, {.program = {"cmd.exe", {"/S", "/C", std::move(script)}},
+                        .budgets = b,
+                        .max_output_bytes = 64u * 1024u});
+#else
     return exec()->run(mt::Call{}, {.program = {"/bin/sh", {"-c", std::move(script)}},
                         .budgets = b,
                         .max_output_bytes = 64u * 1024u});
+#endif
 }
 
 bool timed_out_on(const mt::ExecResult& r, mt::TimedOut::budget which) {
@@ -74,7 +84,11 @@ TEST_CASE("exec: a chatty runaway is reaped by the wall clock") {
     // THE bug. Output resets the idle clock forever, so only an absolute
     // ceiling can end this. Without one the call never returns.
     const auto t0 = std::chrono::steady_clock::now();
+#if defined(_WIN32)
+    auto r = sh("for /l %i in (0,0,1) do @echo spin", {.idle = 30s, .wall = 2s});
+#else
     auto r = sh("while :; do echo spin; done", {.idle = 30s, .wall = 2s});
+#endif
     const auto elapsed = std::chrono::steady_clock::now() - t0;
 
     CHECK_MESSAGE(timed_out_on(r, mt::TimedOut::budget::wall),
@@ -91,8 +105,17 @@ TEST_CASE("exec: a long chatty job is NOT cut off") {
     // default rather than a wall clock. Runtime here exceeds the idle
     // budget several times over; progress is what keeps it alive, and that
     // is correct.
+#if defined(_WIN32)
+    // cmd.exe has no sub-second sleep short of a ~300ms PowerShell start, so
+    // each step sleeps ~1s (ping -n 2) and the idle budget is 3s instead of
+    // 1s. The property is unchanged: total runtime (~6s) is double the idle
+    // budget, and only the output in between keeps it alive.
+    auto r = sh("for /l %i in (1,1,6) do @(echo step%i& ping -n 2 127.0.0.1 >nul)",
+                {.idle = 3s, .wall = 60s});
+#else
     auto r = sh("for i in 1 2 3 4 5 6; do echo step$i; sleep 0.2; done",
                 {.idle = 1s, .wall = 60s});
+#endif
 
     CHECK_MESSAGE(r.ok(), "progress keeps rolling the idle window forward");
     CHECK_MESSAGE(r.output.find("step6") != std::string::npos,
@@ -100,7 +123,11 @@ TEST_CASE("exec: a long chatty job is NOT cut off") {
 }
 
 TEST_CASE("exec: a silent hang is caught by the idle clock") {
+#if defined(_WIN32)
+    auto r = sh("ping -n 31 127.0.0.1 >nul", {.idle = 1s, .wall = 60s});
+#else
     auto r = sh("sleep 30", {.idle = 1s, .wall = 60s});
+#endif
     CHECK(timed_out_on(r, mt::TimedOut::budget::idle));
     CHECK_FALSE(timed_out_on(r, mt::TimedOut::budget::wall));
 }
@@ -110,8 +137,13 @@ TEST_CASE("exec: which budget fired is part of the answer") {
     // was working fine, give it longer or run it in the background". A
     // single timed_out flag forces the caller to guess, and it guesses
     // wrong half the time.
+#if defined(_WIN32)
+    auto hung    = sh("ping -n 31 127.0.0.1 >nul", {.idle = 1s, .wall = 60s});
+    auto runaway = sh("for /l %i in (0,0,1) do @echo x", {.idle = 30s, .wall = 2s});
+#else
     auto hung    = sh("sleep 30", {.idle = 1s, .wall = 60s});
     auto runaway = sh("while :; do echo x; done", {.idle = 30s, .wall = 2s});
+#endif
 
     const auto* a = std::get_if<mt::TimedOut>(&hung.outcome);
     const auto* b = std::get_if<mt::TimedOut>(&runaway.outcome);
@@ -125,7 +157,11 @@ TEST_CASE("exec: output printed before the exit survives it") {
     // The exit says the bytes are finished, not that we have them: what was
     // written before it is still in the pipe. jaal's conformance suite pins
     // this for the platform; this pins that the policy layer honours it.
+#if defined(_WIN32)
+    auto r = sh("<nul set /p \"=last-bytes\"& exit /b 3", {.idle = 5s, .wall = 30s});
+#else
     auto r = sh("printf 'last-bytes'; exit 3", {.idle = 5s, .wall = 30s});
+#endif
 
     const auto* e = std::get_if<mt::Exited>(&r.outcome);
     REQUIRE(e);
@@ -150,7 +186,12 @@ TEST_CASE("exec: a program that never ran is not a program that failed") {
 TEST_CASE("exec: a clean command reports no timeout at all") {
     // The negative case, so a bug that reports every run as timed-out does
     // not hide behind the checks above.
+#if defined(_WIN32)
+    // `set /p` at EOF leaves errorlevel 1, hence the explicit clean exit.
+    auto r = sh("<nul set /p \"=ok\"& exit /b 0", {.idle = 5s, .wall = 30s});
+#else
     auto r = sh("printf 'ok'", {.idle = 5s, .wall = 30s});
+#endif
     CHECK(r.ok());
     CHECK_FALSE(std::holds_alternative<mt::TimedOut>(r.outcome));
     CHECK_FALSE(r.truncated);
@@ -213,9 +254,15 @@ TEST_CASE("exec: the sandboxed path spawns, is watched, and still obeys the cloc
 // what matters is that the three tools still compose, since the lifetime
 // spans three separate calls.
 TEST_CASE("process session: start, poll, stop through the registry") {
+#if defined(_WIN32)
+    constexpr const char* kTicks =
+        "for /l %i in (1,1,3) do @(echo tick%i& ping -n 1 127.0.0.1 >nul)& echo done";
+#else
+    constexpr const char* kTicks = "for i in 1 2 3; do echo tick$i; sleep 0.15; done; echo done";
+#endif
     auto start = agentty::tool::DynamicDispatch::execute(
-        "process_start",
-        json{{"command", "for i in 1 2 3; do echo tick$i; sleep 0.15; done; echo done"}});
+        agtest::cap(), "process_start",
+        json{{"command", kTicks}});
     if (!start) MESSAGE("process_start failed: " << start.error().detail);
     REQUIRE(start.has_value());
 
@@ -230,7 +277,7 @@ TEST_CASE("process session: start, poll, stop through the registry") {
     bool ended = false;
     for (int i = 0; i < 40 && !ended; ++i) {
         auto p = agentty::tool::DynamicDispatch::execute(
-            "process_poll", json{{"id", id}, {"wait_ms", 100}});
+            agtest::cap(), "process_poll", json{{"id", id}, {"wait_ms", 100}});
         REQUIRE(p.has_value());
         seen += p->text;
         if (p->text.find("exited") != std::string::npos
@@ -246,7 +293,7 @@ TEST_CASE("process session: start, poll, stop through the registry") {
 
     // Stopping an already-finished session is not an error.
     auto stop = agentty::tool::DynamicDispatch::execute(
-        "process_stop", json{{"id", id}});
+        agtest::cap(), "process_stop", json{{"id", id}});
     CHECK(stop.has_value());
 }
 
@@ -309,8 +356,15 @@ TEST_CASE("exec: a tool call streams progress and stops on cancel") {
     {
         agentty::tools::CallContext ctx;
         ctx.progress = [&](std::string_view) { ++calls; };
+#if defined(_WIN32)
+        // ~1s apart (ping -n 2) so each tick is a separate progress event.
+        constexpr const char* kStream =
+            "for /l %i in (1,1,3) do @(echo tick%i& ping -n 2 127.0.0.1 >nul)";
+#else
+        constexpr const char* kStream = "for i in 1 2 3; do echo tick$i; sleep 0.2; done";
+#endif
         auto r = DynamicDispatch::execute(
-            "shell", json{{"command", "for i in 1 2 3; do echo tick$i; sleep 0.2; done"}}, ctx);
+            agtest::cap(), "shell", json{{"command", kStream}}, ctx);
         CHECK(r.has_value());
     }
     CHECK_MESSAGE(calls >= 3, "output streamed while the command ran");
@@ -321,7 +375,12 @@ TEST_CASE("exec: a tool call streams progress and stops on cancel") {
     {
         agentty::tools::CallContext ctx;
         ctx.cancel.push_back(src.get_token());
-        (void)DynamicDispatch::execute("shell", json{{"command", "sleep 20; echo done"}}, ctx);
+#if defined(_WIN32)
+        constexpr const char* kLong = "ping -n 21 127.0.0.1 >nul& echo done";
+#else
+        constexpr const char* kLong = "sleep 20; echo done";
+#endif
+        (void)DynamicDispatch::execute(agtest::cap(), "shell", json{{"command", kLong}}, ctx);
     }
     CHECK_MESSAGE(std::chrono::steady_clock::now() - t0 < 5s, "Esc stopped the command");
 }

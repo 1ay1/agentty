@@ -45,6 +45,16 @@ void write_file(const fs::path& p, const std::string& body) {
     return s;
 }
 
+// A hook command that creates `marker`. cmd.exe (the Windows hook shell) has
+// no `touch`; `type nul >` is its spelling.
+[[nodiscard]] std::string touch_cmd(const fs::path& marker) {
+#ifdef _WIN32
+    return "type nul > \"" + marker.string() + "\"";
+#else
+    return "touch " + marker.string();
+#endif
+}
+
 // Approve the CURRENT bytes of the hooks file by writing the approval map
 // directly (the interactive `agentty hooks approve` does the same store).
 void approve_current(const fs::path& hooks_file, const fs::path& home) {
@@ -63,7 +73,7 @@ void unapproved_never_runs(const fs::path& sandbox) {
     write_file(sandbox / ".agentty" / "hooks.json",
                nlohmann::json{
                    {"pre_tool", {{{"match", ""},
-                                  {"run", "touch " + marker.string()}}}},
+                                  {"run", touch_cmd(marker)}}}},
                }.dump());
 
     check(hooks::pending_approval(::agentty::IoAccess::grant()), "unapproved file reports pending");
@@ -83,11 +93,18 @@ void approved_runs_and_blocks(const fs::path& sandbox, const fs::path& home) {
                    {"pre_tool",
                     {{{"match", "shell"},
                       {"run",
+#ifdef _WIN32
+                       "findstr /c:\"rm -rf\" \"%AGENTTY_HOOK_PAYLOAD_FILE%\" >nul "
+                       "&& (echo dangerous command blocked& exit /b 1) "
+                       "|| exit /b 0"
+#else
                        "grep -q 'rm -rf' \"$AGENTTY_HOOK_PAYLOAD_FILE\" "
                        "&& { echo 'dangerous command blocked'; exit 1; } "
-                       "|| exit 0"}}}},
+                       "|| exit 0"
+#endif
+                      }}}},
                    {"post_tool", {{{"match", "shell"},
-                                   {"run", "touch " + marker.string()}}}},
+                                   {"run", touch_cmd(marker)}}}},
                }.dump());
     approve_current(sandbox / ".agentty" / "hooks.json", home);
     check(!hooks::pending_approval(::agentty::IoAccess::grant()), "approved file no longer pending");
@@ -117,7 +134,7 @@ void byte_change_regates(const fs::path& sandbox) {
     const fs::path hf = sandbox / ".agentty" / "hooks.json";
     write_file(hf, nlohmann::json{
                        {"pre_tool", {{{"match", ""},
-                                      {"run", "touch " + marker.string()}}}},
+                                      {"run", touch_cmd(marker)}}}},
                    }.dump() + " ");
     check(hooks::pending_approval(::agentty::IoAccess::grant()),
           "byte change to an approved file re-gates (pending again)");
@@ -132,16 +149,20 @@ void kill_switch(const fs::path& sandbox, const fs::path& home) {
     write_file(sandbox / ".agentty" / "hooks.json",
                nlohmann::json{
                    {"pre_tool", {{{"match", ""},
-                                  {"run", "touch " + marker.string()}}}},
+                                  {"run", touch_cmd(marker)}}}},
                }.dump());
     approve_current(sandbox / ".agentty" / "hooks.json", home);
-#ifndef _WIN32
+#ifdef _WIN32
+    _putenv_s("AGENTTY_NO_HOOKS", "1");
+#else
     ::setenv("AGENTTY_NO_HOOKS", "1", 1);
 #endif
     check(!hooks::pending_approval(::agentty::IoAccess::grant()), "kill switch silences pending notice");
     (void)hooks::run_pre_tool("shell", "{}");
     check(!fs::exists(marker), "AGENTTY_NO_HOOKS=1 disables approved hooks");
-#ifndef _WIN32
+#ifdef _WIN32
+    _putenv_s("AGENTTY_NO_HOOKS", "");   // empty value removes it
+#else
     ::unsetenv("AGENTTY_NO_HOOKS");
 #endif
     std::println("PASS\n");
@@ -186,15 +207,16 @@ TEST_CASE("hooks_gate") {
     const fs::path home = sandbox / "home";
     fs::create_directories(home);
     fs::current_path(sandbox);
+    // User-scope config resolves via util::user_root() ($AGENTTY_HOME, else
+    // home_dir()/.agentty, where home_dir() is $HOME then $USERPROFILE) —
+    // point ALL of them at this test's home so the files written under
+    // home/.agentty are the ones the loader reads. Setting only USERPROFILE
+    // on Windows lost to an inherited $HOME (MSYS2, Git Bash shells).
+    ::setenv("HOME", home.string().c_str(), 1);
 #ifdef _WIN32
     _putenv_s("USERPROFILE", home.string().c_str());
-#else
-    ::setenv("HOME", home.string().c_str(), 1);
-    // User-scope config resolves via util::user_root() ($AGENTTY_HOME,
-    // else $HOME/.agentty) — point it at this test's home so the files
-    // written under home/.agentty are the ones the loader reads.
-    ::unsetenv("AGENTTY_HOME");   // fall back to $HOME/.agentty
 #endif
+    ::unsetenv("AGENTTY_HOME");   // fall back to home_dir()/.agentty
 
     std::println("=== hooks_gate_test ===");
     unapproved_never_runs(sandbox);

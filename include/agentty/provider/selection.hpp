@@ -231,8 +231,9 @@ void prewarm_active_provider(Io);
 // disagree about which backend a selection names. ExternalAcp returns empty
 // (an ACP agent picks its own model and exposes no catalog). `auth` is the
 // active credential (used by the Anthropic / OpenAI-compat catalog endpoints;
-// ChatGPT reads its own in-process OAuth creds and ignores it).
-[[nodiscard]] std::vector<ModelInfo> list_models_for(Io io, 
+// ChatGPT reads its own in-process OAuth creds and ignores it). It fetches
+// over the network (and refreshes OAuth tokens): `unlocked`.
+[[nodiscard]] std::vector<ModelInfo> list_models_for(Io io, const maya::unlocked& cap,
     const Selection& sel, const auth::AuthHeader& auth);
 
 // ── Provider-picker search filter (shared by the reducer + the view) ────────

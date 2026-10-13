@@ -106,6 +106,16 @@ constexpr std::array kRules{
 
 bool is_host_trusted(std::string_view path, TrustKind* out_kind) {
     std::uint32_t t = 0;
+#if defined(_WIN32)
+    // claybin's shape rules split on '/'. A Windows path from
+    // std::filesystem ("C:\\repo\\.git\\hooks\\post-commit") had no '/' at
+    // all, so NO trusted file ever matched and the handoff gate reported
+    // nothing on Windows. Match on the generic form; '\\' is never a legal
+    // filename byte there, so this cannot create a false match.
+    std::string generic{path};
+    std::ranges::replace(generic, '\\', '/');
+    path = generic;
+#endif
     if (!shape_matches(path, std::span<const ShapeRule>{kRules}, &t)) return false;
     if (out_kind) *out_kind = static_cast<TrustKind>(t);
     return true;
@@ -295,12 +305,12 @@ std::vector<std::string> mask_paths(const Config& cfg, std::string_view workspac
         // a fraction of walking their entries (one syscall per directory, no
         // readdir, no per-file symlink_status), so the common case stays
         // cheap while staying exact.
-        // maya::guarded rather than a raw std::mutex: the concurrency banlist
-        // requires it (tests/lint/allowlist.txt -- my first version failed
-        // that check), and the type is the better tool anyway. The state is
-        // only reachable through with(), so "forgot the lock" is
-        // unrepresentable instead of a review item. Commands spawn from tool
-        // worker threads, so this really is shared.
+        // maya::snapshot rather than a lock: commands spawn from tool worker
+        // threads, so this really is shared, but it is a read-mostly value
+        // keyed by (ws, depth, stamp). Readers take one atomic load; a miss
+        // sweeps OUTSIDE any lock and publishes the result. Two concurrent
+        // misses both sweep and the last store wins -- both results are
+        // correct for their key, so that costs a walk, never correctness.
         struct Cache {
             std::string              ws;
             int                      depth = -1;
@@ -309,7 +319,7 @@ std::vector<std::string> mask_paths(const Config& cfg, std::string_view workspac
         };
         // Function-local static: the first command can land from a worker
         // during startup, and a file-scope global would race its own ctor.
-        static maya::guarded<Cache> cache;
+        static maya::snapshot<Cache> cache;
 
         const int depth = static_cast<int>(cfg.mask_scan_depth);
         // OUTSIDE the lock: stat-ing the tree is the slow part, and holding
@@ -318,28 +328,23 @@ std::vector<std::string> mask_paths(const Config& cfg, std::string_view workspac
         const std::uint64_t stamp =
             dir_stamp(std::filesystem::path{workspace}, depth);
 
-        // Captureless, as guarded<T> insists: everything it needs is passed
-        // as an argument. (A capture could name a second lock, and holding
-        // two is how deadlocks start -- the type enforces that rather than
-        // trusting the comment.)
-        //
-        // Returns a COPY rather than appending through a reference: with()
-        // forwards its arguments, so an out-parameter would bind to an
-        // rvalue. Copying ~16 short strings once per command is nothing
-        // against the walk this exists to avoid, and it keeps the critical
-        // section to a memcpy.
-        auto hits = cache.with(
-            [](Cache& c, std::string ws_, int depth_, std::uint64_t stamp_) {
-                if (c.ws != ws_ || c.depth != depth_ || c.stamp != stamp_) {
-                    c.paths.clear();
-                    sweep(std::filesystem::path{ws_}, depth_, c.paths);
-                    c.ws    = std::move(ws_);
-                    c.depth = depth_;
-                    c.stamp = stamp_;
-                }
-                return c.paths;
-            },
-            std::string{workspace}, depth, stamp);
+        // Copying ~16 short strings once per command is nothing against the
+        // walk this exists to avoid.
+        std::vector<std::string> hits;
+        {
+            auto cur = cache.load();
+            if (cur->ws == workspace && cur->depth == depth && cur->stamp == stamp) {
+                hits = cur->paths;
+            } else {
+                Cache next;
+                sweep(std::filesystem::path{workspace}, depth, next.paths);
+                next.ws    = std::string{workspace};
+                next.depth = depth;
+                next.stamp = stamp;
+                hits = next.paths;
+                cache.store(std::move(next));
+            }
+        }
         out.insert(out.end(), std::make_move_iterator(hits.begin()),
                    std::make_move_iterator(hits.end()));
     }

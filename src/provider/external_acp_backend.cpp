@@ -229,37 +229,45 @@ void ExternalAcpBackend::connect(rpc::Peer& peer) noexcept {
 }
 
 std::string ExternalAcpBackend::session_id() const {
-    return session_.read([](const std::optional<std::string>& s) {
-        return s.value_or(std::string{});
-    });
+    return session_.get().value_or(std::string{});
 }
 
 // ── Inbound calls ───────────────────────────────────────────────────────────
 // The agent's calls and notifications, answered on the peer's reader. The
 // round's sink is published for the life of the in-flight round and null
 // otherwise, so a late update after settle is dropped, not crashed.
+//
+// The reader hands each callback its `unlocked`; the router's handlers get it
+// through their context (Ctx), so a handler that takes a lock is checked.
 rpc::Dispatch ExternalAcpBackend::make_dispatch() {
     rpc::Dispatch d;
-    d.on_call         = [this](const acp::Call& c) { return router_.handle(*this, c); };
-    d.on_notification = [this](const acp::Notification& n) { router_.handle(*this, n); };
+    d.on_call = [this](const maya::unlocked& cap, const acp::Call& c) {
+        Ctx ctx{*this, cap};
+        return router_.handle(ctx, c);
+    };
+    d.on_notification = [this](const maya::unlocked& cap, const acp::Notification& n) {
+        Ctx ctx{*this, cap};
+        router_.handle(ctx, n);
+    };
     return d;
 }
 
 ExternalAcpBackend::Router ExternalAcpBackend::make_router() const {
     namespace m = acp::to_client;
-    using B = ExternalAcpBackend;
+    using B = Ctx;
     Router r;
 
     // session/update → normalized SessionUpdate to the round's sink.
-    r.on<m::SessionUpdate>([](B& b, const acp::SessionUpdateMsg& msg) {
-        auto round = b.round_.current();
+    r.on<m::SessionUpdate>([](B& c, const acp::SessionUpdateMsg& msg) {
+        auto round = c.self.round_.current();
         if (!round) return;
         if (auto member = round->inflight.join()) round->sink(msg.update);
     });
 
     // request_permission → delegate decides; default allow. We answer with the
     // agent's own first option when allowing, else Cancelled.
-    r.on<m::RequestPermission>([](B& b, const acp::RequestPermissionParams& p) {
+    r.on<m::RequestPermission>([](B& c, const acp::RequestPermissionParams& p) {
+        auto& b = c.self;
         bool allow = true;
         if (b.opts_.delegate.request_permission) allow = b.opts_.delegate.request_permission(p);
         acp::RequestPermissionResult res;
@@ -276,7 +284,8 @@ ExternalAcpBackend::Router ExternalAcpBackend::make_router() const {
 
     // fs/* → delegate. Unset ⇒ MethodNotFound, which tells the agent not to use it.
     if (opts_.delegate.read_text_file) {
-        r.on<m::FsReadTextFile>([](B& b, const acp::ReadTextFileParams& p) {
+        r.on<m::FsReadTextFile>([](B& c, const acp::ReadTextFileParams& p) {
+            auto& b = c.self;
             std::optional<int> line  = p.line  ? std::optional<int>(static_cast<int>(*p.line))  : std::nullopt;
             std::optional<int> limit = p.limit ? std::optional<int>(static_cast<int>(*p.limit)) : std::nullopt;
             acp::ReadTextFileResult res;
@@ -287,7 +296,8 @@ ExternalAcpBackend::Router ExternalAcpBackend::make_router() const {
         });
     }
     if (opts_.delegate.write_text_file) {
-        r.on<m::FsWriteTextFile>([](B& b, const acp::WriteTextFileParams& p) {
+        r.on<m::FsWriteTextFile>([](B& c, const acp::WriteTextFileParams& p) {
+            auto& b = c.self;
             b.opts_.delegate.write_text_file(p.path, p.content);
             return acp::Unit{};
         });
@@ -297,21 +307,22 @@ ExternalAcpBackend::Router ExternalAcpBackend::make_router() const {
     // completion via the delegate and caches the result under a fresh id;
     // output/wait_for_exit read it back; release() drops it.
     if (opts_.delegate.run_terminal) {
-        r.on<m::TerminalCreate>([](B& b, const acp::CreateTerminalParams& p) {
+        r.on<m::TerminalCreate>([](B& c, const acp::CreateTerminalParams& p) {
+            auto& b = c.self;
             std::optional<std::string> cwd = p.cwd ? std::optional<std::string>(*p.cwd)
                                                    : std::nullopt;
             auto res = b.opts_.delegate.run_terminal(p.command, p.args, cwd);
             acp::CreateTerminalResult out;
-            out.terminalId = b.terminals_.with([](Terminals& t, TerminalState st) {
+            out.terminalId = b.terminals_.with(c.cap, [](Terminals& t, TerminalState st) {
                 std::string tid = "term_" + std::to_string(t.next_id++);
                 t.by_id[tid] = std::move(st);
                 return tid;
             }, TerminalState{std::move(res.output), res.exit_code, res.truncated});
             return out;
         });
-        r.on<m::TerminalOutput>([](B& b, const acp::TerminalOutputParams& p) {
+        r.on<m::TerminalOutput>([](B& c, const acp::TerminalOutputParams& p) {
             acp::TerminalOutputResult res;
-            const auto term = b.terminals_.read([](const Terminals& t, std::string id) {
+            const auto term = c.self.terminals_.read(c.cap, [](const Terminals& t, std::string id) {
                 auto it = t.by_id.find(id);
                 return it == t.by_id.end() ? std::optional<TerminalState>{}
                                            : std::optional<TerminalState>{it->second};
@@ -325,9 +336,9 @@ ExternalAcpBackend::Router ExternalAcpBackend::make_router() const {
             }
             return res;
         });
-        r.on<m::TerminalWaitForExit>([](B& b, const acp::TerminalWaitForExitParams& p) {
+        r.on<m::TerminalWaitForExit>([](B& c, const acp::TerminalWaitForExitParams& p) {
             acp::TerminalExitStatus st;
-            st.exitCode = b.terminals_.read([](const Terminals& t, std::string id) {
+            st.exitCode = c.self.terminals_.read(c.cap, [](const Terminals& t, std::string id) {
                 auto it = t.by_id.find(id);
                 return it == t.by_id.end() ? std::optional<int>{}
                                            : std::optional<int>{it->second.exit_code};
@@ -336,8 +347,8 @@ ExternalAcpBackend::Router ExternalAcpBackend::make_router() const {
         });
         // The command already ran; nothing to signal.
         r.on<m::TerminalKill>([](B&, const acp::TerminalKillParams&) { return acp::Unit{}; });
-        r.on<m::TerminalRelease>([](B& b, const acp::TerminalReleaseParams& p) {
-            b.terminals_.with([](Terminals& t, std::string id) { t.by_id.erase(id); },
+        r.on<m::TerminalRelease>([](B& c, const acp::TerminalReleaseParams& p) {
+            c.self.terminals_.with(c.cap, [](Terminals& t, std::string id) { t.by_id.erase(id); },
                               p.terminalId);
             return acp::Unit{};
         });
@@ -347,11 +358,11 @@ ExternalAcpBackend::Router ExternalAcpBackend::make_router() const {
 
 // ── Session lifecycle ────────────────────────────────────────────────────────
 std::optional<acp::SessionId>
-ExternalAcpBackend::ensure_session_(const Request& req, std::optional<TurnError>& err) {
+ExternalAcpBackend::ensure_session_(const maya::unlocked& cap, const Request& req,
+                                    std::optional<TurnError>& err) {
     (void)req;
     if (opts_.reuse_session) {
-        auto have = session_.read([](const std::optional<std::string>& s) { return s; });
-        if (have) return acp::SessionId{std::move(*have)};
+        if (auto have = session_.get()) return acp::SessionId{std::move(*have)};
     }
     if (peer_ == nullptr) {
         err = TurnError{"ExternalAcpBackend: connect() not called (no connection bound)"};
@@ -362,27 +373,28 @@ ExternalAcpBackend::ensure_session_(const Request& req, std::optional<TurnError>
     np.cwd = opts_.cwd;
     np.mcpServers = opts_.mcp_servers;
 
-    auto r = peer_->call<acp::to_agent::SessionNew>(np);
+    auto r = peer_->call<acp::to_agent::SessionNew>(cap, np);
     if (!r) {
         err = TurnError{std::string("session/new failed: ") + r.error().what()};
         return std::nullopt;
     }
     if (!opts_.reuse_session) return r->sessionId;
     // Rounds are one at a time, but if two ever raced, the first id wins.
-    auto kept = session_.with([](std::optional<std::string>& s, std::string id) {
-        if (!s) s = std::move(id);
-        return *s;
-    }, r->sessionId.value);
-    return acp::SessionId{std::move(kept)};
+    const auto kept = session_.update(
+        [](const std::optional<std::string>& s, const std::string& id) {
+            return s ? s : std::optional<std::string>{id};
+        }, r->sessionId.value);
+    return acp::SessionId{**kept};
 }
 
 // ── The round ────────────────────────────────────────────────────────────────
-TurnResult ExternalAcpBackend::prompt(const Request&              req,
+TurnResult ExternalAcpBackend::prompt(const maya::unlocked&       cap,
+                                      const Request&              req,
                                       const TurnSink&             sink,
                                       const http::CancelTokenPtr& cancel) {
     // Open (or reuse) the session.
     std::optional<TurnError> sess_err;
-    auto sid = ensure_session_(req, sess_err);
+    auto sid = ensure_session_(cap, req, sess_err);
     if (!sid) return TurnResult::failed(*sess_err);
 
     // Publish this round's sink so inbound session/update notifications (on the
@@ -413,14 +425,14 @@ TurnResult ExternalAcpBackend::prompt(const Request&              req,
     rpc::CallOptions o;
     o.timeout = 0ms;
     if (cancel) o.cancel = cancel->token();
-    o.on_cancel = [this, &sent_cancel, sid = *sid] {
+    o.on_cancel = [this, &sent_cancel, sid = *sid](const maya::unlocked& c) {
         sent_cancel = true;
         acp::CancelParams cp;
         cp.sessionId = sid;
-        peer_->notify<acp::to_agent::SessionCancel>(cp);
+        peer_->notify<acp::to_agent::SessionCancel>(c, cp);
     };
     o.cancel_grace = 2s;
-    auto result = peer_->call<acp::to_agent::SessionPrompt>(pp, std::move(o));
+    auto result = peer_->call<acp::to_agent::SessionPrompt>(cap, pp, std::move(o));
 
     if (sent_cancel) return TurnResult::cancelled();
 
@@ -467,16 +479,16 @@ struct AgentProcessHolder {
 } // namespace
 
 void SpawnedAcpAgent::reset() noexcept {
-    // Stop the peer first: it closes the child's stdin (a cooperative agent
-    // exits), and the stop's interrupt kills the child so a reader parked on
-    // its stdout sees EOF and finishes inside the peer's grace. Only then is
-    // the child (and its streams) destroyed.
-    if (connection) connection->stop();
+    // Destroy the peer first: ~Peer stops it (closes the child's stdin -- a
+    // cooperative agent exits -- and the interrupt kills the child so a
+    // reader parked on its stdout sees EOF) and joins. Only then is the child
+    // (and its streams) destroyed.
     connection.reset();
     process.reset();
 }
 
-SpawnedAcpAgent spawn_acp_agent(const std::vector<std::string>& argv,
+SpawnedAcpAgent spawn_acp_agent(const maya::unlocked&           cap,
+                                const std::vector<std::string>& argv,
                                 const acp::InitializeParams&    init,
                                 rpc::Dispatch                   dispatch,
                                 std::string&                    err) {
@@ -500,7 +512,7 @@ SpawnedAcpAgent spawn_acp_agent(const std::vector<std::string>& argv,
     // stdin, a short grace for a cooperative exit, then kill it so its stdout
     // closes and the reader wakes.
     auto ch = rpc::stream_channel(holder->child->out(), holder->child->in());
-    ch.interrupt = [child = holder->child.get()] {
+    ch.interrupt = [child = holder->child.get()](const maya::unlocked&) {
         using namespace std::chrono_literals;
         child->close_stdin();
         child->terminate(1s);   // EOF first, up to 1s to exit, then the tree
@@ -514,7 +526,7 @@ SpawnedAcpAgent spawn_acp_agent(const std::vector<std::string>& argv,
 
     // Negotiate. A handshake failure (incompatible version, agent died on
     // startup, malformed reply) is a spawn error, never a half-open peer.
-    auto r = out.connection->call<acp::to_agent::Initialize>(init);
+    auto r = out.connection->call<acp::to_agent::Initialize>(cap, init);
     if (r) {
         try { (void)acp::negotiate_version(acp::kProtocolVersion, r->protocolVersion); }
         catch (const std::exception& e) { r = std::unexpected(acp::RpcError(acp::errc::InternalError, e.what())); }

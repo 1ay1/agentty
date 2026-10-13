@@ -24,11 +24,15 @@ std::string system_prompt_for(Io io, const Selection& selection) {
         if (ep.native_api) return ollama::system_prompt();
 
         // Compact prompting is a model/endpoint capability decision, not a
-        // provider-brand decision. Keep it for local OpenAI-compatible servers
-        // where small models benefit from short imperative instructions.
-        const bool local_endpoint = !ep.use_tls
-            && (ep.host == "localhost" || ep.host == "127.0.0.1");
-        if (local_endpoint) return openai::local_model_system_prompt();
+        // provider-brand decision. Keep it for self-hosted OpenAI-compatible
+        // servers, where small models benefit from short imperative
+        // instructions. "Self-hosted" means a server YOU run -- loopback,
+        // a LAN box (192.168.x.x, gpu-box, *.local), a tailnet -- the same
+        // rule the window probe uses. It used to be loopback-only, so a
+        // llama.cpp/vLLM on another machine fed gpt-oss the long hosted
+        // prompt and none of the local action rules (#91).
+        if (!ep.use_tls && openai::detail::is_local_endpoint(ep))
+            return openai::local_model_system_prompt();
 
         // Hosted OpenAI-compatible model on the shared base + any openai delta.
         return system_prompt_with_overlay(io, "openai");

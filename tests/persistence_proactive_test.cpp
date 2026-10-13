@@ -73,8 +73,8 @@ TEST_CASE("persistence proactive") {
     t.messages.push_back(fnote);
 
     // ── Round-trip through real disk ────────────────────────────────────
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
     // Through the store seam: a saved thread now lives in the log format
     // and <id>.json is retired once it verifies.
@@ -163,8 +163,8 @@ TEST_CASE("persistence: a tool in flight does not fail log verification") {
     asst.tool_calls.push_back(tc);
     t.messages.push_back(asst);
 
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
     const auto log_path    = persistence::threads_dir() / (t.id.value + ".jsonl");
     const auto legacy_path = persistence::threads_dir() / (t.id.value + ".json");

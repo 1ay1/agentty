@@ -12,54 +12,63 @@
 namespace agentty::tools::subagent {
 
 namespace {
-// The installed config, behind one guarded value. A whole Config is
-// copied out by current() and replaced by install(); the setters change one
-// field at a time as the user switches.
-maya::guarded<Config>& cfg() {
-    static maya::guarded<Config> c;
+// The installed config. A whole Config is copied out by current() and
+// replaced by install(); the setters change one field at a time as the user
+// switches. Copy-on-write in a published slot, not a lock: set_auth is
+// called from the effect host's auth swap and current() from every subagent
+// start, neither of which should need a capability for a value that is
+// replaced, never mutated in place. Each setter is one compare-and-swap.
+// (Config holds callables, so it can't be a jaal::snapshot -- those need a
+// provably-immutable T; a published<const Config> holds an immutable copy.)
+maya::published<const Config>& cfg() {
+    static maya::published<const Config> c;
     return c;
+}
+
+// Read-modify-write: f(Config&) on a private copy, swapped in only if no one
+// else swapped first; retried otherwise. f must have no side effects.
+template <class F>
+void edit(F f) {
+    for (;;) {
+        auto cur  = cfg().current();
+        auto next = std::make_shared<Config>(cur ? *cur : Config{});
+        f(*next);
+        if (cfg().publish_if(cur, std::shared_ptr<const Config>(std::move(next)))) return;
+    }
 }
 
 } // namespace
 
 void install(Config c) {
     c.installed = true;
-    cfg().with([](Config& k, Config v) { k = std::move(v); }, std::move(c));
+    cfg().publish(std::make_shared<const Config>(std::move(c)));
 }
 
 Config current() {
-    return cfg().read([](const Config& c) { return c; });
+    auto c = cfg().current();
+    return c ? *c : Config{};
 }
 
 void set_auth(Io, auth::AuthHeader auth) {
-    cfg().with([](Config& c, auth::AuthHeader a) {
-        if (c.installed) c.auth = std::move(a);
-    }, std::move(auth));
+    edit([&](Config& c) { if (c.installed) c.auth = auth; });
 }
 
 void set_model(Io, std::string model) {
     if (model.empty()) return;
     // Only meaningful once a config exists; leave `installed` untouched.
-    cfg().with([](Config& c, std::string m) { c.model = std::move(m); },
-               std::move(model));
+    edit([&](Config& c) { c.model = model; });
 }
 
 void set_candidates(Io, std::vector<ModelInfo> candidates) {
-    cfg().with([](Config& c, std::vector<ModelInfo> v) {
-        if (c.installed) c.candidates = std::move(v);
-    }, std::move(candidates));
+    edit([&](Config& c) { if (c.installed) c.candidates = candidates; });
 }
 
 void set_smart(Io, smart::RoleConfig smart) {
-    cfg().with([](Config& c, smart::RoleConfig v) {
-        if (c.installed) c.smart = std::move(v);
-    }, std::move(smart));
+    edit([&](Config& c) { if (c.installed) c.smart = smart; });
 }
 
 void set_provider(Io, std::string provider) {
-    cfg().with([](Config& c, std::string p) {
-        if (c.installed) c.provider = std::move(p);
-    }, std::move(provider));
+    edit([&](Config& c) { if (c.installed) c.provider = provider; });
 }
 
 
@@ -94,8 +103,9 @@ maya::stop_group& runs() {
 void ensure_teardown_registered() {
     static std::once_flag once;
     std::call_once(once, [] {
-        util::teardown::on_shutdown("subagent.running",
-                                    [] { (void)shutdown_running(); });
+        util::teardown::on_shutdown("subagent.running", [](const maya::unlocked&) {
+            (void)shutdown_running();
+        });
     });
 }
 

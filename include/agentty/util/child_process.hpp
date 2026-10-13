@@ -15,6 +15,7 @@
 
 #if AGENTTY_HAVE_CHILD_PROCESS
 
+#include <atomic>
 #include <chrono>
 #include <istream>
 #include <memory>
@@ -23,6 +24,7 @@
 #include <stdexcept>
 #include <streambuf>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -44,13 +46,91 @@
 
 namespace agentty::util {
 
-// The child itself, and what it ended with. Only reachable under a
-// maya::guarded, so stop(), reap() and close_stdin() never race each other:
-// a stop that ran after another thread's reap could signal a reused pid.
-struct child_proc {
-    maya::platform::native_process proc;
-    bool                           reaped = false;
-    std::optional<int>             exit_code;
+// The child itself, and what it ended with.
+//
+// stop(), reap() and close_stdin() must never race: a stop that ran after
+// another thread's reap could signal a reused pid, and a close racing a
+// close would double-close a handle. That used to be a lock. It is now ONE
+// atomic word with an "in use" bit claimed by compare-and-swap, because the
+// operations are reached from places that can't be handed a lock capability
+// (a destructor; a std::streambuf::sync override the library calls), and a
+// lock taken there would sit outside the compile-time order. A claim that
+// loses simply does nothing, which is right for every operation here:
+//
+//   reap   loses to another reap   -> the other one records the status
+//   stop   loses to anything       -> skipped; terminate() retries with a
+//                                     deadline and the reap ends it anyway
+//   close  loses to anything       -> retried until the claim is free or
+//                                     the process is reaped (EOF either way)
+//
+// No waiting, no lock, nothing for the order to see.
+class child_proc {
+public:
+    explicit child_proc(maya::platform::native_process p) : proc_(std::move(p)) {}
+
+    [[nodiscard]] bool reaped() const noexcept {
+        return (st_.load(std::memory_order_acquire) & kReaped) != 0;
+    }
+    [[nodiscard]] std::optional<int> exit_code() const noexcept {
+        // Published before kReaped is set (release), read after (acquire).
+        if (!reaped()) return std::nullopt;
+        return code_;
+    }
+
+    /// Reap once the exit handle has fired. True when the child is gone.
+    bool reap() noexcept {
+        if (!claim()) return reaped();
+        if (!(st_.load(std::memory_order_relaxed) & kReaped)) {
+            if (auto st = proc_.reap())
+                code_ = st->how == maya::platform::exit_status::kind::exited ? st->code
+                                                                             : 128 + st->code;
+            release(kReaped);
+        } else {
+            release(0);
+        }
+        return true;
+    }
+
+    /// Signal the tree, unless it's already reaped (or busy: skipped).
+    void stop(maya::platform::stop_mode mode) noexcept {
+        if (!claim()) return;
+        if (!(st_.load(std::memory_order_relaxed) & kReaped))
+            (void)proc_.stop(mode, maya::platform::stop_scope::tree);
+        release(0);
+    }
+
+    /// EOF on the child's stdin. Idempotent.
+    void close_stdin() noexcept {
+        for (;;) {
+            if (st_.load(std::memory_order_acquire) & (kReaped | kStdinClosed)) return;
+            if (claim()) {
+                if (!(st_.load(std::memory_order_relaxed) & kStdinClosed)) proc_.close_stdin();
+                release(kStdinClosed);
+                return;
+            }
+            std::this_thread::yield();   // a stop/reap holds the claim for a syscall
+        }
+    }
+
+private:
+    static constexpr unsigned kBusy        = 1u;
+    static constexpr unsigned kReaped      = 2u;
+    static constexpr unsigned kStdinClosed = 4u;
+
+    bool claim() noexcept {
+        unsigned cur = st_.load(std::memory_order_acquire);
+        while (!(cur & kBusy))
+            if (st_.compare_exchange_weak(cur, cur | kBusy, std::memory_order_acq_rel)) return true;
+        return false;
+    }
+    void release(unsigned set) noexcept {
+        st_.fetch_or(set, std::memory_order_release);
+        st_.fetch_and(~kBusy, std::memory_order_release);
+    }
+
+    maya::platform::native_process proc_;
+    std::optional<int>             code_;
+    std::atomic<unsigned>          st_{0};
 };
 
 
@@ -68,14 +148,14 @@ public:
         reg_.emplace(std::move(*reg));
     }
     void interrupt() noexcept {
-        interrupted_.with([](bool& v) { v = true; });
+        interrupted_.store(true, std::memory_order_release);
         if (reactor_) reactor_->waker().wake();
     }
 
 protected:
     int_type underflow() override {
         for (;;) {
-            if (interrupted_.read([](const bool& v) { return v; })) return traits_type::eof();
+            if (interrupted_.load(std::memory_order_acquire)) return traits_type::eof();
 #if defined(_WIN32)
             bool eof = false;
             const auto n = maya::platform::read_some(h_, in_, sizeof(in_), eof);
@@ -96,7 +176,7 @@ private:
     maya::platform::borrowed_handle h_;
     std::optional<maya::platform::native_reactor> reactor_;
     std::optional<maya::platform::native_reactor::registration> reg_;
-    maya::guarded<bool> interrupted_{false};
+    std::atomic<bool> interrupted_{false};
     char in_[4096]{};
 };
 
@@ -110,19 +190,25 @@ private:
 // stopped reading, and close() is called on the way to killing that child.
 // So close() marks the stream closed and, if a write is in flight, leaves
 // the fd to that writer, which closes it as it leaves.
+//
+// The two flags live in ONE atomic word and every transition is a single
+// compare-and-swap. sync() is a std::streambuf override the library calls,
+// so it can't be handed a lock capability; making the claim lock-free keeps
+// this class outside the lock order entirely.
 class child_in_buf final : public std::streambuf {
 public:
-    child_in_buf(maya::guarded<child_proc>& p, std::optional<maya::platform::borrowed_handle> h)
+    child_in_buf(child_proc& p, std::optional<maya::platform::borrowed_handle> h)
         : p_(p), h_(h) { setp(out_, out_ + sizeof(out_)); }
     void close() noexcept {
-        // Decide under the lock, act outside it. The writer, if any, sees
-        // `closed` when it leaves and closes the fd itself.
-        const bool close_now = st_.with([](State& s) {
-            if (s.closed) return false;
-            s.closed = true;
-            return !s.writing;
-        });
-        if (close_now) close_fd();
+        // Set `closed`. If no write was in flight, the fd is ours to close;
+        // otherwise the writer sees `closed` when it leaves and closes it.
+        unsigned cur = st_.load(std::memory_order_acquire);
+        for (;;) {
+            if (cur & kClosed) return;
+            if (st_.compare_exchange_weak(cur, cur | kClosed, std::memory_order_acq_rel))
+                break;
+        }
+        if (!(cur & kWriting)) close_fd();
     }
 
 protected:
@@ -139,25 +225,30 @@ protected:
         std::size_t left = static_cast<std::size_t>(pptr() - pbase());
         if (left == 0) return 0;
         // Claim the fd: nobody closes it while `writing` is set.
-        const bool mine = st_.with([](State& s) {
-            if (s.closed || s.writing) return false;
-            s.writing = true;
-            return true;
-        });
-        if (!mine) return -1;
+        unsigned cur = st_.load(std::memory_order_acquire);
+        for (;;) {
+            if (cur & (kClosed | kWriting)) return -1;
+            if (st_.compare_exchange_weak(cur, cur | kWriting, std::memory_order_acq_rel))
+                break;
+        }
         // Copied at spawn; valid until close_fd(), which can't run now.
-        if (!h_) { st_.with([](State& s) { s.writing = false; }); return -1; }
+        if (!h_) { release_claim(); return -1; }
         const int rc = write_all(*h_, p, left);
-        const bool closed = st_.with([](State& s) { s.writing = false; return s.closed; });
-        if (closed) { close_fd(); return -1; }   // close() left it to us
+        if (release_claim()) { close_fd(); return -1; }   // close() left it to us
         if (rc == 0) setp(out_, out_ + sizeof(out_));
         return rc;
     }
 
 private:
-    void close_fd() noexcept {
-        p_.with([](child_proc& c) { c.proc.close_stdin(); });
+    static constexpr unsigned kClosed  = 1u;
+    static constexpr unsigned kWriting = 2u;   // a write is in flight; it owns the fd
+
+    // Drop the write claim; true when close() ran meanwhile (the fd is ours).
+    bool release_claim() noexcept {
+        return (st_.fetch_and(~kWriting, std::memory_order_acq_rel) & kClosed) != 0;
     }
+
+    void close_fd() noexcept { p_.close_stdin(); }
 
     static int write_all(maya::platform::borrowed_handle h, const char* p, std::size_t left) {
         while (left > 0) {
@@ -179,13 +270,9 @@ private:
         return 0;
     }
 
-    struct State {
-        bool closed  = false;
-        bool writing = false;   // a write is in flight; it owns the fd
-    };
-    maya::guarded<child_proc>&                       p_;
+    child_proc&                                      p_;
     const std::optional<maya::platform::borrowed_handle> h_;
-    maya::guarded<State> st_;
+    std::atomic<unsigned> st_{0};
     char out_[4096]{};
 };
 
@@ -230,7 +317,7 @@ public:
         const auto out = p->stdout_handle();
         const auto in  = p->stdin_handle();
         if (!out) throw std::runtime_error("child_process: no stdout pipe");
-        proc_ = std::make_unique<maya::guarded<child_proc>>(child_proc{std::move(*p)});
+        proc_ = std::make_unique<child_proc>(std::move(*p));
         out_buf_    = std::make_unique<child_out_buf>(*out);
         in_buf_     = std::make_unique<child_in_buf>(*proc_, in);
         out_stream_ = std::make_unique<std::istream>(out_buf_.get());
@@ -252,9 +339,7 @@ public:
     }
 
     // 0..255 for an exit, 128+N for death by signal N; nullopt while running.
-    [[nodiscard]] std::optional<int> exit_code() const noexcept {
-        return proc_->read([](const child_proc& c) { return c.exit_code; });
-    }
+    [[nodiscard]] std::optional<int> exit_code() const noexcept { return proc_->exit_code(); }
 
     // EOF on the child's stdin: a well-behaved server starts exiting. The
     // streams stay alive (a peer may still hold them); writes now fail.
@@ -282,16 +367,10 @@ public:
     }
 
 private:
-    [[nodiscard]] bool exited() const noexcept {
-        return proc_->read([](const child_proc& c) { return c.reaped; });
-    }
+    [[nodiscard]] bool exited() const noexcept { return proc_->reaped(); }
 
-    // Under the lock, so it can't land after a reap.
-    void stop(maya::platform::stop_mode m) noexcept {
-        proc_->with([](child_proc& c, maya::platform::stop_mode mode) {
-            if (!c.reaped) (void)c.proc.stop(mode, maya::platform::stop_scope::tree);
-        }, m);
-    }
+    // Claimed, so it can't land after a reap.
+    void stop(maya::platform::stop_mode m) noexcept { proc_->stop(m); }
 
     // Is the exit handle signalled within `d`? Level-triggered, so any
     // thread may ask without a shared reactor.
@@ -312,18 +391,12 @@ private:
     bool wait_exit(std::chrono::milliseconds d) noexcept {
         if (exited()) return true;
         if (!exit_ready(d)) return false;
-        proc_->with([](child_proc& c) {
-            if (c.reaped) return;
-            if (auto st = c.proc.reap())
-                c.exit_code = st->how == maya::platform::exit_status::kind::exited
-                                ? st->code : 128 + st->code;
-            c.reaped = true;
-        });
+        while (!proc_->reap()) std::this_thread::yield();   // a stop holds the claim briefly
         return true;
     }
 
-    // Behind a pointer: guarded can't move, and the in-buf holds a reference.
-    std::unique_ptr<maya::guarded<child_proc>> proc_;
+    // Behind a pointer: the in-buf holds a reference.
+    std::unique_ptr<child_proc>                proc_;
     maya::platform::borrowed_handle            exit_h_{};
     int                                        pid_ = 0;
     std::unique_ptr<child_out_buf> out_buf_;

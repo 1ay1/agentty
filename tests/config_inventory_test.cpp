@@ -83,7 +83,7 @@ TEST_CASE("every Layout and Spec is declared in the inventory") {
         if (!e.is_regular_file(ec)) continue;
         const std::string ext = e.path().extension().string();
         if (ext != ".cpp" && ext != ".hpp") continue;
-        const std::string rel = fs::relative(e.path(), root, ec).string();
+        const std::string rel = fs::relative(e.path(), root, ec).generic_string();
         if (rel.rfind("build", 0) == 0 || rel.rfind("third_party", 0) == 0)
             continue;
         if (allowed(rel)) continue;
@@ -260,8 +260,14 @@ TEST_CASE("an unreadable subtree is flagged, not silently dropped") {
     // lie the rest of this file exists to prevent. Partial is fine; silent
     // is not.
     //
-    // Root can read anything, so this would pass vacuously there.
+    // Root can read anything, so this would pass vacuously there. Windows
+    // can't express "unlistable" through fs::permissions at all (it only
+    // toggles the read-only attribute), so the precondition can't be built.
+#if defined(_WIN32)
+    return;
+#else
     if (::geteuid() == 0) return;
+#endif
 
     const fs::path base = fs::temp_directory_path()
                         / "agentty_cfg_partial";

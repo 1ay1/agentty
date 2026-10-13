@@ -59,7 +59,17 @@ int main() {
     // 1500 is deliberately loose — this is a debug build on shared CI, and
     // a flaky perf test gets deleted rather than fixed. It catches the
     // REGRESSION SHAPE (re-parsing the library per turn), not jitter.
+    //
+    // Windows: the stat-only pass is ~80 path lookups (40 skill dirs + their
+    // SKILL.md), and an NTFS metadata query is ~30-40 us against ~3 us on
+    // Linux, so the same healthy pass measures ~3 ms there. The re-parse
+    // regression this guards against costs several times that again (every
+    // SKILL.md opened, read and hashed), so the shape still shows.
+#if defined(_WIN32)
+    constexpr long long kBudgetUs = 6000;
+#else
     constexpr long long kBudgetUs = 1500;
+#endif
     const bool ok = per < kBudgetUs;
     if (!ok) {
         std::printf("FAIL: %lld us/call exceeds the %lld us budget.\n", per, kBudgetUs);

@@ -163,8 +163,10 @@ struct DynamicDispatch {
     }
 
     // Execute against a pre-resolved ToolDef (see resolve()). Same body as
-    // execute(name, args) but skips the second name lookup.
-    [[nodiscard]] static ExecResult execute_with(const tools::ToolDef* td,
+    // execute(name, args) but skips the second name lookup. Tools run on a
+    // worker holding no lock, and may block: `unlocked`.
+    [[nodiscard]] static ExecResult execute_with(const maya::unlocked& cap,
+                                                 const tools::ToolDef* td,
                                                  std::string_view name,
                                                  const nlohmann::json& args,
                                                  const tools::CallContext& ctx) noexcept {
@@ -173,7 +175,12 @@ struct DynamicDispatch {
         const nlohmann::json& safe_args = args.is_object() ? args : kEmpty;
         ExecResult result;
         try {
-            result = td->execute(safe_args, ctx);
+            // The capability rides the context across mcp-cpp's callbacks for
+            // exactly this call: a per-call copy holds it, and the copy dies
+            // when the call returns (CallContext::cap).
+            tools::CallContext call_ctx = ctx;
+            call_ctx.cap.set(std::addressof(cap));
+            result = td->execute(cap, safe_args, call_ctx);
         } catch (const std::exception& e) {
             return std::unexpected(ToolError::unknown(std::string{"tool crashed: "} + e.what()));
         } catch (...) {
@@ -222,7 +229,7 @@ struct DynamicDispatch {
     // than failing closed -- refusing those would break resumed threads for a
     // risk that only exists where a grant was actually given.
     [[nodiscard]] static ExecResult execute_approved(
-        std::string_view name, const nlohmann::json& args,
+        const maya::unlocked& cap, std::string_view name, const nlohmann::json& args,
         std::uint64_t approved_hash, const tools::CallContext& ctx) noexcept {
         const auto* td = tools::find(name);
         if (!td) return std::unexpected(ToolError::not_found(tools::unknown_tool_error(name)));
@@ -233,13 +240,14 @@ struct DynamicDispatch {
                 "compromised or updated MCP server looks like. Re-request the "
                 "call to be shown the new definition."));
         }
-        return execute_with(td, name, args, ctx);
+        return execute_with(cap, td, name, args, ctx);
     }
 
-    [[nodiscard]] static ExecResult execute(std::string_view name,
+    [[nodiscard]] static ExecResult execute(const maya::unlocked& cap,
+                                            std::string_view name,
                                             const nlohmann::json& args,
                                             const tools::CallContext& ctx = {}) noexcept {
-        return execute_with(tools::find(name), name, args, ctx);
+        return execute_with(cap, tools::find(name), name, args, ctx);
     }
 
     // Single source of truth for whether a tool gates on the user.

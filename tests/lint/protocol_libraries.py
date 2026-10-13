@@ -23,6 +23,13 @@ import sys
 LIBS = ["mcp-cpp", "acp-cpp", "rag-cpp", "jsonrpc-cpp", "claybin"]
 EXTS = (".cpp", ".hpp", ".h", ".c", ".mm", ".cc")
 
+
+def relpath(path, start):
+    """os.path.relpath with '/' separators on every OS. The prefix tables
+    below are written POSIX-style ("mcp-cpp/src/tools_native/"); on Windows
+    relpath returns backslashes and every allow-prefix silently missed."""
+    return os.path.relpath(path, start).replace(os.sep, "/")
+
 # rule -> regex over stripped code. A leading space is added to every line so
 # "not preceded by an identifier" can be written as [^\w.>:].
 RULES = {
@@ -123,7 +130,7 @@ def purity(root):
             continue
         for path in lib_files(root, lib):
             nfiles += 1
-            rel = os.path.relpath(path, os.path.join(root, "third_party"))
+            rel = relpath(path, os.path.join(root, "third_party"))
             code = strip(open(path, encoding="utf-8", errors="replace").read())
             for no, line in enumerate(code.split("\n"), 1):
                 if not line.strip():
@@ -175,7 +182,7 @@ def duplication(root):
     windows = {}   # hash of DUP_WINDOW lines -> (lib, rel, line)
     for lib in ["jsonrpc-cpp", "mcp-cpp", "acp-cpp"]:
         for path in lib_files(root, lib, ("include",) if lib == "jsonrpc-cpp" else ("src", "include")):
-            rel = os.path.relpath(path, os.path.join(root, "third_party"))
+            rel = relpath(path, os.path.join(root, "third_party"))
             code = strip(open(path, encoding="utf-8", errors="replace").read())
             if lib != "jsonrpc-cpp":
                 for no, line in enumerate(code.split("\n"), 1):
@@ -219,7 +226,7 @@ def jsonrpc_leaf(root):
     hits = []
     inc = re.compile(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]')
     for path in lib_files(root, "jsonrpc-cpp", ("include", "src")):
-        rel = os.path.relpath(path, os.path.join(root, "third_party"))
+        rel = relpath(path, os.path.join(root, "third_party"))
         for no, line in enumerate(open(path, encoding="utf-8").read().split("\n"), 1):
             m = inc.match(line)
             if not m:
@@ -235,7 +242,7 @@ def jsonrpc_leaf(root):
                 if not f.endswith(EXTS):
                     continue
                 path = os.path.join(dp, f)
-                rel = os.path.relpath(path, root)
+                rel = relpath(path, root)
                 if rel.startswith(JSONRPC_USERS):
                     continue
                 for no, line in enumerate(open(path, encoding="utf-8", errors="replace").read().split("\n"), 1):
@@ -303,7 +310,7 @@ def scan_agentty(root, rx, banner):
                 code = drop_win32(strip(open(path, encoding="utf-8", errors="replace").read()))
                 for no, line in enumerate(code.split("\n"), 1):
                     if rx.search(" " + line):
-                        hits.append(f"{os.path.relpath(path, root)}:{no}: {line.strip()}")
+                        hits.append(f"{relpath(path, root)}:{no}: {line.strip()}")
     print(banner)
     return hits
 

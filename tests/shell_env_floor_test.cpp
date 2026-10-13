@@ -36,7 +36,7 @@ namespace {
 // Run `shell` with an env block and report whether it was refused.
 bool env_refused(const char* key, const char* value = "/tmp/payload") {
     auto r = agentty::tool::DynamicDispatch::execute(
-        "shell", json{{"command", "true"},
+        agtest::cap(), "shell", json{{"command", "true"},
                       {"env", json{{key, value}}}});
     if (r.has_value()) return false;
     return r.error().kind == agentty::tools::ErrorKind::InvalidArgs
@@ -108,7 +108,7 @@ TEST_CASE("shell env: a refused key fails the call, it is not dropped") {
     // Silently dropping it would run a command that does something subtly
     // different from what was asked, which is worse than a clear no.
     auto r = agentty::tool::DynamicDispatch::execute(
-        "shell", json{{"command", "true"},
+        agtest::cap(), "shell", json{{"command", "true"},
                       {"env", json{{"LD_PRELOAD", "/tmp/x.so"},
                                    {"CI", "1"}}}});
     REQUIRE_FALSE(r.has_value());

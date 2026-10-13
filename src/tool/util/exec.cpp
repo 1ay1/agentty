@@ -216,28 +216,52 @@ std::optional<std::chrono::seconds> env_wall_override() {
 /// wants to, not on a schedule -- so draining only inside poll() would stall
 /// exactly the chatty servers this tool exists for. It is a jaal worker
 /// (util::WorkerGroup): stop_token to wind it up, joined on destruction.
+///
+/// Lock order: the shared state is a LEAF whose bodies only move bytes and
+/// flags. The pump gets its `unlocked` at job entry. poll() and stop() are
+/// mcp-cpp Session virtuals whose signatures the library fixes, and the
+/// destructor can't be handed a capability either; each re-states it at that
+/// one entry (`session_root`, listed in tests/lint/allowlist.txt). Sound
+/// because they are called only by mcp-cpp's process tools from a tool body
+/// on a tool worker, which holds no agentty lock.
 class JaalSession final : public mt::Session {
   public:
     // The process moves into the pump: from here on nothing else can reach
     // it, so a stop() racing the pump's reap() can't happen by construction.
     JaalSession(process_t p, std::size_t cap) : started_(clock_t_::now()) {
-        drain_.post([](std::stop_token st, process_t proc, std::size_t cap,
-                       state_t state) { pump(st, std::move(proc), cap, state); },
+        drain_.post([](const maya::unlocked& c, std::stop_token st, process_t proc, std::size_t cap,
+                       state_t state) { pump(c, st, std::move(proc), cap, state); },
                     std::move(p), cap, st_);
     }
     ~JaalSession() override {
-        stop();
-        drain_.stop();   // requests stop on the pump's token, then joins
+        session_root([this](const maya::unlocked& c) {
+            stop_with(c);
+            drain_.stop(c);   // requests stop on the pump's token, then joins
+        });
     }
 
     [[nodiscard]] Update poll(std::chrono::milliseconds wait) override {
+        return session_root([&](const maya::unlocked& c) { return poll_with(c, wait); });
+    }
+
+    void stop() override {
+        session_root([this](const maya::unlocked& c) { stop_with(c); });
+    }
+
+  private:
+    template <class F>
+    static auto session_root(F&& f) -> decltype(maya::thread_root(std::forward<F>(f))) {
+        return maya::thread_root(std::forward<F>(f));
+    }
+
+    [[nodiscard]] Update poll_with(const maya::unlocked& cap, std::chrono::milliseconds wait) {
         // Wait for something to report rather than returning empty
         // immediately: a caller that polls in a loop should not spin, and one
         // that asks for 5s of news should get 5s of news.
         // Wakes the instant the pump writes news or the child ends. One
         // exclusive section that both drains and decides; returning a struct
         // by value is the only way out of the guarded state.
-        auto [u, news] = st_->wait_with_for(wait,
+        auto [u, news] = st_->wait_with_for(cap, wait,
             [](const Shared& s) { return !s.pending.empty() || !s.alive; },
             [](Shared& s) {
             Update u;
@@ -255,21 +279,21 @@ class JaalSession final : public mt::Session {
         return u;
     }
 
-    void stop() override {
+    void stop_with(const maya::below<maya::leaf>& cap) {
         // The pump owns the process, so this just asks; the pump sees it
         // within its 100ms wait and sends SIGTERM.
-        st_->with([](Shared& s, clock_t_::time_point at) {
+        st_->with(cap, [](Shared& s, clock_t_::time_point at) {
             if (!s.alive || s.stopping) return;
             s.stopping = true;
             s.stop_at  = at;
         }, clock_t_::now() + std::chrono::seconds{2});
     }
 
-  private:
     struct Shared;
     using state_t = maya::co_owned<maya::guarded<Shared>>;
 
-    static void pump(std::stop_token st, process_t proc_, std::size_t cap_, state_t state) {
+    static void pump(const maya::unlocked& cap, std::stop_token st, process_t proc_,
+                     std::size_t cap_, state_t state) {
         auto& st_ = *state;
         auto reactor = reactor_t::create();
         if (!reactor) return;
@@ -296,7 +320,7 @@ class JaalSession final : public mt::Session {
                     // reports the hangup on every wait and the loop spins.
                     if (r.hangup && chunk.empty()) out_reg.reset();
                     if (!chunk.empty() || lost)
-                        st_.with([](Shared& s, std::string c, bool l,
+                        st_.with(cap, [](Shared& s, std::string c, bool l,
                                     std::size_t cap) {
                             if (s.pending.size() < cap) s.pending += c;
                             else                        s.truncated = true;
@@ -307,7 +331,7 @@ class JaalSession final : public mt::Session {
                 }
             }
             if (!exited) {
-                const auto [stopping, overdue] = st_.read(
+                const auto [stopping, overdue] = st_.read(cap,
                     [](const Shared& s, clock_t_::time_point now) {
                         return std::pair{s.stopping, s.stopping && now >= s.stop_at};
                     }, clock_t_::now());
@@ -344,7 +368,7 @@ class JaalSession final : public mt::Session {
                      ? mt::ExecOutcome{mt::Exited{s->code}}
                      : mt::ExecOutcome{mt::Signalled{s->code}};
 
-        st_.with([](Shared& s, std::string t, bool l, mt::ExecOutcome o) {
+        st_.with(cap, [](Shared& s, std::string t, bool l, mt::ExecOutcome o) {
             if (!t.empty()) s.pending += t;
             if (l) s.truncated = true;
             s.outcome = o;
@@ -557,7 +581,7 @@ ChildResult run_child(const ChildRun& run) {
         // feeder.stop() after the reap is the join.
         if (auto dup = maya::platform::duplicate_handle(h->get())) {
             proc.close_stdin();
-            feeder.post([](std::stop_token, maya::platform::owned_handle own,
+            feeder.post([](const maya::unlocked&, std::stop_token, maya::platform::owned_handle own,
                            std::string data) {
                 std::size_t off = 0;
                 while (off < data.size()) {
@@ -686,18 +710,31 @@ ChildResult run_child(const ChildRun& run) {
     // feeder blocked in WriteFile. Ending the job closes every copy, so the
     // write fails and the barrier below can't hang.
     (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
-    feeder.stop();
+    // run_child is a blocking leaf helper (it locks nothing of ours). Its
+    // callers are tool bodies, mcp-cpp's Exec, the keystore/clipboard CLI
+    // probes -- none inside an agentty lock body, which can't reach it (they
+    // are captureless over their own value). The join re-states that here,
+    // the one reviewed root for this helper (tests/lint/allowlist.txt).
+    maya::thread_root([&](const maya::unlocked& c) { feeder.stop(c); });
 #endif
     stamp();
     return r;
 }
 
+// The scan fan-out mcp-cpp's and rag-cpp's search tools call through their
+// Splitter (a std::function whose signature those libraries fix). Joining
+// helpers needs `unlocked`; it is re-stated here, the one reviewed root for
+// the splitter (tests/lint/allowlist.txt). Sound: the libraries call it from
+// a tool body or a RAG index build, never from inside an agentty lock body,
+// and `fn` (their per-share scan) takes no agentty lock.
 void scope_fan_out(std::size_t n, const std::function<void(std::size_t)>& fn) {
     if (n <= 1) { if (n) fn(0); return; }
-    maya::scope([&](maya::nursery& nur) {
-        for (std::size_t i = 1; i < n; ++i)
-            (void)nur.spawn([&fn, i] { fn(i); });   // joined by scope
-        fn(0);   // the caller runs a share too
+    maya::thread_root([&](const maya::unlocked& cap) {
+        maya::scope(cap, [&](maya::nursery& nur) {
+            for (std::size_t i = 1; i < n; ++i)
+                (void)nur.spawn([&fn, i] { fn(i); });   // joined by scope
+            fn(0);   // the caller runs a share too
+        });
     });
 }
 

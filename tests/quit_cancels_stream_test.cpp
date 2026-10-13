@@ -25,7 +25,7 @@ namespace D = agentty::app::detail;
 namespace {
 void install_stub_deps() {
     A::app::install_deps(A::app::Deps{
-        .stream        = [](A::provider::Request, A::provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, A::provider::Request, A::provider::EventSink) {},
         .save_thread   = [](const A::Thread&) {},
         .delete_thread = [](const A::ThreadId&) {},
         .load_threads  = [] { return std::vector<A::Thread>{}; },

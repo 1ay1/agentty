@@ -140,7 +140,11 @@ public:
 
     // AcpBackend contract. Drives one round; streams SessionUpdates to `sink`;
     // returns the round's TurnResult. Thread-compatible: one round at a time.
-    TurnResult prompt(const Request&              req,
+    // ExternalAcpBackend's turn: send session/prompt and stream session/update
+    // into `sink` until the PromptResult. Exactly one terminal event.
+    // Blocks on the agent's reply: `unlocked`.
+    TurnResult prompt(const maya::unlocked&       cap,
+                      const Request&              req,
                       const TurnSink&             sink,
                       const http::CancelTokenPtr& cancel) override;
 
@@ -155,20 +159,26 @@ public:
     [[nodiscard]] rpc::Dispatch make_dispatch();
 
 private:
-    using Router = ::jsonrpc::Router<ExternalAcpBackend>;
+    // What a router handler gets: the backend, and the reader thread's
+    // capability for the call it is answering (it lives on the reader's
+    // stack for exactly that call).
+    struct Ctx {
+        ExternalAcpBackend&   self;
+        const maya::unlocked& cap;
+    };
+    using Router = ::jsonrpc::Router<Ctx>;
     Router make_router() const;
 
-    // Ensure a live session exists; opens one via `session/new` if needed.
-    // Returns the session id, or std::nullopt on failure (fills `err`).
-    std::optional<acp::SessionId> ensure_session_(const Request& req,
+    std::optional<acp::SessionId> ensure_session_(const maya::unlocked& cap,
+                                                  const Request& req,
                                                   std::optional<TurnError>& err);
 
     rpc::Peer*         peer_ = nullptr;   // set once by connect()
     ExternalAcpOptions opts_;
     Router             router_;
 
-    // The reused session id (reuse_session mode), empty until the first round.
-    maya::guarded<std::optional<std::string>> session_;
+    // The reused session id: set once, read every round. A snapshot.
+    maya::snapshot<std::optional<std::string>> session_;
 
     // The round in flight. session/update arrives on the peer's reader,
     // which joins `inflight` before calling `sink`. prompt() takes the
@@ -230,7 +240,11 @@ struct SpawnedAcpAgent {
 //     if (!agent.ok()) { /* handle err */ }
 //     backend.connect(*agent.connection);
 //     // ... backend.prompt(...) ...  (keep `agent` alive for the backend's life)
-[[nodiscard]] SpawnedAcpAgent spawn_acp_agent(const std::vector<std::string>& argv,
+// Spawn `argv` as an ACP agent, run an rpc::Peer over its stdio, and complete
+// the `initialize` handshake. On failure returns !ok() and sets `err`.
+// Waits for the handshake: `unlocked`.
+[[nodiscard]] SpawnedAcpAgent spawn_acp_agent(const maya::unlocked&           cap,
+                                              const std::vector<std::string>& argv,
                                               const acp::InitializeParams&    init,
                                               rpc::Dispatch                   dispatch,
                                               std::string&                    err);

@@ -1,8 +1,35 @@
 // src/mcp/connection.cpp — one MCP server as a capability provider. See
 // connection.hpp.
+//
+// ── Lock order ─────────────────────────────────────────────────────────────
+//
+// Connection implements mcp-cpp's CapabilityProvider, whose virtuals
+// (execute, list, read_resource, ...) have signatures fixed by a third-party
+// library: they cannot be handed a capability. So this file takes NO jaal
+// lock at all, and nothing in it can be part of a lock-order cycle:
+//
+//   lists        a jaal::snapshot (replaced wholesale on refresh)
+//   poisoned     an atomic flag
+//   busy         one call at a time: an atomic claimed by compare-and-swap.
+//                A caller that loses waits for the holder to finish, in
+//                short sleeps -- a wait on an atomic, not on a lock, so it
+//                can't nest with any lock the caller holds into a cycle
+//                (the holder never waits for anything the caller holds:
+//                it waits only for the server's reply, delivered by the
+//                peer's own reader thread).
+//   reconnecting the same, for one reconnect at a time
+//
+// The blocking work -- an RPC round-trip -- runs on the caller's thread.
+// The rpc::Peer needs `unlocked` for it, and that capability is minted at
+// each library entry point below (`entry_root`), the one reviewed place.
+// That is sound for the reason above: the peer's waits are for its own
+// reader, which never takes any lock a caller of this class could hold.
 
 #include "agentty/mcp/connection.hpp"
 #include "agentty/mcp/client.hpp"
+
+#include <atomic>
+#include <thread>
 
 #include <mcp/mrtr.hpp>
 #include <mcp/protocol.hpp>
@@ -31,16 +58,41 @@ struct Lists {
 }  // namespace agentty::mcp
 
 MAYA_SENDABLE(agentty::mcp::Lists);
+MAYA_FROZEN(agentty::mcp::Lists);
 MAYA_SENDABLE(mcp::cap::CapabilityProvider::ListChangedFn);
 
 namespace agentty::mcp {
 
+namespace {
+// The capability root for a CapabilityProvider entry point (see the top of
+// this file for why it is sound). Listed in tests/lint/allowlist.txt.
+template <class F>
+decltype(auto) entry_root(F&& f) {
+    return maya::thread_root(std::forward<F>(f));
+}
+
+// Claim an atomic gate, blocking (atomic wait, holding nothing of ours)
+// while someone else holds it. Every release goes through release() so the
+// waiter is woken.
+void claim(std::atomic<bool>& gate) {
+    bool expected = false;
+    while (!gate.compare_exchange_weak(expected, true, std::memory_order_acquire)) {
+        if (expected) gate.wait(true, std::memory_order_acquire);
+        expected = false;
+    }
+}
+void release(std::atomic<bool>& gate) {
+    gate.store(false, std::memory_order_release);
+    gate.notify_all();
+}
+}  // namespace
+
 struct Connection::Live {
     std::shared_ptr<void>      holder;   // what backs the channel; dropped after the peer
     std::unique_ptr<rpc::Peer> peer;
-    maya::guarded<Lists>       lists;
-    maya::guarded<bool>        poisoned;   // a cancelled call left it untrusted
-    maya::guarded<bool>        busy;       // a call is in flight; calls go one at a time
+    maya::snapshot<Lists>      lists;
+    std::atomic<bool>          poisoned{false};   // a cancelled call left it untrusted
+    std::atomic<bool>          busy{false};       // a call is in flight; calls go one at a time
     m::ClientHandlers          handlers;
     // Who to tell about a tool call's progress. One call at a time per
     // connection, so one slot is enough.
@@ -49,7 +101,7 @@ struct Connection::Live {
     maya::published<const std::function<m::Json(const m::Json&)>> elicit;
 
     ~Live() {
-        if (peer) peer->stop();
+        // ~Peer stops and joins its tasks itself; the holder goes after it.
         peer.reset();
         holder.reset();
     }
@@ -72,11 +124,9 @@ namespace {
 // One call at a time per connection, as the server sees it: progress is
 // routed to the single in-flight call, and some servers can't interleave.
 struct Turn {
-    maya::guarded<bool>& busy;
-    explicit Turn(maya::guarded<bool>& b) : busy(b) {
-        busy.wait_with([](const bool& v) { return !v; }, [](bool& v) { v = true; });
-    }
-    ~Turn() { busy.with([](bool& v) { v = false; }); }
+    std::atomic<bool>& busy;
+    explicit Turn(std::atomic<bool>& b) : busy(b) { claim(busy); }
+    ~Turn() { release(busy); }
 };
 
 template <class R>
@@ -94,7 +144,7 @@ Link stdio_link(::agentty::util::ChildProcess::Spawn spawn) {
         // On stop: EOF on its stdin, then kill it so its stdout closes and a
         // reader parked on it wakes. The child object lives on in `holder`
         // until after the peer has stopped.
-        ch.interrupt = [c = child.get()] {
+        ch.interrupt = [c = child.get()](const maya::unlocked&) {
             c->close_stdin();
             c->terminate();
             c->interrupt_output();
@@ -109,12 +159,13 @@ Link stdio_link(::agentty::util::ChildProcess::Spawn spawn) {
 
 Connection::Connection(ConnectionConfig cfg, Link link)
     : cfg_(std::move(cfg)), link_(std::move(link)), origin_("mcp:" + cfg_.name) {
-    live_.publish(connect());
+    live_.publish(entry_root([this](const maya::unlocked& cap) { return connect(cap); }));
 }
 
 Connection::~Connection() {
-    // Stop the peer before anything its dispatch points at goes away.
-    if (auto l = live_.current()) l->peer->stop();
+    // Stop the peer before anything its dispatch points at goes away:
+    // dropping our handle runs ~Live -> ~Peer (stop + join) if we were the
+    // last owner; a call still in flight holds its own handle until it ends.
     live_.publish(nullptr);
 }
 
@@ -149,27 +200,35 @@ m::ClientHandlers Connection::handlers(std::weak_ptr<Live> weak) {
     // host-side read refreshes. Refreshing here, on the reader, would wait
     // for a reply only the reader can deliver.
     auto changed = [this, weak](auto mark) {
-        if (auto l = weak.lock()) l->lists.with(mark);
+        if (auto l = weak.lock()) (void)l->lists.update(mark);
         if (auto fn = on_changed_.current(); fn && *fn) (*fn)();
     };
-    h.on_tools_changed     = [changed] { changed([](Lists& s) { s.tools_stale = true; }); };
-    h.on_resources_changed = [changed] { changed([](Lists& s) { s.resources_stale = true; }); };
-    h.on_prompts_changed   = [changed] { changed([](Lists& s) { s.prompts_stale = true; }); };
+    h.on_tools_changed     = [changed] {
+        changed([](const Lists& s) { Lists o = s; o.tools_stale = true; return o; });
+    };
+    h.on_resources_changed = [changed] {
+        changed([](const Lists& s) { Lists o = s; o.resources_stale = true; return o; });
+    };
+    h.on_prompts_changed   = [changed] {
+        changed([](const Lists& s) { Lists o = s; o.prompts_stale = true; return o; });
+    };
     return h;
 }
 
-std::shared_ptr<Connection::Live> Connection::connect() {
+std::shared_ptr<Connection::Live> Connection::connect(const maya::unlocked& cap) {
     auto opened = link_.open();
     auto l = std::make_shared<Live>();
     l->holder   = std::move(opened.holder);
     l->handlers = handlers(l);
 
     rpc::Dispatch d;
-    d.on_call = [weak = std::weak_ptr<Live>(l)](const m::Call& c) -> std::optional<std::string> {
+    d.on_call = [weak = std::weak_ptr<Live>(l)](const maya::unlocked&,
+                                                const m::Call& c) -> std::optional<std::string> {
         if (auto live = weak.lock()) return live->handlers.handle(c);
         return m::reply(c.id, std::unexpected(m::RpcError(m::errc::InternalError, "connection closed")));
     };
-    d.on_notification = [weak = std::weak_ptr<Live>(l)](const m::Notification& n) {
+    d.on_notification = [weak = std::weak_ptr<Live>(l)](const maya::unlocked&,
+                                                         const m::Notification& n) {
         if (auto live = weak.lock()) live->handlers.handle(n);
     };
     l->peer = std::make_unique<rpc::Peer>(std::move(opened.channel), std::move(d), origin_);
@@ -189,22 +248,22 @@ std::shared_ptr<Connection::Live> Connection::connect() {
     // 2026-07-28 servers read the protocol metadata from every request; older
     // ones ignore it. Then: server/discover if the server has it, else the
     // legacy initialize handshake.
-    l->peer->set_request_meta(m::modern_request_meta(cfg_.client_info, client_caps));
-    if (auto disc = l->peer->call<m::to_server::Discover>(m::DiscoverParams{})) {
+    l->peer->set_request_meta(cap, m::modern_request_meta(cfg_.client_info, client_caps));
+    if (auto disc = l->peer->call<m::to_server::Discover>(cap, m::DiscoverParams{})) {
         caps_ = disc->capabilities;
     } else {
         m::InitializeParams ip;
         ip.protocolVersion = std::string(m::kProtocolVersion);
         ip.capabilities    = client_caps;
         ip.clientInfo      = cfg_.client_info;
-        auto init = take(l->peer->call<m::to_server::Initialize>(ip));
+        auto init = take(l->peer->call<m::to_server::Initialize>(cap, ip));
         caps_ = init.capabilities;
-        l->peer->notify<m::to_server::Initialized>(m::Unit{});
+        l->peer->notify<m::to_server::Initialized>(cap, m::Unit{});
     }
 
-    refresh_tools(*l);
-    if (caps_.resources) { try { refresh_resources(*l); } catch (...) {} }
-    if (caps_.prompts)   { try { refresh_prompts(*l); } catch (...) {} }
+    refresh_tools(cap, *l);
+    if (caps_.resources) { try { refresh_resources(cap, *l); } catch (...) {} }
+    if (caps_.prompts)   { try { refresh_prompts(cap, *l); } catch (...) {} }
 
     l->peer->set_default_timeout(cfg_.call_timeout);
     return l;
@@ -212,28 +271,37 @@ std::shared_ptr<Connection::Live> Connection::connect() {
 
 bool Connection::alive() const {
     auto l = live_.current();
-    if (!l || l->peer->closed()) return false;
+    if (!l || entry_root([&](const maya::unlocked& c) { return l->peer->closed(c); })) return false;
     return !link_.alive || link_.alive(l->holder);
 }
 
-std::expected<std::shared_ptr<Connection::Live>, std::string> Connection::ensure_live() {
+std::expected<std::shared_ptr<Connection::Live>, std::string>
+Connection::ensure_live(const maya::unlocked& cap) {
     auto l = live_.current();
-    const bool healthy = l && !l->peer->closed() && (!link_.alive || link_.alive(l->holder))
-                         && !l->poisoned.read([](const bool& p) { return p; });
+    const bool healthy = l && !l->peer->closed(cap) && (!link_.alive || link_.alive(l->holder))
+                         && !l->poisoned.load(std::memory_order_acquire);
     if (healthy) return l;
 
     // One reconnect at a time; whoever loses the race uses the winner's.
-    const bool mine = reconnecting_.with([](bool& busy) { return !std::exchange(busy, true); });
+    bool expected = false;
+    const bool mine = reconnecting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
     if (!mine) {
-        reconnecting_.wait_with([](const bool& busy) { return !busy; }, [](bool&) {});
+        // Block until the winner finishes (atomic wait, not a sleep-poll).
+        reconnecting_.wait(true, std::memory_order_acquire);
         if (auto now = live_.current(); now && now != l) return now;
         return std::unexpected(std::string{"mcp server '" + origin_ + "' is not running"});
     }
-    struct Done { Connection* c; ~Done() { c->reconnecting_.with([](bool& b) { b = false; }); } } done{this};
+    struct Done {
+        Connection* c;
+        ~Done() {
+            c->reconnecting_.store(false, std::memory_order_release);
+            c->reconnecting_.notify_all();
+        }
+    } done{this};
     try {
-        if (auto old = live_.current()) old->peer->stop();
+        if (auto old = live_.current()) old->peer->stop(cap);
         live_.publish(nullptr);
-        live_.publish(connect());
+        live_.publish(connect(cap));
     } catch (const std::exception& e) {
         return std::unexpected(std::string{"mcp reconnect failed: "} + e.what());
     }
@@ -247,33 +315,35 @@ void Connection::set_on_list_changed(ListChangedFn fn) {
 
 // ── lists ───────────────────────────────────────────────────────────────────
 
-void Connection::refresh_tools(Live& l) const {
+void Connection::refresh_tools(const maya::unlocked& cap, Live& l) const {
     std::vector<m::Tool> all;
     m::Maybe<std::string> cursor;
     std::int64_t ttl = 0;
     do {
         m::ListToolsParams p;
         p.cursor = cursor;
-        auto res = take(l.peer->call<m::to_server::ListTools>(p));
+        auto res = take(l.peer->call<m::to_server::ListTools>(cap, p));
         for (auto& t : res.tools) all.push_back(std::move(t));
         cursor = res.nextCursor;
         if (res.ttlMs > 0 && ttl == 0) ttl = res.ttlMs;   // the first page's hint
     } while (cursor);
     const auto until = ttl > 0 ? Clock::now() + std::chrono::milliseconds(ttl) : Clock::time_point{};
-    l.lists.with([](Lists& s, std::vector<m::Tool> t, Clock::time_point u) {
-        s.tools = std::move(t);
-        s.tools_fresh_until = u;
-        s.tools_stale = false;
+    (void)l.lists.update([](const Lists& s, const std::vector<m::Tool>& t, const Clock::time_point& u) {
+        Lists o = s;
+        o.tools = t;
+        o.tools_fresh_until = u;
+        o.tools_stale = false;
+        return o;
     }, std::move(all), until);
 }
 
-void Connection::refresh_resources(Live& l) const {
+void Connection::refresh_resources(const maya::unlocked& cap, Live& l) const {
     std::vector<m::Resource> res;
     std::vector<m::ResourceTemplate> tpl;
     m::Maybe<std::string> cursor;
     do {
         m::ListResourcesParams p; p.cursor = cursor;
-        auto r = take(l.peer->call<m::to_server::ListResources>(p));
+        auto r = take(l.peer->call<m::to_server::ListResources>(cap, p));
         for (auto& x : r.resources) res.push_back(std::move(x));
         cursor = r.nextCursor;
     } while (cursor);
@@ -281,75 +351,86 @@ void Connection::refresh_resources(Live& l) const {
         cursor = m::Nothing;
         do {
             m::ListResourceTemplatesParams p; p.cursor = cursor;
-            auto r = take(l.peer->call<m::to_server::ListResourceTemplates>(p));
+            auto r = take(l.peer->call<m::to_server::ListResourceTemplates>(cap, p));
             for (auto& x : r.resourceTemplates) tpl.push_back(std::move(x));
             cursor = r.nextCursor;
         } while (cursor);
     } catch (...) {}   // templates are optional
-    l.lists.with([](Lists& s, std::vector<m::Resource> r, std::vector<m::ResourceTemplate> t) {
-        s.resources = std::move(r);
-        s.templates = std::move(t);
-        s.resources_stale = false;
+    (void)l.lists.update([](const Lists& s, const std::vector<m::Resource>& r,
+                            const std::vector<m::ResourceTemplate>& t) {
+        Lists o = s;
+        o.resources = r;
+        o.templates = t;
+        o.resources_stale = false;
+        return o;
     }, std::move(res), std::move(tpl));
 }
 
-void Connection::refresh_prompts(Live& l) const {
+void Connection::refresh_prompts(const maya::unlocked& cap, Live& l) const {
     std::vector<m::Prompt> all;
     m::Maybe<std::string> cursor;
     do {
         m::ListPromptsParams p; p.cursor = cursor;
-        auto r = take(l.peer->call<m::to_server::ListPrompts>(p));
+        auto r = take(l.peer->call<m::to_server::ListPrompts>(cap, p));
         for (auto& x : r.prompts) all.push_back(std::move(x));
         cursor = r.nextCursor;
     } while (cursor);
-    l.lists.with([](Lists& s, std::vector<m::Prompt> p) {
-        s.prompts = std::move(p);
-        s.prompts_stale = false;
+    (void)l.lists.update([](const Lists& s, const std::vector<m::Prompt>& p) {
+        Lists o = s;
+        o.prompts = p;
+        o.prompts_stale = false;
+        return o;
     }, std::move(all));
 }
 
 std::vector<m::Tool> Connection::list() const {
     auto l = live_.current();
     if (!l) return {};
-    const bool stale = l->lists.read([](const Lists& s, Clock::time_point now) {
-        const bool ttl_lapsed = s.tools_fresh_until != Clock::time_point{} && now >= s.tools_fresh_until;
-        return s.tools_stale || ttl_lapsed;
-    }, Clock::now());
-    if (stale) { try { refresh_tools(*l); } catch (...) {} }
-    return l->lists.read([](const Lists& s) { return s.tools; });
+    const auto cur = l->lists.load();
+    const auto now = Clock::now();
+    const bool ttl_lapsed =
+        cur->tools_fresh_until != Clock::time_point{} && now >= cur->tools_fresh_until;
+    if (cur->tools_stale || ttl_lapsed) {
+        try { entry_root([&](const maya::unlocked& c) { refresh_tools(c, *l); }); } catch (...) {}
+    }
+    return l->lists.load()->tools;
 }
 
 std::vector<m::Resource> Connection::resources() const {
     auto l = live_.current();
     if (!l || !caps_.resources) return {};
-    if (l->lists.read([](const Lists& s) { return s.resources_stale; })) {
-        try { refresh_resources(*l); } catch (...) {}
+    if (l->lists.load()->resources_stale) {
+        try { entry_root([&](const maya::unlocked& c) { refresh_resources(c, *l); }); } catch (...) {}
     }
-    return l->lists.read([](const Lists& s) { return s.resources; });
+    return l->lists.load()->resources;
 }
 
 std::vector<m::ResourceTemplate> Connection::resource_templates() const {
     auto l = live_.current();
     if (!l || !caps_.resources) return {};
-    if (l->lists.read([](const Lists& s) { return s.resources_stale; })) {
-        try { refresh_resources(*l); } catch (...) {}
+    if (l->lists.load()->resources_stale) {
+        try { entry_root([&](const maya::unlocked& c) { refresh_resources(c, *l); }); } catch (...) {}
     }
-    return l->lists.read([](const Lists& s) { return s.templates; });
+    return l->lists.load()->templates;
 }
 
 std::vector<m::Prompt> Connection::prompts() const {
     auto l = live_.current();
     if (!l || !caps_.prompts) return {};
-    if (l->lists.read([](const Lists& s) { return s.prompts_stale; })) {
-        try { refresh_prompts(*l); } catch (...) {}
+    if (l->lists.load()->prompts_stale) {
+        try { entry_root([&](const maya::unlocked& c) { refresh_prompts(c, *l); }); } catch (...) {}
     }
-    return l->lists.read([](const Lists& s) { return s.prompts; });
+    return l->lists.load()->prompts;
 }
 
 // ── calls ───────────────────────────────────────────────────────────────────
 
 m::cap::Result Connection::execute(const m::cap::Request& req) {
-    auto got = ensure_live();
+    return entry_root([&](const maya::unlocked& cap) { return execute_impl(cap, req); });
+}
+
+m::cap::Result Connection::execute_impl(const maya::unlocked& cap, const m::cap::Request& req) {
+    auto got = ensure_live(cap);
     if (!got) return m::cap::Result::error(std::move(got.error()));
     auto l = std::move(*got);
     Turn turn(l->busy);
@@ -363,7 +444,7 @@ m::cap::Result Connection::execute(const m::cap::Request& req) {
     // to be in a clean state) and fails the call; the next call reconnects.
     rpc::CallOptions o;
     o.cancel    = req.stop;
-    o.on_cancel = [l] { l->poisoned.with([](bool& p) { p = true; }); };
+    o.on_cancel = [l](const maya::unlocked&) { l->poisoned.store(true, std::memory_order_release); };
 
     try {
         // MRTR: a 2026-07-28 server may answer input_required, asking us to
@@ -371,7 +452,7 @@ m::cap::Result Connection::execute(const m::cap::Request& req) {
         const auto mrtr = l->handlers.mrtr();
         m::Json params = m::to_json(m::CallToolParams{req.tool, req.args, m::Nothing, m::Json::object()});
         for (int round = 0; round < m::kMrtrMaxRounds; ++round) {
-            auto c = l->peer->call_raw(m::to_server::CallTool::name, params, o);
+            auto c = l->peer->call_raw(cap, m::to_server::CallTool::name, params, o);
             if (!c.outcome) {
                 if (req.stop.stop_requested()) return m::cap::Result::error("cancelled");
                 return m::cap::Result::error(std::string{"mcp call failed: "} + c.outcome.error().what());
@@ -388,28 +469,32 @@ m::cap::Result Connection::execute(const m::cap::Request& req) {
 
 bool Connection::read_resource(const std::string& uri, std::vector<m::ResourceContents>& out,
                                std::string& err) {
-    auto got = ensure_live();
+    return entry_root([&](const maya::unlocked& cap) {
+    auto got = ensure_live(cap);
     if (!got) { err = std::move(got.error()); return false; }
     Turn turn((*got)->busy);
-    auto r = (*got)->peer->call<m::to_server::ReadResource>(m::ReadResourceParams{uri, m::Json::object()});
+    auto r = (*got)->peer->call<m::to_server::ReadResource>(cap, m::ReadResourceParams{uri, m::Json::object()});
     if (!r) { err = std::string{"resources/read failed: "} + r.error().what(); return false; }
     out = std::move(r->contents);
     return true;
+    });
 }
 
 bool Connection::get_prompt(const std::string& name,
                             const std::vector<std::pair<std::string, std::string>>& args,
                             m::GetPromptResult& out, std::string& err) {
-    auto got = ensure_live();
+    return entry_root([&](const maya::unlocked& cap) {
+    auto got = ensure_live(cap);
     if (!got) { err = std::move(got.error()); return false; }
     Turn turn((*got)->busy);
     m::GetPromptParams p;
     p.name = name;
     if (!args.empty()) p.arguments = args;
-    auto r = (*got)->peer->call<m::to_server::GetPrompt>(p);
+    auto r = (*got)->peer->call<m::to_server::GetPrompt>(cap, p);
     if (!r) { err = std::string{"prompts/get failed: "} + r.error().what(); return false; }
     out = std::move(*r);
     return true;
+    });
 }
 
 }  // namespace agentty::mcp

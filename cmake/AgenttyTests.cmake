@@ -418,8 +418,11 @@ agentty_fold_test(plugin_disabled_tools_test TIMEOUT 60)
 agentty_fold_test(tool_budget_env_test     TIMEOUT 60)
 agentty_fold_test(frozen_invariant_fuzz)
 agentty_fold_test(scrollback_wire_fuzz     TIMEOUT 120)
-agentty_fold_test(reveal_scrollback_test   TIMEOUT 180 UNIX_LIBS util)
-agentty_fold_test(scrollback_oracle_test   TIMEOUT 600 UNIX_LIBS util)
+if(UNIX)
+    # Both drive the runtime through openpty — POSIX only (see the .def).
+    agentty_fold_test(reveal_scrollback_test   TIMEOUT 180 UNIX_LIBS util)
+    agentty_fold_test(scrollback_oracle_test   TIMEOUT 600 UNIX_LIBS util)
+endif()
 agentty_fold_test(external_acp_backend_test TIMEOUT 60)
 agentty_fold_test(md_shape_sweep           TIMEOUT 120)
 agentty_fold_test(reasoning_stall_sweep    TIMEOUT 120
@@ -855,7 +858,12 @@ add_test(NAME cli_arg_order_test
          COMMAND ${CMAKE_COMMAND} -E env sh
                  ${CMAKE_SOURCE_DIR}/tests/cli_arg_order_test.sh
                  $<TARGET_FILE:agentty>)
-set_tests_properties(cli_arg_order_test PROPERTIES TIMEOUT 60)
+# 15 launches of the binary. A Debug build on Windows is ~860 MB of
+# unstripped image and takes ~3-6 s per launch just to map (39 s total on
+# an idle box); under a parallel ctest the mapping competes with every
+# other test's I/O and blew past 3x that. RUN_SERIAL keeps it honest; the
+# parse itself is microseconds.
+set_tests_properties(cli_arg_order_test PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE)
 
 # `agentty config move` / doctor against the real binary in a scratch home.
 if(NOT WIN32)

@@ -64,7 +64,7 @@ std::vector<std::pair<std::string, std::string>> copilot_headers() {
 }
 
 using Models = std::vector<ModelInfo>;
-maya::guarded<Models>& models_cache() { static maya::guarded<Models> c; return c; }
+maya::snapshot<Models>& models_cache() { static maya::snapshot<Models> c; return c; }
 
 } // namespace
 
@@ -211,7 +211,7 @@ copilot_target(const ResponsesTurn& t) {
 // The Site's own authorize has no turn context; stream() never routes
 // through it (it passes copilot_target's result instead).
 std::expected<provider::responses::Target, std::string>
-copilot_authorize(provider::Request&) {
+copilot_authorize(const maya::unlocked&, provider::Request&) {
     return std::unexpected(std::string{
         "copilot: no Auto session for the Responses API — sign in again "
         "with `agentty login` and choose GitHub Copilot"});
@@ -272,9 +272,10 @@ provider::openai::Endpoint make_auto_endpoint(const std::string& api_base,
 }
 } // namespace
 
-provider::StreamResult CopilotProvider::stream(provider::Request req,
+provider::StreamResult CopilotProvider::stream(const maya::unlocked& cap,
+                                               provider::Request req,
                                                provider::EventSink sink) {
-    auto tok = fresh_token();
+    auto tok = fresh_token(cap);
     if (!tok) {
         sink(StreamError{"GitHub Copilot is not signed in (or the token could "
                          "not be refreshed) — run `agentty login` and choose "
@@ -299,11 +300,11 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
     // path would otherwise never get a session — and never show reasoning.
     // Responses-only models (mai-code-*) need it for the same reason.
     const bool wants_auto = (requested == kAutoId)
-        || (!is_base_direct(requested) && !is_supported_model(requested))
+        || (!is_base_direct(requested) && !is_supported_model(cap, requested))
         || prefers_responses_dialect(requested);
 
     std::optional<AutoSession> as;
-    if (wants_auto) as = auto_session();
+    if (wants_auto) as = auto_session(cap);
 
     auto run = [&](const CopilotToken& t) -> provider::StreamResult {
         // ── Responses fork ─────────────────────────────────────────
@@ -383,12 +384,12 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
     // Proxy token revoked mid-life → refresh + retry once.
     if (!result.ok() && (result.http_status == 401 || result.http_status == 403)) {
         invalidate_cached_token();
-        if (auto fresh = fresh_token()) result = run(*fresh);
+        if (auto fresh = fresh_token(cap)) result = run(*fresh);
     }
     // Auto session expired/stale → refresh it + retry once.
     if (!result.ok() && wants_auto && result.http_status == 400) {
-        invalidate_auto_session();
-        as = auto_session();
+        invalidate_auto_session(cap);
+        as = auto_session(cap);
         if (as) result = run(*tok);
     }
     // LEARN direct model support (only meaningful for a directly-requested
@@ -402,7 +403,7 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
             as && as->valid() && session_lists_model(*as, requested);
         if (result.http_status == 400 && result.error
             && result.error->find("not supported") != std::string::npos) {
-            note_unsupported_model(requested);
+            note_unsupported_model(cap, requested);
             invalidate_model_cache();
         } else if (result.ok() && !via_session) {
             // A DIRECT stream succeeded — either an already-direct model, or a
@@ -412,7 +413,7 @@ provider::StreamResult CopilotProvider::stream(provider::Request req,
             // so it survives restarts. Models that need the session (gpt-5
             // reasoning via /responses) keep wants_auto set through
             // prefers_responses_dialect, so this never strands them on chat.
-            note_supported_model(requested);
+            note_supported_model(cap, requested);
         }
     }
     return result;
@@ -425,10 +426,10 @@ static std::vector<ModelInfo> bundled_models() {
     return catalog::bundled("copilot");
 }
 
-std::vector<ModelInfo> list_models(Io io) {
-    if (auto hit = models_cache().read([](const Models& c) { return c; }); !hit.empty())
+std::vector<ModelInfo> list_models(Io io, const maya::unlocked& cap) {
+    if (auto hit = models_cache().get(); !hit.empty())
         return hit;
-    auto tok = fresh_token();
+    auto tok = fresh_token(cap);
     if (!tok || !tok->chat_enabled) {
         // The "no models / only stale models" report: the live catalog was
         // never fetched. Name the reason — no CAPI token vs an account with
@@ -475,13 +476,13 @@ std::vector<ModelInfo> list_models(Io io) {
     // premium model families at all? On Copilot Free (premium_available=false)
     // only the base gpt-4o-family models run — every premium model 400s. We
     // fetch this once and HIDE the models the account can't use.
-    const Entitlement ent = account_entitlement();
+    const Entitlement ent = account_entitlement(cap);
     const bool hide_premium = ent.known && !ent.premium_available;
 
     // AUTO session: the per-account set of models reachable via server-side
     // routing (the ONLY way a free/limited plan runs premium models). These
     // become first-class usable entries even though a DIRECT request 400s.
-    auto as = auto_session();
+    auto as = auto_session(cap);
     std::set<std::string> auto_ok;
     if (as) for (auto& m : as->available_models)
         if (auto_chat_compatible(m)) auto_ok.insert(m);   // skip /responses-only
@@ -538,8 +539,8 @@ std::vector<ModelInfo> list_models(Io io) {
 
             const bool has_policy   = m.contains("policy") && m["policy"].is_object();
             const bool base         = is_base_family(id);   // policy = terms, not premium
-            const bool learned_bad  = is_unsupported_model(id);
-            const bool learned_good = is_supported_model(id);
+            const bool learned_bad  = is_unsupported_model(cap, id);
+            const bool learned_good = is_supported_model(cap, id);
             const bool auto_usable  = auto_ok.count(id) > 0;   // reachable via Auto
 
             // A model is premium (draws the premium quota) unless it's a base
@@ -626,16 +627,16 @@ std::vector<ModelInfo> list_models(Io io) {
     out.reserve(rows.size());
     for (auto& r : rows) out.push_back(std::move(r.info));
 
-    models_cache().with([](Models& c, Models fresh) { c = std::move(fresh); }, out);
+    models_cache().store(out);
     return out;
 }
 
-std::string default_model(Io io) {
+std::string default_model(Io io, const maya::unlocked& cap) {
     // Prefer a base-allowlist model that works on every Copilot tier, so a
     // fresh sign-in never lands on a model that 400s on the first turn.
     for (const char* id : {"gpt-4o", "gpt-4.1", "gpt-4o-mini"})
-        if (!is_unsupported_model(id)) return id;
-    auto ms = list_models(io);
+        if (!is_unsupported_model(cap, id)) return id;
+    auto ms = list_models(io, cap);
     return ms.empty() ? std::string{"gpt-4o"} : ms.front().id.value;
 }
 
@@ -670,7 +671,7 @@ std::string pick_auto_model_for_test(
 }
 
 void invalidate_model_cache() {
-    models_cache().with([](Models& c) { c.clear(); });
+    models_cache().store(Models{});
 }
 
 } // namespace agentty::provider::copilot

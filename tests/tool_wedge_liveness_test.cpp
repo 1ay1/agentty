@@ -122,7 +122,7 @@ TEST_CASE("tool wedge liveness") {
     // The wedge path calls kick_pending_tools, which reaches deps(). Install a
     // no-op Deps so the reducer runs without a real Provider/Store.
     app::install_deps(app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const Thread&) {},
         .delete_thread = [](const ThreadId&) {},
         .load_threads  = [] { return std::vector<Thread>{}; },

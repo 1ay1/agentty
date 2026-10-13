@@ -9,6 +9,7 @@
 #include "agentty/workspace/files.hpp"
 
 #include <doctest/doctest.h>
+#include "agtest.hpp"
 
 #include <algorithm>
 #include <string>
@@ -174,7 +175,7 @@ TEST_CASE("prewarm walk bails promptly when cancelled") {
 
     const auto t0 = std::chrono::steady_clock::now();
     agentty::prewarm_workspace_files(stop.get_token());
-    agentty::prewarm_workspace_symbols(stop.get_token());
+    agentty::prewarm_workspace_symbols(agtest::cap(), stop.get_token());
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     CHECK(ms < 1000);   // generous; a full 3000-file scan is far slower

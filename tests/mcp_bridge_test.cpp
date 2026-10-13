@@ -8,6 +8,7 @@
 // stays green on machines that didn't build mcp-cpp examples. Set
 // AGENTTY_MCP_E2E_SERVER to point at a server binary explicitly.
 
+#include "agtest_cap.hpp"
 #include "agentty/mcp/client.hpp"
 
 #include <cstdio>
@@ -124,7 +125,7 @@ int main() {
     CHECK(add != nullptr);
 
     if (add) {
-        auto r = add->execute(nlohmann::json{{"a", 17}, {"b", 25}}, agentty::tools::CallContext{});
+        auto r = add->execute(agtest::cap(), nlohmann::json{{"a", 17}, {"b", 25}}, agentty::tools::CallContext{});
         CHECK(r.has_value());
         if (r) {
             std::printf("  add(17,25) -> %s\n", r->text.c_str());
@@ -179,7 +180,7 @@ int main() {
     for (const auto& t : tools) if (t.name.value == "mcp_read_resource") read_res = &t;
     CHECK(read_res != nullptr);
     if (read_res) {
-        auto listing = read_res->execute(nlohmann::json::object(), agentty::tools::CallContext{});
+        auto listing = read_res->execute(agtest::cap(), nlohmann::json::object(), agentty::tools::CallContext{});
         CHECK(listing.has_value());
         if (listing) CHECK(listing->text.find("motd") != std::string::npos);
     }

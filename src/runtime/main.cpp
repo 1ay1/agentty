@@ -1176,7 +1176,12 @@ Utf8Argv recover_utf8_argv() {
 }
 #endif
 
-int main(int argc, char** argv) {
+namespace {
+// The program, from the one thread that starts holding no lock. Everything
+// main() did is here, unchanged, except that it can PROVE it holds no lock:
+// `cap` is the root capability every lock, wait and join below is checked
+// against. main() (at the bottom of this file) mints it, once.
+int run_main(int argc, char** argv, const maya::unlocked& cap) {
     using namespace agentty;
 
     // Any setenv happens here, before a thread exists: setenv racing a getenv
@@ -1213,7 +1218,12 @@ int main(int argc, char** argv) {
     // statics while those statics are still alive. Subsystems register
     // themselves at the moment they start a thread (util::teardown), so this
     // stays correct as subsystems are added — nobody has to update a list.
+    //
+    // The guard holds a reference to run_main's capability: it is destroyed
+    // at the end of run_main's frame, where the capability is still valid
+    // and no lock is held (every lock body is a nested scope that has ended).
     struct TeardownGuard {
+        const maya::unlocked& cap;
         ~TeardownGuard() {
             // These four run on EVERY exit path, not just the normal one.
             //
@@ -1232,12 +1242,12 @@ int main(int argc, char** argv) {
             // Order matters: stop the workers that LOG before running the
             // registry, because logx's own worker is one of the registered
             // teardowns.
-            http::default_client(::agentty::IoAccess::grant()).join_prewarm();
-            modelsdev::join_background_refresh();
-            blobs::join_background_gc();
-            util::teardown::run();
+            http::default_client(::agentty::IoAccess::grant()).join_prewarm(cap);
+            modelsdev::join_background_refresh(cap);
+            blobs::join_background_gc(cap);
+            util::teardown::run(cap);
         }
-    } teardown_guard;
+    } teardown_guard{cap};
 
 #if defined(_WIN32)
     Win32PerfTuning win32_perf;
@@ -1384,9 +1394,9 @@ int main(int argc, char** argv) {
                     c.latest.c_str());
         return 0;
     }
-    if (args.subcommand == "login")  return auth::cmd_login(IoAccess::grant());
-    if (args.subcommand == "logout") return auth::cmd_logout(IoAccess::grant());
-    if (args.subcommand == "status") return auth::cmd_status(IoAccess::grant());
+    if (args.subcommand == "login")  return auth::cmd_login(IoAccess::grant(), cap);
+    if (args.subcommand == "logout") return auth::cmd_logout(IoAccess::grant(), cap);
+    if (args.subcommand == "status") return auth::cmd_status(IoAccess::grant(), cap);
     if (args.subcommand == "skills") return tools::skills::cmd_skills(IoAccess::grant());
     if (args.subcommand == "config") return config::cmd_config(args.plugin_argv);
 #if defined(AGENTTY_MCP)
@@ -1396,13 +1406,13 @@ int main(int argc, char** argv) {
                                  " [--dry-run] [--force]\n");
             return 1;
         }
-        return mcp::import_::cli(::agentty::IoAccess::grant(), {args.plugin_argv.begin() + 1,
+        return mcp::import_::cli(::agentty::IoAccess::grant(), cap, {args.plugin_argv.begin() + 1,
                                   args.plugin_argv.end()});
     }
 #endif
     if (args.subcommand == "skill")  return tools::skills::cli(args.plugin_argv);
     if (args.subcommand == "hooks")  return tools::hooks::cli(args.cli_run_agent);
-    if (args.subcommand == "plugin") return tools::plugin::cli(::agentty::IoAccess::grant(), args.plugin_argv);
+    if (args.subcommand == "plugin") return tools::plugin::cli(::agentty::IoAccess::grant(), cap, args.plugin_argv);
     if (args.subcommand == "mcp-login")
         return mcp::oauth::cmd_mcp_login(::agentty::IoAccess::grant(), args.cli_mcp_server, args.cli_mcp_metadata,
                                          args.cli_mcp_client_id);
@@ -1431,7 +1441,7 @@ int main(int argc, char** argv) {
     if (!args.cli_model.empty() && args.subcommand != "acp") {
         auto s = persistence::load_settings(::agentty::IoAccess::grant());
         s.model_id = ModelId{args.cli_model};
-        persistence::save_settings(::agentty::IoAccess::grant(), s);
+        persistence::save_settings(::agentty::IoAccess::grant(), cap, s);
         // An explicit --model binds every role, not just the main turn. Set
         // here so the TUI's init() sees it too -- it takes no argv (#70).
         smart::tuning::model_pinned() = true;
@@ -1740,7 +1750,7 @@ int main(int argc, char** argv) {
                 // provider's recall so a later bare relaunch restores it.
                 s.provider_models[provider_spec] = args.cli_model;
             }
-            persistence::save_settings(::agentty::IoAccess::grant(), s);
+            persistence::save_settings(::agentty::IoAccess::grant(), cap, s);
         } else {
             // Register for persist-on-success: the ModelsLoaded reducer
             // writes settings the moment this host answers a non-empty
@@ -1828,37 +1838,39 @@ int main(int argc, char** argv) {
         [anthropic_provider, chatgpt_provider, copilot_provider, kimi_provider] {
             provider::ProviderRouter router;
             router.set(provider::LongLived::Anthropic,
-                       [anthropic_provider](provider::Request r,
+                       [anthropic_provider](const maya::unlocked& c, provider::Request r,
                                             provider::EventSink s) {
-                           return anthropic_provider->stream(std::move(r), std::move(s));
+                           return anthropic_provider->stream(c, std::move(r), std::move(s));
                        })
                   .set(provider::LongLived::ChatGpt,
-                       [chatgpt_provider](provider::Request r,
+                       [chatgpt_provider](const maya::unlocked& c, provider::Request r,
                                           provider::EventSink s) {
-                           return chatgpt_provider->stream(std::move(r), std::move(s));
+                           return chatgpt_provider->stream(c, std::move(r), std::move(s));
                        })
                   .set(provider::LongLived::Copilot,
-                       [copilot_provider](provider::Request r,
+                       [copilot_provider](const maya::unlocked& c, provider::Request r,
                                           provider::EventSink s) {
-                           return copilot_provider->stream(std::move(r), std::move(s));
+                           return copilot_provider->stream(c, std::move(r), std::move(s));
                        })
                   .set(provider::LongLived::Kimi,
-                       [kimi_provider](provider::Request r,
+                       [kimi_provider](const maya::unlocked& c, provider::Request r,
                                        provider::EventSink s) {
-                           return kimi_provider->stream(std::move(r), std::move(s));
+                           return kimi_provider->stream(c, std::move(r), std::move(s));
                        });
-            router.external_acp = [](const std::string& agent_id,
+            router.external_acp = [](const maya::unlocked& c, const std::string& agent_id,
                                      provider::Request r, provider::EventSink s) {
-                return provider::stream_external_acp(agent_id, std::move(r),
+                return provider::stream_external_acp(c, agent_id, std::move(r),
                                                      std::move(s));
             };
             return router;
         };
 
-    std::function<provider::StreamResult(provider::Request,
+    // Both seams run on a turn worker (the TUI's turn task, a subagent, an
+    // ACP turn), which holds no lock and passes its `unlocked` in.
+    std::function<provider::StreamResult(const maya::unlocked&, provider::Request,
                                          provider::EventSink)> stream_fn =
-        [build_router](provider::Request req, provider::EventSink sink) {
-            return provider::dispatch_stream(build_router(), std::move(req),
+        [build_router](const maya::unlocked& c, provider::Request req, provider::EventSink sink) {
+            return provider::dispatch_stream(c, build_router(), std::move(req),
                                              std::move(sink));
         };
 
@@ -1871,32 +1883,51 @@ int main(int argc, char** argv) {
     // already answers for an arbitrary provider id, and returns empty for the
     // oauth_native and local rows whose transports own their own tokens — so
     // an empty answer is left alone rather than treated as a failure.
-    std::function<provider::StreamResult(const std::string&, provider::Request,
+    std::function<provider::StreamResult(const maya::unlocked&, const std::string&,
+                                         provider::Request,
                                          provider::EventSink)> stream_to_fn =
-        [build_router](const std::string& provider_id, provider::Request req,
-                       provider::EventSink sink) {
+        [build_router](const maya::unlocked& c, const std::string& provider_id,
+                       provider::Request req, provider::EventSink sink) {
             const auto sel = provider::parse_selection(provider_id);
             auto cred = provider::credentials::resolve(IoAccess::grant(), provider_id);   // stream entry: on a worker
             const bool have = !auth::bearer_token(cred).empty()
                 || std::holds_alternative<auth::BearerHeader>(cred);
             if (have)
                 req.auth = sel.kind == provider::Kind::Anthropic
-                             ? auth::fresh_auth_header(IoAccess::grant(), cred)
+                             ? auth::fresh_auth_header(IoAccess::grant(), c, cred)
                              : std::move(cred);
             AGT_LOG(Smart, Debug, "route.cross_provider",
                     "provider={} model={} auth={}", provider_id, req.model,
                     have ? "resolved" : "transport-owned");
-            return provider::dispatch_stream(build_router(), sel,
+            return provider::dispatch_stream(c, build_router(), sel,
                                              std::move(req), std::move(sink));
         };
+    // Settings through the write-behind cache, as app::install does: the
+    // reducer never waits on disk. Lock order: Deps is an effect seam,
+    // called by the effect host and init() on the loop thread between steps
+    // (no lock held), so the seam re-states that as a capability root here.
+    auto settings_seam = maya::thread_root([&](const maya::unlocked& cap) {
+        return app::settings_cache::wrap(cap,
+            [&store] { return store.load_settings(); },
+            [&store](const maya::unlocked& c, const store::Settings& x) {
+                store.save_settings_quiet(c, x);
+            });
+    });
     app::install_deps(app::Deps{
-        .stream        = stream_fn,
+        .stream        = [stream_fn](const maya::unlocked& c, provider::Request r,
+                                     provider::EventSink s) {
+            (void)stream_fn(c, std::move(r), std::move(s));
+        },
         .save_thread   = [&store](const Thread& t) { store.save_thread(t); },
         .delete_thread = [&store](const ThreadId& id) { store.delete_thread(id); },
         .load_threads  = [&store] { return store.load_threads(); },
         .load_thread   = [&store](const ThreadId& id) { return store.load_thread(id); },
-        .load_settings = [&store] { return store.load_settings(); },
-        .save_settings = [&store](const store::Settings& x) { store.save_settings(x); },
+        .load_settings = [l = std::move(settings_seam.load)] {
+            return maya::thread_root([&](const maya::unlocked& c) { return l(c); });
+        },
+        .save_settings = [sv = std::move(settings_seam.save)](const store::Settings& x) {
+            maya::thread_root([&](const maya::unlocked& c) { sv(c, x); });
+        },
         .new_thread_id = [&store] { return store.new_id(); },
         .title_from    = [&store](std::string_view t) { return store.title_from(t); },
         .write_file    = [](const std::string& path, const std::string& contents) {
@@ -1987,8 +2018,8 @@ int main(int argc, char** argv) {
             // floor. Wrapped anyway: a catalog fetch must never be the thing
             // that stops a headless run from starting.
             try {
-                sa_candidates = provider::list_models_for(::agentty::IoAccess::grant(), provider::active(),
-                                                          provider_auth);
+                sa_candidates = provider::list_models_for(::agentty::IoAccess::grant(), cap,
+                                                          provider::active(), provider_auth);
             } catch (...) { /* fall through to the bundled floor below */ }
         }
         if (sa_candidates.empty())
@@ -2042,8 +2073,8 @@ int main(int argc, char** argv) {
     // as they do in the TUI (filesystem tools stay sandboxed to --workspace).
     if (args.subcommand == "mcp-serve") {
         provider::prewarm_active_provider(::agentty::IoAccess::grant());   // `task`/web tools reuse the warm session
-        int rc = mcp::serve_stdio();
-        persistence::flush_pending_saves(::agentty::IoAccess::grant());
+        int rc = mcp::serve_stdio(cap);
+        persistence::flush_pending_saves(::agentty::IoAccess::grant(), cap);
         return rc;
     }
 
@@ -2188,8 +2219,8 @@ int main(int argc, char** argv) {
 
         provider::prewarm_active_provider(::agentty::IoAccess::grant());
         ro.prompt = std::move(prompt);
-        const int code = run_cli::run(ro);
-        persistence::flush_pending_saves(::agentty::IoAccess::grant());
+        const int code = run_cli::run(cap, ro);
+        persistence::flush_pending_saves(::agentty::IoAccess::grant(), cap);
         return code;
     }
 
@@ -2239,15 +2270,17 @@ int main(int argc, char** argv) {
 #endif
         auto server = maya::co_owned<agentty::acp::AgentServer>::make(
             agentty::rpc::fd_channel(0, 1),
-            stream_fn,
+            [stream_fn](const maya::unlocked& c, provider::Request r, provider::EventSink s) {
+                (void)stream_fn(c, std::move(r), std::move(s));
+            },
             provider_auth,
             std::move(model_id),
             profile);
         // Lets a session pick a model on any signed-in provider, not just
         // the active one (Zed's model dropdown lists them all).
-        server->set_stream_to([stream_to_fn](const std::string& pid, provider::Request r,
-                                             provider::EventSink s) {
-            (void)stream_to_fn(pid, std::move(r), std::move(s));
+        server->set_stream_to([stream_to_fn](const maya::unlocked& c, const std::string& pid,
+                                             provider::Request r, provider::EventSink s) {
+            (void)stream_to_fn(c, pid, std::move(r), std::move(s));
         });
         // After the editor runs `agentty login` for us, `authenticate` re-reads
         // the store with this.
@@ -2256,8 +2289,8 @@ int main(int argc, char** argv) {
         });
         std::fprintf(stderr, "agentty: ACP agent ready on stdio (profile=%s)\n",
                      std::string(to_string(profile)).c_str());
-        int rc = server->serve();
-        persistence::flush_pending_saves(::agentty::IoAccess::grant());
+        int rc = server->serve(cap);
+        persistence::flush_pending_saves(::agentty::IoAccess::grant(), cap);
         return rc;
     }
 
@@ -2421,15 +2454,15 @@ int main(int argc, char** argv) {
     // and letting them overlap during shutdown is the race this ordering
     // exists to prevent. The guard would join it too, but that runs AFTER
     // this function body — too late for the flush.
-    blobs::join_background_gc();
+    blobs::join_background_gc(cap);
 
     // Drain the async persistence queue. The Quit reducer arm enqueues
     // a final save_thread() right before maya returns; this blocks
     // until that (and any earlier-still-queued) write lands on disk.
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), cap);
     // Tear down any cached external ACP agent subprocesses (bounded even for a
     // wedged agent via ExternalAcpBackend's teardown watchdog).
-    provider::release_acp_agents();
+    provider::release_acp_agents(cap);
 
     // Everything ABOVE this line is a subsystem main() happens to know about;
     // the registry below covers everything that registered ITSELF when it
@@ -2437,6 +2470,16 @@ int main(int argc, char** argv) {
     // scope guard installed at the top of main() is what makes the same thing
     // happen on the ~20 CLI subcommand paths that return before ever getting
     // here. Calling run() twice is a no-op; the registry clears itself.
-    util::teardown::run();
+    util::teardown::run(cap);
     return 0;
+}
+
+}  // namespace
+
+// The process's root capability. main() is the one place a thread starts
+// that jaal didn't start, and it holds nothing yet. Everything else gets its
+// capability from here, from a job/task entry, or from a lock body.
+// (lint: cap_roots lists this file.)
+int main(int argc, char** argv) {
+    return maya::thread_root([&](const maya::unlocked& cap) { return run_main(argc, argv, cap); });
 }

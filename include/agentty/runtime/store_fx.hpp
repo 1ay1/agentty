@@ -38,6 +38,7 @@
 #include "agentty/provider/selection.hpp"    // provider::Selection
 #include "agentty/store/store.hpp"           // store::Settings
 #include "agentty/auth/auth.hpp"             // auth::Credentials
+#include "agentty/provider/chatgpt/codex_oauth.hpp"   // CodexCredentials
 
 namespace agentty {
 
@@ -127,6 +128,17 @@ struct SaveCredentials {
     bool              as_new_account = false;
 };
 using save_credentials = maya::pure_fx<SaveCredentials, "save_credentials">;
+
+/// Persist ChatGPT (Codex) OAuth credentials from a finished login. The
+/// reducer still decides (only after matching the active attempt id, so an
+/// abandoned worker can't overwrite the store); the host performs the write,
+/// with `unlocked`, because it is encrypted file IO under the codex creds
+/// lock and a reducer can neither block nor take locks. A failed write
+/// answers CodexCredentialsSaveFailed.
+struct SaveCodexCredentials {
+    provider::chatgpt::CodexCredentials creds;
+};
+using save_codex_credentials = maya::pure_fx<SaveCodexCredentials, "save_codex_credentials">;
 
 /// Read the credential stores, env and accounts registry into an AuthView
 /// and answer AuthViewLoaded. Batched after any effect that changes them.

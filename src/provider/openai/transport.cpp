@@ -48,6 +48,7 @@
 #include "agentty/provider/dialect.hpp"  // chat-vs-Responses routing (SSOT)
 #include "agentty/provider/openai/responses_site.hpp"
 #include "agentty/provider/registry.hpp" // endpoint columns: from_spec's SSOT
+#include "agentty/provider/error_class.hpp" // OptionalField: learned rejections (#93)
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/stream_scaffold.hpp"
 #include "agentty/provider/usage.hpp"
@@ -1641,14 +1642,11 @@ void feed_ndjson(StreamCtx& ctx, const char* data, size_t len) {
 bool endpoint_speaks_native(Io io, const Endpoint& ep) {
     if (!ep.native_api) return false;
 
-    static maya::guarded<std::map<std::string, bool, std::less<>>> cache;
+    using Cache = std::map<std::string, bool, std::less<>>;
+    static maya::snapshot<Cache> cache;
     const std::string key = ep.host + ":" + std::to_string(ep.port);
-    if (auto hit = cache.with(
-            [](auto& m, std::string k) -> std::optional<bool> {
-                auto it = m.find(k);
-                return it == m.end() ? std::nullopt : std::optional{it->second};
-            }, key))
-        return *hit;
+    if (auto snap = cache.load(); snap->contains(key))
+        return snap->find(key)->second;
 
     http::Request probe;
     probe.method    = http::HttpMethod::Get;
@@ -1667,10 +1665,11 @@ bool endpoint_speaks_native(Io io, const Endpoint& ep) {
                 "{}:{} has no /api/tags — treating it as OpenAI-compatible",
                 ep.host, ep.port);
 
-    cache.with([](auto& m, std::pair<std::string, bool> kv) {
-        m.insert_or_assign(std::move(kv.first), kv.second);
-        return 0;
-    }, std::pair{key, native});
+    cache.update([](const Cache& m, const std::string& k, const bool& v) {
+        Cache next = m;
+        next.insert_or_assign(k, v);
+        return next;
+    }, key, native);
     return native;
 }
 
@@ -1720,6 +1719,7 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
                     std::string{row->models_path}, row->use_tls,
                     std::string{row->id}};
         ep.native_api = row->native_api;
+        ep.prompt_cache_key = row->accepts_prompt_cache_key;
         // Name ourselves when the row asks for it (OpenRouter today). Same
         // builder the Responses path uses, so both dialects are credited to
         // one app page. Rides extra_headers, which build_request_headers
@@ -2075,6 +2075,48 @@ http::Headers build_request_headers(const AuthHeader& auth,
     return h;
 }
 
+// The human sentence in a provider's error body, or a capped raw excerpt.
+//
+// Shapes seen in the wild across the OpenAI-compat family:
+//   {"error": {"message": "..."}}          OpenAI, Groq, most
+//   {"error": "..."}                         some gateways
+//   {"message": "..."}                       a few
+//   [{"error": {"message": "..."}}]          Google Gemini (array-wrapped!)
+// Gemini's array wrapper used to fall through to the raw dump, so the user
+// got a screen of JSON (`fieldViolations`, `@type`, ...) instead of the one
+// sentence that names the problem (#93). Whatever the shape, the result is
+// a single line: newlines collapsed so the transcript shows a sentence.
+std::string provider_error_message(std::string_view body) {
+    auto one_line = [](std::string s) {
+        for (char& c : s) if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s)
+            if (!(c == ' ' && !out.empty() && out.back() == ' ')) out += c;
+        while (!out.empty() && out.back() == ' ') out.pop_back();
+        return out;
+    };
+    if (body.empty()) return {};
+    try {
+        json j = json::parse(body);
+        if (j.is_array() && !j.empty()) j = j.front();
+        if (j.is_object()) {
+            if (auto e = j.find("error"); e != j.end()) {
+                if (e->is_object()) {
+                    if (auto m = e->find("message"); m != e->end() && m->is_string())
+                        return one_line(m->get<std::string>());
+                } else if (e->is_string()) {
+                    return one_line(e->get<std::string>());
+                }
+            }
+            if (auto m = j.find("message"); m != j.end() && m->is_string())
+                return one_line(m->get<std::string>());
+        }
+    } catch (...) {}
+    constexpr std::size_t kRawCap = 300;
+    return one_line(std::string{body.substr(0, kRawCap)});
+}
+
 // Infer only explicit memory-tool intent from the latest real user message.
 // This is a safety gate for JSON-in-content salvage, not a general NLP policy:
 // false negatives merely leave the call swallowed; false positives could mutate
@@ -2272,18 +2314,8 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         .stop        = ctx.stop_reason,
         .http_error_message = [&]() -> std::string {
             std::string msg = "HTTP " + std::to_string(sc.http_status);
-            try {
-                auto j = json::parse(sc.error_body);
-                if (j.contains("error") && j["error"].is_object()
-                    && j["error"].contains("message"))
-                    msg += ": " + j["error"]["message"].get<std::string>();
-                else if (j.contains("message"))
-                    msg += ": " + j["message"].get<std::string>();
-                else if (!sc.error_body.empty())
-                    msg += ": " + sc.error_body.substr(0, 300);
-            } catch (...) {
-                if (!sc.error_body.empty()) msg += ": " + sc.error_body.substr(0, 300);
-            }
+            if (auto said = provider_error_message(sc.error_body); !said.empty())
+                msg += ": " + said;
             if (sc.http_status == 401 || sc.http_status == 403)
                 msg += "  (check the provider API key)";
             // A 404 on a local OpenAI-compatible server is one of TWO things:
@@ -2361,6 +2393,29 @@ std::string_view local_model_prompt_addendum() {
         "Never call remember/forget/wipe_memory on your own.";
 }
 
+std::string_view local_model_action_rules() {
+    return
+        "DOING WORK\n"
+        "- When the user asks you to create, implement, build, change, fix, "
+        "rename, or delete something, DO it with tools. Write files with "
+        "`write`, change them with `edit`, run commands with the shell tool.\n"
+        "- NEVER paste the code (or a command) into your reply instead of "
+        "calling the tool. Code in a reply does nothing \u2014 the user wants "
+        "the files on disk.\n"
+        "- Big tasks are normal here. You are NOT limited to one reply: you "
+        "work in many steps, one tool call at a time, and the user sees each "
+        "file land. So never refuse or apologise that a task is too large "
+        "for a single response. Start with the first file, then the next, "
+        "until it is done.\n"
+        "- If you are unsure what exists, `read` or list the directory "
+        "first. A missing directory is not a reason to stop: `write` "
+        "creates parent directories.\n"
+        "- Never say a file was created, changed, or deleted unless a tool "
+        "you called returned that result.\n"
+        "- A `read` result tagged [cached] still contains the file's "
+        "content: use it, do not read the same file again.\n\n";
+}
+
 std::string local_model_system_prompt() {
     std::string cwd;
     try { cwd = std::filesystem::current_path().string(); }
@@ -2406,6 +2461,8 @@ std::string local_model_system_prompt() {
            "the next. Never invent a tool result.\n"
            "- Never call remember/forget/wipe_memory unless the user asks "
            "you to remember or forget something.\n\n";
+
+    out += local_model_action_rules();
 
     out += "OUTPUT\n"
            "- Output is rendered as GitHub-flavoured markdown in a terminal. "
@@ -2544,9 +2601,18 @@ json build_request_body(const Request& req) {
     // also accept max_completion_tokens; max_tokens stays accepted for the
     // whole compatible family, so use it for portability).
     body["max_tokens"] = req.max_tokens;
+    // Optional fields this host has REJECTED before (its own 400, learned
+    // by the stream reducer and persisted). Checked per field below so a
+    // strict host gets a body it accepts on every turn after the first.
+    const std::uint8_t rejected =
+        rejected_fields_for(host_key(req.endpoint.host, req.endpoint.port));
+    auto allowed = [&](provider::OptionalField f) {
+        return (rejected & provider::bit(f)) == 0;
+    };
     // Ask for a usage frame on the final SSE event so the context gauge can
     // update even on streaming requests.
-    body["stream_options"] = {{"include_usage", true}};
+    if (allowed(provider::OptionalField::StreamOptions))
+        body["stream_options"] = {{"include_usage", true}};
 
     // messages: system prompt first, then the conversation.
     json messages = json::array();
@@ -2567,10 +2633,13 @@ json build_request_body(const Request& req) {
 
     // Prompt-cache routing. OpenAI auto-caches prefixes >=1024 tokens;
     // sending a stable prompt_cache_key pins a conversation's identical
-    // system+tools+history prefix to one cache node. HOSTED TIER: local
-    // servers reject the field and their KV cache is prefix-automatic
-    // anyway, so there is nothing to gain and a 400 to lose.
-    if (req.endpoint.use_tls && !req.session_key.empty())
+    // system+tools+history prefix to one cache node. PROBED TIER, from the
+    // registry row: this used to be gated on TLS ("hosted") alone, and TLS
+    // is not evidence -- Groq and Gemini are hosted, strictly validated,
+    // and 400 the unknown field, so every turn on them died (#93). Local
+    // servers reject it too, and their KV cache is prefix-automatic anyway.
+    if (req.endpoint.prompt_cache_key && !req.session_key.empty()
+        && allowed(provider::OptionalField::PromptCacheKey))
         body["prompt_cache_key"] = req.session_key;
 
     // Reasoning effort. PROBED TIER: the catalog already excluded models
@@ -3011,8 +3080,8 @@ struct WindowProbe {
 // than read out, because this layer takes no dependency on the settings
 // store (the whole transport is constructed from an Endpoint and an auth
 // header, which is what makes it testable without a filesystem).
-maya::guarded<std::set<std::string>>& probe_opt_in() {
-    static maya::guarded<std::set<std::string>> s;
+maya::snapshot<std::set<std::string>>& probe_opt_in() {
+    static maya::snapshot<std::set<std::string>> s;
     return s;
 }
 
@@ -3046,11 +3115,7 @@ maya::guarded<std::set<std::string>>& probe_opt_in() {
     // This exists because the alternative is telling someone their setup is
     // unsupported — the probe is the only way to learn a runtime window, so
     // refusing to run it makes the window permanently wrong.
-    if (probe_opt_in().read(
-            [](const std::set<std::string>& s, std::string host) {
-                return s.count(host) > 0;
-            },
-            h))
+    if (probe_opt_in().load()->count(h) > 0)
         return true;
     if (const char* v = std::getenv("AGENTTY_PROBE_HOSTS")) {
         std::string_view list{v};
@@ -3426,9 +3491,7 @@ maya::guarded<std::set<std::string>>& probe_opt_in() {
 }  // namespace detail
 
 void install_probe_hosts(std::set<std::string> hosts) {
-    detail::probe_opt_in().with(
-        [](std::set<std::string>& s, std::set<std::string> v) { s = std::move(v); },
-        std::move(hosts));
+    detail::probe_opt_in().store(std::move(hosts));
 }
 
 // Public forwarder — see the header for why the 0 is a contract.

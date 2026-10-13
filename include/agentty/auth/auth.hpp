@@ -26,6 +26,9 @@
 
 #include "agentty/domain/id.hpp"
 #include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
+
+#include <maya/runtime.hpp>
 
 namespace agentty::auth {
 
@@ -233,7 +236,9 @@ void open_browser(const std::string& url);
 // `fallback` is returned unchanged when no saved/env credential is usable
 // (e.g. a CLI -k key was the only auth) so callers that already hold a
 // known-good header don't regress. Thread-safe to call from any worker.
-[[nodiscard]] AuthHeader fresh_auth_header(Io, const AuthHeader& fallback);
+// Refreshes run one at a time on the auth_refresh lane.
+[[nodiscard]] AuthHeader fresh_auth_header(Io, const locks::below_auth_refresh&,
+                                           const AuthHeader& fallback);
 
 // ── Pending OAuth refresh handoff ────────────────────────────────────────
 // One-shot channel from `auth::resolve()` (called pre-TUI from main()) to
@@ -302,8 +307,8 @@ private:
 };
 
 // ── Interactive CLI flows (blocking, stdout/stdin — NOT in TUI) ──────────
-int cmd_login(Io);
-int cmd_logout(Io);
-int cmd_status(Io);
+int cmd_login(Io, const maya::unlocked&);
+int cmd_logout(Io, const maya::unlocked&);
+int cmd_status(Io, const maya::unlocked&);
 
 } // namespace agentty::auth

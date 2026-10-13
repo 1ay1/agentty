@@ -265,7 +265,7 @@ TEST_CASE("rag adapter") {
             auto fb = tmp / ".agentty" / "rag_feedback.tsv";
             fs::remove(fb, ec);
             (void)r.retrieve("filesystem sandbox workspace root", 3);
-            agentty::rag::feedback::note_file_opened("sandbox.md");
+            agentty::rag::feedback::note_file_opened(agtest::cap(), "sandbox.md");
             check(!fs::exists(fb, ec), "implicit learning is disabled by default");
         }
 

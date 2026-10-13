@@ -10,6 +10,39 @@
 # loop, park reducer state in a thread_local, or forge a Sink, and jaal
 # would never notice. Pointing the same check at agentty is what closes it.
 #
+# ── Lock-order capability roots (cap_mint) ───────────────────────────────────
+# jaal makes lock order a type (jaal core/capability.hpp): taking a lock needs
+# a capability proving every held lock ranks lower, and a blocking wait needs
+# `unlocked`. Capabilities are handed out at thread entry (job/task/stream/
+# scope bodies), inside lock bodies, and nowhere else -- EXCEPT the roots
+# listed with `cap_mint` below, each a place a thread starts holding nothing
+# but whose signature a library or the language fixes. Each is a claim a
+# human checked: no agentty lock can be held when control reaches it.
+# Adding one is a review.
+#
+# main(): the process root; run_main threads `cap` everywhere below it.
+runtime/main.cpp: cap_mint
+# The ACP server: the URL-elicitation-complete callback (MCP transport
+# thread), tool progress / update sinks and the elicit relay (tool worker
+# thread) -- all reached from threads that hold no agentty lock.
+acp/server.cpp: cap_mint
+# rpc::Peer's destructor joins its tasks. Peer is joins_on_destroy, so no
+# guarded can own one and it is never destroyed inside a lock body.
+rpc/peer.cpp: cap_mint atomic
+# mcp-cpp's CapabilityProvider virtuals (execute/list/read_resource/...):
+# signatures fixed by the library; called from tool bodies and MCP
+# transports. The class holds no jaal lock at all (atomics + snapshots).
+mcp/connection.cpp: atomic cap_mint
+# The Retriever's public API (tool bodies, proactive path, settings worker)
+# and its warm worker; the index lock and the memory store below it are
+# checked against this one root.
+# mcp-cpp's MemoryStore interface (no Call is passed to it).
+# mcp-cpp's StateAccess::with (the tool state gate) -- a library virtual.
+# exec.cpp: mcp-cpp's Session poll/stop virtuals, run_child's feeder join,
+# and the scan Splitter mcp-cpp / rag-cpp call.
+tool/util/exec.cpp: cap_mint
+tool/mcp_tools_bridge.cpp: cap_mint
+#
 # Each entry names the primitives that file may use, so a file allowed
 # std::mutex still cannot sneak in a .detach(). Adding a line is a
 # deliberate act: it says someone checked by hand that the raw primitive IS
@@ -61,7 +94,7 @@
 # http: prewarm dials run on a maya::pool, the connection pool is
 # maya::guarded. thread_local is the retry-jitter RNG; const_cast is the
 # OpenSSL C API.
-io/http.cpp: thread_local const_cast
+io/http.cpp: thread_local const_cast atomic
 io/tls.cpp: const_cast
 
 # ── Persistence and credentials ──────────────────────────────────────────
@@ -78,7 +111,7 @@ io/cred_crypt.cpp: const_cast
 # and the subagent stream's cancel bridge is stop_callbacks on real tokens, so
 # this file starts no thread of its own. Its caches are maya::guarded or
 # published; the atomics are two sequence counters.
-tool/mcp_tools_backends.cpp: atomic
+tool/mcp_tools_backends.cpp: atomic cap_mint
 tool/plugin.cpp: atomic
 # skills: the atomic counts discovery-cache resolutions for a test.
 tool/skills.cpp: atomic
@@ -142,7 +175,7 @@ mcp/oauth.cpp: atomic
 # rag/adapter: the warm worker is a util::WorkerGroup; the index and the
 # feedback store are maya::guarded (the status row uses try_read so a frame
 # never waits on a rebuild). atomic is the warming gate and the stop flag.
-rag/adapter.cpp: atomic
+rag/adapter.cpp: atomic cap_mint
 
 # ── Process-wide plumbing ────────────────────────────────────────────────
 util/logx.cpp: atomic
@@ -181,3 +214,23 @@ runtime/app/cmd_factory.cpp: atomic
 # Dropping these two lines is the point of the exercise. An allowlist entry
 # removed because the primitive was replaced by a checked one is the only kind
 # of progress this file can record.
+
+# ── Lock-free by design: reached where no capability can be ──────────────────
+# The typed-lock migration replaced these files' mutexes. Each spot is a
+# single word reached from a context that can't carry a capability (a
+# std::stop_callback, a static used from every layer, a lock body that must
+# not nest another lock), so a guarded<T> would either be unreachable or
+# put a capability on half the program. Each has its reasoning in place.
+#   io/http.cpp: the connection-pool slot state (CAS-claimed, see above).
+#   rpc/peer.cpp: the cancel flag a stop_callback raises from any thread.
+#   persistence.cpp: random_hex_id's seeded counter (every layer mints ids).
+io/persistence.cpp: atomic
+# codex_oauth: the login listener's wake fds + in-flight count, touched by
+# the cancel callback on whichever thread requests the stop.
+provider/chatgpt/codex_oauth.cpp: atomic
+# registry: the MCP connect phase and the reload running/pending word;
+# registry() is read from views, lock bodies and tool workers alike.
+tool/registry.cpp: atomic
+# memory_store: the per-thread id RNG, so remember() can mint an id inside
+# the store's own lock body without taking a second lock.
+tool/memory_store.cpp: thread_local

@@ -213,6 +213,17 @@ static_assert(sizeof(memory::AppendResult) == sizeof(mt::MemoryAppendResult),
               "AppendResult / MemoryAppendResult drifted — update both structs "
               "and the field mapping in AgenttyMemoryStore::append()");
 
+// Lock order: mcp-cpp's MemoryStore interface hands these methods no Call, so
+// the tool worker's capability can't ride the context to them. Each method
+// re-states it at this one boundary (`mem_root`, tests/lint/allowlist.txt):
+// they are called only by mcp-cpp's memory tool from a tool body on a tool
+// worker, which holds no agentty lock, and they take only the memory store
+// lane (ranked below every leaf) and its file IO.
+template <class F>
+auto mem_root(F&& f) -> decltype(maya::thread_root(std::forward<F>(f))) {
+    return maya::thread_root(std::forward<F>(f));
+}
+
 class AgenttyMemoryStore final : public mt::MemoryStore {
 public:
     // scopes()[0] is the DEFAULT scope the shell uses when the model omits
@@ -262,7 +273,9 @@ public:
         opts.pinned        = req.pinned;
         opts.tags          = req.tags;
         opts.supersedes_id = req.supersedes_id;
-        const auto r = memory::append(*scope, req.text, opts);
+        const auto r = mem_root([&](const maya::unlocked& cap) {
+            return memory::append(cap, *scope, req.text, opts);
+        });
 
         // Bridge the agentty result onto the mcp result. Named designated
         // initialisers so a renamed/removed field is a compile error rather
@@ -280,14 +293,14 @@ public:
     }
 
     std::size_t forget_by_id(const std::string& id) override {
-        return memory::forget_by_id(id);
+        return mem_root([&](const maya::unlocked& cap) { return memory::forget_by_id(cap, id); });
     }
     std::size_t forget_by_substring(const std::string& needle) override {
-        return memory::forget_by_substring(needle);
+        return mem_root([&](const maya::unlocked& cap) { return memory::forget_by_substring(cap, needle); });
     }
     std::vector<mt::MemoryRecord> preview_forget(const std::string& needle) override {
         std::vector<mt::MemoryRecord> out;
-        for (const auto& r : memory::preview_forget_by_substring(needle)) {
+        for (const auto& r : mem_root([&](const maya::unlocked& cap) { return memory::preview_forget_by_substring(cap, needle); })) {
             mt::MemoryRecord m;
             m.id     = r.id;
             m.text   = r.text;
@@ -304,13 +317,13 @@ public:
     std::optional<std::size_t> preview_wipe(const std::string& scope) override {
         auto s = memory::parse_scope(scope);
         if (!s || memory::path_for(*s).empty()) return std::nullopt;
-        return memory::load_all(*s).size();
+        return mem_root([&](const maya::unlocked& cap) { return memory::load_all(cap, *s).size(); });
     }
 
     std::optional<std::size_t> wipe(const std::string& scope) override {
         auto s = memory::parse_scope(scope);
         if (!s) return std::nullopt;
-        return memory::wipe(*s);
+        return mem_root([&](const maya::unlocked& cap) { return memory::wipe(cap, *s); });
     }
 };
 
@@ -1232,10 +1245,10 @@ provider::StreamResult run_one_completion(Thread& thread,
             || std::holds_alternative<auth::BearerHeader>(live);
         req.auth = live_real
                  ? (sel.kind == provider::Kind::Anthropic
-                        ? auth::fresh_auth_header(IoAccess::grant(), live)
+                        ? auth::fresh_auth_header(IoAccess::grant(), ctx.capability(), live)
                         : std::move(live))
                  : (sel.kind == provider::Kind::Anthropic
-                        ? auth::fresh_auth_header(IoAccess::grant(), cfg.auth)
+                        ? auth::fresh_auth_header(IoAccess::grant(), ctx.capability(), cfg.auth)
                         : cfg.auth);
     }
     // A subagent's job is to investigate and return a CONCISE standalone
@@ -1496,12 +1509,12 @@ provider::StreamResult run_one_completion(Thread& thread,
         // A role pinned on another endpoint. stream_to resolves that
         // provider's own credential before dispatching — see the auth block
         // above for why this path skips the active-provider lookup.
-        result = cfg.stream_to(route_provider, std::move(req), sink);
+        result = cfg.stream_to(ctx.capability(), route_provider, std::move(req), sink);
     } else if (cfg.stream) {
-        result = cfg.stream(std::move(req), sink);
+        result = cfg.stream(ctx.capability(), std::move(req), sink);
     } else {
         provider::anthropic::AnthropicProvider p;
-        result = p.stream(std::move(req), sink);
+        result = p.stream(ctx.capability(), std::move(req), sink);
     }
     // Deregister before anything else runs: the callbacks capture `cancel`,
     // and a late stop must not trip it once the stream has already settled.
@@ -1710,6 +1723,13 @@ public:
         // own reader, the tighter deadline, and cancelled when either the
         // parent call or this run is.
         CallContext child = ctx;
+        // Copying a context drops its capability on purpose (a copy could
+        // outlive or out-travel the call). `child` does neither: it lives on
+        // this frame, inside the very call that proved the capability, on
+        // the same thread — so carry it over explicitly. Without this every
+        // provider/auth callback below throws "tool callback outside a
+        // dispatched call" and the subagent can never run.
+        child.cap.set(ctx.cap.get());
         child.depth    = ctx.depth + 1;
         child.reader   = run_reader;
         child.deadline = run_deadline;
@@ -1940,7 +1960,7 @@ public:
                     // deadline, the parent's card for live output (as before).
                     CallContext tool_ctx = child;
                     tool_ctx.active_skills = skills::active_in(::agentty::visible_text(thread));
-                    auto res = tool::DynamicDispatch::execute(tc.name.value, tc.args, tool_ctx);
+                    auto res = tool::DynamicDispatch::execute(child.capability(), tc.name.value, tc.args, tool_ctx);
                     // Same tool.exec record the main loop emits, so a headless
                     // `agentty run` and a subagent turn are as diagnosable as
                     // an interactive one. A failing tool is Warn (and therefore
@@ -2216,7 +2236,7 @@ std::string_view status_name(OneShotResult::Status s) noexcept {
     return "failed";
 }
 
-OneShotResult run_one_shot(const OneShotOptions& opts) {
+OneShotResult run_one_shot(const maya::unlocked& cap, const OneShotOptions& opts) {
     // Same loop as the task tool, driven from main() at depth 0.
     using S = OneShotResult::Status;
     const auto t0 = std::chrono::steady_clock::now();
@@ -2248,7 +2268,7 @@ OneShotResult run_one_shot(const OneShotOptions& opts) {
         const Io io = IoAccess::grant();
         std::optional<Thread> got;
         if (opts.resume == "last") {
-            auto all = persistence::load_all_threads(io);
+            auto all = persistence::load_all_threads(io, cap);
             auto newest = std::max_element(all.begin(), all.end(),
                 [](const Thread& a, const Thread& b) { return a.updated_at < b.updated_at; });
             if (newest != all.end()) got = persistence::load_thread_by_id(io, newest->id);
@@ -2290,7 +2310,7 @@ OneShotResult run_one_shot(const OneShotOptions& opts) {
         }
         t.messages   = std::move(st.final_thread.messages);
         t.updated_at = std::chrono::system_clock::now();
-        persistence::save_thread(IoAccess::grant(), t);
+        persistence::save_thread(IoAccess::grant(), cap, t);
         out.thread_id = t.id.value;
     }
 
@@ -2367,7 +2387,8 @@ bool memory_fact_in_prompt_(const std::string& mem_path) {
     const std::string id = mem_path.substr(slash + 1);
 
     struct PromptIds { std::uint64_t stamp = ~0ULL; std::unordered_set<std::string> ids; };
-    static maya::guarded<PromptIds> cache;
+    // Replaced whole when the memory files change: a snapshot, no lock.
+    static maya::snapshot<PromptIds> cache;
 
     std::uint64_t now_stamp = 1469598103934665603ULL;
     auto mix = [&now_stamp](std::uint64_t v) {
@@ -2385,10 +2406,7 @@ bool memory_fact_in_prompt_(const std::string& mem_path) {
     }
 
     // Fresh: answer from the cache. Stale: reload outside the lock.
-    auto hit = cache.read([](const PromptIds& c, std::uint64_t st, std::string k) {
-        return c.stamp == st ? std::optional<bool>{c.ids.count(k) > 0} : std::nullopt;
-    }, now_stamp, id);
-    if (hit) return *hit;
+    if (const auto c = cache.load(); c->stamp == now_stamp) return c->ids.count(id) > 0;
 
     std::unordered_set<std::string> ids;
     for (auto load : {&memory::load_recent_user, &memory::load_recent_project}) {
@@ -2396,10 +2414,7 @@ bool memory_fact_in_prompt_(const std::string& mem_path) {
         for (const auto& r : picked.records) ids.insert(r.id);
     }
     const bool in = ids.count(id) > 0;
-    cache.with([](PromptIds& c, std::uint64_t st, std::unordered_set<std::string> fresh) {
-        c.stamp = st;
-        c.ids   = std::move(fresh);
-    }, now_stamp, std::move(ids));
+    cache.store(PromptIds{now_stamp, std::move(ids)});
     return in;
 }
 
@@ -2427,8 +2442,10 @@ struct ProactiveDedup {
     std::unordered_set<std::string> seen;
     std::deque<std::string>         fifo;
 };
-maya::guarded<ProactiveDedup>& proactive_dedup_() {
-    static maya::guarded<ProactiveDedup> d;
+// A snapshot: peeked on every candidate passage, committed a few keys a
+// turn. Lock-free, so the abandoned-worker peek can never block a commit.
+maya::snapshot<ProactiveDedup>& proactive_dedup_() {
+    static maya::snapshot<ProactiveDedup> d;
     return d;
 }
 constexpr std::size_t kProactiveDedupMax = 256;
@@ -2436,20 +2453,21 @@ constexpr std::size_t kProactiveDedupMax = 256;
 
 // PEEK: true if `key` was already injected this session. Does NOT record it.
 bool proactive_seen_(const std::string& key) {
-    return proactive_dedup_().read([](const ProactiveDedup& d, std::string k) {
-        return d.seen.count(k) > 0;
-    }, key);
+    return proactive_dedup_().load()->seen.count(key) > 0;
 }
 
 // COMMIT: record `key` as injected (bounded FIFO eviction). Idempotent.
 void proactive_mark_injected_(const std::string& key) {
-    proactive_dedup_().with([](ProactiveDedup& d, std::string k) {
-        if (!d.seen.insert(k).second) return;
-        d.fifo.push_back(std::move(k));
+    (void)proactive_dedup_().update([](const ProactiveDedup& cur, const std::string& k) {
+        if (cur.seen.count(k)) return cur;
+        ProactiveDedup d = cur;
+        d.seen.insert(k);
+        d.fifo.push_back(k);
         while (d.fifo.size() > kProactiveDedupMax) {
             d.seen.erase(d.fifo.front());
             d.fifo.pop_front();
         }
+        return d;
     }, key);
 }
 

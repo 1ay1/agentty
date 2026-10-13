@@ -555,10 +555,15 @@ public:
         return s;
     }
 
+    // Lock order: the store is a LEAF (its bodies only update counts; the TSV
+    // append runs after). boost() is called from ranking inside the index
+    // body (held<rag_index> converts: leaf ranks above it); the note_* write
+    // side runs from tool bodies via feedback::note_*.
+
     // Ranking nudge for `path`, in roughly [0.85, 1.15]. 1.0 (neutral) when
     // learning is off, the path is unseen, or it has too little evidence.
-    float boost(const std::string& path) {
-        return st_.with([](FeedbackState& st, std::string p, std::string tsv) {
+    float boost(const maya::below<maya::leaf>& cap, const std::string& path) {
+        return st_.with(cap, [](FeedbackState& st, std::string p, std::string tsv) {
             ensure_loaded(st, tsv);
             auto it = st.counts.find(p);
             if (it == st.counts.end()) return 1.0f;
@@ -580,9 +585,9 @@ public:
 
     // Record that these paths were surfaced by a retrieval (each a "use"), and
     // remember them as recently-surfaced so a following read can be a win.
-    void note_surfaced(const std::vector<std::string>& paths) {
+    void note_surfaced(const maya::below<maya::leaf>& cap, const std::vector<std::string>& paths) {
         const std::string tsv = tsv_path().string();
-        auto to_write = st_.with(
+        auto to_write = st_.with(cap,
             [](FeedbackState& st, std::vector<std::string> ps, std::string t) {
                 ensure_loaded(st, t);
                 std::vector<std::string> out;
@@ -601,10 +606,10 @@ public:
     // Record that `path` was opened. It is a WIN only if it (or its basename)
     // was recently surfaced — otherwise the read tells us nothing about
     // retrieval quality and is ignored (no denominator inflation either).
-    void note_opened(const std::string& path) {
+    void note_opened(const maya::below<maya::leaf>& cap, const std::string& path) {
         if (path.empty()) return;
         const std::string tsv = tsv_path().string();
-        auto matched = st_.with(
+        auto matched = st_.with(cap,
             [](FeedbackState& st, std::string opened, std::string t) {
                 ensure_loaded(st, t);
                 std::string m = match_recent(st, opened);
@@ -612,7 +617,7 @@ public:
                 return m;
             },
             path, tsv);
-        if (!matched.empty()) append(tsv, "win", {matched});
+        if (!matched.empty()) append(tsv, "win", std::vector<std::string>{matched});
     }
 
 private:
@@ -780,7 +785,19 @@ using DenseState = std::variant<dense::Unprobed, dense::Ready, dense::Unavailabl
 // maya::guarded: every method below runs inside index.with(), so the lock is
 // implied by the receiver. Held across whole rebuilds on purpose; the UI's
 // status row uses try_read so a frame never waits on one.
+//
+// Lock order: the index is ranked lock_levels::rag_index. Its body reads the
+// learned-memory store (memory_store, ranked above it) through
+// memory_fingerprint() and reindex(). Each body takes the `held<rag_index>`
+// it is handed and parks its address in `held_` for the body's duration
+// (IndexBody, below), and the two memory reads use it. held_ is only ever
+// set inside the lock and cleared before it is released, so a capability
+// never outlives the body that proved it.
 struct Index {
+    using held_t = maya::held<lock_levels::rag_index>;
+    const held_t* held_ = nullptr;
+    [[nodiscard]] const held_t& held() const { return *held_; }
+
     // The warm worker's cancel flag, owned by Impl (outside the lock, so
     // shutdown can trip it while a rebuild holds the index). refresh_docs()
     // and reindex() poll it at every loop boundary so a multi-second embed
@@ -1042,7 +1059,7 @@ struct Index {
         std::uint64_t h = 1469598103934665603ull;
         if (!cfg.memory) return h;
         for (auto scope : {tools::memory::Scope::User, tools::memory::Scope::Project})
-            for (const auto& r : tools::memory::load_all(scope)) {
+            for (const auto& r : tools::memory::load_all(held(), scope)) {
                 hash_text(h, r.id);
                 hash_text(h, r.text);
             }
@@ -1075,7 +1092,7 @@ struct Index {
                                           {{"kind", "skill"}}, s.name);
         if (cfg.memory)
             for (auto scope : {tools::memory::Scope::User, tools::memory::Scope::Project})
-                for (const auto& r : tools::memory::load_all(scope))
+                for (const auto& r : tools::memory::load_all(held(), scope))
                     if (!r.text.empty())
                         (void)warm_engine.add("memory://" + r.id, r.text,
                             {{"kind", "memory"},
@@ -1129,7 +1146,7 @@ struct Index {
         // Learned memory (both scopes).
         if (cfg.memory) {
             for (auto scope : {tools::memory::Scope::User, tools::memory::Scope::Project}) {
-                for (const auto& r : tools::memory::load_all(scope)) {
+                for (const auto& r : tools::memory::load_all(held(), scope)) {
                     if (r.text.empty()) continue;
                     (void)engine.add("memory://" + r.id, r.text,
                                {{"kind", "memory"}, {"scope", std::string(tools::memory::to_string(scope))}});
@@ -1557,10 +1574,34 @@ struct Index {
 // What the warm worker shares with the Retriever: the index, plus (outside
 // its lock) the one-at-a-time gate and the cancel flag shutdown trips while
 // a rebuild holds the index.
+// Parks a body's held<rag_index> on the Index for the body's duration, so
+// Index methods that read the memory store (ranked above the index) can pass
+// it. Exclusive bodies only: a shared (read) body never sets it.
+struct IndexBody {
+    Index& ix;
+    IndexBody(Index& i, const Index::held_t& h) : ix(i) { ix.held_ = std::addressof(h); }
+    ~IndexBody() { ix.held_ = nullptr; }
+    IndexBody(const IndexBody&)            = delete;
+    IndexBody& operator=(const IndexBody&) = delete;
+};
+
+// The Retriever's public API is called from tool bodies, the proactive
+// pre-turn path and the RAG settings worker -- never from inside an agentty
+// lock body (those are captureless over their own value and can't reach a
+// Retriever). Its methods are also behind a stable public interface used by
+// tests and the rag host. So each re-states "no lock held" here, the one
+// reviewed root for the retriever (tests/lint/allowlist.txt), and everything
+// below it -- the index lock, the memory store, the warm worker -- is
+// checked against it.
+template <class F>
+auto api_root(F&& f) -> decltype(maya::thread_root(std::forward<F>(f))) {
+    return maya::thread_root(std::forward<F>(f));
+}
+
 struct WarmState {
     std::atomic<bool>    warming{false};
     std::atomic<bool>    warm_stop{false};
-    maya::guarded<Index> index{lock_levels::kRagIndex, &warm_stop};
+    maya::guarded<Index, lock_levels::rag_index> index{std::in_place, &warm_stop};
 };
 using WarmRef = maya::co_owned<WarmState>;
 
@@ -1568,7 +1609,7 @@ struct Retriever::Impl {
     WarmRef               warm = WarmRef::make();
     std::atomic<bool>&    warming   = warm->warming;
     std::atomic<bool>&    warm_stop = warm->warm_stop;
-    maya::guarded<Index>& index     = warm->index;
+    maya::guarded<Index, lock_levels::rag_index>& index = warm->index;
 
     // Optional LLM seam for HyDE / multi-query. Outside the index: it is a
     // closure that may dial out, so retrieve() takes a snapshot of it and
@@ -1577,7 +1618,7 @@ struct Retriever::Impl {
 
     Impl() {
         generator.publish(std::make_shared<const Retriever::Generator>(
-            Index::default_generator(index.read([](const Index& ix) { return ix.cfg; }))));
+            Index::default_generator(api_root([&](const maya::unlocked& c) { return index.read(c, [](const Index& ix) { return ix.cfg; }); }))));
     }
 
     // LAST data member ON PURPOSE: members destroy in reverse order, so the
@@ -1589,7 +1630,7 @@ struct Retriever::Impl {
     ~Impl() {
         // stop() requests stop through the token, which trips warm_stop, so
         // a warm in flight bails at its next batch.
-        warmer.stop();
+        // The group's own destructor (last member) stops and joins it.
     }
 };
 
@@ -1762,7 +1803,7 @@ Retrieval retrieve_locked(Index& ix, const std::string& query, int kk, bool skip
         for (auto& h : hits) {
             auto [src, path] = split_uri(h.uri);
             (void)src;
-            float b = fb.boost(path);
+            float b = fb.boost(ix.held(), path);
             if (b != 1.0f) {
                 h.score.value *= b;
                 learned = true;
@@ -1840,7 +1881,7 @@ Retrieval retrieve_locked(Index& ix, const std::string& query, int kk, bool skip
     // Learning-loop write side (denominator): record what we surfaced so a
     // later `read` of one of these can be scored as a win.
     if (ix.cfg.learn && !surfaced.empty())
-        FeedbackStore::instance().note_surfaced(surfaced);
+        FeedbackStore::instance().note_surfaced(ix.held(), surfaced);
     // Prefer CRAG's calibrated confidence when available; else top score.
     out.confidence = crag_conf >= 0.0 ? crag_conf : top;
 
@@ -1899,10 +1940,11 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
     if (query.empty()) { out.error = "empty query"; return out; }
     const int kk = k > 0 ? k : 6;
     try {
-        out = impl_->index.with(
-            [](Index& ix, std::string query, int kk, bool skip_docs, GeneratorRef g) {
+        out = api_root([&](const maya::unlocked& cap) { return impl_->index.with(cap,
+            [](const Index::held_t& h, Index& ix, std::string query, int kk, bool skip_docs, GeneratorRef g) {
+                IndexBody body{ix, h};
                 return retrieve_locked(ix, query, kk, skip_docs, g);
-            }, query, kk, skip_docs, GeneratorRef{impl_->generator.current()});
+            }, query, kk, skip_docs, GeneratorRef{impl_->generator.current()}); });
     } catch (const std::exception& e) {
         out.error = std::string("retrieval error: ") + e.what();
     } catch (...) {
@@ -2112,10 +2154,11 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
     if (query.empty()) { out.error = "empty query"; return out; }
     const int kk = k > 0 ? k : 6;
     try {
-        out = impl_->index.with(
-            [](Index& ix, std::string query, int kk) {
+        out = api_root([&](const maya::unlocked& cap) { return impl_->index.with(cap,
+            [](const Index::held_t& h, Index& ix, std::string query, int kk) {
+                IndexBody body{ix, h};
                 return retrieve_code_locked(ix, query, kk);
-            }, query, kk);
+            }, query, kk); });
     } catch (const std::exception& e) {
         out.error = std::string("search_code failed: ") + e.what();
     } catch (...) {
@@ -2125,17 +2168,21 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
 }
 
 bool Retriever::warm() const {
-    return impl_->index.with([](Index& ix) {
+    return api_root([&](const maya::unlocked& cap) {
+      return impl_->index.with(cap, [](const Index::held_t& h, Index& ix) {
+        IndexBody body{ix, h};
         auto root = resolve_docs_root(ix.cfg.docs_root);
         if (root.empty()) return true;
         if (ix.engine.corpus().chunk_count() == 0)
             (void)ix.try_load_persisted(root);
         return !ix.needs_reindex(root, /*skip_docs=*/false);
+      });
     });
 }
 
 bool Retriever::code_warm() const {
-    return impl_->index.read([](const Index& ix) {
+    return api_root([&](const maya::unlocked& cap) {
+      return impl_->index.read(cap, [](const Index& ix) {
         if (ix.code_initialized) return true;
         // A persisted code index from a prior session counts as warm: loading
         // it is Engine::open() + a manifest stat-walk, not an embed-everything
@@ -2143,6 +2190,7 @@ bool Retriever::code_warm() const {
         // cold build — refuse; only an explicit search_code call should.
         std::error_code ec;
         return fs::exists(ix.code_ragdb_path(), ec) && !ec;
+      });
     });
 }
 
@@ -2155,7 +2203,7 @@ void Retriever::warm_async() {
     // Fresh warm pass: clear any stale cancellation from a prior worker. The
     // CAS above means no other warm is running, so nothing reads this yet.
     impl_->warm_stop.store(false, std::memory_order_relaxed);
-    impl_->warmer.post([](std::stop_token st, WarmRef state) {
+    impl_->warmer.post([](const maya::unlocked& cap, std::stop_token st, WarmRef state) {
         // Bridge the group's stop_token to the flag the deep index functions
         // poll, so a shutdown interrupts the embed pass.
         std::stop_callback on_stop(st, [&state] {
@@ -2167,7 +2215,8 @@ void Retriever::warm_async() {
             WarmState& s;
             ~ClearWarming() { s.warming.store(false); }
         } clear{*state};
-        state->index.with([](Index& ix) {
+        state->index.with(cap, [](const Index::held_t& h, Index& ix) {
+            IndexBody body{ix, h};
             auto root = resolve_docs_root(ix.cfg.docs_root);
             if (ix.engine.corpus().chunk_count() == 0)
                 (void)ix.try_load_persisted(root);
@@ -2188,7 +2237,7 @@ void Retriever::shutdown() {
     //    waits. Bounded in practice because the worker checks the flag
     //    between network batches, so the worst case is one in-flight batch.
     //    Safe from any thread, and idempotent with ~Impl's own stop.
-    impl_->warmer.stop();
+    api_root([&](const maya::unlocked& cap) { impl_->warmer.stop(cap); });
 }
 
 // Replace the live configuration. Anything that changes the CORPUS shape
@@ -2202,13 +2251,14 @@ void Retriever::shutdown() {
 // picker-owned, so unlike docs_root it is taken from the incoming config and
 // a change to it forces a re-probe + cold rebuild.
 void Retriever::apply_config(const Config& cfg) {
+  api_root([&](const maya::unlocked& cap) {
     try {
         // Step 1, locked: install the new config, and report whether the
         // embedder changed (its probe must then run unlocked) and whether the
         // corpus shape changed.
         struct Change { bool embedder = false; bool corpus = false;
                         ::agentty::rag::embed::EmbedConfig embed; };
-        const Change ch = impl_->index.with([](Index& ix, Config cfg) {
+        const Change ch = impl_->index.with(cap, [](Index& ix, Config cfg) {
             const Config& old = ix.cfg;
             Change c;
             // A different embedder means a different VECTOR SPACE: every
@@ -2248,7 +2298,7 @@ void Retriever::apply_config(const Config& cfg) {
         if (ch.embedder) probed = Index::run_probe(ch.embed);
 
         // Step 3, locked: land the probe, then reset or re-pipeline.
-        impl_->index.with([](Index& ix, Change c,
+        impl_->index.with(cap, [](Index& ix, Change c,
                              std::optional<::agentty::rag::embed::ProbeResult> pr) {
             if (pr) ix.apply_probe(*pr);
             if (c.corpus) {
@@ -2279,10 +2329,11 @@ void Retriever::apply_config(const Config& cfg) {
             impl_->generator.publish(std::make_shared<const Generator>(
                 Index::default_generator(snapshot_config())));
     } catch (...) { /* best-effort; keep the old config live on failure */ }
+  });
 }
 
 Config Retriever::snapshot_config() const {
-    return impl_->index.read([](const Index& ix) { return ix.cfg; });
+    return api_root([&](const maya::unlocked& cap) { return impl_->index.read(cap, [](const Index& ix) { return ix.cfg; }); });
 }
 
 Retriever::EmbedStatus Retriever::embed_status() const {
@@ -2295,7 +2346,7 @@ Retriever::EmbedStatus Retriever::embed_status() const {
     // A status readout is advisory by nature: if the retriever is busy being
     // reconfigured, "reconfiguring" IS the true answer, and it costs nothing
     // to say so. The next frame picks up the real state.
-    auto now = impl_->index.try_read([](const Index& ix) {
+    auto now = api_root([&](const maya::unlocked& cap) { return impl_->index.try_read(cap, [](const Index& ix) {
         EmbedStatus st_out;
         st_out.describe = ::agentty::rag::embed::describe(ix.cfg.embed);
         std::visit([&st_out](const auto& st) {
@@ -2312,7 +2363,7 @@ Retriever::EmbedStatus Retriever::embed_status() const {
             }
         }, ix.dense);
         return st_out;
-    });
+    }); });
     if (!now) {
         out.state    = EmbedStatus::State::Unprobed;
         out.describe = "reconfiguring\xe2\x80\xa6";
@@ -2325,30 +2376,32 @@ Retriever::EmbedStatus Retriever::reprobe_embedder() {
     // Same discipline as apply_config: the probe itself runs UNLOCKED, because
     // it dials a network endpoint. Only the state write and the re-attach take
     // the lock, and both are cheap.
-    const auto ec = impl_->index.with([](Index& ix) {
+    return api_root([&](const maya::unlocked& cap) {
+    const auto ec = impl_->index.with(cap, [](Index& ix) {
         ix.dense = dense::Unprobed{};
         return ix.effective_embed();
     });
     auto r = Index::run_probe(ec);
-    impl_->index.with([](Index& ix, ::agentty::rag::embed::ProbeResult pr) {
+    impl_->index.with(cap, [](Index& ix, ::agentty::rag::embed::ProbeResult pr) {
         ix.apply_probe(pr);
         ix.attach_embedder();
     }, std::move(r));
     return embed_status();
+    });
 }
 
 // ── Learning loop (write side) ─────────────
 // Both halves delegate to the process-wide FeedbackStore, which owns the TSV
 // and the read-side nudge. Best-effort; never throws.
 namespace feedback {
-void note_surfaced(const std::vector<std::string>& paths) {
+void note_surfaced(const maya::below<maya::leaf>& cap, const std::vector<std::string>& paths) {
     if (paths.empty()) return;
     try {
         if (truthy_default_off("AGENTTY_RAG_LEARN"))
-            FeedbackStore::instance().note_surfaced(paths);
+            FeedbackStore::instance().note_surfaced(cap, paths);
     } catch (...) { /* best-effort */ }
 }
-void note_file_opened(const std::string& path) {
+void note_file_opened(const maya::below<maya::leaf>& cap, const std::string& path) {
     // A `read` of a file a recent passage pointed at is an IMPLICIT relevance
     // judgment. FeedbackStore credits a "win" ONLY if the path was recently
     // surfaced by retrieval — a read of a never-surfaced file is not a signal
@@ -2356,7 +2409,7 @@ void note_file_opened(const std::string& path) {
     if (path.empty()) return;
     try {
         if (truthy_default_off("AGENTTY_RAG_LEARN"))
-            FeedbackStore::instance().note_opened(path);
+            FeedbackStore::instance().note_opened(cap, path);
     } catch (...) { /* best-effort */ }
 }
 } // namespace feedback
@@ -2683,7 +2736,7 @@ Retriever::EmbedStatus Retriever::reprobe_embedder() { return embed_status(); }
 
 namespace feedback {
 void note_surfaced(const std::vector<std::string>& /*paths*/) {}
-void note_file_opened(const std::string& /*path*/) {}
+void note_file_opened(const maya::below<maya::leaf>&, const std::string& /*path*/) {}
 }  // namespace feedback
 
 namespace bench {

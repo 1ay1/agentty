@@ -26,8 +26,9 @@
 #include <thread>
 #include <vector>
 
-#include <fcntl.h>
 #include <unistd.h>
+
+#include "wire_pipe.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -74,22 +75,8 @@ static int g_checks   = 0;
 
 // ── Non-blocking pipe writer; the read end is drained per frame so we
 //    capture exactly the bytes each compose emitted.
-static std::pair<Writer, int> make_pipe_writer() {
-    int fds[2];
-    if (pipe(fds) != 0) { std::perror("pipe"); std::abort(); }
-    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL, 0) | O_NONBLOCK);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
-    return {Writer{static_cast<platform::NativeHandle>(fds[1])}, fds[0]};
-}
-
-static std::string drain(int rfd) {
-    std::string out;
-    char buf[8192];
-    ssize_t n;
-    while ((n = read(rfd, buf, sizeof(buf))) > 0)
-        out.append(buf, static_cast<std::size_t>(n));
-    return out;
-}
+static std::pair<Writer, int> make_pipe_writer() { return wire_pipe::make_writer(); }
+static std::string drain(int rfd) { return wire_pipe::drain(rfd); }
 
 // Build the conversation Element tree for the current model state.
 static maya::Element build_root(const Model& m) {
@@ -1633,7 +1620,7 @@ TEST_CASE("model picker open close no scrollback growth") {
 
     // deps stub: ModelsSelect persists settings via deps().
     app::install_deps(app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const agentty::Thread&) {},
         .delete_thread = [](const agentty::ThreadId&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },

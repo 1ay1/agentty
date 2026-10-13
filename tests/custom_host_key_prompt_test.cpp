@@ -37,7 +37,7 @@ namespace app = agentty::app;
 // CustomHostInput arm only calls deps().load_settings() and deps().auth.
 static void install_stub_deps(agentty::store::Settings& s) {
     app::install_deps(app::Deps{
-        .stream         = [](auto, auto) {},
+        .stream         = [](const maya::unlocked&, auto, auto) {},
         .save_thread    = [](const auto&) {},
         .delete_thread  = [](const auto&) {},
         .load_threads   = [] { return std::vector<agentty::Thread>{}; },

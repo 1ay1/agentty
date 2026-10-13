@@ -47,6 +47,10 @@
 // argument is Sendable. State the job shares with its owner is passed in as
 // a maya::co_owned<T>, which requires T to be Sync. So a job can't borrow
 // `this` or a local and outlive it; that used to be a comment here.
+//
+// A body may take `const maya::unlocked&` FIRST and gets a fresh one: a job
+// starts on a pool thread holding no lock, so that is where background work
+// earns the right to take locks (agentty/util/lock_levels.hpp).
 
 #include <chrono>
 #include <concepts>
@@ -59,6 +63,7 @@
 #include <maya/runtime.hpp>
 
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/lock_levels.hpp"
 #include "agentty/util/teardown.hpp"
 
 namespace agentty::util {
@@ -83,11 +88,11 @@ inline maya::pool& background_pool() {
                        "a job escaped its own handler (isolated — process "
                        "survives)");
             }};
-        teardown::on_shutdown("util.background_pool", [] {
+        teardown::on_shutdown("util.background_pool", [](const maya::unlocked& cap) {
             // Bounded by the pool's grace. Anything still stuck is abandoned,
             // which is safe by construction: a worker co-owns the state it
             // touches, so it cannot outlive it.
-            if (const std::size_t stuck = inst.shutdown(); stuck > 0)
+            if (const std::size_t stuck = inst.shutdown(cap); stuck > 0)
                 dbglog("util.background_pool",
                        "abandoned " + std::to_string(stuck)
                            + " job(s) still running at the grace deadline");
@@ -103,12 +108,24 @@ namespace detail {
 // copied: every call site passes a literal.
 struct Where { std::string_view name; };
 
+// Call a job body, handing it a fresh `unlocked` if it asks for one.
+template <class Body, class... Args>
+decltype(auto) call_body(std::stop_token st, Args&... args) {
+    if constexpr (std::is_invocable_v<Body&, const maya::unlocked&, std::stop_token, Args...>) {
+        return maya::thread_root([&](const maya::unlocked& cap) -> decltype(auto) {
+            return Body{}(cap, std::move(st), std::move(args)...);
+        });
+    } else {
+        return Body{}(std::move(st), std::move(args)...);
+    }
+}
+
 // Run the body, and let nothing out. Body is a captureless lambda type, so
 // Body{} is the same function.
 template <class Body, class... Args>
 void run_guarded(std::stop_token st, Where where, Args... args) noexcept {
     try {
-        (void)Body{}(std::move(st), std::move(args)...);
+        (void)call_body<Body, Args...>(std::move(st), args...);
     } catch (const std::exception& e) {
         dbglog(where.name, e.what());
     } catch (...) {
@@ -124,9 +141,13 @@ MAYA_SENDABLE(agentty::util::detail::Where);
 
 namespace agentty::util {
 
-// A job body: captureless, `body(stop_token, args...)`, args Sendable.
+// A job body: captureless, `body([const maya::unlocked&,] stop_token,
+// args...)`, args Sendable.
 template <class Body, class... Args>
 concept JobBody = maya::CheckedJob<Body, Args...>;
+
+template <class Body, class... Args>
+consteval void require_job() { maya::require_job<Body, Args...>(); }
 
 // Fire-and-forget on a WARM worker. For bounded work that will finish:
 // a filesystem walk, a parse, a cache refresh that cannot block forever.
@@ -139,7 +160,7 @@ concept JobBody = maya::CheckedJob<Body, Args...>;
 // the pool's workers permanently. If it might wedge, it is isolated work.
 template <class Body, class... Args>
 void run_background(std::string_view where, Body, Args... args) {
-    maya::require_job<Body, Args...>();
+    require_job<Body, Args...>();
     background_pool().post(&detail::run_guarded<Body, Args...>,
                            detail::Where{where}, std::move(args)...);
 }
@@ -154,7 +175,7 @@ void run_background(std::string_view where, Body, Args... args) {
 // Use maya::delay_for on the token rather than sleeping through a shutdown.
 template <class Body, class... Args>
 void run_isolated_detached(std::string_view where, Body, Args... args) {
-    maya::require_job<Body, Args...>();
+    require_job<Body, Args...>();
     background_pool().post_isolated(&detail::run_guarded<Body, Args...>,
                                     detail::Where{where}, std::move(args)...);
 }
@@ -164,25 +185,32 @@ void run_isolated_detached(std::string_view where, Body, Args... args) {
 // maya::worker_group (jaal) is the primitive: a long-lived object's jobs,
 // and a stop() that is a hard barrier with no grace. This adds only the
 // `where` label when a job throws.
+//
+// stop() waits for the jobs, which may need any lock the caller holds, so it
+// takes `unlocked`: stopping a group from inside a lock body does not
+// compile. A WorkerGroup joins on destruction too, so it is marked
+// joins_on_destroy, and no maya::guarded<T> may own one (jaal refuses the
+// type): its owner keeps it outside every lock and stops it with a
+// capability first.
 class WorkerGroup {
   public:
     /// `where` labels the group in logs. Static storage, same contract as the
     /// spawn functions above.
     explicit WorkerGroup(std::string_view where) : where_(where) {}
 
-    /// Run `body(stop_token, args...)` on a thread of its own. Dropped once
-    /// the group is stopped.
+    /// Run `body([unlocked,] stop_token, args...)` on a thread of its own.
+    /// Dropped once the group is stopped.
     template <class Body, class... Args>
     void post(Body, Args... args) {
-        maya::require_job<Body, Args...>();
+        require_job<Body, Args...>();
         group_.post(&detail::run_guarded<Body, Args...>,
                     detail::Where{where_}, std::move(args)...);
     }
 
     /// Barrier: when this returns, no job posted here is running. No
     /// deadline, on purpose, so a job that hangs hangs this. Give jobs their
-    /// own timeouts. Idempotent; the destructor calls it too.
-    void stop() noexcept { group_.stop(); }
+    /// own timeouts. Idempotent; the destructor joins too.
+    void stop(const maya::unlocked& cap) noexcept { group_.stop(cap); }
 
   private:
     std::string_view   where_;
@@ -191,6 +219,5 @@ class WorkerGroup {
 
 } // namespace agentty::util
 
-// An owner moves its group out of a guarded slot to stop() it with no lock
-// held. The pointer owns the group outright, and moving it hands that over.
-MAYA_SENDABLE(std::unique_ptr<agentty::util::WorkerGroup>);
+// ~WorkerGroup joins its jobs: never inside a maya::guarded<T>.
+MAYA_JOINS_ON_DESTROY(agentty::util::WorkerGroup);

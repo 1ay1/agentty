@@ -33,6 +33,7 @@
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/provider/debug.hpp"
+#include "agentty/provider/openai/transport.hpp"   // local_model_action_rules (#91)
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
@@ -1579,6 +1580,9 @@ std::string system_prompt() {
            "call `search_docs` FIRST to retrieve the relevant passages, then "
            "answer from what it returns. Do NOT guess from memory when the "
            "answer should come from their documents.\n\n";
+
+    // Shared with the OpenAI-compat local prompt (one source, #91).
+    out += openai::local_model_action_rules();
 
     out += "OUTPUT\n"
            "- Output is rendered as GitHub-flavoured markdown in a terminal. "

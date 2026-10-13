@@ -24,6 +24,8 @@
 #include <vector>
 #include "agentty/util/io.hpp"
 
+#include <maya/runtime.hpp>
+
 namespace agentty::auth::accounts {
 
 // One saved account. `secret` is the provider-specific credential blob,
@@ -97,7 +99,9 @@ bool snapshot_active(Io, const std::string& provider, const std::string& label);
 // switching back to it later would present a dead refresh token and every
 // refresh would be refused (invalid_grant). Re-snapshotting on the way out
 // keeps every slot as fresh as the last moment it was live.
-bool activate(Io, const std::string& provider, const std::string& label);
+// Takes `unlocked`: a custom-host switch rewrites settings.json (blocking).
+bool activate(Io, const maya::unlocked&, const std::string& provider,
+              const std::string& label);
 
 // Best-effort human label for whatever credential is currently live in the
 // provider's active store but not yet registered (legacy single-login case).

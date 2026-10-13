@@ -57,7 +57,7 @@ struct TmpHome {
 void set_key(const std::string& provider, const std::string& key) {
     auto s = persistence::load_settings(::agentty::IoAccess::grant());
     s.provider_keys[provider] = key;
-    persistence::save_settings(::agentty::IoAccess::grant(), s);
+    persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 }
 
 } // namespace
@@ -96,7 +96,7 @@ TEST_CASE("credentials::add_key preserves the prior account (no clobber)") {
     TmpHome home;
     set_key("mistral", "key-AAAA");
     // Adding a different key snapshots the old one as an account first.
-    cred::add_key(::agentty::IoAccess::grant(), "mistral", "key-BBBB");
+    cred::add_key(::agentty::IoAccess::grant(), agtest::cap(), "mistral", "key-BBBB");
     CHECK(auth::bearer_token(cred::resolve(::agentty::IoAccess::grant(), "mistral")) == "key-BBBB");
     CHECK(cred::list(::agentty::IoAccess::grant(), "mistral").size() >= 1);   // the prior key was preserved
 }

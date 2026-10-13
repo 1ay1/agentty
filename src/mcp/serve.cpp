@@ -106,7 +106,7 @@ using ::mcp::Json;
 
 } // namespace
 
-int serve_stdio() {
+int serve_stdio(const maya::unlocked& cap) {
     ::mcp::Server server(
         ::mcp::Implementation{"agentty", AGENTTY_VERSION,
                               std::string("agentty native tools"),
@@ -135,14 +135,27 @@ int serve_stdio() {
     // the dispatch closure still refuses web_search when off, as a backstop.
     // The handler routes through the very same DynamicDispatch the agent loop
     // uses, so behaviour is identical.
+    //
+    // Lock order: calls are answered on the peer's reader thread, which holds
+    // nothing and hands its `unlocked` to on_call (rpc/peer.hpp). mcp-cpp's
+    // Server then invokes the tool closure synchronously inside
+    // server.handle(c), with a signature it fixes (no capability). So on_call
+    // parks a pointer to its capability in this frame-local slot for the
+    // duration of handle(), and the closure reads it back: the capability
+    // never outlives the call that proved it, and never leaves the thread.
+    struct CallScope { const maya::unlocked* cap = nullptr; };
+    auto scope = std::make_shared<CallScope>();
     std::size_t n = 0, withheld = 0;
     for (const auto& def : tools::native_registry()) {
         if (tools::withheld_by_policy(def)) { ++withheld; continue; }
         const std::string name = def.name.value;
         server.register_tool(spec_for(def),
-            [name](const Json& args) -> ::mcp::CallToolResult {
+            [name, scope](const Json& args) -> ::mcp::CallToolResult {
+                if (!scope->cap)
+                    return to_call_result(std::unexpected(tools::ToolError::unknown(
+                        "tool called outside a request")));
                 return to_call_result(
-                    tool::DynamicDispatch::execute(name, args));
+                    tool::DynamicDispatch::execute(*scope->cap, name, args));
             });
         ++n;
     }
@@ -156,8 +169,14 @@ int serve_stdio() {
 
     // Calls are answered on the reader, one at a time, in arrival order.
     rpc::Dispatch d;
-    d.on_call         = [&server](const ::mcp::Call& c) { return std::optional<std::string>(server.handle(c)); };
-    d.on_notification = [&server](const ::mcp::Notification& n) { server.handle(n); };
+    d.on_call = [&server, scope](const maya::unlocked& c, const ::mcp::Call& call) {
+        scope->cap = std::addressof(c);
+        struct Clear { CallScope& s; ~Clear() { s.cap = nullptr; } } clear{*scope};
+        return std::optional<std::string>(server.handle(call));
+    };
+    d.on_notification = [&server](const maya::unlocked&, const ::mcp::Notification& note) {
+        server.handle(note);
+    };
     std::cout.flush();
 #if defined(_WIN32)
     // Text mode would turn every '\n' of the framing into "\r\n".
@@ -166,8 +185,8 @@ int serve_stdio() {
 #endif
     rpc::Peer peer(rpc::fd_channel(0, 1), std::move(d), "mcp-serve");
     peer.start();
-    peer.wait_closed();   // run until stdin closes
-    peer.stop();
+    peer.wait_closed(cap);   // run until stdin closes
+    peer.stop(cap);
     return 0;
 }
 

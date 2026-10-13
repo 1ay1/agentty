@@ -33,6 +33,8 @@
 
 #include <maya/runtime.hpp>   // run_tasks_inline
 
+#include "agtest_cap.hpp"          // agtest::cap()
+
 #include "agentty/provider/selection.hpp"
 #include "agentty/auth/accounts.hpp"
 #include "agentty/auth/vault.hpp"
@@ -137,12 +139,12 @@ inline void run_credentials(const agentty::Cmd& c) {
         if constexpr (std::same_as<U, agentty::AccountOp>) {
             using K = agentty::AccountOp::Kind;
             switch (e.kind) {
-                case K::Activate:    (void)cr::activate(::agentty::IoAccess::grant(), e.provider, e.label); break;
+                case K::Activate:    (void)cr::activate(::agentty::IoAccess::grant(), agtest::cap(), e.provider, e.label); break;
                 case K::Remove:      (void)cr::remove(::agentty::IoAccess::grant(), e.provider, e.label); break;
                 case K::Register:    (void)acc::snapshot_active(::agentty::IoAccess::grant(), e.provider, e.label); break;
-                case K::AddKey:      (void)cr::add_key(::agentty::IoAccess::grant(), e.provider, e.key); break;
-                case K::SignOut:     agentty::auth::vault::sign_out(::agentty::IoAccess::grant(), e.provider); break;
-                case K::ClearActive: cr::clear_active(::agentty::IoAccess::grant(), e.provider); break;
+                case K::AddKey:      (void)cr::add_key(::agentty::IoAccess::grant(), agtest::cap(), e.provider, e.key); break;
+                case K::SignOut:     agentty::auth::vault::sign_out(::agentty::IoAccess::grant(), agtest::cap(), e.provider); break;
+                case K::ClearActive: cr::clear_active(::agentty::IoAccess::grant(), agtest::cap(), e.provider); break;
             }
         } else if constexpr (std::same_as<U, agentty::SaveCredentials>) {
             agentty::auth::save_credentials(::agentty::IoAccess::grant(), e.creds);

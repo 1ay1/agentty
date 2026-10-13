@@ -28,12 +28,12 @@ namespace fs = std::filesystem;
 namespace {
 
 // Same storage shape and the same reasoning as the broker's blocked feed: see
-// sandbox_broker.cpp. `maya::guarded` because access is only possible through
-// `with()`, so "forgot the lock" is unrepresentable rather than a review item;
+// sandbox_broker.cpp. A lock-free `maya::snapshot`: a small value replaced whole
+// by `update()` and copied out by readers, so no rank and no capability;
 // function-local static because the first handoff can arrive from a tool worker
 // during startup and a file-scope global would race its own constructor.
-maya::guarded<std::vector<sandbox_cfg::TrustHandoff>>& feed() {
-    static maya::guarded<std::vector<sandbox_cfg::TrustHandoff>> f;
+maya::snapshot<std::vector<sandbox_cfg::TrustHandoff>>& feed() {
+    static maya::snapshot<std::vector<sandbox_cfg::TrustHandoff>> f;
     return f;
 }
 
@@ -51,8 +51,9 @@ constexpr std::size_t kMaxHandoffs = 32;
 }
 
 void remember(const sandbox_cfg::TrustHandoff& h) {
-    feed().with([](std::vector<sandbox_cfg::TrustHandoff>& all,
-                   sandbox_cfg::TrustHandoff incoming) {
+    (void)feed().update([](const std::vector<sandbox_cfg::TrustHandoff>& old,
+                           const sandbox_cfg::TrustHandoff& incoming) {
+        std::vector<sandbox_cfg::TrustHandoff> all = old;
         // Collapse a repeat of the same path. Unlike the broker's feed this
         // checks the WHOLE list rather than just the back: a handoff is
         // identified by its path, and the same file rewritten twice in a turn
@@ -60,15 +61,16 @@ void remember(const sandbox_cfg::TrustHandoff& h) {
         for (auto& existing : all) {
             if (existing.write.path == incoming.write.path) {
                 existing.write.at_ms = incoming.write.at_ms;
-                existing.write.command = std::move(incoming.write.command);
-                return;
+                existing.write.command = incoming.write.command;
+                return all;
             }
         }
-        all.push_back(std::move(incoming));
+        all.push_back(incoming);
         // Drop the oldest when full, keeping the newest -- flushing an early
         // handoff out of view costs an attacker 32 distinct ones, each of which
         // is itself recorded and (by default) refused.
         if (all.size() > kMaxHandoffs) all.erase(all.begin());
+        return all;
     }, h);
 }
 
@@ -197,12 +199,11 @@ Verdict check(std::string_view path, std::string_view tool) {
 }
 
 std::vector<sandbox_cfg::TrustHandoff> handoff_feed() {
-    return feed().with(
-        [](std::vector<sandbox_cfg::TrustHandoff>& all) { return all; });
+    return feed().get();
 }
 
 void clear_handoff_feed() {
-    feed().with([](std::vector<sandbox_cfg::TrustHandoff>& all) { all.clear(); });
+    feed().store({});
 }
 
 // ── Detection for the shell path ──────────────────────────────────
@@ -307,10 +308,21 @@ struct Listing {
 using ListingPtr = std::optional<maya::shared<Listing>>;
 
 using ListingCache = std::unordered_map<std::string, maya::shared<Listing>>;
-maya::guarded<ListingCache>& listing_cache() {
-    static maya::guarded<ListingCache> c;
+// A lock-free snapshot rather than a guarded map: snapshot_trusted() is
+// called from spawn paths (sandbox posture) that carry no lock capability.
+// One walk loads the map ONCE, collects the listings it had to (re)build in a
+// private batch, and publishes the batch in a single update() at the end, so
+// the copy-on-write cost is paid once per walk that found a change, not per
+// directory.
+maya::snapshot<ListingCache>& listing_cache() {
+    static maya::snapshot<ListingCache> c;
     return c;
 }
+struct ListingWalk {
+    maya::shared<ListingCache> seen = listing_cache().load();
+    ListingCache               fresh;
+    ~ListingWalk();
+};
 constexpr std::size_t kMaxCachedDirs = 200000;
 // A dir changed this recently may change again within the same mtime tick,
 // so its listing isn't cached (git's "racy" rule).
@@ -323,17 +335,13 @@ constexpr auto kRacyWindow = std::chrono::seconds{2};
 
 // The listing of `dir`, from the cache when its mtime hasn't moved. One stat
 // on a hit. No lock is held while touching the filesystem.
-ListingPtr list_dir(const fs::path& dir) {
+ListingPtr list_dir(ListingWalk& walk, const fs::path& dir) {
     std::error_code ec;
     const auto mtime = fs::last_write_time(dir, ec);
     if (ec) return std::nullopt;
     std::string key = dir.string();
-    auto hit = listing_cache().with(
-        [](ListingCache& m, std::string k) -> ListingPtr {
-            const auto it = m.find(k);
-            if (it == m.end()) return std::nullopt;
-            return it->second;
-        }, key);
+    ListingPtr hit;
+    if (auto it = walk.seen->find(key); it != walk.seen->end()) hit = it->second;
     if (hit && (*hit)->mtime == mtime) return hit;
 
     Listing built;
@@ -365,13 +373,25 @@ ListingPtr list_dir(const fs::path& dir) {
         }
     }
     auto frozen = maya::shared<Listing>::make(std::move(built));
-    if (fs::file_time_type::clock::now() - mtime >= kRacyWindow) {
-        listing_cache().with([](ListingCache& m, std::string k, maya::shared<Listing> v) {
-            if (m.size() >= kMaxCachedDirs) m.clear();
-            m.insert_or_assign(std::move(k), std::move(v));
-        }, std::move(key), frozen);
-    }
+    if (fs::file_time_type::clock::now() - mtime >= kRacyWindow)
+        walk.fresh.insert_or_assign(std::move(key), frozen);
     return frozen;
+}
+
+// Publish what this walk built. A destructor so every return path of
+// snapshot_trusted() keeps what it learned.
+ListingWalk::~ListingWalk() {
+    if (fresh.empty()) return;
+    (void)listing_cache().update(
+        [](const ListingCache& old, const ListingCache& add) {
+            ListingCache m;
+            if (old.size() + add.size() <= kMaxCachedDirs) m = old;
+            for (const auto& [k, v] : add) {
+                if (m.size() >= kMaxCachedDirs) m.clear();
+                m.insert_or_assign(k, v);
+            }
+            return m;
+        }, std::move(fresh));
 }
 
 }  // namespace
@@ -379,6 +399,7 @@ ListingPtr list_dir(const fs::path& dir) {
 TrustedSnapshot snapshot_trusted(std::string_view root) {
     TrustedSnapshot snap;
     if (root.empty()) return snap;
+    ListingWalk walk;
 
     // Allow means "do not gate", so there is nothing to report and no reason to
     // pay for the stats. Same early-out as check(): a user who turned this off
@@ -468,7 +489,7 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
         while (!stack.empty() && pseen <= kMaxEntries) {
             auto [dir, depth] = std::move(stack.back());
             stack.pop_back();
-            const auto lp = list_dir(dir);
+            const auto lp = list_dir(walk, dir);
             if (!lp) continue;
             const Listing* l = &**lp;
             if (depth > 0 && l->has_cmake_cache) continue;
@@ -486,7 +507,7 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
             while (!st.empty()) {
                 const fs::path d = std::move(st.back());
                 st.pop_back();
-                const auto lp = list_dir(d);
+                const auto lp = list_dir(walk, d);
                 if (!lp) continue;
                 const Listing* l = &**lp;
                 for (const auto& f : l->trusted) record(f.path, f.kind);
@@ -515,7 +536,7 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
     while (!stack.empty()) {
         auto [dir, depth] = std::move(stack.back());
         stack.pop_back();
-        const auto lp = list_dir(dir);
+        const auto lp = list_dir(walk, dir);
         if (!lp) continue;
         const Listing* l = &**lp;
         if (depth > 0 && l->has_cmake_cache) continue;

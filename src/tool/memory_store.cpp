@@ -52,7 +52,8 @@ using json = nlohmann::json;
 // Contention is at most "the agent fired remember + forget back-to-back".
 // Helpers that need the lock take the Files token, which only exists inside.
 struct Files {};
-maya::guarded<Files>& store() { static maya::guarded<Files> f{lock_levels::kMemoryStore}; return f; }
+using StoreLock = maya::guarded<Files, locks::memory_store>;
+StoreLock& store() { static StoreLock f; return f; }
 
 [[nodiscard]] fs::path home_dir() noexcept {
     if (auto* h = std::getenv("HOME"); h && *h) return fs::path{h};
@@ -121,9 +122,10 @@ maya::guarded<Files>& store() { static maya::guarded<Files> f{lock_levels::kMemo
 // produce two lines with the same id — `forget {id}` would clear
 // both, which is the user-intuitive outcome anyway.
 [[nodiscard]] std::string make_id() {
-    struct Rng { std::mt19937_64 engine{std::random_device{}()}; };
-    static maya::guarded<Rng> rng;
-    const auto v = rng.with([](Rng& r) { return static_cast<std::uint32_t>(r.engine()); });
+    // One engine per thread: no lock, so this is callable from inside the
+    // memory_store lock body (remember() mints ids there).
+    thread_local std::mt19937_64 engine{std::random_device{}()};
+    const auto v = static_cast<std::uint32_t>(engine());
     char buf[9];
     std::snprintf(buf, sizeof(buf), "%08x", v);
     return std::string{buf, 8};
@@ -338,7 +340,10 @@ struct CacheEntry {
     std::vector<Record> tail;
 };
 using Cache = std::unordered_map<std::string, CacheEntry>;
-maya::guarded<Cache>& cache() { static maya::guarded<Cache> c; return c; }
+// A snapshot: at most two entries (user + project), replaced on a miss and
+// read on every turn. No lock, so the loader and bump_cache need no
+// capability and are callable from inside the memory_store lock body.
+maya::snapshot<Cache>& cache() { static maya::snapshot<Cache> c; return c; }
 
 [[nodiscard]] std::vector<Record> tail_of(const std::vector<Record>& all,
                                           std::size_t n) {
@@ -355,20 +360,21 @@ maya::guarded<Cache>& cache() { static maya::guarded<Cache> c; return c; }
     const auto t = fs::last_write_time(p, ec);
     if (ec) {
         // Missing file — drop cache entry so a future re-creation is observed.
-        cache().with([](Cache& c, std::string k) { c.erase(k); }, key);
+        cache().update([](const Cache& c, const std::string& k) {
+            Cache next = c; next.erase(k); return next;
+        }, key);
         return {};
     }
     const long long now_mt = static_cast<long long>(t.time_since_epoch().count());
-    if (auto hit = cache().read([](const Cache& c, std::string k, long long mt)
-                                    -> std::optional<std::vector<Record>> {
-            auto it = c.find(k);
-            if (it != c.end() && it->second.mtime == mt) return it->second.tail;
-            return std::nullopt;
-        }, key, now_mt))
-        return std::move(*hit);
+    {
+        const auto cur = cache().load();
+        auto it = cur->find(key);
+        if (it != cur->end() && it->second.mtime == now_mt) return it->second.tail;
+    }
     auto tail = tail_of(read_records(p), kTailLoadCount);
-    cache().with([](Cache& c, std::string k, CacheEntry e) { c[k] = std::move(e); },
-                 key, CacheEntry{now_mt, tail});
+    cache().update([](const Cache& c, const std::string& k, const CacheEntry& e) {
+        Cache next = c; next[k] = e; return next;
+    }, key, CacheEntry{now_mt, tail});
     return tail;
 }
 
@@ -380,7 +386,9 @@ maya::guarded<Cache>& cache() { static maya::guarded<Cache> c; return c; }
 void bump_cache(Scope s) {
     const auto p = path_for(s);
     if (p.empty()) return;
-    cache().with([](Cache& c, std::string k) { c.erase(k); }, p.string());
+    cache().update([](const Cache& c, const std::string& k) {
+        Cache next = c; next.erase(k); return next;
+    }, p.string());
 }
 
 } // namespace
@@ -527,7 +535,8 @@ AppendResult append_locked(Files&, Scope actual_scope, std::string body,
                            const fs::path& p, AppendResult res);
 }
 
-AppendResult append(Scope s, std::string_view text, AppendOptions opts) {
+AppendResult append(const locks::below_memory_store& cap, Scope s,
+                    std::string_view text, AppendOptions opts) {
     AppendResult res;
     std::string body = trim(text);
     if (body.empty()) {
@@ -576,7 +585,7 @@ AppendResult append(Scope s, std::string_view text, AppendOptions opts) {
         return res;
     }
 
-    return store().with([](Files& f, Scope actual_scope, std::string body,
+    return store().with(cap, [](Files& f, Scope actual_scope, std::string body,
                            std::vector<std::string> tags_norm, AppendOptions opts,
                            std::string path, AppendResult res) {
         return append_locked(f, actual_scope, std::move(body), std::move(tags_norm),
@@ -755,10 +764,10 @@ AppendResult append_locked(Files&, Scope actual_scope, std::string body,
 }
 } // namespace
 
-std::vector<Record> load_all(Scope s) {
+std::vector<Record> load_all(const locks::below_memory_store& cap, Scope s) {
     const auto p = path_for(s);
     if (p.empty()) return {};
-    return store().with([](Files&, std::string path) { return read_records(path); }, p.string());
+    return store().with(cap, [](Files&, std::string path) { return read_records(path); }, p.string());
 }
 
 std::vector<Record> load_recent_user()    { return load_recent_for(Scope::User); }
@@ -852,18 +861,19 @@ std::size_t remove_where(Files&, Pred pred) {
 }
 } // namespace
 
-std::size_t forget_by_id(std::string_view id) {
+std::size_t forget_by_id(const locks::below_memory_store& cap, std::string_view id) {
     std::string want{id};
     if (trim(want).empty()) return 0;
-    return store().with([](Files& f, std::string w) {
+    return store().with(cap, [](Files& f, std::string w) {
         return remove_where(f, [&w](const Record& r) { return r.id == w; });
     }, want);
 }
 
-std::size_t forget_by_substring(std::string_view needle) {
+std::size_t forget_by_substring(const locks::below_memory_store& cap,
+                                std::string_view needle) {
     std::string want = trim(needle);
     if (want.empty()) return 0;
-    return store().with([](Files& f, std::string w) {
+    return store().with(cap, [](Files& f, std::string w) {
         return remove_where(f, [&w](const Record& r) {
             return r.text.find(w) != std::string::npos;
         });
@@ -893,10 +903,11 @@ std::string render_for_prompt(const Record& r) {
     return out;
 }
 
-std::optional<std::pair<Record, Scope>> find_by_id(std::string_view id) {
+std::optional<std::pair<Record, Scope>> find_by_id(const locks::below_memory_store& cap,
+                                                   std::string_view id) {
     std::string want{id};
     if (trim(want).empty()) return std::nullopt;
-    return store().with([](Files&, std::string w) -> std::optional<std::pair<Record, Scope>> {
+    return store().with(cap, [](Files&, std::string w) -> std::optional<std::pair<Record, Scope>> {
         for (auto s : {Scope::User, Scope::Project}) {
             const auto p = path_for(s);
             if (p.empty()) continue;
@@ -907,11 +918,12 @@ std::optional<std::pair<Record, Scope>> find_by_id(std::string_view id) {
     }, want);
 }
 
-std::vector<Record> preview_forget_by_substring(std::string_view needle) {
+std::vector<Record> preview_forget_by_substring(const locks::below_memory_store& cap,
+                                                std::string_view needle) {
     std::vector<Record> out;
     std::string want = trim(needle);
     if (want.empty()) return out;
-    return store().with([](Files&, std::string w) {
+    return store().with(cap, [](Files&, std::string w) {
         std::vector<Record> hits;
         for (auto s : {Scope::User, Scope::Project}) {
             const auto p = path_for(s);
@@ -923,14 +935,14 @@ std::vector<Record> preview_forget_by_substring(std::string_view needle) {
     }, want);
 }
 
-std::optional<std::size_t> wipe(Scope s) {
+std::optional<std::size_t> wipe(const locks::below_memory_store& cap, Scope s) {
     const auto p = path_for(s);
     if (p.empty()) return std::nullopt;
     // Truncate (write empty) rather than fs::remove — keeps the path
     // valid for subsequent append calls without re-running
     // create_directories. write_records on an empty vector writes a
     // zero-byte file, which read_records / load_all both handle.
-    const std::size_t n = store().with([](Files&, std::string path) {
+    const std::size_t n = store().with(cap, [](Files&, std::string path) {
         const std::size_t count = read_records(path).size();
         (void)write_records(path, {});
         return count;

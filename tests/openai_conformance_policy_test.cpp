@@ -71,9 +71,9 @@ TEST_CASE("conformance: endpoint-specific fields are not Universal") {
     // Universal.
     for (const auto& r : cf::kRequestFields) {
         if (r.field == "prompt_cache_key") {
-            // OpenAI-only routing hint. Local servers reject it and their KV
-            // cache is prefix-automatic anyway.
-            CHECK(r.tier == cf::Tier::Hosted);
+            // OpenAI-only routing hint, gated per registry row. NOT Hosted:
+            // strict hosted compat layers (Groq, Gemini) 400 it (#93).
+            CHECK(r.tier == cf::Tier::Probed);
         }
         if (r.field == "reasoning_effort") {
             // Mistral MAGISTRAL reasons natively and returns 422 for this.

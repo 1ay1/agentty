@@ -514,7 +514,7 @@ TEST_CASE("web search settings: dials and slots persist, and a key never does") 
     s.web_search.language = "de";
     s.web_search.dials["exa-api.type"] = "fast";
     REQUIRE(ss::store("exa-api", "exa-LEAKCHECK-0123456789"));
-    persistence::save_settings(::agentty::IoAccess::grant(), s);
+    persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 
     const auto text = TmpHome::slurp(home.dir / "home" / "settings.json");
     CHECK(text.find("\"exa-api\"") != std::string::npos);

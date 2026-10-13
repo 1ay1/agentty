@@ -46,7 +46,7 @@ using namespace agentty;
 static store::Settings g_settings;
 static void install_stub_deps() {
     app::install_deps(app::Deps{
-        .stream         = [](auto, auto) {},
+        .stream         = [](const maya::unlocked&, auto, auto) {},
         .save_thread    = [](const auto&) {},
         .delete_thread  = [](const auto&) {},
         .load_threads   = [] { return std::vector<Thread>{}; },
@@ -1260,7 +1260,7 @@ TEST_CASE("custom host supports multiple accounts") {
     auto set_key = [&](const std::string& k) {
         auto s = agentty::persistence::load_settings(::agentty::IoAccess::grant());
         s.provider_keys[spec] = k;
-        agentty::persistence::save_settings(::agentty::IoAccess::grant(), s);
+        agentty::persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
     };
     auto get_key = [&]() {
         return agentty::persistence::load_settings(::agentty::IoAccess::grant()).provider_keys[spec];
@@ -1278,9 +1278,9 @@ TEST_CASE("custom host supports multiple accounts") {
     CHECK(acc::list_for(::agentty::IoAccess::grant(), spec).size() == 2);
 
     // Activating A restores its key into provider_keys[spec]; then B.
-    CHECK(acc::activate(::agentty::IoAccess::grant(), spec, "A"));
+    CHECK(acc::activate(::agentty::IoAccess::grant(), agtest::cap(), spec, "A"));
     CHECK(get_key() == "sk-aaaa1111");
-    CHECK(acc::activate(::agentty::IoAccess::grant(), spec, "B"));
+    CHECK(acc::activate(::agentty::IoAccess::grant(), agtest::cap(), spec, "B"));
     CHECK(get_key() == "sk-bbbb2222");
 
     // Two keys that SHARE the same last-4 still derive DISTINCT labels (the

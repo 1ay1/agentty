@@ -21,6 +21,9 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/provider/chatgpt/oauth.hpp"
 #include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
+
+#include <maya/runtime.hpp>
 
 namespace agentty::provider::chatgpt {
 
@@ -41,9 +44,11 @@ struct CodexCredentials {
 
 // ── Token store (separate from the Anthropic credentials.json) ─────────────
 [[nodiscard]] std::filesystem::path codex_credentials_path();
+// Saves/clears take the store's leaf lock; the load is lock-free (atomic
+// rename), so views and signed-in probes can call it without a capability.
 [[nodiscard]] std::optional<CodexCredentials> load_codex_credentials();
-bool save_codex_credentials(const CodexCredentials& c);
-bool clear_codex_credentials();
+bool save_codex_credentials(const maya::below<maya::leaf>& cap, const CodexCredentials& c);
+bool clear_codex_credentials(const maya::below<maya::leaf>& cap);
 
 // ── Authorize URL ──────────────────────────────────────────────────────────
 // Pure: same (verifier, state) → same URL. Points at the loopback redirect.
@@ -92,7 +97,9 @@ codex_refresh(const CodexCredentials& current);
 
 // Return a valid credential, refreshing in place (and persisting) if the
 // stored access token is stale. Worker-thread safe. Empty optional when no
-// ChatGPT credential is saved.
-[[nodiscard]] std::optional<CodexCredentials> codex_fresh_credentials();
+// ChatGPT credential is saved. Refreshes run one at a time on the
+// auth_refresh lane, which then takes the (leaf) store.
+[[nodiscard]] std::optional<CodexCredentials>
+codex_fresh_credentials(const locks::below_auth_refresh& cap);
 
 } // namespace agentty::provider::chatgpt

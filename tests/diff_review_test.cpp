@@ -56,7 +56,7 @@ S&& apply_fx(S&& step) {
 void install_stub_deps() {
     g_writes.clear();
     agentty::app::install_deps(agentty::app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const Thread&) {},
         .delete_thread = [](const ThreadId&) {},
         .load_threads  = [] { return std::vector<Thread>{}; },

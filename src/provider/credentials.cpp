@@ -117,28 +117,33 @@ std::string active_label(Io io, std::string_view provider_id) {
     return auth::accounts::derive_current_label(io, std::string{provider_id});
 }
 
-bool activate(Io io, std::string_view provider_id, std::string_view label) {
-    return auth::accounts::activate(io, std::string{provider_id}, std::string{label});
+// Lock order: activate/clear_active/add_key write settings.json, which tells
+// the settings cache to drain (a wait) -- so they take `unlocked`. Their
+// callers are the effect host's AccountOp handler and CLI login paths.
+bool activate(Io io, const maya::unlocked& cap, std::string_view provider_id,
+              std::string_view label) {
+    return auth::accounts::activate(io, cap, std::string{provider_id}, std::string{label});
 }
 
 bool remove(Io io, std::string_view provider_id, std::string_view label) {
     return auth::accounts::remove(io, std::string{provider_id}, std::string{label});
 }
 
-void clear_active(Io io, std::string_view provider_id) {
+void clear_active(Io io, const maya::unlocked& cap, std::string_view provider_id) {
     const std::string id{provider_id};
     if (is_anthropic(id))          { auth::clear_credentials(io); return; }
-    if (id == "chatgpt")           { chatgpt::clear_codex_credentials(); return; }
-    if (id == "copilot")           { copilot::clear_credentials(io); return; }
-    if (id == "kimi")              { kimi::clear_credentials(io); return; }
+    if (id == "chatgpt")           { chatgpt::clear_codex_credentials(cap); return; }
+    if (id == "copilot")           { copilot::clear_credentials(io, cap); return; }
+    if (id == "kimi")              { kimi::clear_credentials(io, cap); return; }
     // Hosted key / custom host: the credential IS provider_keys[id].
     auto s = persistence::load_settings(io);
     s.provider_keys.erase(id);
     s.provider_models.erase(id);
-    persistence::save_settings(io, s);
+    persistence::save_settings(io, cap, s);
 }
 
-bool add_key(Io io, std::string_view provider_id, std::string_view key) {
+bool add_key(Io io, const maya::unlocked& cap, std::string_view provider_id,
+             std::string_view key) {
     const std::string id{provider_id};
     auto s = persistence::load_settings(io);
     // Preserve any existing key as a switchable account BEFORE overwriting,
@@ -150,7 +155,7 @@ bool add_key(Io io, std::string_view provider_id, std::string_view key) {
             auth::accounts::snapshot_active(io, id, prior);
     }
     s.provider_keys[id] = std::string{key};
-    persistence::save_settings(io, s);
+    persistence::save_settings(io, cap, s);
     if (auto lbl = auth::accounts::derive_current_label(io, id); !lbl.empty())
         auth::accounts::snapshot_active(io, id, lbl);
     return true;

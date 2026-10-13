@@ -60,10 +60,9 @@ namespace agentty::persistence {
 /// keyed off the path would need its own lock to look up). Only
 /// with_shared_file can enter it.
 struct FileLane {};
-// A lane is the outer lock: its body may take the state it protects.
-struct Lane : maya::guarded<FileLane> {
-    Lane() : maya::guarded<FileLane>(lock_levels::kFileLane) {}
-};
+// A lane is an outer lock, ranked lock_levels::file_lane: its body may take
+// the state it protects, which must rank above it.
+using Lane = maya::guarded<FileLane, lock_levels::file_lane>;
 
 /// What the body of with_shared_file sees.
 struct Held {
@@ -79,14 +78,22 @@ std::optional<maya::platform::native_file_lock> acquire_cross(const std::string&
 }  // namespace detail
 
 /// Enter the critical section for `target`, both locks, in-process first,
-/// run `body(Held, args...)`, and leave. body is captureless and args are
-/// moved in, the same rules as guarded<T>::with, since that is what it is.
+/// run `body(const held<file_lane>&, Held, args...)`, and leave. body is
+/// captureless and args are moved in, the same rules as guarded<T>::with,
+/// since that is what it is. The capability lets the body take the state
+/// the file protects (ranked above the lane); the caller proves it holds
+/// nothing ranked at or above the lane.
 template <class F, class... Args>
-auto with_shared_file(Lane& lane, const std::filesystem::path& target, F body, Args... args) {
+auto with_shared_file(const lock_levels::below_file_lane& cap, Lane& lane,
+                      const std::filesystem::path& target, F body, Args... args) {
     (void)body;
-    return lane.with([](FileLane&, std::string t, Args... a) {
+    return lane.with(cap, [](const maya::held<lock_levels::file_lane>& h, FileLane&,
+                             std::string t, Args... a) {
+        // The OS file lock is taken inside the lane and released before it,
+        // and only one shared file is ever entered at a time (a lane's body
+        // can't take another lane: same rank), so the two never invert.
         const auto cross = detail::acquire_cross(t);
-        return F{}(Held{cross.has_value()}, std::move(a)...);
+        return F{}(h, Held{cross.has_value()}, std::move(a)...);
     }, target.string(), std::move(args)...);
 }
 

@@ -106,10 +106,14 @@ inline constexpr FieldRule kRequestFields[] = {
     {"tool_choice", Tier::Universal,
      "sent as \"auto\", which is the default everywhere; harmless."},
 
-    {"prompt_cache_key", Tier::Hosted,
-     "OpenAI prompt-cache routing. Local servers reject or ignore it and "
-     "their KV cache is prefix-automatic anyway, so there is nothing to "
-     "gain and a 400 to lose."},
+    {"prompt_cache_key", Tier::Probed,
+     "OpenAI prompt-cache routing, sent ONLY where the registry row opts in "
+     "(ProviderPreset::accepts_prompt_cache_key: OpenAI, OpenRouter). It "
+     "was Hosted (= every TLS endpoint) until #93: Groq ('property "
+     "prompt_cache_key is unsupported') and Gemini ('Unknown name') are "
+     "hosted AND strictly validated, so every turn on them died with a "
+     "400. Local servers reject it too, and their KV cache is "
+     "prefix-automatic anyway."},
 
     {"reasoning_effort", Tier::Probed,
      "o-series / DeepSeek-R1 / Grok / Mistral Small-Medium take it. Mistral "

@@ -295,7 +295,7 @@ void start_background_refresh(bool no_net) {
     static std::once_flag once;
     std::call_once(once, [no_net] {
         util::teardown::on_shutdown("modelsdev.refresh",
-                                    [] { join_background_refresh(); });
+                                    [](const maya::unlocked& cap) { join_background_refresh(cap); });
 
     // Isolated: refresh() is a network fetch, so it may never return and must
     // not occupy a shared worker.
@@ -318,8 +318,8 @@ void start_background_refresh(bool no_net) {
     });
 }
 
-void join_background_refresh() noexcept {
-    (void)refresh_pool().shutdown();   // requests stop, waits within the grace
+void join_background_refresh(const maya::unlocked& cap) noexcept {
+    (void)refresh_pool().shutdown(cap);   // requests stop, waits within the grace
 }
 
 } // namespace agentty::modelsdev

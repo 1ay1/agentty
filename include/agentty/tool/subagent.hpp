@@ -48,8 +48,10 @@ struct Config {
     // hardcoding the Anthropic transport — previously `task` failed on
     // every non-Anthropic provider (wrong wire, wrong auth). Null ⇒ the
     // runner falls back to the Anthropic transport (old behaviour, keeps
-    // tests that install only auth+model working).
-    std::function<provider::StreamResult(provider::Request,
+    // tests that install only auth+model working). Runs on the subagent's
+    // worker, which holds no lock: it gets that worker's `unlocked`.
+    std::function<provider::StreamResult(const maya::unlocked&,
+                                         provider::Request,
                                          provider::EventSink)> stream;
 
     // The same dispatch, but to a NAMED provider instead of the active one.
@@ -65,8 +67,10 @@ struct Config {
     // provider cannot fail to find one, and dispatching to a named provider
     // can (signed out, removed, misspelled). A caller that does not install
     // this gets the old behaviour — the role falls back to the active
-    // provider's own cheapest capable model, never a 404.
-    std::function<provider::StreamResult(const std::string& provider_id,
+    // provider's own cheapest capable model, never a 404. Runs on the
+    // subagent's worker: it gets that worker's `unlocked`.
+    std::function<provider::StreamResult(const maya::unlocked&,
+                                         const std::string& provider_id,
                                          provider::Request,
                                          provider::EventSink)> stream_to;
 

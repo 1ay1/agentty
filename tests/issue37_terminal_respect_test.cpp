@@ -138,6 +138,13 @@ TEST_CASE("issue 37: a black-and-white terminal is a supported request") {
         ScopedEnv term{"TERM", "xterm-256color"};
         ScopedEnv no_color{"NO_COLOR", nullptr};
         ScopedEnv forced{"MAYA_COLOR", nullptr};
+        // A self-identified host (Windows Terminal sets WT_SESSION for every
+        // child) deliberately outranks the handle probe; this case is about
+        // a plain redirect, so take the host's name out of the picture.
+        ScopedEnv wt{"WT_SESSION", nullptr};
+        ScopedEnv conemu{"ConEmuANSI", nullptr};
+        ScopedEnv prog{"TERM_PROGRAM", nullptr};
+        ScopedEnv clif{"CLICOLOR_FORCE", nullptr};
         CHECK(maya::theme::detect_tier(/*tty=*/false) == maya::theme::ColorTier::Mono);
     }
 }

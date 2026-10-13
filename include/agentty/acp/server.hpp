@@ -43,15 +43,17 @@
 
 namespace agentty::acp {
 
-// The provider call, type-erased: (Request, EventSink) → void. Matches
-// provider::Provider::stream.
+// The provider call, type-erased: (unlocked, Request, EventSink) → void.
+// Matches provider::Provider::stream. Called from a turn worker, which holds
+// no lock and passes its `unlocked`.
 using StreamFn =
-    std::function<void(provider::Request, provider::EventSink)>;
+    std::function<void(const maya::unlocked&, provider::Request, provider::EventSink)>;
 // Stream to a NAMED provider ("anthropic", "copilot", a custom host), with
 // that provider's own credential. Used when a session's model lives on a
 // provider other than the active one.
 using StreamToFn =
-    std::function<void(const std::string&, provider::Request, provider::EventSink)>;
+    std::function<void(const maya::unlocked&, const std::string&, provider::Request,
+                       provider::EventSink)>;
 
 // Per-session state: one agentty Thread + the workspace cwd the client opened
 // the session against, plus the in-flight turn's cancel handle. `profile` is
@@ -90,6 +92,25 @@ struct Sessions {
 };
 
 class AgentServer : public std::enable_shared_from_this<AgentServer> {
+    // ── Lock order ────────────────────────────────────────────────────────
+    //
+    // One lock, `sessions_`, a LEAF: every body is a few lines over the
+    // session map and calls nothing that locks. So:
+    //
+    //   with_session / anything that only touches sessions   below<leaf>
+    //   acquire_turn (waits its turn), run_turn, stream_completion,
+    //   run_tools, ask_permission (waits on the client), persist/index
+    //   (file lanes), serve                                   unlocked
+    //
+    // Request handlers run on the rpc reader, which holds nothing and hands
+    // its `unlocked` through the router context (Ctx); turns and compaction
+    // run on detached workers, whose bodies receive their own. The auth
+    // header and the model-choice cache are snapshots (no lock at all).
+    struct Ctx {
+        AgentServer&          self;
+        const maya::unlocked& cap;
+    };
+
 public:
     // `stream` is the provider entrypoint (bind AnthropicProvider::stream or a
     // test double). `auth` is the resolved wire credential; may be empty (then
@@ -106,76 +127,86 @@ public:
     ~AgentServer();
 
     // Start reading and block until the client disconnects (EOF on stdin).
-    // Returns a process exit code.
-    int serve();
+    // Returns a process exit code. Waits for the reader: `unlocked`.
+    int serve(const maya::unlocked& cap);
 
 private:
     using Responder = rpc::Peer::Deferred<::acp::to_agent::SessionPrompt>;
 
     // ── method handlers ─────────────────────────────────────────────────
-    ::acp::InitializeResult     on_initialize(const ::acp::InitializeParams&);
-    ::acp::NewSessionResult     on_new_session(const ::acp::NewSessionParams&);
-    ::acp::ListSessionsResult   on_list_sessions(const ::acp::ListSessionsParams&);
-    ::acp::LoadSessionResult    on_load_session(const ::acp::LoadSessionParams&);
-    ::acp::ResumeSessionResult  on_resume_session(const ::acp::ResumeSessionParams&);
-    ::acp::NewSessionResult     on_fork_session(const ::acp::ForkSessionParams&);
-    void                        on_close_session(const ::acp::CloseSessionParams&);
-    void                        on_delete_session(const ::acp::DeleteSessionParams&);
-    void                        on_set_mode(const ::acp::SetModeParams&);
-    ::acp::SetConfigOptionResult on_set_config_option(const ::acp::SetConfigOptionParams&);
-    void                        on_logout();
-    void                        on_prompt(const ::acp::PromptParams&, Responder);
-    void                        on_cancel(const ::acp::CancelParams&);
+    // All run on the rpc reader thread and receive its `unlocked`.
+    using Cap = maya::unlocked;
+    ::acp::InitializeResult     on_initialize(const Cap&, const ::acp::InitializeParams&);
+    ::acp::NewSessionResult     on_new_session(const Cap&, const ::acp::NewSessionParams&);
+    ::acp::ListSessionsResult   on_list_sessions(const Cap&, const ::acp::ListSessionsParams&);
+    ::acp::LoadSessionResult    on_load_session(const Cap&, const ::acp::LoadSessionParams&);
+    ::acp::ResumeSessionResult  on_resume_session(const Cap&, const ::acp::ResumeSessionParams&);
+    ::acp::NewSessionResult     on_fork_session(const Cap&, const ::acp::ForkSessionParams&);
+    void                        on_close_session(const Cap&, const ::acp::CloseSessionParams&);
+    void                        on_delete_session(const Cap&, const ::acp::DeleteSessionParams&);
+    void                        on_set_mode(const Cap&, const ::acp::SetModeParams&);
+    ::acp::SetConfigOptionResult on_set_config_option(const Cap&, const ::acp::SetConfigOptionParams&);
+    void                        on_logout(const Cap&);
+    void                        on_prompt(const Cap&, const ::acp::PromptParams&, Responder);
+    void                        on_cancel(const Cap&, const ::acp::CancelParams&);
     // Generic $/cancel_request: cancel the turn whose session/prompt request
     // has this JSON-RPC id (falls back to a no-op for an unknown id).
-    void                        on_cancel_request(const ::acp::RpcId& id);
+    void                        on_cancel_request(const Cap&, const ::acp::RpcId& id);
 
     // The method table, built once in the constructor.
-    using Router = ::jsonrpc::Router<AgentServer>;
+    using Router = ::jsonrpc::Router<Ctx>;
     static Router make_router();
     rpc::Dispatch make_dispatch();
-    std::optional<std::string> on_call(const ::acp::Call& c);
-    void on_notification(const ::acp::Notification& n);
+    std::optional<std::string> on_call(const Cap&, const ::acp::Call& c);
+    void on_notification(const Cap&, const ::acp::Notification& n);
 
     // ── The headless turn loop ───────────────────────────────────────────
-    void run_turn(Io io, std::string session_id, std::string req_id_dump, Responder resp,
-                  Message user_msg, std::string typed);
-    void run_compact(Io io, std::string session_id, std::string req_id_dump, Responder resp);
+    void run_turn(Io io, const Cap& cap, std::string session_id, std::string req_id_dump,
+                  Responder resp, Message user_msg, std::string typed);
+    void run_compact(Io io, const Cap& cap, std::string session_id, std::string req_id_dump,
+                     Responder resp);
     // Turn queue. register_prompt files a prompt in line; acquire_turn blocks
     // until it is first, then appends its message (if any) and arms its
     // cancel. Nothing back: cancelled while waiting, or the session closed.
     // release_turn hands the session to the next prompt.
     struct Acquired { std::shared_ptr<http::CancelToken> cancel; std::string title; };
-    void register_prompt(const std::string& sid, const std::string& rid);
-    std::optional<Acquired> acquire_turn(const std::string& sid, const std::string& rid,
+    void register_prompt(const maya::below<maya::leaf>& cap, const std::string& sid,
+                         const std::string& rid);
+    std::optional<Acquired> acquire_turn(const Cap& cap, const std::string& sid,
+                                         const std::string& rid,
                                          std::optional<Message> msg = {},
                                          std::string typed = {});
-    void release_turn(const std::string& sid, const std::string& rid);
+    void release_turn(const maya::below<maya::leaf>& cap, const std::string& sid,
+                      const std::string& rid);
     // Trip these cancel handles, then wake anyone waiting in acquire_turn.
-    void cancel_tokens(std::vector<std::shared_ptr<http::CancelToken>> toks);
+    void cancel_tokens(const maya::below<maya::leaf>& cap,
+                       std::vector<std::shared_ptr<http::CancelToken>> toks);
 
-    StopReason stream_completion(Io io, const std::string& session_id, bool& out_cancelled,
-                                 std::string& out_error,
+    StopReason stream_completion(Io io, const Cap& cap, const std::string& session_id,
+                                 bool& out_cancelled, std::string& out_error,
                                  bool suppress_tools = false);
-    bool       run_tools(const std::string& session_id, bool& out_cancelled);
+    bool       run_tools(const Cap& cap, const std::string& session_id, bool& out_cancelled);
 
     // ── Helpers ──────────────────────────────────────────────────────────
-    void send_update(const std::string& session_id, ::acp::SessionUpdate update);
+    void send_update(const maya::below<maya::leaf>& cap, const std::string& session_id,
+                     ::acp::SessionUpdate update);
 
     // Emit the slash-command menu + model-picker config option for a session,
     // so Zed's composer `/` menu and model dropdown match the native agent.
     // Sent as session/update notifications; call outside the session lock.
-    void emit_session_config(const std::string& session_id,
+    void emit_session_config(const Cap& cap, const std::string& session_id,
                              const std::string& model_id);
     // Complete config-option state (SSOT for the initial advertise + every
     // post-change echo). Reads live session profile/model.
-    void emit_config_state(const std::string& session_id,
+    void emit_config_state(const Cap& cap, const std::string& session_id,
                            const std::string& fallback_model);
-    ::acp::List<::acp::ConfigOption> config_options(const std::string& session_id,
+    ::acp::List<::acp::ConfigOption> config_options(const Cap& cap,
+                                                     const std::string& session_id,
                                                      const std::string& fallback_model);
 
     enum class PermissionOutcome { Deny, DenyAlways, AllowOnce, AllowAlways };
-    PermissionOutcome ask_permission(const std::string& session_id, const ToolUse& tc,
+    PermissionOutcome ask_permission(const Cap& cap, const std::string& session_id,
+                                     const ToolUse& tc,
                                      std::stop_token cancel = {});
 
     // Live-terminal execution of a `bash` tool call via the client's ACP
@@ -196,23 +227,25 @@ private:
         std::vector<std::string> extra_roots;
         [[nodiscard]] bool cancelled() const { return cancel && cancel->is_cancelled(); }
     };
-    std::optional<TerminalRun> run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc);
+    std::optional<TerminalRun> run_bash_via_terminal(const Cap& cap, const TurnCtx& ctx, ToolUse& tc);
 
     // Settle a tool call: set it on the local copy AND write it back into
     // the live session (matched by message id + tool id), in one step.
-    void settle_tool(const TurnCtx& ctx, ToolUse& tc, ToolUse::Status st,
+    void settle_tool(const Cap& cap, const TurnCtx& ctx, ToolUse& tc, ToolUse::Status st,
                      std::chrono::steady_clock::time_point executing_since = {});
 
     // Run f(Session&, args...) on the live session `id` under the sessions
     // lock; nullopt if there is no such session. f is captureless and its
     // args/result are copied in and out, the same rules as guarded<T>::with,
     // because that is what this is. Nothing escapes that points into a
-    // session, so a concurrent close can never free one under a reader.
+    // session, so a concurrent close can never free one under a reader. The
+    // sessions lock is a leaf: callable holding anything but a leaf.
     template <class F, class... Args>
-    auto with_session(const std::string& id, F f, Args... args) {
+    auto with_session(const maya::below<maya::leaf>& cap, const std::string& id, F f,
+                      Args... args) {
         (void)f;
         using R = std::invoke_result_t<F&, Session&, Args&&...>;
-        return sessions_.with([](Sessions& ss, std::string k, Args... a) -> std::optional<R> {
+        return sessions_.with(cap, [](Sessions& ss, std::string k, Args... a) -> std::optional<R> {
             auto it = ss.by_id.find(k);
             if (it == ss.by_id.end()) return std::nullopt;
             return F{}(it->second, std::move(a)...);
@@ -227,17 +260,20 @@ private:
     static const char*    mode_id_for(Profile p);
 
     // ── Persisted session index (cwd + title sidecar) ────────────────────
-    void                  index_session(const std::string& id);
-    void                  unindex_session(const std::string& id);
-    nlohmann::json        load_session_index();
+    // The index is a shared-file lane: they need below<file_lane>.
+    void                  index_session(const Cap& cap, const std::string& id);
+    void                  unindex_session(const Cap& cap, const std::string& id);
+    nlohmann::json        load_session_index(const Cap& cap);
 
-    void                  persist(const std::string& id);
-    void                  adopt_client_mcp(const ::acp::List<::acp::McpServer>& servers);
+    void                  persist(const Cap& cap, const std::string& id);
+    void                  adopt_client_mcp(const Cap& cap, const ::acp::List<::acp::McpServer>& servers);
   public:
-    void                  refresh_command_menus();
+    void                  refresh_command_menus(const Cap& cap);
   private:
-    void                  replay_history(const std::string& session_id,
+    void                  replay_history(const Cap& cap, const std::string& session_id,
                                          const Thread& thread);
+    void                  replay_history_body(const Cap& cap, const std::string& session_id,
+                                              const Thread& thread, const std::string& scwd);
 
     // Reader thread only (Router::handle isn't const).
     Router                           router_;
@@ -252,21 +288,22 @@ private:
   private:
     // Every model the session selector offers, across signed-in providers.
     // Built lazily on first use and kept for the connection: listing catalogs
-    // can hit the network, and the dropdown shouldn't wait on it twice.
+    // can hit the network, and the dropdown shouldn't wait on it twice. A
+    // published slot: built outside any lock, swapped in whole.
     struct ModelChoice { std::string value, provider, model, name, group, group_name; };
-    maya::guarded<std::vector<ModelChoice>> model_choices_;
-    [[nodiscard]] std::vector<ModelChoice> model_choices();
-    [[nodiscard]] ::acp::List<::acp::ConfigOption> model_options(const std::string& provider,
+    maya::published<const std::vector<ModelChoice>> model_choices_;
+    [[nodiscard]] std::vector<ModelChoice> model_choices(const Cap& cap);
+    [[nodiscard]] ::acp::List<::acp::ConfigOption> model_options(const Cap& cap,
+                                                                 const std::string& provider,
                                                                  const std::string& model,
                                                                  const std::string& effort,
                                                                  bool show_reasoning);
     const std::string                model_id_;
     const Profile                    profile_;
-    // on_logout (reader thread) clears it while a turn may be reading it.
-    maya::guarded<auth::AuthHeader>  auth_;
-    [[nodiscard]] auth::AuthHeader auth() const {
-        return auth_.read([](const auth::AuthHeader& a) { return a; });
-    }
+    // on_logout (reader thread) clears it while a turn may be reading it: a
+    // snapshot, replaced whole, read lock-free.
+    maya::snapshot<auth::AuthHeader> auth_;
+    [[nodiscard]] auth::AuthHeader auth() const { return auth_.get(); }
   public:
     // Re-reads credentials (after a terminal login the editor ran for us).
     // Set by main(); without it `authenticate` can only report the state.
@@ -299,7 +336,7 @@ private:
     std::atomic<bool>         air_diff_patch_{false};
     std::atomic<bool>         client_elicit_form_{false};      // elicitation.form
     std::atomic<bool>         client_elicit_url_{false};       // elicitation.url
-    nlohmann::json elicit_via_client(const std::string& session_id, const std::string& tool_id,
+    nlohmann::json elicit_via_client(const Cap& cap, const std::string& session_id, const std::string& tool_id,
                                      const nlohmann::json& mcp_params,
                                      std::stop_token cancel = {});
     // {"jetbrains":{"air":{"version":1, ...payload}}} for AIR, else {}.
@@ -308,13 +345,13 @@ private:
 
     // A user-facing notice: a `notice` update when the client renders them,
     // otherwise nothing (the turn's own text already says what happened).
-    void notice(const std::string& session_id, std::string severity,
+    void notice(const maya::below<maya::leaf>& cap, const std::string& session_id, std::string severity,
                 std::string title, std::string description = {});
 
     // Zed's terminal channel for shell tools we run ourselves.
     [[nodiscard]] bool terminal_channel() const noexcept;
     [[nodiscard]] static bool is_command_tool(std::string_view name);
-    void send_terminal_output(const std::string& session_id, const std::string& tool_id,
+    void send_terminal_output(const maya::below<maya::leaf>& cap, const std::string& session_id, const std::string& tool_id,
                               std::string_view data);
     [[nodiscard]] static nlohmann::json terminal_exit_meta(const std::string& tool_id,
                                                            std::string_view text, bool failed);

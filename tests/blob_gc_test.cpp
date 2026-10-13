@@ -199,8 +199,14 @@ TEST_CASE("blob gc: an unlistable threads dir deletes nothing") {
     // deleted EVERY blob. The safety rule below already said what to do
     // with an unreadable input; nothing had told it this was one.
     //
-    // Root can read anything, so this would pass vacuously there.
+    // Root can read anything, so this would pass vacuously there. Windows
+    // can't express "unlistable" through fs::permissions at all (it only
+    // toggles the read-only attribute), so the precondition can't be built.
+#if defined(_WIN32)
+    return;
+#else
     if (::geteuid() == 0) return;
+#endif
 
     const auto dir = make_dir("unlistable");
     const auto blob = put_in(dir, std::string(256, 'u'));
@@ -319,10 +325,10 @@ TEST_CASE("blob gc: background thread joins at once and runs nothing") {
     const auto t0 = std::chrono::steady_clock::now();
     blobs::start_background_gc();
     blobs::start_background_gc();                 // second start is a no-op
-    blobs::join_background_gc();
-    blobs::join_background_gc();                  // idempotent
+    blobs::join_background_gc(agtest::cap());
+    blobs::join_background_gc(agtest::cap());                  // idempotent
     blobs::start_background_gc();                 // after join: stays stopped
-    blobs::join_background_gc();
+    blobs::join_background_gc(agtest::cap());
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     CHECK_MESSAGE(ms < 1000, "join must not wait out the start delay");

@@ -180,8 +180,10 @@ struct Cache {
     std::vector<Command> commands;
     std::string          sig = "\x01uninit";
 };
-maya::guarded<Cache>& cache() {
-    static maya::guarded<Cache> c;
+// Replaced wholesale by a rescan, read by every lookup: a snapshot, so no
+// lock, rank or capability on the read path.
+maya::snapshot<Cache>& cache() {
+    static maya::snapshot<Cache> c;
     return c;
 }
 
@@ -207,15 +209,16 @@ std::vector<Command> all(Io) {
         scan_root(src.base / layout.leaf,
                   std::string{scope::to_string(src.locus)}, fresh, sig);
     }
-    return cache().with(
-        [](Cache& c, std::string s, std::vector<Command> f) {
-            if (s != c.sig) {
-                c.commands = std::move(f);
-                c.sig      = std::move(s);
-            }
-            return c.commands;
+    auto now = cache().update(
+        [](const Cache& c, const std::string& s, const std::vector<Command>& f) {
+            if (s == c.sig) return c;
+            Cache next;
+            next.commands = f;
+            next.sig      = s;
+            return next;
         },
         std::move(sig), std::move(fresh));
+    return now->commands;
 }
 
 std::optional<Command> find(Io io, std::string_view name) {
@@ -225,7 +228,11 @@ std::optional<Command> find(Io io, std::string_view name) {
 }
 
 void invalidate_cache() {
-    cache().with([](Cache& c) { c.sig = "\x01invalidated"; });
+    cache().update([](const Cache& c) {
+        Cache next = c;
+        next.sig   = "\x01invalidated";
+        return next;
+    });
 }
 
 std::string expand(std::string_view body, std::string_view args) {

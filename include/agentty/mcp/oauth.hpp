@@ -27,6 +27,9 @@
 #include <optional>
 #include <string>
 #include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
+
+#include <maya/runtime.hpp>
 
 namespace agentty::mcp::oauth {
 
@@ -74,7 +77,9 @@ struct LoginResult {
 // Return a fresh "Bearer <token>" header for `server_name`, refreshing a token
 // that's within the expiry skew. std::nullopt if no token is stored (caller
 // proceeds unauthenticated) or a refresh failed with no usable stale token.
-[[nodiscard]] std::optional<std::string> bearer_for(const std::string& server_name);
+// Refreshes run one at a time on the auth_refresh lane.
+[[nodiscard]] std::optional<std::string> bearer_for(const locks::below_auth_refresh& cap,
+                                                    const std::string& server_name);
 
 // Remove a stored token. Returns true if a file was removed or none existed.
 bool logout(const std::string& server_name);

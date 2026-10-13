@@ -156,7 +156,11 @@ util::AtomicSnapshot<std::vector<SymbolEntry>> g_symbols;
 // Single-flight latch for the symbol scan lives beside
 // prewarm_workspace_symbols below, next to the only code that reads it.
 
-std::vector<SymbolEntry> build_symbol_list(std::size_t cap, std::stop_token stop = {}) {
+// `fan` is the caller's proof it holds no lock, needed to open the parallel
+// maya::scope. A caller without one (the cold synchronous picker fetch) passes
+// nullptr and the scan runs as a single share on the calling thread.
+std::vector<SymbolEntry> build_symbol_list(const maya::unlocked* fan, std::size_t cap,
+                                           std::stop_token stop = {}) {
     std::vector<SymbolEntry> out;
     const auto root = tools::util::project_root();
     if (root.empty()) return out;
@@ -241,15 +245,11 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap, std::stop_token stop
 
     std::atomic<std::size_t> next{0};
     std::vector<std::vector<SymbolEntry>> partials(nthreads);
-    // maya::scope joins every helper before it returns (and on a throw),
-    // which is what makes the [&] captures of `partials` and `next` safe.
-    maya::scope(stop, [&](maya::nursery& n) {
-        for (unsigned t = 0; t < nthreads; ++t) {
-            (void)n.spawn([&, t] {
+    auto share = [&](unsigned t) {
                 // Lowest priority: this is a speculative cache for a picker
                 // that may never open, so it must only use cores nothing
                 // else wants.
-                deprioritize_prewarm_thread();
+                if (fan) deprioritize_prewarm_thread();
                 auto& local = partials[t];
                 for (;;) {
                     if (stop.stop_requested()) return;   // drain on shutdown
@@ -264,9 +264,18 @@ std::vector<SymbolEntry> build_symbol_list(std::size_t cap, std::stop_token stop
                     // core for its whole quantum mid-burst.
                     std::this_thread::yield();
                 }
-            });
-        }
-    });
+    };
+    if (fan) {
+        // maya::scope joins every helper before it returns (and on a throw),
+        // which is what makes the [&] captures of `partials` and `next` safe.
+        maya::scope(*fan, stop, [&](maya::nursery& n) {
+            for (unsigned t = 0; t < nthreads; ++t) {
+                (void)n.spawn([&share, t] { share(t); });
+            }
+        });
+    } else {
+        for (unsigned t = 0; t < nthreads; ++t) share(t);
+    }
     for (auto& p : partials) {
         for (auto& e : p) {
             out.push_back(std::move(e));
@@ -292,7 +301,7 @@ std::atomic<bool>& sym_building() {
 }
 }  // namespace
 
-void prewarm_workspace_symbols(std::stop_token stop, std::size_t cap) {
+void prewarm_workspace_symbols(const maya::unlocked& lk, std::stop_token stop, std::size_t cap) {
     // SYNCHRONOUS — see files.cpp for the full rationale. In short: agentty
     // had two mechanisms for "run this in the background" (maya's Cmd seam
     // and hand-rolled std::threads), and the duplication is what let the git
@@ -310,7 +319,7 @@ void prewarm_workspace_symbols(std::stop_token stop, std::size_t cap) {
     // thousands of stat() calls; it gets the same treatment so the whole
     // prewarm — walk and scan — stays out of the foreground's way.
     deprioritize_prewarm_thread();
-    auto syms = build_symbol_list(cap, stop);
+    auto syms = build_symbol_list(std::addressof(lk), cap, stop);
     if (!stop.stop_requested()) g_symbols.store(std::move(syms));
     sym_building() = false;
 }
@@ -337,7 +346,7 @@ util::Snapshot<std::vector<SymbolEntry>> list_workspace_symbols(std::size_t cap)
     // Cold synchronous caller: build inline + publish. Two cold callers may
     // both scan rather than one waiting on the other's multi-second walk —
     // see list_workspace_files for the same trade.
-    auto built = util::make_snapshot(build_symbol_list(cap));
+    auto built = util::make_snapshot(build_symbol_list(nullptr, cap));
     g_symbols.store(built);
     return built;
 }

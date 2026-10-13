@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "agentty/runtime/panel/settings/categories.hpp"
+#include <maya/runtime.hpp>
 #include "agentty/util/io.hpp"
 
 namespace agentty { struct Model; }
@@ -129,7 +130,7 @@ struct AddResult { bool ok; std::string message; };
 // Plugins: parse a one-line "name command [args…]" spec and write it to
 // the user mcp.json via tools::plugin. `--python foo.py` / `--uvx pkg` /
 // `--npx pkg` shorthands are expanded exactly like the CLI.
-[[nodiscard]] AddResult add_plugin_from_line(Io, const std::string& line);
+[[nodiscard]] AddResult add_plugin_from_line(Io, const maya::below<maya::leaf>&, const std::string& line);
 
 // Commands / Agents: create a starter <name>.md under the user root
 // (~/.agentty/commands or ~/.agentty/agents) with a minimal template, so

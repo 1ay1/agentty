@@ -279,7 +279,7 @@ std::optional<std::string> worktree_tree(ScratchIndex&) {
 }
 } // namespace
 
-CheckpointDiff checkpoint_summary(const std::string& id) {
+CheckpointDiff checkpoint_summary(const maya::below<maya::leaf>& cap, const std::string& id) {
     CheckpointDiff out;
     if (!repo().in_repo || id.empty()) return out;
 
@@ -295,7 +295,7 @@ CheckpointDiff checkpoint_summary(const std::string& id) {
     // checkpoint tree against it. Doing it tree-vs-tree (not
     // tree-vs-worktree) keeps the untracked/new-file accounting identical
     // to what a rewind would actually revert.
-    const auto tree = scratch().with([](ScratchIndex& si) { return worktree_tree(si); });
+    const auto tree = scratch().with(cap, [](ScratchIndex& si) { return worktree_tree(si); });
     if (!tree) return out;
     const std::string& cur_tree = *tree;
 
@@ -331,10 +331,10 @@ CheckpointDiff checkpoint_summary(const std::string& id) {
     return out;
 }
 
-bool create_checkpoint(const std::string& id) {
+bool create_checkpoint(const maya::below<maya::leaf>& cap, const std::string& id) {
     if (!repo().in_repo || id.empty()) return false;
     // The whole create (commit, ref, prune) stays serialized, as before.
-    return scratch().with([](ScratchIndex& si, std::string cid) {
+    return scratch().with(cap, [](ScratchIndex& si, std::string cid) {
         return create_checkpoint_locked(si, cid);
     }, id);
 }
@@ -369,7 +369,8 @@ bool checkpoint_exists(const std::string& id) {
                        ref_for(id) + "^{commit}"}));
 }
 
-bool restore_checkpoint(const std::string& id, std::string* error) {
+bool restore_checkpoint(const maya::below<maya::leaf>& cap, const std::string& id,
+                        std::string* error) {
     auto fail = [&](std::string why) {
         if (error) *error = std::move(why);
         return false;
@@ -394,7 +395,7 @@ bool restore_checkpoint(const std::string& id, std::string* error) {
     // force-writes the files. The real index and HEAD stay untouched —
     // `git status` afterwards shows the restored state as ordinary
     // working-tree changes, which is exactly what the user expects.
-    const bool wrote = scratch().with([](ScratchIndex&, std::string c) {
+    const bool wrote = scratch().with(cap, [](ScratchIndex&, std::string c) {
         const std::string idx = prepare_scratch_index();
         const bool w =
             ok(run_git_scratch(idx, {"git", "-C", repo().root, "read-tree", c}))

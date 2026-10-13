@@ -19,6 +19,7 @@
 // No argument = no-op pass, so this costs nothing in CI.
 
 #include <agentty/domain/conversation.hpp>
+#include "agtest_cap.hpp"
 #include <agentty/io/persistence.hpp>
 #include <agentty/io/thread_log.hpp>
 
@@ -153,10 +154,10 @@ int main(int argc, char** argv) {
     for (const auto& id : ids) {
         auto t = persistence::load_thread_by_id(::agentty::IoAccess::grant(), id);
         if (!t) continue;
-        persistence::save_thread(::agentty::IoAccess::grant(), *t);
+        persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), *t);
         ++migrated;
     }
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0).count();
     std::printf("migrated %zu threads in %lld ms -> %.0f MB\n",
@@ -188,7 +189,7 @@ int main(int argc, char** argv) {
     }
 
     // The picker must still list every thread, exactly once.
-    const auto listed = persistence::load_all_threads(::agentty::IoAccess::grant());
+    const auto listed = persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap());
     std::size_t dupes = 0;
     for (const auto& id : ids) {
         std::size_t n = 0;

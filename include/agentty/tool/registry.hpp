@@ -104,8 +104,42 @@ enum class OutputTruncation : std::uint8_t { Head, Tail, HeadTail };
 // parked on the thread. These used to be thread_locals installed by RAII
 // scopes, which went silently missing whenever work moved to another thread
 // (shell output stopped streaming and Esc stopped working for a release).
+// A capability pointer that is NOT carried by copies: copying a context
+// makes a new context for a new call, and the capability belongs to the
+// dispatch that set it on the original. Moves keep it (same call).
+class CallCapability {
+public:
+    CallCapability() = default;
+    CallCapability(const CallCapability&) noexcept {}
+    CallCapability& operator=(const CallCapability&) noexcept { p_ = nullptr; return *this; }
+    CallCapability(CallCapability&& o) noexcept : p_(std::exchange(o.p_, nullptr)) {}
+    CallCapability& operator=(CallCapability&& o) noexcept {
+        p_ = std::exchange(o.p_, nullptr);
+        return *this;
+    }
+    void set(const maya::unlocked* c) noexcept { p_ = c; }
+    [[nodiscard]] const maya::unlocked* get() const noexcept { return p_; }
+private:
+    const maya::unlocked* p_ = nullptr;
+};
+
 struct CallContext {
     using Sink = std::function<void(std::string_view snapshot)>;
+
+    // The tool worker's `unlocked`, for the duration of ONE execute() call.
+    //
+    // mcp-cpp runs agentty's native tools and calls back into agentty
+    // (memory store, subagent runner, exec) through interfaces whose
+    // signatures it fixes; the only thing that crosses that boundary is this
+    // context (Call::host). DynamicDispatch::execute_with sets it from the
+    // capability it was handed and clears it before returning, so it never
+    // outlives the call that proved it and never reaches another thread (a
+    // copied context drops it: CallCapability).
+    CallCapability cap;
+    [[nodiscard]] const maya::unlocked& capability() const {
+        if (!cap.get()) throw std::logic_error("tool callback outside a dispatched call");
+        return *cap.get();
+    }
 
     // Live output for the UI, whole buffer each time. Empty: nobody watches.
     Sink progress;
@@ -195,10 +229,18 @@ struct ToolDef {
     // world. The permission policy reads these and these alone — there
     // is no per-tool override. Set this when constructing the ToolDef
     // (e.g. `t.effects = {Effect::ReadFs};`); leaving it default
-    // (empty) means "this tool is pure and never needs permission".
+    // empty) means "this tool is pure and never needs permission".
     EffectSet effects;
 
-    std::function<ExecResult(const nlohmann::json& args, const CallContext& ctx)> execute;
+    // Runs on a tool worker thread, which holds no lock between tool calls:
+    // the body gets that thread's `unlocked`. A tool may block (a subprocess,
+    // an MCP round-trip, a scope of helpers) and take any lock in rank
+    // order; the type is what proves the dispatcher never calls it from
+    // inside a lock body.
+    using ExecuteFn = std::function<ExecResult(const maya::unlocked& cap,
+                                               const nlohmann::json& args,
+                                               const CallContext& ctx)>;
+    ExecuteFn execute;
 
     // A stable fingerprint of everything a consent decision depends on:
     // which tool this is, what it claims to do, what it accepts, and what it

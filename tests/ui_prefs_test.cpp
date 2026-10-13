@@ -18,7 +18,10 @@
 #include "agentty/runtime/panel/appearance.hpp"
 
 #include <cstdio>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace agentty;
 namespace se = agentty::settings;
@@ -32,7 +35,7 @@ store::Settings g_saved;
 void install_stub_deps() {
     g_saved = store::Settings{};
     agentty::app::install_deps(agentty::app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const agentty::Thread&) {},
         .delete_thread = [](const agentty::ThreadId&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },
@@ -477,6 +480,17 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
                  const char* fgbg; const char* no_color; };
 
     auto with_env = [](const Env& e, auto&& fn) {
+        // A terminal that names itself (Windows Terminal's WT_SESSION,
+        // ConEmuANSI, TERM_PROGRAM) outranks TERM in detect_tier, so the
+        // HOST running the suite would leak into every case. Clear them for
+        // the duration and restore after.
+        const char* host_vars[] = {"WT_SESSION", "ConEmuANSI", "TERM_PROGRAM", "CLICOLOR_FORCE"};
+        std::vector<std::pair<std::string, std::optional<std::string>>> saved;
+        for (const char* k : host_vars) {
+            const char* v = std::getenv(k);
+            saved.emplace_back(k, v ? std::optional<std::string>{v} : std::nullopt);
+            ::unsetenv(k);
+        }
         ::unsetenv("TERM"); ::unsetenv("COLORTERM");
         ::unsetenv("COLORFGBG"); ::unsetenv("NO_COLOR"); ::unsetenv("MAYA_COLOR");
         if (e.term)      ::setenv("TERM", e.term, 1);
@@ -486,6 +500,8 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
         fn();
         ::unsetenv("TERM"); ::unsetenv("COLORTERM");
         ::unsetenv("COLORFGBG"); ::unsetenv("NO_COLOR"); ::unsetenv("MAYA_COLOR");
+        for (const auto& [k, v] : saved)
+            if (v) ::setenv(k.c_str(), v->c_str(), 1);
     };
 
     const Env envs[] = {

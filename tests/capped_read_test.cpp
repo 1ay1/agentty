@@ -155,7 +155,7 @@ TEST_CASE("no file writes its own capped reader") {
     for (const auto& e : fs::recursive_directory_iterator(root / "src", ec)) {
         if (!e.is_regular_file(ec)) continue;
         if (e.path().extension() != ".cpp") continue;
-        const std::string rel = fs::relative(e.path(), root, ec).string();
+        const std::string rel = fs::relative(e.path(), root, ec).generic_string();
 
         std::ifstream in(e.path());
         std::string line;

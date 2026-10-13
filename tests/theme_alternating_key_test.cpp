@@ -111,7 +111,7 @@ private:
 
 Model seeded() {
     app::install_deps(app::Deps{
-        .stream = [](provider::Request, provider::EventSink) {},
+        .stream = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread = [](const Thread&) {},
         .load_threads = [] { return std::vector<Thread>{}; },
         .load_thread = [](const ThreadId&) { return std::optional<Thread>{}; },

@@ -48,7 +48,9 @@ namespace fs = std::filesystem;
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/subagent.hpp"
+#include "agentty/tool/tool.hpp"
 #include "agentty/runtime/msg.hpp"
+#include "agtest_cap.hpp"
 
 using nlohmann::json;
 using namespace agentty;
@@ -74,10 +76,13 @@ bool has(const std::string& hay, std::string_view needle) {
 struct TaskOut { std::string text; bool is_error = false; };
 
 TaskOut run_task(const std::string& prompt, const tools::CallContext& ctx = {}) {
-    const auto* td = tools::find("task");
+    const auto* td = tool::DynamicDispatch::resolve("task");
     if (!td) return {"[task tool missing from registry]", true};
     json args; args["prompt"] = prompt;
-    auto r = td->execute(args, ctx);    // production dispatch, as cmd_factory does
+    // Production dispatch, as cmd_factory does: execute_with stamps the
+    // call's capability into the context, which the subagent runner needs
+    // for its provider/auth callbacks (CallContext::capability()).
+    auto r = tool::DynamicDispatch::execute_with(agtest::cap(), td, "task", args, ctx);
     if (!r) return {r.error().detail, true};
     return {r->text, false};
 }
@@ -92,7 +97,7 @@ void install_scripted_stream(Script script, bool with_auth = true) {
     tools::subagent::Config cfg;
     if (with_auth) cfg.auth = auth::ApiKeyHeader{"sk-test-not-real"};
     cfg.model = "test-model";
-    cfg.stream = [counter, script](provider::Request req,
+    cfg.stream = [counter, script](const maya::unlocked&, provider::Request req,
                                    provider::EventSink sink) {
         int turn = counter->fetch_add(1);
         provider::StreamResult result;
@@ -168,7 +173,7 @@ int main() {
         const auto dir = fs::temp_directory_path(ec)
             / ("agentty-subagent-test-" + std::to_string(::getpid()));
         fs::create_directories(dir, ec);
-        if (!ec) (void)!chdir(dir.c_str());
+        if (!ec) fs::current_path(dir, ec);
     }
     // Select a non-Anthropic provider: the runner only calls the disk-reading
     // fresh_auth_header() when active().kind == Anthropic. The OpenAI-family

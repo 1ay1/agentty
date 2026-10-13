@@ -64,8 +64,8 @@ TEST_CASE("thread blobs: images round-trip byte-exact and shrink the JSON") {
     user.images.push_back(std::move(img));
 
     Thread t{ThreadId{"blobtest"}, "blob round-trip", {user}, {}, {}};
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
     const fs::path file =
         persistence::threads_dir() / "blobtest.json";
@@ -84,7 +84,7 @@ TEST_CASE("thread blobs: images round-trip byte-exact and shrink the JSON") {
                   "image bytes must survive verbatim, NUls and all");
     CHECK(loaded->messages[0].images[0].media_type == "image/png");
 
-    persistence::delete_thread(::agentty::IoAccess::grant(), ThreadId{"blobtest"});
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), ThreadId{"blobtest"});
 }
 
 TEST_CASE("thread blobs: large tool output round-trips") {
@@ -105,8 +105,8 @@ TEST_CASE("thread blobs: large tool output round-trips") {
     asst.tool_calls.push_back(std::move(tc));
 
     Thread t{ThreadId{"blobtool"}, "tool blob", {asst}, {}, {}};
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
     const std::string json_text =
         read_file(persistence::threads_dir() / "blobtool.json");
@@ -120,7 +120,7 @@ TEST_CASE("thread blobs: large tool output round-trips") {
     CHECK_MESSAGE(loaded->messages[0].tool_calls[0].output() == original,
                   "tool output must survive verbatim");
 
-    persistence::delete_thread(::agentty::IoAccess::grant(), ThreadId{"blobtool"});
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), ThreadId{"blobtool"});
 }
 
 TEST_CASE("thread blobs: identical payloads share one file") {
@@ -137,8 +137,8 @@ TEST_CASE("thread blobs: identical payloads share one file") {
         img.set_bytes(payload);
         m.images.push_back(std::move(img));
         Thread t{ThreadId{id}, "dedup", {m}, {}, {}};
-        persistence::save_thread(::agentty::IoAccess::grant(), t);
-        persistence::flush_pending_saves(::agentty::IoAccess::grant());
+        persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+        persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
     };
 
     const fs::path blobs = persistence::threads_dir() / "blobs";
@@ -164,7 +164,7 @@ TEST_CASE("thread blobs: identical payloads share one file") {
         REQUIRE(loaded.has_value());
         REQUIRE(loaded->messages[0].images.size() == 1u);
         CHECK(loaded->messages[0].images[0].bytes() == payload);
-        persistence::delete_thread(::agentty::IoAccess::grant(), ThreadId{id});
+        persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), ThreadId{id});
     }
 }
 
@@ -186,8 +186,8 @@ TEST_CASE("thread blobs: thinking payloads round-trip") {
         Message::ThinkingBlock{reasoning, sig, ""});
 
     Thread t{ThreadId{"blobthink"}, "thinking blob", {a}, {}, {}};
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
     const std::string json_text =
         read_file(persistence::threads_dir() / "blobthink.json");
@@ -206,7 +206,7 @@ TEST_CASE("thread blobs: thinking payloads round-trip") {
     CHECK_MESSAGE(got.thinking_blocks[0].signature == sig,
                   "a mangled signature 400s the next turn");
 
-    persistence::delete_thread(::agentty::IoAccess::grant(), ThreadId{"blobthink"});
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), ThreadId{"blobthink"});
 }
 
 TEST_CASE("thread blobs: a legacy inline thread still loads") {
@@ -252,5 +252,5 @@ TEST_CASE("thread blobs: a legacy inline thread still loads") {
     CHECK_MESSAGE(loaded->messages[0].images[0].bytes() == bytes,
                   "inline legacy images must still decode");
 
-    persistence::delete_thread(::agentty::IoAccess::grant(), ThreadId{"legacyimg"});
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), ThreadId{"legacyimg"});
 }

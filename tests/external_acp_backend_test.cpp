@@ -24,6 +24,7 @@
 
 #include "agentty/rpc/peer.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"   // set_workspace_root
+#include "agtest_cap.hpp"
 
 #include <atomic>
 #include <condition_variable>
@@ -83,20 +84,20 @@ struct FakeAgent {
 
     ~FakeAgent() {
         release();
-        if (peer) peer->stop();
+        if (peer) peer->stop(agtest::cap());
         for (auto& t : workers) if (t.joinable()) t.join();
     }
 
     template <jsonrpc::IsMethod M>
     typename M::result call(const typename M::params& p) {
-        auto r = peer->call<M>(p);
+        auto r = peer->call<M>(agtest::cap(), p);
         if (!r) throw r.error();
         return std::move(*r);
     }
 
     void send_update(const SessionId& sid, SessionUpdate u) {
         SessionUpdateMsg m; m.sessionId = sid; m.update = std::move(u);
-        peer->notify<to_client::SessionUpdate>(m);
+        peer->notify<to_client::SessionUpdate>(agtest::cap(), m);
     }
 
     // Runs on a worker so the agent's reader stays free for replies.
@@ -107,7 +108,7 @@ struct FakeAgent {
             std::unique_lock lk(mu);
             cv.wait(lk, [&] { return released; });
             lk.unlock();
-            peer->reply<Prompt>(id, PromptResult{StopReason::Cancelled});
+            peer->reply<Prompt>(agtest::cap(), id, PromptResult{StopReason::Cancelled});
             return;
         }
         if (script.exercise_callbacks) {
@@ -127,7 +128,7 @@ struct FakeAgent {
             if (out.exitStatus && out.exitStatus->exitCode)
                 script.term_exit = static_cast<int>(*out.exitStatus->exitCode);
             (void)call<to_client::TerminalRelease>(ref);
-            peer->reply<Prompt>(id, PromptResult{StopReason::EndTurn});
+            peer->reply<Prompt>(agtest::cap(), id, PromptResult{StopReason::EndTurn});
             return;
         }
         if (script.stream_updates) {
@@ -139,12 +140,12 @@ struct FakeAgent {
             send_update(p.sessionId, SU_ToolCall{tc});
             send_update(p.sessionId, SU_Usage{/*used*/123, /*size*/200000, Nothing});
         }
-        peer->reply<Prompt>(id, PromptResult{script.stop});
+        peer->reply<Prompt>(agtest::cap(), id, PromptResult{script.stop});
     }
 
     rpc::Dispatch dispatch() {
         rpc::Dispatch d;
-        d.on_call = [this](const Call& c) -> std::optional<std::string> {
+        d.on_call = [this](const maya::unlocked&, const Call& c) -> std::optional<std::string> {
             if (c.method == to_agent::Initialize::name) {
                 InitializeResult r;
                 r.agentCapabilities.promptCapabilities.embeddedContext = true;
@@ -164,7 +165,7 @@ struct FakeAgent {
             }
             return reply(c.id, std::unexpected(RpcError(errc::MethodNotFound, c.method)));
         };
-        d.on_notification = [this](const Notification& n) {
+        d.on_notification = [this](const maya::unlocked&, const Notification& n) {
             if (n.method == to_agent::SessionCancel::name && !script.ignore_cancel) release();
         };
         return d;
@@ -181,7 +182,7 @@ struct Harness {
     AgentScript& script() { return agent->script; }
     ~Harness() {
         // The client peer first: its dispatch points at the backend.
-        if (client) client->stop();
+        if (client) client->stop(agtest::cap());
         agent.reset();
         client.reset();
         backend.reset();
@@ -210,7 +211,7 @@ std::unique_ptr<Harness> make_harness(AgentScript script,
 
     InitializeParams ip;
     ip.clientCapabilities.fs.readTextFile = true;
-    (void)h->client->call<to_agent::Initialize>(ip);
+    (void)h->client->call<to_agent::Initialize>(agtest::cap(), ip);
     return h;
 }
 
@@ -240,7 +241,7 @@ void test_clean_turn_streams_and_settles() {
         else kinds.push_back("other");
     };
 
-    auto res = h->backend->prompt(make_req("Hi!"), sink, /*cancel*/nullptr);
+    auto res = h->backend->prompt(agtest::cap(), make_req("Hi!"), sink, /*cancel*/nullptr);
 
     CHECK(res.ok());
     CHECK(res.stop == agentty::StopReason::EndTurn);
@@ -262,7 +263,7 @@ void test_prompt_forwards_text_and_image_content() {
         agentty::ImageContent{"image/jpeg", std::string{"\x01\x02\x03", 3}});
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
 
-    auto res = h->backend->prompt(req, sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), req, sink, nullptr);
 
     CHECK(res.ok());
     CHECK(h->last_prompt().size() == 2);
@@ -282,7 +283,7 @@ void test_prompt_forwards_image_only_turn() {
         agentty::ImageContent{"image/png", std::string{"PNG", 3}});
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
 
-    auto res = h->backend->prompt(req, sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), req, sink, nullptr);
 
     CHECK(res.ok());
     CHECK(h->last_prompt().size() == 1);
@@ -296,7 +297,7 @@ void test_prompt_forwards_image_only_turn() {
 void test_max_turn_requests_maps_to_endturn() {
     auto h = make_harness(AgentScript{StopReason::MaxTurnRequests, false, false});
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
-    auto res = h->backend->prompt(make_req("go"), sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), make_req("go"), sink, nullptr);
     CHECK(res.ok());
     CHECK(res.stop == agentty::StopReason::EndTurn);
 }
@@ -304,7 +305,7 @@ void test_max_turn_requests_maps_to_endturn() {
 void test_refusal_is_error() {
     auto h = make_harness(AgentScript{StopReason::Refusal, false, false});
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
-    auto res = h->backend->prompt(make_req("do bad thing"), sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), make_req("do bad thing"), sink, nullptr);
     CHECK(!res.ok());
     CHECK(res.error.has_value());
     CHECK(!res.error->user_cancel);
@@ -313,7 +314,7 @@ void test_refusal_is_error() {
 void test_agent_cancelled_stop_reason() {
     auto h = make_harness(AgentScript{StopReason::Cancelled, false, false});
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
-    auto res = h->backend->prompt(make_req("x"), sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), make_req("x"), sink, nullptr);
     CHECK(!res.ok());
     CHECK(res.error.has_value() && res.error->user_cancel);
 }
@@ -329,7 +330,7 @@ void test_user_cancel_via_token() {
         cancel->cancel();
     });
 
-    auto res = h->backend->prompt(make_req("long task"), sink, cancel);
+    auto res = h->backend->prompt(agtest::cap(), make_req("long task"), sink, cancel);
     tripper.join();
 
     CHECK(!res.ok());
@@ -352,7 +353,7 @@ void test_cancel_against_non_settling_agent_is_bounded() {
     });
 
     auto t0 = std::chrono::steady_clock::now();
-    auto res = h->backend->prompt(make_req("never answered"), sink, cancel);
+    auto res = h->backend->prompt(agtest::cap(), make_req("never answered"), sink, cancel);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - t0).count();
     tripper.join();
@@ -399,7 +400,7 @@ void test_delegate_callbacks_wired() {
     auto h = make_harness(script, std::move(del));
 
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
-    auto res = h->backend->prompt(make_req("use tools"), sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), make_req("use tools"), sink, nullptr);
 
     CHECK(res.ok());
     CHECK((*files)["acp_probe.txt"] == "delegate-wrote-this\n");
@@ -451,7 +452,7 @@ std::unique_ptr<rpc::Peer> start_stdio_agent(std::string session, std::atomic<bo
     // The dispatch notifies through the peer it belongs to, set right after.
     auto self = std::make_shared<rpc::Peer*>(nullptr);
     rpc::Dispatch d;
-    d.on_call = [self, session, &answered](const Call& c) -> std::optional<std::string> {
+    d.on_call = [self, session, &answered](const maya::unlocked&, const Call& c) -> std::optional<std::string> {
         if (c.method == to_agent::Initialize::name) {
             InitializeResult r;
             r.agentCapabilities.promptCapabilities.embeddedContext = true;
@@ -464,7 +465,7 @@ std::unique_ptr<rpc::Peer> start_stdio_agent(std::string session, std::atomic<bo
             auto pp = jsonrpc::from_json<PromptParams>(c.params);
             SessionUpdateMsg m; m.sessionId = pp.sessionId;
             m.update = SU_AgentMessageChunk{TextContent{"pong", Nothing, Json::object()}, Nothing};
-            (*self)->notify<to_client::SessionUpdate>(m);
+            (*self)->notify<to_client::SessionUpdate>(agtest::cap(), m);
             answered.store(true);
             return reply<to_agent::SessionPrompt>(c.id, PromptResult{StopReason::EndTurn});
         }
@@ -479,8 +480,8 @@ int run_agent_mode() {
     std::atomic<bool> answered{false};
     auto peer = start_stdio_agent("e2e", answered);
     peer->start();
-    peer->wait_closed();   // the parent closes our stdin
-    peer->stop();
+    peer->wait_closed(agtest::cap());   // the parent closes our stdin
+    peer->stop(agtest::cap());
     return 0;
 }
 
@@ -515,7 +516,7 @@ void test_spawn_real_subprocess(const std::string& self_path) {
 
     InitializeParams init;
     std::string err;
-    auto agent = P::spawn_acp_agent(
+    auto agent = P::spawn_acp_agent(agtest::cap(),
         // Bundled into agentty_standalone_tests (argv-dispatched), so the child
         // must carry the dispatch name before its own child-mode flag:
         //   <exe> external_acp_backend_test --acp-agent
@@ -528,7 +529,7 @@ void test_spawn_real_subprocess(const std::string& self_path) {
     }
     backend->connect(*agent.connection);
 
-    auto res = backend->prompt(make_req("ping"), sink, nullptr);
+    auto res = backend->prompt(agtest::cap(), make_req("ping"), sink, nullptr);
     CHECK(res.ok());
     CHECK(res.stop == agentty::StopReason::EndTurn);
     CHECK(backend->session_id() == "e2e");
@@ -548,7 +549,7 @@ void test_wedged_child_teardown_is_bounded(const std::string& self_path) {
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
     InitializeParams init;
     std::string err;
-    auto agent = P::spawn_acp_agent(
+    auto agent = P::spawn_acp_agent(agtest::cap(),
         {self_path, "external_acp_backend_test", "--acp-agent-wedged"}, init,
                                     backend->make_dispatch(), err);
     if (!agent.ok()) {
@@ -559,7 +560,7 @@ void test_wedged_child_teardown_is_bounded(const std::string& self_path) {
     backend->connect(*agent.connection);
 
     // One clean round so the child is fully live and its reader is parked.
-    auto res = backend->prompt(make_req("ping"), sink, nullptr);
+    auto res = backend->prompt(agtest::cap(), make_req("ping"), sink, nullptr);
     CHECK(res.ok());
 
     // Now tear down. The child will IGNORE the stdin-EOF we send; only the

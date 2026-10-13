@@ -8,6 +8,16 @@ project(agentty
 # extracted toolchain/standalone/hardening includes) live under cmake/.
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+# GNU ld on MinGW loads every object's full symbol table into memory; the
+# test binaries link the whole tree, and four at once exhausted a 63 GB box
+# ("could not read symbols: memory exhausted"). Compiles stay fully
+# parallel; links take turns. Override with -DAGENTTY_LINK_JOBS=N.
+if(MINGW AND CMAKE_GENERATOR MATCHES "Ninja")
+    set(AGENTTY_LINK_JOBS 1 CACHE STRING "Concurrent link jobs (Ninja pool)")
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS agentty_link=${AGENTTY_LINK_JOBS})
+    set(CMAKE_JOB_POOL_LINK agentty_link)
+endif()
+
 # No C++ modules anywhere in the tree. With scanning on, every target gets
 # ninja dyndep files, and ninja 1.13 can assert on those mid-build
 # (RefreshDyndepDependents). Off globally so no target is missed.
@@ -805,4 +815,16 @@ if(AGENTTY_BUILD_TESTS)
     # sanitizer_tests aggregates are DERIVED from the registry (no hand-listed
     # parallel lists). See cmake/AgenttyTestRegistry.cmake + cmake/DESIGN.md.
     include(AgenttyTests)
+
+    # The test suite is written against POSIX setenv/unsetenv (it sandboxes
+    # HOME and the workspace per test). UCRT lacks them, so on Windows every
+    # source under tests/ force-includes one shim. A source property, so it
+    # reaches every test target however it is defined (consolidated, standalone
+    # or raw) and never the product.
+    if(WIN32)
+        file(GLOB_RECURSE _agentty_test_srcs CONFIGURE_DEPENDS
+             ${CMAKE_SOURCE_DIR}/tests/*.cpp)
+        set_source_files_properties(${_agentty_test_srcs} PROPERTIES
+            COMPILE_OPTIONS "-include;${CMAKE_SOURCE_DIR}/tests/win_posix_compat.hpp")
+    endif()
 endif()

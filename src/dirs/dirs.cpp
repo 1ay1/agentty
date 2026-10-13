@@ -66,20 +66,22 @@ constexpr std::array<std::string_view, 4> kMarkers{
 // called from render and retrieval paths, so a broken override would print
 // on every frame and bury the one line that mattered.
 //
-// maya::guarded, not a raw mutex + set: access is only possible through
-// with(), so "forgot the lock" is unrepresentable rather than a review item.
-// Same reasoning as the handoff gate's feed(), and the concurrency banlist
-// enforces it.
+// maya::snapshot, not a lock: these resolvers run from render paths and
+// from inside other locks' callers with no capability in hand, and the set
+// only ever grows. A lock-free read-mostly value fits that exactly. Two
+// threads hitting the same broken override for the first time at the same
+// instant could both print -- a duplicated warning line, never a lost one.
 void warn_once(std::string_view env, const fs::path& bad,
                const fs::path& fallback, const std::error_code& ec) {
-    static maya::guarded<std::set<std::string, std::less<>>> warned;
-    // Capture-less AND owned-value arguments, both jaal rules: a capture or a
-    // pointer/view could reach a second lock while this one is held, and
-    // holding two is how deadlocks start. So the key is copied in.
-    if (!warned.with([](auto& seen, std::string k) {
-            return seen.emplace(std::move(k)).second;
-        }, std::string{env}))
-        return;
+    using Seen = std::set<std::string, std::less<>>;
+    static maya::snapshot<Seen> warned;
+    if (warned.load()->contains(env)) return;
+    // Captureless and owned-value arguments: update() may retry.
+    (void)warned.update([](const Seen& old, const std::string& k) {
+        Seen next = old;
+        next.insert(k);
+        return next;
+    }, std::string{env});
 
     // create_directories() leaves `ec` CLEAR when the path already exists
     // as a non-directory -- it did not fail, it had nothing to do -- so

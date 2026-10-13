@@ -90,7 +90,9 @@ public:
     // agentty's agent loop (kick_pending_tools) turns N rounds into one turn and
     // executes any requested tools itself — a `SU_ToolCall` is only the model
     // ASKING for a tool; execution, sandboxing, and permission stay agentty's.
-    virtual TurnResult prompt(const Request&              req,
+    // Runs on a turn worker holding no lock, and blocks: `unlocked`.
+    virtual TurnResult prompt(const maya::unlocked&       cap,
+                              const Request&              req,
                               const TurnSink&             sink,
                               const http::CancelTokenPtr& cancel) = 0;
 };

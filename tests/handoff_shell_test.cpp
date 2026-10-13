@@ -27,6 +27,11 @@
 
 #ifndef _WIN32
 #include <unistd.h>   // getpid — unique sandbox dir per test run
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 #include "agentty/tool/util/handoff_gate.hpp"
@@ -38,6 +43,32 @@ namespace hg = agentty::tools::util::handoff;
 namespace sc = agentty::sandbox_cfg;
 
 namespace {
+
+// fs::last_write_time(dir, t): MinGW's libstdc++ opens the path without
+// FILE_FLAG_BACKUP_SEMANTICS, which a DIRECTORY needs, so it throws
+// "Permission denied". Set it through a directory-capable handle there.
+void set_mtime(const fs::path& p, fs::file_time_type t) {
+#if defined(_WIN32)
+    if (!fs::is_directory(p)) { fs::last_write_time(p, t); return; }
+    // file_time_type -> FILETIME via the regular-file path: stamp a scratch
+    // file with t and copy its FILETIME (avoids clock-epoch arithmetic).
+    const fs::path probe = p / ".agentty_mtime_probe";
+    { std::ofstream{probe}; }
+    fs::last_write_time(probe, t);
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    const bool got = ::GetFileAttributesExW(probe.c_str(), GetFileExInfoStandard, &a);
+    fs::remove(probe);
+    if (!got) return;
+    HANDLE h = ::CreateFileW(p.c_str(), FILE_WRITE_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    ::SetFileTime(h, nullptr, nullptr, &a.ftLastWriteTime);
+    ::CloseHandle(h);
+#else
+    fs::last_write_time(p, t);
+#endif
+}
 
 fs::path g_root;
 
@@ -221,9 +252,9 @@ TEST_CASE("handoff: the shell path is watched by observation, not parsing") {
     {
         const auto old = fs::last_write_time(g_root) - std::chrono::hours{1};
         auto backdate = [&] {
-            fs::last_write_time(g_root, old);
+            set_mtime(g_root, old);
             for (auto& e : fs::recursive_directory_iterator(g_root))
-                if (e.is_directory()) fs::last_write_time(e.path(), old);
+                if (e.is_directory()) set_mtime(e.path(), old);
         };
         backdate();
         auto warm = hg::snapshot_trusted(g_root.string());
@@ -235,8 +266,9 @@ TEST_CASE("handoff: the shell path is watched by observation, not parsing") {
         auto after = hg::snapshot_trusted(g_root.string());
         bool pkg = false, mk = false;
         for (const auto& e : after.entries) {
-            if (e.path.ends_with("src/package.json")) pkg = true;
-            if (e.path.ends_with("deep/Makefile")) mk = true;
+            const std::string p = fs::path(e.path).generic_string();   // '\\' on Windows
+            if (p.ends_with("src/package.json")) pkg = true;
+            if (p.ends_with("deep/Makefile")) mk = true;
         }
         CHECK_MESSAGE(pkg, "a file added to a cached dir must be seen");
         CHECK_MESSAGE(mk, "a file in a new subdir of a cached dir must be seen");

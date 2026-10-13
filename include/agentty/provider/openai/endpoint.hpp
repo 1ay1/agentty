@@ -34,6 +34,12 @@ struct Endpoint {
     // endpoint applies the model's chat template and answers cleanly. Set
     // for the "ollama" preset only.
     bool        native_api  = false;
+    // Send `prompt_cache_key` (conversation-pinned prompt caching). ONLY
+    // for hosts that accept the field: strict OpenAI-compat layers (Groq,
+    // Gemini) 400 an unknown body field and kill the turn (#93). Set from
+    // the registry row (ProviderPreset::accepts_prompt_cache_key); false
+    // for custom hosts, local servers and every row that hasn't opted in.
+    bool        prompt_cache_key = false;
     // Custom auth header NAME (e.g. "X-API-Key") for gateways that don't
     // accept `Authorization: Bearer`. Empty (the default) keeps the standard
     // bearer header. When set, the key goes out raw as `<name>: <key>` —

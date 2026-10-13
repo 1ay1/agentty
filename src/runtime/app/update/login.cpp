@@ -1137,18 +1137,17 @@ Cmd login_codex_done(Model& m, std::uint64_t attempt_id,
         m.ui.login = login::Failed{result.error().render()};
         return Cmd::none();
     }
-    if (!provider::chatgpt::save_codex_credentials(*result)) {
-        m.ui.login = login::Failed{
-            "signed in, but encrypted credentials could not be saved"};
-        return Cmd::none();
-    }
     // Persistence happens only after the attempt identity check above. An
     // abandoned or superseded worker can therefore neither switch provider
-    // nor overwrite the active credential store.
+    // nor overwrite the active credential store. The write itself is an
+    // effect the host runs (encrypted file IO under the creds lock can't run
+    // in a reducer); it is batched BEFORE the switch, and effects in a batch
+    // run in order, so the switch sees the saved credentials.
     m.ui.login = login::Closed{};
     m.s.status = "signed in to ChatGPT";
     m.s.status_until = m.now + std::chrono::seconds{4};
-    return commit_provider_switch(m, "chatgpt", "ChatGPT");
+    return Cmd::batch(Cmd(SaveCodexCredentials{std::move(*result)}),
+                      commit_provider_switch(m, "chatgpt", "ChatGPT"));
 }
 
 Cmd login_device_code_ready(Model& m, std::string provider,

@@ -72,13 +72,13 @@ TEST_CASE("settings defaults + persistence round-trip") {
     //     isn't masking a broken parser (Ask/Minimal persist and reload).
     {
         store::Settings s; s.profile = Profile::Ask;
-        persistence::save_settings(::agentty::IoAccess::grant(), s);
+        persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
     }
     check(persistence::load_settings(::agentty::IoAccess::grant()).profile == Profile::Ask,
           "save/load round-trips a non-default profile (Ask)");
     {
         store::Settings s; s.profile = Profile::Minimal;
-        persistence::save_settings(::agentty::IoAccess::grant(), s);
+        persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
     }
     check(persistence::load_settings(::agentty::IoAccess::grant()).profile == Profile::Minimal,
           "save/load round-trips Minimal");
@@ -134,14 +134,14 @@ TEST_CASE("settings rows harden bad input") {
 
     // add_plugin_from_line: a misplaced flag as the name is rejected, a
     // non-existent --python script is rejected, and a good spec is accepted.
-    check(!S::add_plugin_from_line(::agentty::IoAccess::grant(), "--http http://x").ok,
+    check(!S::add_plugin_from_line(::agentty::IoAccess::grant(), agtest::cap(), "--http http://x").ok,
           "leading-dash name (misplaced flag) rejected");
-    check(!S::add_plugin_from_line(::agentty::IoAccess::grant(), "tool --python /no/such/script_xyz.py").ok,
+    check(!S::add_plugin_from_line(::agentty::IoAccess::grant(), agtest::cap(), "tool --python /no/such/script_xyz.py").ok,
           "non-existent --python script rejected");
     {
         auto script = tmp / "srv.py";
         std::ofstream(script) << "print('hi')\n";
-        auto r = S::add_plugin_from_line(::agentty::IoAccess::grant(), "mysrv --python " + script.string());
+        auto r = S::add_plugin_from_line(::agentty::IoAccess::grant(), agtest::cap(), "mysrv --python " + script.string());
         check(r.ok, "valid --python plugin accepted");
     }
 

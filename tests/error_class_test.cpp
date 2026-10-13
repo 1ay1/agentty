@@ -19,6 +19,7 @@
 #include "agentty/provider/error_class.hpp"
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/entitlement.hpp"
+#include "agentty/provider/openai/transport.hpp"   // build_request_body (#93)
 
 using namespace agentty::provider;
 
@@ -427,6 +428,70 @@ TEST_CASE("learned effort set drives ladder, clamp and wire") {
     }
 
     set_learned_effort_sets({});   // reset global state for other tests
+}
+
+// #93: strict OpenAI-compat hosts 400 an optional field; we must recognise
+// exactly that (and nothing broader) so the turn retries without it.
+TEST_CASE("parse_rejected_field: the issue's bodies and its neighbours") {
+    using agentty::provider::parse_rejected_field;
+    using F = agentty::provider::OptionalField;
+
+    // Groq.
+    CHECK(parse_rejected_field("property 'prompt_cache_key' is unsupported", 400)
+          == F::PromptCacheKey);
+    // Gemini (the extracted sentence).
+    CHECK(parse_rejected_field(
+              "Invalid JSON payload received. Unknown name \"prompt_cache_key\": "
+              "Cannot find field.", 400) == F::PromptCacheKey);
+    // Azure-style / vLLM / pydantic phrasings, and stream_options.
+    CHECK(parse_rejected_field("Unrecognized request argument supplied: stream_options", 400)
+          == F::StreamOptions);
+    CHECK(parse_rejected_field("stream_options: Extra inputs are not permitted", 422)
+          == F::StreamOptions);
+
+    // NOT a rejection of the field: a value error naming it must surface.
+    CHECK(parse_rejected_field("prompt_cache_key must be at most 64 chars", 400)
+          == F::None);
+    // A required field is never "learned" away.
+    CHECK(parse_rejected_field("Unknown name \"messages\": Cannot find field.", 400)
+          == F::None);
+    // Only 400/422 (or status-less mid-stream frames).
+    CHECK(parse_rejected_field("prompt_cache_key is unsupported", 500) == F::None);
+    CHECK(parse_rejected_field("prompt_cache_key is unsupported", 401) == F::None);
+    CHECK(parse_rejected_field("prompt_cache_key is unsupported", 0) == F::PromptCacheKey);
+}
+
+TEST_CASE("learned rejected field is omitted from the next body (#93)") {
+    namespace oa = agentty::provider::openai;
+    using agentty::provider::OptionalField;
+    using agentty::provider::bit;
+
+    // OpenAI opts in to prompt_cache_key, so the first body carries it...
+    oa::Request r;
+    r.endpoint    = oa::Endpoint::from_spec("openai");
+    r.model       = "gpt-4o";
+    r.max_tokens  = 64;
+    r.session_key = "thread-1";
+    CHECK(oa::build_request_body(r).contains("prompt_cache_key"));
+    CHECK(oa::build_request_body(r).contains("stream_options"));
+
+    // ...until that host rejects it once. Learned per HOST: every model
+    // behind it gets the corrected body.
+    const auto host = agentty::host_key(r.endpoint.host, r.endpoint.port);
+    agentty::add_rejected_field(host, bit(OptionalField::PromptCacheKey));
+    CHECK(!oa::build_request_body(r).contains("prompt_cache_key"));
+    CHECK(oa::build_request_body(r).contains("stream_options"));   // untouched
+
+    agentty::add_rejected_field(host, bit(OptionalField::StreamOptions));
+    CHECK(!oa::build_request_body(r).contains("stream_options"));
+    CHECK(agentty::rejected_fields_for(host)
+          == (bit(OptionalField::PromptCacheKey) | bit(OptionalField::StreamOptions)));
+
+    // Another host is unaffected.
+    r.endpoint = oa::Endpoint::from_spec("openrouter");
+    CHECK(oa::build_request_body(r).contains("prompt_cache_key"));
+
+    agentty::set_rejected_fields({});   // reset global state
 }
 
 TEST_CASE("parse_effort_rejection: ollama think-value + minimal harvesting") {

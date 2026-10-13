@@ -106,6 +106,18 @@ void install(const sandbox_cfg::Config& cfg) {
 
 }  // namespace
 
+// Whether this host has a sandbox backend for the pane to configure. Mirrors
+// the guard in src/runtime/panel/sandbox.cpp: on Windows there is none, so
+// annotate_sandbox_form is deliberately a no-op (no walls, no per-row
+// warnings) and build_sandbox_form locks every claybin row. Cases that pin
+// annotations or the unlocked-row count only mean something where a backend
+// exists.
+#if defined(__linux__) || defined(__APPLE__)
+#define AGENTTY_TEST_SANDBOX_BACKEND 1
+#else
+#define AGENTTY_TEST_SANDBOX_BACKEND 0
+#endif
+
 TEST_CASE("sandbox pane: the General list has a door that opens it") {
     // The gap that made the pane dead code: it was reachable from nothing.
     Model m;
@@ -328,7 +340,13 @@ TEST_CASE("sandbox pane: every row round-trips into the config") {
 
     // And the sweep actually ran. A loop that skipped everything would report
     // zero failures, which is the failure mode this whole file is about.
+#if AGENTTY_TEST_SANDBOX_BACKEND
     CHECK(checked >= 10);
+#else
+    // No backend: every claybin row is locked, leaving only the handful of
+    // agentty-side rows -- still require the sweep ran over them.
+    CHECK(checked >= 1);
+#endif
 }
 
 TEST_CASE("sandbox pane: the wall report tracks the rows") {
@@ -745,7 +763,11 @@ TEST_CASE("sandbox pane: the posture row scores the walls") {
     const int p = row_of(form, pn::kSbPosture);
     REQUIRE(p >= 0);
     const auto& origin = form.fields[static_cast<std::size_t>(p)].origin;
+#if AGENTTY_TEST_SANDBOX_BACKEND
     CHECK(!origin.empty());
+#else
+    (void)origin;   // no backend: annotate_sandbox_form scores nothing
+#endif
 #if defined(__linux__)
     if (preview.compiled) {
         // "N/M strong" -- the number is what makes two postures comparable at a
@@ -1456,9 +1478,13 @@ TEST_CASE("sandbox pane: a path in two lists is flagged, not silently resolved")
     const int d = row_of(form, pn::kSbDenyPaths);
     REQUIRE(d >= 0);
     const auto& err = form.fields[static_cast<std::size_t>(d)].error;
+#if AGENTTY_TEST_SANDBOX_BACKEND
     CHECK(!err.empty());
     CHECK(err.find("/opt/shared") != std::string::npos);
     CHECK(err.find("writable") != std::string::npos);
+#else
+    CHECK(err.empty());   // no backend: the pane annotates nothing
+#endif
 }
 
 TEST_CASE("sandbox pane: a relative path is flagged") {
@@ -1477,6 +1503,11 @@ TEST_CASE("sandbox pane: a relative path is flagged") {
 
     const int r = row_of(form, pn::kSbReadPaths);
     REQUIRE(r >= 0);
+#if !AGENTTY_TEST_SANDBOX_BACKEND
+    // No backend: annotate_sandbox_form is a no-op, nothing to flag.
+    CHECK(form.fields[static_cast<std::size_t>(r)].error.empty());
+    return;
+#endif
     CHECK(form.fields[static_cast<std::size_t>(r)].error.find("relative")
           != std::string::npos);
 
@@ -2185,7 +2216,9 @@ TEST_CASE("sandbox pane: per-port network with no ports says it denies all") {
 
     const int ports = row_of(form, pn::kSbPorts);
     REQUIRE(ports >= 0);
+#if AGENTTY_TEST_SANDBOX_BACKEND
     CHECK(!form.fields[static_cast<std::size_t>(ports)].error.empty());
+#endif
 
     // And it goes away once the config is coherent -- an error that never
     // clears is a label, and users learn to read past labels.
@@ -2213,8 +2246,12 @@ TEST_CASE("sandbox pane: turning the syscall filter off says brokering goes too"
     const int sys = row_of(form, pn::kSbSyscalls);
     REQUIRE(sys >= 0);
     const auto& err = form.fields[static_cast<std::size_t>(sys)].error;
+#if AGENTTY_TEST_SANDBOX_BACKEND
     CHECK(!err.empty());
     CHECK(err.find("brokering") != std::string::npos);
+#else
+    CHECK(err.empty());   // no backend: the pane annotates nothing
+#endif
 }
 
 TEST_CASE("sandbox pane: loosening the handoff policy warns on the row") {
@@ -2232,7 +2269,9 @@ TEST_CASE("sandbox pane: loosening the handoff policy warns on the row") {
 
     const int h = row_of(form, pn::kSbHandoff);
     REQUIRE(h >= 0);
+#if AGENTTY_TEST_SANDBOX_BACKEND
     CHECK(!form.fields[static_cast<std::size_t>(h)].error.empty());
+#endif
 
     // Refuse is the default and must be silent: a warning on the SAFE setting
     // trains the user to ignore the warning on the unsafe one.

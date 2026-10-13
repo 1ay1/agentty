@@ -37,12 +37,28 @@ template <ToolArgs Args>
 [[nodiscard]] auto adapt(
         std::expected<Args, ToolError> (*parse)(const nlohmann::json&),
         ExecResult (*run)(const Args&))
-    -> std::function<ExecResult(const nlohmann::json&, const CallContext&)>
+    -> ToolDef::ExecuteFn
 {
-    return [parse, run](const nlohmann::json& j, const CallContext&) -> ExecResult {
+    return [parse, run](const maya::unlocked&, const nlohmann::json& j,
+                        const CallContext&) -> ExecResult {
         auto parsed = parse(j);
         if (!parsed) return std::unexpected(std::move(parsed.error()));
         return run(*parsed);
+    };
+}
+
+// A tool body that blocks or takes locks gets the tool worker's capability.
+template <ToolArgs Args>
+[[nodiscard]] auto adapt(
+        std::expected<Args, ToolError> (*parse)(const nlohmann::json&),
+        ExecResult (*run)(const maya::unlocked&, const Args&))
+    -> ToolDef::ExecuteFn
+{
+    return [parse, run](const maya::unlocked& cap, const nlohmann::json& j,
+                        const CallContext&) -> ExecResult {
+        auto parsed = parse(j);
+        if (!parsed) return std::unexpected(std::move(parsed.error()));
+        return run(cap, *parsed);
     };
 }
 

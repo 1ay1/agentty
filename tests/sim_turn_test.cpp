@@ -50,12 +50,13 @@ struct NullStore {
     void delete_thread(const ThreadId&) {}
     store::Settings load_settings() { return {}; }
     void save_settings(const store::Settings&) {}
+    void save_settings_quiet(const maya::unlocked&, const store::Settings&) {}
     ThreadId new_id() { return ThreadId{"sim"}; }
     std::string title_from(std::string_view t) { return std::string{t}; }
 };
 
 struct NullProvider {
-    provider::StreamResult stream(provider::Request, provider::EventSink) {
+    provider::StreamResult stream(const maya::unlocked&, provider::Request, provider::EventSink) {
         return provider::StreamResult::failed("sim");
     }
 };
@@ -72,8 +73,8 @@ void install() { app::install(g_provider, g_store, auth::AuthHeader{}); }
 // TEST_CASE that runs init() joins them the way main() does.
 struct JoinsBackgroundThreads {
     ~JoinsBackgroundThreads() {
-        modelsdev::join_background_refresh();
-        blobs::join_background_gc();
+        modelsdev::join_background_refresh(agtest::cap());
+        blobs::join_background_gc(agtest::cap());
     }
 };
 

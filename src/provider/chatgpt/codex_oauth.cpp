@@ -378,7 +378,16 @@ std::string query_param(std::string_view target, std::string_view key) {
 
 // The sockets a cancel should shut down, so a blocked select() wakes at once.
 // -1 = none. Read by the cancel callback, written by the waiting thread.
-struct WakeFds { std::intptr_t srv = -1; std::intptr_t cli = -1; };
+// Lock-free: the cancel callback runs on whichever thread requests the stop
+// (it cannot carry a capability), so it must not take a guarded. `busy`
+// counts callbacks mid-shutdown; the waiter clears the fds and then waits
+// for `busy` to drain before it closes a socket, so the number cannot be
+// reused between the callback's read and its shutdown. (All seq_cst.)
+struct WakeFds {
+    std::atomic<std::intptr_t> srv{-1};
+    std::atomic<std::intptr_t> cli{-1};
+    std::atomic<int>           busy{0};
+};
 
 void shut_read(std::intptr_t fd) noexcept {
     if (fd < 0) return;
@@ -390,7 +399,7 @@ void shut_read(std::intptr_t fd) noexcept {
 }
 
 CallbackResult wait_for_callback_impl(int timeout_s, const CodexCancelProbe& cancelled,
-                                      maya::guarded<WakeFds>& wake) {
+                                      WakeFds& wake) {
     CallbackResult out;
 #if defined(_WIN32)
     WSADATA wsa;
@@ -430,11 +439,18 @@ CallbackResult wait_for_callback_impl(int timeout_s, const CodexCancelProbe& can
     // instead of waking every second to check.
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::seconds(timeout_s);
-    const auto arm = [&wake](sock_t a, sock_t b) {
-        wake.with([](WakeFds& w, std::intptr_t x, std::intptr_t y) { w = {x, y}; },
-                  static_cast<std::intptr_t>(a), static_cast<std::intptr_t>(b));
+    const auto drain = [&wake] {
+        while (wake.busy.load() != 0) std::this_thread::yield();
     };
-    const auto disarm = [&wake] { wake.with([](WakeFds& w) { w = {}; }); };
+    const auto arm = [&wake](sock_t a, sock_t b) {
+        wake.srv.store(static_cast<std::intptr_t>(a));
+        wake.cli.store(static_cast<std::intptr_t>(b));
+    };
+    const auto disarm = [&wake, &drain] {
+        wake.srv.store(-1);
+        wake.cli.store(-1);
+        drain();
+    };
     arm(srv, kInvalid);
     // A cancel that landed before arming would otherwise be missed.
     if (cancelled.stop_requested()) shut_read(static_cast<std::intptr_t>(srv));
@@ -529,11 +545,14 @@ CallbackResult wait_for_callback_impl(int timeout_s, const CodexCancelProbe& can
 }
 
 CallbackResult wait_for_callback(int timeout_s, const CodexCancelProbe& cancelled) {
-    maya::guarded<WakeFds> wake;
+    WakeFds wake;
     std::stop_callback on_cancel(cancelled, [&wake] {
-        // Shut down under the lock, so the waiter cannot close the fd (and the
-        // number be reused) between our read of it and the shutdown.
-        wake.with([](WakeFds& w) { shut_read(w.srv); shut_read(w.cli); });
+        // Announce ourselves before reading, so the waiter's disarm() waits
+        // for this shutdown before it closes (and frees) the fd number.
+        wake.busy.fetch_add(1);
+        shut_read(wake.srv.load());
+        shut_read(wake.cli.load());
+        wake.busy.fetch_sub(1);
     });
     return wait_for_callback_impl(timeout_s, cancelled, wake);
 }
@@ -614,8 +633,8 @@ bool save_codex_credentials_unlocked(const CodexCredentials& c) {
 }
 
 struct Loaded { std::optional<CodexCredentials> creds; std::uint64_t generation = 0; };
-Loaded load_with_generation() {
-    return store().with([](Store& st) {
+Loaded load_with_generation(const maya::below<maya::leaf>& cap) {
+    return store().with(cap, [](Store& st) {
         return Loaded{load_codex_credentials_unlocked(), st.generation};
     });
 }
@@ -630,20 +649,23 @@ fs::path codex_credentials_path() {
     return auth::config_dir() / "codex_credentials.json";
 }
 
+// Lock-free: saves publish by atomic rename and clears by remove, so a reader
+// sees the old file, the new file, or none — never a torn one. The store
+// lock only orders writers (and the refresh's generation check).
 std::optional<CodexCredentials> load_codex_credentials() {
-    return store().with([](Store&) { return load_codex_credentials_unlocked(); });
+    return load_codex_credentials_unlocked();
 }
 
-bool save_codex_credentials(const CodexCredentials& c) {
-    return store().with([](Store& st, CodexCredentials creds) {
+bool save_codex_credentials(const maya::below<maya::leaf>& cap, const CodexCredentials& c) {
+    return store().with(cap, [](Store& st, CodexCredentials creds) {
         if (!save_codex_credentials_unlocked(creds)) return false;
         ++st.generation;
         return true;
     }, c);
 }
 
-bool clear_codex_credentials() {
-    return store().with([](Store& st) {
+bool clear_codex_credentials(const maya::below<maya::leaf>& cap) {
+    return store().with(cap, [](Store& st) {
         std::error_code ec;
         const bool ok = fs::remove(codex_credentials_path(), ec) || !ec;
         if (ok) ++st.generation;
@@ -804,21 +826,24 @@ codex_login(Io io, int timeout_s, CodexDeviceCodeSink on_device_code,
 }
 
 namespace {
-std::optional<CodexCredentials> codex_fresh_credentials_locked();
+std::optional<CodexCredentials>
+codex_fresh_credentials_locked(const maya::held<locks::auth_refresh>& cap);
 }
 
-std::optional<CodexCredentials> codex_fresh_credentials() {
+std::optional<CodexCredentials> codex_fresh_credentials(const locks::below_auth_refresh& cap) {
     // One refresh at a time. The store is only held for file IO, never
     // across the network call, so sign-out and a new login stay responsive.
-    // Lock order: refresh lane, then store.
-    struct RefreshLane {};
-    static maya::guarded<RefreshLane> one_at_a_time{lock_levels::kAuthRefresh};
-    return one_at_a_time.with([](RefreshLane&) { return codex_fresh_credentials_locked(); });
+    // Lock order: refresh lane (auth_refresh), then store (leaf).
+    static maya::guarded<bool, locks::auth_refresh> lane;
+    return lane.with(cap, [](const maya::held<locks::auth_refresh>& h, bool&) {
+        return codex_fresh_credentials_locked(h);
+    });
 }
 
 namespace {
-std::optional<CodexCredentials> codex_fresh_credentials_locked() {
-    auto [loaded, source_generation] = load_with_generation();
+std::optional<CodexCredentials>
+codex_fresh_credentials_locked(const maya::held<locks::auth_refresh>& cap) {
+    auto [loaded, source_generation] = load_with_generation(cap);
     if (!loaded) return std::nullopt;
     if (!loaded->expired(/*skew_ms=*/60'000)) return loaded;
     if (loaded->refresh_token.empty()) return loaded;
@@ -830,7 +855,7 @@ std::optional<CodexCredentials> codex_fresh_credentials_locked() {
     // concurrent refreshes mutually invalidate and spin the refresh loop).
     auth::CrossProcessFileLock xlock(codex_credentials_path());
     if (xlock.held()) {
-        auto [disk, gen] = load_with_generation();
+        auto [disk, gen] = load_with_generation(cap);
         source_generation = gen;
         if (!disk) return loaded;
         if (!disk->expired(/*skew_ms=*/60'000)) return disk;  // a peer refreshed
@@ -841,7 +866,7 @@ std::optional<CodexCredentials> codex_fresh_credentials_locked() {
     auto refreshed = codex_refresh(*loaded);
     if (!refreshed) return loaded;
 
-    return store().with([](Store& st, std::uint64_t source_gen, CodexCredentials source,
+    return store().with(cap, [](Store& st, std::uint64_t source_gen, CodexCredentials source,
                            CodexCredentials fresh) -> std::optional<CodexCredentials> {
         auto current = load_codex_credentials_unlocked();
         const bool source_unchanged = current

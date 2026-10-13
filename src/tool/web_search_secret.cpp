@@ -26,16 +26,20 @@ namespace fs = std::filesystem;
 
 // service -> key as last read from the keystore or sealed file.
 using KeyCache = std::unordered_map<std::string, std::string>;
-maya::guarded<KeyCache>& key_cache() {
-    static maya::guarded<KeyCache> c;
+// A snapshot, not a guarded map: tiny, read per search, written rarely, and
+// load()/store() are called from tool bodies that should not need a capability.
+maya::snapshot<KeyCache>& key_cache() {
+    static maya::snapshot<KeyCache> c;
     return c;
 }
 void forget(std::string_view service) {
     // Every store's entry for this service: cheap, and never stale.
-    key_cache().with([](KeyCache& c, std::string s) {
+    (void)key_cache().update([](const KeyCache& old, std::string s) {
+        KeyCache c = old;
         const std::string tail = '\n' + s;
         for (auto it = c.begin(); it != c.end();)
             it = it->first.ends_with(tail) ? c.erase(it) : std::next(it);
+        return c;
     }, std::string{service});
 }
 
@@ -132,17 +136,19 @@ std::string load(std::string_view service) {
     // secret-tool. Keep what we read, per secrets file (a different
     // AGENTTY_HOME is a different store); store()/erase() drop the entry.
     const std::string ck = secrets_path().string() + '\n' + std::string{service};
-    if (auto hit = key_cache().read([](const KeyCache& c, std::string s) -> std::optional<std::string> {
-            auto it = c.find(s);
-            return it == c.end() ? std::nullopt : std::optional<std::string>{it->second};
-        }, ck))
-        return *hit;
+    {
+        const auto c = key_cache().load();
+        if (auto it = c->find(ck); it != c->end()) return it->second;
+    }
     std::string got = from_store(service);
     // Only a found key is kept: "none" must not hide one stored by another
     // agentty window later.
     if (!got.empty())
-        key_cache().with([](KeyCache& c, std::string s, std::string k) { c[std::move(s)] = std::move(k); },
-                         ck, got);
+        (void)key_cache().update([](const KeyCache& old, std::string s, std::string k) {
+            KeyCache c = old;
+            c[std::move(s)] = std::move(k);
+            return c;
+        }, ck, got);
     return got;
 }
 

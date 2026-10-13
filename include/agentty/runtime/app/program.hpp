@@ -26,6 +26,12 @@ namespace pn = agentty::ui::panel;   // the exclusive overlay slot's alternative
 
 [[nodiscard]] std::pair<Model, Cmd> init();
 
+// Log any loop step (an update arm, view, subscribe) that took longer than a
+// frame. Free when fast: one clock read and a compare. Lands in agentty.log
+// as `ui loop.slow: <what> <ms>`, so a user's "it lags when I open X"
+// becomes a line naming the arm instead of a guess.
+void note_slow(const char* what, std::chrono::steady_clock::time_point t0) noexcept;
+
 struct AgenttyApp {
     using Model = ::agentty::Model;
     using Msg   = ::agentty::Msg;
@@ -74,8 +80,11 @@ struct AgenttyApp {
 #define AGENTTY_FWD_UPDATE(DomainMsg)                                    \
     static Cmd update(Model& m, msg::DomainMsg d, Clock::time_point now) { \
         m.now = now;   /* the fold's time: see Model::now */             \
+        const auto t0 = std::chrono::steady_clock::now();                \
         auto c = ::agentty::app::update(m, std::move(d));                \
-        return ::agentty::app::publish_derived(m, std::move(c));          \
+        auto out = ::agentty::app::publish_derived(m, std::move(c));      \
+        ::agentty::app::note_slow(#DomainMsg, t0);                       \
+        return out;                                                       \
     }
 
     AGENTTY_FWD_UPDATE(ComposerMsg)
@@ -107,11 +116,17 @@ struct AgenttyApp {
 #undef AGENTTY_FWD_UPDATE
 
     static maya::Element view(const Model& m) {
-        return ::agentty::ui::view(m);
+        const auto t0 = std::chrono::steady_clock::now();
+        auto e = ::agentty::ui::view(m);
+        ::agentty::app::note_slow("view", t0);
+        return e;
     }
 
     static auto subscribe(const Model& m) -> Sub {
-        return ::agentty::app::subscribe(m);
+        const auto t0 = std::chrono::steady_clock::now();
+        auto s = ::agentty::app::subscribe(m);
+        ::agentty::app::note_slow("subscribe", t0);
+        return s;
     }
 
     // Optional Program hook (jaal core/program.hpp — HasSubsKey). jaal

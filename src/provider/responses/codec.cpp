@@ -874,10 +874,13 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         && !type.starts_with("response.content_part")
         && !type.starts_with("response.output_text.done")
         && !type.contains("_summary_part")) {
-        static maya::guarded<std::set<std::string>> seen;
-        if (seen.with([](std::set<std::string>& s, std::string t) {
-                return s.insert(std::move(t)).second;
-            }, std::string{type})) {
+        // Lock-free dedupe: a racing first sighting may log twice, which is
+        // harmless for a diagnostic line.
+        static maya::snapshot<std::set<std::string>> seen;
+        if (!seen.load()->contains(std::string{type})) {
+            seen.update([](const std::set<std::string>& s, const std::string& t) {
+                auto next = s; next.insert(t); return next;
+            }, std::string{type});
             // On the WIRE channel, not dbglog. An unknown event is the
             // single most useful line in a bug report about this dialect —
             // and under `AGENTTY_LOG=wire=debug`, the filter someone
@@ -906,13 +909,14 @@ provider::StreamResult stream_started(const Site& site,
                                       provider::EventSink sink);
 }
 
-provider::StreamResult stream(const Site& site, provider::Request req,
+provider::StreamResult stream(const maya::unlocked& cap, const Site& site,
+                              provider::Request req,
                               provider::EventSink sink) {
     sink(StreamStarted{});
     // Host resolves credentials + destination (may block on a token refresh,
     // and may rewrite req.model). Auth prose is the host's: this layer never
     // invents remediation text it can't be sure of.
-    auto target = site.authorize(req);
+    auto target = site.authorize(cap, req);
     return stream_started(site, std::move(target), std::move(req), std::move(sink));
 }
 

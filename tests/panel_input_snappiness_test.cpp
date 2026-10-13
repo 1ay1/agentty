@@ -90,7 +90,7 @@ const char* verdict(double ms, double budget) {
 
 int main() {
     app::install_deps(app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const Thread&) {},
         .delete_thread = [](const ThreadId&) {},
         .load_threads  = [] { return std::vector<Thread>{}; },
@@ -217,6 +217,27 @@ int main() {
             worst = std::max(worst, key_ms(m, Msg{SettingsListMove{+1}}));
         std::printf("%-26s %10.2f  %s\n", "settings list  \u2193", worst, verdict(worst, kBudget));
         CHECK(worst <= kBudget, "settings list %.1f ms > %.1f budget", worst, kBudget);
+    }
+    // The model picker: the panel users report as laggy. It fuses every
+    // authed provider's catalog, so both its reducer and its view are the
+    // heaviest of the pickers.
+    {
+        Model m = seeded(msgs);
+        auto t0 = clk::now();
+        m = app::update(std::move(m), Msg{OpenModels{}}).first;
+        paint(m);
+        const double open_ms = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+        double worst = 0;
+        for (int i = 0; i < 20; ++i)
+            worst = std::max(worst, key_ms(m, Msg{ModelsMove{+1}}));
+        double type_worst = 0;
+        for (char32_t c : {U'c', U'l', U'a', U'u'})
+            type_worst = std::max(type_worst, key_ms(m, Msg{ModelsFilterInput{c}}));
+        std::printf("%-26s %10.2f  %s   (open %.1f ms, %zu rows)\n", "model picker   \u2193",
+                    worst, verdict(worst, kBudget), open_ms, m.d.fused_rows.size());
+        std::printf("%-26s %10.2f  %s\n", "model filter   type", type_worst, verdict(type_worst, kBudget));
+        CHECK(worst <= kBudget, "model picker %.1f ms > %.1f budget", worst, kBudget);
+        CHECK(type_worst <= kBudget, "model filter %.1f ms > %.1f budget", type_worst, kBudget);
     }
 
     // ── 2. Burst == single-step (the race check) ────────────────────────

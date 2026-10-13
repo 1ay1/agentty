@@ -435,26 +435,25 @@ bool anthropic_signed_in(Io io) {
         std::int64_t   mtime = 0;   // file_time_type ticks: a Sendable key
         std::uintmax_t size = static_cast<std::uintmax_t>(-1);
     };
-    static maya::guarded<Cache> cache;
+    // Lock-free: the whole (ok, mtime, size) triple is replaced wholesale, and
+    // views reach this on the render path, so no capability is needed.
+    static maya::snapshot<Cache> cache;
 
     std::error_code ec;
     const fs::path p = credentials_path();
     const std::int64_t mtime = fs::last_write_time(p, ec).time_since_epoch().count();
     const auto size  = ec ? 0 : fs::file_size(p, ec);
     if (ec) {   // missing / unreadable → signed out; remember cheaply
-        cache.with([](Cache& c) { c = Cache{}; });
+        cache.store(Cache{});
         return false;
     }
-    if (auto hit = cache.read(
-            [](const Cache& c, std::int64_t m, std::uintmax_t s) -> std::optional<bool> {
-                if (c.mtime != m || c.size != s) return std::nullopt;
-                return c.ok;
-            },
-            mtime, size))
-        return *hit;
-    // Changed: unseal + parse outside the lock, then publish.
+    {
+        const auto c = cache.load();
+        if (c->mtime == mtime && c->size == size) return c->ok;
+    }
+    // Changed: unseal + parse, then publish.
     const bool ok = load_credentials(io).has_value();
-    cache.with([](Cache& c, Cache v) { c = v; }, Cache{ok, mtime, size});
+    cache.store(Cache{ok, mtime, size});
     return ok;
 }
 
@@ -1005,7 +1004,8 @@ namespace {
 AuthHeader fresh_auth_header_locked(Io io, const AuthHeader& fallback);
 }
 
-AuthHeader fresh_auth_header(Io /*io*/, const AuthHeader& fallback) {
+AuthHeader fresh_auth_header(Io /*io*/, const locks::below_auth_refresh& cap,
+                             const AuthHeader& fallback) {
     using namespace agentty::util;
 
     // CLI/env API keys are static — nothing to refresh. The env OAuth token
@@ -1018,8 +1018,8 @@ AuthHeader fresh_auth_header(Io /*io*/, const AuthHeader& fallback) {
     // Serialize refreshes: several subagent worker threads can land here at
     // once when a captured OAuth token expires. The first in refreshes +
     // persists; the rest re-read the freshly-saved token.
-    static maya::guarded<bool> one_at_a_time{lock_levels::kAuthRefresh};
-    return one_at_a_time.with(
+    static maya::guarded<bool, locks::auth_refresh> lane;
+    return lane.with(cap,
         [](bool&, AuthHeader fb) {
             // guarded's body can't take the caller's Io (it isn't Sendable),
             // but this runs under fresh_auth_header, which had one.
@@ -1110,7 +1110,7 @@ void open_browser(const std::string& url) {
 // Subcommands
 // ---------------------------------------------------------------------------
 
-int cmd_login(Io io) {
+int cmd_login(Io io, const maya::unlocked& cap) {
     // Surface what you're already signed into so switching accounts is
     // obvious — pick a different option to add/replace, `agentty logout`
     // to drop one.
@@ -1147,7 +1147,7 @@ int cmd_login(Io io) {
     if (choice == "4" || choice == "copilot" || choice == "github") {
         std::cout << "\nRequesting a GitHub device code\xE2\x80\xA6\n" << std::flush;
         auto r = provider::copilot::login(
-            900,
+            cap, 900,
             [](const provider::copilot::DeviceCode& dc) {
                 std::cout << "\nOpen this link in a browser on any device:\n  "
                           << dc.verification_uri
@@ -1199,7 +1199,7 @@ int cmd_login(Io io) {
             std::cerr << "ChatGPT sign-in failed: " << r.error().render() << "\n";
             return 1;
         }
-        if (!provider::chatgpt::save_codex_credentials(*r)) {
+        if (!provider::chatgpt::save_codex_credentials(cap, *r)) {
             std::cerr << "ChatGPT sign-in succeeded but credentials could not be saved.\n";
             return 1;
         }
@@ -1242,7 +1242,7 @@ int cmd_login(Io io) {
         if (!detected.empty() && detected != "anthropic") {
             const auto* row = provider::preset_for(detected);
             const std::string_view label = row ? row->label : detected;
-            if (!provider::credentials::add_key(io, detected, key)) {
+            if (!provider::credentials::add_key(io, cap, detected, key)) {
                 std::cerr << "Failed to save the " << label << " key.\n";
                 return 1;
             }
@@ -1251,7 +1251,7 @@ int cmd_login(Io io) {
             // the same class of surprise in a quieter form.
             auto s = persistence::load_settings(io);
             s.provider = std::string{detected};
-            persistence::save_settings(io, s);
+            persistence::save_settings(io, cap, s);
             // "an OpenRouter key", "a Groq key" — the labels are a fixed set,
             // so a vowel check is the whole of the grammar needed here.
             const bool vowel = !label.empty()
@@ -1304,7 +1304,7 @@ int cmd_login(Io io) {
     return 0;
 }
 
-int cmd_logout(Io io) {
+int cmd_logout(Io io, const maya::unlocked& cap) {
     namespace codex = provider::chatgpt;
     // One entry per signed-in account. Scales to N providers without the
     // 2-way special case (which didn't cover Copilot).
@@ -1322,10 +1322,10 @@ int cmd_logout(Io io) {
                             [io] { return clear_credentials(io); }});
     if (codex::load_codex_credentials())
         accounts.push_back({"ChatGPT / Codex", codex::codex_credentials_path().string(),
-                            [] { return codex::clear_codex_credentials(); }});
+                            [&cap] { return codex::clear_codex_credentials(cap); }});
     if (provider::copilot::signed_in())
         accounts.push_back({"GitHub Copilot", provider::copilot::credentials_path().string(),
-                            [io] { return provider::copilot::clear_credentials(io); }});
+                            [io, &cap] { return provider::copilot::clear_credentials(io, cap); }});
 
     if (accounts.empty()) { std::cout << "No saved credentials.\n"; return 0; }
 
@@ -1364,7 +1364,7 @@ int cmd_logout(Io io) {
     return rc;
 }
 
-int cmd_status(Io io) {
+int cmd_status(Io io, const maya::unlocked& cap) {
     std::cout << "Credentials file: " << credentials_path().string() << "\n";
     using namespace agentty::util;
     if (env::get_or_null<env::Var::AnthropicApiKey>()) {
@@ -1436,7 +1436,7 @@ int cmd_status(Io io) {
         if (provider::copilot::signed_in()) {
             std::cout << "Signed in via GitHub Copilot OAuth\n";
             // Probe the proxy token so status reflects real usability + host.
-            if (auto t = provider::copilot::fresh_token()) {
+            if (auto t = provider::copilot::fresh_token(cap)) {
                 if (!t->chat_enabled)
                     std::cout << "Chat: NOT entitled on this account\n";
                 else if (t->quota_exhausted)

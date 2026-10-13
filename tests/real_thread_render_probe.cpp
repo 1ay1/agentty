@@ -12,6 +12,7 @@
 
 #include <agentty/domain/session.hpp>
 #include <agentty/io/persistence.hpp>
+#include "agtest_cap.hpp"
 #include <agentty/io/thread_log.hpp>
 #include <agentty/runtime/model.hpp>
 #include <agentty/runtime/view/thread/conversation.hpp>
@@ -120,8 +121,8 @@ int main(int argc, char** argv) {
     // shrinks once and loads fast forever after.
     if (std::getenv("MIGRATE")) {
         const auto before = std::filesystem::file_size(p);
-        persistence::save_thread(::agentty::IoAccess::grant(), m.d.current);
-        persistence::flush_pending_saves(::agentty::IoAccess::grant());
+        persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), m.d.current);
+        persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
         const auto after_path =
             persistence::threads_dir() / (m.d.current.id.value + ".json");
         std::error_code ec;

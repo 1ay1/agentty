@@ -19,8 +19,18 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <system_error>
+
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#else
+#  include <sys/stat.h>
+#endif
 
 namespace agentty::tools::skills {
 
@@ -501,15 +511,18 @@ void scan_root(Io io, const fs::path& root, const std::string& source,
 }
 
 // The last discovery: the skills, what they shadowed, and the signature
-// they were scanned at. One guarded value so the three can't disagree.
+// they were scanned at. One immutable value in a published slot so the three
+// can't disagree: every reader sees a whole discovery, and a rescan publishes
+// a whole new one. No lock, so no capability on all() (called from tool
+// bodies, the RAG reindex and the prompt builder alike).
 struct Discovery {
     std::vector<Skill>    skills;
     std::vector<Shadowed> shadows;
     std::string           sig = "\x01uninit";
     std::uint64_t         generation = 0;   // bumped on every rescan
 };
-maya::guarded<Discovery>& discovery() {
-    static maya::guarded<Discovery> d;
+maya::published<const Discovery>& discovery() {
+    static maya::published<const Discovery> d;
     return d;
 }
 
@@ -524,47 +537,101 @@ std::size_t debug_cap_resolutions() noexcept {
 // directory order, same SKILL.md locations, same nesting) so the two agree
 // on what "changed" means — if they drift, the cache either never hits or
 // never invalidates, and both are worse than the cost this saves.
+// ONE metadata query per path: is it there, what kind, mtime, size. This
+// pass runs on every turn, and fs::is_regular_file + last_write_time +
+// file_size is three separate stats -- on Windows each one opens and closes
+// a file handle, which put 40 skills at ~10 ms/turn. GetFileAttributesExW
+// answers all of it from the directory entry without opening the file.
+struct StatSig { bool dir = false; bool file = false; long long mtime = 0; std::uintmax_t size = 0; };
+[[nodiscard]] std::optional<StatSig> stat_sig(const fs::path& p) noexcept {
+#if defined(_WIN32)
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (!::GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &a)) return std::nullopt;
+    StatSig s;
+    s.dir   = (a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    s.file  = !s.dir && (a.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) == 0;
+    s.mtime = static_cast<long long>((static_cast<unsigned long long>(a.ftLastWriteTime.dwHighDateTime) << 32)
+                                     | a.ftLastWriteTime.dwLowDateTime);
+    s.size  = (static_cast<std::uintmax_t>(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+    return s;
+#else
+    struct ::stat st{};
+    if (::stat(p.c_str(), &st) != 0) return std::nullopt;
+    StatSig s;
+    s.dir   = S_ISDIR(st.st_mode);
+    s.file  = S_ISREG(st.st_mode);
+#  if defined(__APPLE__)
+    s.mtime = static_cast<long long>(st.st_mtimespec.tv_sec) * 1'000'000'000LL + st.st_mtimespec.tv_nsec;
+#  else
+    s.mtime = static_cast<long long>(st.st_mtim.tv_sec) * 1'000'000'000LL + st.st_mtim.tv_nsec;
+#  endif
+    s.size  = static_cast<std::uintmax_t>(st.st_size);
+    return s;
+#endif
+}
+
+void append_md_sig(const fs::path& dir, const StatSig& md, std::string& sig) {
+    sig += dir.filename().string();
+    sig += std::to_string(md.mtime);
+    sig += ':';
+    sig += std::to_string(md.size);
+    sig += ';';
+}
+
 void scan_root_signature(const fs::path& root, std::string& sig) {
     std::error_code ec;
-    if (!fs::is_directory(root, ec)) return;
+    const auto rs = stat_sig(root);
+    if (!rs || !rs->dir) return;
 
     // The root's own mtime catches an added or removed skill directory.
-    if (const auto t = fs::last_write_time(root, ec); !ec)
-        sig += std::to_string(static_cast<long long>(t.time_since_epoch().count()));
+    sig += std::to_string(rs->mtime);
     sig += "|";
 
     std::vector<fs::path> dirs;
+#if defined(_WIN32)
+    // One FindFirstFile pass yields every child's name + attributes without
+    // a handle per entry; std::filesystem's iterator stats each entry again
+    // for is_directory(), which is most of the per-turn cost on Windows.
+    auto list_subdirs = [](const fs::path& d, std::vector<fs::path>& out) {
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = ::FindFirstFileExW((d / L"*").c_str(), FindExInfoBasic, &fd,
+                                      FindExSearchNameMatch, nullptr,
+                                      FIND_FIRST_EX_LARGE_FETCH);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            const std::wstring_view n{fd.cFileName};
+            if (n == L"." || n == L"..") continue;
+            out.push_back(d / fd.cFileName);
+        } while (::FindNextFileW(h, &fd));
+        ::FindClose(h);
+    };
+    list_subdirs(root, dirs);
+#else
     for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
         if (it->is_directory(ec)) dirs.push_back(it->path());
     }
+#endif
     std::ranges::sort(dirs);   // stable order → stable signature
 
     for (const auto& d : dirs) {
         // A skill is <dir>/SKILL.md, or one level of group nesting.
-        const auto md = d / "SKILL.md";
-        if (fs::is_regular_file(md, ec)) {
-            sig += d.filename().string();
-            if (const auto t = fs::last_write_time(md, ec); !ec)
-                sig += std::to_string(static_cast<long long>(t.time_since_epoch().count()));
-            if (const auto z = fs::file_size(md, ec); !ec)
-                sig += ":" + std::to_string(z);
-            sig += ";";
+        if (const auto md = stat_sig(d / "SKILL.md"); md && md->file) {
+            append_md_sig(d, *md, sig);
             continue;
         }
         std::vector<fs::path> subs;
+#if defined(_WIN32)
+        list_subdirs(d, subs);
+#else
         for (fs::directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec)) {
             if (it->is_directory(ec)) subs.push_back(it->path());
         }
+#endif
         std::ranges::sort(subs);
         for (const auto& s : subs) {
-            const auto smd = s / "SKILL.md";
-            if (!fs::is_regular_file(smd, ec)) continue;
-            sig += s.filename().string();
-            if (const auto t = fs::last_write_time(smd, ec); !ec)
-                sig += std::to_string(static_cast<long long>(t.time_since_epoch().count()));
-            if (const auto z = fs::file_size(smd, ec); !ec)
-                sig += ":" + std::to_string(z);
-            sig += ";";
+            if (const auto smd = stat_sig(s / "SKILL.md"); smd && smd->file)
+                append_md_sig(s, *smd, sig);
         }
     }
 }
@@ -614,13 +681,7 @@ std::vector<Skill> all(Io io) {
     // which flips the env var and re-reads all().
     sig += "#cap=" + std::to_string(cap);
 
-    if (auto hit = discovery().read(
-            [](const Discovery& d, std::string s) -> std::optional<std::vector<Skill>> {
-                if (s != d.sig) return std::nullopt;
-                return d.skills;
-            },
-            sig))
-        return *hit;
+    if (const auto cur = discovery().current(); cur && cur->sig == sig) return cur->skills;
 
     // PASS 2 — something changed on disk; do the expensive read+parse.
     Discovery fresh;
@@ -631,16 +692,20 @@ std::vector<Skill> all(Io io) {
     }
     fresh.sig = sig;
     std::vector<Skill> out = fresh.skills;
-    discovery().with([](Discovery& d, Discovery f) {
-        f.generation = d.generation + 1;
-        d = std::move(f);
-    }, std::move(fresh));
+    // Publish with the next generation; retried if a racing scan got in first.
+    for (;;) {
+        auto prev = discovery().current();
+        auto next = std::make_shared<Discovery>(fresh);
+        next->generation = (prev ? prev->generation : 0) + 1;
+        if (discovery().publish_if(prev, std::shared_ptr<const Discovery>(std::move(next)))) break;
+    }
     return out;
 }
 
 std::vector<Shadowed> shadowed(Io io) {
     (void)all(io);           // ensure a discovery has run
-    return discovery().read([](const Discovery& d) { return d.shadows; });
+    auto d = discovery().current();
+    return d ? d->shadows : std::vector<Shadowed>{};
 }
 
 bool shadowed_within_scope(Io io, std::string_view name) {
@@ -677,37 +742,26 @@ std::string catalog_block(Io io) {
         std::uintmax_t key = 0;
         std::uint64_t  generation = ~std::uint64_t{0};
     };
-    static maya::guarded<Built> built_cache;
+    // Replaced whole, read every turn: an immutable value in a published slot.
+    static maya::published<const Built> built_cache;
 
     const auto skills = all(io);
-    const std::uint64_t gen =
-        discovery().read([](const Discovery& d) { return d.generation; });
+    const auto disc = discovery().current();
+    const std::uint64_t gen = disc ? disc->generation : 0;
 
-    // Approvals file identity — cheap stat, no parse.
+    // Approvals file identity — ONE metadata query, no parse (the same
+    // stat_sig the discovery signature uses; file_size + last_write_time
+    // were two handle opens each on Windows).
     std::uintmax_t akey = 0;
-    {
-        std::error_code ec;
-        const auto p = agentty::util::user_root() / std::string{kApprovalsLeaf};
-        const auto sz = fs::file_size(p, ec);
-        if (!ec) {
-            akey = sz;
-            const auto t = fs::last_write_time(p, ec);
-            if (!ec)
-                akey ^= static_cast<std::uintmax_t>(
-                    t.time_since_epoch().count()) * 1099511628211ull;
-        }
-    }
+    if (const auto st = stat_sig(agentty::util::user_root() / std::string{kApprovalsLeaf});
+        st && st->file)
+        akey = st->size ^ static_cast<std::uintmax_t>(st->mtime) * 1099511628211ull;
     // The discovery generation says the skills changed; the approvals
     // fingerprint says a trust decision did.
     const std::uintmax_t key = akey;
 
-    if (auto hit = built_cache.read(
-            [](const Built& b, std::uintmax_t k, std::uint64_t g) -> std::optional<std::string> {
-                if (b.key != k || b.generation != g) return std::nullopt;
-                return b.text;
-            },
-            key, gen))
-        return *hit;
+    if (const auto b = built_cache.current(); b && b->key == key && b->generation == gen)
+        return b->text;
 
     // Hidden beats listed-but-blocked: user_only skills never appear, so
     // the model can't waste a turn trying to activate one. An UNAPPROVED
@@ -729,8 +783,7 @@ std::string catalog_block(Io io) {
     std::size_t eligible = 0;
     for (const auto& s : skills) if (eligible_for_model(s)) ++eligible;
     if (eligible == 0) {
-        built_cache.with([](Built& b, Built v) { b = std::move(v); },
-                         Built{{}, key, gen});
+        built_cache.publish(std::make_shared<const Built>(Built{{}, key, gen}));
         return {};
     }
 
@@ -760,8 +813,7 @@ std::string catalog_block(Io io) {
     }
     m << "</skills>";
     auto built = m.str();
-    built_cache.with([](Built& b, Built v) { b = std::move(v); },
-                     Built{built, key, gen});
+    built_cache.publish(std::make_shared<const Built>(Built{built, key, gen}));
     return built;
 }
 

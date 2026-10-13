@@ -192,18 +192,18 @@ namespace {
 
 // The blocked-activity feed's storage.
 //
-// `maya::guarded<T>` rather than a raw std::mutex, and not merely because the
-// concurrency banlist says so (it does -- tests/lint/allowlist.txt, and my
-// first version failed that check). The type is better for the job: access is
-// only possible through `with()`, so "forgot the lock" is unrepresentable
-// rather than a review item. For a cross-thread security surface that is worth
-// more than the two lines it saves.
+// `maya::snapshot<T>` rather than a raw std::mutex or a guarded<T>: the feed is
+// a small value replaced whole on every denial and copied out by the reader, so
+// a lock-free immutable value fits exactly -- no rank, no capability, and
+// `record()` (called from the broker's supervisor thread) never has to prove
+// what it holds. "Forgot the lock" stays unrepresentable: the only writes are
+// `update()`, which builds a NEW vector from the old one.
 //
 // Function-local static so initialisation order cannot bite: the first denial
 // can arrive from a worker thread during startup, and a file-scope global would
 // be a race with its own constructor.
-maya::guarded<std::vector<Event>>& feed() {
-    static maya::guarded<std::vector<Event>> f;
+maya::snapshot<std::vector<Event>>& feed() {
+    static maya::snapshot<std::vector<Event>> f;
     return f;
 }
 
@@ -224,23 +224,25 @@ void record(const Event& ev) {
     // the one denial that matters would drown in it.
     if (ev.allowed) return;
 
-    feed().with([](std::vector<Event>& events, Event incoming) {
+    (void)feed().update([](const std::vector<Event>& old, const Event& in) {
+        std::vector<Event> events = old;
         // Coalesce an identical repeat. Checked against the LAST event only,
         // not the whole feed: a build that alternates two denied calls should
         // show both interleaved rather than two counters, because the order is
         // the information -- it tells you what the toolchain was doing.
         if (!events.empty()) {
             auto& last = events.back();
-            if (last.syscall == incoming.syscall &&
-                last.detail == incoming.detail) {
+            if (last.syscall == in.syscall &&
+                last.detail == in.detail) {
                 // Saturate rather than wrap. A count that rolls over to 0 would
                 // read as "this never happened", which is the worst possible
                 // lie for an audit surface to tell.
                 if (last.count < UINT32_MAX) ++last.count;
-                return;
+                return events;
             }
         }
 
+        Event incoming = in;
         incoming.count = 1;
         events.push_back(std::move(incoming));
 
@@ -249,18 +251,18 @@ void record(const Event& ev) {
         // through, every one of which is itself recorded -- so the attempt is
         // louder than the thing it would hide.
         if (events.size() > kMaxEvents) events.erase(events.begin());
+        return events;
     }, ev);
 }
 
 std::vector<Event> blocked_feed() {
-    // A copy, deliberately: the caller is on another thread, so handing back a
-    // reference would be a race with the next denial. `with()` makes that hard
-    // to get wrong -- the result must not point into the guarded value.
-    return feed().with([](std::vector<Event>& events) { return events; });
+    // A copy, deliberately: the caller is on another thread. The snapshot
+    // value is immutable, so copying it out needs no lock at all.
+    return feed().get();
 }
 
 void clear_blocked_feed() {
-    feed().with([](std::vector<Event>& events) { events.clear(); });
+    feed().store({});
 }
 
 std::vector<std::uint32_t> brokered_syscalls() {

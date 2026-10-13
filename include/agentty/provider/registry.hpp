@@ -253,6 +253,18 @@ struct ProviderDescriptor {
     // ONE place agentty states its own identity (identity.hpp).
     bool             attribution = false;
 
+    // The row's API accepts OpenAI's `prompt_cache_key` body field.
+    //
+    // OpenAI-COMPATIBLE is not OpenAI: the compat layers validate the body
+    // strictly and 400 an unknown field, killing the turn (#93) --
+    //   Groq:   "property 'prompt_cache_key' is unsupported"
+    //   Gemini: "Unknown name \"prompt_cache_key\": Cannot find field."
+    // So this is opt-IN per row, set only where the API documents the field
+    // (OpenAI) or passes it through (OpenRouter, which routes to OpenAI and
+    // ignores it elsewhere). Omitting it costs a cache optimisation;
+    // sending it to a strict host costs the whole turn. When in doubt, omit.
+    bool             accepts_prompt_cache_key = false;
+
     // Ollama's NATIVE /api/chat protocol (NDJSON, structured tool_calls)
     // instead of its OpenAI-compat shim, which makes weak local models
     // leak tool calls as raw JSON in `content`.
@@ -376,6 +388,8 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      // Reasoning models are routed here by dialect_for(). Not cosmetic:
      // GPT-5.4+ rejects tool calls on chat with a real reasoning effort.
      .responses_path = "/v1/responses",
+     // The field's home: documented on Chat Completions and Responses.
+     .accepts_prompt_cache_key = true,
      .default_model = "gpt-4o"},
 
     {.id = "chatgpt", .label = "ChatGPT",
@@ -444,7 +458,10 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .responses_path = "/api/v1/responses",
      // Name ourselves: OpenRouter credits attributed requests to an app page
      // and some models only serve a recognised harness. Issue #74.
-     .attribution = true},
+     .attribution = true,
+     // Passed through to OpenAI upstreams (where it pins the cache node)
+     // and dropped for the others: OpenRouter normalises the body.
+     .accepts_prompt_cache_key = true},
 
     {.id = "together", .label = "Together",
      .blurb = "Open models on together.ai",

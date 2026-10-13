@@ -49,18 +49,61 @@ void check(bool ok, const char* what) {
     if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); failures.fetch_add(1); }
 }
 
+// The same command shapes on each platform's shell: quick exit, a short
+// sleep then output and a non-zero exit, a burst of output, a long sleep.
+// Windows has no /bin/sh; cmd.exe covers them, with `ping -n N 127.0.0.1`
+// as the sleep (N-1 seconds; -n 1 is a few ms) since `timeout` needs a
+// console the session doesn't have.
+struct Scripts {
+    const char* quick;
+    const char* short_then_fail;
+    const char* burst;
+    const char* long_sleep;
+    const char* print_ok;
+    const char* print_fail;
+    const char* short_then_print;
+};
+#if defined(_WIN32)
+constexpr Scripts kS{
+    "echo x",
+    "ping -n 1 127.0.0.1 >nul & echo y& exit /b 3",
+    "for /l %i in (1,1,3000) do @echo yyyyyy",
+    "ping -n 6 127.0.0.1 >nul",
+    "echo a",
+    "echo b& exit /b 1",
+    "ping -n 1 127.0.0.1 >nul & echo z",
+};
+
+mt::ExecRequest sh(const std::string& script) {
+    mt::ExecRequest r;
+    r.program = {"cmd.exe", {"/S", "/C", script}};
+    r.max_output_bytes = 64 * 1024;
+    return r;
+}
+#else
+constexpr Scripts kS{
+    "echo x",
+    "sleep 0.05; echo y; exit 3",
+    "yes | head -c 20000",
+    "sleep 5",
+    "printf a",
+    "printf b; exit 1",
+    "sleep 0.02; echo z",
+};
+
 mt::ExecRequest sh(const std::string& script) {
     mt::ExecRequest r;
     r.program = {"/bin/sh", {"-c", script}};
     r.max_output_bytes = 64 * 1024;
     return r;
 }
+#endif
 
 // Start, poll until it ends (or give up), stop, drop. The session's last
 // reference dies on whichever thread happens to hold it.
 void session_round(mt::Exec& exec, int i) {
-    auto s = exec.start(sh(i % 3 == 0 ? "echo x" : i % 3 == 1 ? "sleep 0.05; echo y; exit 3"
-                                                              : "yes | head -c 20000"));
+    auto s = exec.start(sh(i % 3 == 0 ? kS.quick : i % 3 == 1 ? kS.short_then_fail
+                                                              : kS.burst));
     check(s.has_value(), "session starts");
     if (!s) return;
     auto sess = *s;
@@ -73,7 +116,7 @@ void session_round(mt::Exec& exec, int i) {
 
 // Stop while it is still running, from another thread than the poller.
 void stop_while_polled(mt::Exec& exec) {
-    auto s = exec.start(sh("sleep 5"));
+    auto s = exec.start(sh(kS.long_sleep));
     check(s.has_value(), "long session starts");
     if (!s) return;
     std::shared_ptr<mt::Session> sess = *s;
@@ -89,7 +132,7 @@ void stop_while_polled(mt::Exec& exec) {
 }
 
 void foreground(mt::Exec& exec, const mt::Call& call, int i) {
-    auto r = exec.run(call, sh(i % 2 ? "printf a" : "printf b; exit 1"));
+    auto r = exec.run(call, sh(i % 2 ? kS.print_ok : kS.print_fail));
     check(!std::holds_alternative<mt::StartFailed>(r.outcome), "foreground run starts");
 }
 
@@ -120,7 +163,7 @@ int main() {
     // not the thread that started them.
     std::vector<std::shared_ptr<mt::Session>> pile;
     for (int i = 0; i < 16; ++i)
-        if (auto s = exec->start(sh("sleep 0.02; echo z"))) pile.push_back(*s);
+        if (auto s = exec->start(sh(kS.short_then_print))) pile.push_back(*s);
     std::thread dropper([p = std::move(pile)]() mutable { p.clear(); });
     dropper.join();
 

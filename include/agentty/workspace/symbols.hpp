@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "agentty/util/snapshot.hpp"
+#include <maya/runtime.hpp>
 
 namespace agentty {
 
@@ -41,7 +42,8 @@ list_workspace_symbols(std::size_t cap = 50000);
 // Run the (parallel) symbol scan — single-flight, safe to call repeatedly.
 // Synchronous: run it on a background task at startup so the first `#` is
 // instant. Returns early, publishing nothing, once `stop` is requested.
-void prewarm_workspace_symbols(std::stop_token stop = {}, std::size_t cap = 50000);
+void prewarm_workspace_symbols(const maya::unlocked& cap, std::stop_token stop = {},
+                               std::size_t max_entries = 50000);
 
 // Non-blocking: is the symbol index built yet? The composer opens the
 // `#` picker INSTANTLY and shows "indexing…" until this returns true.

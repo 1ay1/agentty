@@ -25,6 +25,7 @@
 #include "agentty/io/persistence.hpp"
 #include "agentty/provider/credentials.hpp"
 #include "agentty/provider/auth_state.hpp"
+#include "agentty/provider/chatgpt/codex_oauth.hpp"   // SaveCodexCredentials
 #include "agentty/auth/vault.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/program.hpp"
@@ -32,6 +33,7 @@
 #include "agentty/tool/subagent.hpp"            // PublishSubagent's target
 #include "agentty/tool/web_search_policy.hpp"       // PublishWebSearchPolicy's target
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/util/logx.hpp"
 
 namespace agentty::app {
 
@@ -72,8 +74,16 @@ struct Host : maya::terminal_host<P> {
     //
     // The payloads were copied when the reducer built the effect, so there
     // is nothing here borrowing from a Model that has since moved on.
-    void handle(SaveThread e)   { persistence::save_thread(io_, e.thread); }
-    void handle(DeleteThread e) { persistence::delete_thread(io_, e.id); }
+    //
+    // Lock order: jaal calls handle() on the loop thread between steps,
+    // where no lock is held (update() and view() can't take locks at all).
+    // So each handler runs with `unlocked`, minted here, once per call.
+    void handle(SaveThread e) {
+        with_unlocked([&](const maya::unlocked& c) { persistence::save_thread(io_, c, e.thread); });
+    }
+    void handle(DeleteThread e) {
+        with_unlocked([&](const maya::unlocked& c) { persistence::delete_thread(io_, c, e.id); });
+    }
 
     // Publish the subagent router's view (see store_fx.hpp PublishSubagent).
     // A mutex-guarded copy into the registry — microseconds — so it runs here
@@ -121,16 +131,18 @@ struct Host : maya::terminal_host<P> {
     void handle(AccountOp e) {
         namespace cr = provider::credentials;
         using K = AccountOp::Kind;
-        switch (e.kind) {
-            case K::Activate:    (void)cr::activate(io_, e.provider, e.label); break;
-            case K::Remove:      (void)cr::remove(io_, e.provider, e.label); break;
-            case K::Register:
-                (void)auth::accounts::snapshot_active(io_, e.provider, e.label);
-                break;
-            case K::AddKey:      (void)cr::add_key(io_, e.provider, e.key); break;
-            case K::SignOut:     auth::vault::sign_out(io_, e.provider); break;
-            case K::ClearActive: cr::clear_active(io_, e.provider); break;
-        }
+        with_unlocked([&](const maya::unlocked& cap) {
+            switch (e.kind) {
+                case K::Activate:    (void)cr::activate(io_, cap, e.provider, e.label); break;
+                case K::Remove:      (void)cr::remove(io_, e.provider, e.label); break;
+                case K::Register:
+                    (void)auth::accounts::snapshot_active(io_, e.provider, e.label);
+                    break;
+                case K::AddKey:      (void)cr::add_key(io_, cap, e.provider, e.key); break;
+                case K::SignOut:     auth::vault::sign_out(io_, cap, e.provider); break;
+                case K::ClearActive: cr::clear_active(io_, cap, e.provider); break;
+            }
+        });
     }
 
     void handle(SaveCredentials e) {
@@ -146,6 +158,18 @@ struct Host : maya::terminal_host<P> {
             for (int n = 2; acc::get(io_, provider, label).has_value() && n < 100; ++n)
                 label = base + " " + std::to_string(n);
         acc::snapshot_active(io_, provider, label);
+    }
+
+    // The ChatGPT login's credential write (see store_fx.hpp). Loop thread,
+    // between steps: `unlocked`. A failure is logged; the provider switch
+    // that follows finds no credentials and the next turn reports
+    // "not signed in", which is the same state the user would see.
+    void handle(SaveCodexCredentials e) {
+        with_unlocked([&](const maya::unlocked& cap) {
+            if (!provider::chatgpt::save_codex_credentials(cap, e.creds))
+                AGT_LOG(Auth, Warn, "codex.save",
+                        "signed in, but encrypted credentials could not be saved");
+        });
     }
 
     // Settings go through the write-behind seam, NOT straight to disk.
@@ -178,6 +202,13 @@ struct Host : maya::terminal_host<P> {
     }
 
 private:
+    // The loop thread between steps holds nothing; see the note above.
+    // This file is the effect host's capability root (lint: cap_roots).
+    template <class F>
+    static decltype(auto) with_unlocked(F&& f) {
+        return maya::thread_root(std::forward<F>(f));
+    }
+
     // The host runs effects; that's what an Io is for.
     Io io_ = IoAccess::grant();
 };

@@ -115,8 +115,8 @@ bool load_config_uncached(std::vector<AcpAgentSpec>& out) {
 // path — re-reading + JSON-parsing acp-agents.json each time is disk work
 // per frame. Key the parsed vector on (resolved path, mtime, size): a stat
 // is ~1µs and picks up edits, deletion, and env-var retargeting alike.
-// Keyed on plain values (path string, mtime ticks) so they can cross into
-// guarded<T>::read as Sendable arguments.
+// Keyed on plain values (path string, mtime ticks). Read from view code, so
+// a lock-free snapshot: no capability needed.
 struct ConfigCache {
     std::vector<AcpAgentSpec> agents;
     bool                      ok = false;
@@ -124,8 +124,8 @@ struct ConfigCache {
     std::int64_t              mtime = 0;
     std::uintmax_t            size = 0;
 };
-maya::guarded<ConfigCache>& config_cache() {
-    static maya::guarded<ConfigCache> c;
+maya::snapshot<ConfigCache>& config_cache() {
+    static maya::snapshot<ConfigCache> c;
     return c;
 }
 
@@ -140,26 +140,24 @@ bool load_config(std::vector<AcpAgentSpec>& out) {
         mtime = fs::last_write_time(cfg, ec);
         size  = ec ? 0 : fs::file_size(cfg, ec);
     }
-    // Hit: copy the cached list out under the lock.
+    // Hit: copy the cached list out of the current snapshot.
     const std::string  key_path  = cfg.string();
     const std::int64_t key_mtime = mtime.time_since_epoch().count();
-    auto hit = config_cache().read(
-        [](const ConfigCache& c, std::string p, std::int64_t m, std::uintmax_t s)
-            -> std::optional<std::pair<bool, std::vector<AcpAgentSpec>>> {
-            if (c.path != p || c.mtime != m || c.size != s) return std::nullopt;
-            return std::pair{c.ok, c.agents};
-        },
-        key_path, key_mtime, size);
+    std::optional<std::pair<bool, std::vector<AcpAgentSpec>>> hit;
+    {
+        const auto c = config_cache().load();
+        if (c->path == key_path && c->mtime == key_mtime && c->size == size)
+            hit = std::pair{c->ok, c->agents};
+    }
     if (!hit) {
-        // Miss: parse outside the lock (disk + JSON), then publish.
+        // Miss: parse (disk + JSON), then publish.
         ConfigCache fresh;
         fresh.ok    = load_config_uncached(fresh.agents);
         fresh.path  = key_path;
         fresh.mtime = key_mtime;
         fresh.size  = size;
         hit = std::pair{fresh.ok, fresh.agents};
-        config_cache().with([](ConfigCache& c, ConfigCache f) { c = std::move(f); },
-                            std::move(fresh));
+        config_cache().store(std::move(fresh));
     }
     if (!hit->first) return false;
     out.insert(out.end(), hit->second.begin(), hit->second.end());

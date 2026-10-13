@@ -55,7 +55,7 @@ std::string get(const fs::path& p) {
 agentty::tools::ExecResult do_edit(const fs::path& p,
                                    std::string old_text, std::string new_text) {
     return agentty::tool::DynamicDispatch::execute(
-        "edit", json{{"path", p.string()},
+        agtest::cap(), "edit", json{{"path", p.string()},
                      {"edits", json::array({json{{"old_text", std::move(old_text)},
                                                  {"new_text", std::move(new_text)}}})}});
 }
@@ -165,7 +165,7 @@ TEST_CASE("edit through a symlink writes the target and keeps the link") {
     REQUIRE(fs::is_symlink(link, ec));
 
     auto r = agentty::tool::DynamicDispatch::execute(
-        "edit", json{{"path", link.string()},
+        agtest::cap(), "edit", json{{"path", link.string()},
                      {"edits", json::array({json{{"old_text", "beta"},
                                                  {"new_text", "BETA"}}})}});
     REQUIRE(r.has_value());
@@ -217,7 +217,7 @@ agentty::tools::ExecResult edit_at(const fs::path& p, std::string old_text,
     json one{{"old_text", std::move(old_text)}, {"new_text", std::move(new_text)}};
     if (line > 0) one["line"] = line;
     return agentty::tool::DynamicDispatch::execute(
-        "edit", json{{"path", p.string()}, {"edits", json::array({one})}});
+        agtest::cap(), "edit", json{{"path", p.string()}, {"edits", json::array({one})}});
 }
 
 } // namespace

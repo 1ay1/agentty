@@ -87,8 +87,10 @@ struct Target {
 struct Site {
     std::string_view id;              // "chatgpt" | "copilot" — routing key.
 
-    // Resolve credentials + destination. Error string on failure.
-    std::expected<Target, std::string> (*authorize)(provider::Request& req);
+    // Resolve credentials + destination. Error string on failure. Runs on
+    // the turn worker holding no lock (it may block on a token refresh).
+    std::expected<Target, std::string> (*authorize)(const maya::unlocked& cap,
+                                                     provider::Request& req);
 
     // Host-specific request-body fields, applied after the shared builder.
     // ChatGPT adds include[]/store; Copilot adds reasoning.summary. Both
@@ -103,7 +105,8 @@ struct Site {
 // Stream one turn against `site`. Owns the whole lifecycle: authorise, build
 // the body, POST, translate SSE → Msgs, and finish through the SHARED
 // stream epilogue so this path terminates identically to Anthropic/OpenAI.
-[[nodiscard]] provider::StreamResult stream(const Site& site,
+[[nodiscard]] provider::StreamResult stream(const maya::unlocked& cap,
+                                            const Site& site,
                                             provider::Request req,
                                             provider::EventSink sink);
 

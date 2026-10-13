@@ -29,7 +29,9 @@ namespace agentty::app {
 
 struct Deps {
     // ── Provider seam ────────────────────────────────────────────────────
-    std::function<void(provider::Request, provider::EventSink)> stream;
+    // Called by the turn worker (a cmd::io_task body), which holds no lock;
+    // it passes its `unlocked` down to the provider.
+    std::function<void(const maya::unlocked&, provider::Request, provider::EventSink)> stream;
 
     // ── Store seam (just the calls update.cpp actually makes) ────────────
     std::function<void(const Thread&)>          save_thread;
@@ -108,19 +110,32 @@ void install(P& p, S& s, auth::AuthHeader auth) {
     // place a Deps is built — is what makes "a reducer never blocks on
     // settings IO" a property of the framework rather than a rule eight call
     // sites have to remember. See runtime/app/settings_cache.hpp.
-    auto seam = settings_cache::wrap(
-        [&s] { return s.load_settings(); },
-        [&s](const store::Settings& x) { s.save_settings(x); });
+    //
+    // Lock order: Deps is an EFFECT seam. Its functions are called only by
+    // the effect host and by init(), on the loop thread between steps, where
+    // no lock is held (update() and view() cannot take locks). So the seam
+    // re-states that as a capability root, in this one reviewed place (lint:
+    // cap_roots), and everything behind it is checked. The disk save is the
+    // store's QUIET save, so the cache's own write doesn't invalidate it.
+    auto seam = maya::thread_root([&](const maya::unlocked& cap) {
+        return settings_cache::wrap(cap,
+            [&s] { return s.load_settings(); },
+            [&s](const maya::unlocked& c, const store::Settings& x) { s.save_settings_quiet(c, x); });
+    });
 
     install_deps(Deps{
-        .stream = [&p](provider::Request req, provider::EventSink sink) {
-            p.stream(std::move(req), std::move(sink));
+        .stream = [&p](const maya::unlocked& c, provider::Request req, provider::EventSink sink) {
+            p.stream(c, std::move(req), std::move(sink));
         },
         .save_thread     = [&s](const Thread& t) { s.save_thread(t); },
         .load_threads    = [&s] { return s.load_threads(); },
         .load_thread     = [&s](const ThreadId& id) { return s.load_thread(id); },
-        .load_settings   = std::move(seam.load),
-        .save_settings   = std::move(seam.save),
+        .load_settings   = [l = std::move(seam.load)] {
+            return maya::thread_root([&](const maya::unlocked& c) { return l(c); });
+        },
+        .save_settings   = [sv = std::move(seam.save)](const store::Settings& x) {
+            maya::thread_root([&](const maya::unlocked& c) { sv(c, x); });
+        },
         .new_thread_id   = [&s] { return s.new_id(); },
         .title_from      = [&s](std::string_view t) { return s.title_from(t); },
         .auth            = std::move(auth),

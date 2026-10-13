@@ -1046,15 +1046,14 @@ private:
 // which only receives a model id — can consult the scoped fact without the
 // domain layer depending on provider state.
 namespace caps_scope_detail {
-inline maya::guarded<std::string>& val() { static maya::guarded<std::string> s; return s; }
+inline maya::snapshot<std::string>& val() { static maya::snapshot<std::string> s; return s; }
 } // namespace caps_scope_detail
 
 inline void set_caps_provider_scope(std::string provider_id) {
-    caps_scope_detail::val().with([](std::string& v, std::string p) { v = std::move(p); },
-                                  std::move(provider_id));
+    caps_scope_detail::val().store(std::move(provider_id));
 }
 [[nodiscard]] inline std::string caps_provider_scope() {
-    return caps_scope_detail::val().read([](const std::string& v) { return v; });
+    return caps_scope_detail::val().get();
 }
 // "provider/model" when a scope is set; "" when not (callers then use bare).
 // The one-arg form uses the ACTIVE provider scope; pass `scope` explicitly
@@ -1116,10 +1115,16 @@ inline void bump_caps_epoch() noexcept {
     return capkey::norm_model(key);
 }
 
-// The shape every registry below shares: a map of facts, the keys poisoned
-// by disagreeing sources, and a lock-free "anything recorded?" flag. The
-// flag lets the per-frame render path skip the lock entirely in the common
-// case (no facts), since background turns take the write side.
+// The shape every registry below shares: a map of facts and the keys
+// poisoned by disagreeing sources, held in a jaal::snapshot.
+//
+// These are read on the per-frame render path and from every streaming turn
+// (resolved_caps) and written a handful of times a session (a catalog
+// refresh, a settings hydrate, a user override). That is a snapshot's shape
+// exactly: readers take one atomic load and never a lock, writers build a
+// new map and swap it in. With no lock there is no rank and no capability,
+// so a view, a reducer and a lock body can all read caps freely, and none of
+// them can be half of a deadlock.
 template <class V>
 struct Facts {
     std::map<std::string, V> map;
@@ -1127,51 +1132,52 @@ struct Facts {
 };
 template <class V>
 struct Registry {
-    maya::guarded<Facts<V>> facts;
-    std::atomic<bool>       any{false};
+    maya::snapshot<Facts<V>> facts;
 
     // Record a fact for an exact key.
     void set(std::string key, V v) {
-        facts.with([](Facts<V>& f, std::string k, V val) { f.map[std::move(k)] = val; },
-                   std::move(key), v);
-        any.store(true, std::memory_order_relaxed);
+        (void)facts.update([](const Facts<V>& f, const std::string& k, const V& val) {
+            Facts<V> out = f;
+            out.map[k] = val;
+            return out;
+        }, std::move(key), v);
     }
     // Agree-or-poison merge for a key shared across sources.
     void merge(std::string key, V v) {
-        const bool recorded = facts.with([](Facts<V>& f, std::string k, V val) {
-            if (f.poisoned.count(k)) return false;
-            if (auto it = f.map.find(k); it != f.map.end()) {
-                if (it->second != val) { f.map.erase(it); f.poisoned.insert(k); }
-                return false;
+        (void)facts.update([](const Facts<V>& f, const std::string& k, const V& val) {
+            if (f.poisoned.count(k)) return f;
+            Facts<V> out = f;
+            if (auto it = out.map.find(k); it != out.map.end()) {
+                if (it->second != val) { out.map.erase(it); out.poisoned.insert(k); }
+                return out;
             }
-            f.map[std::move(k)] = val;
-            return true;
+            out.map[k] = val;
+            return out;
         }, std::move(key), v);
-        if (recorded) any.store(true, std::memory_order_relaxed);
+    }
+    // Drop one key. Returns whether anything is left.
+    bool erase(std::string key) {
+        return !facts.update([](const Facts<V>& f, const std::string& k) {
+            Facts<V> out = f;
+            out.map.erase(k);
+            return out;
+        }, std::move(key))->map.empty();
     }
     // Scoped-first, bare-tail fallback.
-    [[nodiscard]] std::optional<V> find(std::string scoped, std::string bare) const {
-        if (!any.load(std::memory_order_relaxed)) return std::nullopt;
-        return facts.read([](const Facts<V>& f, std::string sk, std::string bk)
-                              -> std::optional<V> {
-            if (!sk.empty())
-                if (auto it = f.map.find(sk); it != f.map.end()) return it->second;
-            if (auto it = f.map.find(bk); it != f.map.end()) return it->second;
-            return std::nullopt;
-        }, std::move(scoped), std::move(bare));
+    [[nodiscard]] std::optional<V> find(std::string_view scoped, std::string_view bare) const {
+        const auto f = facts.load();
+        if (f->map.empty()) return std::nullopt;
+        if (!scoped.empty())
+            if (auto it = f->map.find(std::string(scoped)); it != f->map.end()) return it->second;
+        if (auto it = f->map.find(std::string(bare)); it != f->map.end()) return it->second;
+        return std::nullopt;
     }
     // Replace everything (settings hydrate).
     void replace(std::map<std::string, V> all) {
-        const bool non_empty = !all.empty();
-        facts.with([](Facts<V>& f, std::map<std::string, V> m) {
-            f.map = std::move(m);
-            f.poisoned.clear();
-        }, std::move(all));
-        any.store(non_empty, std::memory_order_relaxed);
+        facts.store(Facts<V>{std::move(all), {}});
     }
-    [[nodiscard]] std::map<std::string, V> snapshot() const {
-        return facts.read([](const Facts<V>& f) { return f.map; });
-    }
+    [[nodiscard]] std::map<std::string, V> snapshot() const { return facts.load()->map; }
+    [[nodiscard]] bool any() const { return !facts.load()->map.empty(); }
 };
 
 namespace catalog_reasoning_detail {
@@ -1202,8 +1208,7 @@ inline void merge_catalog_reasoning(const std::string& raw_id, bool reasons) {
 // Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
 [[nodiscard]] inline int catalog_reasoning_for(std::string_view model_id,
                                                std::string_view scope = {}) {
-    if (!catalog_reasoning_detail::reg().any.load(std::memory_order_relaxed))
-        return -1;
+    if (!catalog_reasoning_detail::reg().any()) return -1;
     auto scoped = scope.empty() ? scoped_caps_key(model_id)
                                 : scoped_caps_key(model_id, scope);
     const auto v = catalog_reasoning_detail::reg().find(
@@ -1311,8 +1316,7 @@ struct Entry {
 };
 // host → (model → entry)
 using Hosts = std::map<std::string, std::map<std::string, Entry>>;
-inline maya::guarded<Hosts>& hosts() { static maya::guarded<Hosts> h; return h; }
-inline std::atomic<bool>& any() { static std::atomic<bool> a{false}; return a; }
+inline maya::snapshot<Hosts>& hosts() { static maya::snapshot<Hosts> h; return h; }
 } // namespace catalog_endpoint_detail
 
 // Parse the ORIGIN out of an api URL / endpoint spec: canonical host
@@ -1382,11 +1386,14 @@ inline void merge_endpoint_context_window(std::string_view api_url,
     const std::string model_id = norm_caps_key(raw_id);
     if (model_id.empty()) return;
     bump_caps_epoch();
-    catalog_endpoint_detail::hosts().with(
-        [](catalog_endpoint_detail::Hosts& hs, std::string h, std::string m,
-           catalog_endpoint_detail::Entry e) { hs[h][m] = e; },
+    (void)catalog_endpoint_detail::hosts().update(
+        [](const catalog_endpoint_detail::Hosts& hs, const std::string& h, const std::string& m,
+           const catalog_endpoint_detail::Entry& e) {
+            auto out = hs;
+            out[h][m] = e;
+            return out;
+        },
         host, model_id, catalog_endpoint_detail::Entry{tokens, port});
-    catalog_endpoint_detail::any().store(true, std::memory_order_relaxed);
 }
 
 // 0 = no declaration; else the window a models.dev entry serving this
@@ -1404,18 +1411,13 @@ inline void merge_endpoint_context_window(std::string_view api_url,
 // `host` is the CANONICAL origin host (context_endpoint_origin form).
 [[nodiscard]] inline int endpoint_context_window_for(
     std::string_view model_id, std::string_view host, std::uint16_t port) {
-    if (!catalog_endpoint_detail::any().load(std::memory_order_relaxed))
-        return 0;
+    const auto all = catalog_endpoint_detail::hosts().load();
+    if (all->empty()) return 0;
     const std::string mid = norm_caps_key(model_id);
     if (mid.empty()) return 0;
-    // Copy out this host's entries; the scan runs unlocked.
-    const auto entries = catalog_endpoint_detail::hosts().read(
-        [](const catalog_endpoint_detail::Hosts& hs, std::string h) {
-            auto it = hs.find(h);
-            return it == hs.end() ? std::map<std::string, catalog_endpoint_detail::Entry>{}
-                                  : it->second;
-        }, std::string(host));
-    if (entries.empty()) return 0;
+    const auto hit = all->find(std::string(host));
+    if (hit == all->end() || hit->second.empty()) return 0;
+    const auto& entries = hit->second;
     int host_tier = 0, adopted = 0; bool ambiguous = false;
     for (const auto& [mid_key, e] : entries) {
         if (mid_key != mid) continue;
@@ -1436,12 +1438,11 @@ inline void merge_endpoint_context_window(std::string_view api_url,
 // 0 = no declaration. Scoped-first, bare fallback.
 [[nodiscard]] inline int catalog_context_window_for(std::string_view model_id,
                                                     std::string_view scope = {}) {
-    if (!catalog_context_detail::reg().any.load(std::memory_order_relaxed))
-        return 0;
+    if (!catalog_context_detail::reg().any()) return 0;
     auto scoped = scope.empty() ? scoped_caps_key(model_id)
                                 : scoped_caps_key(model_id, scope);
     return catalog_context_detail::reg()
-        .find(std::move(scoped), std::string{capkey::norm_tail(model_id)})
+        .find(scoped, capkey::norm_tail(model_id))
         .value_or(0);
 }
 
@@ -1449,12 +1450,10 @@ inline void merge_endpoint_context_window(std::string_view api_url,
 // Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
 [[nodiscard]] inline int catalog_effort_set_for(std::string_view model_id,
                                                 std::string_view scope = {}) {
-    if (!catalog_effort_detail::reg().any.load(std::memory_order_relaxed))
-        return -1;
+    if (!catalog_effort_detail::reg().any()) return -1;
     auto scoped = scope.empty() ? scoped_caps_key(model_id)
                                 : scoped_caps_key(model_id, scope);
-    const auto v = catalog_effort_detail::reg().find(
-        std::move(scoped), std::string{capkey::norm_tail(model_id)});
+    const auto v = catalog_effort_detail::reg().find(scoped, capkey::norm_tail(model_id));
     return v ? static_cast<int>(*v) : -1;
 }
 
@@ -1470,18 +1469,9 @@ inline void merge_endpoint_context_window(std::string_view api_url,
 namespace reasoning_override_detail {
 // The override map is empty for the vast majority of users (nobody set a ^E
 // override), yet reasoning_override_for is called on the PER-FRAME UI render
-// path. The registry's `any` flag lets that common case return without
-// taking the lock, which background threads (launch_stream, subagent) also
-// take via resolved_caps.
+// path; a snapshot read is one atomic load.
 inline Registry<bool>& reg() { static Registry<bool> r; return r; }
-// After an erase, `any` follows the map.
-inline void erase(std::string key) {
-    const bool left = reg().facts.with([](Facts<bool>& f, std::string k) {
-        f.map.erase(k);
-        return !f.map.empty();
-    }, std::move(key));
-    reg().any.store(left, std::memory_order_relaxed);
-}
+inline void erase(std::string key) { (void)reg().erase(std::move(key)); }
 } // namespace reasoning_override_detail
 
 // Set/clear a single model's override (true = force effort on, false = off).
@@ -1538,6 +1528,43 @@ inline void set_effort_force(int v) noexcept {
     return effort_force_detail::cell().load(std::memory_order_relaxed);
 }
 
+// ── Learned rejected-field registry (per HOST) ──────────────────────────────
+// Optional request-body fields a host has told us it does not accept
+// (provider::OptionalField bits), learned from its own 400 (#93). Keyed by
+// HOST ("api.groq.com", "llm.corp:8443"), not model: body-schema validation
+// is the gateway's, identical for every model behind it. The transport
+// consults this before adding an optional field, so after ONE rejection the
+// host never sees the field again — persisted in Settings, so not even on
+// the next launch. Same lock discipline as the other registries.
+namespace rejected_fields_detail {
+inline Registry<std::uint8_t>& reg() { static Registry<std::uint8_t> r; return r; }
+} // namespace rejected_fields_detail
+
+[[nodiscard]] inline std::string host_key(std::string_view host, std::uint16_t port) {
+    std::string k{host};
+    for (char& c : k) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+    if (port != 0 && port != 443) k += ":" + std::to_string(port);
+    return k;
+}
+inline void add_rejected_field(const std::string& host, std::uint8_t bit) {
+    // OR in one snapshot update so two concurrent learns can't drop a bit.
+    (void)rejected_fields_detail::reg().facts.update(
+        [](const Facts<std::uint8_t>& f, const std::string& k, std::uint8_t b) {
+            Facts<std::uint8_t> out = f;
+            out.map[k] = static_cast<std::uint8_t>(out.map[k] | b);
+            return out;
+        }, host, bit);
+}
+inline void set_rejected_fields(std::map<std::string, std::uint8_t> all) {
+    rejected_fields_detail::reg().replace(std::move(all));
+}
+[[nodiscard]] inline std::uint8_t rejected_fields_for(const std::string& host) {
+    return rejected_fields_detail::reg().find("", host).value_or(0);
+}
+[[nodiscard]] inline std::map<std::string, std::uint8_t> rejected_fields_snapshot() {
+    return rejected_fields_detail::reg().snapshot();
+}
+
 // ── Learned effort-set registry (feature DETECTION, not enumeration) ──────
 // When a provider rejects a reasoning_effort value it usually names the
 // contract in the error body — Mistral: "supported values: [high, none]";
@@ -1575,8 +1602,7 @@ learned_effort_sets_snapshot() {
 // entry (legacy, or explicitly unscoped) still matches everywhere.
 [[nodiscard]] inline int learned_effort_set_for(std::string_view model_id,
                                                 std::string_view scope = {}) {
-    if (!learned_effort_detail::reg().any.load(std::memory_order_relaxed))
-        return -1;
+    if (!learned_effort_detail::reg().any()) return -1;
     auto scoped = scope.empty() ? scoped_caps_key(model_id)
                                 : scoped_caps_key(model_id, scope);
     const auto v = learned_effort_detail::reg().find(

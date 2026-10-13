@@ -25,6 +25,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -2646,80 +2647,159 @@ MAYA_SENDABLE(agentty::http::Connection);
 namespace agentty::http {
 namespace {
 
-using PoolMap = std::unordered_map<Endpoint, std::vector<PooledConn>, EndpointHash>;
-
+// Lock-free by design, not a guarded map: acquire()/release() run inside
+// network code that is itself reached from ranked lock bodies (the
+// auth_refresh lane refreshes a token over HTTPS while holding rank 15), and
+// freeing a stale connection runs SSL_shutdown -> new_session_cb (the tls
+// ticket snapshot). A lock here would need a capability threaded through
+// every http call in the program. Instead the pool is a fixed array of slots,
+// each owned by whoever wins a CAS on its state word:
+//
+//   Empty --CAS--> Busy (filler writes payload) --store--> Full
+//   Full  --CAS--> Busy (claimer inspects/takes) --store--> Empty | Full
+//
+// Nobody ever WAITS on a Busy slot -- a claim that loses just skips it -- so
+// nothing here can block or deadlock. The cost is that a connection being
+// inspected by another thread is invisible for those microseconds, and the
+// caller dials fresh instead: harmless for a cache.
 class Pool {
+    enum : int { kEmpty = 0, kBusy = 1, kFull = 2 };
+    // Per-endpoint cap is kMaxPoolEntriesPerEndpoint; agentty talks to a
+    // handful of endpoints, so 64 slots never constrain real use. If they
+    // fill, release() evicts the oldest entry overall.
+    static constexpr std::size_t kSlots = 64;
+
+    struct Slot {
+        std::atomic<int> state{kEmpty};
+        PooledConn       entry;   // owned by the thread that set kBusy
+    };
+
+    bool claim(Slot& s) noexcept {
+        int expected = kFull;
+        return s.state.compare_exchange_strong(expected, kBusy,
+                                               std::memory_order_acquire);
+    }
+
 public:
     std::unique_ptr<Connection> acquire(const Endpoint& ep) {
-        // Stale entries are moved out and freed AFTER the lock: freeing one
-        // runs SSL_shutdown, which can fire new_session_cb, which locks the
-        // ticket map. Two locks nested aborts (lock_order_error).
-        auto [got, stale] = map_.with([](PoolMap& map, Endpoint e)
-                -> std::pair<std::unique_ptr<Connection>, std::vector<PooledConn>> {
-            std::vector<PooledConn> dead;
-            auto it = map.find(e);
-            if (it == map.end()) return {nullptr, std::move(dead)};
-            auto& stack = it->second;
-            const auto now = clock_t_::now();
-            while (!stack.empty()) {
-                auto p = std::move(stack.back());
-                stack.pop_back();
-                // Four-stage liveness check: total lifetime → idle TTL →
-                // nghttp2 protocol state → socket-level FIN/RST. Each stage
-                // is cheap and catches a class of stale connections the
-                // previous one misses; lifetime in particular catches the
-                // proxy-drain case that no client-side check can detect.
-                if (now - p.created_at  > kMaxLifetime
-                    || now - p.released_at > idle_ttl()
-                    || !p.conn->is_alive()
-                    || !socket_is_alive(p.conn->fd())) {
-                    dead.push_back(std::move(p));
+        // Stale entries are freed as they're found; no lock is held anywhere
+        // in this class, so SSL_shutdown -> new_session_cb is fine.
+        const auto now = clock_t_::now();
+        // Newest first, like the old LIFO stack: the most recently released
+        // socket is the likeliest to still be warm.
+        for (;;) {
+            Slot* best = nullptr;
+            for (auto& s : slots_) {
+                if (!claim(s)) continue;
+                if (!(s.entry.conn->endpoint() == ep)) {
+                    s.state.store(kFull, std::memory_order_release);
                     continue;
                 }
-                p.conn->set_pooled(true);   // reused socket — see was_pooled()
-                p.conn->set_idle_ms(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - p.released_at).count());
-                return {std::move(p.conn), std::move(dead)};
+                if (!best || s.entry.released_at > best->entry.released_at) {
+                    if (best) best->state.store(kFull, std::memory_order_release);
+                    best = &s;
+                } else {
+                    s.state.store(kFull, std::memory_order_release);
+                }
             }
-            return {nullptr, std::move(dead)};
-        }, ep);
-        stale.clear();   // freed here, no lock held
-        // Explicit move: a structured binding is not an implicitly-movable
-        // entity on return, so MSVC tries the deleted copy (C2280).
-        return std::move(got);
+            if (!best) return nullptr;
+            PooledConn p = std::move(best->entry);
+            best->entry = {};
+            best->state.store(kEmpty, std::memory_order_release);
+            // Four-stage liveness check: total lifetime -> idle TTL ->
+            // nghttp2 protocol state -> socket-level FIN/RST. Each stage
+            // is cheap and catches a class of stale connections the
+            // previous one misses; lifetime in particular catches the
+            // proxy-drain case that no client-side check can detect.
+            if (now - p.created_at  > kMaxLifetime
+                || now - p.released_at > idle_ttl()
+                || !p.conn->is_alive()
+                || !socket_is_alive(p.conn->fd())) {
+                continue;   // `p` freed here; look for the next-newest
+            }
+            p.conn->set_pooled(true);   // reused socket -- see was_pooled()
+            p.conn->set_idle_ms(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - p.released_at).count());
+            return std::move(p.conn);
+        }
     }
 
     void release(std::unique_ptr<Connection> c) {
         if (!c || !c->is_alive()) return;
-        c->set_pooled(false);   // back in the pool — next acquirer re-marks
-        // The evicted oldest is freed after the lock, same reason as acquire().
-        auto evicted = map_.with([](PoolMap& map, std::unique_ptr<Connection> conn) {
-            auto& stack = map[conn->endpoint()];
-            // Full: drop the oldest (front), the likeliest to have been
-            // closed by the peer by the time we'd reach for it.
-            std::unique_ptr<Connection> out;
-            if (stack.size() >= kMaxPoolEntriesPerEndpoint) {
-                out = std::move(stack.front().conn);
-                stack.erase(stack.begin());
+        c->set_pooled(false);   // back in the pool -- next acquirer re-marks
+        const Endpoint ep = c->endpoint();
+
+        // Full for this endpoint: drop the oldest, the likeliest to have
+        // been closed by the peer by the time we'd reach for it. Counting is
+        // best-effort under concurrency (a slot mid-claim is not seen),
+        // which can overshoot the cap by the number of racing releasers.
+        std::size_t same = 0;
+        Slot* oldest = nullptr;
+        for (auto& s : slots_) {
+            if (!claim(s)) continue;
+            if (s.entry.conn->endpoint() == ep) {
+                ++same;
+                if (!oldest || s.entry.released_at < oldest->entry.released_at) {
+                    if (oldest) oldest->state.store(kFull, std::memory_order_release);
+                    oldest = &s;
+                    continue;
+                }
             }
-            // Release time stands in for dial time; the lifetime cap is
-            // about pool tenure, not socket age.
-            const auto now = clock_t_::now();
-            stack.push_back({std::move(conn), now, now});
-            return out;
-        }, std::move(c));
+            s.state.store(kFull, std::memory_order_release);
+        }
+        std::unique_ptr<Connection> evicted;
+        if (oldest) {
+            if (same >= kMaxPoolEntriesPerEndpoint) {
+                evicted = std::move(oldest->entry.conn);
+                oldest->entry = {};
+                oldest->state.store(kEmpty, std::memory_order_release);
+            } else {
+                oldest->state.store(kFull, std::memory_order_release);
+            }
+        }
         evicted.reset();
+
+        // Release time stands in for dial time; the lifetime cap is about
+        // pool tenure, not socket age.
+        const auto now = clock_t_::now();
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            for (auto& s : slots_) {
+                int expected = kEmpty;
+                if (!s.state.compare_exchange_strong(expected, kBusy,
+                                                     std::memory_order_acquire))
+                    continue;
+                s.entry = PooledConn{std::move(c), now, now};
+                s.state.store(kFull, std::memory_order_release);
+                return;
+            }
+            // Every slot taken: evict the oldest entry overall, then retry.
+            Slot* victim = nullptr;
+            for (auto& s : slots_) {
+                if (!claim(s)) continue;
+                if (!victim || s.entry.released_at < victim->entry.released_at) {
+                    if (victim) victim->state.store(kFull, std::memory_order_release);
+                    victim = &s;
+                } else {
+                    s.state.store(kFull, std::memory_order_release);
+                }
+            }
+            if (!victim) break;
+            PooledConn gone = std::move(victim->entry);
+            victim->entry = {};
+            victim->state.store(kEmpty, std::memory_order_release);
+        }
+        // Lost every race: just drop `c` (closes the socket). Pool is a cache.
     }
 
 private:
-    maya::guarded<PoolMap> map_;
+    std::array<Slot, kSlots> slots_{};
 };
 
 } // namespace
 } // namespace agentty::http
 
-// Its one field is a guarded map; every method goes through it.
+// Every member is reached only through a CAS-claimed slot (see above).
 MAYA_SYNC(agentty::http::Pool);
 
 namespace agentty::http {
@@ -2749,7 +2829,7 @@ std::expected<bool, std::string> is_chunked(const Headers& headers) {
 // ---------------------------------------------------------------------------
 // Client::Impl
 // ---------------------------------------------------------------------------
-// Pool is one guarded map, so dials on other threads can share it.
+// Pool is a lock-free slot array, so dials on other threads can share it.
 using PoolRef = maya::co_owned<Pool>;
 
 struct Client::Impl {
@@ -2784,7 +2864,10 @@ Client::Client(Config cfg) : impl_(std::make_unique<Impl>()) {
     (void)tls::shared_context(impl_->cfg.insecure);
 }
 
-Client::~Client() { join_prewarm(); }
+// No explicit join: a destructor can't be handed `unlocked`. The prewarm
+// pool's own destructor does the same bounded stop-and-wait. The default
+// client is leaked and never destroyed; main() joins it with a capability.
+Client::~Client() = default;
 
 // Helper: grab a connection from the pool or dial fresh.
 static std::expected<std::unique_ptr<Connection>, HttpError>
@@ -3150,7 +3233,7 @@ void Client::prewarm(std::string host, uint16_t port,
        std::move(dial_host), dial_port);
 }
 
-void Client::join_prewarm() noexcept {
+void Client::join_prewarm(const maya::unlocked& cap) noexcept {
     // shutdown() requests stop on every dial before it waits, and each dial
     // turns that into its cancel token (the stop_callback above), so the
     // dials abort at their next poll slice.
@@ -3168,7 +3251,7 @@ void Client::join_prewarm() noexcept {
     // to join or detach. That is a condition variable spelled as a poll — up
     // to 200 wakeups per dial on a slow exit, and a shutdown that could not
     // notice a dial finishing sooner than its next 10 ms tick.
-    (void)impl_->prewarm_pool.shutdown();
+    (void)impl_->prewarm_pool.shutdown(cap);
 }
 
 Client& default_client(Io) {

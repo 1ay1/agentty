@@ -14,11 +14,19 @@ namespace {
 // Log the degrade ONCE per file. A lock that cannot be taken on a read-only
 // filesystem cannot be taken on the next save either, and a line per save
 // would bury the log in a message the user can do nothing about.
+//
+// A snapshot, not a lock: this runs INSIDE a lane's body, and a lock here
+// would have to rank above every lane. Lock-free, it ranks nowhere.
 bool first_failure_for(const std::string& path) {
-    static maya::guarded<std::set<std::string>> seen;
-    return seen.with([](std::set<std::string>& s, std::string p) {
-        return s.insert(std::move(p)).second;
+    static maya::snapshot<std::set<std::string>> seen;
+    if (seen.load()->count(path)) return false;
+    const auto after = seen.update([](const std::set<std::string>& s, const std::string& p) {
+        auto out = s;
+        out.insert(p);
+        return out;
     }, path);
+    // Two first failures racing both insert; both log once. Rare and harmless.
+    return after->count(path) == 1;
 }
 
 }  // namespace

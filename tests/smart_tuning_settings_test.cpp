@@ -190,7 +190,7 @@ TEST_CASE("smart tuning: a configured value survives save and load") {
     Settings s;
     s.smart.complex_threshold = 6;
     s.smart.deep_margin       = 7;
-    agentty::persistence::save_settings(::agentty::IoAccess::grant(), s);
+    agentty::persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 
     const Settings back = agentty::persistence::load_settings(::agentty::IoAccess::grant());
     CHECK(back.smart.complex_threshold == 6);
@@ -371,7 +371,7 @@ TEST_CASE("smart tuning: a pinned slot survives a save/load round trip") {
         .model = "gpt-5", .effort = agentty::Effort::High,
         .set = true, .provider = "openai"};
     s.smart.deep_margin = 7;
-    agentty::persistence::save_settings(::agentty::IoAccess::grant(), s);
+    agentty::persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 
     const Settings back = agentty::persistence::load_settings(::agentty::IoAccess::grant());
     CHECK(back.smart.enabled);
@@ -403,7 +403,7 @@ TEST_CASE("smart tuning: a config change reaches all three holders") {
     static agentty::store::Settings persisted;
     persisted = agentty::store::Settings{};
     agentty::app::install_deps(agentty::app::Deps{
-        .stream        = [](auto, auto) {},
+        .stream        = [](const maya::unlocked&, auto, auto) {},
         .save_thread   = [](const agentty::Thread&) {},
         .delete_thread = [](const auto&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },
@@ -505,7 +505,7 @@ TEST_CASE("smart tuning: an env var overrides the stored value") {
     Settings s;
     s.smart.complex_threshold = 6;
     s.smart.deep_margin       = 7;
-    agentty::persistence::save_settings(::agentty::IoAccess::grant(), s);
+    agentty::persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 
     // The override the locked settings row advertises.
     setenv("AGENTTY_SMART_COMPLEX_THRESHOLD", "2", 1);
@@ -535,7 +535,7 @@ TEST_CASE("smart tuning: an env var applies to a config with no smart block") {
     isolate_config_dir();
     clear_env();
 
-    agentty::persistence::save_settings(::agentty::IoAccess::grant(), Settings{});   // nothing to persist
+    agentty::persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), Settings{});   // nothing to persist
 
     setenv("AGENTTY_SMART_DEEP_MARGIN", "6", 1);
     CHECK(agentty::persistence::load_settings(::agentty::IoAccess::grant()).smart.deep_margin == 6);

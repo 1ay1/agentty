@@ -2204,6 +2204,46 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 }
             }
 
+            // ── Optional body field rejected: learn it, retry without ────────
+            // A strict OpenAI-compat host 400s a field it doesn't know
+            // (#93: Groq / Gemini on prompt_cache_key). The field is an
+            // optimisation; the turn is not. Record "this host rejects X"
+            // (persisted: no later turn or session sends it) and re-run
+            // the SAME request — the body builder now omits X. Bounded by
+            // the transient budget, and a host can only teach each field
+            // once (it is gone from the next body), so this can't loop.
+            if (err_ctx && !has_committed
+                && m.d.selection.kind != provider::Kind::Anthropic
+                && prior_transient < provider::kMaxRetries) {
+                const auto field = provider::parse_rejected_field(e.message, e.http_status);
+                const auto& ep = m.d.selection.openai_endpoint;
+                const std::string host = host_key(ep.host, ep.port);
+                if (field != provider::OptionalField::None && !ep.host.empty()
+                    && (rejected_fields_for(host) & provider::bit(field)) == 0) {
+                    add_rejected_field(host, provider::bit(field));
+                    m.d.persisted.rejected_fields[host] |= provider::bit(field);
+                    Cmd learned_save = save_record(m);
+                    AGT_LOG(Model, Warn, "caps.field_rejected",
+                            "host={} field={} http={} msg={}", host,
+                            provider::wire_name(field), e.http_status,
+                            std::string_view{e.message}.substr(0, 256));
+                    if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
+                            c.transient_retries = prior_transient + 1;
+                            c.last_failure_at   = m.now;
+                            c.retry             = retry::Scheduled{};
+                        }))
+                        return Cmd::none();
+                    auto toast = set_status_toast(
+                        m, std::string{ep.host} + " doesn't take "
+                               + std::string{provider::wire_name(field)}
+                               + " \xe2\x80\x94 resent without it",
+                        std::chrono::seconds{6});
+                    return Cmd::batch(std::move(learned_save), std::move(toast),
+                                      Cmd::after(std::chrono::milliseconds{50},
+                                                 Msg{RetryStream{}}));
+                }
+            }
+
             // ── reasoning_effort rejection 4xx: learn, clamp, retry ─────
             // The provider rejected the effort value we sent — and usually
             // NAMES its accepted set in the body (Mistral: "supported

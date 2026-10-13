@@ -40,29 +40,25 @@
 namespace agentty::ui_prefs {
 
 namespace detail {
-// Prefs holds a std::string (the theme name), so it is not trivially
-// copyable and cannot live in a std::atomic. A guarded value is the honest
-// implementation: uncontended in practice (published once per frame on the
-// render thread, read on the same thread), and its read side is a shared
-// lock, the same order of cost an atomic would have been.
-inline maya::guarded<Prefs>& slot() noexcept {
-    static maya::guarded<Prefs> s;
+// A snapshot, not a lock: published once per frame by view() and read from
+// view code, panels and background prewarms. A lock here would need a rank
+// and a capability on every reader, and view() is deliberately never handed
+// one (it must not be able to take locks). A snapshot read is one atomic
+// load, and no reader can ever be part of a deadlock.
+inline maya::snapshot<Prefs>& slot() noexcept {
+    static maya::snapshot<Prefs> s;
     return s;
 }
 }  // namespace detail
 
 // Make `p` the prefs every consumer sees from now on. Called once per frame
 // by view(), before any Element is built.
-inline void publish(const Prefs& p) {
-    detail::slot().with([](Prefs& s, Prefs next) { s = std::move(next); }, p);
-}
+inline void publish(const Prefs& p) { detail::slot().store(p); }
 
 // The prefs in force. Defaults until the first publish(), so a consumer
 // that runs before the first frame (a test, a background prewarm) gets the
 // documented defaults rather than garbage.
-[[nodiscard]] inline Prefs current() {
-    return detail::slot().read([](const Prefs& s) { return s; });
-}
+[[nodiscard]] inline Prefs current() { return detail::slot().get(); }
 
 // ── Convenience readers ──────────────────────────────────────────────────
 //
@@ -141,18 +137,13 @@ struct PathRoots {
 };
 
 namespace detail {
-inline maya::guarded<PathRoots>& roots_slot() noexcept {
-    static maya::guarded<PathRoots> s;
+inline maya::snapshot<PathRoots>& roots_slot() noexcept {
+    static maya::snapshot<PathRoots> s;
     return s;
 }
 }  // namespace detail
 
-inline void publish_path_roots(PathRoots r) {
-    detail::roots_slot().with([](PathRoots& s, PathRoots next) { s = std::move(next); },
-                              std::move(r));
-}
-[[nodiscard]] inline PathRoots path_roots() {
-    return detail::roots_slot().read([](const PathRoots& s) { return s; });
-}
+inline void publish_path_roots(PathRoots r) { detail::roots_slot().store(std::move(r)); }
+[[nodiscard]] inline PathRoots path_roots() { return detail::roots_slot().get(); }
 
 }  // namespace agentty::ui_prefs

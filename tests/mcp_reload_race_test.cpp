@@ -58,7 +58,9 @@ TEST_CASE("mcp reload race") {
     // Same global SIGPIPE ignore agentty installs — a spawned server dying
     // during the handshake must not kill us (this test spawns /usr/bin/false
     // which exits before the handshake write).
+#ifdef SIGPIPE   // Windows has no SIGPIPE: a broken pipe is a write error
     std::signal(SIGPIPE, SIG_IGN);
+#endif
     // A dead-on-spawn server (/usr/bin/false) would otherwise burn the full
     // connect deadline each round — shrink it so the concurrency stress runs
     // fast. We're testing the BUILD/SWAP/READ race, not connect latency.
@@ -172,7 +174,9 @@ done
 }
 
 TEST_CASE("mcp destroy during handshake") {
+#ifdef SIGPIPE   // Windows has no SIGPIPE: a broken pipe is a write error
     std::signal(SIGPIPE, SIG_IGN);
+#endif
     auto tmp = fs::temp_directory_path()
              / ("agentty_mcp_dtor_race_" + std::to_string(::getpid()));
     fs::remove_all(tmp);

@@ -24,6 +24,7 @@
 // months later.
 
 #include "agentty/util/teardown.hpp"
+#include "agtest_cap.hpp"
 #include "agentty/util/modelsdev.hpp"
 #include "agentty/io/blob_gc.hpp"
 
@@ -85,12 +86,12 @@ int teardown_registration_test_main() {
     // deadlocks or a callback touches freed memory, this is where it shows
     // up -- and under TSan, so does any race between the worker and its own
     // join.
-    td::run();
+    td::run(agtest::cap());
     expect(td::pending() == 0, "teardown::run() drains the registry");
 
     // Idempotent: the TUI path calls run() explicitly AND a scope guard
     // calls it again on the way out.
-    td::run();
+    td::run(agtest::cap());
     expect(td::pending() == 0, "teardown::run() is idempotent");
 
     if (g_failures) {

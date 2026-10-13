@@ -6,6 +6,8 @@
 #include <string>
 #include <string_view>
 
+#include <maya/runtime.hpp>
+
 namespace agentty::run_cli {
 
 struct Options {
@@ -28,7 +30,8 @@ struct Options {
 //   0 ok, 1 task failed or out of turns, 3 provider/auth problem,
 //   4 --resume thread not found, 5 context window full,
 //   124 timed out, 130/143/129 stopped by SIGINT/SIGTERM/SIGHUP.
-[[nodiscard]] int run(const Options& o);
+// Runs the agent and waits for it (and its signal watcher): `unlocked`.
+[[nodiscard]] int run(const maya::unlocked&, const Options& o);
 
 // "25" -> 25 (1..500). nullopt when it isn't one.
 [[nodiscard]] std::optional<int> parse_count(std::string_view s);

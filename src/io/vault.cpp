@@ -37,22 +37,24 @@ bool key_signed_in(Io io, const std::string& p) {
     auto it = s.provider_keys.find(p);
     return it != s.provider_keys.end() && !it->second.empty();
 }
-void key_clear(Io io, const std::string& p) {
+void key_clear(Io io, const maya::unlocked& cap, const std::string& p) {
     auto s = persistence::load_settings(io);
-    if (s.provider_keys.erase(p) > 0) persistence::save_settings(io, s);
+    if (s.provider_keys.erase(p) > 0) persistence::save_settings(io, cap, s);
 }
 
-void noop_after(Io, const std::string&) {}
+void noop_after(Io, const maya::below<maya::leaf>&, const std::string&) {}
 
 // ── Per-kind rows ────────────────────────────────────────────────────────
 constexpr Desc kAnthropic{
     .id           = "anthropic",
     .kind         = Kind::AnthropicFile,
     .is_signed_in = [](Io io, const std::string&) { return auth::anthropic_signed_in(io); },
-    .clear        = [](Io io, const std::string&) { (void)auth::clear_credentials(io); },
+    .clear        = [](Io io, const maya::unlocked&, const std::string&) {
+        (void)auth::clear_credentials(io);
+    },
     .resolve      = resolve_central,
     .current_label = label_from_registry,
-    .after_activate = [](Io io, const std::string&) {
+    .after_activate = [](Io io, const maya::below<maya::leaf>&, const std::string&) {
         // Re-seal into the keystore so the next resolve() reads the
         // switched-to account, not a stale cache.
         if (auto c = auth::load_credentials(io)) auth::save_credentials(io, *c);
@@ -65,14 +67,14 @@ constexpr Desc kChatGpt{
     .is_signed_in = [](Io /*io*/, const std::string&) {
         return provider::chatgpt::responses_available();
     },
-    .clear = [](Io /*io*/, const std::string&) {
-        (void)provider::chatgpt::clear_codex_credentials();
+    .clear = [](Io /*io*/, const maya::unlocked& cap, const std::string&) {
+        (void)provider::chatgpt::clear_codex_credentials(cap);
     },
     .resolve      = resolve_central,   // empty: the transport owns the token
     .current_label = label_from_registry,
-    .after_activate = [](Io /*io*/, const std::string&) {
+    .after_activate = [](Io /*io*/, const maya::below<maya::leaf>& cap, const std::string&) {
         if (auto c = provider::chatgpt::load_codex_credentials())
-            provider::chatgpt::save_codex_credentials(*c);
+            provider::chatgpt::save_codex_credentials(cap, *c);
     },
 };
 
@@ -82,12 +84,12 @@ constexpr Desc kCopilot{
     .is_signed_in = [](Io /*io*/, const std::string&) {
         return provider::copilot::signed_in();
     },
-    .clear = [](Io io, const std::string&) {
-        (void)provider::copilot::clear_credentials(io);
+    .clear = [](Io io, const maya::unlocked& cap, const std::string&) {
+        (void)provider::copilot::clear_credentials(io, cap);
     },
     .resolve      = resolve_central,
     .current_label = label_from_registry,
-    .after_activate = [](Io /*io*/, const std::string&) {
+    .after_activate = [](Io /*io*/, const maya::below<maya::leaf>&, const std::string&) {
         provider::copilot::invalidate_cached_token();
     },
 };
@@ -98,12 +100,12 @@ constexpr Desc kKimi{
     .is_signed_in = [](Io /*io*/, const std::string&) {
         return provider::kimi::signed_in();
     },
-    .clear = [](Io io, const std::string&) {
-        (void)provider::kimi::clear_credentials(io);
+    .clear = [](Io io, const maya::unlocked& cap, const std::string&) {
+        (void)provider::kimi::clear_credentials(io, cap);
     },
     .resolve      = resolve_central,
     .current_label = label_from_registry,
-    .after_activate = [](Io /*io*/, const std::string&) {
+    .after_activate = [](Io /*io*/, const maya::below<maya::leaf>&, const std::string&) {
         provider::kimi::invalidate_cached_token();
     },
 };

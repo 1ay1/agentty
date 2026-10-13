@@ -39,6 +39,8 @@
 
 #include <functional>
 
+#include <maya/runtime.hpp>
+
 #include "agentty/store/store.hpp"
 
 namespace agentty::app::settings_cache {
@@ -46,13 +48,19 @@ namespace agentty::app::settings_cache {
 // Wrap a synchronous (load, save) pair into a write-behind (load, save) pair.
 // `install_deps` uses this so every Deps built anywhere gets the behaviour;
 // there is no opt-in to forget.
+//
+// Lock order: the cache is one LEAF lock. load and save take only it, so
+// they need `below<leaf>` (any caller holding no leaf). The disk side runs
+// on the drain worker with its own `unlocked`. flush/invalidate/shutdown
+// wait for that worker, so they need `unlocked`.
 struct Seam {
-    std::function<store::Settings()>            load;
-    std::function<void(const store::Settings&)> save;
+    std::function<store::Settings(const maya::below<maya::leaf>&)>              load;
+    std::function<void(const maya::below<maya::leaf>&, const store::Settings&)> save;
 };
 
-[[nodiscard]] Seam wrap(std::function<store::Settings()> load_from_disk,
-                        std::function<void(const store::Settings&)> save_to_disk);
+[[nodiscard]] Seam wrap(
+    const maya::unlocked& cap, std::function<store::Settings()> load_from_disk,
+    std::function<void(const maya::unlocked&, const store::Settings&)> save_to_disk);
 
 // Drop the cached value so the next `load` faults in from disk again.
 //
@@ -65,13 +73,13 @@ struct Seam {
 //
 // Drains any queued write first, so an in-flight save cannot land on disk
 // AFTER the bypassing write and re-clobber it.
-void invalidate() noexcept;
+void invalidate(const maya::unlocked&) noexcept;
 
 // Block until every queued write has hit disk. Called from the quit path.
 // Never throws; safe to call when nothing is queued or nothing was wrapped.
-void flush() noexcept;
+void flush(const maya::unlocked&) noexcept;
 
 // Stop the worker and drain. Idempotent; called during teardown.
-void shutdown() noexcept;
+void shutdown(const maya::unlocked&) noexcept;
 
 } // namespace agentty::app::settings_cache

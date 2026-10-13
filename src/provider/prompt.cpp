@@ -53,10 +53,7 @@ namespace {
 // so worst case ~192 KiB of process memory.
 //
 // Concurrency: the system prompt is built on the stream worker thread
-// (Cmd::stream's task body). Two concurrent stream calls against the
-// same Anthropic endpoint are serialized at the connection-pool layer,
-// so there's effectively one writer in practice — but the mutex
-// removes "in practice" from the contract.
+// (Cmd::stream's task body); the cache is a lock-free snapshot.
 [[nodiscard]] std::string read_memory_cached(const std::filesystem::path& p) {
     // Keyed on plain values (path string, mtime ticks) so they cross into
     // guarded<T> as Sendable arguments.
@@ -65,7 +62,9 @@ namespace {
         std::string  content;
     };
     using Cache = std::unordered_map<std::string, Entry>;
-    static maya::guarded<Cache> cache;
+    // Read-mostly, replaced per entry: a lock-free snapshot, so building a
+    // prompt needs no capability.
+    static maya::snapshot<Cache> cache;
 
     std::string     key = p.string();
     std::error_code ec;
@@ -74,25 +73,30 @@ namespace {
     if (ec) {
         // File missing / unreadable — drop any previous cache entry so
         // a re-creation later is observed.
-        cache.with([](Cache& c, std::string k) { c.erase(k); }, std::move(key));
+        if (cache.load()->contains(key))
+            (void)cache.update([](const Cache& old, const std::string& k) {
+                Cache c = old;
+                c.erase(k);
+                return c;
+            }, std::move(key));
         return {};
     }
     const std::int64_t now_mtime = mt.time_since_epoch().count();
 
-    if (auto hit = cache.read(
-            [](const Cache& c, std::string k, std::int64_t m) -> std::optional<std::string> {
-                auto it = c.find(k);
-                if (it != c.end() && it->second.mtime == m) return it->second.content;
-                return std::nullopt;
-            },
-            key, now_mtime))
-        return *hit;
+    {
+        const auto c = cache.load();
+        auto it = c->find(key);
+        if (it != c->end() && it->second.mtime == now_mtime) return it->second.content;
+    }
 
-    // Cache miss or stale — read outside the lock so a slow NFS read
+    // Cache miss or stale — read with no lock held so a slow NFS read
     // doesn't block other paths' cache hits.
     std::string body = read_optional_memory(p);
-    cache.with([](Cache& c, std::string k, Entry e) { c[std::move(k)] = std::move(e); },
-               std::move(key), Entry{now_mtime, body});
+    (void)cache.update([](const Cache& old, const std::string& k, const Entry& e) {
+        Cache c = old;
+        c[k] = e;
+        return c;
+    }, std::move(key), Entry{now_mtime, body});
     return body;
 }
 

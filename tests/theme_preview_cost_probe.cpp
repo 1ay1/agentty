@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
     const int msgs = argc > 1 ? std::atoi(argv[1]) : 1000;
 
     app::install_deps(app::Deps{
-        .stream = [](provider::Request, provider::EventSink) {},
+        .stream = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread = [](const Thread&) {},
         .load_threads = [] { return std::vector<Thread>{}; },
         .load_thread = [](const ThreadId&) { return std::optional<Thread>{}; },

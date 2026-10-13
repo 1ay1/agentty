@@ -420,24 +420,36 @@ ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
 // this one is held. These can't: mcp-cpp holds no locks and starts nothing
 // (its concurrency allowlist is empty), and every with() body in it only
 // reads and writes ToolState. So the one callable type is opted in here.
+//
+// Lock order: the state is a LEAF. StateAccess::with is mcp-cpp's virtual,
+// called from inside a tool body with a signature it fixes, so it can't be
+// handed a capability; it re-states one here, the single reviewed root for
+// mcp-cpp's state callback (tests/lint/allowlist.txt). Sound because the
+// only caller is mcp-cpp tool code, which holds no lock of ours: every
+// agentty lock body is a captureless function over its own value and can't
+// reach a tool body.
 using StateFn    = std::function<void(mt::ToolState&)>;
 using StateFnRef = tool_state::FnRef;
 
 class GuardedToolState final : public mt::StateAccess {
   public:
     explicit GuardedToolState(std::filesystem::path home) {
-        st_.with([](mt::ToolState& s, std::filesystem::path h) { s.home = std::move(h); },
-                 std::move(home));
+        maya::thread_root([&](const maya::unlocked& cap) {
+            st_.with(cap, [](mt::ToolState& s, std::filesystem::path h) { s.home = std::move(h); },
+                     std::move(home));
+        });
     }
     void with(const StateFn& f) override {
         auto ws    = util::workspace_root();
         auto roots = util::read_roots_now();
-        st_.with([](mt::ToolState& s, StateFnRef fn,
-                    std::filesystem::path w, std::vector<std::filesystem::path> r) {
-            s.workspace_root = std::move(w);
-            s.read_roots     = std::move(r);
-            (*fn.fn)(s);
-        }, StateFnRef{&f}, std::move(ws), std::move(roots));
+        maya::thread_root([&](const maya::unlocked& cap) {
+            st_.with(cap, [](mt::ToolState& s, StateFnRef fn,
+                             std::filesystem::path w, std::vector<std::filesystem::path> r) {
+                s.workspace_root = std::move(w);
+                s.read_roots     = std::move(r);
+                (*fn.fn)(s);
+            }, StateFnRef{&f}, std::move(ws), std::move(roots));
+        });
     }
   private:
     maya::guarded<mt::ToolState> st_;
@@ -532,7 +544,8 @@ std::vector<ToolDef> build_mcp_tool_defs() {
         }
 
         std::string tool_name = spec.name;
-        def.execute = [provider, tool_name](const nlohmann::json& args_in,
+        def.execute = [provider, tool_name](const maya::unlocked& cap,
+                                            const nlohmann::json& args_in,
                                             const CallContext& ctx) -> ExecResult {
             // Canonify alias keys HERE, at the dispatch boundary.
             //
@@ -581,10 +594,10 @@ std::vector<ToolDef> build_mcp_tool_defs() {
             if (tool_name == "read" || tool_name == "edit" ||
                 tool_name == "write") {
                 if (auto it = args.find("path"); it != args.end() && it->is_string())
-                    rag::feedback::note_file_opened(it->get_ref<const std::string&>());
+                    rag::feedback::note_file_opened(cap, it->get_ref<const std::string&>());
                 else if (auto fp = args.find("file_path");
                          fp != args.end() && fp->is_string())
-                    rag::feedback::note_file_opened(fp->get_ref<const std::string&>());
+                    rag::feedback::note_file_opened(cap, fp->get_ref<const std::string&>());
             }
             // TRUST HANDOFF GATE. Before the bytes land, not after.
             //

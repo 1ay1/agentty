@@ -5,10 +5,10 @@
 // ↑/↓ — the only exits were Enter/Esc, which nothing on screen advertised.
 // Drives the REAL reducers (update) and the real view (render), with a
 // watchdog so any genuine hang fails with exit 42 instead of wedging ctest.
-#include <csignal>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <unistd.h>
+#include <thread>
 
 #include <maya/print.hpp>
 #include <maya/core/render_context.hpp>
@@ -43,14 +43,17 @@ static void render_once(const Model& m, const char* what) {
 }
 
 int main() {
-    alarm(10);   // watchdog: any hang -> SIGALRM kills us, exit != 0
-    signal(SIGALRM, [](int) {
+    // Watchdog: any hang -> exit 42. A detached thread rather than
+    // alarm()/SIGALRM so it works on Windows too; it dies with the process
+    // when main returns normally.
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::seconds(10));
         std::fprintf(stderr, "HANG DETECTED (watchdog fired)\n");
-        _exit(42);
-    });
+        std::_Exit(42);
+    }).detach();
 
     app::install_deps(app::Deps{
-        .stream         = [](auto, auto) {},
+        .stream         = [](const maya::unlocked&, auto, auto) {},
         .save_thread    = [](const Thread&) {},
         .delete_thread  = [](const auto&) {},
         .load_threads   = [] { return std::vector<Thread>{}; },

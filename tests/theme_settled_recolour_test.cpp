@@ -132,6 +132,12 @@ std::string render_to_fixpoint(maya::StreamingMarkdown& md) {
 } // namespace
 
 int main() {
+    // These compare painted bytes across palettes; a NO_COLOR in the
+    // caller's env (CI, agent shells, a console with no VT) would make every
+    // scheme identical. MAYA_COLOR is maya's documented deterministic-test
+    // override (see detect_color_level).
+    ::unsetenv("NO_COLOR");
+    ::setenv("MAYA_COLOR", "truecolor", 1);
     std::printf("=== theme_idle_async_parse_test ===\n\n");
 
     const maya::Theme* dracula = ui_prefs::find_scheme("Dracula");

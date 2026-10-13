@@ -54,10 +54,24 @@ static int g_failures = 0;
         }                                                                    \
     } while (0)
 
+// Remove a test tree, leaving it first: Windows refuses to delete a
+// directory that is any process's current directory, and the cases chdir
+// into their workspace. Never throws — cleanup must not kill the run.
+static void rm_tree(const fs::path& p) {
+    std::error_code ec;
+    const fs::path cwd = fs::current_path(ec);
+    if (!ec && !p.empty()) {
+        const auto rel = cwd.lexically_relative(p);
+        if (!rel.empty() && *rel.begin() != "..")
+            fs::current_path(fs::temp_directory_path(), ec);
+    }
+    fs::remove_all(p, ec);
+}
+
 static fs::path make_workspace() {
     const fs::path tmp =
         fs::temp_directory_path() / "agentty_agents_md_test_workspace";
-    fs::remove_all(tmp);
+    rm_tree(tmp);
     fs::create_directories(tmp);
     return tmp;
 }
@@ -73,7 +87,7 @@ static void test_missing_returns_empty() {
     fs::current_path(ws);
     const std::string r = wire::agents_md_block("intro", workspace_root());
     CHECK(r.empty());
-    fs::remove_all(ws);
+    rm_tree(ws);
 }
 
 static void test_wraps_content() {
@@ -94,7 +108,7 @@ static void test_wraps_content() {
     CHECK(r.find("ctest") != std::string::npos);
     // No nested file → no <agents-md-package> block.
     CHECK(r.find("<agents-md-package>") == std::string::npos);
-    fs::remove_all(ws);
+    rm_tree(ws);
 }
 
 static void test_truncates_at_cap() {
@@ -128,7 +142,7 @@ static void test_truncates_at_cap() {
     // -- never arrives, while the author watches the top of their file take
     // effect and reasonably assumes the whole thing did.
     CHECK(body.find("NOT read") != std::string::npos);
-    fs::remove_all(ws);
+    rm_tree(ws);
 }
 
 static void test_uses_project_root_not_process_cwd() {
@@ -139,7 +153,7 @@ static void test_uses_project_root_not_process_cwd() {
     // one is NOT.
     const auto ws    = make_workspace();
     const auto other = fs::temp_directory_path() / "agentty_agents_md_test_other";
-    fs::remove_all(other);
+    rm_tree(other);
     fs::create_directories(other);
     set_workspace_root(::agentty::IoAccess::grant(), ws);
     write_file(ws / "AGENTS.md",    "workspace-root-AGENTS");
@@ -154,8 +168,8 @@ static void test_uses_project_root_not_process_cwd() {
     // (project_root() falls back to workspace_root), so no nested block.
     CHECK(r.find("<agents-md-package>") == std::string::npos);
     fs::current_path(fs::temp_directory_path());
-    fs::remove_all(ws);
-    fs::remove_all(other);
+    rm_tree(ws);
+    rm_tree(other);
 }
 
 // ── Nested monorepo walk tests ───────────────────────────────────────────
@@ -179,7 +193,7 @@ static void test_nested_overrides_root() {
     CHECK(r.find("<agents-md-package>") != std::string::npos);
     CHECK(r.find("auth-package guidance") != std::string::npos);
     CHECK(r.find("</agents-md-package>") != std::string::npos);
-    fs::remove_all(ws);
+    rm_tree(ws);
 }
 
 static void test_no_nested_when_at_root() {
@@ -193,7 +207,7 @@ static void test_no_nested_when_at_root() {
     CHECK(r.find("<agents-md>") != std::string::npos);
     CHECK(r.find("root-only guidance") != std::string::npos);
     CHECK(r.find("<agents-md-package>") == std::string::npos);
-    fs::remove_all(ws);
+    rm_tree(ws);
 }
 
 static void test_walk_stops_at_workspace_boundary() {
@@ -214,7 +228,7 @@ static void test_walk_stops_at_workspace_boundary() {
     CHECK(r.find("<agents-md>") != std::string::npos);
     CHECK(r.find("root guidance") != std::string::npos);
     CHECK(r.find("<agents-md-package>") == std::string::npos);
-    fs::remove_all(ws);
+    rm_tree(ws);
 }
 
 static void test_nested_truncates_at_cap() {
@@ -241,7 +255,7 @@ static void test_nested_truncates_at_cap() {
     const auto block_size = pkg_end - pkg_start;
     // 64 KiB content + ~300 bytes for tags + intro line.
     CHECK(block_size <= 64u * 1024u + 500u);
-    fs::remove_all(ws);
+    rm_tree(ws);
 }
 
 static void test_dedup_when_same_file() {
@@ -262,7 +276,7 @@ static void test_dedup_when_same_file() {
     CHECK(r.find("<agents-md>") != std::string::npos);
     CHECK(r.find("only-one-file") != std::string::npos);
     CHECK(r.find("<agents-md-package>") == std::string::npos);
-    fs::remove_all(ws);
+    rm_tree(ws);
 }
 
 static void test_nearest_wins_not_deepest() {
@@ -288,7 +302,7 @@ static void test_nearest_wins_not_deepest() {
     // Nearest is auth-level, NOT packages-level.
     CHECK(r.find("auth-level guidance") != std::string::npos);
     CHECK(r.find("packages-level guidance") == std::string::npos);
-    fs::remove_all(ws);
+    rm_tree(ws);
 }
 
 // ── Global scope tests ───────────────────────────────────────────────────
@@ -315,8 +329,8 @@ static void test_global_agents_md() {
     CHECK(r.find("root guidance") != std::string::npos);
     // Global block should come BEFORE root block.
     CHECK(r.find("<agents-md-global>") < r.find("<agents-md>"));
-    fs::remove_all(ws);
-    fs::remove_all(fake_home);
+    rm_tree(ws);
+    rm_tree(fake_home);
 }
 
 static void test_global_only_no_root() {
@@ -337,8 +351,8 @@ static void test_global_only_no_root() {
     CHECK(r.find("global-only guidance") != std::string::npos);
     CHECK(r.find("<agents-md>") == std::string::npos);  // no root block
     CHECK(r.find("<agents-md-package>") == std::string::npos);
-    fs::remove_all(ws);
-    fs::remove_all(fake_home);
+    rm_tree(ws);
+    rm_tree(fake_home);
 }
 
 static void test_no_global_when_not_provided() {
@@ -352,7 +366,7 @@ static void test_no_global_when_not_provided() {
     CHECK(r.find("<agents-md>") != std::string::npos);
     CHECK(r.find("root guidance") != std::string::npos);
     CHECK(r.find("<agents-md-global>") == std::string::npos);
-    fs::remove_all(ws);
+    rm_tree(ws);
 }
 
 static void test_global_truncated_at_cap() {
@@ -377,8 +391,8 @@ static void test_global_truncated_at_cap() {
     const auto block_size = glb_end - glb_start;
     // 64 KiB content + ~300 bytes for tags + intro line.
     CHECK(block_size <= 64u * 1024u + 500u);
-    fs::remove_all(ws);
-    fs::remove_all(fake_home);
+    rm_tree(ws);
+    rm_tree(fake_home);
 }
 
 static void test_resolve_global_agentty_wins() {
@@ -413,7 +427,7 @@ static void test_resolve_global_agentty_wins() {
     else unsetenv("HOME");
     if (!saved_agentty_home.empty())
         setenv("AGENTTY_HOME", saved_agentty_home.c_str(), 1);
-    fs::remove_all(fake_home);
+    rm_tree(fake_home);
 }
 
 static void test_resolve_global_fallback_to_agents_dir() {
@@ -431,7 +445,7 @@ static void test_resolve_global_fallback_to_agents_dir() {
     CHECK(content.find("agents-fallback") != std::string::npos);
     if (orig_home) setenv("HOME", orig_home, 1);
     else unsetenv("HOME");
-    fs::remove_all(fake_home);
+    rm_tree(fake_home);
 }
 
 static void test_resolve_global_both_missing() {
@@ -445,7 +459,7 @@ static void test_resolve_global_both_missing() {
     CHECK(resolved.empty());
     if (orig_home) setenv("HOME", orig_home, 1);
     else unsetenv("HOME");
-    fs::remove_all(fake_home);
+    rm_tree(fake_home);
 }
 
 int main() {

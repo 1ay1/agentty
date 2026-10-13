@@ -80,7 +80,7 @@ a::InitializeParams make_init() {
 
 // Get (or lazily spawn) the live agent for `agent_id`. Returns nullptr and
 // fills `err` on any launch failure.
-std::shared_ptr<LiveAgent> acquire(const std::string& agent_id, std::string& err) {
+std::shared_ptr<LiveAgent> acquire(const maya::unlocked& cap, const std::string& agent_id, std::string& err) {
     if (auto hit = cached(agent_id)) return hit;
 
     auto spec = resolve_acp_agent(agent_id);
@@ -123,7 +123,7 @@ std::shared_ptr<LiveAgent> acquire(const std::string& agent_id, std::string& err
     live->backend = std::make_unique<ExternalAcpBackend>(std::move(opts));
 
     std::string spawn_err;
-    live->agent = spawn_acp_agent(spec->argv(), make_init(),
+    live->agent = spawn_acp_agent(cap, spec->argv(), make_init(),
                                   live->backend->make_dispatch(), spawn_err);
     if (!live->agent.ok()) {
         err = "failed to launch ACP agent '" + agent_id + "': " + spawn_err;
@@ -145,11 +145,11 @@ std::shared_ptr<LiveAgent> acquire(const std::string& agent_id, std::string& err
 
 } // namespace
 
-StreamResult stream_external_acp(const std::string& agent_id, Request req, EventSink sink) {
+StreamResult stream_external_acp(const maya::unlocked& cap, const std::string& agent_id, Request req, EventSink sink) {
     sink(StreamStarted{});
 
     std::string err;
-    auto live = acquire(agent_id, err);
+    auto live = acquire(cap, agent_id, err);
     if (!live) {
         StreamError e; e.message = err;
         sink(std::move(e));
@@ -256,7 +256,7 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
     // ACP's per-round TurnResult (acp_backend.hpp) is the ADJACENT layer's
     // outcome; fold it onto the shared provider StreamResult so the ACP arm
     // reports through the same value type as the native transports.
-    TurnResult res = live->backend->prompt(req, tsink, cancel);
+    TurnResult res = live->backend->prompt(cap, req, tsink, cancel);
 
     // Some adapters omit a final status update on cancellation/early turn
     // settlement. Close each remaining card exactly once using its latest
@@ -292,7 +292,7 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
     return sr;
 }
 
-void release_acp_agents() noexcept {
+void release_acp_agents(const maya::unlocked&) noexcept {
     auto drained = g_cache().take();
     if (!drained) return;
     // Each agent's teardown is bounded even for a wedged agent.

@@ -69,8 +69,8 @@ Thread thread_with_image(const std::string& bytes) {
 TEST_CASE("lazy image: save → load round-trips the exact bytes") {
     const std::string original = payload(64u * 1024u);
     Thread t = thread_with_image(original);
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
     auto loaded = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(loaded.has_value());
@@ -85,8 +85,8 @@ TEST_CASE("lazy image: save → load round-trips the exact bytes") {
 TEST_CASE("lazy image: loading does NOT materialise the bytes") {
     const std::string original = payload(32u * 1024u, 7);
     Thread t = thread_with_image(original);
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
     auto loaded = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(loaded.has_value());
@@ -106,8 +106,8 @@ TEST_CASE("lazy image: loading does NOT materialise the bytes") {
 TEST_CASE("lazy image: a copy of an unmaterialised image still resolves") {
     const std::string original = payload(16u * 1024u, 3);
     Thread t = thread_with_image(original);
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
     auto loaded = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(loaded.has_value());
@@ -125,15 +125,15 @@ TEST_CASE("lazy image: re-saving an unmaterialised image keeps the payload") {
     // first save after a switch would wipe every image in the thread.
     const std::string original = payload(48u * 1024u, 11);
     Thread t = thread_with_image(original);
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
     auto loaded = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(loaded.has_value());
     CHECK(!loaded->messages[0].images[0].materialised());
 
     // Save it straight back WITHOUT ever touching bytes().
-    persistence::save_thread(::agentty::IoAccess::grant(), *loaded);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), *loaded);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
     auto again = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(again.has_value());
@@ -237,8 +237,8 @@ TEST_CASE("lazy image: a legacy inline image migrates to a blob on save") {
     auto legacy = persistence::load_thread_file(::agentty::IoAccess::grant(), path);
     REQUIRE(legacy.has_value());
     CHECK(!legacy->messages[0].images[0].materialised());
-    persistence::save_thread(::agentty::IoAccess::grant(), *legacy);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), *legacy);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
     // The save rewrote the thread in the LOG format, so the legacy
     // document is gone and the payload now lives in the blob store.
@@ -283,8 +283,8 @@ TEST_CASE("lazy image: many threads reading one unmaterialised image") {
     // sees the exact bytes.
     const std::string original = payload(256u * 1024u, 11);
     Thread t = thread_with_image(original);
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
     auto loaded = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
     REQUIRE(loaded.has_value());
 

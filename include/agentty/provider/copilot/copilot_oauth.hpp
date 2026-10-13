@@ -26,6 +26,7 @@
 
 #include "agentty/auth/auth.hpp"   // OAuthError
 #include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 namespace agentty::provider::copilot {
 
@@ -94,7 +95,8 @@ using CancelProbe    = std::stop_token;
 // can display it (+ open the browser), then poll until the user authorises.
 // Persists the resulting GithubToken on success. Blocking; honours `cancelled`.
 [[nodiscard]] std::expected<GithubToken, OAuthError>
-login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled);
+login(const maya::below<maya::leaf>&, int timeout_s, DeviceCodeSink on_device_code,
+      CancelProbe cancelled);
 
 // The account's real plan + quota entitlement, from GET
 // api.github.com/copilot_internal/user — the AUTHORITATIVE source for which
@@ -113,7 +115,8 @@ struct Entitlement {
 // Fetch (and briefly cache) the account entitlement. Best-effort: on any
 // failure returns {known=false}, and callers should degrade PERMISSIVELY (show
 // everything) rather than hide models on a transient network blip.
-[[nodiscard]] Entitlement account_entitlement();
+// Lock order: takes only leaves (its cache, the creds store).
+[[nodiscard]] Entitlement account_entitlement(const maya::below<maya::leaf>&);
 
 // ── Auto model selection ────────────────────────────────────────────
 // GitHub's "Auto" mode (POST {api}/models/session) is how Free/Limited plans
@@ -144,24 +147,29 @@ inline constexpr const char* kAutoApiVersion = "2026-08-01";
 
 // Return a valid Auto session, fetching/refreshing as needed. nullopt when not
 // signed in or the endpoint is unavailable. Single-flight cached.
-[[nodiscard]] std::optional<AutoSession> auto_session();
-void invalidate_auto_session();
+// Lock order: takes copilot.auto_session, then (inside) auth.refresh and the
+// creds store. Callable holding nothing ranked at or above copilot_auto.
+[[nodiscard]] std::optional<AutoSession> auto_session(const locks::below_copilot_auto&);
+void invalidate_auto_session(const locks::below_copilot_auto&);
 
 // ── Persistence ──────────────────────────────────────────────────────────
-[[nodiscard]] std::optional<GithubToken> load_github_token();
-bool save_github_token(const GithubToken&);
-bool clear_credentials(Io);                 // wipes both the ghu_ token and cache
+// The creds store is a leaf lock.
+[[nodiscard]] std::optional<GithubToken> load_github_token(const maya::below<maya::leaf>&);
+bool save_github_token(const maya::below<maya::leaf>&, const GithubToken&);
+bool clear_credentials(Io, const maya::below<maya::leaf>&);   // wipes the ghu_ token and cache
 [[nodiscard]] std::filesystem::path credentials_path();
 
 // True when a GitHub token is on disk (i.e. the user has signed in). Cheap; no
 // network. The proxy token may still need a first exchange.
-[[nodiscard]] bool signed_in();
+[[nodiscard]] bool signed_in();   // lock-free; safe from views
 
 // ── Token exchange / refresh ─────────────────────────────────────────────
 // Return a VALID Copilot proxy token, exchanging or refreshing from the stored
 // ghu_ token as needed. Single-flight + cross-process de-duplicated. nullopt
 // when not signed in or the exchange fails (chat disabled, network, revoked).
-[[nodiscard]] std::optional<CopilotToken> fresh_token();
+// Lock order: takes auth.refresh, then the creds store (leaf). Callable
+// holding nothing ranked at or above auth_refresh.
+[[nodiscard]] std::optional<CopilotToken> fresh_token(const locks::below_auth_refresh&);
 
 // Force a re-exchange on the next fresh_token() (called after a 401 from the
 // inference endpoint, in case the cached proxy token was revoked early).
@@ -173,12 +181,12 @@ void invalidate_cached_token();
 // reliable catalog signal (policy.state "enabled" still 400s on free tiers). So
 // we LEARN: when a turn 400s as unsupported, record the model id; list_models
 // then demotes it out of the usable set. Persisted per config dir.
-void note_unsupported_model(const std::string& model_id);
-[[nodiscard]] bool is_unsupported_model(const std::string& model_id);
+void note_unsupported_model(const maya::below<maya::leaf>&, const std::string& model_id);
+[[nodiscard]] bool is_unsupported_model(const maya::below<maya::leaf>&, const std::string& model_id);
 // Also record models that DID work, so a known-good one is never demoted by a
 // stale/transient 400.
-void note_supported_model(const std::string& model_id);
-[[nodiscard]] bool is_supported_model(const std::string& model_id);
+void note_supported_model(const maya::below<maya::leaf>&, const std::string& model_id);
+[[nodiscard]] bool is_supported_model(const maya::below<maya::leaf>&, const std::string& model_id);
 
 // ── Pure helpers (exposed for tests) ─────────────────────────────────────
 // Parse the `/copilot_internal/v2/token` success JSON into a CopilotToken,

@@ -155,8 +155,14 @@ maya::published<ConnectionPool>& g_retired() {
     return r;
 }
 
-maya::guarded<bool>& g_connecting() {
-    static maya::guarded<bool> c{lock_levels::kMcpConnecting};
+// Single-flight for the WHOLE connect-and-swap: no two builds run at once.
+// Not a jaal lock: mcp_tools() is reached from the tool registry's lazy
+// build, which has dozens of callers and no capability, and the build
+// itself blocks for seconds (spawning servers, RPC handshakes). A gate a
+// loser waits on in short sleeps holds nothing, so it can't be half of a
+// lock-order cycle; the build never waits for anything a waiter holds.
+std::atomic<bool>& g_connecting() {
+    static std::atomic<bool> c{false};
     return c;
 }
 
@@ -326,10 +332,14 @@ void read_one_config(const fs::path& file, const scope::Source& src,
 
 // MCP servers the ACP client sent with session/new (Zed's context servers,
 // JetBrains' MCP settings), in mcp.json shape. Process-wide: one editor drives
-// one agent process.
-maya::guarded<json>& client_servers() {
-    static maya::guarded<json> s{json::object()};
+// one agent process. A snapshot of the serialised object: replaced whole, and
+// read from the config walk that the (capability-free) build runs.
+maya::snapshot<std::string>& client_servers() {
+    static maya::snapshot<std::string> s{std::string{"{}"}};
     return s;
+}
+json client_servers_json() {
+    try { return json::parse(*client_servers().load()); } catch (...) { return json::object(); }
 }
 
 void read_one_doc(const json& doc, const scope::Source& src, const fs::path& file,
@@ -398,7 +408,7 @@ read_config_servers() {
     // Servers the editor handed us over ACP come first: the user set them up
     // in their editor, which is a stronger statement than a file we found.
     {
-        const json extra = client_servers().read([](const json& j) { return j; });
+        const json extra = client_servers_json();
         if (extra.is_object() && !extra.empty()) {
             scope::Source src;
             src.locus = scope::Locus::Explicit;   // trusted: the editor vouches
@@ -672,7 +682,8 @@ tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t,
     def.always_expose = policy.pin.contains(mcp_bare_name(exposed));
     def.output_truncation = tools::OutputTruncation::HeadTail;
 
-    def.execute = [pool, exposed](const json& args, const tools::CallContext& ctx) -> tools::ExecResult {
+    def.execute = [pool, exposed](const maya::unlocked&, const json& args,
+                                  const tools::CallContext& ctx) -> tools::ExecResult {
         try {
             ::mcp::cap::Result r;
             // Registry dispatch resolves a provider through its own
@@ -724,7 +735,7 @@ tools::ToolDef make_read_resource_tool(PoolHandle pool) {
     def.origin_id = "resources";
     def.scheduling_effects = def.effects;
     def.max_output_chars = 30'000;
-    def.execute = [pool](const json& args, const tools::CallContext&) -> tools::ExecResult {
+    def.execute = [pool](const maya::unlocked&, const json& args, const tools::CallContext&) -> tools::ExecResult {
         const std::string uri = args.is_object() ? args.value("uri", std::string{}) : std::string{};
         const bool want_list  = uri.empty() || (args.is_object() && args.value("list", false));
         try {
@@ -835,7 +846,7 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
     def.origin_id = "prompts";
     def.scheduling_effects = def.effects;
     def.max_output_chars = 30'000;
-    def.execute = [pool](const json& args, const tools::CallContext&) -> tools::ExecResult {
+    def.execute = [pool](const maya::unlocked&, const json& args, const tools::CallContext&) -> tools::ExecResult {
         const std::string name = args.is_object() ? args.value("name", std::string{}) : std::string{};
         const bool want_list   = name.empty() || (args.is_object() && args.value("list", false));
         try {
@@ -971,7 +982,7 @@ tools::ToolDef make_search_tools_tool(PoolHandle pool) {
     def.scheduling_effects = def.effects;
     def.max_output_chars = 12'000;
     def.always_expose = true;
-    def.execute = [pool](const json& args, const tools::CallContext&) -> tools::ExecResult {
+    def.execute = [pool](const maya::unlocked&, const json& args, const tools::CallContext&) -> tools::ExecResult {
         const std::string query = args.value("query", std::string{});
         if (query.empty())
             return std::unexpected(tools::ToolError::invalid_args("query is required"));
@@ -1048,7 +1059,7 @@ tools::ToolDef make_call_tool(PoolHandle pool) {
     def.scheduling_effects = tools::EffectSet{tools::Effect::Exec};
     def.max_output_chars = 30'000;
     def.always_expose = true;
-    def.execute = [pool](const json& args, const tools::CallContext& ctx) -> tools::ExecResult {
+    def.execute = [pool](const maya::unlocked&, const json& args, const tools::CallContext& ctx) -> tools::ExecResult {
         const std::string name = args.value("name", std::string{});
         const json call_args = args.contains("arguments") && args["arguments"].is_object()
             ? args["arguments"] : json::object();
@@ -1159,7 +1170,7 @@ std::vector<tools::ToolDef> passthrough_tools() {
             def.effects  = tools::EffectSet{tools::Effect::Net};
             def.scheduling_effects = def.effects;
             def.max_output_chars   = 30'000;
-            def.execute = [url, name = pt.name, parse_pt_url](const json& args, const tools::CallContext&)
+            def.execute = [url, name = pt.name, parse_pt_url](const maya::unlocked&, const json& args, const tools::CallContext&)
                 -> tools::ExecResult {
                 const PtUrl u = parse_pt_url(url);
                 if (!u.ok)
@@ -1338,22 +1349,26 @@ void set_client_servers(const json& servers) {
     // A union over sessions: an editor normally sends the same list each
     // time, and a session that sends fewer must not unplug another's.
     // A server sent again with a new spec replaces the old one.
-    const bool changed = client_servers().with([](json& s, json n) {
-        if (!n.is_object()) return false;
-        bool diff = false;
+    if (!servers.is_object()) return;
+    const std::string before = *client_servers().load();
+    const auto after = client_servers().update([](const std::string& cur, const std::string& add) {
+        json s = json::object();
+        try { s = json::parse(cur); } catch (...) {}
+        const json n = json::parse(add);
         for (auto it = n.begin(); it != n.end(); ++it) {
-            auto cur = s.find(it.key());
-            if (cur == s.end() || *cur != it.value()) { s[it.key()] = it.value(); diff = true; }
+            auto c = s.find(it.key());
+            if (c == s.end() || *c != it.value()) s[it.key()] = it.value();
         }
-        return diff;
-    }, servers.is_object() ? servers : json::object());
+        return s.dump();
+    }, servers.dump());
+    const bool changed = *after != before;
     // Through the registry, so the tool catalog the model sees is rebuilt too.
     if (changed) (void)::agentty::tools::reload_mcp_plugins();
 }
 
 std::vector<std::string> configured_server_names_from_client() {
     std::vector<std::string> out;
-    const json s = client_servers().read([](const json& j) { return j; });
+    const json s = client_servers_json();
     for (auto it = s.begin(); it != s.end(); ++it) out.push_back(it.key());
     return out;
 }
@@ -1364,13 +1379,24 @@ std::vector<tools::ToolDef> build_pool(PoolHandle& out_pool);
 
 std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
     // Serialize the whole connect+swap — no two builds ever run at once.
-    // The handle crosses as a pointer-free value: build into a local, then
-    // hand it back.
     // build_pool publishes the pool itself, so out_pool reads it back.
-    auto defs = g_connecting().with([](bool&) {
+    auto& gate = g_connecting();
+    bool expected = false;
+    while (!gate.compare_exchange_weak(expected, true, std::memory_order_acquire)) {
+        // Block until the holder releases (atomic wait, not a sleep-poll).
+        if (expected) gate.wait(true, std::memory_order_acquire);
+        expected = false;
+    }
+    auto release = [&gate] {
+        gate.store(false, std::memory_order_release);
+        gate.notify_all();
+    };
+    std::vector<tools::ToolDef> defs;
+    try {
         PoolHandle built;
-        return build_pool(built);
-    });
+        defs = build_pool(built);
+    } catch (...) { release(); throw; }
+    release();
     // The replaced pool dies here, with no lock held.
     (void)g_retired().replace(nullptr);
     out_pool = current_pool();
@@ -1667,7 +1693,7 @@ PluginModel plugin_model() {
         std::vector<std::pair<std::string, std::string>> tools;  // (bare, desc)
     };
     using SeenMap = std::unordered_map<std::string, SeenEntry>;
-    static maya::guarded<SeenMap> s_seen;
+    static maya::snapshot<SeenMap> s_seen;
     // What the cache needs from config and the live pool, as plain values:
     // each configured server's command, and what each live server advertises.
     std::unordered_map<std::string, std::string> commands;
@@ -1680,10 +1706,11 @@ PluginModel plugin_model() {
     }
     // Prune entries for servers no longer configured (or whose command
     // changed: identity reuse), then record what live servers advertise.
-    // Returns a snapshot for the fallback below, so no lock is held there.
-    const SeenMap seen = s_seen.with(
-        [](SeenMap& m, std::unordered_map<std::string, std::string> cmds,
-           SeenMap adv) {
+    // Lock-free: plugin_model() is read from a view-side command.
+    const SeenMap seen = *s_seen.update(
+        [](const SeenMap& prev, const std::unordered_map<std::string, std::string>& cmds,
+           const SeenMap& adv) {
+            SeenMap m = prev;
             for (auto it = m.begin(); it != m.end();) {
                 auto cit = cmds.find(it->first);
                 if (cit == cmds.end() || cit->second != it->second.command)
@@ -1691,7 +1718,7 @@ PluginModel plugin_model() {
                 else
                     ++it;
             }
-            for (auto& [srv, ent] : adv) m[srv] = std::move(ent);
+            for (const auto& [srv, ent] : adv) m[srv] = ent;
             return m;
         },
         std::move(commands), std::move(advertised));

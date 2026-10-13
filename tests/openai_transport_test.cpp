@@ -1313,7 +1313,7 @@ TEST_CASE("bundled model seed when no key / fetch empty") {
 
     for (const char* id : {"xai", "mistral", "gemini", "fireworks",
                            "deepseek", "groq", "cerebras", "together"}) {
-        auto models = P::list_models_for(::agentty::IoAccess::grant(), P::parse_selection(id), none);
+        auto models = P::list_models_for(::agentty::IoAccess::grant(), agtest::cap(), P::parse_selection(id), none);
         CHECK(!models.empty());
         // The seed stamps the provider label so the picker groups it right.
         if (!models.empty())
@@ -1322,12 +1322,12 @@ TEST_CASE("bundled model seed when no key / fetch empty") {
 
     // A couple of concrete slugs land where expected (newest first).
     {
-        auto xai = P::list_models_for(::agentty::IoAccess::grant(), P::parse_selection("xai"), none);
+        auto xai = P::list_models_for(::agentty::IoAccess::grant(), agtest::cap(), P::parse_selection("xai"), none);
         CHECK(!xai.empty());
         if (!xai.empty()) CHECK(xai.front().id.value == "grok-4.6");
     }
     {
-        auto gem = P::list_models_for(::agentty::IoAccess::grant(), P::parse_selection("gemini"), none);
+        auto gem = P::list_models_for(::agentty::IoAccess::grant(), agtest::cap(), P::parse_selection("gemini"), none);
         CHECK(!gem.empty());
         if (!gem.empty()) CHECK(gem.front().id.value == "gemini-2.5-pro");
     }
@@ -1335,7 +1335,7 @@ TEST_CASE("bundled model seed when no key / fetch empty") {
     // Providers WITHOUT a seed (openrouter, custom hosts, locals) legitimately
     // stay empty with no key rather than showing guessed models.
     {
-        auto orr = P::list_models_for(::agentty::IoAccess::grant(), P::parse_selection("openrouter"), none);
+        auto orr = P::list_models_for(::agentty::IoAccess::grant(), agtest::cap(), P::parse_selection("openrouter"), none);
         CHECK(orr.empty());
     }
 }

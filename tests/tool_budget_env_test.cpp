@@ -46,7 +46,9 @@ static std::size_t demo_tools_on_wire() {
 }  // namespace (fold)
 
 int main() {
+#ifdef SIGPIPE   // Windows has no SIGPIPE: a broken pipe is a write error
     std::signal(SIGPIPE, SIG_IGN);
+#endif
     ::setenv("AGENTTY_MCP_CONNECT_TIMEOUT_MS", "5000", 1);
     ::unsetenv("AGENTTY_MCP_TOOL_BUDGET");   // section 1 asserts the default
 

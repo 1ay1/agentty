@@ -107,8 +107,8 @@ Cmd load_all_diffs(const std::vector<cp::Entry>& entries) {
     parts.reserve(entries.size());
     for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
         parts.push_back(Cmd::task_isolated(
-            [](maya::Sink<Msg> out, std::stop_token, int i, std::string id) {
-                auto d = workspace::checkpoint_summary(id);
+            [](const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token, int i, std::string id) {
+                auto d = workspace::checkpoint_summary(cap, id);
                 CheckpointDiffLoaded ev;
                 ev.index         = i;
                 ev.ok            = d.valid;

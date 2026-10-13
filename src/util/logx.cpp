@@ -24,6 +24,10 @@
   #include <fcntl.h>
   #include <sys/stat.h>
   #include <direct.h>     // _mkdir
+  #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <windows.h>
   #define AGT_WRITE  ::_write
   #define AGT_OPEN   ::_open
   #define AGT_LSEEK  ::_lseeki64
@@ -75,12 +79,15 @@ std::string g_path;                  // resolved path for log_file()
 // relaxed add per write; the actual rotation runs inside rotation().with
 // and re-checks there, so concurrent writers rotate exactly once.
 std::atomic<std::int64_t> g_bytes{0};
-// Leaked: a late log line during static teardown must not hit a dead lock.
+// Single-rotator flag. NOT a guarded<T>: emit() is called from inside other
+// locks' bodies all over the program (any AGT_LOG/dbglog under a leaf), and a
+// leaf guarded here would make every such log line a jaal lock-order fault
+// the moment the file crosses the threshold -- thrown inside this noexcept
+// path, i.e. std::terminate. Rotation is idempotent and optional (a writer
+// that loses the race just keeps appending), so a try-flag is all it needs:
+// no waiting, no nesting, nothing for the order checker to see.
 struct Rotation {};
-maya::guarded<Rotation>& rotation() {
-    static auto* r = new maya::guarded<Rotation>;
-    return *r;
-}
+std::atomic<bool> g_rotating{false};
 constexpr std::int64_t kRotateBytesDefault = 32ll * 1024 * 1024;
 
 }  // namespace
@@ -412,6 +419,27 @@ void parse_filter(std::string_view spec) noexcept {
     detail::g_ring_all.store(ring_all, std::memory_order_relaxed);
 }
 
+// Open a log file for appending. On Windows the CRT's _open shares the file
+// for read+write but NOT delete, and an open handle without
+// FILE_SHARE_DELETE makes every rename of the file fail — so rotation
+// (rename live -> .old while the sink is open) silently never happened and
+// the log grew without bound. Open through CreateFile with full sharing and
+// wrap the handle in a CRT fd so the rest of logx stays fd-based.
+int open_append(const char* path) noexcept {
+#if defined(_WIN32)
+    HANDLE h = ::CreateFileA(path, FILE_APPEND_DATA,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    const int fd = ::_open_osfhandle(reinterpret_cast<intptr_t>(h),
+                                     _O_WRONLY | _O_APPEND | _O_BINARY);
+    if (fd < 0) ::CloseHandle(h);
+    return fd;
+#else
+    return AGT_OPEN(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+#endif
+}
+
 void open_sink(const char* path) noexcept {
     if (!path || !*path) return;
     const std::int64_t limit =
@@ -423,14 +451,7 @@ void open_sink(const char* path) noexcept {
         std::remove(old.c_str());
         std::rename(path, old.c_str());
     }
-#if defined(_WIN32)
-    g_fd.store(AGT_OPEN(path, _O_WRONLY | _O_APPEND | _O_CREAT | _O_BINARY,
-                        _S_IREAD | _S_IWRITE),
-               std::memory_order_relaxed);
-#else
-    g_fd.store(AGT_OPEN(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600),
-               std::memory_order_relaxed);
-#endif
+    g_fd.store(open_append(path), std::memory_order_relaxed);
     if (g_fd.load(std::memory_order_relaxed) >= 0) g_path = path;
     // Seed the rotation counter with the existing size so an appended-to
     // file still rotates at the same absolute threshold.
@@ -454,7 +475,14 @@ void rotate_if_needed() noexcept {
     const std::int64_t limit =
         detail::g_rotate_bytes.load(std::memory_order_relaxed);
     if (g_bytes.load(std::memory_order_relaxed) <= limit) return;
-    rotation().with([](Rotation& r, std::int64_t lim) { rotate_locked(r, lim); }, limit);
+    bool expected = false;
+    if (!g_rotating.compare_exchange_strong(expected, true,
+                                            std::memory_order_acquire,
+                                            std::memory_order_relaxed))
+        return;   // another writer is rotating; it re-checks the size itself
+    Rotation r;
+    rotate_locked(r, limit);
+    g_rotating.store(false, std::memory_order_release);
 }
 
 void rotate_locked(Rotation&, std::int64_t limit) noexcept {
@@ -487,14 +515,7 @@ void rotate_locked(Rotation&, std::int64_t limit) noexcept {
     // writer racing the rotation lands its line in either the old file or
     // the new one — both correct, neither lost. Only the temporary nfd is
     // closed, and nothing else has ever seen it.
-#if defined(_WIN32)
-    const int nfd = AGT_OPEN(g_path.c_str(),
-                             _O_WRONLY | _O_APPEND | _O_CREAT | _O_BINARY,
-                             _S_IREAD | _S_IWRITE);
-#else
-    const int nfd = AGT_OPEN(g_path.c_str(),
-                             O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
-#endif
+    const int nfd = open_append(g_path.c_str());
     if (nfd >= 0) {
 #if defined(_WIN32)
         (void)::_dup2(nfd, g_fd.load(std::memory_order_relaxed));

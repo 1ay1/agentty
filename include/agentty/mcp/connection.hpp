@@ -10,6 +10,7 @@
 // A Link opens the channel. reconnect() asks it for a fresh one, so the
 // stdio and HTTP flavours differ only in their Link.
 
+#include <atomic>
 #include <chrono>
 #include <expected>
 #include <functional>
@@ -90,15 +91,17 @@ public:
 private:
     struct Live;   // the peer, the holder, the cached lists
 
-    // Make sure a healthy connection is up, reconnecting if needed. Returns
-    // the live state, or an error.
-    std::expected<std::shared_ptr<Live>, std::string> ensure_live();
-    std::shared_ptr<Live> connect();
+    // The capability-carrying core. The CapabilityProvider overrides above
+    // are the entry points (their signatures are mcp-cpp's) and mint the
+    // thread's root there; see connection.cpp's header comment.
+    ::mcp::cap::Result execute_impl(const maya::unlocked&, const ::mcp::cap::Request& req);
+    std::expected<std::shared_ptr<Live>, std::string> ensure_live(const maya::unlocked&);
+    std::shared_ptr<Live> connect(const maya::unlocked&);
     ::mcp::ClientHandlers handlers(std::weak_ptr<Live> live);
 
-    void refresh_tools(Live& l) const;
-    void refresh_resources(Live& l) const;
-    void refresh_prompts(Live& l) const;
+    void refresh_tools(const maya::unlocked&, Live& l) const;
+    void refresh_resources(const maya::unlocked&, Live& l) const;
+    void refresh_prompts(const maya::unlocked&, Live& l) const;
 
     ConnectionConfig          cfg_;
     Link                      link_;
@@ -108,8 +111,8 @@ private:
     // The live connection, swapped whole on reconnect. Readers take a
     // snapshot; a call keeps its snapshot alive for its duration.
     maya::published<Live> live_;
-    // One reconnect at a time.
-    maya::guarded<bool>   reconnecting_;
+    // One reconnect at a time (an atomic gate; see connection.cpp).
+    std::atomic<bool>     reconnecting_{false};
     // The host's list_changed callback, read from the peer's reader.
     maya::published<const ListChangedFn> on_changed_;
 };

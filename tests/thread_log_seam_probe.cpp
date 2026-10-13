@@ -15,6 +15,7 @@
 // hide. No arguments = no-op pass, so ctest costs nothing.
 
 #include <agentty/domain/conversation.hpp>
+#include "agtest_cap.hpp"
 #include <agentty/io/persistence.hpp>
 #include <agentty/io/thread_log.hpp>
 
@@ -136,7 +137,7 @@ int main(int argc, char** argv) {
 
     // 4. The picker walk must show exactly one row for this thread, not
     //    two (legacy + log) and not zero.
-    const auto all = persistence::load_all_threads(::agentty::IoAccess::grant());
+    const auto all = persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap());
     std::size_t seen = 0;
     for (const auto& t : all) if (t.id.value == id.value) ++seen;
     check(seen == 1, "the thread list must show the thread exactly once");
@@ -144,7 +145,7 @@ int main(int argc, char** argv) {
         std::printf("  (saw it %zu times among %zu threads)\n", seen, all.size());
 
     // 5. Deleting must take the log with it.
-    persistence::delete_thread(::agentty::IoAccess::grant(), id);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), id);
     check(!fs::exists(log_path), "delete_thread must remove the log");
     check(!persistence::load_thread_by_id(::agentty::IoAccess::grant(), id).has_value(),
           "a deleted thread must not load");

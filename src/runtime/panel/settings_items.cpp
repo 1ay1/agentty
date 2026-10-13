@@ -437,7 +437,7 @@ std::vector<std::string> starter_segments(const std::string& name) {
 
 } // namespace
 
-AddResult add_plugin_from_line(Io io, const std::string& line) {
+AddResult add_plugin_from_line(Io io, const maya::below<maya::leaf>& cap, const std::string& line) {
     auto tok = split_ws(line);
     // Pull an optional --project flag from anywhere in the line; the rest is
     // the <name> <recipe> [args…] spec.
@@ -520,7 +520,7 @@ AddResult add_plugin_from_line(Io io, const std::string& line) {
     }
 
     const auto path = tools::plugin::config_path(io, project);
-    switch (tools::plugin::add_server(io, path, spec, /*force=*/false)) {
+    switch (tools::plugin::add_server(io, cap, path, spec, /*force=*/false)) {
         case tools::plugin::EditResult::Ok:
             return {true, "added " + std::string{project ? "project " : ""}
                           + "plugin '" + name + "'"};

@@ -32,6 +32,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/accounts.hpp"
 #include "agentty/util/io.hpp"
+#include <maya/runtime.hpp>
 
 namespace agentty::provider::credentials {
 
@@ -68,7 +69,7 @@ enum class AddMethod : std::uint8_t {
 
 // Switch the active account for a provider to `label` (writes its secret into
 // the provider's live store + updates the registry). Returns false if unknown.
-bool activate(Io, std::string_view provider_id, std::string_view label);
+bool activate(Io, const maya::unlocked&, std::string_view provider_id, std::string_view label);
 
 // Remove one saved account. When it was the active one, promotes the next (or
 // clears the live credential if none remain).
@@ -77,10 +78,10 @@ bool remove(Io, std::string_view provider_id, std::string_view label);
 // Wipe the provider's LIVE active credential entirely (its file, or its
 // provider_keys[spec] entry) — a full sign-out. Used when the last account is
 // removed so build_account_list can't rediscover and resurrect it.
-void clear_active(Io, std::string_view provider_id);
+void clear_active(Io, const maya::unlocked&, std::string_view provider_id);
 
 // Persist a freshly-obtained API key as this provider's active account
 // (snapshots any prior active account first, so it ADDS, not replaces).
-bool add_key(Io, std::string_view provider_id, std::string_view key);
+bool add_key(Io, const maya::unlocked&, std::string_view provider_id, std::string_view key);
 
 } // namespace agentty::provider::credentials

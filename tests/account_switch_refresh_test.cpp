@@ -91,7 +91,7 @@ void isolate_config_dir() {
 store::Settings g_settings;
 void install_stub_deps() {
     app::install_deps(app::Deps{
-        .stream         = [](auto, auto) {},
+        .stream         = [](const maya::unlocked&, auto, auto) {},
         .save_thread    = [](const auto&) {},
         .delete_thread  = [](const auto&) {},
         .load_threads   = [] { return std::vector<Thread>{}; },
@@ -160,7 +160,7 @@ TEST_CASE("account switch refreshes a stale token") {
 
     // ── Switch back to the fresh account A → NO refresh ──
     {
-        acc::activate(::agentty::IoAccess::grant(), "anthropic", "B");   // make A the inactive target
+        acc::activate(::agentty::IoAccess::grant(), agtest::cap(), "anthropic", "B");   // make A the inactive target
         Model m;
         m.ui.login = setup_two_accounts("A");
         auto [m2, cmd] = app::update(std::move(m),
@@ -261,7 +261,7 @@ TEST_CASE("switch A→B→A returns A's FRESHEST token, not the login-day one") 
         acc::set_active("anthropic", "A");
     }
 
-    REQUIRE(acc::activate(::agentty::IoAccess::grant(), "anthropic", "B"));
+    REQUIRE(acc::activate(::agentty::IoAccess::grant(), agtest::cap(), "anthropic", "B"));
     // Live store now carries B.
     {
         auto c = auth::load_credentials(::agentty::IoAccess::grant());
@@ -274,7 +274,7 @@ TEST_CASE("switch A→B→A returns A's FRESHEST token, not the login-day one") 
     // Switch back to A: the token must be v2 (the rotated one), because
     // activate() re-snapshotted A on the way OUT. Pre-fix this was v1 —
     // server-invalidated, so every refresh failed until re-login.
-    REQUIRE(acc::activate(::agentty::IoAccess::grant(), "anthropic", "A"));
+    REQUIRE(acc::activate(::agentty::IoAccess::grant(), agtest::cap(), "anthropic", "A"));
     {
         auto c = auth::load_credentials(::agentty::IoAccess::grant());
         REQUIRE(c.has_value());
@@ -298,7 +298,7 @@ TEST_CASE("activate to the SAME label does not self-snapshot-clobber") {
     // this is a genuine "restore from registry" and not a no-op — without
     // upserting v2 into the slot first (which would make restore-from-
     // registry impossible).
-    REQUIRE(acc::activate(::agentty::IoAccess::grant(), "anthropic", "solo"));
+    REQUIRE(acc::activate(::agentty::IoAccess::grant(), agtest::cap(), "anthropic", "solo"));
     auto c = auth::load_credentials(::agentty::IoAccess::grant());
     REQUIRE(c.has_value());
     auto* o = std::get_if<auth::cred::OAuth>(&*c);

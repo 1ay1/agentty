@@ -28,8 +28,9 @@
 #include <string>
 #include <vector>
 
-#include <fcntl.h>
 #include <unistd.h>
+
+#include "wire_pipe.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -105,22 +106,8 @@ struct Rng {
 };
 
 // ── Pipe writer (real Writer over a real fd, drained per frame) ───────
-static std::pair<Writer, int> make_pipe_writer() {
-    int fds[2];
-    if (pipe(fds) != 0) { std::perror("pipe"); std::abort(); }
-    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL, 0) | O_NONBLOCK);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
-    return {Writer{static_cast<platform::NativeHandle>(fds[1])}, fds[0]};
-}
-
-static std::string drain_fd(int rfd) {
-    std::string out;
-    char buf[8192];
-    ssize_t n;
-    while ((n = read(rfd, buf, sizeof(buf))) > 0)
-        out.append(buf, static_cast<std::size_t>(n));
-    return out;
-}
+static std::pair<Writer, int> make_pipe_writer() { return wire_pipe::make_writer(); }
+static std::string drain_fd(int rfd) { return wire_pipe::drain(rfd); }
 
 // ── Settled tool-card builders (the realistic body shapes) ────────────
 static ToolUse settled_tool(Rng& rng, const std::string& tag) {

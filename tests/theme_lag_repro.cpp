@@ -64,6 +64,12 @@ std::string view_bytes(const Model& m) {
 } // namespace
 
 int main(int argc, char** argv) {
+    // These compare painted bytes across palettes; a NO_COLOR in the
+    // caller's env (CI, agent shells, a console with no VT) would make every
+    // scheme identical. MAYA_COLOR is maya's documented deterministic-test
+    // override (see detect_color_level).
+    ::unsetenv("NO_COLOR");
+    ::setenv("MAYA_COLOR", "truecolor", 1);
     const int msgs = argc > 1 ? std::atoi(argv[1]) : 200;
     // Optional: a REAL thread file. Synthetic messages do not reproduce the
     // frozen ledger's real block shapes (tool cards, code blocks, folds),
@@ -71,7 +77,7 @@ int main(int argc, char** argv) {
     const char* thread_path = argc > 2 ? argv[2] : nullptr;
 
     app::install_deps(app::Deps{
-        .stream = [](provider::Request, provider::EventSink) {},
+        .stream = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread = [](const Thread&) {},
         .load_threads = [] { return std::vector<Thread>{}; },
         .load_thread = [](const ThreadId&) { return std::optional<Thread>{}; },

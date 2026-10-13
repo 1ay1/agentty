@@ -33,8 +33,10 @@ FOLD_NOARGS(plugin_disabled_tools_test)
 FOLD_NOARGS(tool_budget_env_test)
 FOLD_NOARGS(frozen_invariant_fuzz)
 FOLD_NOARGS(scrollback_wire_fuzz)
-FOLD_NOARGS(reveal_scrollback_test)
-FOLD_NOARGS(scrollback_oracle_test)
+#if !defined(_WIN32)
+FOLD_NOARGS(reveal_scrollback_test)     // openpty — POSIX only
+FOLD_NOARGS(scrollback_oracle_test)     // openpty — POSIX only
+#endif
 FOLD_NOARGS(mcp_bridge_test)
 FOLD_NOARGS(mcp_http_test)
 FOLD_NOARGS(md_shape_sweep)

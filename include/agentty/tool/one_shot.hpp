@@ -7,6 +7,8 @@
 #include <string>
 #include <string_view>
 
+#include <maya/runtime.hpp>
+
 namespace agentty::tools {
 
 struct OneShotOptions {
@@ -44,7 +46,7 @@ struct OneShotResult {
     [[nodiscard]] bool ok() const noexcept { return status == Status::Ok; }
 };
 
-[[nodiscard]] OneShotResult run_one_shot(const OneShotOptions& opts);
+[[nodiscard]] OneShotResult run_one_shot(const maya::unlocked&, const OneShotOptions& opts);
 
 // "ok", "failed", "turn_limit", ... for --json and messages.
 [[nodiscard]] std::string_view status_name(OneShotResult::Status s) noexcept;

@@ -28,6 +28,7 @@
 #include "agentty/util/snapshot.hpp"
 #include "agentty/util/teardown.hpp"
 #include "agentty/util/logx.hpp"
+#include "agtest_cap.hpp"
 
 #include <atomic>
 #include <barrier>
@@ -64,7 +65,7 @@ void teardown_race() {
         ts.emplace_back([&, t] {
             sync.arrive_and_wait();
             for (int i = 0; i < kEach; ++i) {
-                auto tok = td::on_shutdown("race", [&fired] {
+                auto tok = td::on_shutdown("race", [&fired](const maya::unlocked&) {
                     fired.fetch_add(1, std::memory_order_relaxed);
                 });
                 // Half the registrants cancel themselves — the shape that
@@ -76,8 +77,8 @@ void teardown_race() {
     for (auto& th : ts) th.join();
 
     // run() must not deadlock, double-fire a cancelled token, or trip TSan.
-    td::run();
-    td::run();   // idempotent
+    td::run(agtest::cap());
+    td::run(agtest::cap());   // idempotent
     std::printf("  teardown: %d actions fired, registry drained to %zu\n",
                 fired.load(), td::pending());
     if (td::pending() != 0) fail("registry not drained after run()");

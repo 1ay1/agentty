@@ -62,13 +62,16 @@ struct Desc {
     // std::function): stateless, no allocation, trivially copyable.
     // `provider` is passed back in so SettingsKey descriptors (shared by
     // every hosted-key provider AND every custom host) know which slot.
+    // is_signed_in is lock-free (views reach it). clear may rewrite
+    // settings.json (a blocking settings save), so it needs `unlocked`;
+    // after_activate only takes leaf credential-store locks.
     bool (*is_signed_in)(Io, const std::string& provider);
-    void (*clear)(Io, const std::string& provider);          // sign out
+    void (*clear)(Io, const maya::unlocked&, const std::string& provider);  // sign out
     auth::AuthHeader (*resolve)(Io, const std::string& provider);
     // Display label for the CURRENT credential (account switcher rows).
     std::string (*current_label)(Io, const std::string& provider);
     // Post-activate hook (keystore re-seal / token-cache bust). May be null.
-    void (*after_activate)(Io, const std::string& provider);
+    void (*after_activate)(Io, const maya::below<maya::leaf>&, const std::string& provider);
 };
 
 // The total lookup: registry providers get their row; anything else is a
@@ -79,7 +82,9 @@ struct Desc {
 [[nodiscard]] inline bool signed_in(Io io, const std::string& p) {
     return of(p).is_signed_in(io, p);
 }
-inline void sign_out(Io io, const std::string& p) { of(p).clear(io, p); }
+inline void sign_out(Io io, const maya::unlocked& cap, const std::string& p) {
+    of(p).clear(io, cap, p);
+}
 [[nodiscard]] inline auth::AuthHeader resolve(Io io, const std::string& p) {
     return of(p).resolve(io, p);
 }

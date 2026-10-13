@@ -34,7 +34,7 @@ constexpr const char* kApiHost   = "api.kimi.com";
 constexpr const char* kBasePath  = "/coding/v1";
 
 using Models = std::vector<ModelInfo>;
-maya::guarded<Models>& models_cache() { static maya::guarded<Models> c; return c; }
+maya::snapshot<Models>& models_cache() { static maya::snapshot<Models> c; return c; }
 
 // Query /coding/v1/usages. Returns a human message when the account is out of
 // credits (Kimi reports 429 resource_exhausted here even though /chat 500s),
@@ -100,11 +100,12 @@ provider::openai::Endpoint KimiProvider::make_endpoint() {
     return ep;
 }
 
-provider::StreamResult KimiProvider::stream(provider::Request req,
+provider::StreamResult KimiProvider::stream(const maya::unlocked& cap,
+                                            provider::Request req,
                                             provider::EventSink sink) {
     // A provider stream runs on the turn's worker (dispatch), never a reducer.
     const Io io = IoAccess::grant();
-    auto tok = fresh_token();
+    auto tok = fresh_token(cap);
     if (!tok) {
         sink(StreamError{"Kimi is not signed in (or the token could not be "
                          "refreshed) — run `agentty login` and choose Kimi."});
@@ -125,7 +126,7 @@ provider::StreamResult KimiProvider::stream(provider::Request req,
     // Token revoked mid-life → refresh + retry once.
     if (!result.ok() && (result.http_status == 401 || result.http_status == 403)) {
         invalidate_cached_token();
-        if (auto fresh = fresh_token()) result = run(*fresh);
+        if (auto fresh = fresh_token(cap)) result = run(*fresh);
     }
     // Kimi's coding API returns a bare HTTP 500 ("server had an error") when the
     // account is out of credits — the /usages endpoint reports the real reason
@@ -147,10 +148,10 @@ static std::vector<ModelInfo> bundled_models() {
     return catalog::bundled("kimi");
 }
 
-std::vector<ModelInfo> list_models(Io io) {
-    if (auto hit = models_cache().read([](const Models& c) { return c; }); !hit.empty())
+std::vector<ModelInfo> list_models(Io io, const maya::unlocked& cap) {
+    if (auto hit = models_cache().get(); !hit.empty())
         return hit;
-    auto tok = fresh_token();
+    auto tok = fresh_token(cap);
     if (!tok) return bundled_models();
 
     auto ep = KimiProvider::make_endpoint();
@@ -167,17 +168,17 @@ std::vector<ModelInfo> list_models(Io io) {
             if (b.id.value == m.id.value) { m.context_window = b.context_window; break; }
     }
 
-    models_cache().with([](Models& c, Models fresh) { c = std::move(fresh); }, models);
+    models_cache().store(models);
     return models;
 }
 
-std::string default_model(Io io) {
-    auto ms = list_models(io);
+std::string default_model(Io io, const maya::unlocked& cap) {
+    auto ms = list_models(io, cap);
     return ms.empty() ? std::string{"kimi-k2-turbo-preview"} : ms.front().id.value;
 }
 
 void invalidate_model_cache() {
-    models_cache().with([](Models& c) { c.clear(); });
+    models_cache().store(Models{});
 }
 
 } // namespace agentty::provider::kimi

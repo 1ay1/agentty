@@ -227,7 +227,7 @@ GcStats collect(bool dry_run) {
     return collect_in(persistence::threads_dir(), dry_run);
 }
 
-std::optional<GcStats> collect_if_due(std::stop_token stop) {
+std::optional<GcStats> collect_if_due(const maya::unlocked& cap, std::stop_token stop) {
     using namespace std::chrono;
     const auto blob_dir = persistence::threads_dir() / "blobs";
     std::error_code ec;
@@ -243,7 +243,7 @@ std::optional<GcStats> collect_if_due(std::stop_token stop) {
     // Thread retention first, so the blobs of expired threads go in this sweep.
     const Io io = IoAccess::grant();
     if (const int days = persistence::thread_keep_days(io); days > 0 && !stop.stop_requested())
-        (void)persistence::expire_threads(io, days, ThreadId{});
+        (void)persistence::expire_threads(io, cap, days, ThreadId{});
     return collect_in(persistence::threads_dir(), /*dry_run=*/false, hours{24}, stop);
 }
 
@@ -278,18 +278,19 @@ void start_background_gc() {
     // Once per process.
     static std::once_flag once;
     std::call_once(once, [] {
-        util::teardown::on_shutdown("blobs.gc", [] { join_background_gc(); });
+        util::teardown::on_shutdown("blobs.gc",
+                                    [](const maya::unlocked& cap) { join_background_gc(cap); });
 
     // Isolated, not queued: the walk is unbounded in principle (a large blob
     // store on a slow disk), and it must not occupy a shared worker.
-    gc_pool().post_isolated([](std::stop_token st) {
+    gc_pool().post_isolated([](const maya::unlocked& cap, std::stop_token st) {
         // The delay means a process that exits at once never starts the walk
         // at all. delay_for returns true if we were asked to stop first — one
         // cancellation channel, the token, rather than a second stop flag that
         // someone has to remember to notify.
         if (maya::delay_for(st, kStartDelay)) return;
         try {
-            (void)collect_if_due(st);   // stops at its next check on shutdown
+            (void)collect_if_due(cap, st);   // stops at its next check on shutdown
         } catch (const std::exception& e) {
             AGT_LOG(Persist, Warn, "blob_gc", "{}", e.what());
         } catch (...) {}
@@ -297,8 +298,8 @@ void start_background_gc() {
     });
 }
 
-void join_background_gc() noexcept {
-    (void)gc_pool().shutdown();   // requests stop, waits within the grace
+void join_background_gc(const maya::unlocked& cap) noexcept {
+    (void)gc_pool().shutdown(cap);   // requests stop, waits within the grace
 }
 
 } // namespace agentty::blobs

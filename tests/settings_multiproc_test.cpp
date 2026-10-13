@@ -30,6 +30,7 @@
 // `""` is what the setting persisted as for its whole life before `none`.
 
 #include "agentty/io/persistence.hpp"
+#include "agtest.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/domain/catalog.hpp"
 
@@ -96,7 +97,7 @@ TEST_CASE("settings: a stale instance does not revert another's theme") {
     {
         agentty::store::Settings s;
         s.ui.theme = "Harper";
-        ps::save_settings(::agentty::IoAccess::grant(), s);
+        ps::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
     }
     auto a_view = ps::load_settings(::agentty::IoAccess::grant());
     REQUIRE(a_view.ui.theme == "Harper");
@@ -111,7 +112,7 @@ TEST_CASE("settings: a stale instance does not revert another's theme") {
     // Now A saves an UNRELATED setting, from its startup-era record. Before
     // the merge this wrote ui.theme=Harper straight back over B's pick.
     a_view.model_id = agentty::ModelId{"gpt-5"};
-    ps::save_settings(::agentty::IoAccess::grant(), a_view);
+    ps::save_settings(::agentty::IoAccess::grant(), agtest::cap(), a_view);
 
     const auto after = read_raw(root);
     CHECK(after["ui"]["theme"] == "Sumi Phosphor");   // B's edit survived
@@ -129,13 +130,13 @@ TEST_CASE("settings: the writer's OWN edit still wins over a stale disk") {
     {
         agentty::store::Settings s;
         s.ui.theme = "Harper";
-        ps::save_settings(::agentty::IoAccess::grant(), s);
+        ps::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
     }
     auto mine = ps::load_settings(::agentty::IoAccess::grant());
 
     // This process changes the theme deliberately.
     mine.ui.theme = "Sumi Linen";
-    ps::save_settings(::agentty::IoAccess::grant(), mine);
+    ps::save_settings(::agentty::IoAccess::grant(), agtest::cap(), mine);
 
     CHECK(read_raw(root)["ui"]["theme"] == "Sumi Linen");
 
@@ -155,7 +156,7 @@ TEST_CASE("settings: reasoning off persists as off, not as unset") {
     // the sentinel the fix introduced. Writing Effort::None through the wire
     // spelling would give "", which is exactly the bug.
     s.effort = std::string{agentty::effort_to_wire_setting(agentty::Effort::None)};
-    ps::save_settings(::agentty::IoAccess::grant(), s);
+    ps::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 
     const auto raw = read_raw(root);
     REQUIRE(raw.contains("effort"));
@@ -176,7 +177,7 @@ TEST_CASE("settings: reasoning off persists as off, not as unset") {
 TEST_CASE("settings: a sibling's new web_search block survives an unrelated save") {
     const auto root = scratch("search-sibling");
     use_store(root);
-    ps::save_settings(::agentty::IoAccess::grant(), agentty::store::Settings{});   // no `search` key
+    ps::save_settings(::agentty::IoAccess::grant(), agtest::cap(), agentty::store::Settings{});   // no `search` key
     auto a = ps::load_settings(::agentty::IoAccess::grant());                     // A's baseline: no `search`
 
     // B turns web search off.
@@ -188,7 +189,7 @@ TEST_CASE("settings: a sibling's new web_search block survives an unrelated save
 
     // A saves something else; it never had an opinion on `search`.
     a.model_id = agentty::ModelId{"gpt-5"};
-    ps::save_settings(::agentty::IoAccess::grant(), a);
+    ps::save_settings(::agentty::IoAccess::grant(), agtest::cap(), a);
 
     const auto after = read_raw(root);
     REQUIRE(after.contains("web_search"));
@@ -203,13 +204,13 @@ TEST_CASE("settings: resetting web search to defaults persists") {
     {
         agentty::store::Settings s;
         s.web_search.count = 5;
-        ps::save_settings(::agentty::IoAccess::grant(), s);
+        ps::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
     }
     auto mine = ps::load_settings(::agentty::IoAccess::grant());
     REQUIRE(mine.web_search.count == 5);
 
     mine.web_search = agentty::web_search_cfg::Config{};   // every row back on its default
-    ps::save_settings(::agentty::IoAccess::grant(), mine);
+    ps::save_settings(::agentty::IoAccess::grant(), agtest::cap(), mine);
 
     CHECK(ps::load_settings(::agentty::IoAccess::grant()).web_search.count == 10);   // not re-adopted from disk
     fs::remove_all(root);
@@ -226,7 +227,7 @@ TEST_CASE("settings: a web search env override is never written to settings.json
     auto s = ps::load_settings(::agentty::IoAccess::grant());
     CHECK(s.web_search.count == 4);                // the export is in force
     s.model_id = agentty::ModelId{"gpt-5"};
-    ps::save_settings(::agentty::IoAccess::grant(), s);                      // any save at all
+    ps::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);                      // any save at all
 #ifdef _WIN32
     _putenv_s("AGENTTY_WEB_SEARCH_COUNT", "");
 #else

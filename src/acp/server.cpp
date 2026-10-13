@@ -75,8 +75,8 @@ namespace a = ::acp;
 
 // A call to the client that throws its RpcError, for the try/catch paths.
 template <jsonrpc::IsMethod M>
-typename M::result call(rpc::Peer& peer, const typename M::params& p) {
-    auto r = peer.call<M>(p);
+typename M::result call(const maya::unlocked& cap, rpc::Peer& peer, const typename M::params& p) {
+    auto r = peer.call<M>(cap, p);
     if (!r) throw r.error();
     return std::move(*r);
 }
@@ -1093,48 +1093,53 @@ AgentServer::AgentServer(rpc::Channel      channel,
 AgentServer::~AgentServer() {
     if (client_elicit_url_.load(std::memory_order_relaxed))
         ::agentty::mcp::set_url_elicitation({});
-    if (peer_) peer_->stop();
+    // peer_ is destroyed with the members: ~Peer stops and joins its
+    // reader/writer (Peer is joins_on_destroy, so no lock can own it, and
+    // this destructor never runs inside a lock body).
 }
 
 AgentServer::Router AgentServer::make_router() {
     namespace m = a::to_agent;
     Router r;
-    r.on<m::Initialize>([](AgentServer& s, const a::InitializeParams& p) { return s.on_initialize(p); });
-    r.on<m::SessionNew>([](AgentServer& s, const a::NewSessionParams& p) { return s.on_new_session(p); });
-    r.on<m::SessionCancel>([](AgentServer& s, const a::CancelParams& p) { s.on_cancel(p); });
-    r.on<a::CancelRequest>([](AgentServer& s, const a::CancelRequestParams& p) { s.on_cancel_request(p.id); });
+    // Every handler gets the reader thread's capability through Ctx.
+    r.on<m::Initialize>([](Ctx& c, const a::InitializeParams& p) { return c.self.on_initialize(c.cap, p); });
+    r.on<m::SessionNew>([](Ctx& c, const a::NewSessionParams& p) { return c.self.on_new_session(c.cap, p); });
+    r.on<m::SessionCancel>([](Ctx& c, const a::CancelParams& p) { c.self.on_cancel(c.cap, p); });
+    r.on<a::CancelRequest>([](Ctx& c, const a::CancelRequestParams& p) { c.self.on_cancel_request(c.cap, p.id); });
     // session/prompt is answered in on_call, before the router.
     r.defer<m::SessionPrompt>();
-    r.on<m::SessionLoad>([](AgentServer& s, const a::LoadSessionParams& p) {
-        return s.on_load_session(p);
+    r.on<m::SessionLoad>([](Ctx& c, const a::LoadSessionParams& p) {
+        return c.self.on_load_session(c.cap, p);
     });
-    r.on<m::SessionResume>([](AgentServer& s, const a::ResumeSessionParams& p) { return s.on_resume_session(p); });
-    r.on<m::SessionFork>([](AgentServer& s, const a::ForkSessionParams& p) { return s.on_fork_session(p); });
-    r.on<m::SessionList>([](AgentServer& s, const a::ListSessionsParams& p) { return s.on_list_sessions(p); });
-    r.on<m::SessionClose>([](AgentServer& s, const a::CloseSessionParams& p) {
-        s.on_close_session(p); return a::Unit{};
+    r.on<m::SessionResume>([](Ctx& c, const a::ResumeSessionParams& p) { return c.self.on_resume_session(c.cap, p); });
+    r.on<m::SessionFork>([](Ctx& c, const a::ForkSessionParams& p) { return c.self.on_fork_session(c.cap, p); });
+    r.on<m::SessionList>([](Ctx& c, const a::ListSessionsParams& p) { return c.self.on_list_sessions(c.cap, p); });
+    r.on<m::SessionClose>([](Ctx& c, const a::CloseSessionParams& p) {
+        c.self.on_close_session(c.cap, p); return a::Unit{};
     });
-    r.on<m::SessionDelete>([](AgentServer& s, const a::DeleteSessionParams& p) {
-        s.on_delete_session(p); return a::Unit{};
+    r.on<m::SessionDelete>([](Ctx& c, const a::DeleteSessionParams& p) {
+        c.self.on_delete_session(c.cap, p); return a::Unit{};
     });
-    r.on<m::SessionSetMode>([](AgentServer& s, const a::SetModeParams& p) {
-        s.on_set_mode(p); return a::Unit{};
+    r.on<m::SessionSetMode>([](Ctx& c, const a::SetModeParams& p) {
+        c.self.on_set_mode(c.cap, p); return a::Unit{};
     });
-    r.on<m::SessionSetConfig>([](AgentServer& s, const a::SetConfigOptionParams& p) {
-        return s.on_set_config_option(p);
+    r.on<m::SessionSetConfig>([](Ctx& c, const a::SetConfigOptionParams& p) {
+        return c.self.on_set_config_option(c.cap, p);
     });
-    r.on<m::Authenticate>([](AgentServer& s, const a::AuthenticateParams& p) {
-        s.on_authenticate(p);
+    r.on<m::Authenticate>([](Ctx& c, const a::AuthenticateParams& p) {
+        c.self.on_authenticate(p);
         return a::Unit{};
     });
-    r.on<m::Logout>([](AgentServer& s, const a::Unit&) { s.on_logout(); return a::Unit{}; });
+    r.on<m::Logout>([](Ctx& c, const a::Unit&) { c.self.on_logout(c.cap); return a::Unit{}; });
     return r;
 }
 
 rpc::Dispatch AgentServer::make_dispatch() {
     rpc::Dispatch d;
-    d.on_call         = [this](const a::Call& c) { return on_call(c); };
-    d.on_notification = [this](const a::Notification& n) { on_notification(n); };
+    d.on_call         = [this](const maya::unlocked& cap, const a::Call& c) { return on_call(cap, c); };
+    d.on_notification = [this](const maya::unlocked& cap, const a::Notification& n) {
+        on_notification(cap, n);
+    };
     // Every frame lands on the `acp` channel of the structured log, captured
     // by default in a non-release build or via AGENTTY_LOG=acp=trace.
     if (logx::enabled(logx::Channel::Acp, logx::Level::Trace))
@@ -1144,39 +1149,41 @@ rpc::Dispatch AgentServer::make_dispatch() {
     return d;
 }
 
-std::optional<std::string> AgentServer::on_call(const a::Call& c) {
+std::optional<std::string> AgentServer::on_call(const Cap& cap, const a::Call& c) {
     if (c.method == a::to_agent::SessionPrompt::name) {
         Responder resp(*peer_, c.id);
         try {
-            on_prompt(jsonrpc::from_json<a::PromptParams>(c.params), std::move(resp));
+            on_prompt(cap, jsonrpc::from_json<a::PromptParams>(c.params), std::move(resp));
         } catch (const std::exception& e) {
             return a::reply(c.id, std::unexpected(a::RpcError(a::errc::InvalidParams, e.what())));
         }
         return std::nullopt;
     }
-    return router_.handle(*this, c);
+    Ctx ctx{*this, cap};
+    return router_.handle(ctx, c);
 }
 
-void AgentServer::on_notification(const a::Notification& n) {
-    router_.handle(*this, n);
+void AgentServer::on_notification(const Cap& cap, const a::Notification& n) {
+    Ctx ctx{*this, cap};
+    router_.handle(ctx, n);
 }
 
-int AgentServer::serve() {
+int AgentServer::serve(const Cap& cap) {
     peer_->start();
-    peer_->wait_closed();   // EOF on stdin
+    peer_->wait_closed(cap);   // EOF on stdin
     return 0;
 }
 
-void AgentServer::persist(const std::string& id) {
+void AgentServer::persist(const Cap& cap, const std::string& id) {
     // Copy the thread out under the lock, write it outside.
-    if (auto snapshot = with_session(id, [](Session& s) { return s.thread; }))
-        persistence::save_thread(IoAccess::grant(), *snapshot);
+    if (auto snapshot = with_session(cap, id, [](Session& s) { return s.thread; }))
+        persistence::save_thread(IoAccess::grant(), cap, *snapshot);
 }
 
 // The editor's MCP servers (session/new, load, resume, fork), turned into
 // mcp.json entries and handed to the MCP bridge. The bridge reconnects only
 // when the set changed, so sending the same list each session is free.
-void AgentServer::adopt_client_mcp(const a::List<a::McpServer>& servers) {
+void AgentServer::adopt_client_mcp(const Cap&, const a::List<a::McpServer>& servers) {
 #if AGENTTY_MCP
     json out = json::object();
     for (const auto& s : servers) {
@@ -1202,9 +1209,9 @@ void AgentServer::adopt_client_mcp(const a::List<a::McpServer>& servers) {
     // Connecting can take seconds; don't hold up session/new for it. When it
     // lands, re-send every live session's / menu so the servers' prompts show.
     util::run_isolated_detached("acp.mcp_servers",
-        [](std::stop_token, json servers, maya::co_owned<AgentServer> self) {
+        [](const maya::unlocked& cap, std::stop_token, json servers, maya::co_owned<AgentServer> self) {
             ::agentty::mcp::set_client_servers(servers);
-            self->refresh_command_menus();
+            self->refresh_command_menus(cap);
         },
         std::move(out), maya::co_owned<AgentServer>::of(*this));
 #else
@@ -1214,8 +1221,8 @@ void AgentServer::adopt_client_mcp(const a::List<a::McpServer>& servers) {
 
 // The / menu changed under every session (an MCP server connected and
 // brought prompts): send each live session the new list.
-void AgentServer::refresh_command_menus() {
-    const auto ids = sessions_.read([](const Sessions& ss) {
+void AgentServer::refresh_command_menus(const Cap& cap) {
+    const auto ids = sessions_.read(cap, [](const Sessions& ss) {
         std::vector<std::string> out;
         for (const auto& [id, s] : ss.by_id) out.push_back(id);
         return out;
@@ -1223,24 +1230,26 @@ void AgentServer::refresh_command_menus() {
     if (ids.empty()) return;
     a::SU_AvailableCommands ac;
     ac.availableCommands = available_commands(IoAccess::grant(), air_.load(std::memory_order_relaxed));
-    for (const auto& id : ids) send_update(id, ac);
+    for (const auto& id : ids) send_update(cap, id, ac);
 }
 
-void AgentServer::send_update(const std::string& session_id, a::SessionUpdate update) {
+void AgentServer::send_update(const maya::below<maya::leaf>& cap, const std::string& session_id,
+                              a::SessionUpdate update) {
     a::SessionUpdateMsg msg;
     msg.sessionId = a::SessionId{session_id};
     msg.update    = std::move(update);
-    peer_->notify<a::to_client::SessionUpdate>(msg);
+    peer_->notify<a::to_client::SessionUpdate>(cap, msg);
 }
 
-void AgentServer::notice(const std::string& session_id, std::string severity,
+void AgentServer::notice(const maya::below<maya::leaf>& cap, const std::string& session_id,
+                         std::string severity,
                          std::string title, std::string description) {
     if (!client_notices_.load(std::memory_order_relaxed) || title.empty()) return;
     a::SU_Notice n;
     n.severity = std::move(severity);
     n.title    = std::move(title);
     if (!description.empty()) n.description = a::Just(std::move(description));
-    send_update(session_id, std::move(n));
+    send_update(cap, session_id, std::move(n));
 }
 
 bool AgentServer::terminal_channel() const noexcept {
@@ -1285,7 +1294,7 @@ static void merge_meta(json& meta, const json& extra) {
 // Relay an MCP server's elicitation/create (form mode) to the editor. The two
 // share the restricted JSON Schema, so the form passes through; ACP adds the
 // session and tool call scope. Anything we can't relay is declined.
-json AgentServer::elicit_via_client(const std::string& session_id,
+json AgentServer::elicit_via_client(const Cap& cap, const std::string& session_id,
                                     const std::string& tool_id, const json& mcp,
                                     std::stop_token cancel) {
     const json decline{{"action", "decline"}};
@@ -1317,7 +1326,7 @@ json AgentServer::elicit_via_client(const std::string& session_id,
     rpc::CallOptions o;
     o.cancel      = cancel;
     o.notify_peer = true;
-    auto got = peer_->call<a::to_client::ElicitationCreate>(req, std::move(o));
+    auto got = peer_->call<a::to_client::ElicitationCreate>(cap, req, std::move(o));
     if (!got || !got->is_object() || !got->contains("action")) return decline;
     json out{{"action", (*got)["action"]}};
     if ((*got)["action"] == "accept" && got->contains("content")) out["content"] = (*got)["content"];
@@ -1329,7 +1338,8 @@ bool AgentServer::is_command_tool(std::string_view name) {
     return spec && spec->kind == tools::spec::Kind::Bash;
 }
 
-void AgentServer::send_terminal_output(const std::string& session_id,
+void AgentServer::send_terminal_output(const maya::below<maya::leaf>& cap,
+                                       const std::string& session_id,
                                        const std::string& tool_id, std::string_view data) {
     a::ToolCallUpdate u;
     u.toolCallId = a::ToolCallId{tool_id};
@@ -1339,7 +1349,7 @@ void AgentServer::send_terminal_output(const std::string& session_id,
                     ? "terminal_output_delta" : "terminal_output";
     // progress text is already valid UTF-8 (exec converts it).
     u.meta = json{{key, {{"terminal_id", tool_id}, {"data", std::string{data}}}}};
-    send_update(session_id, a::SU_ToolCallUpdate{std::move(u)});
+    send_update(cap, session_id, a::SU_ToolCallUpdate{std::move(u)});
 }
 
 // _meta.terminal_exit for a finished command. The shell tool's result says
@@ -1362,7 +1372,7 @@ json AgentServer::terminal_exit_meta(const std::string& tool_id, std::string_vie
                                     {"signal", nullptr}}}};
 }
 
-void AgentServer::emit_session_config(const std::string& session_id,
+void AgentServer::emit_session_config(const Cap& cap, const std::string& session_id,
                                       const std::string& model_id) {
     // Slash-command menu (Zed's `/` composer menu).
     {
@@ -1370,7 +1380,7 @@ void AgentServer::emit_session_config(const std::string& session_id,
         ac.availableCommands = available_commands(IoAccess::grant(),   // ACP handler: not a reducer
                                                   air_.load(std::memory_order_relaxed));
         if (!ac.availableCommands.empty())
-            send_update(session_id, std::move(ac));
+            send_update(cap, session_id, std::move(ac));
     }
     // Session config options, emitted as ONE complete-state notification (the
     // v2 contract: a SU_ConfigOptions carries the FULL set, not a delta). We
@@ -1380,7 +1390,7 @@ void AgentServer::emit_session_config(const std::string& session_id,
     // session/set_config_option with no restart. The permission mode is ALSO
     // carried by the legacy `modes` field on the session result for v1
     // clients — dual-surface, no gap either way.
-    emit_config_state(session_id, model_id);
+    emit_config_state(cap, session_id, model_id);
 }
 
 // The current, COMPLETE config-option state for a session as a single
@@ -1389,22 +1399,23 @@ void AgentServer::emit_session_config(const std::string& session_id,
 // (on_set_config_option) — the v2 spec requires each SU_ConfigOptions to carry
 // the full set so dependent options stay consistent. Reads live session state
 // (profile + model) so the echoed `currentValue`s always match reality.
-void AgentServer::emit_config_state(const std::string& session_id,
+void AgentServer::emit_config_state(const Cap& cap, const std::string& session_id,
                                     const std::string& fallback_model) {
     a::SU_ConfigOptions co;
-    co.configOptions = config_options(session_id, fallback_model);
+    co.configOptions = config_options(cap, session_id, fallback_model);
     if (co.configOptions.empty()) return;   // nothing to advertise
-    send_update(session_id, std::move(co));
+    send_update(cap, session_id, std::move(co));
 }
 
 // The complete config state for a session. Returned in every session/new,
 // load, resume and set_config_option result (clients that only read results,
 // like JetBrains, need it there) and echoed as config_option_update.
-a::List<a::ConfigOption> AgentServer::config_options(const std::string& session_id,
+a::List<a::ConfigOption> AgentServer::config_options(const Cap& cap,
+                                                     const std::string& session_id,
                                                      const std::string& fallback_model) {
     struct Cfg { Profile prof; std::string provider, model, effort; bool reasoning; };
     Cfg c{profile_, "", fallback_model, "", true};
-    if (auto got = with_session(session_id, [](Session& s) {
+    if (auto got = with_session(cap, session_id, [](Session& s) {
             return Cfg{s.profile, s.provider, s.model, s.effort, s.show_reasoning};
         })) {
         c = *got;
@@ -1422,7 +1433,7 @@ a::List<a::ConfigOption> AgentServer::config_options(const std::string& session_
                 o.meta = air_meta(json{{"kind", o.value == "write" ? "auto_review" : "standard"}});
         out.push_back(std::move(opt));
     }
-    for (auto& o : model_options(c.provider, c.model, c.effort, c.reasoning))
+    for (auto& o : model_options(cap, c.provider, c.model, c.effort, c.reasoning))
         out.push_back(std::move(o));
     return out;
 }
@@ -1431,10 +1442,9 @@ a::List<a::ConfigOption> AgentServer::config_options(const std::string& session_
 // provider, the same set the TUI's fused picker (ctrl+/) shows. Without a
 // stream_to_ the server can only reach the active provider, so only its
 // models are offered.
-std::vector<AgentServer::ModelChoice> AgentServer::model_choices() {
-    if (auto have = model_choices_.read([](const std::vector<ModelChoice>& v) { return v; });
-        !have.empty())
-        return have;
+std::vector<AgentServer::ModelChoice> AgentServer::model_choices(const Cap& cap) {
+    if (auto have = model_choices_.current(); have && !have->empty())
+        return *have;
 
     const Io io = IoAccess::grant();
     std::vector<ModelChoice> out;
@@ -1443,7 +1453,7 @@ std::vector<AgentServer::ModelChoice> AgentServer::model_choices() {
     auto add_provider = [&](const std::string& pid, const std::string& label,
                             const provider::Selection& sel, const auth::AuthHeader& auth) {
         std::vector<ModelInfo> models;
-        try { models = provider::list_models_for(io, sel, auth); } catch (...) {}
+        try { models = provider::list_models_for(io, cap, sel, auth); } catch (...) {}
         for (const auto& m : models)
             out.push_back({choice_value(pid, m.id.value), pid, m.id.value,
                            m.display_name.empty() ? m.id.value : m.display_name,
@@ -1465,21 +1475,20 @@ std::vector<AgentServer::ModelChoice> AgentServer::model_choices() {
             }
         } catch (...) { /* the active provider's models still stand */ }
     }
-    model_choices_.with([](std::vector<ModelChoice>& v, std::vector<ModelChoice> n) {
-        v = std::move(n);
-    }, out);
+    model_choices_.publish(std::make_shared<const std::vector<ModelChoice>>(out));
     return out;
 }
 
 // Model, then the knobs that depend on it: reasoning effort (only for a
 // model that has one) and whether to show its thinking. Rebuilt on every
 // change, since the effort ladder depends on the model.
-a::List<a::ConfigOption> AgentServer::model_options(const std::string& provider,
+a::List<a::ConfigOption> AgentServer::model_options(const Cap& cap,
+                                                    const std::string& provider,
                                                     const std::string& model,
                                                     const std::string& effort,
                                                     bool show_reasoning) {
     a::List<a::ConfigOption> out;
-    const auto choices = model_choices();
+    const auto choices = model_choices(cap);
     const std::string active_id = provider::active().catalog_id();
     const std::string pid = provider.empty() ? active_id : provider;
 
@@ -1560,15 +1569,22 @@ a::List<a::ConfigOption> AgentServer::model_options(const std::string& provider,
     return out;
 }
 
-void AgentServer::replay_history(const std::string& session_id, const Thread& thread) {
+void AgentServer::replay_history(const Cap& cap, const std::string& session_id,
+                                 const Thread& thread) {
     // Project-relative display paths in replayed tool cards, matching a live
     // turn. The session cwd is already set by the time replay runs.
     const std::string scwd =
-        with_session(session_id, [](Session& s) { return s.cwd; }).value_or(std::string{});
+        with_session(cap, session_id, [](Session& s) { return s.cwd; }).value_or(std::string{});
 
     // Send the whole replay as one write: replay emits many session/update
     // notifications back-to-back on the reader thread.
-    rpc::Peer::Batch batch(*peer_);
+    peer_->batch(cap, [&] {
+        replay_history_body(cap, session_id, thread, scwd);
+    });
+}
+
+void AgentServer::replay_history_body(const Cap& cap, const std::string& session_id,
+                                      const Thread& thread, const std::string& scwd) {
 
     // Replay is a synchronous fan-out to the wire on the reader thread (one
     // blocking write per message + per tool call), so an arbitrarily large
@@ -1591,7 +1607,7 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
             const auto& rec = thread.compactions[next_cmp];
             a::List<a::ContentBlock> sum;
             sum.push_back(text_block(rec.summary));
-            send_update(session_id, a::SU_Compaction{
+            send_update(cap, session_id, a::SU_Compaction{
                 "cmp_" + session_id + "_" + std::to_string(next_cmp + 1), "completed",
                 a::Just(std::move(sum)), a::Nothing, json::object()});
             ++next_cmp;
@@ -1602,15 +1618,15 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
         const auto& m = thread.messages[mi];
         if (m.role == Role::User) {
             if (m.text.empty()) continue;
-            send_update(session_id, a::SU_UserMessageChunk{
+            send_update(cap, session_id, a::SU_UserMessageChunk{
                 text_block(m.text), a::Just(a::MessageId{m.id.value})});
         } else if (m.role == Role::Assistant) {
             if (!m.thinking.empty())
-                send_update(session_id, a::SU_AgentThoughtChunk{
+                send_update(cap, session_id, a::SU_AgentThoughtChunk{
                     text_block(m.thinking), a::Just(a::MessageId{m.id.value})});
             const std::string body = m.text.empty() ? m.streaming_text : m.text;
             if (!body.empty())
-                send_update(session_id, a::SU_AgentMessageChunk{
+                send_update(cap, session_id, a::SU_AgentMessageChunk{
                     text_block(body), a::Just(a::MessageId{m.id.value})});
 
             std::size_t emitted = 0;
@@ -1619,7 +1635,7 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
                 {
                     auto call = make_tool_call(tc, a::ToolCallStatus::Pending, scwd);
                     merge_meta(call.meta, air_tool_meta(tc));
-                    send_update(session_id, a::SU_ToolCall{std::move(call)});
+                    send_update(cap, session_id, a::SU_ToolCall{std::move(call)});
                 }
 
                 const auto status = (tc.is_failed() || tc.is_rejected())
@@ -1644,14 +1660,14 @@ void AgentServer::replay_history(const std::string& session_id, const Thread& th
                     upd.content   = a::Just(std::move(content));
                     upd.rawOutput = a::Just<json>(json{{"text", out}});
                 }
-                send_update(session_id, a::SU_ToolCallUpdate{std::move(upd)});
+                send_update(cap, session_id, a::SU_ToolCallUpdate{std::move(upd)});
             }
         }
     }
     replay_compactions_before(total);
 }
 
-a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
+a::InitializeResult AgentServer::on_initialize(const Cap& cap, const a::InitializeParams& p) {
     a::InitializeResult r;
     // Remember whether the client can host terminals for us. Zed advertises
     // this; a bare/test client may not. Gates the live-terminal execution of
@@ -1670,8 +1686,14 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     // URL mode: MCP servers may ask for it, and their "done" goes to the editor.
     if (p.clientCapabilities.elicitUrl)
         ::agentty::mcp::set_url_elicitation([this](const std::string& id) {
+            // Called by the MCP bridge from a server's reader thread when a
+            // URL elicitation completes. That thread holds no agentty lock
+            // (it is mcp-cpp's transport loop), so the notify re-states it
+            // here -- a reviewed root (tests/lint/allowlist.txt).
             try {
-                peer_->notify_raw("elicitation/complete", json{{"elicitationId", id}});
+                maya::thread_root([&](const maya::unlocked& c) {
+                    peer_->notify_raw(c, "elicitation/complete", json{{"elicitationId", id}});
+                });
             } catch (...) {}
         });
     // Zed's terminal channel: a command tool call carries _meta.terminal_info,
@@ -1791,9 +1813,9 @@ a::InitializeResult AgentServer::on_initialize(const a::InitializeParams& p) {
     return r;
 }
 
-a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
+a::NewSessionResult AgentServer::on_new_session(const Cap& cap, const a::NewSessionParams& p) {
     auto extra = extra_roots_of(p.additionalDirectories);   // throws on a bad path
-    adopt_client_mcp(p.mcpServers);
+    adopt_client_mcp(cap, p.mcpServers);
     ThreadId tid = persistence::new_id();
     const std::string sid = tid.value;
     const Profile session_profile = profile_;
@@ -1806,13 +1828,13 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
         s.thread.id = tid;
         s.thread.title = p.cwd.empty() ? std::string{"ACP session"}
                                        : std::string{"ACP "} + p.cwd;
-        sessions_.with([](Sessions& ss, Session v) {
+        sessions_.with(cap, [](Sessions& ss, Session v) {
             std::string k = v.id;
             ss.by_id.emplace(std::move(k), std::move(v));
         }, std::move(s));
     }
-    persist(sid);
-    index_session(sid);
+    persist(cap, sid);
+    index_session(cap, sid);
 
     a::NewSessionResult r;
     r.sessionId = a::SessionId{sid};
@@ -1823,25 +1845,25 @@ a::NewSessionResult AgentServer::on_new_session(const a::NewSessionParams& p) {
         r.modes = a::Just(modes_for_client(session_profile));
     // The selectors ride on the result too: JetBrains builds its model
     // dropdown from it and never looks at the update that follows.
-    if (auto opts = config_options(sid, model_id_); !opts.empty())
+    if (auto opts = config_options(cap, sid, model_id_); !opts.empty())
         r.configOptions = a::Just(std::move(opts));
     // Slash-command menu, and the same config as an update for clients that
     // only watch notifications.
-    emit_session_config(sid, model_id_);
+    emit_session_config(cap, sid, model_id_);
     return r;
 }
 
 // session/fork: a new session whose history is a copy of another's, the
 // editor's "fork from here". The source can be live or only on disk; the
 // copy keeps its model, thinking and mode, and gets a fresh id and title.
-a::NewSessionResult AgentServer::on_fork_session(const a::ForkSessionParams& p) {
+a::NewSessionResult AgentServer::on_fork_session(const Cap& cap, const a::ForkSessionParams& p) {
     auto extra = extra_roots_of(p.additionalDirectories);
-    adopt_client_mcp(p.mcpServers);
+    adopt_client_mcp(cap, p.mcpServers);
     const std::string src = p.sessionId.value;
     if (src.empty()) throw a::RpcError(a::errc::InvalidParams, "session/fork: missing sessionId");
 
     struct Copy { Thread thread; Profile profile; std::string model, provider, effort; bool reasoning; };
-    std::optional<Copy> copy = with_session(src, [](Session& s) {
+    std::optional<Copy> copy = with_session(cap, src, [](Session& s) {
         return Copy{s.thread, s.profile, s.model, s.provider, s.effort, s.show_reasoning};
     });
     if (!copy) {
@@ -1869,30 +1891,30 @@ a::NewSessionResult AgentServer::on_fork_session(const a::ForkSessionParams& p) 
         s.thread.forked_from = src;
         s.thread.title = s.thread.title.empty() ? std::string{"Fork"}
                                                 : "Fork of " + s.thread.title;
-        sessions_.with([](Sessions& ss, Session v) {
+        sessions_.with(cap, [](Sessions& ss, Session v) {
             std::string k = v.id;
             ss.by_id.emplace(std::move(k), std::move(v));
         }, std::move(s));
     }
-    persist(sid);
-    index_session(sid);
+    persist(cap, sid);
+    index_session(cap, sid);
 
     a::NewSessionResult r;
     r.sessionId = a::SessionId{sid};
     if (!v2_config())
         r.modes = a::Just(modes_for_client(copy->profile));
-    if (auto opts = config_options(sid, model_id_); !opts.empty())
+    if (auto opts = config_options(cap, sid, model_id_); !opts.empty())
         r.configOptions = a::Just(std::move(opts));
-    emit_session_config(sid, model_id_);
-    const std::string title = with_session(sid, [](Session& s) { return s.thread.title; })
+    emit_session_config(cap, sid, model_id_);
+    const std::string title = with_session(cap, sid, [](Session& s) { return s.thread.title; })
                                   .value_or(std::string{});
     if (!title.empty())
-        send_update(sid, a::SU_SessionInfo{a::Just(title), a::Nothing, json::object()});
+        send_update(cap, sid, a::SU_SessionInfo{a::Just(title), a::Nothing, json::object()});
     return r;
 }
 
-a::LoadSessionResult AgentServer::on_load_session(const a::LoadSessionParams& p) {
-    adopt_client_mcp(p.mcpServers);
+a::LoadSessionResult AgentServer::on_load_session(const Cap& cap, const a::LoadSessionParams& p) {
+    adopt_client_mcp(cap, p.mcpServers);
     std::string sid = p.sessionId.value;
     std::string cwd = p.cwd;
     // InvalidParams, not InternalError. Zed's client branches on the code
@@ -1910,7 +1932,7 @@ a::LoadSessionResult AgentServer::on_load_session(const a::LoadSessionParams& p)
 
     auto extra = extra_roots_of(p.additionalDirectories);
     // Live session: adopt the new cwd and roots, and copy the thread out.
-    if (auto live = with_session(sid, [](Session& s, std::string new_cwd,
+    if (auto live = with_session(cap, sid, [](Session& s, std::string new_cwd,
                                          std::vector<std::string> roots) {
             if (!new_cwd.empty()) s.cwd = std::move(new_cwd);
             s.extra_roots = std::move(roots);
@@ -1937,13 +1959,13 @@ a::LoadSessionResult AgentServer::on_load_session(const a::LoadSessionParams& p)
         Session s;
         s.id = sid; s.cwd = cwd; s.profile = profile; s.thread = thread;
         s.extra_roots = std::move(extra);
-        sessions_.with([](Sessions& ss, Session v) {
+        sessions_.with(cap, [](Sessions& ss, Session v) {
             std::string k = v.id;
             ss.by_id.insert_or_assign(std::move(k), std::move(v));
         }, std::move(s));
     }
 
-    replay_history(sid, thread);
+    replay_history(cap, sid, thread);
     // A fork made in the TUI points at its parent's transcript outside the
     // workspace; let the read tools reach exactly that file (#83).
     {
@@ -1958,38 +1980,38 @@ a::LoadSessionResult AgentServer::on_load_session(const a::LoadSessionParams& p)
     // Re-advertise the slash-command menu + model picker for the restored
     // session, and push its title so Zed's sidebar entry is populated the same
     // as the native agent.
-    emit_session_config(sid, model_id_);
+    emit_session_config(cap, sid, model_id_);
     if (!thread.title.empty())
-        send_update(sid, a::SU_SessionInfo{
+        send_update(cap, sid, a::SU_SessionInfo{
             a::Just<std::string>(thread.title), a::Nothing, json::object()});
 
     a::LoadSessionResult r;
     if (!v2_config())
         r.modes = a::Just(modes_for_client(profile));
-    if (auto opts = config_options(sid, model_id_); !opts.empty())
+    if (auto opts = config_options(cap, sid, model_id_); !opts.empty())
         r.configOptions = a::Just(std::move(opts));
     return r;
 }
 
-void AgentServer::on_cancel(const a::CancelParams& p) {
+void AgentServer::on_cancel(const Cap& cap, const a::CancelParams& p) {
     // Cancels the running turn and every prompt queued behind it. A prompt
     // sent after this notification is not affected.
-    auto toks = with_session(p.sessionId.value, [](Session& s) {
+    auto toks = with_session(cap, p.sessionId.value, [](Session& s) {
         std::vector<http::CancelTokenPtr> out;
         for (const auto& [rid, tok] : s.queued) out.push_back(tok);
         return out;
     });
-    if (toks) cancel_tokens(std::move(*toks));
+    if (toks) cancel_tokens(cap, std::move(*toks));
 }
 
-void AgentServer::cancel_tokens(std::vector<http::CancelTokenPtr> toks) {
+void AgentServer::cancel_tokens(const maya::below<maya::leaf>& cap, std::vector<http::CancelTokenPtr> toks) {
     for (auto& t : toks) if (t) t->cancel();
     // Wake prompts waiting in acquire_turn so a cancelled one leaves the line.
-    sessions_.with([](Sessions&) {});
+    sessions_.with(cap, [](Sessions&) {});
 }
 
-void AgentServer::register_prompt(const std::string& sid, const std::string& rid) {
-    sessions_.with([](Sessions& ss, std::string id, std::string r) {
+void AgentServer::register_prompt(const maya::below<maya::leaf>& cap, const std::string& sid, const std::string& rid) {
+    sessions_.with(cap, [](Sessions& ss, std::string id, std::string r) {
         auto it = ss.by_id.find(id);
         if (it == ss.by_id.end()) return;
         it->second.queued.emplace_back(r, std::make_shared<http::CancelToken>());
@@ -1998,9 +2020,9 @@ void AgentServer::register_prompt(const std::string& sid, const std::string& rid
 }
 
 std::optional<AgentServer::Acquired>
-AgentServer::acquire_turn(const std::string& sid, const std::string& rid,
+AgentServer::acquire_turn(const Cap& cap, const std::string& sid, const std::string& rid,
                           std::optional<Message> msg, std::string typed) {
-    return sessions_.wait_with(
+    return sessions_.wait_with(cap,
         [](const Sessions& ss, const std::string& id, const std::string& r,
            const std::optional<Message>&, const std::string&) {
             auto it = ss.by_id.find(id);
@@ -2036,8 +2058,8 @@ AgentServer::acquire_turn(const std::string& sid, const std::string& rid,
         }, sid, rid, std::move(msg), std::move(typed));
 }
 
-void AgentServer::release_turn(const std::string& sid, const std::string& rid) {
-    sessions_.with([](Sessions& ss, std::string id, std::string r) {
+void AgentServer::release_turn(const maya::below<maya::leaf>& cap, const std::string& sid, const std::string& rid) {
+    sessions_.with(cap, [](Sessions& ss, std::string id, std::string r) {
         ss.reqid_to_session.erase(r);
         auto it = ss.by_id.find(id);
         if (it == ss.by_id.end()) return;
@@ -2050,14 +2072,14 @@ void AgentServer::release_turn(const std::string& sid, const std::string& rid) {
     }, sid, rid);
 }
 
-void AgentServer::on_cancel_request(const a::RpcId& id) {
+void AgentServer::on_cancel_request(const Cap& cap, const a::RpcId& id) {
     // Generic JSON-RPC $/cancel_request: the client wants to cancel the
     // request with this id. We only track in-flight session/prompt requests
     // (the only long-running ones), so map the id back to its session and
     // cancel that turn — identical effect to a session/cancel, just addressed
     // by request id instead of sessionId. Unknown ids (already-settled turns,
     // or non-prompt requests) are a no-op, which is spec-legal.
-    auto tok = sessions_.with([](Sessions& ss, std::string rid) -> http::CancelTokenPtr {
+    auto tok = sessions_.with(cap, [](Sessions& ss, std::string rid) -> http::CancelTokenPtr {
         auto mit = ss.reqid_to_session.find(rid);
         if (mit == ss.reqid_to_session.end()) return nullptr;
         auto sit = ss.by_id.find(mit->second);
@@ -2065,7 +2087,7 @@ void AgentServer::on_cancel_request(const a::RpcId& id) {
         for (const auto& [r, t] : sit->second.queued) if (r == rid) return t;
         return nullptr;
     }, id.dump());
-    if (tok) cancel_tokens({tok});
+    if (tok) cancel_tokens(cap, std::vector<std::shared_ptr<http::CancelToken>>{tok});
 }
 
 // ── Session modes ───────────────────────────────────────────────────────────
@@ -2108,8 +2130,8 @@ a::SessionModeState AgentServer::modes_for_client(Profile current) const {
     return st;
 }
 
-void AgentServer::on_set_mode(const a::SetModeParams& p) {
-    const auto applied = with_session(p.sessionId.value, [](Session& s, std::string mode) {
+void AgentServer::on_set_mode(const Cap& cap, const a::SetModeParams& p) {
+    const auto applied = with_session(cap, p.sessionId.value, [](Session& s, std::string mode) {
         s.profile = profile_from_mode_id(mode, s.profile);
         return s.profile;
     }, p.modeId.value);
@@ -2117,18 +2139,18 @@ void AgentServer::on_set_mode(const a::SetModeParams& p) {
         throw a::RpcError(a::errc::InvalidParams,
                           "session/set_mode: unknown sessionId: " + p.sessionId.value,
                           json{{"sessionId", p.sessionId.value}});
-    send_update(p.sessionId.value,
+    send_update(cap, p.sessionId.value,
         a::SU_CurrentMode{a::SessionModeId{mode_id_for(*applied)}, json::object()});
 }
 
-a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOptionParams& p) {
+a::SetConfigOptionResult AgentServer::on_set_config_option(const Cap& cap, const a::SetConfigOptionParams& p) {
     const auto unknown = [&p] {
         return a::RpcError(a::errc::InvalidParams,
                            "session/set_config_option: unknown sessionId: "
                                + p.sessionId.value,
                            json{{"sessionId", p.sessionId.value}});
     };
-    if (!with_session(p.sessionId.value, [](Session&) { return true; })) throw unknown();
+    if (!with_session(cap, p.sessionId.value, [](Session&) { return true; })) throw unknown();
 
     const auto bad = [&p](std::string why, json supported = nullptr) {
         json data{{"configId", p.configId}, {"value", p.value}};
@@ -2145,7 +2167,7 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
         // client, or a hand-written one) means a model on the active provider.
         auto [prov, model] = split_choice(value);
         if (model.empty()) throw bad("empty model");
-        const auto choices = model_choices();
+        const auto choices = model_choices(cap);
         const bool listed = std::ranges::any_of(choices, [&](const ModelChoice& c) {
             return c.value == value || (prov.empty() && c.model == model);
         });
@@ -2154,7 +2176,7 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
         if (!prov.empty() && prov != provider::active().catalog_id() && !stream_to_)
             throw bad("this agent can only use the active provider's models");
         if (prov == provider::active().catalog_id()) prov.clear();
-        if (!with_session(p.sessionId.value,
+        if (!with_session(cap, p.sessionId.value,
                           [](Session& s, std::string pv, std::string m) {
                               s.provider = std::move(pv);
                               s.model    = std::move(m);
@@ -2162,7 +2184,7 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
                           }, std::move(prov), std::move(model)))
             throw unknown();
     } else if (p.configId == "effort") {
-        const auto cur = with_session(p.sessionId.value, [](Session& s) {
+        const auto cur = with_session(cap, p.sessionId.value, [](Session& s) {
             return std::pair{s.provider, s.model};
         });
         if (!cur) throw unknown();
@@ -2173,13 +2195,13 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
         for (Effort e : ladder) ok.push_back(std::string{effort_wire(e)});
         if (std::ranges::find(ok, json(value)) == ok.end())
             throw bad("this model doesn't take effort '" + value + "'", ok);
-        with_session(p.sessionId.value, [](Session& s, std::string v) {
+        with_session(cap, p.sessionId.value, [](Session& s, std::string v) {
             s.effort = v == "auto" ? std::string{} : std::move(v);
             return true;
         }, value);
     } else if (p.configId == "show_thinking") {
         if (!p.is_bool()) throw bad("show_thinking takes a boolean");
-        with_session(p.sessionId.value, [](Session& s, bool on) {
+        with_session(cap, p.sessionId.value, [](Session& s, bool on) {
             s.show_reasoning = on;
             return true;
         }, p.value_bool());
@@ -2190,7 +2212,7 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
         if (value != "ask" && value != "write" && value != "minimal")
             throw bad("mode must be ask|write|minimal",
                       json::array({"ask", "write", "minimal"}));
-        const auto got = with_session(p.sessionId.value, [](Session& s, std::string mode) {
+        const auto got = with_session(cap, p.sessionId.value, [](Session& s, std::string mode) {
             s.profile = profile_from_mode_id(mode, s.profile);
             return s.profile;
         }, value);
@@ -2201,7 +2223,7 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
         // option); a v1 client that reached this path anyway still gets its
         // SessionModeState surface updated. Never both.
         if (!v2_config())
-            send_update(p.sessionId.value,
+            send_update(cap, p.sessionId.value,
                 a::SU_CurrentMode{a::SessionModeId{mode_id_for(applied)}, json::object()});
     } else {
         // An unknown config id is an error, not a no-op that looks like success.
@@ -2212,8 +2234,8 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const a::SetConfigOpt
     // Echo the COMPLETE new config state, in the result (the spec requires
     // it; Zed and JetBrains reconcile their selectors from it) and as an
     // update for clients that only watch notifications.
-    a::SetConfigOptionResult r{config_options(p.sessionId.value, model_id_), json::object()};
-    emit_config_state(p.sessionId.value, model_id_);
+    a::SetConfigOptionResult r{config_options(cap, p.sessionId.value, model_id_), json::object()};
+    emit_config_state(cap, p.sessionId.value, model_id_);
     return r;
 }
 
@@ -2226,18 +2248,18 @@ void AgentServer::on_authenticate(const a::AuthenticateParams& p) {
                           "authenticate: unknown methodId '" + p.methodId + "'");
     if (auth::is_empty(auth()) && reauth_) {
         auth::AuthHeader fresh = reauth_();
-        auth_.with([](auth::AuthHeader& a, auth::AuthHeader v) { a = std::move(v); }, fresh);
+        auth_.store(fresh);
         // The model list depends on which providers are signed in.
-        model_choices_.with([](std::vector<ModelChoice>& v) { v.clear(); });
+        model_choices_.publish(nullptr);
     }
     if (auth::is_empty(auth()))
         throw a::RpcError(a::AuthRequired,
                           "still not signed in. Run `agentty login` and try again.");
 }
 
-void AgentServer::on_logout() {
+void AgentServer::on_logout(const Cap& cap) {
     auth::clear_credentials(IoAccess::grant());   // ACP handler, not a reducer
-    auth_.with([](auth::AuthHeader& a) { a = auth::ApiKeyHeader{""}; });
+    auth_.store(auth::AuthHeader{auth::ApiKeyHeader{""}});
 }
 
 // ── Session lifecycle: list / resume / close / delete ────────────────────────
@@ -2269,16 +2291,19 @@ void write_session_index(const json& j) {
 }
 }  // namespace
 
-json AgentServer::load_session_index() {
-    return persistence::with_shared_file(session_index_lane(), session_index_path(),
-        [](persistence::Held) { return read_session_index("acp.load_session_index"); });
+json AgentServer::load_session_index(const Cap& cap) {
+    return persistence::with_shared_file(cap, session_index_lane(), session_index_path(),
+        [](const maya::held<lock_levels::file_lane>&, persistence::Held) {
+            return read_session_index("acp.load_session_index");
+        });
 }
 
-void AgentServer::index_session(const std::string& id) {
-    auto meta = with_session(id, [](Session& s) { return std::pair{s.cwd, s.thread.title}; });
+void AgentServer::index_session(const Cap& cap, const std::string& id) {
+    auto meta = with_session(cap, id, [](Session& s) { return std::pair{s.cwd, s.thread.title}; });
     if (!meta) return;
-    persistence::with_shared_file(session_index_lane(), session_index_path(),
-        [](persistence::Held, std::string key, json entry) {
+    persistence::with_shared_file(cap, session_index_lane(), session_index_path(),
+        [](const maya::held<lock_levels::file_lane>&, persistence::Held, std::string key,
+           json entry) {
             json j = read_session_index("acp.index_session");
             j[key] = std::move(entry);
             write_session_index(j);
@@ -2290,9 +2315,9 @@ void AgentServer::index_session(const std::string& id) {
         });
 }
 
-void AgentServer::unindex_session(const std::string& id) {
-    persistence::with_shared_file(session_index_lane(), session_index_path(),
-        [](persistence::Held, std::string key) {
+void AgentServer::unindex_session(const Cap& cap, const std::string& id) {
+    persistence::with_shared_file(cap, session_index_lane(), session_index_path(),
+        [](const maya::held<lock_levels::file_lane>&, persistence::Held, std::string key) {
             json j = read_session_index("acp.unindex_session");
             if (!j.contains(key)) return;
             j.erase(key);
@@ -2300,12 +2325,12 @@ void AgentServer::unindex_session(const std::string& id) {
         }, id);
 }
 
-a::ListSessionsResult AgentServer::on_list_sessions(const a::ListSessionsParams& p) {
+a::ListSessionsResult AgentServer::on_list_sessions(const Cap& cap, const a::ListSessionsParams& p) {
     std::string filter_cwd = p.cwd.value_or("");
-    json index = load_session_index();
+    json index = load_session_index(cap);
 
     // Live sessions not yet in the on-disk index (cwd, title).
-    const auto live = sessions_.read([](const Sessions& ss) {
+    const auto live = sessions_.read(cap, [](const Sessions& ss) {
         std::vector<std::array<std::string, 3>> out;
         for (const auto& [id, s] : ss.by_id) out.push_back({id, s.cwd, s.thread.title});
         return out;
@@ -2356,22 +2381,22 @@ a::ListSessionsResult AgentServer::on_list_sessions(const a::ListSessionsParams&
     return result;
 }
 
-a::ResumeSessionResult AgentServer::on_resume_session(const a::ResumeSessionParams& p) {
-    return on_load_session(p);   // restore + replay; same result shape
+a::ResumeSessionResult AgentServer::on_resume_session(const Cap& cap, const a::ResumeSessionParams& p) {
+    return on_load_session(cap, p);   // restore + replay; same result shape
 }
 
-void AgentServer::on_close_session(const a::CloseSessionParams& p) {
-    sessions_.with([](Sessions& ss, std::string id) { ss.by_id.erase(id); }, p.sessionId.value);
+void AgentServer::on_close_session(const Cap& cap, const a::CloseSessionParams& p) {
+    sessions_.with(cap, [](Sessions& ss, std::string id) { ss.by_id.erase(id); }, p.sessionId.value);
 }
 
-void AgentServer::on_delete_session(const a::DeleteSessionParams& p) {
-    sessions_.with([](Sessions& ss, std::string id) { ss.by_id.erase(id); }, p.sessionId.value);
-    persistence::delete_thread(IoAccess::grant(), ThreadId{p.sessionId.value});
-    unindex_session(p.sessionId.value);
+void AgentServer::on_delete_session(const Cap& cap, const a::DeleteSessionParams& p) {
+    sessions_.with(cap, [](Sessions& ss, std::string id) { ss.by_id.erase(id); }, p.sessionId.value);
+    persistence::delete_thread(IoAccess::grant(), cap, ThreadId{p.sessionId.value});
+    unindex_session(cap, p.sessionId.value);
 }
 
 // ── Prompt + turn loop ───────────────────────────────────────────────────────
-void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
+void AgentServer::on_prompt(const Cap& cap, const a::PromptParams& p, Responder resp) {
     std::string sid  = p.sessionId.value;
     auto parts = prompt_parts_from_blocks(p.prompt);
     std::string text = std::move(parts.text);
@@ -2384,13 +2409,13 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
         const auto& sel = provider::active();
         const bool keyless_local =
             sel.kind == provider::Kind::OpenAI && !sel.openai_endpoint.use_tls;
-        const bool known = with_session(sid, [](Session&) { return true; }).has_value();
+        const bool known = with_session(cap, sid, [](Session&) { return true; }).has_value();
         if (!known) {
-            resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
+            resp.error(cap, a::errc::InvalidParams, "unknown sessionId: " + sid);
             return;
         }
         if (auth::is_empty(auth()) && !keyless_local) {
-            resp.error(a::AuthRequired,
+            resp.error(cap, a::AuthRequired,
                 "agentty has no credentials — run `agentty login` first");
             return;
         }
@@ -2404,26 +2429,26 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
         while (!t.empty() && std::isspace(static_cast<unsigned char>(t.back())))  t.remove_suffix(1);
         if (t == "/new") {
             // A fresh context in the same session: the client keeps its tab.
-            with_session(sid, [](Session& s) {
+            with_session(cap, sid, [](Session& s) {
                 s.thread.messages.clear();
                 s.thread.compactions.clear();
                 s.warned_context = false;
                 return true;
             });
-            persist(sid);
-            send_update(sid, a::SU_AgentMessageChunk{
+            persist(cap, sid);
+            send_update(cap, sid, a::SU_AgentMessageChunk{
                 text_block("Started a fresh conversation. Earlier messages are no longer "
                            "sent to the model."), a::Nothing});
-            resp.ok(a::PromptResult{a::StopReason::EndTurn, json::object()});
+            resp.ok(cap, a::PromptResult{a::StopReason::EndTurn, json::object()});
             return;
         }
         if (t == "/compact" || t.starts_with("/compact ")) {
             std::string rid = jsonrpc::to_json(resp.id()).dump();
-            register_prompt(sid, rid);
+            register_prompt(cap, sid, rid);
             util::run_isolated_detached("acp.compact",
-                [](std::stop_token, maya::co_owned<AgentServer> self, std::string sid,
-                   std::string rid, Responder r) {
-                    self->run_compact(IoAccess::grant(), std::move(sid), std::move(rid),
+                [](const maya::unlocked& cap, std::stop_token, maya::co_owned<AgentServer> self,
+                   std::string sid, std::string rid, Responder r) {
+                    self->run_compact(IoAccess::grant(), cap, std::move(sid), std::move(rid),
                                       std::move(r));
                 }, maya::co_owned<AgentServer>::of(*this), std::move(sid), std::move(rid),
                 std::move(resp));
@@ -2443,7 +2468,7 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
                 const std::string rest = sp == std::string_view::npos
                                        ? std::string{} : std::string{t.substr(sp + 1)};
                 if (auto sk = tools::skills::find(io, tok)) {
-                    const Thread snap = with_session(sid, [](Session& s) {
+                    const Thread snap = with_session(cap, sid, [](Session& s) {
                         return s.thread;
                     }).value_or(Thread{});
                     if (!tools::skills::is_active_in(sk->name, ::agentty::visible_text(snap))) {
@@ -2469,16 +2494,16 @@ void AgentServer::on_prompt(const a::PromptParams& p, Responder resp) {
     // before the worker starts still finds this prompt. The message joins the
     // thread when its turn comes, so a queued prompt never lands mid-turn.
     std::string req_id_dump = jsonrpc::to_json(resp.id()).dump();
-    register_prompt(sid, req_id_dump);
+    register_prompt(cap, sid, req_id_dump);
 
     // Run the whole turn off the reader thread; the engine stays free to
     // deliver our outbound permission responses. The Responder resolves the
     // deferred session/prompt when the turn settles. The job co-owns the
     // server, so a turn still running at exit can't outlive it.
     util::run_isolated_detached("acp.turn_worker",
-        [](std::stop_token, maya::co_owned<AgentServer> self, std::string sid,
-           std::string rid, Responder r, Message m, std::string typed) {
-            self->run_turn(IoAccess::grant(), std::move(sid), std::move(rid), std::move(r),
+        [](const maya::unlocked& cap, std::stop_token, maya::co_owned<AgentServer> self,
+           std::string sid, std::string rid, Responder r, Message m, std::string typed) {
+            self->run_turn(IoAccess::grant(), cap, std::move(sid), std::move(rid), std::move(r),
                            std::move(m), std::move(typed));
         }, maya::co_owned<AgentServer>::of(*this), std::move(sid),
         std::move(req_id_dump), std::move(resp), std::move(um), std::move(typed));
@@ -2496,19 +2521,19 @@ constexpr std::string_view kMemoryToolNames[] = {"remember", "forget", "wipe_mem
 // the summary instead of the full history. The transcript itself is kept
 // (the client still shows it), same as the TUI. Reported as a v1.11
 // compaction entity when the client renders those, as plain text otherwise.
-void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder resp) {
+void AgentServer::run_compact(Io, const Cap& cap, std::string sid, std::string rid, Responder resp) {
   struct Release {
-      AgentServer& s; const std::string& sid; const std::string& rid;
-      ~Release() { s.release_turn(sid, rid); }
-  } release{*this, sid, rid};
+      AgentServer& s; const Cap& c; const std::string& sid; const std::string& rid;
+      ~Release() { s.release_turn(c, sid, rid); }
+  } release{*this, cap, sid, rid};
   try {
-    const auto settle = [&] { release_turn(sid, rid); };
-    if (!acquire_turn(sid, rid)) {
+    const auto settle = [&] { release_turn(cap, sid, rid); };
+    if (!acquire_turn(cap, sid, rid)) {
         settle();
-        if (with_session(sid, [](Session&) { return true; }))
-            resp.ok(a::PromptResult{a::StopReason::Cancelled, json::object()});
+        if (with_session(cap, sid, [](Session&) { return true; }))
+            resp.ok(cap, a::PromptResult{a::StopReason::Cancelled, json::object()});
         else
-            resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid);
+            resp.error(cap, a::errc::InvalidParams, "unknown sessionId: " + sid);
         return;
     }
     struct Snap {
@@ -2516,16 +2541,16 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
         std::string model, provider;
         http::CancelTokenPtr cancel;
     };
-    auto snap = with_session(sid, [](Session& s) {
+    auto snap = with_session(cap, sid, [](Session& s) {
         return Snap{s.thread, s.model, s.provider, s.cancel};
     });
-    if (!snap) { settle(); resp.error(a::errc::InvalidParams, "unknown sessionId: " + sid); return; }
+    if (!snap) { settle(); resp.error(cap, a::errc::InvalidParams, "unknown sessionId: " + sid); return; }
     const std::size_t up_to = snap->thread.messages.size();
     if (up_to < 2) {
         settle();
-        send_update(sid, a::SU_AgentMessageChunk{
+        send_update(cap, sid, a::SU_AgentMessageChunk{
             text_block("Nothing to compact yet."), a::Nothing});
-        resp.ok(a::PromptResult{a::StopReason::EndTurn, json::object()});
+        resp.ok(cap, a::PromptResult{a::StopReason::EndTurn, json::object()});
         return;
     }
 
@@ -2539,7 +2564,7 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
             std::chrono::steady_clock::now() - started).count();
         return air_meta(json{{"contextCompaction", std::move(extra)}});
     };
-    if (entity) send_update(sid, a::SU_Compaction{cid, "in_progress", a::Nothing, a::Nothing,
+    if (entity) send_update(cap, sid, a::SU_Compaction{cid, "in_progress", a::Nothing, a::Nothing,
                                                   air_meta(json{{"contextCompaction", {{"version", 1}, {"trigger", "manual"}}}})});
 
     provider::Request req;
@@ -2560,7 +2585,7 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
                     if constexpr (std::is_same_v<T, StreamTextDelta>) {
                         summary += ev.text;
                         if (entity)
-                            send_update(sid, a::SU_CompactionSummaryChunk{
+                            send_update(cap, sid, a::SU_CompactionSummaryChunk{
                                 cid, text_block(ev.text), json::object()});
                     } else if constexpr (std::is_same_v<T, StreamError>) {
                         error = ev.message;
@@ -2570,8 +2595,8 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
         }, m);
     };
     try {
-        if (!snap->provider.empty() && stream_to_) stream_to_(snap->provider, std::move(req), sink);
-        else                                        stream_(std::move(req), sink);
+        if (!snap->provider.empty() && stream_to_) stream_to_(cap, snap->provider, std::move(req), sink);
+        else                                        stream_(cap, std::move(req), sink);
     } catch (const std::exception& e) { error = e.what(); }
 
     const bool cancelled = snap->cancel && snap->cancel->is_cancelled();
@@ -2579,18 +2604,18 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
     if (cancelled || !error.empty() || summary.empty()) {
         settle();
         if (entity)
-            send_update(sid, a::SU_Compaction{cid, cancelled ? "cancelled" : "failed", a::Nothing,
+            send_update(cap, sid, a::SU_Compaction{cid, cancelled ? "cancelled" : "failed", a::Nothing,
                         cancelled ? a::Nothing : a::Just<std::string>(error.empty() ? "empty summary" : error),
                         facts(cancelled ? json{{"version", 1}}
                                         : json{{"version", 1}, {"error", error.empty() ? "empty summary" : error}})});
-        if (cancelled) { resp.ok(a::PromptResult{a::StopReason::Cancelled, json::object()}); return; }
-        resp.error(a::errc::InternalError, "compaction failed: " + (error.empty() ? std::string{"empty summary"} : error));
+        if (cancelled) { resp.ok(cap, a::PromptResult{a::StopReason::Cancelled, json::object()}); return; }
+        resp.error(cap, a::errc::InternalError, "compaction failed: " + (error.empty() ? std::string{"empty summary"} : error));
         return;
     }
 
     // Record it. Messages that arrived while summarising are past up_to and
     // stay on the wire verbatim.
-    const auto before_after = with_session(sid, [](Session& s, std::size_t upto, std::string text) {
+    const auto before_after = with_session(cap, sid, [](Session& s, std::size_t upto, std::string text) {
         Thread::CompactionRecord rec;
         rec.up_to_index = std::min(upto, s.thread.messages.size());
         rec.summary     = std::move(text);
@@ -2602,8 +2627,8 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
                          s.thread.compactions.back().tokens_after};
     }, up_to, summary);
     settle();
-    persist(sid);
-    index_session(sid);
+    persist(cap, sid);
+    index_session(cap, sid);
 
     if (entity) {
         // The streamed chunks were the raw reply; this replaces them with the
@@ -2615,51 +2640,51 @@ void AgentServer::run_compact(Io, std::string sid, std::string rid, Responder re
             f["preTokens"]  = before_after->first;
             f["postTokens"] = before_after->second;
         }
-        send_update(sid, a::SU_Compaction{cid, "completed", a::Just(std::move(clean)),
+        send_update(cap, sid, a::SU_Compaction{cid, "completed", a::Just(std::move(clean)),
                                           a::Nothing, facts(std::move(f))});
     } else {
         std::string msg = "Compacted the conversation.";
         if (before_after && before_after->first > 0)
             msg += " About " + std::to_string(before_after->first / 1000) + "k tokens down to " +
                    std::to_string(before_after->second / 1000) + "k.";
-        send_update(sid, a::SU_AgentMessageChunk{text_block(std::move(msg)), a::Nothing});
+        send_update(cap, sid, a::SU_AgentMessageChunk{text_block(std::move(msg)), a::Nothing});
     }
-    resp.ok(a::PromptResult{a::StopReason::EndTurn, json::object()});
+    resp.ok(cap, a::PromptResult{a::StopReason::EndTurn, json::object()});
   } catch (const std::exception& e) {
-    resp.error(a::errc::InternalError, std::string{"compaction failed: "} + e.what());
+    resp.error(cap, a::errc::InternalError, std::string{"compaction failed: "} + e.what());
   } catch (...) {
-    resp.error(a::errc::InternalError, "compaction failed");
+    resp.error(cap, a::errc::InternalError, "compaction failed");
   }
 }
 
-void AgentServer::run_turn(Io io, std::string session_id, std::string req_id_dump,
+void AgentServer::run_turn(Io io, const Cap& cap, std::string session_id, std::string req_id_dump,
                            Responder resp, Message user_msg, std::string typed) {
   // Hand the session to the next queued prompt however this one ends.
   struct Release {
-      AgentServer& s; const std::string& sid; const std::string& rid;
-      ~Release() { s.release_turn(sid, rid); }
-  } release{*this, session_id, req_id_dump};
+      AgentServer& s; const Cap& c; const std::string& sid; const std::string& rid;
+      ~Release() { s.release_turn(c, sid, rid); }
+  } release{*this, cap, session_id, req_id_dump};
   // This runs on a DETACHED worker thread, entirely outside acp-cpp's
   // handle_request try/catch. An uncaught throw here would call
   // std::terminate() and kill every session in the process; and a return
   // without resolving `resp` leaves the client's session/prompt future
   // hanging forever (the Responder destructor does not auto-reply). So the
   // whole body is guarded: any escape resolves the deferred prompt with an
-  // InternalError. The ok/error done-latch makes the trailing resp.ok(...)
+  // InternalError. The ok/error done-latch makes the trailing resp.ok(cap, ...)
   // a no-op if we already errored, so exactly one reply is sent.
   try {
     // Wait for any turn already running in this session, then add our
     // message. Cancelled while queued: answer cancelled, never run.
-    auto got = acquire_turn(session_id, req_id_dump, std::move(user_msg), std::move(typed));
+    auto got = acquire_turn(cap, session_id, req_id_dump, std::move(user_msg), std::move(typed));
     if (!got) {
-        if (with_session(session_id, [](Session&) { return true; }))
-            resp.ok(a::PromptResult{a::StopReason::Cancelled, json::object()});
+        if (with_session(cap, session_id, [](Session&) { return true; }))
+            resp.ok(cap, a::PromptResult{a::StopReason::Cancelled, json::object()});
         else
-            resp.error(a::errc::InvalidParams, "unknown sessionId: " + session_id);
+            resp.error(cap, a::errc::InvalidParams, "unknown sessionId: " + session_id);
         return;
     }
     if (!got->title.empty())
-        send_update(session_id, a::SU_SessionInfo{
+        send_update(cap, session_id, a::SU_SessionInfo{
             a::Just<std::string>(got->title), a::Nothing, json::object()});
 
     bool cancelled = false;
@@ -2678,11 +2703,11 @@ void AgentServer::run_turn(Io io, std::string session_id, std::string req_id_dum
 
     for (int turn = 0; turn < 64; ++turn) {
         // A concurrent session/close|delete ends the turn at the next step.
-        if (!with_session(session_id, [](Session&) { return true; })) {
+        if (!with_session(cap, session_id, [](Session&) { return true; })) {
             errored = true; error_msg = "session vanished"; break;
         }
 
-        StopReason stop = stream_completion(io, session_id, cancelled, error_msg,
+        StopReason stop = stream_completion(io, cap, session_id, cancelled, error_msg,
                                             force_text_retry);
         last_stop = stop;
         force_text_retry = false;
@@ -2703,7 +2728,7 @@ void AgentServer::run_turn(Io io, std::string session_id, std::string req_id_dum
             // report which ones so the client cards follow, unlocked.
             struct Salvage { bool any = false, mem_leak = false;
                              std::vector<std::string> failed; };
-            const auto sv = with_session(session_id,
+            const auto sv = with_session(cap, session_id,
                 [](Session& cs, bool fail_now) -> Salvage {
                     Salvage out;
                     if (cs.thread.messages.empty()) return out;
@@ -2733,7 +2758,7 @@ void AgentServer::run_turn(Io io, std::string session_id, std::string req_id_dum
                         a::ToolCallUpdate u;
                         u.toolCallId = a::ToolCallId{id};
                         u.status     = a::Just(a::ToolCallStatus::Failed);
-                        send_update(session_id, a::SU_ToolCallUpdate{std::move(u)});
+                        send_update(cap, session_id, a::SU_ToolCallUpdate{std::move(u)});
                     }
                     // Over budget: one final tool-free retry so the model
                     // answers in plain text instead of an empty bubble. The
@@ -2749,20 +2774,20 @@ void AgentServer::run_turn(Io io, std::string session_id, std::string req_id_dum
             }
         }
 
-        bool ran = run_tools(session_id, cancelled);
+        bool ran = run_tools(cap, session_id, cancelled);
         if (cancelled || !ran) break;
     }
 
     // Persist if the session still exists. The cancel handle and the reqid
     // mapping go when the turn is released.
-    const bool alive = with_session(session_id, [](Session&) { return true; }).value_or(false);
+    const bool alive = with_session(cap, session_id, [](Session&) { return true; }).value_or(false);
     if (alive) {
-        persist(session_id);
-        index_session(session_id);
+        persist(cap, session_id);
+        index_session(cap, session_id);
         // Bump the sidebar's "last active" for this chat.
         const auto now_s = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        send_update(session_id, a::SU_SessionInfo{
+        send_update(cap, session_id, a::SU_SessionInfo{
             a::Nothing, a::Just<std::string>(iso8601(now_s)), json::object()});
     }
 
@@ -2772,22 +2797,22 @@ void AgentServer::run_turn(Io io, std::string session_id, std::string req_id_dum
     // would tell the client the model declined and hide why. Cancellation
     // still wins, as the spec requires.
     if (errored && !cancelled) {
-        resp.error(a::errc::InternalError,
+        resp.error(cap, a::errc::InternalError,
                    error_msg.empty() ? std::string{"turn failed"} : error_msg);
         return;
     }
-    resp.ok(result);
+    resp.ok(cap, result);
   } catch (const std::exception& e) {
     util::dbglog("acp.run_turn", e.what());
-    resp.error(a::errc::InternalError,
+    resp.error(cap, a::errc::InternalError,
                std::string{"turn failed: "} + e.what());
   } catch (...) {
     util::dbglog("acp.run_turn", "non-std exception");
-    resp.error(a::errc::InternalError, "turn failed (unknown error)");
+    resp.error(cap, a::errc::InternalError, "turn failed (unknown error)");
   }
 }
 
-StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
+StopReason AgentServer::stream_completion(Io io, const Cap& cap, const std::string& session_id,
                                           bool& out_cancelled,
                                           std::string& out_error,
                                           bool suppress_tools) {
@@ -2800,7 +2825,7 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
         http::CancelTokenPtr cancel;
         std::vector<Message> messages;
     };
-    auto snap = with_session(session_id, [](Session& s) {
+    auto snap = with_session(cap, session_id, [](Session& s) {
         // The wire view: after /compact the summary replaces the prefix.
         return Snap{s.model, s.cwd, s.provider, s.effort, s.show_reasoning, s.cancel,
                     app::cmd::wire_messages_for(s.thread)};
@@ -2892,7 +2917,7 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
                     using E = std::decay_t<decltype(ev)>;
                     if constexpr (std::is_same_v<E, StreamTextDelta>) {
                         assistant.text += ev.text;
-                        send_update(sid, a::SU_AgentMessageChunk{
+                        send_update(cap, sid, a::SU_AgentMessageChunk{
                             text_block(ev.text), a::Just(a::MessageId{msg_id})});
                     } else if constexpr (std::is_same_v<E, StreamThinkingDelta>) {
                         // Adaptive/extended thinking (effort on): forward the
@@ -2924,7 +2949,7 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
                         if (!ev.text.empty()) {
                             open_block().text += ev.text;
                             assistant.thinking += ev.text;   // replayed on load
-                            send_update(sid, a::SU_AgentThoughtChunk{
+                            send_update(cap, sid, a::SU_AgentThoughtChunk{
                                 text_block(ev.text), a::Just(a::MessageId{msg_id})});
                         }
                     } else if constexpr (std::is_same_v<E, StreamReasoning>) {
@@ -2956,7 +2981,7 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
                         if (is_command_tool(ev.name.value) && terminal_channel())
                             call.meta = json{{"terminal_info",
                                               {{"terminal_id", ev.id.value}, {"cwd", scwd}}}};
-                        send_update(sid, a::SU_ToolCall{std::move(call)});
+                        send_update(cap, sid, a::SU_ToolCall{std::move(call)});
                     } else if constexpr (std::is_same_v<E, StreamToolUseDelta>) {
                         cur_tool_json += ev.partial_json;
                     } else if constexpr (std::is_same_v<E, StreamToolUseEnd>) {
@@ -2994,14 +3019,14 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
                             if (auto pc = prompt_content(tc))     c.push_back(std::move(*pc));
                             if (!c.empty()) upd.content = a::Just(std::move(c));
                             merge_meta(upd.meta, air_tool_meta(tc));
-                            send_update(sid, a::SU_ToolCallUpdate{std::move(upd)});
+                            send_update(cap, sid, a::SU_ToolCallUpdate{std::move(upd)});
 
                             // A `todo` write drives Zed's native plan/checklist
                             // widget (claude-code-acp parity) — emit the plan the
                             // moment the list is known, in addition to the tool
                             // card above.
                             if (auto plan = plan_from_todos(tc))
-                                send_update(sid, std::move(*plan));
+                                send_update(cap, sid, std::move(*plan));
                         }
                     } else if constexpr (std::is_same_v<E, StreamFinished>) {
                         stop = ev.stop_reason;
@@ -3027,9 +3052,9 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
         provider::Request this_req = req;
         try {
             if (!snap->provider.empty() && stream_to_)
-                stream_to_(snap->provider, std::move(this_req), sink);
+                stream_to_(cap, snap->provider, std::move(this_req), sink);
             else
-                stream_(std::move(this_req), sink);
+                stream_(cap, std::move(this_req), sink);
         } catch (const std::exception& e) {
             out_error = std::string{"stream backend: "} + e.what();
         }
@@ -3044,7 +3069,7 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
         auto wait = std::chrono::seconds{1 << (attempt - 1)};   // 1, 2, 4 s
         if (last_retry_after) wait = std::clamp(*last_retry_after, std::chrono::seconds{1},
                                                 std::chrono::seconds{60});
-        notice(sid, "warning",
+        notice(cap, sid, "warning",
                cls == provider::ErrorClass::RateLimit ? "Rate limited, retrying"
                                                       : "Provider error, retrying",
                out_error + " (attempt " + std::to_string(attempt + 1) + " of " +
@@ -3073,31 +3098,31 @@ StopReason AgentServer::stream_completion(Io io, const std::string& session_id,
         // Warn once per session as the window passes 85%: the next turns are
         // where answers get cut off.
         if (u.size > 0 && u.used * 100 >= u.size * 85) {
-            const bool first = with_session(session_id, [](Session& s) {
+            const bool first = with_session(cap, session_id, [](Session& s) {
                 return !std::exchange(s.warned_context, true);
             }).value_or(false);
             if (first)
-                notice(sid, "warning", "Context window is nearly full",
+                notice(cap, sid, "warning", "Context window is nearly full",
                        std::to_string(u.used * 100 / u.size) +
                        "% used. Run /compact, or start a new thread.");
         }
-        send_update(sid, std::move(u));
+        send_update(cap, sid, std::move(u));
     }
     if (!out_error.empty() && !out_cancelled)
-        notice(sid, "error", "The model request failed", out_error);
+        notice(cap, sid, "error", "The model request failed", out_error);
 
     // Structural mutation of the shared messages vector — lock the
     // per-session thread mutex so a concurrent reader-thread snapshot
     // (session/load|resume replay, persist) can't observe a half-grown
     // vector or race the reallocation. Held only for the push, not the
     // stream above.
-    with_session(session_id,
+    with_session(cap, session_id,
                  [](Session& s, Message m) { s.thread.messages.push_back(std::move(m)); return true; },
                  std::move(assistant));
     return stop;
 }
 
-void AgentServer::settle_tool(const TurnCtx& ctx, ToolUse& tc, ToolUse::Status st,
+void AgentServer::settle_tool(const Cap& cap, const TurnCtx& ctx, ToolUse& tc, ToolUse::Status st,
                               std::chrono::steady_clock::time_point executing_since) {
     if (executing_since != std::chrono::steady_clock::time_point{}) {
         if (auto* d = std::get_if<ToolUse::Done>(&st))   d->executing_since = executing_since;
@@ -3106,7 +3131,7 @@ void AgentServer::settle_tool(const TurnCtx& ctx, ToolUse& tc, ToolUse::Status s
     tc.status = st;
     // Write it back by (message id, tool id): a session closed mid-turn, or a
     // message that moved, just means nothing to update.
-    with_session(ctx.id, [](Session& s, std::string mid, std::string tid, ToolUse::Status v) {
+    with_session(cap, ctx.id, [](Session& s, std::string mid, std::string tid, ToolUse::Status v) {
         for (auto it = s.thread.messages.rbegin(); it != s.thread.messages.rend(); ++it) {
             if (it->id.value != mid) continue;
             for (auto& t : it->tool_calls)
@@ -3117,7 +3142,7 @@ void AgentServer::settle_tool(const TurnCtx& ctx, ToolUse& tc, ToolUse::Status s
     }, ctx.msg_id, tc.id.value, std::move(st));
 }
 
-bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) {
+bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool& out_cancelled) {
     // Copy out the batch and what the gate needs, once. The profile is one
     // stable value for the whole batch; a mode change mid-turn takes effect
     // next turn. Tools run on the copies with no lock held, and each settled
@@ -3128,7 +3153,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         std::vector<ToolUse> calls;
         std::set<std::string> grants;
     };
-    auto batch = with_session(session_id, [](Session& s) -> std::optional<Batch> {
+    auto batch = with_session(cap, session_id, [](Session& s) -> std::optional<Batch> {
         if (s.thread.messages.empty()) return std::nullopt;
         const Message& last = s.thread.messages.back();
         if (last.role != Role::Assistant || last.tool_calls.empty()) return std::nullopt;
@@ -3149,7 +3174,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
     // latency win of overlapping independent reads. Results land in emission
     // order for the wire tool_use/result pairing, and Zed renders the cards
     // sequentially anyway.
-    auto set_status = [&](ToolUse& tc, ToolUse::Status st) { settle_tool(ctx, tc, std::move(st)); };
+    auto set_status = [&](ToolUse& tc, ToolUse::Status st) { settle_tool(cap, ctx, tc, std::move(st)); };
 
     for (auto& tc : (*batch)->calls) {
         if (ctx.cancelled()) { out_cancelled = true; return false; }
@@ -3164,7 +3189,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
             tool::DynamicDispatch::needs_permission_with(td, profile)
             && !grants.contains(tc.name.value);
         // "Always reject" from earlier this session: refused without asking.
-        const bool denied_always = needs_perm && with_session(ctx.id, [](Session& s, std::string n) {
+        const bool denied_always = needs_perm && with_session(cap, ctx.id, [](Session& s, std::string n) {
             return s.denials.contains(n);
         }, tc.name.value).value_or(false);
         if (needs_perm) {
@@ -3173,25 +3198,25 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
                 a::ToolCallUpdate u;
                 u.toolCallId = a::ToolCallId{tc.id.value};
                 u.status     = a::Just(a::ToolCallStatus::Pending);
-                send_update(ctx.id, a::SU_ToolCallUpdate{std::move(u)});
-                outcome = ask_permission(ctx.id, tc,
+                send_update(cap, ctx.id, a::SU_ToolCallUpdate{std::move(u)});
+                outcome = ask_permission(cap, ctx.id, tc,
                                          ctx.cancel ? ctx.cancel->token() : std::stop_token{});
             }
             if (ctx.cancelled()) { out_cancelled = true; return false; }
             if (outcome == PermissionOutcome::AllowAlways) {
                 grants.insert(tc.name.value);
-                with_session(ctx.id, [](Session& s, std::string n) { s.grants.insert(std::move(n)); return true; },
+                with_session(cap, ctx.id, [](Session& s, std::string n) { s.grants.insert(std::move(n)); return true; },
                              tc.name.value);
             }
             if (outcome == PermissionOutcome::DenyAlways)
-                with_session(ctx.id, [](Session& s, std::string n) { s.denials.insert(std::move(n)); return true; },
+                with_session(cap, ctx.id, [](Session& s, std::string n) { s.denials.insert(std::move(n)); return true; },
                              tc.name.value);
             if (outcome == PermissionOutcome::Deny || outcome == PermissionOutcome::DenyAlways) {
                 set_status(tc, ToolUse::Rejected{});
                 a::ToolCallUpdate r;
                 r.toolCallId = a::ToolCallId{tc.id.value};
                 r.status     = a::Just(a::ToolCallStatus::Failed);
-                send_update(ctx.id, a::SU_ToolCallUpdate{std::move(r)});
+                send_update(cap, ctx.id, a::SU_ToolCallUpdate{std::move(r)});
                 continue;
             }
         }
@@ -3199,7 +3224,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         a::ToolCallUpdate running;
         running.toolCallId = a::ToolCallId{tc.id.value};
         running.status     = a::Just(a::ToolCallStatus::InProgress);
-        send_update(ctx.id, a::SU_ToolCallUpdate{std::move(running)});
+        send_update(cap, ctx.id, a::SU_ToolCallUpdate{std::move(running)});
 
         // Live-terminal fast path: when the client hosts terminals and our
         // sandbox isn't wrapping commands, run `bash` through the client's ACP
@@ -3207,7 +3232,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         // claude-code-acp UX) instead of us capturing static text. Emits its
         // own completion update + sets tc.status; nullopt means "not eligible,
         // use internal execution below".
-        if (auto tr = run_bash_via_terminal(ctx, tc)) {
+        if (auto tr = run_bash_via_terminal(cap, ctx, tc)) {
             if (tr->cancelled) { out_cancelled = true; return false; }
             continue;
         }
@@ -3238,7 +3263,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         // Thread. Only the skill tool reads it, so only it pays to derive.
         std::vector<std::string> active_skills;
         if (tc.name.value == "skill") {
-            active_skills = with_session(ctx.id, [](Session& s) {
+            active_skills = with_session(cap, ctx.id, [](Session& s) {
                 return tools::skills::active_in(::agentty::visible_text(s.thread));
             }).value_or(std::vector<std::string>{});
         }
@@ -3262,11 +3287,17 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
             || client_elicit_url_.load(std::memory_order_relaxed))
             call_ctx.elicit = [this, sid = ctx.id, tid = tc.id.value,
                                tok = ctx.cancel ? ctx.cancel->token() : std::stop_token{}](const json& mcp) {
-                return elicit_via_client(sid, tid, mcp, tok);
+                // Called by the MCP bridge on the tool's call thread (an MCP
+                // server's request, relayed synchronously), which holds no
+                // agentty lock: a reviewed root (tests/lint/allowlist.txt).
+                return maya::thread_root([&](const maya::unlocked& c) {
+                    return elicit_via_client(c, sid, tid, mcp, tok);
+                });
             };
         // A subagent run is kept as its own session so Zed can show it
-        // nested under this card (_meta.subagent_session_info).
-        auto sub_sid = std::make_shared<maya::guarded<std::string>>();
+        // nested under this card (_meta.subagent_session_info). Set once by
+        // the subagent's completion, read after the tool returns: a snapshot.
+        auto sub_sid = std::make_shared<maya::snapshot<std::string>>();
         if (tc.name.value == "task")
             call_ctx.on_subagent_done = [sub_sid, parent = ctx.id](const Thread& t) {
                 Thread copy = t;
@@ -3274,8 +3305,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
                 copy.forked_from = parent;
                 if (copy.title.empty()) copy.title = "Subagent";
                 if (persistence::save_subagent_thread(IoAccess::grant(), copy))
-                    sub_sid->with([](std::string& s, std::string id) { s = std::move(id); },
-                                  copy.id.value);
+                    sub_sid->store(copy.id.value);
             };
         // Zed's terminal channel: a shell command's output streams into a real
         // terminal in the card while it runs. progress hands us the whole
@@ -3283,9 +3313,14 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
         const bool term = is_command_tool(tc.name.value) && terminal_channel();
         if (term) {
             auto sent = std::make_shared<std::size_t>(0);
+            // Progress is reported from the tool's worker thread, which holds
+            // no agentty lock; the notify (a leaf: the peer's outbox) re-states
+            // it at this one callback (tests/lint/allowlist.txt).
             call_ctx.progress = [this, sid = ctx.id, tid = tc.id.value, sent](std::string_view all) {
                 if (all.size() <= *sent) return;
-                send_terminal_output(sid, tid, all.substr(*sent));
+                maya::thread_root([&](const maya::unlocked& c) {
+                    send_terminal_output(c, sid, tid, all.substr(*sent));
+                });
                 *sent = all.size();
             };
         } else {
@@ -3311,18 +3346,21 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
                 c.push_back(a::ToolCallContent{a::TCC_Content{
                     text_block("```\n" + tools::util::sanitize_utf8(tail) + "\n```"), json::object()}});
                 u.content = a::Just(std::move(c));
-                send_update(sid, a::SU_ToolCallUpdate{std::move(u)});
+                maya::thread_root([&](const maya::unlocked& rc) {   // tool worker: no lock held
+                    send_update(rc, sid, a::SU_ToolCallUpdate{std::move(u)});
+                });
             };
         }
         // The job gets its own copy of the definition it was gated against.
         auto fut = util::background_pool().submit_isolated(
-            [](std::stop_token, std::optional<tools::ToolDef> def, std::string name,
-               nlohmann::json args, std::stop_source wake, tools::CallContext call_ctx) {
+            [](const maya::unlocked& job_cap, std::stop_token, std::optional<tools::ToolDef> def,
+               std::string name, nlohmann::json args, std::stop_source wake,
+               tools::CallContext call_ctx) {
                 struct Signal {
                     std::stop_source& s;
                     ~Signal() { s.request_stop(); }
                 } on_exit{wake};
-                return tool::DynamicDispatch::execute_with(def ? &*def : nullptr,
+                return tool::DynamicDispatch::execute_with(job_cap, def ? &*def : nullptr,
                                                            name, args, call_ctx);
             },
             td ? std::optional<tools::ToolDef>{*td} : std::nullopt,
@@ -3357,11 +3395,11 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
             // waited for at teardown; its late result is discarded.
             const char* why = tool_timed_out ? "timed out" : "cancelled";
             if (tool_timed_out) util::dbglog("acp.run_tools.timeout", tc.name.value);
-            settle_tool(ctx, tc, ToolUse::Failed{{}, {}, why}, tool_start);
+            settle_tool(cap, ctx, tc, ToolUse::Failed{{}, {}, why}, tool_start);
             a::ToolCallUpdate c;
             c.toolCallId = a::ToolCallId{tc.id.value};
             c.status     = a::Just(a::ToolCallStatus::Failed);
-            send_update(ctx.id, a::SU_ToolCallUpdate{std::move(c)});
+            send_update(cap, ctx.id, a::SU_ToolCallUpdate{std::move(c)});
             if (tool_cancelled) { out_cancelled = true; return false; }
             // A timeout fails just this tool; continue the turn so the model
             // can react to the failure result.
@@ -3379,7 +3417,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
             a::ToolCallUpdate f;
             f.toolCallId = a::ToolCallId{tc.id.value};
             f.status     = a::Just(a::ToolCallStatus::Failed);
-            send_update(ctx.id, a::SU_ToolCallUpdate{std::move(f)});
+            send_update(cap, ctx.id, a::SU_ToolCallUpdate{std::move(f)});
             continue;
         }
         auto result = std::move(*got);
@@ -3441,7 +3479,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
             upd.content   = a::Just(std::move(content));
             upd.rawOutput = a::Just<json>(json{{"text", result->text}});
             if (term) upd.meta = terminal_exit_meta(tc.id.value, result->text, false);
-            if (auto s = sub_sid->read([](const std::string& v) { return v; }); !s.empty())
+            if (auto s = sub_sid->get(); !s.empty())
                 merge_meta(upd.meta, json{{"subagent_session_info",
                                            {{"session_id", s}, {"message_start_index", 0}}}});
             // tool_start, NOT tc.executing_since(). ACP never moves a tool
@@ -3451,7 +3489,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
             // client. tool_start is stamped above at the pool submit that is
             // this path's actual dispatch, and the timeout branch already
             // uses it. The two terminal paths now agree.
-            settle_tool(ctx, tc, ToolUse::Done{{}, {}, result->text}, tool_start);
+            settle_tool(cap, ctx, tc, ToolUse::Done{{}, {}, result->text}, tool_start);
         } else {
             std::string detail = result.error().render();
             a::List<a::ToolCallContent> content;
@@ -3468,10 +3506,10 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
             upd.rawOutput = a::Just<json>(json{{"text", detail}, {"error", true}});
             if (term) upd.meta = terminal_exit_meta(tc.id.value, detail, true);
             // Same as the Done branch: tool_start is the dispatch stamp.
-            settle_tool(ctx, tc, ToolUse::Failed{{}, {}, detail}, tool_start);
+            settle_tool(cap, ctx, tc, ToolUse::Failed{{}, {}, detail}, tool_start);
         }
 
-        send_update(ctx.id, a::SU_ToolCallUpdate{std::move(upd)});
+        send_update(cap, ctx.id, a::SU_ToolCallUpdate{std::move(upd)});
     }
 
     return true;
@@ -3479,7 +3517,7 @@ bool AgentServer::run_tools(const std::string& session_id, bool& out_cancelled) 
 
 // Live-terminal execution of a `bash` call. See header for the contract.
 std::optional<AgentServer::TerminalRun>
-AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
+AgentServer::run_bash_via_terminal(const Cap& cap, const TurnCtx& ctx, ToolUse& tc) {
     namespace sp = tools::spec;
 
     // Eligibility: the `bash` tool only; the client must host terminals; and
@@ -3512,7 +3550,7 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
     auto is_cancelled = [&] { return ctx.cancelled(); };
     auto set_status = [&](ToolUse::Status st,
                           std::chrono::steady_clock::time_point since = {}) {
-        settle_tool(ctx, tc, std::move(st), since);
+        settle_tool(cap, ctx, tc, std::move(st), since);
     };
     // Execution starts HERE (the terminal create is the dispatch), not at
     // the card's birth — mirror the local bash tool's convention so the
@@ -3526,7 +3564,7 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
         a::List<a::ToolCallContent> c;
         c.push_back(a::ToolCallContent{a::TCC_Content{text_block(detail), json::object()}});
         f.content = a::Just(std::move(c));
-        send_update(ctx.id, a::SU_ToolCallUpdate{std::move(f)});
+        send_update(cap, ctx.id, a::SU_ToolCallUpdate{std::move(f)});
         return TerminalRun{false, false, detail};
     };
 
@@ -3548,7 +3586,7 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
 
     std::string terminal_id;
     try {
-        terminal_id = call<a::to_client::TerminalCreate>(*peer_, cp).terminalId;
+        terminal_id = call<a::to_client::TerminalCreate>(cap, *peer_, cp).terminalId;
     } catch (const std::exception& e) {
         // Client couldn't create the terminal after advertising the cap: fall
         // back to internal execution rather than failing the tool.
@@ -3559,16 +3597,16 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
 
     // Ensure the terminal is always released, even on an early return/throw.
     struct Releaser {
-        AgentServer* self; std::string sid, tid; bool armed = true;
+        AgentServer* self; const Cap& cap; std::string sid, tid; bool armed = true;
         void disarm() { armed = false; }
         ~Releaser() {
             if (!armed) return;
             try {
                 a::TerminalRef r; r.sessionId = a::SessionId{sid}; r.terminalId = tid;
-                (void)call<a::to_client::TerminalRelease>(*self->peer_, r);
+                (void)call<a::to_client::TerminalRelease>(cap, *self->peer_, r);
             } catch (...) { /* client gone; nothing to clean up */ }
         }
-    } releaser{this, ctx.id, terminal_id};
+    } releaser{this, cap, ctx.id, terminal_id};
 
     a::TerminalRef ref; ref.sessionId = a::SessionId{ctx.id}; ref.terminalId = terminal_id;
 
@@ -3580,7 +3618,7 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
         a::List<a::ToolCallContent> c;
         c.push_back(a::ToolCallContent{a::TCC_Terminal{terminal_id, json::object()}});
         u.content = a::Just(std::move(c));
-        send_update(ctx.id, a::SU_ToolCallUpdate{std::move(u)});
+        send_update(cap, ctx.id, a::SU_ToolCallUpdate{std::move(u)});
     }
 
     // 3) Wait for the process to exit. A session cancel cuts the wait short,
@@ -3590,14 +3628,14 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
         rpc::CallOptions o;
         o.timeout = std::chrono::milliseconds{0};   // a build can run for an hour; cancel is the way out
         if (ctx.cancel) o.cancel = ctx.cancel->token();
-        auto waited = peer_->call<a::to_client::TerminalWaitForExit>(ref, std::move(o));
+        auto waited = peer_->call<a::to_client::TerminalWaitForExit>(cap, ref, std::move(o));
         if (waited) {
             exit = std::move(*waited);
         } else if (!is_cancelled()) {
             return fail(std::string{"terminal wait failed: "} + waited.error().what());
         } else {
             try { a::TerminalKillParams k; k.sessionId = ref.sessionId; k.terminalId = ref.terminalId;
-                  (void)call<a::to_client::TerminalKill>(*peer_, k); }
+                  (void)call<a::to_client::TerminalKill>(cap, *peer_, k); }
             catch (const std::exception& e) { util::dbglog("acp.terminal_kill", e.what()); }
             catch (...) { util::dbglog("acp.terminal_kill", "non-std exception"); }
             set_status(ToolUse::Failed{{}, {}, "cancelled"});
@@ -3611,7 +3649,7 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
             cc.push_back(a::ToolCallContent{
                 a::TCC_Content{text_block("(cancelled)"), json::object()}});
             c.content = a::Just(std::move(cc));
-            send_update(ctx.id, a::SU_ToolCallUpdate{std::move(c)});
+            send_update(cap, ctx.id, a::SU_ToolCallUpdate{std::move(c)});
             return TerminalRun{false, true, {}};
         }
     }
@@ -3621,7 +3659,7 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
     bool truncated = false;
     try {
         a::TerminalOutputParams op; op.sessionId = ref.sessionId; op.terminalId = ref.terminalId;
-        auto out = call<a::to_client::TerminalOutput>(*peer_, op);
+        auto out = call<a::to_client::TerminalOutput>(cap, *peer_, op);
         output    = std::move(out.output);
         truncated = out.truncated;
     } catch (const std::exception& e) {
@@ -3666,7 +3704,7 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
     upd.rawOutput = a::Just<json>(json{{"text", model_text},
                                        {"exitCode", code},
                                        {"truncated", truncated}});
-    send_update(ctx.id, a::SU_ToolCallUpdate{std::move(upd)});
+    send_update(cap, ctx.id, a::SU_ToolCallUpdate{std::move(upd)});
 
     // Execution began at the terminal create (the dispatch), not the card's
     // birth — stamp that onto the settled state so the stats fold measures
@@ -3678,10 +3716,10 @@ AgentServer::run_bash_via_terminal(const TurnCtx& ctx, ToolUse& tc) {
 }
 
 AgentServer::PermissionOutcome
-AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc,
+AgentServer::ask_permission(const Cap& cap, const std::string& session_id, const ToolUse& tc,
                             std::stop_token cancel) {
     const std::string cwd =
-        with_session(session_id, [](Session& s) { return s.cwd; }).value_or(std::string{});
+        with_session(cap, session_id, [](Session& s) { return s.cwd; }).value_or(std::string{});
     a::RequestPermissionParams req;
     req.sessionId = a::SessionId{session_id};
     // ToolCallUpdate carries the tool card for the permission dialog.
@@ -3721,7 +3759,7 @@ AgentServer::ask_permission(const std::string& session_id, const ToolUse& tc,
     o.cancel      = cancel;
     o.notify_peer = true;
     try {
-        auto r = peer_->call<a::to_client::RequestPermission>(req, std::move(o));   // blocks worker, not reader
+        auto r = peer_->call<a::to_client::RequestPermission>(cap, req, std::move(o));   // blocks worker, not reader
         if (!r) return PermissionOutcome::Deny;
         auto outcome = std::move(*r);
         return a::match(outcome.outcome,

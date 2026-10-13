@@ -70,7 +70,7 @@ TEST_CASE("proactive deferred") {
     // walks the tool registry; it must not touch the network. The returned
     // Cmd is inspected, never run.
     agentty::app::install_deps(agentty::app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const agentty::Thread&) {},
         .delete_thread = [](const agentty::ThreadId&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },

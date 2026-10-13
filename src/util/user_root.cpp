@@ -174,18 +174,19 @@ fs::path subdir_under(const fs::path& root, const char* env, const char* leaf,
     std::error_code ec;
     fs::create_directories(p, ec);
     if (overridden && !fs::is_directory(p, ec)) {
-        // maya::guarded rather than a raw mutex + set: access is only possible
-        // through with(), so "forgot the lock" is unrepresentable. The
-        // concurrency banlist enforces this, and agentty::dirs (the write-side
-        // peer of this resolver) uses the same shape for the same warn-once.
-        static maya::guarded<std::set<std::string>> warned;
-        // Capture-less AND owned-value arguments, both jaal rules: either a
-        // capture or a pointer could reach a second lock while this one is
-        // held. So the variable name is copied in.
-        if (!warned.with([](auto& seen, std::string k) {
-                return seen.insert(std::move(k)).second;
-            }, std::string{env}))
-            return root / leaf;
+        // maya::snapshot rather than a lock: this resolver is reached from
+        // anywhere (including under ranked locks) with no capability to
+        // thread, and the set only ever grows. Lock-free read-then-insert;
+        // two threads hitting the same broken override in the same instant
+        // may both warn, which is harmless.
+        static maya::snapshot<std::set<std::string>> warned;
+        const std::string key{env};
+        if (warned.load()->contains(key)) return root / leaf;
+        (void)warned.update([](const std::set<std::string>& old, const std::string& k) {
+            auto next = old;
+            next.insert(k);
+            return next;
+        }, key);
         // create_directories() leaves `ec` CLEAR when the path already
         // exists as a non-directory -- it did not fail, it had nothing to
         // do -- so reporting ec here printed "Undefined error: 0" for the
@@ -251,14 +252,27 @@ fs::path user_root() {
         }
     }
 
-    std::error_code ec;
-    fs::create_directories(root, ec);
+    // Create once per resolved root, not per call. user_root() sits on the
+    // per-turn path (skills catalog, approvals, memory), and on Windows
+    // create_directories is several metadata queries even when the tree
+    // exists. The root can change mid-process (tests repoint AGENTTY_HOME),
+    // so remember WHICH path was ensured, not just that one was. A root
+    // deleted underneath a live process is recreated by the writer that
+    // next needs it (every writer creates its own parent dirs). A published
+    // immutable value: read lock-free every call, replaced on a change; two
+    // threads racing a change both create (idempotent) and both publish.
+    static maya::published<const fs::path> ensured;
+    if (const auto e = ensured.current(); !e || *e != root) {
+        std::error_code ec;
+        fs::create_directories(root, ec);
 #ifndef _WIN32
-    // Owner-only: the root holds conversation history, learned memory and
-    // (post-consolidation) credentials. One chmod is the whole security
-    // story of the single-root design.
-    ::chmod(root.c_str(), S_IRWXU);
+        // Owner-only: the root holds conversation history, learned memory and
+        // (post-consolidation) credentials. One chmod is the whole security
+        // story of the single-root design.
+        ::chmod(root.c_str(), S_IRWXU);
 #endif
+        if (!ec) ensured.publish(std::make_shared<const fs::path>(root));
+    }
     std::call_once(once, [&] { migrate_legacy_config(root); });
     return root;
 }

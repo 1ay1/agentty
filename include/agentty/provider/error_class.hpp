@@ -320,6 +320,72 @@ enum class VisionRejection : std::uint8_t {
     return VisionRejection::None;
 }
 
+// ── Optional-field rejection → learned capability ────────────────────────
+// The OpenAI-compat family is not one API: each host validates the body
+// against its OWN schema, and a strict one 400s any field it doesn't know
+// — killing a turn over an OPTIMISATION (#93):
+//   Groq:   "property 'prompt_cache_key' is unsupported"
+//   Gemini: "Invalid JSON payload received. Unknown name \"prompt_cache_key\":
+//            Cannot find field."
+//   others: "Unrecognized request argument supplied: stream_options",
+//           "Extra inputs are not permitted" (pydantic: loc names it), …
+// The registry opts hosts in to the fields it knows they take, so a
+// built-in row never hits this. It is the safety net for everything else:
+// custom hosts, a gateway in front of a strict backend, a provider that
+// tightens its schema next month. Returns which OPTIONAL field the server
+// named — only fields agentty can drop and still send a correct request;
+// a rejection of `messages`/`model`/`tools` is a real error, never
+// "learned" away. The reducer records it for this host and retries the
+// SAME turn without the field.
+enum class OptionalField : std::uint8_t {
+    None = 0,
+    PromptCacheKey = 1u << 0,
+    StreamOptions  = 1u << 1,
+};
+[[nodiscard]] constexpr std::uint8_t bit(OptionalField f) noexcept {
+    return static_cast<std::uint8_t>(f);
+}
+[[nodiscard]] constexpr std::string_view wire_name(OptionalField f) noexcept {
+    switch (f) {
+        case OptionalField::PromptCacheKey: return "prompt_cache_key";
+        case OptionalField::StreamOptions:  return "stream_options";
+        case OptionalField::None:           break;
+    }
+    return {};
+}
+[[nodiscard]] inline OptionalField parse_rejected_field(
+        std::string_view message, int http_status) noexcept {
+    if (http_status != 0 && http_status != 400 && http_status != 422)
+        return OptionalField::None;
+    auto lower = [](char c) noexcept {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+    };
+    auto icontains = [&](std::string_view needle) noexcept {
+        if (needle.size() > message.size()) return false;
+        for (std::size_t i = 0; i + needle.size() <= message.size(); ++i) {
+            std::size_t k = 0;
+            while (k < needle.size() && lower(message[i + k]) == needle[k]) ++k;
+            if (k == needle.size()) return true;
+        }
+        return false;
+    };
+    // The message must SAY the field is unknown/unsupported — naming a
+    // field in some unrelated error ("prompt_cache_key must be a string")
+    // is a value error we must not paper over by dropping it.
+    constexpr std::string_view kRejectionWords[] = {
+        "unsupported", "not supported", "unknown name", "unknown field",
+        "unknown parameter", "unrecognized", "unrecognised",
+        "cannot find field", "not permitted", "not allowed",
+        "extra inputs", "additional properties", "invalid field",
+    };
+    bool says_unknown = false;
+    for (auto w : kRejectionWords) if (icontains(w)) { says_unknown = true; break; }
+    if (!says_unknown) return OptionalField::None;
+    for (auto f : {OptionalField::PromptCacheKey, OptionalField::StreamOptions})
+        if (icontains(wire_name(f))) return f;
+    return OptionalField::None;
+}
+
 // ── reasoning_effort rejection → learned capability ──────────────────────
 // Parse a 4xx body that REJECTS the reasoning_effort parameter and extract
 // what the provider says it accepts — this is capability DISCOVERY, not a

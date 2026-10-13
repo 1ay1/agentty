@@ -25,6 +25,8 @@
 
 #include <string>
 
+#include <maya/runtime.hpp>
+
 namespace agentty::modelsdev {
 
 // Load the cached snapshot from disk (if any) into the catalog registries.
@@ -43,7 +45,7 @@ int refresh();
 // HTTP call while the CRT frees statics is a use-after-free (Windows
 // 0xC0000005 on the CI pipe smoke test — same class as the blob-gc fix).
 void start_background_refresh(bool no_net = false);
-// Cancel and join. Idempotent, no-op if start never ran.
-void join_background_refresh() noexcept;
+// Cancel and join. Idempotent, no-op if start never ran. Joins: `unlocked`.
+void join_background_refresh(const maya::unlocked& cap) noexcept;
 
 } // namespace agentty::modelsdev

@@ -77,8 +77,13 @@ public:
         if (this != &o) { reset(); s_ = std::exchange(o.s_, nullptr); }
         return *this;
     }
-    Ticket(const Ticket&) = delete;
-    Ticket& operator=(const Ticket&) = delete;
+    // Copy = a second owned reference (OpenSSL session refcounts are
+    // atomic), so the ticket map can be copied for a snapshot update.
+    Ticket(const Ticket& o) noexcept : s_(o.s_) { if (s_) SSL_SESSION_up_ref(s_); }
+    Ticket& operator=(const Ticket& o) noexcept {
+        if (this != &o) { Ticket t{o}; *this = std::move(t); }
+        return *this;
+    }
     ~Ticket() { reset(); }
 
     // A second owned reference to the same session.
@@ -98,13 +103,24 @@ private:
 // A Ticket owns its own reference (OpenSSL session refcounts are atomic), so
 // it can move between threads.
 MAYA_SENDABLE(agentty::tls::Ticket);
+// Frozen: an established SSL_SESSION is never mutated by us after capture;
+// OpenSSL documents sessions as shareable across SSL objects/threads once
+// handed out, and every holder only reads it (SSL_set_session up-refs).
+MAYA_FROZEN(agentty::tls::Ticket);
 
 namespace agentty::tls {
 namespace {
 using Tickets = std::unordered_map<std::string, Ticket>;
 // Leaked on purpose: freeing sessions at exit can race OpenSSL's own teardown.
-maya::guarded<Tickets>& tickets() {
-    static auto* t = new maya::guarded<Tickets>;
+//
+// A maya::snapshot, not a lock: wrap_client / new_session_cb run inside
+// network code that is itself reached from ranked lock bodies (e.g. the
+// auth_refresh lane refreshes a token over HTTPS), so a lock here would need
+// a capability threaded through every http call. The map is a handful of
+// hosts and changes once per handshake: readers do one atomic load, writers
+// copy-and-publish (CAS retry). Nothing is held, so nothing can deadlock.
+maya::snapshot<Tickets>& tickets() {
+    static auto* t = new maya::snapshot<Tickets>;
     return *t;
 }
 
@@ -123,8 +139,11 @@ int new_session_cb(SSL* ssl, SSL_SESSION* sess) {
         SSL_get_ex_data(ssl, sni_ex_index()));
     if (!host) return 0;   // not ours to keep — let OpenSSL free it
     // We now own one ref (the cb hands us a ref to keep); the old one drops.
-    tickets().with([](Tickets& m, std::string h, Ticket t) { m[h] = std::move(t); },
-                   *host, Ticket{sess});
+    (void)tickets().update([](const Tickets& old, const std::string& h, const Ticket& t) {
+        Tickets m = old;
+        m[h] = t;
+        return m;
+    }, *host, Ticket{sess});
     return 1;
 }
 
@@ -496,11 +515,13 @@ SSL* wrap_client(int fd, std::string_view sni_host) {
     SSL_set_ex_data(ssl, sni_ex_index(), building.host);
     // A shared ref, so a concurrent replace can't free it mid-attach.
     // SSL_set_session takes its own ref; ours drops at scope end.
-    if (auto t = tickets().read([](const Tickets& m, std::string h) {
-            auto it = m.find(h);
-            return it == m.end() ? Ticket{} : it->second.share();
-        }, std::string{host}); t.get())
-        SSL_set_session(ssl, t.get());
+    // The loaded snapshot keeps the map (and its sessions) alive for the
+    // duration; SSL_set_session takes its own ref.
+    {
+        const auto snap = tickets().load();
+        if (auto it = snap->find(std::string{host}); it != snap->end() && it->second.get())
+            SSL_set_session(ssl, it->second.get());
+    }
 
     if (SSL_set_fd(ssl, fd) != 1) {
         return nullptr;   // ~Building frees host key + SSL

@@ -191,8 +191,8 @@ std::string session_id_for(std::string_view session_key) {
 // ── The ChatGPT Site ──────────────────────────────────────────────────────
 
 std::expected<responses::Target, std::string>
-chatgpt_authorize(provider::Request& req) {
-    auto creds = codex_fresh_credentials();   // auto-refreshes if stale
+chatgpt_authorize(const maya::unlocked& cap, provider::Request& req) {
+    auto creds = codex_fresh_credentials(cap);   // auto-refreshes if stale
     if (!creds || creds->access_token.empty())
         return std::unexpected(
             std::string{"not signed in to ChatGPT — run `agentty login` and "
@@ -252,32 +252,27 @@ bool responses_available() {
         std::int64_t   mtime = 0;   // file_time_type ticks: a Sendable key
         std::uintmax_t size = static_cast<std::uintmax_t>(-1);
     };
-    static maya::guarded<Cache> cache;
+    static maya::snapshot<Cache> cache;
     std::error_code ec;
     const auto p = codex_credentials_path();
     const std::int64_t mtime = fs::last_write_time(p, ec).time_since_epoch().count();
     const auto size  = ec ? 0 : fs::file_size(p, ec);
     if (ec) {   // missing/unreadable → signed out; remember that cheaply
-        cache.with([](Cache& c) { c = Cache{}; });
+        cache.store(Cache{});
         return false;
     }
-    if (auto hit = cache.read(
-            [](const Cache& c, std::int64_t m, std::uintmax_t s) -> std::optional<bool> {
-                if (c.mtime != m || c.size != s) return std::nullopt;
-                return c.ok;
-            },
-            mtime, size))
-        return *hit;
-    // Changed: unseal + parse outside the lock, then publish.
+    if (auto hit = cache.load(); hit->mtime == mtime && hit->size == size)
+        return hit->ok;
+    // Changed: unseal + parse, then publish.
     auto c = load_codex_credentials();
     const bool ok = c && !c->access_token.empty();
-    cache.with([](Cache& k, Cache v) { k = v; }, Cache{ok, mtime, size});
+    cache.store(Cache{ok, mtime, size});
     return ok;
 }
 
 // ── Live model catalog ────────────────────────────────────────────────────
-std::vector<CatalogModel> fetch_models(Io io) {
-    auto creds = codex_fresh_credentials();
+std::vector<CatalogModel> fetch_models(Io io, const maya::unlocked& cap) {
+    auto creds = codex_fresh_credentials(cap);
     if (!creds || creds->access_token.empty()) return {};
 
     http::Request hr;
@@ -333,9 +328,10 @@ std::vector<CatalogModel> fetch_models(Io io) {
     return out;
 }
 
-provider::StreamResult stream_responses(provider::Request req,
+provider::StreamResult stream_responses(const maya::unlocked& cap,
+                                        provider::Request req,
                                         provider::EventSink sink) {
-    return responses::stream(kChatGptSite, std::move(req), std::move(sink));
+    return responses::stream(cap, kChatGptSite, std::move(req), std::move(sink));
 }
 
 // ── Test seams ────────────────────────────────────────────────────────────

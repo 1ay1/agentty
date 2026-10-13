@@ -19,6 +19,8 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/ollama/transport.hpp"
+#include "agentty/provider/registry.hpp"
 
 using json = nlohmann::json;
 namespace oa = agentty::provider::openai;
@@ -115,21 +117,101 @@ TEST_CASE("body: no tools means no tools key at all") {
 
 // ═══ Hosted tier: TLS only ═══════════════════════════════════════════════
 
-TEST_CASE("body: prompt_cache_key is hosted-only") {
+TEST_CASE("body: prompt_cache_key only where the row opts in (#93)") {
     // OpenAI auto-caches prefixes >=1024 tokens and a stable key pins a
-    // conversation to one cache node. Local servers reject or ignore the
-    // field and their KV cache is prefix-automatic anyway: nothing to gain,
-    // a 400 to lose.
-    auto h = base(hosted());
-    h.session_key = "thread-abc";
-    CHECK(oa::build_request_body(h)["prompt_cache_key"] == "thread-abc");
+    // conversation to one cache node. But OpenAI-COMPATIBLE is not OpenAI:
+    // strict hosted layers 400 the unknown field and the turn dies.
+    //   Groq:   "property 'prompt_cache_key' is unsupported"
+    //   Gemini: "Unknown name \"prompt_cache_key\": Cannot find field."
+    // TLS used to be the gate; it is not evidence. The registry row is.
+    auto with_key = [](oa::Endpoint ep) {
+        auto r = base(std::move(ep));
+        r.session_key = "thread-abc";
+        return oa::build_request_body(r);
+    };
 
-    auto l = base(local());
-    l.session_key = "thread-abc";
-    CHECK(!oa::build_request_body(l).contains("prompt_cache_key"));
+    // Resolved exactly as the picker/CLI resolve a provider id.
+    CHECK(with_key(oa::Endpoint::from_spec("openai"))["prompt_cache_key"] == "thread-abc");
+    CHECK(with_key(oa::Endpoint::from_spec("openrouter"))["prompt_cache_key"] == "thread-abc");
 
-    // No session key: no field, even on a hosted endpoint.
-    CHECK(!oa::build_request_body(base(hosted())).contains("prompt_cache_key"));
+    // The two hosts from the issue, plus every other strict compat row.
+    for (const char* id : {"groq", "gemini", "together", "cerebras", "deepseek",
+                           "xai", "mistral", "fireworks", "kimi"}) {
+        INFO("provider " << id);
+        CHECK(!with_key(oa::Endpoint::from_spec(id)).contains("prompt_cache_key"));
+    }
+
+    // A hosted endpoint that hasn't opted in (custom host over TLS): no.
+    CHECK(!with_key(hosted()).contains("prompt_cache_key"));
+    // Local servers: no.
+    CHECK(!with_key(local()).contains("prompt_cache_key"));
+
+    // No session key: no field, even where it is accepted.
+    CHECK(!oa::build_request_body(base(oa::Endpoint::from_spec("openai")))
+               .contains("prompt_cache_key"));
+}
+
+// The two bodies from issue #93, verbatim in shape.
+TEST_CASE("error: the provider's sentence, whatever the body shape (#93)") {
+    // Groq: the usual OpenAI object.
+    CHECK(oa::provider_error_message(
+              R"({"error":{"message":"property 'prompt_cache_key' is unsupported",)"
+              R"("type":"invalid_request_error"}})")
+          == "property 'prompt_cache_key' is unsupported");
+
+    // Gemini: ARRAY-wrapped, pretty-printed, with a details/fieldViolations
+    // tree. Used to dump the whole thing into the transcript.
+    const std::string gemini = R"([{
+  "error": {
+    "code": 400,
+    "message": "Invalid JSON payload received. Unknown name \"prompt_cache_key\": Cannot find field.",
+    "status": "INVALID_ARGUMENT",
+    "details": [{"@type": "type.googleapis.com/google.rpc.BadRequest",
+                 "fieldViolations": [{"description": "x"}]}]
+  }
+}])";
+    CHECK(oa::provider_error_message(gemini)
+          == "Invalid JSON payload received. Unknown name \"prompt_cache_key\": "
+             "Cannot find field.");
+
+    // Other shapes.
+    CHECK(oa::provider_error_message(R"({"error":"rate limited"})") == "rate limited");
+    CHECK(oa::provider_error_message(R"({"message":"nope"})") == "nope");
+    // Not JSON: a capped one-line excerpt, never a multi-line wall.
+    const auto raw = oa::provider_error_message("<html>\n<body>bad\ngateway</body>\n</html>");
+    CHECK(raw == "<html> <body>bad gateway</body> </html>");
+    CHECK(oa::provider_error_message(std::string(5000, 'x')).size() == 300);
+    CHECK(oa::provider_error_message("").empty());
+}
+
+// #91: a local model (gpt-oss on llama.cpp) pasted code into its reply and
+// then refused "the entire codebase in a single response". Its prompt only
+// said when NOT to call tools. Both local prompts must now carry the rules
+// that make it act: use tools to write, never paste instead, many steps are
+// normal, and a [cached] read still has the bytes (#92).
+TEST_CASE("local prompts tell the model to act, not paste (#91)") {
+    const std::string rules{oa::local_model_action_rules()};
+    CHECK(rules.find("NEVER paste the code") != std::string::npos);
+    CHECK(rules.find("single response") != std::string::npos);
+    CHECK(rules.find("[cached]") != std::string::npos);
+    // Both local prompts embed the SAME block, verbatim.
+    CHECK(oa::local_model_system_prompt().find(rules) != std::string::npos);
+    CHECK(agentty::provider::ollama::system_prompt().find(rules) != std::string::npos);
+}
+
+// Every OpenAI-compat registry row: the body we'd send carries ONLY fields
+// the conformance table allows for that row. Catches the next #93 — any
+// field leaking to a host that never opted in — at test time, not on a
+// user's turn.
+TEST_CASE("body: no row is sent prompt_cache_key unless it opted in") {
+    for (const auto& p : agentty::provider::kProviders) {
+        if (!p.http_dialled() || p.native_api) continue;
+        INFO("provider " << p.id);
+        auto r = base(oa::Endpoint::from_spec(p.id));
+        r.session_key = "t";
+        CHECK(oa::build_request_body(r).contains("prompt_cache_key")
+              == p.accepts_prompt_cache_key);
+    }
 }
 
 // ═══ Probed tier: only with evidence ═════════════════════════════════════

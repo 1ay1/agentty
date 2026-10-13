@@ -414,8 +414,8 @@ public:
     // OpenSSL static state is torn down under it — a data race that surfaces as
     // heap corruption (Windows STATUS_HEAP_CORRUPTION 0xC0000374) when the app
     // exits within milliseconds of launch (e.g. immediate pipe-stdin EOF).
-    // Idempotent; safe to call with no prewarm in flight.
-    void join_prewarm() noexcept;
+    // Idempotent; safe to call with no prewarm in flight. Joins: `unlocked`.
+    void join_prewarm(const maya::unlocked& cap) noexcept;
 
 private:
     struct Impl;

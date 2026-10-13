@@ -429,7 +429,7 @@ namespace runner_ui {
 // The console-echo helper below is also deliberately NOT named `out`: the
 // Sink parameter owns that name, and shadowing it made `out.send(...)`
 // resolve to the echo lambda.
-static void run_block_body(maya::Sink<Msg> out, std::stop_token stop,
+static void run_block_body(const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token stop,
                            std::string cmd, cbp::BlockShell shell) {
     const std::string wrapped = wrap_for_windows_shell(shell, cmd);
 
@@ -477,7 +477,7 @@ static void run_block_body(maya::Sink<Msg> out, std::stop_token stop,
         long                          secs = 0;
     };
 
-    auto outcome = maya::scope(stop, [&](maya::nursery& n) {
+    auto outcome = maya::scope(cap, stop, [&](maya::nursery& n) {
         std::stop_source done;
 
         // The helper's own token comes from the scope's, so Esc reaches the
@@ -543,9 +543,15 @@ static void run_block_body(maya::Sink<Msg> out, std::stop_token stop,
 }
 
 [[nodiscard]] Cmd run_block_cmd(std::string command, cbp::BlockShell shell) {
-    // Body is a plain function; the command and shell ride along as Sendable
-    // arguments, which is what jaal's task contract asks for.
-    return Cmd::task_isolated(run_block_body, std::move(command), shell);
+    // Body is a captureless lambda over the plain function, so jaal hands it
+    // the worker's `unlocked` (the heartbeat scope joins: it needs one); the
+    // command and shell ride along as Sendable arguments.
+    return Cmd::task_isolated(
+        [](const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token stop,
+           std::string cmd, cbp::BlockShell sh) {
+            run_block_body(cap, std::move(out), std::move(stop), std::move(cmd), sh);
+        },
+        std::move(command), shell);
 }
 
 #endif

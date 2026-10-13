@@ -277,6 +277,12 @@ struct HostProbe {
 //   Probed     reasoning_effort    — arrives pre-gated by the catalog
 [[nodiscard]] nlohmann::json build_request_body(const Request& req);
 
+// The one sentence a provider's HTTP error body says, as a single line.
+// Handles {"error":{"message"}}, {"error":"..."}, {"message"} and
+// Gemini's array-wrapped [{"error":{...}}]; falls back to a capped raw
+// excerpt. Exposed for tests.
+[[nodiscard]] std::string provider_error_message(std::string_view body);
+
 // Common request headers (accept/content-type/user-agent + auth). The auth
 // header is `authorization: Bearer <key>` unless `endpoint.auth_header_name`
 // is set, in which case the key goes out raw under that name. Exposed for
@@ -298,6 +304,16 @@ struct HostProbe {
 // catalog. The verbose Claude agentic prose is omitted because it primes small
 // models to over-call tools and leak them as content text.
 [[nodiscard]] std::string local_model_system_prompt();
+
+// The ACTION rules every local-model prompt carries (OpenAI-compat local and
+// Ollama native share this one block so they can't drift again). Exists
+// because of #91: gpt-oss on llama.cpp got a prompt that said "call a tool
+// ONLY when the task needs it" and nothing else, so on "implement UI.md" it
+// pasted code into the reply and then refused ("I can't write the entire
+// codebase in a single response") -- it had never been told that writing
+// files with tools, one at a time across many steps, IS how a big task gets
+// done here.
+[[nodiscard]] std::string_view local_model_action_rules();
 
 // Test-only: feed a complete OpenAI SSE byte buffer through the same parser
 // the live stream uses and collect every dispatched Msg. Lets a unit test

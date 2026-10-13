@@ -35,6 +35,8 @@
 #include <string_view>
 #include <vector>
 
+#include "agentty/util/lock_levels.hpp"
+
 namespace agentty::tools::memory {
 
 namespace fs = std::filesystem;
@@ -166,12 +168,13 @@ struct AppendResult {
     std::size_t rolled = 0;  // number of old records dropped to fit caps
     bool deduped = false;    // true ⇒ hit an existing record; id is the existing one
 };
-[[nodiscard]] AppendResult append(Scope s, std::string_view text,
+[[nodiscard]] AppendResult append(const locks::below_memory_store& cap, Scope s,
+                                  std::string_view text,
                                   AppendOptions opts = {});
 
 // Read all records in a scope, oldest first. Skips lines that fail to
 // parse. Returns empty vector on missing file.
-[[nodiscard]] std::vector<Record> load_all(Scope s);
+[[nodiscard]] std::vector<Record> load_all(const locks::below_memory_store& cap, Scope s);
 
 // Read the tail-N most recent records across BOTH scopes, oldest first
 // within each scope. Used by the system-prompt builder. mtime-cached
@@ -197,17 +200,20 @@ struct PromptSelection {
     std::size_t byte_budget = kPromptByteBudget);
 
 // Forget by exact id. Returns count removed (0 if not found).
-[[nodiscard]] std::size_t forget_by_id(std::string_view id);
+[[nodiscard]] std::size_t forget_by_id(const locks::below_memory_store& cap,
+                                       std::string_view id);
 
 // Forget by substring (case-sensitive) across both scopes. Returns
 // count removed. Refuses to run with an empty/whitespace pattern so
 // a stray `forget {}` doesn't nuke everything.
-[[nodiscard]] std::size_t forget_by_substring(std::string_view needle);
+[[nodiscard]] std::size_t forget_by_substring(const locks::below_memory_store& cap,
+                                              std::string_view needle);
 
 // Preview a substring forget without writing. Returns the records
 // that WOULD be removed. Used by the `forget` tool's `dry_run` path
 // so the model can confirm a non-trivial wipe before committing.
-[[nodiscard]] std::vector<Record> preview_forget_by_substring(std::string_view needle);
+[[nodiscard]] std::vector<Record> preview_forget_by_substring(
+    const locks::below_memory_store& cap, std::string_view needle);
 
 // Wipe an entire scope. The hard "start afresh on this codebase"
 // switch — removes every record in the scope file (the file itself is
@@ -215,7 +221,7 @@ struct PromptSelection {
 // rebuild). Returns the count of records removed, or std::nullopt if
 // the scope path is unresolvable (no $HOME, no workspace, etc.). The
 // `confirm` gate lives in the tool layer; this function always wipes.
-[[nodiscard]] std::optional<std::size_t> wipe(Scope s);
+[[nodiscard]] std::optional<std::size_t> wipe(const locks::below_memory_store& cap, Scope s);
 
 // Render a record for the <learned-memory> block in the system prompt.
 // Format: `[<id>]` + (optional `★ ` for pinned) + text.
@@ -226,7 +232,7 @@ struct PromptSelection {
 // if no record carries that id. Used by the supersede path to find
 // the predecessor wherever it lives.
 [[nodiscard]] std::optional<std::pair<Record, Scope>>
-    find_by_id(std::string_view id);
+    find_by_id(const locks::below_memory_store& cap, std::string_view id);
 
 // ── Smart scope inference ─────────────────────────────────────────────────
 // Which scope does a fact BELONG in? The prompt asks the model to default to

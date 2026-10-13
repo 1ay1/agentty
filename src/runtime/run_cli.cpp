@@ -91,7 +91,8 @@ bool write_file(const std::string& path, const std::string& body) {
 // SIGHUP, and for --timeout. The loop only checks its clock between turns, so
 // the helper cancels a long tool or a stuck stream when time is up. A second
 // Ctrl-C while the run unwinds exits at once.
-tools::OneShotResult run_with_signals(const Options& o, std::optional<maya::sig>& got) {
+tools::OneShotResult run_with_signals(const maya::unlocked& cap, const Options& o,
+                                      std::optional<maya::sig>& got) {
     using clock = std::chrono::steady_clock;
     const auto deadline = o.timeout.count() > 0
         ? std::optional<clock::time_point>(clock::now() + o.timeout) : std::nullopt;
@@ -99,7 +100,7 @@ tools::OneShotResult run_with_signals(const Options& o, std::optional<maya::sig>
         {maya::sig::interrupt, maya::sig::terminate, maya::sig::hangup});
     auto reactor = pf::native_reactor::create();
     if (!sigs || !reactor)
-        return tools::run_one_shot(to_one_shot(o, {}));
+        return tools::run_one_shot(cap, to_one_shot(o, {}));
     constexpr std::uint64_t kSigToken = 1;
     auto reg = reactor->watch(sigs->handle(), pf::interest::read, kSigToken);
     const auto waker = reactor->waker();
@@ -108,7 +109,7 @@ tools::OneShotResult run_with_signals(const Options& o, std::optional<maya::sig>
     std::stop_source done;
     bool timed_out = false;   // written by the helper, read after join
     tools::OneShotResult result;
-    maya::scope([&](maya::nursery& n) {
+    maya::scope(cap, [&](maya::nursery& n) {
         auto watcher = n.spawn([&] {
             int seen = 0;
             while (!done.stop_requested()) {
@@ -139,7 +140,7 @@ tools::OneShotResult run_with_signals(const Options& o, std::optional<maya::sig>
         });
         const auto opts = to_one_shot(o, cancel.get_token());
         try {
-            result = tools::run_one_shot(opts);
+            result = tools::run_one_shot(cap, opts);
         } catch (...) {
             done.request_stop();
             waker.wake();
@@ -196,9 +197,9 @@ bool valid_effort(std::string_view s) {
     return false;
 }
 
-int run(const Options& o) {
+int run(const maya::unlocked& cap, const Options& o) {
     std::optional<maya::sig> got;
-    const tools::OneShotResult r = run_with_signals(o, got);
+    const tools::OneShotResult r = run_with_signals(cap, o, got);
     const int code = exit_code_for(r.status, got);
 
     std::string body;

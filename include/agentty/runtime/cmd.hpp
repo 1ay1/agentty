@@ -130,6 +130,7 @@ using Cmd = maya::Cmd<Msg,
     // ── agentty's own: credentials ───────────────────────────────
     install_auth,
     save_credentials,
+    save_codex_credentials,
     load_auth_view,
     account_op
 >;
@@ -197,37 +198,56 @@ namespace app::cmd {
 }
 
 // ── effects that do IO ──────────────────────────────────────────────────────────
-// A task whose body gets an Io: body(Io, Sink<Msg>, stop_token, args...).
-// Same rules as Cmd::task (captureless, Sendable args). This is how a
-// reducer asks for IO: it returns the task, the worker gets the Io.
+// A task whose body gets an Io: body(Io, Sink<Msg>, stop_token, args...),
+// or, when it takes locks, body(Io, const maya::unlocked&, Sink<Msg>,
+// stop_token, args...). Same rules as Cmd::task (captureless, Sendable
+// args). This is how a reducer asks for IO: it returns the task, and the
+// worker gets the Io -- and, because a worker thread starts holding no lock,
+// the `unlocked` capability that lets it take locks in rank order. The
+// reducer itself never gets either.
 namespace io_detail {
 template <class Body, class... Args>
-void run_io(maya::Sink<Msg> out, std::stop_token st, Args... args) {
-    Body{}(IoAccess::grant(), std::move(out), std::move(st), std::move(args)...);
-}
+concept IoCapBody =
+    std::is_convertible_v<Body, void (*)(Io, const maya::unlocked&, maya::Sink<Msg>,
+                                         std::stop_token, Args...)>;
 template <class Body, class... Args>
-concept IoBody =
+concept IoPlainBody =
     std::is_convertible_v<Body, void (*)(Io, maya::Sink<Msg>, std::stop_token, Args...)>;
+
+// The task body jaal runs: a captureless lambda (so it converts to a function
+// pointer, which is jaal's task contract), taking the fresh worker thread's
+// `unlocked` first (core/fx.hpp). It adds the Io, and forwards the capability
+// to bodies that take locks.
+template <class Body, class... Args>
+inline constexpr auto run_io = [](const maya::unlocked& cap, maya::Sink<Msg> out,
+                                  std::stop_token st, Args... args) {
+    if constexpr (IoCapBody<Body, Args...>)
+        Body{}(IoAccess::grant(), cap, std::move(out), std::move(st), std::move(args)...);
+    else
+        Body{}(IoAccess::grant(), std::move(out), std::move(st), std::move(args)...);
+};
+template <class Body, class... Args>
+concept IoBody = IoCapBody<Body, Args...> || IoPlainBody<Body, Args...>;
 }  // namespace io_detail
 
 template <class Body, class... Args>
     requires io_detail::IoBody<Body, Args...>
 [[nodiscard]] Cmd io_task(Body, Args... args) {
-    return Cmd::task(&io_detail::run_io<Body, Args...>, std::move(args)...);
+    return Cmd::task(io_detail::run_io<Body, Args...>, std::move(args)...);
 }
 
 /// io_task on a thread of its own, for work that may never return.
 template <class Body, class... Args>
     requires io_detail::IoBody<Body, Args...>
 [[nodiscard]] Cmd io_task_isolated(Body, Args... args) {
-    return Cmd::task_isolated(&io_detail::run_io<Body, Args...>, std::move(args)...);
+    return Cmd::task_isolated(io_detail::run_io<Body, Args...>, std::move(args)...);
 }
 
 /// A Sub::stream whose body gets an Io: body(Io, Sink<Msg>, stop_token, args...).
 template <class Body, class... Args>
     requires io_detail::IoBody<Body, Args...>
 [[nodiscard]] Sub io_stream(std::string key, Body, Args... args) {
-    return Sub::stream(std::move(key), &io_detail::run_io<Body, Args...>, std::move(args)...);
+    return Sub::stream(std::move(key), io_detail::run_io<Body, Args...>, std::move(args)...);
 }
 
 }  // namespace app::cmd

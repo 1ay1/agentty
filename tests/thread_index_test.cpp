@@ -18,6 +18,7 @@
 // the right threads — it does, either way, just slowly. So this checks the
 // TIMESTAMP, which is the thing that was wrong.
 #include "agentty/io/persistence.hpp"
+#include "agtest_cap.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -104,9 +105,9 @@ void the_index_records_a_unix_timestamp() {
     std::printf("the index records a real timestamp\n");
     Sandbox sb;
 
-    persistence::save_thread(::agentty::IoAccess::grant(), make_thread("aaaa000000000001", "one"));
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
-    (void)persistence::load_all_threads(::agentty::IoAccess::grant());   // builds the index
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), make_thread("aaaa000000000001", "one"));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+    (void)persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap());   // builds the index
 
     const long long mt = indexed_mtime("aaaa000000000001");
     const long long now = std::chrono::duration_cast<std::chrono::seconds>(
@@ -128,10 +129,10 @@ void a_warm_index_is_reused() {
     std::printf("an unchanged thread is not re-parsed\n");
     Sandbox sb;
 
-    persistence::save_thread(::agentty::IoAccess::grant(), make_thread("aaaa000000000002", "two"));
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), make_thread("aaaa000000000002", "two"));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
-    const auto first = persistence::load_all_threads(::agentty::IoAccess::grant());
+    const auto first = persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap());
     CHECK(first.size() == 1);
     const long long mt1 = indexed_mtime("aaaa000000000002");
 
@@ -139,7 +140,7 @@ void a_warm_index_is_reused() {
     // verbatim: if the stamp does not match, the file is re-parsed and the
     // index rewritten, which is exactly the slow path that was always
     // taken.
-    const auto second = persistence::load_all_threads(::agentty::IoAccess::grant());
+    const auto second = persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap());
     CHECK(second.size() == 1);
     CHECK(indexed_mtime("aaaa000000000002") == mt1);
     if (!second.empty()) CHECK(second[0].title == "two");
@@ -151,18 +152,18 @@ void a_changed_thread_is_re_read() {
     std::printf("a modified thread IS re-parsed\n");
     Sandbox sb;
 
-    persistence::save_thread(::agentty::IoAccess::grant(), make_thread("aaaa000000000003", "before"));
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
-    (void)persistence::load_all_threads(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), make_thread("aaaa000000000003", "before"));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+    (void)persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap());
 
     // Rewrite it with a different title. The cache must NOT serve the old
     // one — a stamp that never changes is as wrong as one that never
     // matches, just in the other direction.
     auto t = make_thread("aaaa000000000003", "after");
-    persistence::save_thread(::agentty::IoAccess::grant(), t);
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 
-    const auto again = persistence::load_all_threads(::agentty::IoAccess::grant());
+    const auto again = persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap());
     CHECK(again.size() == 1);
     if (!again.empty()) CHECK(again[0].title == "after");
 
@@ -173,9 +174,9 @@ void an_index_from_an_older_version_is_discarded() {
     std::printf("an index written by an older version is dropped\n");
     Sandbox sb;
 
-    persistence::save_thread(::agentty::IoAccess::grant(), make_thread("aaaa000000000004", "four"));
-    persistence::flush_pending_saves(::agentty::IoAccess::grant());
-    (void)persistence::load_all_threads(::agentty::IoAccess::grant());
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), make_thread("aaaa000000000004", "four"));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+    (void)persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap());
 
     // The thread file must be on disk before the forged index goes in —
     // the whole case is "a stale index is discarded and REBUILT FROM THE
@@ -195,7 +196,7 @@ void an_index_from_an_older_version_is_discarded() {
             << R"({"created_at":0,"mtime":-4650357762,"size":1,"title":"stale"}}})";
     }
 
-    const auto loaded = persistence::load_all_threads(::agentty::IoAccess::grant());
+    const auto loaded = persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap());
     CHECK(loaded.size() == 1);
     // The title comes from the FILE, not from the forged entry.
     if (!loaded.empty()) CHECK(loaded[0].title == "four");
@@ -224,12 +225,12 @@ void old_threads_expire() {
     std::ofstream(dir / "index.json") << "{}";
     fs::last_write_time(dir / "index.json", fs::file_time_type::clock::now() - std::chrono::days{90});
 
-    CHECK(persistence::expire_threads(io, 0, ThreadId{}).threads == 0);   // off
-    const auto dry = persistence::expire_threads(io, 30, ThreadId{"bbbb000000000003"}, true);
+    CHECK(persistence::expire_threads(io, agtest::cap(), 0, ThreadId{}).threads == 0);   // off
+    const auto dry = persistence::expire_threads(io, agtest::cap(), 30, ThreadId{"bbbb000000000003"}, true);
     CHECK(dry.threads == 1);
     CHECK(fs::exists(dir / "bbbb000000000001.jsonl"));                  // dry run deletes nothing
 
-    const auto st = persistence::expire_threads(io, 30, ThreadId{"bbbb000000000003"});
+    const auto st = persistence::expire_threads(io, agtest::cap(), 30, ThreadId{"bbbb000000000003"});
     CHECK(st.threads == 1);
     CHECK(!fs::exists(dir / "bbbb000000000001.jsonl"));
     CHECK(!fs::exists(dir / "bbbb000000000001.meta.json"));
@@ -239,12 +240,12 @@ void old_threads_expire() {
     CHECK(fs::exists(dir / "index.json"));                               // not a thread
 
     // A thread this process saved is open somewhere: never expired.
-    persistence::save_thread(io, make_thread("bbbb000000000004", "live"));
-    persistence::flush_pending_saves(io);
+    persistence::save_thread(io, agtest::cap(), make_thread("bbbb000000000004", "live"));
+    persistence::flush_pending_saves(io, agtest::cap());
     for (const auto& e : fs::directory_iterator(dir))
         if (e.path().filename().string().starts_with("bbbb000000000004"))
             fs::last_write_time(e.path(), fs::file_time_type::clock::now() - std::chrono::days{90});
-    (void)persistence::expire_threads(io, 30, ThreadId{});
+    (void)persistence::expire_threads(io, agtest::cap(), 30, ThreadId{});
     CHECK(fs::exists(dir / "bbbb000000000004.jsonl"));
 
     std::printf("  deleted %zu, kept the recent, open and live ones\n", st.threads);

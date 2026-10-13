@@ -209,6 +209,9 @@ std::pair<Model, Cmd> init() {
     // ladder / clamps / wire are correct from frame 1 — the reject→learn→
     // retry loop only ever pays its one-time cost once per model, ever.
     set_learned_effort_sets(settings.learned_effort_sets);
+    // Same for optional body fields a host 400'd (#93): a strict host pays
+    // the reject→learn→retry round-trip once, ever, not once per launch.
+    set_rejected_fields(settings.rejected_fields);
 
     // Smart Mode: the persisted config IS the runtime config — one type, no
     // mapping. Everything the old rehydration did by hand (three slots × three
@@ -481,7 +484,7 @@ std::pair<Model, Cmd> init() {
     cmds.push_back(cmd::io_task_isolated(
         [](Io io, maya::Sink<Msg>, std::stop_token) { (void)tools::rag_embed_status(io); }));
     cmds.push_back(Cmd::task_isolated(
-        [](maya::Sink<Msg>, std::stop_token st) { prewarm_workspace_symbols(st); }));
+        [](const maya::unlocked& cap, maya::Sink<Msg>, std::stop_token st) { prewarm_workspace_symbols(cap, st); }));
 
     // Is the workspace a git repo? Two `git rev-parse` spawns, so off the
     // reducer; the answer comes back as RepoProbed and lives on the Model.
@@ -518,7 +521,7 @@ std::pair<Model, Cmd> init() {
     // provider; fresh_token()/auto_session() single-flight internally.
     if (m.d.selection.is_copilot())
         cmds.push_back(Cmd::task_isolated(
-            [](maya::Sink<Msg>, std::stop_token) {
+            [](const maya::unlocked& cap, maya::Sink<Msg>, std::stop_token) {
                 const auto t0 = std::chrono::steady_clock::now();
                 auto ms = [&]{ return std::chrono::duration<double,std::milli>(
                     std::chrono::steady_clock::now() - t0).count(); };
@@ -527,9 +530,9 @@ std::pair<Model, Cmd> init() {
                     AGT_LOG(Perf, Debug, "prewarm.copilot", "skip=not_signed_in");
                     return;
                 }
-                (void)provider::copilot::fresh_token();
+                (void)provider::copilot::fresh_token(cap);
                 AGT_LOG(Perf, Debug, "prewarm.copilot", "stage=token_done ms={:.1f}", ms());
-                (void)provider::copilot::auto_session();
+                (void)provider::copilot::auto_session(cap);
                 AGT_LOG(Perf, Debug, "prewarm.copilot", "stage=session_done ms={:.1f}", ms());
             }));
 

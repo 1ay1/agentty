@@ -1,17 +1,17 @@
-// agentty::mcp — HttpServerProvider: an MCP CapabilityProvider over the
+// agentty::mcp Ã¢â‚¬â€ HttpServerProvider: an MCP CapabilityProvider over the
 // Streamable HTTP transport (MCP spec 2025-03-26+ / 2025-11-25).
 //
 //   The Streamable HTTP transport collapses the old HTTP+SSE pair into ONE
 //   endpoint URL:
-//     • client → server : HTTP POST with a single JSON-RPC message (or batch).
+//     Ã¢â‚¬Â¢ client Ã¢â€ â€™ server : HTTP POST with a single JSON-RPC message (or batch).
 //       The server replies either:
-//         - Content-Type: application/json  → one JSON-RPC response, or
-//         - Content-Type: text/event-stream → an SSE stream whose `data:`
+//         - Content-Type: application/json  Ã¢â€ â€™ one JSON-RPC response, or
+//         - Content-Type: text/event-stream Ã¢â€ â€™ an SSE stream whose `data:`
 //           events each carry a JSON-RPC message (the response, plus any
-//           server→client requests/notifications that belong to it).
-//     • Mcp-Session-Id : if the server returns this header on initialize, the
+//           serverÃ¢â€ â€™client requests/notifications that belong to it).
+//     Ã¢â‚¬Â¢ Mcp-Session-Id : if the server returns this header on initialize, the
 //       client MUST echo it on every subsequent request. We capture + replay it.
-//     • Protocol version: after initialize we send MCP-Protocol-Version on
+//     Ã¢â‚¬Â¢ Protocol version: after initialize we send MCP-Protocol-Version on
 //       every request, per the spec.
 //
 //   To the rest of agentty this is a byte channel, like a child's stdio: the
@@ -56,8 +56,8 @@ namespace {
 
 using json = nlohmann::json;
 
-// Parse a single absolute URL into (scheme, host, port, path). Minimal — MCP
-// endpoints are plain https://host[:port]/path or http://… for localhost.
+// Parse a single absolute URL into (scheme, host, port, path). Minimal Ã¢â‚¬â€ MCP
+// endpoints are plain https://host[:port]/path or http://Ã¢â‚¬Â¦ for localhost.
 struct ParsedUrl {
     bool        ok        = false;
     bool        tls       = true;
@@ -84,7 +84,7 @@ ParsedUrl parse_url(const std::string& url) {
         u.host = std::string{authority.substr(0, colon)};
         try {
             unsigned long port_val = std::stoul(std::string{authority.substr(colon + 1)});
-            if (port_val == 0 || port_val > 65535) return u;   // out of range → !ok
+            if (port_val == 0 || port_val > 65535) return u;   // out of range Ã¢â€ â€™ !ok
             u.port = static_cast<std::uint16_t>(port_val);
         }
         catch (...) { return u; }
@@ -120,7 +120,7 @@ struct Conn {
         return j.is_object() && j.contains("id") && j.contains("method");
     }
 
-    void fail_request(const std::string& frame, std::string_view reason) noexcept {
+    void fail_request(const maya::unlocked& cap, const std::string& frame, std::string_view reason) noexcept {
         alive_.store(false, std::memory_order_release);
         util::dbglog("mcp.http_transport.worker", reason);
         try {
@@ -132,18 +132,18 @@ struct Conn {
                 {"error", {{"code", -32003}, {"message",
                     std::string{"http transport worker: "} + std::string{reason}}}},
             };
-            feed(jsonrpc::dump_frame(err));
+            feed(cap, jsonrpc::dump_frame(err));
         } catch (...) {
             // The transport is already marked dead; the engine deadline is the
             // final fallback if even constructing the error response fails.
         }
     }
 
-    void post_and_feed(const std::string& frame) {
+    void post_and_feed(const maya::unlocked& cap, const std::string& frame) {
         json parsed;
         bool expects_response = false;
         try { parsed = json::parse(frame); expects_response = is_request(parsed); }
-        catch (...) { /* malformed outbound — just POST it raw */ }
+        catch (...) { /* malformed outbound Ã¢â‚¬â€ just POST it raw */ }
 
         http::Request req;
         req.method    = http::HttpMethod::Post;
@@ -168,7 +168,7 @@ struct Conn {
             }
         }
         {
-            const auto sess = session_.read([](const Session& s) { return s; });
+            const Session sess = session_.get();
             if (!sess.id.empty())               req.headers.push_back({"mcp-session-id", sess.id});
             if (!sess.protocol_version.empty()) req.headers.push_back({"mcp-protocol-version", sess.protocol_version});
         }
@@ -185,7 +185,7 @@ struct Conn {
                 if (n == "authorization") { has_auth = true; break; }
             }
             if (!has_auth)
-                if (auto bearer = oauth::bearer_for(server_name_))
+                if (auto bearer = oauth::bearer_for(cap, server_name_))
                     req.headers.push_back({"authorization", *bearer});
         }
 
@@ -211,15 +211,17 @@ struct Conn {
             content_type = header_value(hh, "content-type");
             is_sse = content_type.find("text/event-stream") != std::string::npos;
             // Capture a freshly-issued session id (only on initialize, but the
-            // server may send it on any response — capture whenever present).
+            // server may send it on any response Ã¢â‚¬â€ capture whenever present).
             if (auto sid = header_value(hh, "mcp-session-id"); !sid.empty()) {
-                session_.with([](Session& s, std::string id) {
-                    if (s.id.empty()) s.id = std::move(id);
+                (void)session_.update([](const Session& s, const std::string& id) {
+                    Session o = s;
+                    if (o.id.empty()) o.id = id;
+                    return o;
                 }, sid);
             }
             if (status == 404 || status == 410) {
-                // Session expired/unknown — drop it so the next call re-inits.
-                session_.with([](Session& s) { s.id.clear(); });
+                // Session expired/unknown Ã¢â‚¬â€ drop it so the next call re-inits.
+                (void)session_.update([](const Session& s) { Session o = s; o.id.clear(); return o; });
             }
             if (status == 401) {
                 // MCP 2026-07-28 authorization (RFC 9728): the server is
@@ -236,9 +238,9 @@ struct Conn {
         // Cap total buffered response bytes. The streaming path in
         // io/http.cpp forwards every DATA frame to on_chunk WITHOUT enforcing
         // Request::max_body_bytes (that cap only guards the unary path), so a
-        // hostile or buggy MCP server could stream gigabytes — an unbounded
+        // hostile or buggy MCP server could stream gigabytes Ã¢â‚¬â€ an unbounded
         // json_buf, or an SSE body that never emits a "\n\n" separator so
-        // drain_sse never erases — until the process OOMs. Returning false
+        // drain_sse never erases Ã¢â‚¬â€ until the process OOMs. Returning false
         // from on_chunk aborts the stream (RST) and surfaces an HttpError.
         constexpr std::size_t kMaxResponseBytes = 64ull * 1024 * 1024;
         std::size_t total_bytes = 0;
@@ -246,12 +248,12 @@ struct Conn {
             total_bytes += chunk.size();
             if (total_bytes > kMaxResponseBytes) {
                 util::dbglog("mcp.http_transport.on_chunk",
-                             "response exceeded 64 MiB cap — aborting");
+                             "response exceeded 64 MiB cap Ã¢â‚¬â€ aborting");
                 return false;
             }
             if (is_sse) {
                 sse_buf.append(chunk);
-                drain_sse(sse_buf);
+                drain_sse(cap, sse_buf);
                 // A single unterminated SSE event must not grow without
                 // bound even while under the total cap.
                 if (sse_buf.size() > kMaxResponseBytes) {
@@ -279,16 +281,16 @@ struct Conn {
                     {"error", {{"code", -32003}, {"message",
                         std::string{"http transport: "} + result.error().render()}}},
                 };
-                feed(jsonrpc::dump_frame(err));
+                feed(cap, jsonrpc::dump_frame(err));
             }
             return;
         }
 
         if (is_sse) {
-            drain_sse(sse_buf, /*flush=*/true);
+            drain_sse(cap, sse_buf, /*flush=*/true);
         } else if (!json_buf.empty()) {
-            // Single JSON body — may be one message or a batch array.
-            feed(json_buf);
+            // Single JSON body Ã¢â‚¬â€ may be one message or a batch array.
+            feed(cap, json_buf);
         } else if (expects_response) {
             // 202 Accepted with empty body for a request is a protocol error,
             // but be defensive: resolve the future with an error.
@@ -311,31 +313,31 @@ struct Conn {
                 {"id", parsed.value("id", json(nullptr))},
                 {"error", {{"code", http_status_401_ ? -32020 : -32603}, {"message", msg}}},
             };
-            feed(jsonrpc::dump_frame(err));
+            feed(cap, jsonrpc::dump_frame(err));
         }
-        // notifications with a 202/empty body: nothing to feed — correct.
+        // notifications with a 202/empty body: nothing to feed Ã¢â‚¬â€ correct.
     }
 
     // Parse complete SSE events out of `buf` and feed each event's `data:`
     // payload into the engine. An SSE event ends at a blank line ("\n\n").
-    void drain_sse(std::string& buf, bool flush = false) {
+    void drain_sse(const maya::unlocked& cap, std::string& buf, bool flush = false) {
         for (;;) {
             auto sep = buf.find("\n\n");
             if (sep == std::string::npos) {
                 // Tolerate CRLF framing too.
                 sep = buf.find("\r\n\r\n");
                 if (sep == std::string::npos) break;
-                feed_event(buf.substr(0, sep));
+                feed_event(cap, buf.substr(0, sep));
                 buf.erase(0, sep + 4);
                 continue;
             }
-            feed_event(buf.substr(0, sep));
+            feed_event(cap, buf.substr(0, sep));
             buf.erase(0, sep + 2);
         }
-        if (flush && !buf.empty()) { feed_event(buf); buf.clear(); }
+        if (flush && !buf.empty()) { feed_event(cap, buf); buf.clear(); }
     }
 
-    void feed_event(const std::string& event) {
+    void feed_event(const maya::unlocked& cap, const std::string& event) {
         // An SSE event is a set of `field: value` lines. We only care about
         // `data:` lines; multiple data lines concatenate with '\n'.
         std::string data;
@@ -354,12 +356,12 @@ struct Conn {
             }
             // ignore event:, id:, retry:, and comment (':') lines
         }
-        if (!data.empty()) feed(data);
+        if (!data.empty()) feed(cap, data);
     }
 
     // Hand one frame (a message or a batch) to the peer. It reads lines, so
     // a pretty-printed body is compacted to one.
-    void feed(const std::string& payload) {
+    void feed(const maya::unlocked& cap, const std::string& payload) {
         std::string line;
         try { line = jsonrpc::dump_frame(json::parse(payload)); }
         catch (...) {
@@ -367,7 +369,7 @@ struct Conn {
             return;
         }
         line.push_back('\n');
-        (void)feed_.write(line);
+        (void)feed_.write(cap, line);
     }
 
     const ParsedUrl                 url_;
@@ -376,7 +378,8 @@ struct Conn {
     const std::string               server_name_;   // for oauth::bearer_for lookup
     const rpc::Channel              feed_;          // our end: where we push frames
     struct Session { std::string id; std::string protocol_version; };
-    maya::guarded<Session>          session_;
+    // Replaced whole, read on every POST: a snapshot, no lock.
+    maya::snapshot<Session>         session_;
     std::atomic<bool>               alive_{true};
     // One token for the transport's life: stop() cancels every POST in flight.
     const http::CancelTokenPtr      cancel_ = std::make_shared<http::CancelToken>();
@@ -390,7 +393,7 @@ namespace {
 
 using ConnRef = maya::co_owned<Conn>;
 
-// ── HttpTransport ─────────────────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ HttpTransport Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // channel() is what the peer runs on: write POSTs a frame on a worker, read
 // drains the frames the replies carried.
 class HttpTransport {
@@ -404,15 +407,16 @@ public:
     }
 
     void set_protocol_version(std::string v) {
-        (*conn_)->session_.with([](Conn::Session& s, std::string pv) { s.protocol_version = std::move(pv); },
-                      std::move(v));
+        (void)(*conn_)->session_.update(
+            [](const Conn::Session& s, const std::string& pv) { Conn::Session o = s; o.protocol_version = pv; return o; },
+            std::move(v));
     }
 
     [[nodiscard]] bool alive() const noexcept {
         return (*conn_)->alive_.load(std::memory_order_acquire);
     }
 
-    void stop() {
+    void stop(const maya::unlocked& cap) {
         // Admission is the WorkerGroup's job: workers_.stop() refuses further
         // posts under the pool's own lock. alive_ is the plain liveness flag
         // the provider reads.
@@ -420,15 +424,15 @@ public:
         c.alive_.store(false, std::memory_order_release);
         c.cancel_->cancel();
         // Hard barrier: when this returns no POST worker is running.
-        workers_.stop();
-        if (c.feed_.interrupt) c.feed_.interrupt();   // the peer's reader sees EOF
+        workers_.stop(cap);
+        if (c.feed_.interrupt) c.feed_.interrupt(cap);   // the peer's reader sees EOF
     }
 
     // The channel the peer runs on. Valid while this transport lives.
     rpc::Channel channel() {
         rpc::Channel ch;
         ch.read      = inbound_.read;
-        ch.write     = [this](std::string_view bytes) {
+        ch.write     = [this](const maya::unlocked&, std::string_view bytes) {
             // The peer writes whole lines; each is one JSON-RPC frame.
             std::size_t start = 0;
             while (start < bytes.size()) {
@@ -440,7 +444,7 @@ public:
             }
             return alive();
         };
-        ch.interrupt = [this] { stop(); };
+        ch.interrupt = [this](const maya::unlocked& c) { stop(c); };
         return ch;
     }
 
@@ -449,13 +453,13 @@ private:
         if (!alive()) return;   // stopped
         // POST off this thread: it is the peer's writer, and a slow server
         // must not hold up every other frame.
-        workers_.post([](std::stop_token, ConnRef c, std::string frame) {
+        workers_.post([](const maya::unlocked& cap, std::stop_token, ConnRef c, std::string frame) {
             try {
-                c->post_and_feed(frame);
+                c->post_and_feed(cap, frame);
             } catch (const std::exception& error) {
-                c->fail_request(frame, error.what());
+                c->fail_request(cap, frame, error.what());
             } catch (...) {
-                c->fail_request(frame, "unknown transport exception");
+                c->fail_request(cap, frame, "unknown transport exception");
             }
         }, *conn_, std::move(frame));
     }

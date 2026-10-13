@@ -585,8 +585,8 @@ Cmd submit_message(Model& m) {
     // exists and surfaces a toast there instead.
     if (checkpoint_to_create) {
         parts.push_back(Cmd::task_isolated(
-            [](maya::Sink<Msg>, std::stop_token, std::string id) {
-                (void)workspace::create_checkpoint(id);
+            [](const maya::unlocked& cap, maya::Sink<Msg>, std::stop_token, std::string id) {
+                (void)workspace::create_checkpoint(cap, id);
             }, std::move(*checkpoint_to_create)));
     }
     parts.push_back(std::move(launch));

@@ -293,7 +293,9 @@ util::AtomicSnapshot<std::vector<std::string>> g_files;
 // A tiny recency list (not a full frecency decay) — the last-referenced
 // files are exactly what a follow-up `@` wants at the top.
 using Frecency = std::vector<std::string>;
-maya::guarded<Frecency>& frecency() { static maya::guarded<Frecency> v; return v; }
+// A snapshot: replaced on each reference, read once per filter pass. No lock,
+// so the picker and the tools that note a reference need no capability.
+maya::snapshot<Frecency>& frecency() { static maya::snapshot<Frecency> v; return v; }
 
 // ── Git signals ──────────────────────────────────────────
 // The single strongest "which file matters" signal is git: the files you
@@ -302,7 +304,8 @@ maya::guarded<Frecency>& frecency() { static maya::guarded<Frecency> v; return v
 // prewarm (git status --porcelain + recent commit touch history) and fold
 // it into ranking + row tags. path (workspace-relative) -> GitTag.
 using GitTags = std::unordered_map<std::string, GitTag>;
-maya::guarded<GitTags>& git_status_map() { static maya::guarded<GitTags> m; return m; }
+// Built once at prewarm, read on every filter: a snapshot, no lock.
+maya::snapshot<GitTags>& git_status_map() { static maya::snapshot<GitTags> m; return m; }
 
 void build_git_signals() {
     const auto root = tools::util::project_root();
@@ -350,7 +353,7 @@ void build_git_signals() {
         }
     }
 
-    git_status_map().with([](GitTags& m, GitTags t) { m = std::move(t); }, std::move(tags));
+    git_status_map().store(std::move(tags));
 }
 
 std::vector<std::string> build_file_list(std::size_t cap, std::stop_token stop = {}) {
@@ -446,18 +449,19 @@ bool files_ready() {
 
 void note_file_referenced(std::string_view path) {
     if (path.empty()) return;
-    frecency().with([](Frecency& v, std::string p) {
+    (void)frecency().update([](const Frecency& old, const std::string& p) {
+        Frecency v = old;
         std::erase(v, p);                     // dedupe — move to front
-        v.insert(v.begin(), std::move(p));
+        v.insert(v.begin(), p);
         if (v.size() > 64) v.resize(64);      // bounded recency window
+        return v;
     }, std::string{path});
 }
 
 GitTag file_git_tag(std::string_view path) {
-    return git_status_map().read([](const GitTags& m, std::string p) {
-        auto it = m.find(p);
-        return it == m.end() ? GitTag::None : it->second;
-    }, std::string{path});
+    const auto m = git_status_map().load();
+    auto it = m->find(std::string{path});
+    return it == m->end() ? GitTag::None : it->second;
 }
 
 std::string_view git_tag_label(GitTag tag) {
@@ -504,12 +508,13 @@ filter_files(const std::vector<std::string>& files, std::string_view query) {
     // read once per filter pass.
     std::unordered_map<std::string, int> frec;
     {
-        const auto v = frecency().read([](const Frecency& f) { return f; });
-        for (std::size_t i = 0; i < v.size(); ++i) frec.emplace(v[i], (int)i);
+        const auto v = frecency().load();
+        for (std::size_t i = 0; i < v->size(); ++i) frec.emplace((*v)[i], (int)i);
     }
     // Git-status snapshot: the STRONGEST signal. The file you're editing is
     // almost always dirty/staged — lead with it.
-    const auto git = git_status_map().read([](const GitTags& m) { return m; });
+    const auto git_h = git_status_map().load();
+    const GitTags& git = *git_h;
     auto git_bonus = [&](std::size_t i) -> int {
         auto it = git.find(files[i]);
         if (it == git.end()) return 0;

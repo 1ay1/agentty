@@ -220,8 +220,12 @@ void store_approval(const HooksFile& hf) {
 // Prefix `cmd` with variable assignments the shell applies to that command
 // only. POSIX: `export A='v' B='v'; <cmd>` (exported so a hook that is a
 // script sees them, and single-quoted so nothing in a value is interpreted).
-// Windows cmd.exe: `set "A=v" && set "B=v" && <cmd>`; the values here are an
-// event name, a tool name and a temp path, none of which carry `"` or `%`.
+// Windows cmd.exe: `set "A=v" && set "B=v" && call <cmd>`; the values here
+// are an event name, a tool name and a temp path, none of which carry `"`
+// or `%`. The `call` is load-bearing: cmd expands %VAR% when it PARSES the
+// line, before any `set` on it has run, so a hook written as
+// `findstr x "%AGENTTY_HOOK_PAYLOAD_FILE%"` saw the literal text. `call`
+// re-parses its argument after the sets, which is when the vars exist.
 [[nodiscard]] std::string with_hook_env(
     const std::string& cmd,
     std::initializer_list<std::pair<const char*, std::string>> vars) {
@@ -247,6 +251,7 @@ void store_approval(const HooksFile& hf) {
         out += v;
         out += "\" && ";
     }
+    out += "call ";
 #endif
     out += cmd;
     return out;

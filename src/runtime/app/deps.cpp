@@ -13,17 +13,17 @@ namespace agentty::app {
 namespace {
 Deps* g_deps = nullptr;
 // The live auth header. Written by the host's InstallAuth effect on the loop
-// thread, read by workers (subagents, the catalog fetch), so it is a
-// guarded value: a copy goes out, nothing reaches it unlocked.
-maya::guarded<auth::AuthHeader>& g_auth() {
-    static maya::guarded<auth::AuthHeader> a;
+// thread, read by workers (subagents, the catalog fetch, every stream). A
+// snapshot, not a lock: it is read far more than written and from inside
+// other locks' bodies (provider caches), so a lock here would need a rank
+// above all of them. Lock-free, it ranks nowhere and can't deadlock.
+maya::snapshot<auth::AuthHeader>& g_auth() {
+    static maya::snapshot<auth::AuthHeader> a;
     return a;
 }
 }
 
-auth::AuthHeader live_auth() {
-    return g_auth().read([](const auth::AuthHeader& a) { return a; });
-}
+auth::AuthHeader live_auth() { return g_auth().get(); }
 
 const Deps& deps(Io) {
     if (!g_deps) throw std::logic_error("agentty::app::deps() called before install_deps()");
@@ -32,8 +32,7 @@ const Deps& deps(Io) {
 
 void install_deps(Deps d) {
     static Deps storage;
-    g_auth().with([](auth::AuthHeader& a, auth::AuthHeader v) { a = std::move(v); },
-                  d.auth);
+    g_auth().store(d.auth);
     storage = std::move(d);
     g_deps = &storage;
 }
@@ -69,8 +68,7 @@ auth::AuthHeader auth_snapshot(Io io) {
 }
 
 void update_auth(Io io, auth::AuthHeader auth) {
-    g_auth().with([](auth::AuthHeader& a, auth::AuthHeader v) { a = std::move(v); },
-                  auth);
+    g_auth().store(auth);
     tools::subagent::set_auth(io, std::move(auth));
 }
 

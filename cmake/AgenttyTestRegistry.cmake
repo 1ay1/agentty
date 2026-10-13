@@ -76,6 +76,11 @@ function(_agentty_test_link_full name)
     if(TARGET maya::app)
         target_link_libraries(${name} PRIVATE maya::app)
     endif()
+    # libstdc++ ships std::print's Windows terminal path (__open_terminal /
+    # __write_to_terminal) in the experimental archive, not libstdc++ proper.
+    if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_libraries(${name} PRIVATE stdc++exp)
+    endif()
     # registry.cpp routes the whole tool set through the mcp-cpp bridge.
     if(TARGET mcp::mcp)
         target_link_libraries(${name} PRIVATE mcp::mcp)

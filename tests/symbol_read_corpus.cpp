@@ -5,6 +5,7 @@
 // first line of each resolved span (sanity: it should be the definition).
 //   agentty_standalone_tests symbol_read_corpus <corpus.tsv> [--verbose]
 
+#include "agtest_cap.hpp"
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -32,7 +33,7 @@ int main(int argc, char** argv) {
         if (tab == std::string::npos) continue;
         const std::string path = line.substr(0, tab), sym = line.substr(tab + 1);
         ++total;
-        auto r = read->execute(json{{"path", path}, {"symbol", sym}}, agentty::tools::CallContext{});
+        auto r = read->execute(agtest::cap(), json{{"path", path}, {"symbol", sym}}, agentty::tools::CallContext{});
         if (r && r->text.find("no definition of") == std::string::npos) {
             ++ok;
             if (verbose) {

@@ -93,7 +93,7 @@ openai_target(const PendingTarget& p, const provider::Request& req) {
 
 // No turn context here; stream_responses() never routes through it.
 std::expected<responses::Target, std::string>
-openai_authorize(provider::Request&) {
+openai_authorize(const maya::unlocked&, provider::Request&) {
     return std::unexpected(std::string{"openai responses: no endpoint for this turn"});
 }
 

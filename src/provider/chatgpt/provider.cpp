@@ -25,7 +25,8 @@ struct ChatGptProvider::Impl {};
 ChatGptProvider::ChatGptProvider() : impl_(nullptr) {}
 ChatGptProvider::~ChatGptProvider() = default;
 
-provider::StreamResult ChatGptProvider::stream(provider::Request req, provider::EventSink sink) {
+provider::StreamResult ChatGptProvider::stream(const maya::unlocked& cap, provider::Request req,
+                                               provider::EventSink sink) {
     if (!responses_available()) {
         sink(StreamStarted{});
         sink(StreamError{
@@ -33,7 +34,7 @@ provider::StreamResult ChatGptProvider::stream(provider::Request req, provider::
             "ChatGPT to authenticate, then retry."});
         return provider::StreamResult::failed("not signed in to ChatGPT");
     }
-    return stream_responses(std::move(req), std::move(sink));
+    return stream_responses(cap, std::move(req), std::move(sink));
 }
 
 // ── Model discovery ───────────────────────────────────────────────
@@ -56,22 +57,22 @@ std::vector<ModelInfo> bundled_models() {
 
 // Empty until the first successful live fetch.
 using Models = std::vector<ModelInfo>;
-maya::guarded<Models>& models_cache() { static maya::guarded<Models> c; return c; }
+maya::snapshot<Models>& models_cache() { static maya::snapshot<Models> c; return c; }
 
 } // namespace
 
 std::vector<ModelInfo> list_models_cached() {
-    return models_cache().read([](const Models& c) { return c; });
+    return models_cache().get();
 }
 
-std::vector<ModelInfo> list_models(Io io) {
+std::vector<ModelInfo> list_models(Io io, const maya::unlocked& cap) {
     if (auto hit = list_models_cached(); !hit.empty()) return hit;
 
     // Ask the account for its real catalog (blocking, short timeout; empty on
     // any failure). Only attempted when we actually have a credential.
     std::vector<ModelInfo> resolved;
     if (responses_available()) {
-        auto catalog = fetch_models(io);
+        auto catalog = fetch_models(io, cap);
         // The server lists the default first (or flags is_default); reorder so
         // the account's default is index 0 — that's what the picker preselects.
         std::stable_sort(catalog.begin(), catalog.end(),
@@ -87,15 +88,15 @@ std::vector<ModelInfo> list_models(Io io) {
 
     if (resolved.empty()) resolved = bundled_models();
     else   // cache only real, server-confirmed lists
-        models_cache().with([](Models& c, Models fresh) { c = std::move(fresh); }, resolved);
+        models_cache().store(resolved);
     return resolved;
 }
 
 // The account's default model slug (catalog index 0), or a safe fallback when
 // the catalog can't be reached. This is what selection/defaulting should use
 // instead of any hardcoded "gpt-5.1-codex".
-std::string default_model(Io io) {
-    auto ms = list_models(io);
+std::string default_model(Io io, const maya::unlocked& cap) {
+    auto ms = list_models(io, cap);
     return ms.empty() ? std::string{"gpt-5"} : ms.front().id.value;
 }
 

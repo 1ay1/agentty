@@ -44,7 +44,7 @@ std::vector<std::string> g_deleted;   // ids passed to deps().delete_thread
 void install_stub_deps() {
     g_deleted.clear();
     agentty::app::install_deps(agentty::app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const agentty::Thread&) {},
         .delete_thread = [](const agentty::ThreadId& id) { g_deleted.push_back(id.value); },
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },

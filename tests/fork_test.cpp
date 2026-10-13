@@ -39,7 +39,7 @@ void check(bool cond, const std::string& msg) {
 int g_thread_ids = 0;
 void install_stub_deps() {
     agentty::app::install_deps(agentty::app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const agentty::Thread&) {},
         .delete_thread = [](const agentty::ThreadId&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },

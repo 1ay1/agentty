@@ -5,6 +5,7 @@
 #include "agentty/tool/web_search_policy.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <format>
 #include <memory>
@@ -116,12 +117,14 @@ struct Snapshot {
 };
 
 enum class Phase { Idle, Connecting, Connected };
-struct Connect {
-    Phase phase = Phase::Idle;
-    std::vector<ToolDef> initial_mcp;
-};
-
-maya::guarded<Connect>& connect_state() { static maya::guarded<Connect> c; return c; }
+// Lock-free: registry() is read from everywhere (views, lock bodies, tool
+// workers), so the connect claim is one atomic and the first connect's
+// result is published once. No capability on the catalog path.
+std::atomic<Phase>& connect_phase() { static std::atomic<Phase> p{Phase::Idle}; return p; }
+maya::published<const std::vector<ToolDef>>& initial_mcp() {
+    static auto* s = new maya::published<const std::vector<ToolDef>>;
+    return *s;
+}
 // Leaked on purpose: snapshots live for the whole process, and tearing down
 // a long `prev` chain at exit would only recurse.
 maya::published<const Snapshot>& catalog() {
@@ -150,25 +153,23 @@ std::shared_ptr<const Snapshot> refresh_wire_cache() {
     // the native tools right away (it may be the UI thread, and the connect
     // can take up to 15 s).
     enum class Claim { Mine, Busy, Done };
-    const Claim claim = connect_state().with([](Connect& c) {
-        if (c.phase == Phase::Connected)  return Claim::Done;
-        if (c.phase == Phase::Connecting) return Claim::Busy;
-        c.phase = Phase::Connecting;
-        return Claim::Mine;
-    });
+    const Claim claim = [] {
+        Phase expect = Phase::Idle;
+        if (connect_phase().compare_exchange_strong(expect, Phase::Connecting))
+            return Claim::Mine;
+        return expect == Phase::Connected ? Claim::Done : Claim::Busy;
+    }();
     if (claim == Claim::Busy) return native_only();
     if (claim == Claim::Mine) {
         std::vector<ToolDef> ext;
         try {
             ext = connect_initial_mcp();
         } catch (...) {
-            connect_state().with([](Connect& c) { c.phase = Phase::Idle; });
+            connect_phase().store(Phase::Idle);
             throw;
         }
-        connect_state().with([](Connect& c, std::vector<ToolDef> e) {
-            c.initial_mcp = std::move(e);
-            c.phase = Phase::Connected;
-        }, std::move(ext));
+        initial_mcp().publish(std::make_shared<const std::vector<ToolDef>>(std::move(ext)));
+        connect_phase().store(Phase::Connected);
     }
 
     for (;;) {
@@ -176,9 +177,12 @@ std::shared_ptr<const Snapshot> refresh_wire_cache() {
         const unsigned long generation = mcp::mcp_generation();
         if (cur && !cur->stale && cur->generation == generation) return cur;
 
-        std::vector<ToolDef> external = generation == 0
-            ? connect_state().read([](const Connect& c) { return c.initial_mcp; })
-            : mcp::mcp_tools_live();
+        std::vector<ToolDef> external;
+        if (generation == 0) {
+            if (auto init = initial_mcp().current()) external = *init;
+        } else {
+            external = mcp::mcp_tools_live();
+        }
 
         auto next = std::make_shared<Snapshot>();
         next->tools.reserve(native_registry().size() + external.size());
@@ -380,27 +384,33 @@ std::size_t reload_mcp_plugins() {
     // and a reconnect can take seconds, so a request that lands mid-reload
     // just sets `pending` and returns; the running reload loops once more to
     // pick up the newer config. Checking `pending` and clearing `running`
-    // happen in one locked step, so no request is lost.
-    struct Reload { bool running = false; bool pending = false; };
-    static maya::guarded<Reload> state;
+    // happen in one CAS, so no request is lost.
+    // Both flags live in one atomic word, so each step is a single CAS and
+    // no lock (or capability) is needed on this path.
+    constexpr unsigned kRunning = 1u, kPending = 2u;
+    static std::atomic<unsigned> state{0};
 
-    const bool mine = state.with([](Reload& r) {
-        if (r.running) { r.pending = true; return false; }
-        r.running = true;
-        return true;
-    });
-    if (!mine) return 0;
+    unsigned cur = state.load();
+    for (;;) {
+        const unsigned want = (cur & kRunning) ? (cur | kPending) : kRunning;
+        if (state.compare_exchange_weak(cur, want)) break;
+    }
+    if (cur & kRunning) return 0;   // someone else is reloading; they'll loop
 
     std::size_t n = 0;
-    do {
-        state.with([](Reload& r) { r.pending = false; });
+    for (;;) {
+        state.fetch_and(~kPending);
         n = mcp::mcp_reload();
         invalidate_catalog();
-    } while (state.with([](Reload& r) {
-        if (r.pending) return true;
-        r.running = false;
-        return false;
-    }));
+        unsigned s = state.load();
+        bool again = false;
+        for (;;) {
+            again = (s & kPending) != 0;
+            if (again) break;   // keep running; the next pass clears pending
+            if (state.compare_exchange_weak(s, s & ~kRunning)) break;
+        }
+        if (!again) break;
+    }
     return n;
 }
 

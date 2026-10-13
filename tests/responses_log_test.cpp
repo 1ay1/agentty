@@ -88,10 +88,15 @@ std::string run_and_capture(const std::vector<std::string>& sse) {
     (void)cc::parse_sse_for_test(sse);
     REQUIRE(logx::dump_flight_recorder_to(path.string().c_str()));
 
-    std::ifstream in(path);
-    std::string dump((std::istreambuf_iterator<char>(in)),
-                     std::istreambuf_iterator<char>());
-    std::filesystem::remove(path);
+    std::string dump;
+    {
+        // Scoped: Windows can't delete a file that is still open.
+        std::ifstream in(path);
+        dump.assign(std::istreambuf_iterator<char>(in),
+                    std::istreambuf_iterator<char>());
+    }
+    std::error_code rec;
+    std::filesystem::remove(path, rec);
 
     const auto at = dump.rfind(mark);
     REQUIRE(at != std::string::npos);

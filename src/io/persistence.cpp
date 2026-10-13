@@ -1272,10 +1272,13 @@ persistence::Lane& thread_index_mu() {
 }
 
 // The critical section for index.json. Every read_thread_index_locked /
-// write_thread_index_locked pair runs inside ONE of these: body(Held, args...).
+// write_thread_index_locked pair runs inside ONE of these:
+// body(const held<file_lane>&, Held, args...). The bodies only touch the
+// file, so they ignore the capability; it is there so a future body that
+// needs a ranked lock gets one, checked.
 template <class F, class... Args>
-auto with_thread_index(F body, Args... args) {
-    return persistence::with_shared_file(thread_index_mu(), thread_index_path(),
+auto with_thread_index(const lock_levels::below_file_lane& cap, F body, Args... args) {
+    return persistence::with_shared_file(cap, thread_index_mu(), thread_index_path(),
                                           body, std::move(args)...);
 }
 
@@ -1421,7 +1424,7 @@ Thread thread_from_index(const std::string& id, const IndexEntry& e) {
 // stamping the NEW on-disk mtime so the next startup takes the fast
 // path for this thread instead of re-parsing it. Best-effort: a failed
 // index update just means one slow parse next launch, then self-heals.
-void reindex_thread(const Thread& t) {
+void reindex_thread(const lock_levels::below_file_lane& cap, const Thread& t) {
     // Stat whichever file this thread actually lives in. A migrated thread
     // has no <id>.json, so statting that unconditionally would cache
     // mtime=0/size=0 — and load_all_threads treats mt==0 as "cache miss",
@@ -1444,7 +1447,8 @@ void reindex_thread(const Thread& t) {
                         t.updated_at.time_since_epoch()).count();
     ie.mtime      = mt;
     ie.size       = sz;
-    with_thread_index([](persistence::Held, std::string id, IndexEntry e) {
+    with_thread_index(cap, [](const maya::held<lock_levels::file_lane>&, persistence::Held,
+                              std::string id, IndexEntry e) {
         auto idx = read_thread_index_locked();
         idx[id] = std::move(e);
         write_thread_index_locked(idx);
@@ -1453,7 +1457,7 @@ void reindex_thread(const Thread& t) {
 
 } // namespace
 
-std::vector<Thread> load_all_threads(Io) {
+std::vector<Thread> load_all_threads(Io, const lock_levels::below_file_lane& cap) {
     // Metadata-only directory walk, index-accelerated (see the index
     // sidecar note above). A cached entry whose mtime still matches the
     // file's on-disk mtime is used verbatim — no open/parse. Only new or
@@ -1467,7 +1471,7 @@ std::vector<Thread> load_all_threads(Io) {
     // the bottom are one read-modify-write, and a save landing in the
     // middle — from this process OR another instance — must not have its
     // entry clobbered by our `fresh` snapshot.
-    out = with_thread_index([](persistence::Held) {
+    out = with_thread_index(cap, [](const maya::held<lock_levels::file_lane>&, persistence::Held) {
     std::vector<Thread> out;
     std::error_code ec;
     auto index = read_thread_index_locked();
@@ -1787,7 +1791,7 @@ static LogMismatch log_diff(const ThreadLog& log, const std::vector<Message>& wa
 // Returns true iff the thread is now on disk in the LOG format and that
 // log was verified. The incremental writer only trusts its per-thread
 // bookkeeping after a true here; false means the next save must be full.
-static bool save_thread_sync(const Thread& t) {
+static bool save_thread_sync(const lock_levels::below_file_lane& cap, const Thread& t) {
     if (t.id.empty() || t.messages.empty()) return false;
 
     // ── Write the log, and only then retire the legacy document ──────
@@ -1825,7 +1829,7 @@ static bool save_thread_sync(const Thread& t) {
                         "result=ok format=log id={} messages={}",
                         t.id.value, t.messages.size());
             }
-            reindex_thread(t);
+            reindex_thread(cap, t);
             return true;
         }
         // Wrote, but it did not read back correctly. Keep the legacy file
@@ -1862,7 +1866,7 @@ static bool save_thread_sync(const Thread& t) {
                 t.id.value, t.messages.size());
     // Keep the metadata index in lock-step with the file we just
     // wrote so the next startup's fast path picks it up.
-    reindex_thread(t);
+    reindex_thread(cap, t);
     return false;
 }
 
@@ -2105,6 +2109,14 @@ static bool save_tail_sync(const SaveJob& job) {
 // flush_and_stop() which `main` calls right after maya::run returns.
 // Everything the reducer and the drain worker share. Plain data, so it lives
 // in a guarded; the worker sleeps on it with wait_with.
+//
+// Lock order: the state is a LEAF. Every body below is a few lines over
+// these maps and calls nothing that locks (the slow work -- encoding,
+// fsync, reindexing -- runs between bodies), so enqueue() can be called
+// from any lock-free caller and the drain worker never holds it across IO.
+// The worker group that runs the drain is NOT in a lock: it joins on
+// destruction, so jaal refuses it inside a guarded. It lives in a published
+// slot and is stopped with `unlocked`.
 struct WriterState {
     std::unordered_map<std::string, SaveJob> pending;
     // Per-thread knowledge of the log. The reducer reads it to build a
@@ -2118,30 +2130,28 @@ struct WriterState {
     bool        started  = false;
 };
 
-maya::guarded<WriterState>& async_writer_state() {
-    static maya::guarded<WriterState> s{lock_levels::kWriterState};
+using WriterStateLock = maya::guarded<WriterState>;
+WriterStateLock& async_writer_state() {
+    static WriterStateLock s;
     return s;
 }
 
 struct AsyncWriter {
     // Reached in the constructor, so the state static is built first and
     // destroyed after this one.
-    maya::guarded<WriterState>& st = async_writer_state();
+    WriterStateLock& st = async_writer_state();
 
     // The drain worker: a jaal-backed group, joined with no deadline on stop
-    // so every queued save lands. Recreated if saves arrive again. Its own
-    // lock, taken before `st` and never inside it, so stop() can wait for
-    // run() (which only takes `st`) without a cycle.
-    // A level above the writer state: worker may be taken first, state
-    // inside it, never the reverse. The group is joined with no lock held.
-    struct Worker { std::unique_ptr<util::WorkerGroup> group; };
-    maya::guarded<Worker> worker{lock_levels::kWorkerSlot};
+    // so every queued save lands. Recreated if saves arrive again. A
+    // published slot, not a lock: whoever wins `started` (under `st`)
+    // creates and publishes it, and flush_and_stop takes it out to stop it.
+    maya::published<util::WorkerGroup> worker;
 
     // Build the job on the CALLER's thread, copying only what changed.
     // Fingerprinting is one pass of hashing with no allocation or I/O —
     // far cheaper than the full Thread copy this replaces, and the writer
     // no longer re-encodes or re-reads anything before `from`.
-    void enqueue(const Thread& t) {
+    void enqueue(const maya::below<maya::leaf>& cap, const Thread& t) {
         std::vector<std::uint64_t> fps;
         fps.reserve(t.messages.size());
         for (const auto& m : t.messages)
@@ -2156,7 +2166,7 @@ struct AsyncWriter {
         // The base is copied out and the job built unlocked; the decision
         // is re-checked when the job lands, below.
         const std::string key = t.id.value;
-        auto base = st.read([](const WriterState& s, std::string k)
+        auto base = st.read(cap, [](const WriterState& s, std::string k)
                                 -> std::optional<std::vector<std::uint64_t>> {
             if (s.pending.contains(k) || s.in_flight == k) return std::nullopt;
             auto it = s.known.find(k);
@@ -2195,7 +2205,7 @@ struct AsyncWriter {
         // A tail job is only valid against the base it was diffed on. If
         // that moved while we built it (a save landed, or one got queued),
         // send the whole thread instead. Rare: saves are once per round.
-        const auto start = st.with([](WriterState& s, std::string k, SaveJob j,
+        const auto start = st.with(cap, [](WriterState& s, std::string k, SaveJob j,
                                       std::optional<std::vector<std::uint64_t>> b) {
             if (!j.full) {
                 auto it = s.known.find(k);
@@ -2220,7 +2230,7 @@ struct AsyncWriter {
             full.meta.compactions       = t.compactions;
             full.fps  = std::move(fps);
             full.full = t;
-            const bool s2 = st.with([](WriterState& s, std::string k, SaveJob j) {
+            const bool s2 = st.with(cap, [](WriterState& s, std::string k, SaveJob j) {
                 s.pending.insert_or_assign(k, std::move(j));
                 if (s.started) return false;
                 s.started = true;
@@ -2232,29 +2242,28 @@ struct AsyncWriter {
         if (*start) start_worker();
     }
 
-    void forget(const std::string& key) {
-        st.with([](WriterState& s, std::string k) { s.known.erase(k); }, key);
+    void forget(const maya::below<maya::leaf>& cap, const std::string& key) {
+        st.with(cap, [](WriterState& s, std::string k) { s.known.erase(k); }, key);
     }
 
     // Saved or queued by this process: a thread someone has open.
-    [[nodiscard]] bool live(const std::string& key) {
-        return st.with([](WriterState& s, std::string k) {
+    [[nodiscard]] bool live(const maya::below<maya::leaf>& cap, const std::string& key) {
+        return st.read(cap, [](const WriterState& s, std::string k) {
             return s.known.contains(k) || s.pending.contains(k);
         }, key);
     }
 
-    void flush_and_stop(bool restartable = true) {
+    void flush_and_stop(const maya::unlocked& cap, bool restartable = true) {
         // Mark stopping (which wakes run()), take the worker out of its slot,
         // and join with no lock held. run() drains every queued save before
         // it sees `stopping` and exits, so nothing enqueued before this call
         // is dropped. `started` stays true until the join is done, so a save
         // racing this queues onto the draining worker instead of starting a
         // second one; then it's cleared, and a later save starts a fresh one.
-        async_writer_state().with([](WriterState& s) { s.stopping = true; });
-        auto g = worker.with([](Worker& w) { return std::exchange(w.group, nullptr); });
-        if (g) g->stop();
+        st.with(cap, [](WriterState& s) { s.stopping = true; });
+        if (auto g = worker.take()) g->stop(cap);
         if (!restartable) return;   // process exit: nothing runs after this
-        const bool leftover = async_writer_state().with([](WriterState& s) {
+        const bool leftover = st.with(cap, [](WriterState& s) {
             s.stopping = false;
             s.started  = !s.pending.empty();
             return s.started;
@@ -2263,19 +2272,24 @@ struct AsyncWriter {
         if (leftover) start_worker();
     }
 
-    ~AsyncWriter() { flush_and_stop(/*restartable=*/false); }
+    // No flush here: a destructor can't be handed `unlocked`, and a static's
+    // destructor runs after main. main() calls flush_pending_saves(unlocked)
+    // after the loop returns; by the time this runs the worker is already
+    // taken and stopped. ~published releases nothing that joins.
+    ~AsyncWriter() = default;
 
 private:
     void start_worker() {
-        worker.with([](Worker& w) {
-            w.group = std::make_unique<util::WorkerGroup>("persistence.async_writer");
-            w.group->post([](std::stop_token) { run(); });
-        });
+        // Only the caller that flipped `started` gets here, so there is at
+        // most one worker live at a time.
+        auto g = std::make_shared<util::WorkerGroup>("persistence.async_writer");
+        g->post([](const maya::unlocked& job_cap, std::stop_token) { run(job_cap); });
+        worker.publish(std::move(g));
     }
 
     struct Next { std::string key; SaveJob job; };
 
-    static void run();
+    static void run(const maya::unlocked& cap);
 
     // Title + updated_at, the fields the picker index holds. updated_at is
     // second-resolution on disk, so compare at that grain.
@@ -2286,7 +2300,7 @@ private:
                 up.time_since_epoch()).count());
     }
 
-    static void maybe_reindex(const Thread& meta);
+    static void maybe_reindex(const maya::unlocked& cap, const Thread& meta);
 };
 
 static AsyncWriter& async_writer() {
@@ -2294,25 +2308,25 @@ static AsyncWriter& async_writer() {
     return w;
 }
 
-void AsyncWriter::maybe_reindex(const Thread& meta) {
-    const bool changed = async_writer().st.with(
+void AsyncWriter::maybe_reindex(const maya::unlocked& cap, const Thread& meta) {
+    const bool changed = async_writer().st.with(cap,
         [](WriterState& s, std::string id, std::string k) {
             auto it = s.indexed.find(id);
             if (it != s.indexed.end() && it->second == k) return false;
             s.indexed[id] = k;
             return true;
         }, meta.id.value, index_key(meta.title, meta.updated_at));
-    if (changed) reindex_thread(meta);
+    if (changed) reindex_thread(cap, meta);
 }
 
-void AsyncWriter::run() {
+void AsyncWriter::run(const maya::unlocked& cap) {
     auto& st = async_writer().st;
     for (;;) {
         // Drain-then-stop: even when `stopping` is set we keep popping until
         // `pending` is empty, so the final snapshot the Quit reducer enqueued
         // always lands. Marking the key in flight in the same step keeps
         // enqueue() from building a tail on an outcome it can't see yet.
-        auto taken = st.wait_with(
+        auto taken = st.wait_with(cap,
             [](const WriterState& s) { return !s.pending.empty() || s.stopping; },
             [](WriterState& s) -> std::optional<Next> {
                 if (s.pending.empty()) return std::nullopt;
@@ -2344,7 +2358,7 @@ void AsyncWriter::run() {
                         t.messages = log->range(0, next.from);
                         if (t.messages.size() == next.from) {
                             for (auto& m : next.tail) t.messages.push_back(std::move(m));
-                            ok = save_thread_sync(t);
+                            ok = save_thread_sync(cap, t);
                         }
                     }
                     // The head is gone too (log emptied or replaced behind
@@ -2359,13 +2373,13 @@ void AsyncWriter::run() {
                                 next.meta.id.value, next.from);
                 }
             } else {
-                ok = save_thread_sync(*next.full);
+                ok = save_thread_sync(cap, *next.full);
             }
             // The picker index only needs refreshing when what it shows
             // changes (title, timestamps) or at the first save. It is a
             // read-modify-write of one JSON file covering every thread, so
             // doing it every round was pure waste.
-            if (ok && !next.full) maybe_reindex(next.meta);
+            if (ok && !next.full) maybe_reindex(cap, next.meta);
         }
         catch (const std::exception& e) {
             // best-effort, same policy as the sync path
@@ -2375,7 +2389,7 @@ void AsyncWriter::run() {
 
         std::optional<std::string> idx;
         if (ok && next.full) idx = index_key(next.full->title, next.full->updated_at);
-        st.with([](WriterState& s, std::string k, bool good,
+        st.with(cap, [](WriterState& s, std::string k, bool good,
                    std::vector<std::uint64_t> fps, std::optional<std::string> ik) {
             s.in_flight.clear();
             if (!good) s.known.erase(k);
@@ -2385,19 +2399,21 @@ void AsyncWriter::run() {
     }
 }
 
-void save_thread(Io, const Thread& t) {
+void save_thread(Io, const maya::below<maya::leaf>& cap, const Thread& t) {
     if (t.id.empty() || t.messages.empty()) return;
-    async_writer().enqueue(t);
+    async_writer().enqueue(cap, t);
 }
 
 namespace {
 // Test/diagnostic hook, internal linkage: drop what the writer knows so
 // the next save of `id` is full. Used by delete_thread.
-void forget_log_state(const ThreadId& id) { async_writer().forget(id.value); }
+void forget_log_state(const maya::below<maya::leaf>& cap, const ThreadId& id) {
+    async_writer().forget(cap, id.value);
+}
 } // namespace
 
-void flush_pending_saves(Io) {
-    async_writer().flush_and_stop();
+void flush_pending_saves(Io, const maya::unlocked& cap) {
+    async_writer().flush_and_stop(cap);
 }
 
 namespace {
@@ -2474,8 +2490,8 @@ std::optional<Thread> load_thread_by_id(Io io, const ThreadId& id) {
     return std::move(*loaded);
 }
 
-void delete_thread(Io, const ThreadId& id) {
-    forget_log_state(id);
+void delete_thread(Io, const lock_levels::below_file_lane& cap, const ThreadId& id) {
+    forget_log_state(cap, id);
     std::error_code ec;
     fs::remove(threads_dir() / (id.value + ".json"), ec);
     fs::remove(threads_dir() / (id.value + ".transcript.md"), ec);
@@ -2484,13 +2500,15 @@ void delete_thread(Io, const ThreadId& id) {
     // Blobs are shared between threads (content-addressed), so they are
     // left for blob gc's mark-and-sweep. The index entry goes now, under
     // its lock, so the picker shows no ghost row.
-    with_thread_index([](persistence::Held, std::string key) {
+    with_thread_index(cap, [](const maya::held<lock_levels::file_lane>&, persistence::Held,
+                              std::string key) {
         auto idx = read_thread_index_locked();
         if (idx.erase(key) > 0) write_thread_index_locked(idx);
     }, id.value);
 }
 
-ExpireStats expire_threads(Io io, int keep_days, const ThreadId& keep, bool dry_run) {
+ExpireStats expire_threads(Io io, const lock_levels::below_file_lane& cap, int keep_days,
+                           const ThreadId& keep, bool dry_run) {
     ExpireStats st;
     if (keep_days <= 0) return st;
     const fs::path dir = threads_dir();
@@ -2518,10 +2536,10 @@ ExpireStats expire_threads(Io io, int keep_days, const ThreadId& keep, bool dry_
         if (!fec) s.bytes += sz;
     }
     for (const auto& [id, s] : by_id) {
-        if (id == keep.value || s.newest >= cutoff || async_writer().live(id)) continue;
+        if (id == keep.value || s.newest >= cutoff || async_writer().live(cap, id)) continue;
         ++st.threads;
         st.bytes += s.bytes;
-        if (!dry_run) delete_thread(io, ThreadId{id});
+        if (!dry_run) delete_thread(io, cap, ThreadId{id});
     }
     // Subagent runs kept for editors age out the same way.
     std::error_code sec;
@@ -2556,11 +2574,25 @@ int thread_keep_days(Io) {
 // baseline the only options are "clobber everything" (the bug) or "merge
 // nothing", and neither preserves a second instance's edits.
 //
-// A guarded value: load_settings runs on the engine thread at startup and
-// save_settings can run from a reducer, so the two can overlap.
-maya::guarded<json>& loaded_baseline() {
-    static maya::guarded<json> baseline{json::object()};
-    return baseline;
+// A snapshot: load_settings runs on the engine thread at startup and
+// save_settings can run from a worker, so the two can overlap. Every use
+// reads or replaces the WHOLE document, which is a snapshot's shape exactly
+// -- no lock, so the settings lane's body can read and replace it without
+// any rank above the lane.
+//
+// Held SERIALISED: a snapshot's value must be provably immutable (Shareable),
+// and nlohmann::json can't be proven so. A string can. The baseline is read
+// twice per settings save, so the parse is noise next to the file IO.
+struct Baseline {
+    maya::snapshot<std::string> doc{std::string{"{}"}};
+    void store(const json& j) { doc.store(j.dump()); }
+    [[nodiscard]] json load() const {
+        try { return json::parse(*doc.load()); } catch (...) { return json::object(); }
+    }
+};
+Baseline& loaded_baseline() {
+    static Baseline b;
+    return b;
 }
 
 namespace {
@@ -2584,7 +2616,7 @@ store::Settings load_settings_from_disk() {
     if (!ifs) return s;
     try {
         json j; ifs >> j;
-        loaded_baseline().with([](json& b, json v) { b = std::move(v); }, j);
+        loaded_baseline().store(j);
         s.model_id = ModelId{j.value("model_id", "")};
         s.profile = static_cast<Profile>(j.value("profile", 0));
         // Appearance. Read field by field with the struct's own defaults as
@@ -2672,6 +2704,12 @@ store::Settings load_settings_from_disk() {
             for (auto& [k, v] : j["learned_effort_sets"].items())
                 if (v.is_number_unsigned())
                     s.learned_effort_sets[k] =
+                        static_cast<std::uint8_t>(v.get<unsigned>() & 0xFFu);
+        }
+        if (j.contains("rejected_fields") && j["rejected_fields"].is_object()) {
+            for (auto& [k, v] : j["rejected_fields"].items())
+                if (v.is_number_unsigned())
+                    s.rejected_fields[k] =
                         static_cast<std::uint8_t>(v.get<unsigned>() & 0xFFu);
         }
         auto grants = j.value("always_allow_tools", std::vector<std::string>{});
@@ -2925,19 +2963,18 @@ store::Settings load_settings_from_disk() {
 }
 } // namespace
 
-// The observer registered by on_settings_written(), if any. A plain
-// function-local static: registration happens once, during startup, before
-// any reducer runs.
-std::function<void()>& settings_write_observer() {
-    static std::function<void()> obs;
-    return obs;
-}
-
 namespace {
 void save_settings_locked(persistence::Held held, const store::Settings& s);
+// The observer waits (a cache drains its queue on it), so it is handed the
+// caller's `unlocked`. Published, not locked: set once by the cache.
+maya::published<const std::function<void(const maya::unlocked&)>>& settings_observer() {
+    static maya::published<const std::function<void(const maya::unlocked&)>> o;
+    return o;
+}
+void notify_written(const maya::unlocked& cap);
 }
 
-void save_settings(Io, const store::Settings& s) {
+void save_settings(Io, const maya::unlocked& cap, const store::Settings& s) {
     // Held for the WHOLE read-modify-write, not just the write. Two instances
     // each serialise their own full in-memory record, so without this the
     // second writer silently reverts every field the first one changed --
@@ -2945,15 +2982,28 @@ void save_settings(Io, const store::Settings& s) {
     //
     // Taken BEFORE the json is built so the document we emit cannot be
     // composed from state that another process invalidates while we work.
-    persistence::with_shared_file(settings_mu(), settings_path(),
-        [](persistence::Held h, store::Settings v) { save_settings_locked(h, v); }, s);
-
-    // Tell anyone caching settings that the file moved under them, after
-    // the lock is released. See on_settings_written() in persistence.hpp for
-    // why this is here and not in each of the four callers that bypass the
-    // seam.
-    if (auto& obs = settings_write_observer(); obs) obs();
+    persistence::with_shared_file(cap, settings_mu(), settings_path(),
+        [](const maya::held<lock_levels::file_lane>&, persistence::Held h, store::Settings v) {
+            save_settings_locked(h, v);
+        }, s);
+    notify_written(cap);
 }
+
+void save_settings_quiet(Io, const lock_levels::below_file_lane& cap,
+                         const store::Settings& s) {
+    persistence::with_shared_file(cap, settings_mu(), settings_path(),
+        [](const maya::held<lock_levels::file_lane>&, persistence::Held h, store::Settings v) {
+            save_settings_locked(h, v);
+        }, s);
+}
+
+namespace {
+void notify_written(const maya::unlocked& cap) {
+    // Tell anyone caching settings that the file moved under them, after the
+    // lane is released. See on_settings_written() in persistence.hpp.
+    if (auto obs = settings_observer().current(); obs && *obs) (*obs)(cap);
+}
+}  // namespace
 
 namespace {
 void save_settings_locked(persistence::Held held, const store::Settings& s) {
@@ -3028,6 +3078,12 @@ void save_settings_locked(persistence::Held held, const store::Settings& s) {
         for (const auto& [k, v] : s.learned_effort_sets)
             le[k] = static_cast<unsigned>(v);
         j["learned_effort_sets"] = std::move(le);
+    }
+    if (!s.rejected_fields.empty()) {
+        json rf = json::object();
+        for (const auto& [k, v] : s.rejected_fields)
+            rf[k] = static_cast<unsigned>(v);
+        j["rejected_fields"] = std::move(rf);
     }
     if (!s.always_allow_tools.empty())
         j["always_allow_tools"] = s.always_allow_tools;
@@ -3220,10 +3276,10 @@ void save_settings_locked(persistence::Held held, const store::Settings& s) {
     // Such a row keeps whatever settings.json held for it (the baseline), or
     // stays absent. The pane locks these rows, so nothing else can move them.
     {
-        json base_web_search = loaded_baseline().read([](const json& b) {
+        json base_web_search = [](const json& b) {
             return b.contains("web_search") && b["web_search"].is_object()
                        ? b["web_search"] : json{};
-        });
+        }(loaded_baseline().load());
         const auto env = settings::registry::read_env(internal_io());
         nlohmann::json se = nlohmann::json::object();
         for (const auto& d : settings::registry::kSettings) {
@@ -3300,7 +3356,7 @@ void save_settings_locked(persistence::Held held, const store::Settings& s) {
             if (ifs) { try { ifs >> disk; } catch (...) { disk = json::object(); } }
         }
         if (disk.is_object()) {
-            const json base = loaded_baseline().read([](const json& b) { return b; });
+            const json base = loaded_baseline().load();
             for (auto it = disk.begin(); it != disk.end(); ++it) {
                 const auto& key = it.key();
                 // Absent from what we LOADED and from what we are WRITING:
@@ -3340,24 +3396,36 @@ void save_settings_locked(persistence::Held held, const store::Settings& s) {
         // second save in the same session would diff against the startup
         // snapshot, see its own earlier edit as "changed", and keep
         // re-asserting it over newer values from other instances.
-        loaded_baseline().with([](json& b, json v) { b = std::move(v); }, j);
+        loaded_baseline().store(j);
     }
 }
 } // namespace
 
-void on_settings_written(std::function<void()> observer) {
-    settings_write_observer() = std::move(observer);
+void on_settings_written(std::function<void(const maya::unlocked&)> observer) {
+    settings_observer().publish(
+        std::make_shared<const std::function<void(const maya::unlocked&)>>(std::move(observer)));
 }
 
 // 64 random bits as 16 hex digits. Zero-padded so every id is fixed width:
 // variable width was unambiguous given the ":" separator in cache keys but
-// brittle (a 0x1 roll produced "1", a substring of most other ids). One
-// generator, guarded, shared by thread and message ids.
+// brittle (a 0x1 roll produced "1", a substring of most other ids). Shared
+// by thread and message ids.
+//
+// Lock-free: new_id() is called from reducers, tool bodies and lock bodies
+// alike, so a lock here would put a capability on half the program. One
+// atomic counter seeded from the OS, mixed through splitmix64 (a bijection,
+// so distinct counter values give distinct ids, and the output passes
+// BigCrush). Ids need uniqueness and unpredictability across launches, not
+// cryptographic strength.
 std::string random_hex_id() {
-    static maya::guarded<std::mt19937_64> rng{std::random_device{}()};
-    const std::uint64_t v = rng.with([](std::mt19937_64& g) {
-        return std::uniform_int_distribution<std::uint64_t>{}(g);
-    });
+    static std::atomic<std::uint64_t> counter{[] {
+        std::random_device rd;
+        return (std::uint64_t{rd()} << 32) ^ rd();
+    }()};
+    std::uint64_t z = counter.fetch_add(0x9E3779B97F4A7C15ull, std::memory_order_relaxed);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    const std::uint64_t v = z ^ (z >> 31);
     std::ostringstream oss;
     oss << std::hex << std::setw(16) << std::setfill('0') << v;
     return oss.str();

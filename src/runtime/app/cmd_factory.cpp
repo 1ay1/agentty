@@ -1102,7 +1102,7 @@ Cmd launch_stream(Model& m) {
     };
 
     return cmd::io_task(
-        [](Io io, maya::Sink<Msg> out, std::stop_token, TurnInputs in) {
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token, TurnInputs in) {
         auto& thread                  = in.thread;
         const auto compacting         = in.compacting;
         const auto compaction_style   = in.compaction_style;
@@ -1461,7 +1461,7 @@ Cmd launch_stream(Model& m) {
             // wrapping it in a second lambda that just forwards to it — the
             // wrapper added one extra std::function indirection on every
             // delta (the wire's hottest path) for no behavioural gain.
-            deps(io).stream(std::move(req), guarded);
+            deps(io).stream(cap, std::move(req), guarded);
         } catch (const std::exception& e) {
             // The stream backend threw before producing a terminal event —
             // surface it as StreamError so the UI doesn't hang on the spinner.
@@ -1516,7 +1516,7 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
     // accumulated. Per-call detached thread costs ~100-300 µs of
     // construction; tools run seconds apart so it's noise.
     return Cmd::task_isolated(
-        [](maya::Sink<Msg> sink, std::stop_token stop,
+        [](const maya::unlocked& cap, maya::Sink<Msg> sink, std::stop_token stop,
            ToolCallId id, ToolName name, nlohmann::json args,
            http::CancelTokenPtr cancel, std::uint64_t exec_seq,
            std::uint64_t approved_def_hash,
@@ -1597,7 +1597,7 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 }
                 const auto t_start = std::chrono::steady_clock::now();
                 auto result = tool::DynamicDispatch::execute_approved(
-                    name.value, args, approved_def_hash, ctx);
+                    cap, name.value, args, approved_def_hash, ctx);
                 const auto t_ms = std::chrono::duration_cast<
                     std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t_start).count();
@@ -2318,7 +2318,7 @@ Cmd fetch_models(provider::Selection sel,
     // or a global it owns. A capture is a lifetime you have to reason about
     // on another thread; an argument is a copy the runtime made for you.
     return cmd::io_task(
-        [](Io io, maya::Sink<Msg> out, std::stop_token,
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token,
            provider::Selection sel, std::string for_provider) {
             const auto auth = auth_snapshot(io, sel);
             try {
@@ -2326,7 +2326,7 @@ Cmd fetch_models(provider::Selection sel,
                 // on the same axes as the stream path. No
                 // is_chatgpt/OpenAI/Anthropic ladder here — a new provider
                 // inherits its catalog from its row.
-                auto models = provider::list_models_for(io, sel, auth);
+                auto models = provider::list_models_for(io, cap, sel, auth);
             // EMPTY catalog on a LOCAL host = the server didn't answer (down,
             // wrong port, wrong path) — list_models returns {} on any HTTP
             // failure rather than throwing. Attach the reason so the reducer
@@ -2413,7 +2413,8 @@ Cmd fetch_models_for(std::string spec) {
     // against a provider signed out mid-fetch). list_models_for falls back to
     // the bundled seed on empty auth / unreachable host, so this is fast and
     // non-empty for hosted providers even before a live fetch succeeds.
-    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token, std::string spec) {
+    return cmd::io_task([](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token,
+                           std::string spec) {
         try {
             auto sel = provider::parse_selection(spec);
             // Resolve credentials for THIS spec — not auth_snapshot(), which
@@ -2424,7 +2425,7 @@ Cmd fetch_models_for(std::string spec) {
                 sel.kind == provider::Kind::OpenAI
                     ? sel.openai_endpoint.label
                     : std::string{provider::default_provider_id()};
-            auto models = provider::list_models_for(io,
+            auto models = provider::list_models_for(io, cap,
                 sel, provider::credentials::resolve(io, pid));
             out.send(Msg{FusedCatalogLoaded{spec, std::move(models), true}});
         } catch (...) {
@@ -2538,9 +2539,9 @@ Cmd load_plugins_async(bool reconnect) {
 
 Cmd settings_add(settings::Category concern, std::string line) {
     return cmd::io_task(
-        [](Io io, maya::Sink<Msg> out, std::stop_token, settings::Category c, std::string l) {
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token, settings::Category c, std::string l) {
             const settings::AddResult r = (c == settings::Category::Plugins)
-                ? settings::add_plugin_from_line(io, l)
+                ? settings::add_plugin_from_line(io, cap, l)
                 : settings::create_starter(io, c, l);
             out.send(Msg{SettingsAddDone{c, r.ok, r.message}});
         }, concern, std::move(line));
@@ -2586,8 +2587,8 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
     // std::string owns its bytes, and has no entry for filesystem::path. The
     // worker rebuilds the path, which is the same value either way.
     return cmd::io_task(
-        [](Io io, maya::Sink<Msg> out, std::stop_token, std::string path_str,
-           PluginEdited r, tools::plugin::ServerSpec spec) {
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token,
+           std::string path_str, PluginEdited r, tools::plugin::ServerSpec spec) {
             const std::filesystem::path path{path_str};
             namespace pl = tools::plugin;
             using K = PluginEdited::Kind;
@@ -2599,10 +2600,10 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
             try {
                 switch (r.kind) {
                 case K::SetServerDisabled:
-                    record(pl::set_server_disabled(io, path, r.server, r.flag));
+                    record(pl::set_server_disabled(io, cap, path, r.server, r.flag));
                     break;
                 case K::SetToolEnabled:
-                    record(pl::set_tool_enabled(io, path, r.server, r.tool, r.flag));
+                    record(pl::set_tool_enabled(io, cap, path, r.server, r.tool, r.flag));
                     // A tool's enabled state is baked into the cached MCP
                     // catalog, so the cache must drop it — here, on the
                     // worker, right after the write it depends on, rather
@@ -2613,13 +2614,13 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
                     r.ok = pl::approve_server(io, path, r.server);
                     break;
                 case K::Remove:
-                    record(pl::remove_server(io, path, r.server));
+                    record(pl::remove_server(io, cap, path, r.server));
                     break;
                 case K::Add:
-                    record(pl::add_server(io, path, spec, /*force=*/false));
+                    record(pl::add_server(io, cap, path, spec, /*force=*/false));
                     break;
                 case K::Update:
-                    record(pl::update_server(io, path, spec));
+                    record(pl::update_server(io, cap, path, spec));
                     break;
                 }
             } catch (...) {
@@ -2815,7 +2816,7 @@ Sub device_login_sub(std::string provider, std::string provider_label,
     // for as long as the user takes.
     return Sub::stream(
         "login/device/" + provider + "/" + std::to_string(attempt_id),
-        [](maya::Sink<Msg> out, std::stop_token stop, std::string provider,
+        [](const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token stop, std::string provider,
            std::string provider_label, std::uint64_t attempt_id) {
         const std::stop_token cancelled = stop;
         auto emit_code = [&](std::string bare_url, std::string browser_url,
@@ -2853,7 +2854,7 @@ Sub device_login_sub(std::string provider, std::string provider_label,
             // providers, not two.
             std::optional<std::string> err;
             if (provider == "copilot") {
-                auto r = provider::copilot::login(900,
+                auto r = provider::copilot::login(cap, 900,
                     [&](const provider::copilot::DeviceCode& c) {
                         // GitHub returns one URL (github.com/login/device); the
                         // user types the code there.
@@ -2861,7 +2862,7 @@ Sub device_login_sub(std::string provider, std::string provider_label,
                     }, cancelled);
                 if (!r) err = r.error().render();
             } else if (provider == "kimi") {
-                auto r = provider::kimi::login(900,
+                auto r = provider::kimi::login(cap, 900,
                     [&](const provider::kimi::DeviceCode& c) {
                         // Show + open the PRE-FILLED url (…?user_code=XXXX) so
                         // that on SSH/headless, the url the user manually opens

@@ -35,7 +35,7 @@ struct CatalogModel {
 // account's live catalog, or an empty vector on any failure (offline, 401,
 // parse error) so the caller can fall back to a bundled list. Blocking; short
 // timeout — safe to call from the model-picker refresh path.
-[[nodiscard]] std::vector<CatalogModel> fetch_models(Io);
+[[nodiscard]] std::vector<CatalogModel> fetch_models(Io, const maya::unlocked& cap);
 
 // True iff a saved ChatGPT credential exists (so the provider can pick the
 // direct transport over the app-server subprocess fallback).
@@ -45,7 +45,8 @@ struct CatalogModel {
 // text/thinking/tool deltas → StreamFinished (or StreamError). Blocking; runs
 // on the turn's worker thread and honours req.cancel. Returns a StreamResult
 // naming how the turn ended.
-provider::StreamResult stream_responses(provider::Request req, provider::EventSink sink);
+provider::StreamResult stream_responses(const maya::unlocked& cap, provider::Request req,
+                                        provider::EventSink sink);
 
 // ── Test seams (pure, no network) ──────────────────────────────────────────
 // The Request → Responses-API JSON body the transport would POST.
