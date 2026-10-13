@@ -87,8 +87,10 @@ struct Target {
 struct Site {
     std::string_view id;              // "chatgpt" | "copilot" — routing key.
 
-    // Resolve credentials + destination. Error string on failure.
-    std::expected<Target, std::string> (*authorize)(provider::Request& req);
+    // Resolve credentials + destination. Error string on failure. Runs on
+    // the turn worker holding no lock (it may block on a token refresh).
+    std::expected<Target, std::string> (*authorize)(const maya::unlocked& cap,
+                                                     provider::Request& req);
 
     // Host-specific request-body fields, applied after the shared builder.
     // ChatGPT adds include[]/store; Copilot adds reasoning.summary. Both
@@ -103,23 +105,45 @@ struct Site {
 // Stream one turn against `site`. Owns the whole lifecycle: authorise, build
 // the body, POST, translate SSE → Msgs, and finish through the SHARED
 // stream epilogue so this path terminates identically to Anthropic/OpenAI.
+[[nodiscard]] provider::StreamResult stream(const maya::unlocked& cap,
+                                            const Site& site,
+                                            provider::Request req,
+                                            provider::EventSink sink);
+
+// Same, for a host that already resolved its Target for this turn: the codec
+// skips site.authorize and uses `target` as given. This is how a host passes
+// per-turn context in without a side channel.
 [[nodiscard]] provider::StreamResult stream(const Site& site,
+                                            std::expected<Target, std::string> target,
                                             provider::Request req,
                                             provider::EventSink sink);
 
 // ── Codec pieces (exposed for tests and for hosts that need them) ────────
 
 // Conversation → Responses `input[]`.
-[[nodiscard]] nlohmann::json build_input(const provider::Request& req);
+//
+// `site` is the id of the host this body is being built FOR
+// (`Site::id` — "chatgpt", "copilot"). It gates encrypted-reasoning
+// replay: a blob is account-scoped ciphertext, so it may only be sent
+// back to the site that minted it. Empty means "no site context" and
+// replays nothing, which is the safe default for tests and for any
+// caller that has not threaded it through.
+[[nodiscard]] nlohmann::json build_input(const provider::Request& req,
+                                         std::string_view site = {});
 // agentty ToolSpecs → Responses `tools[]`.
 [[nodiscard]] nlohmann::json build_tools(const provider::Request& req);
 // The neutral request body (model/input/tools/stream + reasoning ladder).
 // Hosts layer their extras on top via Site::decorate_body.
-[[nodiscard]] nlohmann::json build_body(const provider::Request& req);
+[[nodiscard]] nlohmann::json build_body(const provider::Request& req,
+                                        std::string_view site = {});
 
 // Scripted SSE `data:` payloads → the Msg sequence a reducer would see.
 // The single entry point every Responses-dialect test drives.
+// `show_reasoning` mirrors Request::show_reasoning so a test can pin the
+// hidden-reasoning path; defaults true, which is the capture semantics every
+// existing test expects.
 [[nodiscard]] std::vector<Msg> parse_sse_for_test(
-    const std::vector<std::string>& sse_data_lines);
+    const std::vector<std::string>& sse_data_lines,
+    bool show_reasoning = true);
 
 } // namespace agentty::provider::responses

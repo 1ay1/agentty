@@ -67,8 +67,47 @@ namespace agentty::util {
 
 // Subdirectory accessors — each creates its dir on first use. Use these
 // instead of joining literals so the layout stays enforced in one place.
+//
+// ─────────────────────────────────────────────────────────────────────
+// Moving the BULK off the config disk
+// ─────────────────────────────────────────────────────────────────────
+// $AGENTTY_HOME moves the whole root, which is the right answer when you
+// want one agentty install somewhere else. It is the wrong answer to a
+// different question users actually ask (issue #58): "keep my config on
+// the system disk, put the data on a second drive."
+//
+// The numbers are why that question is reasonable. On a working install
+// the split is roughly settings 4 KB, credentials 8 KB — against threads
+// 4 MB, cache 5 MB and logs 38 MB. ~99% of the bytes are the three
+// categories below, and they are exactly the ones that grow without
+// bound.
+//
+// So every directory takes its own environment variable. Storage is set
+// only through the environment; nothing in agentty writes it.
+//
+//   $AGENTTY_THREADS_DIR       conversation history
+//   $AGENTTY_CACHE_DIR         refetchable downloads
+//   $AGENTTY_LOGS_DIR          diagnostics
+//   $AGENTTY_CREDENTIALS_DIR   secrets, forced 0700
+//   $AGENTTY_STATE_DIR         approval hashes
+//
+// This is NOT a retreat to the XDG four-root layout the rationale above
+// rejects, and the difference is the default. XDG scatters by default,
+// so "where does a new file go" has four answers and files land by
+// coin-flip. Here the default is still ONE root, every accessor still
+// goes through this header, and an override is a deliberate per-install
+// choice that changes nothing for anyone who does not set it.
+//
+// Relative paths are resolved against the user root rather than the
+// process CWD — `AGENTTY_LOGS_DIR=logs2` means ~/.agentty/logs2, not
+// "wherever agentty happened to be launched from", which would scatter
+// logs across every directory you ever started it in.
+//
+// docs/website/storage.md is the user-facing map of all of this.
 [[nodiscard]] std::filesystem::path user_credentials_dir();  // secrets, 0700
+[[nodiscard]] std::filesystem::path user_state_dir();        // approvals
 [[nodiscard]] std::filesystem::path user_cache_dir();        // refetchable
 [[nodiscard]] std::filesystem::path user_logs_dir();         // diagnostics
+[[nodiscard]] std::filesystem::path user_threads_dir();      // conversation history
 
 }  // namespace agentty::util

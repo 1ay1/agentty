@@ -172,9 +172,13 @@ struct StreamResult;
 // `stream` drives one turn: it pushes streamed Msgs through `sink` AND returns
 // a StreamResult naming how the turn ended. The two never disagree — the
 // terminal Msg is derived from the same classification as the return value.
+//
+// A turn runs on a worker that holds no lock, and it blocks (network,
+// subprocess, token refresh), so it is handed that worker's `unlocked`. The
+// type is what proves no caller streams from inside a lock body.
 template <class P>
-concept Provider = requires(P& p, Request req, EventSink sink) {
-    { p.stream(std::move(req), std::move(sink)) } -> std::same_as<StreamResult>;
+concept Provider = requires(P& p, const maya::unlocked& cap, Request req, EventSink sink) {
+    { p.stream(cap, std::move(req), std::move(sink)) } -> std::same_as<StreamResult>;
 };
 
 } // namespace agentty::provider

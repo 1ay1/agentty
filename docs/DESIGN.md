@@ -96,12 +96,20 @@ permission` (one permission decider), `update` (one reducer with one
 include/agentty/domain/      ← pure value types only. No I/O. No UI. No threads.
 include/agentty/{io,provider,tool}/ ← satisfies a concept; injected via deps.
 src/runtime/              ← Elm loop. update is pure. Cmd carries the IO.
-maya/                     ← presentation. Consumes a Model, emits Msg.
+third_party/maya/         ← presentation. Consumes a Model, emits Msg.
 ```
 
 A function in `domain/` that opens a file is a violation. A reducer that
-calls `http::send` directly is a violation (use `Cmd::task` + `deps()`).
+calls `http::send` directly is a violation (return a `cmd::io_task`).
 A view function that mutates the model is a violation.
+
+A reducer or view calling one of agentty's IO functions doesn't compile:
+every function that does IO or changes process-wide state takes an
+`agentty::Io` (`util/io.hpp`), and reducers and views never have one. Effect
+bodies get it from `cmd::io_task` / `io_task_isolated` / `io_stream`; the
+host holds its own. Only the files in `tests/lint/io_roots.txt` may mint
+one (the `io_roots` lint). Raw std/OS calls (clocks, getenv, fstream) can't
+carry a token, so `elm_purity` still bans those by name.
 
 The dynamism boundary — JSON parsing, raw HTTP, terminal escape sequences —
 is **one layer**. Past it, code speaks in typed values.

@@ -20,10 +20,12 @@
 
 #include "agtest.hpp"
 
+#include "agtest_fx.hpp"
 #include "agentty/domain/smart_mode.hpp"
 #include "agentty/domain/smart_tuning.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/app/update.hpp"            // publish_derived
 #include "agentty/runtime/app/update/internal.hpp"   // apply_smart
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/panel/rag.hpp"
@@ -136,9 +138,14 @@ TEST_CASE("smart tuning: rows bind to the config struct that owns them") {
     REQUIRE(rag_row != nullptr);
     CHECK(rag_row->owner() == reg::Owner::Rag);
 
-    int settings_rows = 0, rag_rows = 0;
-    for (const auto& d : reg::kSettings)
-        (d.owner() == reg::Owner::Smart ? settings_rows : rag_rows)++;
+    int settings_rows = 0, rag_rows = 0, web_search_rows = 0;
+    for (const auto& d : reg::kSettings) {
+        switch (d.owner()) {
+            case reg::Owner::Smart:  ++settings_rows; break;
+            case reg::Owner::Rag:    ++rag_rows;      break;
+            case reg::Owner::WebSearch: ++web_search_rows;   break;
+        }
+    }
     // Both halves non-empty is the actual invariant — an owner() that
     // answered `Rag` for everything would still compile and would silently
     // drop every routing row from save, load and apply_env. The exact count
@@ -147,6 +154,7 @@ TEST_CASE("smart tuning: rows bind to the config struct that owns them") {
     // being right. Name the rows that must exist instead.
     CHECK(settings_rows > 0);
     CHECK(rag_rows > 0);
+    CHECK(web_search_rows > 0);
     for (auto id : {"smart.complex_threshold", "smart.deep_margin",
                     "smart.bias_clamp", "smart.route_main_turn",
                     "smart.main_turn_floor"}) {
@@ -182,9 +190,9 @@ TEST_CASE("smart tuning: a configured value survives save and load") {
     Settings s;
     s.smart.complex_threshold = 6;
     s.smart.deep_margin       = 7;
-    agentty::persistence::save_settings(s);
+    agentty::persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 
-    const Settings back = agentty::persistence::load_settings();
+    const Settings back = agentty::persistence::load_settings(::agentty::IoAccess::grant());
     CHECK(back.smart.complex_threshold == 6);
     CHECK(back.smart.deep_margin == 7);
     // A row left alone is not written, and comes back as the shipped default.
@@ -200,7 +208,7 @@ TEST_CASE("smart tuning: the Retrieval pane does not carry the routing rows") {
     const Settings s;
 
     for (bool advanced : {false, true}) {
-        const auto f = rs::build_form(cfg, agentty::store::RagMode::On, s,
+        const auto f = rs::build_form(cfg, agentty::store::RagMode::On, s, {},
                                       advanced);
         for (const char* id : {kCut, kDeep, kBias})
             CHECK(f.find(id) == nullptr);
@@ -265,6 +273,7 @@ TEST_CASE("smart tuning: an env override locks the row in the pane") {
     sf::Inputs in;
     in.enabled  = true;
     in.advanced = true;
+    in.env      = agentty::settings::registry::read_env(::agentty::IoAccess::grant());
     const auto f = sf::build_form(in);
 
     const auto* row = f.find(kCut);
@@ -333,7 +342,7 @@ TEST_CASE("smart tuning: an existing settings.json still loads its pins") {
         })";
     }
 
-    const Settings s = agentty::persistence::load_settings();
+    const Settings s = agentty::persistence::load_settings(::agentty::IoAccess::grant());
 
     CHECK(s.smart.enabled);
     // A pin is model + effort + provider, and `set` is what makes resolve_role
@@ -362,9 +371,9 @@ TEST_CASE("smart tuning: a pinned slot survives a save/load round trip") {
         .model = "gpt-5", .effort = agentty::Effort::High,
         .set = true, .provider = "openai"};
     s.smart.deep_margin = 7;
-    agentty::persistence::save_settings(s);
+    agentty::persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 
-    const Settings back = agentty::persistence::load_settings();
+    const Settings back = agentty::persistence::load_settings(::agentty::IoAccess::grant());
     CHECK(back.smart.enabled);
     CHECK(back.smart.strategic.set);
     CHECK(back.smart.strategic.model == "gpt-5");
@@ -388,13 +397,13 @@ TEST_CASE("smart tuning: a config change reaches all three holders") {
     isolate_config_dir();
     clear_env();
 
-    // apply_smart persists through deps(); a test binary has none installed.
-    // An in-memory pair is enough and keeps the assertion honest — what comes
-    // back out is what apply_smart put in, with no disk in the way.
+    // apply_smart RETURNS the save as an effect; a test binary has no host to
+    // run it, so run it here. That is the assertion working as intended — the
+    // record only reaches the store if the call actually returned the save.
     static agentty::store::Settings persisted;
     persisted = agentty::store::Settings{};
     agentty::app::install_deps(agentty::app::Deps{
-        .stream        = [](auto, auto) {},
+        .stream        = [](const maya::unlocked&, auto, auto) {},
         .save_thread   = [](const agentty::Thread&) {},
         .delete_thread = [](const auto&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },
@@ -413,7 +422,7 @@ TEST_CASE("smart tuning: a config change reaches all three holders") {
     // assertion would pass vacuously against a config nobody kept.
     agentty::tools::subagent::install(agentty::tools::subagent::Config{
         .model = "stub", .installed = true});
-    agentty::tools::subagent::set_smart(agentty::smart::RoleConfig{});
+    agentty::tools::subagent::set_smart(::agentty::IoAccess::grant(), agentty::smart::RoleConfig{});
     REQUIRE_FALSE(agentty::tools::subagent::current().smart.enabled);
 
     agentty::Model m;
@@ -424,7 +433,16 @@ TEST_CASE("smart tuning: a config change reaches all three holders") {
         .model = "gpt-5", .effort = agentty::Effort::High,
         .set = true, .provider = "openai"};
 
-    agentty::app::detail::apply_smart(m, cfg);
+    {
+        // Through the seam, like a real fold: apply_smart only changes the
+        // Model, publish_derived is what tells the router.
+        auto save = agentty::app::publish_derived(
+            m, agentty::app::detail::apply_smart(m, cfg));
+        agtest::fx::Store store;
+        store.settings = persisted;
+        agtest::fx::run(save, store);
+        persisted = store.settings;
+    }
 
     // 1. Persisted — survives a restart.
     CHECK(persisted.smart.enabled);
@@ -443,7 +461,7 @@ TEST_CASE("smart tuning: a config change reaches all three holders") {
     CHECK(router.strategic.model == "gpt-5");
 }
 
-TEST_CASE("smart tuning: apply_tuning is the one resolution rule") {
+TEST_CASE("smart tuning: registry::apply_env is the one resolution rule") {
     // Startup and the settings-pane save both resolve env-over-stored into
     // RoleConfig. They call the SAME function, because a rule written out at
     // both is how a pane ends up applying something different from what a
@@ -459,7 +477,7 @@ TEST_CASE("smart tuning: apply_tuning is the one resolution rule") {
     {
         sm::RoleConfig c;
         c.deep_margin = 6; c.bias_clamp = 3; c.complex_threshold = 7;
-        sm::apply_tuning(c);
+        agentty::settings::registry::apply_env(::agentty::IoAccess::grant(), c);
         CHECK(c.deep_margin == 6);
         CHECK(c.bias_clamp == 3);
         CHECK(c.complex_threshold == 7);
@@ -471,7 +489,7 @@ TEST_CASE("smart tuning: apply_tuning is the one resolution rule") {
         setenv("AGENTTY_SMART_COMPLEX_THRESHOLD", "2", 1);
         sm::RoleConfig c;
         c.deep_margin = 6; c.bias_clamp = 3; c.complex_threshold = 7;
-        sm::apply_tuning(c);
+        agentty::settings::registry::apply_env(::agentty::IoAccess::grant(), c);
         CHECK(c.complex_threshold == 2);   // env wins
         CHECK(c.deep_margin == 6);         // others untouched
         clear_env();
@@ -487,27 +505,27 @@ TEST_CASE("smart tuning: an env var overrides the stored value") {
     Settings s;
     s.smart.complex_threshold = 6;
     s.smart.deep_margin       = 7;
-    agentty::persistence::save_settings(s);
+    agentty::persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 
     // The override the locked settings row advertises.
     setenv("AGENTTY_SMART_COMPLEX_THRESHOLD", "2", 1);
-    const Settings with_env = agentty::persistence::load_settings();
+    const Settings with_env = agentty::persistence::load_settings(::agentty::IoAccess::grant());
     CHECK(with_env.smart.complex_threshold == 2);
     CHECK(with_env.smart.deep_margin == 7);      // untouched rows unaffected
 
     // Clamped on the way in, exactly like a UI edit.
     setenv("AGENTTY_SMART_COMPLEX_THRESHOLD", "999", 1);
-    CHECK(agentty::persistence::load_settings().smart.complex_threshold
+    CHECK(agentty::persistence::load_settings(::agentty::IoAccess::grant()).smart.complex_threshold
           == tun::kComplexMax);
 
     // A typo in a shell profile must not silently reset a configured value to
     // the shipped default — the least surprising response is that what the
     // user configured stands.
     setenv("AGENTTY_SMART_COMPLEX_THRESHOLD", "garbage", 1);
-    CHECK(agentty::persistence::load_settings().smart.complex_threshold == 6);
+    CHECK(agentty::persistence::load_settings(::agentty::IoAccess::grant()).smart.complex_threshold == 6);
 
     clear_env();
-    CHECK(agentty::persistence::load_settings().smart.complex_threshold == 6);
+    CHECK(agentty::persistence::load_settings(::agentty::IoAccess::grant()).smart.complex_threshold == 6);
 }
 
 TEST_CASE("smart tuning: an env var applies to a config with no smart block") {
@@ -517,10 +535,10 @@ TEST_CASE("smart tuning: an env var applies to a config with no smart block") {
     isolate_config_dir();
     clear_env();
 
-    agentty::persistence::save_settings(Settings{});   // nothing to persist
+    agentty::persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), Settings{});   // nothing to persist
 
     setenv("AGENTTY_SMART_DEEP_MARGIN", "6", 1);
-    CHECK(agentty::persistence::load_settings().smart.deep_margin == 6);
+    CHECK(agentty::persistence::load_settings(::agentty::IoAccess::grant()).smart.deep_margin == 6);
     clear_env();
 }
 #endif

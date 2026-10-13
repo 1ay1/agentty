@@ -52,6 +52,10 @@ std::optional<Action> translate(bool editing, bool choosing, const KeyEvent& ev)
         if (sk) switch (*sk) {
             case SpecialKey::Escape:
             case SpecialKey::Enter:     return Action{Intent::LeaveField};
+            // Tab asks the PANE to complete. Forms without a completer ignore
+            // it (apply() has no arm), so this is inert everywhere it is not
+            // wanted and costs nothing to translate unconditionally.
+            case SpecialKey::Tab:       return Action{Intent::Complete};
             // ↑/↓ leave the field AND move (apply() ends the edit first).
             // Without this the editing table swallowed them — Enter on a
             // text row then any arrow read as "the panel froze", because
@@ -88,6 +92,26 @@ std::optional<Action> translate(bool editing, bool choosing, const KeyEvent& ev)
         case SpecialKey::End:      return Action{Intent::MoveLast};
         case SpecialKey::PageUp:   return Action{Intent::MovePageUp};
         case SpecialKey::PageDown: return Action{Intent::MovePageDown};
+        // Backspace while BROWSING is still a Backspace.
+        //
+        // It used to fall through to None and be silently lost, which is why
+        // the first press after opening a list did nothing: the pane opens in
+        // Browsing, so the key never reached apply() at all and the user had
+        // to press it twice without ever learning why.
+        //
+        // Translating it does NOT make it destructive -- apply() still
+        // requires an edit session before touching bytes (see its Backspace
+        // arm, and the note there about never destroying value the user
+        // cannot see a caret in). What this buys is that the keystroke
+        // ARRIVES, so a pane can give it a meaning and the default stays a
+        // no-op rather than a hole in the router.
+        case SpecialKey::Backspace: return Action{Intent::Backspace};
+        // Delete has the same hole Backspace did, for the same reason, and is
+        // closed the same way: translate it so apply() (or the pane) can give
+        // it a meaning, rather than losing it in the router and leaving the
+        // user to wonder why one delete key reaches the field and the other
+        // does not.
+        case SpecialKey::Delete:    return Action{Intent::DeleteForward};
         default: break;
     }
     if (ch && ch->ctrl) {
@@ -170,6 +194,14 @@ Applied apply(Form& f, Action a) {
             }
             break;
 
+        case Intent::Complete:
+            // Deliberately nothing. Completion is a PANE concern -- it needs the
+            // candidate set, which the form layer has no business knowing
+            // about. The pane checks for this intent before calling apply()
+            // (see update/sandbox.cpp's list editor); reaching here means no
+            // completer was offered, and the keystroke is inert.
+            break;
+
         case Intent::Activate: {
             const auto r = activate(f);
             out.fired    = (r == Activated::FiredAction);
@@ -210,16 +242,52 @@ Applied apply(Form& f, Action a) {
             // destroy value bytes the user couldn't see a caret in.
             if (!f.editing() && row && row->is_text_like()
                 && row->editable() && !row->locked) {
+                // Does the row ACCEPT this character?
+                //
+                // A Number row takes digits only, and typing a letter used to
+                // enter the edit session anyway: focus flipped to Editing,
+                // edit_dirty went true, and number_insert silently dropped the
+                // character. The row was then live and "changed" with nothing
+                // on screen to show it -- so the next Esc committed a no-op
+                // edit, arrows behaved like caret moves instead of row moves,
+                // and the pane read as having swallowed the keystroke. That is
+                // the "alpha char misbehaves everywhere".
+                //
+                // Checked BEFORE any state moves, so a rejected character is
+                // exactly a no-op rather than a half-entered session.
+                const bool numeric_row =
+                    std::holds_alternative<field::Number>(row->value);
+                if (numeric_row && (a.ch < U'0' || a.ch > U'9')) break;
+
                 f.focus = focus::Editing{};
                 f.edit_dirty = false;
-                insert(row->value, a.ch);
+                // Unambiguously the first keystroke of the session, so a
+                // Number row takes this digit as the whole value rather than
+                // appending it to the saved one.
+                insert(row->value, a.ch, /*fresh=*/true);
                 out.changed = true;
                 f.edit_dirty = true;
             }
             break;
         case Intent::Insert:
             if (f.editing() && row && row->editable()) {
-                insert(row->value, a.ch);
+                // A Number row takes digits only. Inserting a letter is a
+                // no-op there, and reporting `changed` for it armed
+                // commit-on-exit for an edit that never happened -- the same
+                // half-state that made a letter on a numeric row read as the
+                // pane swallowing the key.
+                //
+                // Checked by KIND rather than by comparing values: FieldValue
+                // is a variant of types that are not equality-comparable, and
+                // Number is the only kind that can refuse a character.
+                if (std::holds_alternative<field::Number>(row->value)
+                    && (a.ch < U'0' || a.ch > U'9'))
+                    break;
+
+                // Fresh until something in THIS session has changed the value.
+                // That makes Enter-then-type behave like type-to-edit above:
+                // the first digit replaces, the rest append.
+                insert(row->value, a.ch, /*fresh=*/!f.edit_dirty);
                 out.changed = true;
                 f.edit_dirty = true;
             }

@@ -10,9 +10,23 @@
 #include <maya/dsl.hpp>
 #include <maya/terminal/ansi.hpp>
 
+#include "agentty/domain/ui_live.hpp"   // thinking pref
 #include "agentty/runtime/model.hpp"
 
 namespace agentty::ui {
+
+// Does the thread SHOW a reasoning block for this message?
+//
+// Three consumers have to agree on this and they are in three different
+// layers: the view that renders the block, the subscription that asks for
+// animation frames, and the activity indicator that must not duplicate it.
+// When they disagreed we got a block that painted and never animated, and
+// a hex-tape "still working" row stacked under a reasoning block that was
+// already saying the same thing.
+[[nodiscard]] inline bool reasoning_shown(const Message& msg) noexcept {
+    return ui_prefs::current().thinking != ui_prefs::Thinking::Hidden
+        && !msg.reasoning_display_text().empty();
+}
 
 // Enum reflection — delegates to agentty::to_string().
 [[nodiscard]] inline std::string_view profile_label(Profile p) noexcept { return to_string(p); }
@@ -106,6 +120,12 @@ namespace agentty::ui {
 [[nodiscard]] std::string model_display_label(std::string_view id,
                                               std::string_view display_name);
 
+// As above, but prefixed with the routing namespace when the id has one
+// ("igpu/Laguna Xs 2.1"). For the picker's disambiguation path only — see
+// the collision note in update/models.cpp.
+[[nodiscard]] std::string model_display_label_qualified(
+    std::string_view id, std::string_view display_name);
+
 // Context window size for a given model id. Defaults to 200 K but bumps
 // to 1 M when the model id carries the agentty-internal `[1m]` tag (which
 // triggers the `context-1m-2025-08-07` beta on the wire). Used by the
@@ -168,10 +188,19 @@ inline constexpr int kDefaultContextWindow = 200'000;
 // context_window defaults to 0 rather than a number: "unknown" and "200k"
 // must not be the same value, or a real 1M model gets clamped by a default
 // nobody chose.
+//
+// `env_max` is AGENTTY_MAX_CONTEXT_TOKENS as parsed at launch (Model::Env::
+// max_context_tokens, 0 = unset): the last rung before the default. Passed
+// in so the ladder reads no environment.
 [[nodiscard]] int resolve_context_window(std::string_view provider_id,
                                         std::string_view model_id,
                                         int advertised,
-                                        const store::Settings& settings) noexcept;
+                                        const store::Settings& settings,
+                                        int env_max = 0) noexcept;
+
+// Parse AGENTTY_MAX_CONTEXT_TOKENS. 0 when unset or not a positive integer
+// ("1M", "abc", "-5" are rejected rather than read as a tiny window).
+[[nodiscard]] int max_context_tokens_from_env() noexcept;
 
 // The composite key an override is stored under. Exposed so the settings
 // writer and the resolver cannot disagree about the spelling.
@@ -197,7 +226,8 @@ inline constexpr int kDefaultContextWindow = 200'000;
 // said nothing), which is exactly what the ladder's rung 2 wants.
 void bake_context_window(ModelInfo& row,
                          std::string_view provider_id,
-                         const store::Settings& settings) noexcept;
+                         const store::Settings& settings,
+                         int env_max = 0) noexcept;
 
 [[nodiscard]] int context_max_for_model(std::string_view model_id) noexcept;
 

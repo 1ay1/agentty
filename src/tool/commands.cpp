@@ -8,12 +8,14 @@
 #include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kCommandsLayout — the one declaration
+#include "agentty/util/capped_read.hpp"   // the one capped-read primitive
 
+#include <maya/runtime.hpp>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
-#include <mutex>
 #include <ranges>
 #include <sstream>
 #include <string>
@@ -41,18 +43,8 @@ constexpr int         kMaxDepth     = 3;   // namespace nesting (a:b:c)
     return std::string{v.substr(b, e - b)};
 }
 
-[[nodiscard]] std::string read_capped(const fs::path& p, std::size_t cap) {
-    std::error_code ec;
-    if (!fs::is_regular_file(p, ec) || ec) return {};
-    auto sz = fs::file_size(p, ec);
-    if (ec || sz == 0 || sz > cap) return {};
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return {};
-    std::string out(static_cast<std::size_t>(sz), '\0');
-    f.read(out.data(), static_cast<std::streamsize>(sz));
-    out.resize(static_cast<std::size_t>(f.gcount()));
-    return out;
-}
+// NOTE: the local read_capped() is gone — see util/capped_read.hpp for why
+// three copies of it all shipped the same bug.
 
 [[nodiscard]] bool parse_kv(const std::string& line,
                             std::string& key, std::string& val) {
@@ -148,7 +140,13 @@ void scan_dir(const fs::path& dir, const std::string& prefix,
         if (!sec)
             sig += std::to_string(static_cast<long long>(
                        fmt.time_since_epoch().count())) + ";";
-        std::string raw = read_capped(p, kMaxBodyBytes);
+        // Commands have no `agentty commands` CLI to report into, so an
+        // oversized file is skipped -- but the TooBig case is now named
+        // rather than hidden inside an empty string, so if that CLI ever
+        // ships the branch to fill in is already here.
+        const auto got = ::agentty::util::capped_read(p, kMaxBodyBytes);
+        if (!::agentty::util::has_content(got)) continue;
+        const std::string& raw = ::agentty::util::bytes_or_empty(got);
         if (raw.empty()) continue;
 
         std::string name = prefix.empty() ? stem : prefix + ":" + stem;
@@ -160,7 +158,7 @@ void scan_dir(const fs::path& dir, const std::string& prefix,
         if (c.body.empty()) continue;
         std::error_code cec;
         auto abs = fs::weakly_canonical(p, cec);
-        c.file = cec ? fs::absolute(p, cec) : abs;
+        c.file = (cec ? fs::absolute(p, cec) : abs).string();
         out.push_back(std::move(c));
     }
 }
@@ -177,26 +175,23 @@ void scan_root(const fs::path& root, const std::string& source,
     scan_dir(root, /*prefix=*/{}, source, /*depth=*/0, out, sig);
 }
 
-std::vector<Command>& cache() {
-    static std::vector<Command> c;
+// The scanned commands and the mtime signature they were scanned at.
+struct Cache {
+    std::vector<Command> commands;
+    std::string          sig = "\x01uninit";
+};
+// Replaced wholesale by a rescan, read by every lookup: a snapshot, so no
+// lock, rank or capability on the read path.
+maya::snapshot<Cache>& cache() {
+    static maya::snapshot<Cache> c;
     return c;
-}
-
-std::string& cached_sig() {
-    static std::string s = "\x01uninit";
-    return s;
-}
-
-std::mutex& cache_mu() {
-    static std::mutex mu;
-    return mu;
 }
 
 } // namespace
 
-const std::vector<Command>& all() {
-    std::lock_guard lk(cache_mu());
-
+std::vector<Command> all(Io) {
+    // Scan outside the lock (directory walk + file reads), then keep the
+    // fresh list only if the signature moved.
     std::string sig;
     std::vector<Command> fresh;
     // Root ladder from scope::plan (Locus-major, Dialect-minor): project
@@ -209,28 +204,35 @@ const std::vector<Command>& all() {
     env.user_native_base = ::agentty::util::user_root();
     env.project_root     = fs::path{"."};
     env.project_writable = true;
-    const scope::Layout layout{.leaf = "commands"};
+    const scope::Layout& layout = ::agentty::config::kCommandsLayout;
     for (const scope::Source& src : scope::plan(layout, env)) {
         scan_root(src.base / layout.leaf,
                   std::string{scope::to_string(src.locus)}, fresh, sig);
     }
-
-    if (sig != cached_sig()) {
-        cache() = std::move(fresh);
-        cached_sig() = sig;
-    }
-    return cache();
+    auto now = cache().update(
+        [](const Cache& c, const std::string& s, const std::vector<Command>& f) {
+            if (s == c.sig) return c;
+            Cache next;
+            next.commands = f;
+            next.sig      = s;
+            return next;
+        },
+        std::move(sig), std::move(fresh));
+    return now->commands;
 }
 
-const Command* find(std::string_view name) {
-    for (const auto& c : all())
-        if (c.name == name) return &c;
-    return nullptr;
+std::optional<Command> find(Io io, std::string_view name) {
+    for (auto& c : all(io))
+        if (c.name == name) return std::move(c);
+    return std::nullopt;
 }
 
 void invalidate_cache() {
-    std::lock_guard lk(cache_mu());
-    cached_sig() = "\x01invalidated";
+    cache().update([](const Cache& c) {
+        Cache next = c;
+        next.sig   = "\x01invalidated";
+        return next;
+    });
 }
 
 std::string expand(std::string_view body, std::string_view args) {
@@ -274,7 +276,12 @@ std::string expand(std::string_view body, std::string_view args) {
     return out;
 }
 
-std::optional<std::string> try_expand(std::string_view text) {
+std::optional<std::string> try_expand(Io io, std::string_view text) {
+    if (text.empty() || text[0] != '/') return std::nullopt;
+    return try_expand(text, all(io));
+}
+
+std::optional<std::string> try_expand(std::string_view text, const std::vector<Command>& known) {
     // Shape: starts with '/', then a command name (no whitespace), then
     // optional whitespace + arguments. Leading whitespace before '/'
     // means it's prose, not a command.
@@ -286,8 +293,8 @@ std::optional<std::string> try_expand(std::string_view text) {
     if (name_end == 1) return std::nullopt;   // bare "/"
     const std::string_view name = text.substr(1, name_end - 1);
 
-    const Command* cmd = find(name);
-    if (!cmd) return std::nullopt;   // /etc/hosts, /unknown → plain text
+    const auto cmd = std::ranges::find(known, name, &Command::name);
+    if (cmd == known.end()) return std::nullopt;   // /etc/hosts, /unknown → plain text
 
     std::string_view args =
         name_end < text.size() ? text.substr(name_end + 1) : std::string_view{};

@@ -129,6 +129,11 @@ struct Text {
 struct Secret {
     std::string value;
     std::size_t cursor = 0;
+    // What the EMPTY field says when it is not being edited ("not set" when
+    // blank). Not secret, so it may be shown: a pane uses it to report that a
+    // key is already held elsewhere ("\xe2\x9c\x93 key saved") without the
+    // value ever being in the form.
+    std::string placeholder;
 };
 
 // A filesystem path. Text plus an existence probe, so "model file not found"
@@ -259,6 +264,10 @@ using FormFocus = std::variant<focus::Browsing, focus::Editing, focus::Choosing>
 struct Form {
     std::string        title;
     std::string        subtitle;      // e.g. the effective config summary
+    // A failure the whole pane is in. Projected onto Panel::Config::error,
+    // which wraps it — unlike the subtitle, which truncates. A pane that
+    // put its error in `subtitle` lost the tail that said what to fix.
+    std::string        error;
     std::vector<Field> fields;
     int                cursor = 0;
     FormFocus          focus{focus::Browsing{}};
@@ -333,6 +342,9 @@ public:
     explicit Builder(std::string title) { form_.title = std::move(title); }
 
     Builder& subtitle(std::string s) { form_.subtitle = std::move(s); return *this; }
+    // A pane-wide failure. Wraps when rendered, so the part of the message
+    // that says what to do about it survives a narrow pane.
+    Builder& error(std::string s) { form_.error = std::move(s); return *this; }
     // The footer line under the rows: a validation summary, a save hint, or a
     // key affordance. Same field the panes already set directly — exposed on
     // the builder so a form that is built in one pass can say its piece
@@ -378,6 +390,10 @@ public:
     Builder& pick(std::string id, std::string label, std::string current,
                   std::string help = {});
 
+    // Text shown by the Secret row just added while it is empty (see
+    // field::Secret::placeholder). No-op on any other kind.
+    Builder& placeholder(std::string text);
+
     // Mark the row just added as locked (e.g. pinned by an env var).
     Builder& lock(std::string reason);
     // Provenance for the row just added ("default", "settings.json", "env: X").
@@ -421,7 +437,14 @@ struct Options {
 // Each is a no-op on a kind it doesn't apply to, so call sites never switch
 // on the alternative. All of them clamp; none can leave a field invalid.
 
-void insert(FieldValue& v, char32_t ch);
+// Insert one character into a text-like field.
+//
+// `fresh` = this is the first keystroke of an edit session. Text fields ignore
+// it (a caret already says where the character lands); a Number field uses it
+// to REPLACE rather than append, because the value on screen when editing
+// starts is the saved one and nobody means to extend a number they did not
+// type. Pass `!f.edit_dirty`.
+void insert(FieldValue& v, char32_t ch, bool fresh = false);
 void backspace(FieldValue& v);
 void delete_forward(FieldValue& v);
 void move_cursor(FieldValue& v, int delta);
@@ -437,9 +460,20 @@ void paste(FieldValue& v, std::string_view text);
 // actually editing an editable, unlocked row does the text land. Returns
 // true when it did (caller sets pane-specific dirty semantics if any).
 // Every form pane's Paste arm MUST be exactly `form::paste_into(o->form,
-// e.text)` — a hand-rolled guard is the drift this function exists to end
-// (three panes had three copies of it before this).
+// e.text)` or `form::paste_into_focused(o->form, e.text)` — a hand-rolled
+// guard is the drift these exist to end (three panes had three copies of it
+// before this).
 bool paste_into(Form& f, std::string_view text);
+
+// Paste the way typing works (type-to-edit): while editing, exactly
+// paste_into; while BROWSING an editable, unlocked text-like row, the paste
+// opens the edit session and lands as its first input. Nothing happens on a
+// dropdown, a locked or non-text row, or for a paste the row would take none
+// of (no digits for a Number, only newlines/tabs) — an edit session is never
+// opened with nothing in it. Returns true when the text landed. A pane that
+// uses this routes a paste to itself whenever it is OPEN, not only mid-edit
+// (subscribe.cpp); the guards here are what make that safe.
+bool paste_into_focused(Form& f, std::string_view text);
 
 // ── Typed field readers (SSOT) ───────────────────────────────
 // Read a field's value by id without spelling the variant access at every

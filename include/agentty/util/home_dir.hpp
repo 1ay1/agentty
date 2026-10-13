@@ -22,6 +22,22 @@
 //
 // Returning the SAME directory from every caller is the whole point; do not
 // reintroduce a second precedence order in any path root.
+//
+// ── WHICH `util` IS THIS? ──────────────────────────────────────────
+// This is agentty::util — APP-WIDE PLUMBING with no notion of a tool call:
+// logging, home/root resolution, base64, teardown ordering, the self-updater,
+// the models.dev cache. Callable from anywhere.
+//
+// The other one is agentty::tools::util (include/agentty/tool/util/), the TOOL
+// BOUNDARY: workspace clamping, subprocess spawning, the sandbox, the trust
+// handoff gate, argument parsing. Its unifying property is UNTRUSTED INPUT —
+// it is the set of walls between a model's request and the machine.
+//
+// The dependency runs ONE WAY: tools::util may use util (fs_helpers calls
+// home_dir() below), never the reverse. Verified: nothing under src/util/ or
+// include/agentty/util/ mentions tools::util, and nothing here should start,
+// because a wall that depends on the thing it is protecting is not a wall.
+// The fuller version of this note lives in tool/util/fs_helpers.hpp.
 
 #include <filesystem>
 

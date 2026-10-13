@@ -21,7 +21,7 @@
 
 #include "agentty/domain/ui_theme.hpp"
 
-#include <maya/app/app.hpp>
+#include <maya/style/schemes.hpp>
 #include <maya/style/schemes.hpp>
 #include <maya/style/theme.hpp>
 #include <maya/terminal/ansi.hpp>
@@ -138,6 +138,13 @@ TEST_CASE("issue 37: a black-and-white terminal is a supported request") {
         ScopedEnv term{"TERM", "xterm-256color"};
         ScopedEnv no_color{"NO_COLOR", nullptr};
         ScopedEnv forced{"MAYA_COLOR", nullptr};
+        // A self-identified host (Windows Terminal sets WT_SESSION for every
+        // child) deliberately outranks the handle probe; this case is about
+        // a plain redirect, so take the host's name out of the picture.
+        ScopedEnv wt{"WT_SESSION", nullptr};
+        ScopedEnv conemu{"ConEmuANSI", nullptr};
+        ScopedEnv prog{"TERM_PROGRAM", nullptr};
+        ScopedEnv clif{"CLICOLOR_FORCE", nullptr};
         CHECK(maya::theme::detect_tier(/*tty=*/false) == maya::theme::ColorTier::Mono);
     }
 }
@@ -197,7 +204,7 @@ TEST_CASE("issue 37: a low colour tier falls back to native, not a bad approxima
     agentty::ui_prefs::Prefs p;
     p.theme = "Dracula";
     p.tier  = agentty::ui_prefs::ColorTier::Ansi16;
-    const auto r = agentty::ui_prefs::resolve(p, /*tty=*/true);
+    const auto r = agentty::ui_prefs::resolve(p, agentty::ui_prefs::detect(true));
     CHECK(r.theme == &maya::theme::native);
 }
 
@@ -243,7 +250,7 @@ TEST_CASE("theming: the Background preference actually does something") {
     p.tier     = agentty::ui_prefs::ColorTier::TrueColor;
     p.polarity = agentty::ui_prefs::Polarity::Light;
 
-    const auto r = agentty::ui_prefs::resolve(p, /*tty=*/true);
+    const auto r = agentty::ui_prefs::resolve(p, agentty::ui_prefs::detect(true));
     REQUIRE(r.theme != nullptr);
     CHECK(agentty::ui_prefs::scheme_is_light(*r.theme) == std::optional{false});
     CHECK(!agentty::ui_prefs::theme_override_reason(p, r).empty());
@@ -256,7 +263,7 @@ TEST_CASE("theming: the Background preference actually does something") {
     // Matching polarity is unremarkable and says nothing.
     agentty::ui_prefs::Prefs q = p;
     q.polarity = agentty::ui_prefs::Polarity::Dark;
-    const auto rq = agentty::ui_prefs::resolve(q, /*tty=*/true);
+    const auto rq = agentty::ui_prefs::resolve(q, agentty::ui_prefs::detect(true));
     CHECK(agentty::ui_prefs::theme_override_reason(q, rq).empty());
 
     // And a light scheme on a light terminal is equally quiet — the check
@@ -265,7 +272,7 @@ TEST_CASE("theming: the Background preference actually does something") {
     l.theme    = "Catppuccin Latte";               // a light scheme
     l.tier     = agentty::ui_prefs::ColorTier::TrueColor;
     l.polarity = agentty::ui_prefs::Polarity::Light;
-    const auto rl = agentty::ui_prefs::resolve(l, /*tty=*/true);
+    const auto rl = agentty::ui_prefs::resolve(l, agentty::ui_prefs::detect(true));
     REQUIRE(rl.theme != nullptr);
     CHECK(agentty::ui_prefs::scheme_is_light(*rl.theme) == std::optional{true});
     CHECK(agentty::ui_prefs::theme_override_reason(l, rl).empty());
@@ -286,7 +293,7 @@ TEST_CASE("issue 37: native claims no polarity, because it paints no canvas") {
         p.theme    = "";            // no scheme named => native
         p.tier     = agentty::ui_prefs::ColorTier::TrueColor;
         p.polarity = pol;
-        const auto r = agentty::ui_prefs::resolve(p, /*tty=*/true);
+        const auto r = agentty::ui_prefs::resolve(p, agentty::ui_prefs::detect(true));
         CHECK(agentty::ui_prefs::theme_override_reason(p, r).empty());
     }
 }

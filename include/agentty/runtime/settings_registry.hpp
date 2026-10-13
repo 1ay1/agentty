@@ -36,13 +36,19 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
+#include <vector>
 
+#include "agentty/domain/web_search_config.hpp"  // web_search.* rows: bounds + struct
 #include "agentty/domain/smart_tuning.hpp"   // shipped defaults + ranges
 #include "agentty/runtime/panel/form.hpp"           // Builder (add_rows)
 #include "agentty/store/store.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::settings::registry {
 
@@ -54,6 +60,8 @@ enum class Group : std::uint8_t {
     Proactive,    // pre-turn injection
     Infra,        // persistence, tracing, feedback
     Routing,      // Smart Mode's numeric policy
+    WebSearch,    // web_search: availability, result count, exclusions
+    WebSearchServices, // web_search: which services answer, in what order
 };
 
 [[nodiscard]] constexpr std::string_view label_of(Group g) noexcept {
@@ -64,6 +72,8 @@ enum class Group : std::uint8_t {
         case Group::Proactive: return "Proactive";
         case Group::Infra:     return "Infrastructure";
         case Group::Routing:   return "Routing";
+        case Group::WebSearch: return "Search";
+        case Group::WebSearchServices: return "Services";
     }
     return "";
 }
@@ -76,7 +86,7 @@ enum class Tier : std::uint8_t { Basic, Advanced };
 // What kind of control the row is. Deliberately NOT a variant of values: the
 // value lives in the config struct and is reached through `slot`, so a row
 // carries only its TYPE and its bounds.
-enum class Type : std::uint8_t { Bool, Real, Int, Enum };
+enum class Type : std::uint8_t { Bool, Real, Int, Enum, Text };
 
 // WHICH config struct a row binds to.
 //
@@ -89,7 +99,12 @@ enum class Type : std::uint8_t { Bool, Real, Int, Enum };
 // to the thing the runtime actually reads. That is what makes a UI edit take
 // effect: the pane writes the same struct the router holds, with no shape to
 // convert between and no fan-out step to forget.
-enum class Owner : std::uint8_t { Rag, Smart };
+//
+// Search is the third, for the same reason: web_search's policy is a domain
+// type (web_search_cfg::Config) the tool layer reads as-is. Its rows are the only
+// ones the Web Search pane renders, and the only ones of Type::Text — an
+// exclusion list is free text, not a number or an enum.
+enum class Owner : std::uint8_t { Rag, Smart, WebSearch };
 
 // Pointer-to-member into the persisted config. The row's read/write binding.
 // One alternative per (type, owner) pair; `Owner` says which half is live.
@@ -115,7 +130,17 @@ using Slot = std::variant<
     MemberPtr<smart::RoleConfig, int>,
     MemberPtr<smart::RoleConfig, float>,
     MemberPtr<smart::RoleConfig, double>,
-    MemberPtr<smart::RoleConfig, std::string>>;
+    MemberPtr<smart::RoleConfig, std::string>,
+    MemberPtr<web_search_cfg::Config, bool>,
+    MemberPtr<web_search_cfg::Config, int>,
+    MemberPtr<web_search_cfg::Config, std::string>>;
+
+// The struct a member pointer points into: `bool web_search_cfg::Config::*` →
+// web_search_cfg::Config. owner() is derived from this.
+template <class M> struct member_class;
+template <class C, class T> struct member_class<T C::*> { using type = C; };
+template <class M>
+using member_class_t = typename member_class<M>::type;
 
 struct SettingDef {
     std::string_view id;      // settings.json key AND form field id ("rag.mmr")
@@ -142,16 +167,23 @@ struct SettingDef {
     // than stored alongside it: a row that declared its owner separately
     // could declare it wrongly, and the walkers would then skip a row that
     // was reachable or visit one that was not.
+    //
+    // Keyed on the member pointer's CLASS, not on each (class, type) pair:
+    // with three owners the old "Rag if one of these five, else Smart" chain
+    // would have filed every search row under Smart, silently.
     [[nodiscard]] constexpr Owner owner() const noexcept {
         return std::visit([]<class M>(M) constexpr {
-            if constexpr (std::is_same_v<M, MemberPtr<store::RagConfig, bool>>
-                       || std::is_same_v<M, MemberPtr<store::RagConfig, int>>
-                       || std::is_same_v<M, MemberPtr<store::RagConfig, float>>
-                       || std::is_same_v<M, MemberPtr<store::RagConfig, double>>
-                       || std::is_same_v<M, MemberPtr<store::RagConfig, std::string>>)
+            using C = member_class_t<M>;
+            if constexpr (std::is_same_v<C, store::RagConfig>)
                 return Owner::Rag;
-            else
+            else if constexpr (std::is_same_v<C, smart::RoleConfig>)
                 return Owner::Smart;
+            else {
+                static_assert(std::is_same_v<C, web_search_cfg::Config>,
+                              "a Slot alternative names a config struct "
+                              "owner() does not know");
+                return Owner::WebSearch;
+            }
         }, slot);
     }
 };
@@ -293,6 +325,48 @@ inline constexpr std::array kSettings = std::to_array<SettingDef>({
      Group::Routing, Tier::Basic, Type::Enum,
      &smart::RoleConfig::main_turn_floor,
      0.0, 0.0, 0.0, "utility|implementation|strategic"},
+
+    // ── web_search (Settings → Web Search) ─────────────────────────────
+    // Applied at the two seams agentty owns — wire advertisement and the
+    // dispatch closure — never inside mcp-cpp, which implements the tool.
+    // See domain/web_search_config.hpp for what that does and does not reach.
+    {"web_search.mode", "AGENTTY_WEB_SEARCH", "Web search",
+     "auto: the model decides the count, as before \xc2\xb7 on: your counts apply \xc2\xb7 off: no web search",
+     Group::WebSearch, Tier::Basic, Type::Enum, &web_search_cfg::Config::mode_text,
+     0.0, 0.0, 0.0, "auto|on|off"},
+    {"web_search.count", "AGENTTY_WEB_SEARCH_COUNT", "Results per search",
+     "how many results a search returns when the model does not say",
+     Group::WebSearch, Tier::Basic, Type::Int, &web_search_cfg::Config::count,
+     static_cast<double>(web_search_cfg::kCountMin),
+     static_cast<double>(web_search_cfg::kCountMax), 1.0},
+    {"web_search.max_count", "AGENTTY_WEB_SEARCH_MAX", "Most results allowed",
+     "ceiling on what the model may ask for in one search",
+     Group::WebSearch, Tier::Basic, Type::Int, &web_search_cfg::Config::max_count,
+     static_cast<double>(web_search_cfg::kMaxCountMin),
+     static_cast<double>(web_search_cfg::kMaxCountMax), 1.0},
+    {"web_search.exclude_sites", "AGENTTY_WEB_SEARCH_EXCLUDE", "Never return",
+     "domains to leave out, separated by spaces or commas: pinterest.com w3schools.com",
+     Group::WebSearch, Tier::Basic, Type::Text, &web_search_cfg::Config::exclude_sites},
+
+    // Which services answer, first to succeed wins. The options are the ids of
+    // mcp-cpp's catalogue (mcp/tools/web_search.hpp); the pane shows its labels.
+    // tests/web_search_services_test.cpp pins this list to the catalogue.
+    {"web_search.primary", "AGENTTY_WEB_SEARCH_PRIMARY", "Primary",
+     "asked first. Free needs no account; API key needs one, stored encrypted",
+     Group::WebSearchServices, Tier::Basic, Type::Enum, &web_search_cfg::Config::primary,
+     0.0, 0.0, 0.0, web_search_cfg::kServiceIds},
+    {"web_search.secondary", "AGENTTY_WEB_SEARCH_SECONDARY", "Secondary",
+     "asked when the primary fails or is blocked",
+     Group::WebSearchServices, Tier::Basic, Type::Enum, &web_search_cfg::Config::secondary,
+     0.0, 0.0, 0.0, web_search_cfg::kOptionalServiceIds},
+    {"web_search.fallback", "AGENTTY_WEB_SEARCH_FALLBACK", "Fallback",
+     "asked last, when both of the above fail",
+     Group::WebSearchServices, Tier::Basic, Type::Enum, &web_search_cfg::Config::fallback,
+     0.0, 0.0, 0.0, web_search_cfg::kOptionalServiceIds},
+    {"web_search.language", "AGENTTY_WEB_SEARCH_LANGUAGE", "Language",
+     "result language for the services that take one; auto leaves it to them",
+     Group::WebSearchServices, Tier::Basic, Type::Enum, &web_search_cfg::Config::language,
+     0.0, 0.0, 0.0, web_search_cfg::kLanguages},
 });
 
 inline constexpr int kCount = static_cast<int>(kSettings.size());
@@ -350,7 +424,8 @@ consteval bool slots_match_types() {
         switch (s.type) {
             case Type::Bool:
                 if (!std::holds_alternative<MemberPtr<store::RagConfig, bool>>(s.slot)
-                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, bool>>(s.slot))
+                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, bool>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<web_search_cfg::Config, bool>>(s.slot))
                     return false;
                 break;
             case Type::Real:
@@ -362,13 +437,23 @@ consteval bool slots_match_types() {
                 break;
             case Type::Int:
                 if (!std::holds_alternative<MemberPtr<store::RagConfig, int>>(s.slot)
-                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, int>>(s.slot))
+                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, int>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<web_search_cfg::Config, int>>(s.slot))
                     return false;
                 break;
             case Type::Enum:
                 if (!std::holds_alternative<MemberPtr<store::RagConfig, std::string>>(s.slot)
-                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, std::string>>(s.slot))
+                 && !std::holds_alternative<MemberPtr<smart::RoleConfig, std::string>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<web_search_cfg::Config, std::string>>(s.slot))
                     return false;
+                break;
+            // Free text binds a string like Enum does, but carries no options
+            // to validate against — so it is kept to the one owner that needs
+            // it rather than offered to every string slot.
+            case Type::Text:
+                if (!std::holds_alternative<MemberPtr<web_search_cfg::Config, std::string>>(s.slot))
+                    return false;
+                if (!s.options.empty()) return false;
                 break;
         }
     }
@@ -383,11 +468,13 @@ consteval bool slots_match_types() {
 // only ever sees rows it can reach.
 consteval bool ids_namespaced() {
     for (const auto& s : kSettings) {
-        const bool rag   = s.id.starts_with("rag.");
-        const bool smart = s.id.starts_with("smart.");
-        if (!rag && !smart) return false;
-        if (rag   && s.owner() != Owner::Rag)      return false;
-        if (smart && s.owner() != Owner::Smart)    return false;
+        const bool rag    = s.id.starts_with("rag.");
+        const bool smart  = s.id.starts_with("smart.");
+        const bool web    = s.id.starts_with("web_search.");
+        if (!rag && !smart && !web) return false;
+        if (rag    && s.owner() != Owner::Rag)      return false;
+        if (smart  && s.owner() != Owner::Smart)    return false;
+        if (web    && s.owner() != Owner::WebSearch) return false;
     }
     return true;
 }
@@ -411,6 +498,21 @@ consteval bool smart_rows_match_tuning() {
     return true;
 }
 
+// The search rows' bounds are web_search_cfg's constants, and the tool layer
+// clamps to the same constants at dispatch. Pin the two together so a row
+// cannot advertise a range the dispatch seam then disagrees with.
+consteval bool web_search_rows_match_config() {
+    for (const auto& s : kSettings) {
+        if (s.id == "web_search.count")
+            if (s.min != web_search_cfg::kCountMin
+             || s.max != web_search_cfg::kCountMax) return false;
+        if (s.id == "web_search.max_count")
+            if (s.min != web_search_cfg::kMaxCountMin
+             || s.max != web_search_cfg::kMaxCountMax) return false;
+    }
+    return true;
+}
+
 static_assert(ids_unique(),        "duplicate setting id");
 static_assert(envs_unique(),       "duplicate env var name");
 static_assert(ranges_sane(),       "a numeric row has an empty or inverted range");
@@ -420,6 +522,8 @@ static_assert(ids_namespaced(),    "setting ids must be namespaced, and the "
                                   "prefix must match the slot's owner");
 static_assert(smart_rows_match_tuning(),
               "a smart.* row's range disagrees with smart::tuning");
+static_assert(web_search_rows_match_config(),
+              "a web_search.* row's range disagrees with web_search_cfg");
 
 } // namespace proofs
 
@@ -430,69 +534,71 @@ static_assert(smart_rows_match_tuning(),
 // struct it binds to, so passing the wrong one is a compile error rather than
 // a silent no-op — and each walker naturally SKIPS rows it cannot reach.
 
+// The registry's env overrides, read once. Env vars are fixed at exec, so a
+// reducer or view takes this from Model::env instead of calling getenv.
+struct EnvSnapshot {
+    // (variable, value) for every row whose variable is set and non-empty.
+    std::vector<std::pair<std::string, std::string>> set;
+    // AGENTTY_SMART_MODE: the session pin on the master switch.
+    std::optional<bool> smart_enabled;
+    // AGENTTY_SMART_NO_INTERNAL / _NO_ORCHESTRATE / _NO_SUBAGENTS.
+    bool smart_no_internal    = false;
+    bool smart_no_orchestrate = false;
+    bool smart_no_subagents   = false;
+
+    [[nodiscard]] const std::string* find(std::string_view var) const noexcept {
+        for (const auto& [k, v] : set) if (k == var) return &v;
+        return nullptr;
+    }
+};
+
+// Reads the process environment.
+[[nodiscard]] EnvSnapshot read_env(Io);
+
 // Apply environment overrides on top of `c`. Clamps to each row's range.
-void apply_env(store::RagConfig& c);
-void apply_env(smart::RoleConfig& c);
+void apply_env(store::RagConfig& c, const EnvSnapshot& env);
+void apply_env(smart::RoleConfig& c, const EnvSnapshot& env);
+void apply_env(web_search_cfg::Config& c, const EnvSnapshot& env);
+// Same, reading the environment now. For CLI paths with no Model.
+void apply_env(Io, store::RagConfig& c);
+void apply_env(Io, smart::RoleConfig& c);
+void apply_env(Io, web_search_cfg::Config& c);
 
 // Read/write a row's value as a string — the shape `agentty config get/set`
 // and the JSON walkers both want. Returns false for an unknown id or a value
 // the row cannot hold.
 [[nodiscard]] std::string get(const store::RagConfig& c, const SettingDef& d);
 [[nodiscard]] std::string get(const smart::RoleConfig& c, const SettingDef& d);
+[[nodiscard]] std::string get(const web_search_cfg::Config& c, const SettingDef& d);
 [[nodiscard]] bool        set(store::RagConfig& c, const SettingDef& d,
                               std::string_view value);
 [[nodiscard]] bool        set(smart::RoleConfig& c, const SettingDef& d,
+                              std::string_view value);
+[[nodiscard]] bool        set(web_search_cfg::Config& c, const SettingDef& d,
                               std::string_view value);
 
 // True when the row still holds its shipped default — used to keep
 // settings.json clean (only non-default rows are written).
 [[nodiscard]] bool is_default(const store::RagConfig& c, const SettingDef& d);
 [[nodiscard]] bool is_default(const smart::RoleConfig& c, const SettingDef& d);
+[[nodiscard]] bool is_default(const web_search_cfg::Config& c, const SettingDef& d);
 
 // The env var that is OVERRIDING this row right now, or "" when none is set.
 // A row under an override renders LOCKED and names the variable, instead of
 // looking editable and silently losing the edit on the next read.
-[[nodiscard]] std::string env_override(const SettingDef& d);
+[[nodiscard]] std::string env_override(const SettingDef& d, const EnvSnapshot& env);
 
 // Restore a row to its shipped default.
 void reset(store::RagConfig& c, const SettingDef& d);
 void reset(smart::RoleConfig& c, const SettingDef& d);
+void reset(web_search_cfg::Config& c, const SettingDef& d);
 
-// ── Rows ───────────────────────────────────────────────────
-//
-// Project this table's rows onto a form. THE way a pane renders settings —
-// label, help, control kind, range, group header, env lock and provenance all
-// come from the row, so a pane contributes only WHICH rows it owns.
-//
-// This lives here rather than in one pane's .cpp because both panes need it.
-// It was private to the RAG pane, so the Smart Mode pane hand-rolled its three
-// rows instead: labels, help strings and ranges retyped from the table they
-// were already declared in, and the env-lock/provenance handling quietly
-// reimplemented and subtly different. Two panes rendering settings two ways is
-// exactly the duplication the table exists to remove.
-//
-// `first` and `last_group` thread across calls so group headers stay correct
-// when a pane walks more than one owner.
+// One row: label, help, control kind, range, env lock and provenance, all from
+// the table. Split out of add_rows for a pane that must put its own rows
+// BETWEEN registry rows (Web Search hangs each service's dials under its slot).
 template <class C>
-inline void add_rows(form::Builder& b, const C& cfg, Owner owner, bool advanced,
-                     bool& first, Group& last_group) {
-    for (const auto& d : kSettings) {
-        if (d.owner() != owner) continue;
-
-        // Advanced rows are hidden, not disabled: a knob whose effect a user
-        // cannot judge is noise on the main screen, but it still has to be
-        // reachable (`a`) rather than env-only.
-        if (d.tier == Tier::Advanced && !advanced) continue;
-
-        // A group header separates sections. It is a real field kind, not a
-        // locked text row: faking it leaked a placeholder into the value
-        // column and let the cursor land on a label that does nothing.
-        if (first || d.group != last_group) {
-            b.header(std::string{label_of(d.group)});
-            last_group = d.group;
-            first = false;
-        }
-
+inline void add_row(form::Builder& b, const C& cfg, const EnvSnapshot& env, const SettingDef& d) {
+    {   // (scope kept from add_rows' loop body, so the diff stays a move)
         const std::string id{d.id};
         const std::string label{d.label};
         const std::string help{d.help};
@@ -526,19 +632,64 @@ inline void add_rows(form::Builder& b, const C& cfg, Owner owner, bool advanced,
                 b.choice(id, label, opts, {}, get(cfg, d), help);
                 break;
             }
+            case Type::Text:
+                // Free text: the value is the user's own string, verbatim.
+                // Normalising happens where it is USED (web_search_cfg), so the
+                // row shows exactly what was typed.
+                b.text(id, label, get(cfg, d), help);
+                break;
         }
 
         // An env var overriding this row makes it READ-ONLY and names the
         // variable. The row would otherwise look editable and silently lose
         // the edit on the next read — layered config's worst failure, and the
         // reason `origin` exists at all.
-        if (const std::string env = env_override(d); !env.empty()) {
-            b.origin("env: " + env);
-            b.lock("env: " + env);
+        if (const std::string var = env_override(d, env); !var.empty()) {
+            b.origin("env: " + var);
+            b.lock("env: " + var);
         }
         // Provenance: a row still on its shipped value says so, which is the
         // difference between "I never touched this" and "I set it to that".
         else if (is_default(cfg, d)) b.origin("default");
+    }
+}
+
+// ── Rows ───────────────────────────────────────────────────
+//
+// Project this table's rows onto a form. THE way a pane renders settings —
+// label, help, control kind, range, group header, env lock and provenance all
+// come from the row, so a pane contributes only WHICH rows it owns.
+//
+// This lives here rather than in one pane's .cpp because both panes need it.
+// It was private to the RAG pane, so the Smart Mode pane hand-rolled its three
+// rows instead: labels, help strings and ranges retyped from the table they
+// were already declared in, and the env-lock/provenance handling quietly
+// reimplemented and subtly different. Two panes rendering settings two ways is
+// exactly the duplication the table exists to remove.
+//
+// `first` and `last_group` thread across calls so group headers stay correct
+// when a pane walks more than one owner. A pane that must put rows of its own
+// BETWEEN registry rows walks the table itself and calls add_row (above).
+template <class C>
+inline void add_rows(form::Builder& b, const C& cfg, const EnvSnapshot& env,
+                     Owner owner, bool advanced, bool& first, Group& last_group) {
+    for (const auto& d : kSettings) {
+        if (d.owner() != owner) continue;
+
+        // Advanced rows are hidden, not disabled: a knob whose effect a user
+        // cannot judge is noise on the main screen, but it still has to be
+        // reachable (`a`) rather than env-only.
+        if (d.tier == Tier::Advanced && !advanced) continue;
+
+        // A group header separates sections. It is a real field kind, not a
+        // locked text row: faking it leaked a placeholder into the value
+        // column and let the cursor land on a label that does nothing.
+        if (first || d.group != last_group) {
+            b.header(std::string{label_of(d.group)});
+            last_group = d.group;
+            first = false;
+        }
+        add_row(b, cfg, env, d);
     }
 }
 

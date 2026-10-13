@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+#include <maya/runtime.hpp>
+
 namespace agentty::rag {
 
 // One retrieved passage, flattened for the app. Mirrors mcp::tools::DocPassage
@@ -237,8 +239,8 @@ private:
 //                          future ranking (read side lives in Retriever).
 // Both are best-effort and never throw. AGENTTY_RAG_LEARN=0 disables the loop.
 namespace feedback {
-void note_surfaced(const std::vector<std::string>& paths);
-void note_file_opened(const std::string& path);
+void note_surfaced(const maya::below<maya::leaf>&, const std::vector<std::string>& paths);
+void note_file_opened(const maya::below<maya::leaf>&, const std::string& path);
 }
 
 // ── CLI: `agentty rag-bench <root>` ────────────────────────────────────

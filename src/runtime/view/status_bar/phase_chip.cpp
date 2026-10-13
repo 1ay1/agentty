@@ -1,4 +1,5 @@
 #include "agentty/runtime/view/status_bar/phase_chip.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
 
 #include <chrono>
 #include <string>
@@ -69,7 +70,7 @@ maya::PhaseChip::Config phase_chip_config(const Model& m) {
     float phase_elapsed = -1.0f;
     if (const auto* a = active_ctx(m.s.phase);
         a && phase_active && a->started.time_since_epoch().count() != 0) {
-        auto now = std::chrono::steady_clock::now();
+        auto now = maya::anim_now();
         auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
                        now - a->started).count();
         phase_elapsed = static_cast<float>(ms) / 1000.0f;
@@ -139,7 +140,7 @@ maya::PhaseChip::Config phase_chip_config(const Model& m) {
         verb = "Streaming";
         if (const auto* a = active_ctx(m.s.phase);
             a && a->first_delta_at.time_since_epoch().count() == 0) {
-            const auto& sel = provider::active();
+            const auto& sel = m.d.selection;
             if (sel.kind == provider::Kind::OpenAI
                 && !sel.openai_endpoint.use_tls)
                 verb = "processing\xe2\x80\xa6";

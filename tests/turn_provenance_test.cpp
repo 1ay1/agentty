@@ -35,7 +35,7 @@ store::Settings g_settings;
 
 void install_stub_deps() {
     app::install_deps(app::Deps{
-        .stream         = [](auto, auto) {},
+        .stream         = [](const maya::unlocked&, auto, auto) {},
         .save_thread    = [](const Thread&) {},
         .delete_thread  = [](const auto&) {},
         .load_threads   = [] { return std::vector<Thread>{}; },
@@ -108,7 +108,7 @@ TEST_CASE("turn provenance: the header names the model that served the turn") {
     {
         provider::Selection sel;
         sel.kind = provider::Kind::Anthropic;
-        provider::select(sel);
+        provider::select(::agentty::IoAccess::grant(), sel);
     }
 
     // ── StreamStarted stamps the routed model onto the assistant turn ──

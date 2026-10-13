@@ -1,9 +1,11 @@
 // Appearance settings: the rows exist, Enter changes them, and a change
 // both persists and reaches the renderer.
 #include "agtest.hpp"
+#include "agtest_fx.hpp"
 
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/runtime/app/update/internal.hpp"   // persist_settings
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"
 #include "agentty/runtime/panel/form_keys.hpp"
@@ -16,7 +18,10 @@
 #include "agentty/runtime/panel/appearance.hpp"
 
 #include <cstdio>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace agentty;
 namespace se = agentty::settings;
@@ -30,7 +35,7 @@ store::Settings g_saved;
 void install_stub_deps() {
     g_saved = store::Settings{};
     agentty::app::install_deps(agentty::app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const agentty::Thread&) {},
         .delete_thread = [](const agentty::ThreadId&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },
@@ -43,9 +48,23 @@ void install_stub_deps() {
     });
 }
 
+// Apply whatever effects a step returned to the stub store.
+//
+// Saving is an EFFECT now: the reducer returns a value describing the write
+// and the HOST performs it. These tests assert on `g_saved`, i.e. on what
+// reached the store, so they have to play the host's part — which is also
+// the point: a save only shows up here if the arm actually returned it.
+void apply_fx(const Cmd& c) {
+    agtest::fx::Store s;
+    s.settings = g_saved;
+    agtest::fx::run(c, s);
+    g_saved = s.settings;
+}
+
 // Open the Appearance pane and hand back the model holding it.
 Model opened() {
-    auto [m, _] = app::update(Model{}, Msg{OpenAppearance{}});
+    auto [m, cmd] = app::update(Model{}, Msg{OpenAppearance{}});
+    apply_fx(cmd);
     return std::move(m);
 }
 
@@ -66,7 +85,8 @@ Model press(Model m, std::string_view id, form::keys::Action a) {
         if (f.fields[(size_t)i].id == id) { idx = i; break; }
     REQUIRE(idx >= 0);
     f.cursor = idx;
-    auto [next, _] = app::update(std::move(m), Msg{AppearanceKey{a}});
+    auto [next, cmd] = app::update(std::move(m), Msg{AppearanceKey{a}});
+    apply_fx(cmd);
     return std::move(next);
 }
 
@@ -85,23 +105,23 @@ TEST_CASE("appearance: the pane opens on a setting, not a header") {
 TEST_CASE("appearance: adjusting in place wraps") {
     install_stub_deps();
     Model m = opened();
-    CHECK(m.d.ui.density == ui_prefs::Density::Normal);
+    CHECK(m.d.ui().density == ui_prefs::Density::Normal);
     m = press(std::move(m), ui::panel::kApDensity, form::keys::Action{form::keys::Intent::AdjustUp});
-    CHECK(m.d.ui.density == ui_prefs::Density::Roomy);
+    CHECK(m.d.ui().density == ui_prefs::Density::Roomy);
     m = press(std::move(m), ui::panel::kApDensity, form::keys::Action{form::keys::Intent::AdjustUp});
-    CHECK(m.d.ui.density == ui_prefs::Density::Compact);
+    CHECK(m.d.ui().density == ui_prefs::Density::Compact);
     m = press(std::move(m), ui::panel::kApDensity, form::keys::Action{form::keys::Intent::AdjustUp});
-    CHECK(m.d.ui.density == ui_prefs::Density::Normal);   // wrapped
+    CHECK(m.d.ui().density == ui_prefs::Density::Normal);   // wrapped
 }
 
 TEST_CASE("appearance: a toggle is a toggle") {
     install_stub_deps();
     Model m = opened();
-    const bool was = m.d.ui.syntax;
+    const bool was = m.d.ui().syntax;
     m = press(std::move(m), ui::panel::kApSyntax, form::keys::Action{form::keys::Intent::Activate});
-    CHECK(m.d.ui.syntax == !was);
+    CHECK(m.d.ui().syntax == !was);
     m = press(std::move(m), ui::panel::kApSyntax, form::keys::Action{form::keys::Intent::Activate});
-    CHECK(m.d.ui.syntax == was);
+    CHECK(m.d.ui().syntax == was);
 }
 
 TEST_CASE("appearance: a change is persisted, not just held") {
@@ -110,8 +130,8 @@ TEST_CASE("appearance: a change is persisted, not just held") {
     m = press(std::move(m), ui::panel::kApMotion, form::keys::Action{form::keys::Intent::AdjustUp});
     // The pane has no apply step, so "what I see" and "what is saved"
     // must never be two different things — not even for one keystroke.
-    CHECK(g_saved.ui.motion == m.d.ui.motion);
-    CHECK(m.d.ui.motion != ui_prefs::Motion::Full);
+    CHECK(g_saved.ui.motion == m.d.ui().motion);
+    CHECK(m.d.ui().motion != ui_prefs::Motion::Full);
 }
 
 TEST_CASE("appearance: the theme row hands off to a browser, not a dropdown") {
@@ -125,24 +145,26 @@ TEST_CASE("appearance: the theme row hands off to a browser, not a dropdown") {
 TEST_CASE("appearance: moving in the browser previews the theme live") {
     install_stub_deps();
     Model m = opened();
-    CHECK(m.d.ui.theme.empty());              // native by default
+    CHECK(m.d.ui().theme.empty());              // native by default
     m = press(std::move(m), ui::panel::kApTheme, form::keys::Action{form::keys::Intent::Activate});
 
     // Moving APPLIES — the list is its own preview, so you judge a scheme
     // on the real UI rather than on its name.
     {
-        auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeMove{+1}});
+        auto [n, fxc] = app::update(std::move(m), Msg{AppearanceThemeMove{+1}});
+        apply_fx(fxc);
         m = std::move(n);
     }
-    CHECK(!m.d.ui.theme.empty());
+    CHECK(!m.d.ui().theme.empty());
 
     // Esc is a true cancel: it puts back what we opened on, in the model
     // AND on disk, so a browse you abandoned leaves nothing behind.
     {
-        auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeCancel{}});
+        auto [n, fxc] = app::update(std::move(m), Msg{AppearanceThemeCancel{}});
+        apply_fx(fxc);
         m = std::move(n);
     }
-    CHECK(m.d.ui.theme.empty());
+    CHECK(m.d.ui().theme.empty());
     CHECK(g_saved.ui.theme.empty());
     CHECK(!pane(m).pane.picking);
 }
@@ -152,15 +174,17 @@ TEST_CASE("appearance: Enter in the browser keeps what you are looking at") {
     Model m = opened();
     m = press(std::move(m), ui::panel::kApTheme, form::keys::Action{form::keys::Intent::Activate});
     {
-        auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeMove{+1}});
+        auto [n, fxc] = app::update(std::move(m), Msg{AppearanceThemeMove{+1}});
+        apply_fx(fxc);
         m = std::move(n);
     }
-    const std::string previewing = m.d.ui.theme;
+    const std::string previewing = m.d.ui().theme;
     {
-        auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeCommit{}});
+        auto [n, fxc] = app::update(std::move(m), Msg{AppearanceThemeCommit{}});
+        apply_fx(fxc);
         m = std::move(n);
     }
-    CHECK(m.d.ui.theme == previewing);
+    CHECK(m.d.ui().theme == previewing);
     CHECK(g_saved.ui.theme == previewing);
     CHECK(!pane(m).pane.picking);
 }
@@ -170,13 +194,14 @@ TEST_CASE("appearance: typing filters and previews the top match") {
     Model m = opened();
     m = press(std::move(m), ui::panel::kApTheme, form::keys::Action{form::keys::Intent::Activate});
     for (const char* c : {"d", "r", "a"}) {
-        auto [n, _] = app::update(std::move(m), Msg{AppearanceThemeQuery{c}});
+        auto [n, fxc] = app::update(std::move(m), Msg{AppearanceThemeQuery{c}});
+        apply_fx(fxc);
         m = std::move(n);
     }
     CHECK(pane(m).pane.picker.picker.query() == "dra");
     // Narrowing PREVIEWS too — "dra" shows you Dracula without a second
     // keystroke to move onto it.
-    CHECK(!m.d.ui.theme.empty());
+    CHECK(!m.d.ui().theme.empty());
 }
 
 TEST_CASE("appearance: resolution never leaves the user unable to read") {
@@ -186,20 +211,20 @@ TEST_CASE("appearance: resolution never leaves the user unable to read") {
     ui_prefs::Prefs p;
     p.theme = "Dracula";
     p.tier  = ui_prefs::ColorTier::TrueColor;
-    CHECK(ui_prefs::resolve(p, true).theme != &maya::theme::native);
+    CHECK(ui_prefs::resolve(p, agentty::ui_prefs::detect(true)).theme != &maya::theme::native);
     p.tier  = ui_prefs::ColorTier::Ansi16;
-    CHECK(ui_prefs::resolve(p, true).theme == &maya::theme::native);
+    CHECK(ui_prefs::resolve(p, agentty::ui_prefs::detect(true)).theme == &maya::theme::native);
     // An unknown name is a config typo, not a reason to refuse to start.
     p.theme = "Nope";
     p.tier  = ui_prefs::ColorTier::TrueColor;
-    CHECK(ui_prefs::resolve(p, true).theme == &maya::theme::native);
+    CHECK(ui_prefs::resolve(p, agentty::ui_prefs::detect(true)).theme == &maya::theme::native);
 }
 
 
 TEST_CASE("appearance form: rows, groups and provenance") {
     install_stub_deps();
     ui_prefs::Prefs p;
-    const auto f = ui::panel::build_appearance_form(p, /*tty=*/true);
+    const auto f = ui::panel::build_appearance_form(p, ui_prefs::detect(true));
 
     // Every knob has a row, and the pane is grouped rather than a flat wall.
     CHECK(f.fields.size() >= 11);
@@ -328,12 +353,12 @@ TEST_CASE("appearance: the palette follows the chosen theme") {
     // by the only means that would have caught the original bug — comparing
     // what the tokens RESOLVE TO across a theme change.
 
-    // Native: the terminal's own colours. Nothing literal, so `fg` is the
-    // terminal default rather than a colour we picked for the user.
+    // Native: the terminal's own colours. Nothing literal, so `fg` RESOLVES
+    // to the terminal default rather than a colour we picked for the user.
     ui_prefs::publish_theme(maya::theme::native);
-    const maya::Color native_fg     = ui::fg;
-    const maya::Color native_accent = ui::accent;
-    CHECK(native_fg.kind() == maya::Color::Kind::Default);
+    const maya::LitColor native_fg     = ui::fg();
+    const maya::LitColor native_accent = ui::accent();
+    CHECK(native_fg.kind() == maya::LitColor::Kind::Default);
 
     // Now a scheme with literal RGB. Same token, different colour.
     const maya::Theme* dracula = nullptr;
@@ -346,18 +371,26 @@ TEST_CASE("appearance: the palette follows the chosen theme") {
     // so a bare `ui::fg != x` is ambiguous. `ui::fg()` names the read.
     CHECK(ui::fg() != native_fg);
     CHECK(ui::accent() != native_accent);
-    CHECK(maya::Color{ui::fg}.kind() == maya::ColorKind::Rgb);
+    CHECK(ui::fg().kind() == maya::LitColor::Kind::Rgb);
+
+    // The Color conversion stays SYMBOLIC — that is the late-binding
+    // invariant (docs/LATE_BINDING.md). A token dropped into a Style must
+    // still name a slot so the resolve happens at PAINT, which is what lets
+    // a stored Element follow a later theme switch. Asserting Rgb here would
+    // be asserting the bug.
+    CHECK(maya::Color{ui::fg}.kind() == maya::ColorKind::Slot);
 
     // And every token tracks the SAME theme — not just the one we looked at.
-    CHECK(maya::Color{ui::danger}    == dracula->error);
-    CHECK(maya::Color{ui::success}   == dracula->success);
-    CHECK(maya::Color{ui::muted}     == dracula->muted);
-    CHECK(maya::Color{ui::highlight} == dracula->primary);
-    CHECK(maya::Color{ui::code_path} == dracula->link);
+    // Compared as RESOLVED values, since that is what a Theme field holds.
+    CHECK(ui::danger()    == dracula->error);
+    CHECK(ui::success()   == dracula->success);
+    CHECK(ui::muted()     == dracula->muted);
+    CHECK(ui::highlight() == dracula->primary);
+    CHECK(ui::code_path() == dracula->link);
 
     // Back to native, so the rest of the suite paints as it expects.
     ui_prefs::publish_theme(maya::theme::native);
-    CHECK(maya::Color{ui::fg} == native_fg);
+    CHECK(ui::fg() == native_fg);
 }
 
 TEST_CASE("appearance: publishing a theme reaches the PROJECTED palettes too") {
@@ -447,6 +480,17 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
                  const char* fgbg; const char* no_color; };
 
     auto with_env = [](const Env& e, auto&& fn) {
+        // A terminal that names itself (Windows Terminal's WT_SESSION,
+        // ConEmuANSI, TERM_PROGRAM) outranks TERM in detect_tier, so the
+        // HOST running the suite would leak into every case. Clear them for
+        // the duration and restore after.
+        const char* host_vars[] = {"WT_SESSION", "ConEmuANSI", "TERM_PROGRAM", "CLICOLOR_FORCE"};
+        std::vector<std::pair<std::string, std::optional<std::string>>> saved;
+        for (const char* k : host_vars) {
+            const char* v = std::getenv(k);
+            saved.emplace_back(k, v ? std::optional<std::string>{v} : std::nullopt);
+            ::unsetenv(k);
+        }
         ::unsetenv("TERM"); ::unsetenv("COLORTERM");
         ::unsetenv("COLORFGBG"); ::unsetenv("NO_COLOR"); ::unsetenv("MAYA_COLOR");
         if (e.term)      ::setenv("TERM", e.term, 1);
@@ -456,6 +500,8 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
         fn();
         ::unsetenv("TERM"); ::unsetenv("COLORTERM");
         ::unsetenv("COLORFGBG"); ::unsetenv("NO_COLOR"); ::unsetenv("MAYA_COLOR");
+        for (const auto& [k, v] : saved)
+            if (v) ::setenv(k.c_str(), v->c_str(), 1);
     };
 
     const Env envs[] = {
@@ -471,7 +517,7 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
     for (const Env& e : envs) {
         with_env(e, [&] {
             // Defaults: native, tier auto, polarity auto.
-            const auto r = ui_prefs::resolve(ui_prefs::Prefs{}, /*tty=*/true);
+            const auto r = ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true));
 
             // THE invariant. Whatever was detected, the default theme states
             // neither a foreground nor a background, so it is legible on a
@@ -487,30 +533,30 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
     // TERM is genuinely consulted — the reporter's specific complaint.
     // Different TERMs must produce different tiers, or detection is theatre.
     with_env({"dumb", nullptr, nullptr, nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).tier
               == maya::theme::ColorTier::Mono);
     });
     with_env({"vt100", nullptr, nullptr, nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).tier
               == maya::theme::ColorTier::Ansi16);
     });
     with_env({"xterm-256color", nullptr, nullptr, nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).tier
               == maya::theme::ColorTier::Ansi256);
     });
     with_env({"xterm-256color", "truecolor", nullptr, nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).tier
               == maya::theme::ColorTier::TrueColor);
     });
     // konsole over ssh: COLORTERM does not survive the hop, TERM does.
     with_env({"konsole", nullptr, nullptr, nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).tier
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).tier
               == maya::theme::ColorTier::TrueColor);
     });
 
     // A light background is DETECTED, not guessed, when COLORFGBG says so.
     with_env({"xterm", nullptr, "0;15", nullptr}, [&] {
-        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, true).polarity
+        CHECK(ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true)).polarity
               == maya::theme::Polarity::Light);
     });
 
@@ -518,7 +564,7 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
     // request is honoured, and still leaves a readable, unpainted frame.
     with_env({"xterm-256color", "truecolor", nullptr, nullptr}, [&] {
         ::setenv("MAYA_COLOR", "none", 1);
-        const auto r = ui_prefs::resolve(ui_prefs::Prefs{}, true);
+        const auto r = ui_prefs::resolve(ui_prefs::Prefs{}, agentty::ui_prefs::detect(true));
         CHECK(r.tier == maya::theme::ColorTier::Mono);
         CHECK_FALSE(maya::theme::owns_canvas(*r.theme));
     });
@@ -527,7 +573,7 @@ TEST_CASE("appearance: usable on the terminals issue #37 reported") {
     // Dracula into sixteen is worse than the user's own palette.
     with_env({"vt100", nullptr, nullptr, nullptr}, [&] {
         ui_prefs::Prefs p; p.theme = "Dracula";
-        const auto r = ui_prefs::resolve(p, true);
+        const auto r = ui_prefs::resolve(p, agentty::ui_prefs::detect(true));
         CHECK(r.theme == &maya::theme::native);
     });
 }
@@ -585,6 +631,37 @@ TEST_CASE("appearance: a colour knob invalidates what is already rendered") {
         CHECK_MESSAGE(cached(m),
                       k.what << " is structural and must not re-seal the ledger");
     }
+}
+
+// ── The two save paths must not fight ──────────────────────────────
+//
+// agentty saves settings two different ways:
+//
+//   A. load-modify-save through the seam  (ToggleChangesStrip, and ~20 more)
+//   B. persist_settings(m), which seeds from m.d.persisted and writes it back
+//
+// B only sees what A left in `m.d.persisted`. An A-style arm that writes the
+// seam but not the record leaves the two disagreeing, and the next B — a
+// theme tweak, a model switch, a rag save, or Quit — writes the stale record
+// over the top. That is "settings don't persist": the write lands, then a
+// later unrelated save silently reverts it.
+TEST_CASE("settings: a toggle survives a later whole-record save") {
+    install_stub_deps();
+
+    Model m;
+    m.d.persisted = g_saved;   // as init() seeds it
+
+    auto [m2, toggle_cmd] = app::update(std::move(m), Msg{ToggleChangesStrip{}});
+    apply_fx(toggle_cmd);
+    m = std::move(m2);
+
+    // The toggle itself works — it reaches both the model and the store.
+    CHECK(m.d.show_changes_strip == true);
+    CHECK(g_saved.show_changes_strip == true);
+
+    // ...and it must still be there after ANY other save runs.
+    apply_fx(agentty::app::detail::persist_settings(m));
+    CHECK(g_saved.show_changes_strip == true);
 }
 
 TEST_CASE("appearance: Esc steps back, it does not close everything") {

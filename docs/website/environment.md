@@ -27,9 +27,8 @@ channel list and line format.
 | Variable | Effect |
 |----------|--------|
 | `AGENTTY_LOG` | The diagnostic filter. `trace` · `debug` · `info` · `warn` · `error` · `off`, plus `channel=level` overrides (`warn,wire=trace`). **Release builds default to `warn`** (~2 lines per healthy session) so `agentty diagnostics` works with no setup; non-release builds default to everything. |
-| `AGENTTY_LOG_FILE` | Log destination. Default `~/.agentty/logs/agentty.log`. |
-| `AGENTTY_DEBUG_LOG` | Legacy: sets the file *and* implies `AGENTTY_LOG=debug`. Prefer the two above. |
-| `AGENTTY_TRACE_TOOLS` | `=1` emits one `TOOL <name> <ok\|error>` line to **stderr** per tool a headless `agentty run` executes. stdout stays clean, so it's safe to pipe. |
+| `AGENTTY_LOG_BODIES` | Include payloads (wire bodies, tool args) in the log. Off by default — these carry user data. |
+| `AGENTTY_TRACE_TOOLS` | Older spelling of `--events jsonl`; `=1` selects the same stream. Prefer the flag — it shows up in `--help`. |
 | `AGENTTY_RAG_TRACE` | Fold rag-cpp's per-stage trace into the retrieval `mode` string shown on the tool card. On by default; `=0` disables. |
 | `AGENTTY_NO_STDERR_REDIRECT` | Keep subsystem stderr (MCP servers, sandbox) on the terminal instead of capturing it. Debug-only — it will scribble over the TUI. |
 
@@ -78,16 +77,22 @@ a catalog window and the serving endpoint's, the **serving** one wins: it is
 the one that will reject an over-long prompt.
 
 But a gateway is not obliged to say anything — OpenAI's own `/v1/models`
-schema is just `{id, object, created, owned_by}` — so when yours is silent or
-wrong, set it yourself:
+schema is just `{id, object, created, owned_by}` — so when every layer comes
+up empty the picker shows `auto` and the turn runs on the conservative
+default. For that case:
 
-> In the model picker (**^/**), highlight a model and press **^W** to step
-> its window through `auto → 32k → 64k → 128k → 200k → 272k → 400k → 1M → 2M`
-> and back to `auto`. The choice is saved per **provider + model**, so the same
-> model id behind two gateways can carry two different windows.
+> | Variable | Effect |
+> |---|---|
+> | `AGENTTY_MAX_CONTEXT_TOKENS` | The window to assume when nothing else knows one. Spelled to mirror Claude Code's `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so it is guessable if you have hit this before. |
 
-An override always wins, including over a gateway that advertises a smaller
-window than it actually serves.
+It is consulted **last**, after the catalog, the probe and the model id, so it
+only speaks when nothing better did — it is global, and a session that reaches
+several models should not apply one number to all of them.
+
+In practice almost nothing needs it: between the `/v1/models` listing, the
+endpoint probes and models.dev, discovery covers nearly every provider agentty
+ships. What is left is the genuinely unknowable case — a private gateway
+serving an id no catalog has published.
 
 ## Retrieval (RAG)
 
@@ -119,6 +124,7 @@ common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
 | `AGENTTY_MCP_TIMEOUT_MS` · `AGENTTY_MCP_CONNECT_TIMEOUT_MS` | Per-call and initial-connect timeouts for MCP servers. |
 | `AGENTTY_MCP_TOOL_BUDGET` | Soft cap on total tools on the wire (native + enabled MCP), default 100. Past it, MCP tools are trimmed and the picker warns. `0` disables the cap; unparsable values keep the default. |
 | `AGENTTY_MCP_CLIENT_ID` | OAuth client id for MCP servers that require one. |
+| `AGENTTY_SUBAGENT_MAX_SECONDS` | Wall-clock ceiling for one `task` subagent run, default 900 (15 min). Bounds the case the turn cap cannot: a backend that keeps a stream technically alive without finishing it, where the per-stream budget alone allowed hours. On expiry the subagent stops and reports what it has, flagged incomplete. Values outside 1–86399 keep the default. For `agentty run`, `--timeout` overrides it. |
 | `AGENTTY_ACP_AGENTS` | Path to the ACP agent config (same precedence chain as MCP). |
 | `AGENTTY_ACP_ALLOW_PROJECT` | Allow a project-local ACP agent config. Off by default, same reasoning as MCP. |
 | `AGENTTY_NO_HOOKS` | Disable all lifecycle hooks for this run. |
@@ -129,6 +135,15 @@ common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
 | Variable | Effect |
 |----------|--------|
 | `AGENTTY_HOME` | Root for all agentty state (credentials, threads, settings, logs). Default `~/.agentty`. Point it at a scratch dir to sandbox a session. |
+| `AGENTTY_THREADS_DIR` | Conversation history. Default `<root>/threads`. Kept 0700. |
+| `AGENTTY_CREDENTIALS_DIR` | Sign-ins and API keys. Default `<root>/credentials`. Kept 0700. |
+| `AGENTTY_STATE_DIR` | Approval hashes for project MCP servers, hooks and skills. Default `<root>/state`. |
+| `AGENTTY_CACHE_DIR` | Refetchable data, the model catalog and update stamps. Default `<root>/cache`. Safe to delete. |
+| `AGENTTY_LOGS_DIR` | Diagnostic logs. Default `<root>/logs`. |
+| `AGENTTY_PROJECT_DIR` | The per-project root. Default `<project>/.agentty`. Each project gets its own subfolder under it. |
+| `AGENTTY_RAG_DIR` | Search indexes. Default `<project root>/cache`. Safe to delete, the next search rebuilds. |
+| `AGENTTY_PROJECT_STATE_DIR` | Search feedback. Default `<project root>/state`. |
+| `AGENTTY_THREADS_KEEP_DAYS` | Delete threads idle this many days, once a day. Unset keeps everything. |
 | `AGENTTY_ENCRYPT_PASSPHRASE` / `AGENTTY_PASSPHRASE` | Passphrase for the encrypted credential store — for headless machines where no prompt is possible. |
 | `AGENTTY_USE_KEYSTORE` | Use the OS keychain for credentials instead of the file store. |
 | `AGENTTY_KDF` | Key-derivation parameters for the credential store. Change only if you know why. |
@@ -139,6 +154,79 @@ common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
 | `AGENTTY_AIRGAP_SSH` | SSH target for airgap mode. See **[Airgap](/docs/airgap)**. |
 | `AGENTTY_NO_SSH_THROTTLE` | Skip render throttling over SSH. A fast LAN hop doesn't need it. |
 | `AGENTTY_NO_UPDATE_CHECK` | Disable the background update check (also implied by airgap mode). |
+
+### Keeping config local and bulk elsewhere
+
+`AGENTTY_HOME` moves everything. The per-directory variables move one thing
+each, usually the parts that grow:
+
+```sh
+export AGENTTY_THREADS_DIR=/mnt/data/agentty/threads
+export AGENTTY_LOGS_DIR=/mnt/data/agentty/logs
+```
+
+Use `agentty config move threads /mnt/data/agentty/threads` to bring
+existing data along; it prints the export line to add.
+
+See [Storage](/docs/storage) for every file and how long it stays.
+
+### Retrieval indexes are per-project
+
+`AGENTTY_RAG_DIR` is the odd one out, because the data is. Retrieval indexes
+are keyed to the tree that produced them — they are meaningless away from it,
+and sharing one between unrelated checkouts would invalidate it constantly —
+so they default to `<project>/.agentty` rather than anywhere under
+`AGENTTY_HOME`. Only `AGENTTY_RAG_DIR` and `AGENTTY_PROJECT_DIR` move them.
+
+They are also the biggest thing agentty writes per project: on the agentty
+repo itself, 31 MB of code index and 7 MB of docs index. If your code already
+lives on a roomy disk they follow it and there is nothing to do. If it does
+not:
+
+```sh
+export AGENTTY_RAG_DIR=/mnt/data/agentty/rag
+```
+
+With the override set, each project gets its own readable subdirectory
+(`myrepo-04b42962/`) so two checkouts pointed at one location do not fight
+over the same file.
+
+The "project" is the nearest enclosing directory containing `.git`,
+`.agentty`, `.hg` or `.svn` — **not** the directory you launched from. So
+`cd src/ && agentty` reuses the index at the repo root instead of building a
+second one beside it.
+
+#### Superseded indexes are reclaimed
+
+The filename carries an identity tag for the embedding backend that built it
+(`rag_code.e45ba1de.ragdb`), so changing backends can never serve vectors
+from an incompatible space. The cost is that the filename set grows every
+time you switch.
+
+After a successful index write, agentty deletes superseded variants — keeping
+the live one plus the most recent previous one, so A/B-ing two backends does
+not force a full rebuild each time you switch back. Untagged indexes from
+before the tag existed are removed outright: no current build can read them.
+
+Two deliberate limits. Variants newer than an hour are left alone, since
+another agentty process may be mid-write. And if any file in the directory
+cannot be examined, nothing is deleted at all — being wrong about what is
+present should cost disk, not data.
+
+Details worth knowing:
+
+- A **relative** value is resolved against the root, not your current
+  directory — `AGENTTY_LOGS_DIR=logs2` always means `~/.agentty/logs2`.
+- An **empty** value counts as unset, so an exported-but-blank variable
+  relocates nothing.
+- If a directory **can't be created** (unmounted drive, a file in the way),
+  agentty prints one warning and falls back to the default rather than losing
+  the data silently.
+- An overridden threads directory is forced to `0700`, because conversation
+  history is as sensitive as the credentials it used to sit beside.
+
+Symlinking the subdirectories works too, and predates these variables:
+`ln -s /mnt/data/agentty-logs ~/.agentty/logs`.
 
 ## Interface
 
@@ -162,7 +250,6 @@ Not for normal use. Listed so a reader of the source isn't left guessing.
 
 | Variable | Effect |
 |----------|--------|
-| `AGENTTY_CACHE_PROF` · `AGENTTY_LOAD_PROF` · `AGENTTY_STREAM_PROF` · `AGENTTY_VIEW_PROF` | Profiling counters for the render cache, thread load, streaming, and view paths. |
 | `AGENTTY_STRICT_TEST_ROOT` · `AGENTTY_TEST_FAKE_PASSWD_HOME` | Test-harness isolation: enforce a sandboxed user root and fake the passwd home lookup. |
 | `AGENTTY_UNDER_TEST` | Set by the test mains before anything renders: arms the user-root tripwire so a test can never touch the real `~/.agentty`. |
 

@@ -111,7 +111,7 @@ private:
 
 Model seeded() {
     app::install_deps(app::Deps{
-        .stream = [](provider::Request, provider::EventSink) {},
+        .stream = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread = [](const Thread&) {},
         .load_threads = [] { return std::vector<Thread>{}; },
         .load_thread = [](const ThreadId&) { return std::optional<Thread>{}; },
@@ -122,6 +122,9 @@ Model seeded() {
     });
 
     Model m;
+    // A truecolor terminal, stated in the Model: themes only paint at
+    // truecolor/256, and the view reads the tier from m.env.
+    m.env.terminal.tier = maya::theme::ColorTier::TrueColor;
     for (int i = 0; i < 40; ++i) {
         Message msg;
         msg.role = (i % 2 == 0) ? Role::User : Role::Assistant;
@@ -183,7 +186,7 @@ int main() {
             const bool moved = (cur != prev);
             std::printf("    %-4s theme=%-22s hash=%s screen %s\n",
                         dir > 0 ? "down" : "up",
-                        m.d.ui.theme.empty() ? "native" : m.d.ui.theme.c_str(),
+                        m.d.ui().theme.empty() ? "native" : m.d.ui().theme.c_str(),
                         hash_moved ? "moved " : "SAME  ",
                         moved ? "changed" : "DID NOT CHANGE");
             if (!moved) ++dead;
@@ -212,7 +215,7 @@ int main() {
             std::string cur = scr.frame(m);
             const bool moved = (cur != prev);
             std::printf("    down theme=%-22s screen %s\n",
-                        m.d.ui.theme.empty() ? "native" : m.d.ui.theme.c_str(),
+                        m.d.ui().theme.empty() ? "native" : m.d.ui().theme.c_str(),
                         moved ? "changed" : "DID NOT CHANGE");
             if (!moved) ++dead;
             prev = std::move(cur);
@@ -232,15 +235,15 @@ int main() {
         m = app::update(std::move(m), Msg{AppearancePickTheme{}}).first;
 
         scr.frame(m);
-        const std::string theme_at_start = m.d.ui.theme;
+        const std::string theme_at_start = m.d.ui().theme;
 
         m = app::update(std::move(m), Msg{AppearanceThemeMove{+1}}).first;
         const std::string away_frame  = scr.frame(m);
-        const std::string theme_away  = m.d.ui.theme;
+        const std::string theme_away  = m.d.ui().theme;
 
         m = app::update(std::move(m), Msg{AppearanceThemeMove{-1}}).first;
         const std::string back_frame  = scr.frame(m);
-        const std::string theme_back  = m.d.ui.theme;
+        const std::string theme_back  = m.d.ui().theme;
 
         std::printf("leave a row and come back\n");
         std::printf("    start=%s  away=%s  back=%s\n",

@@ -2,12 +2,13 @@
 
 #include "agentty/mcp/client.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
+#include "agentty/tool/web_search_policy.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <format>
 #include <memory>
-#include <mutex>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -33,6 +34,7 @@ std::string_view to_string(ErrorKind k) noexcept {
         case ErrorKind::Subprocess:     return "subprocess failed";
         case ErrorKind::Io:             return "io";
         case ErrorKind::OutOfWorkspace: return "out of workspace";
+        case ErrorKind::Denied:         return "denied";
         case ErrorKind::Unknown:        return "unknown";
     }
     return "unknown";
@@ -66,17 +68,6 @@ std::string to_string(EffectSet e) {
     add(Effect::ReadFs);
     return out;
 }
-
-// ── Live progress sink (thread-local implementation) ────────────────────
-//
-// thread_local so the cmd runner's dispatch lambda can be captured without
-// cross-thread synchronisation — each tool runs on its own worker, and
-// cmd_factory installs/clears the sink on that worker via a RAII Scope.
-// Subprocess runners (see util/subprocess.cpp) call progress::emit from the
-// same thread, so it's a plain load from TLS — no atomics, no locking.
-// The tools::progress sink itself now lives in its own TU (tool/progress.cpp)
-// so subprocess-only consumers can link it without pulling in build_registry()
-// and the MCP bridge behind it.
 
 namespace {
 
@@ -114,109 +105,118 @@ const std::vector<ToolDef>& native_registry() {
 }
 
 namespace {
-// Published snapshots are immutable and retained for process lifetime because
-// dispatch resolves a ToolDef pointer once, drops the cache lock, then may run
-// for minutes. Retention prevents a concurrent tools/list_changed refresh from
-// invalidating that pointer.
+// Snapshots are immutable and never freed: dispatch resolves a ToolDef
+// pointer once and may run for minutes, so a refresh must not invalidate it.
+// Each snapshot keeps the one it replaced alive through `prev`.
 struct Snapshot {
     std::vector<ToolDef> tools;
     std::unordered_map<std::string, const ToolDef*> idx;
+    unsigned long generation = 0;
+    bool stale = false;   // marker published by invalidation; never served
+    std::shared_ptr<const Snapshot> prev;
 };
 
-struct WireCache {
-    std::mutex mu;
-    unsigned long generation = static_cast<unsigned long>(-1);
-    bool connected = false;
-    // True while some thread is INSIDE connect_initial_mcp() with mu
-    // RELEASED (see refresh_wire_cache). Latecomers must not wait — they
-    // get the native-only snapshot below and the full set on their next
-    // access after the connect publishes.
-    bool connecting = false;
-    std::vector<ToolDef> initial_mcp;
-    std::shared_ptr<const Snapshot> current;
-    // Native-tools-only snapshot served while `connecting`. Cached apart
-    // from `current` so the generation-equality fast path can never keep
-    // serving it after the real connect lands.
-    std::shared_ptr<const Snapshot> native_only;
-    std::vector<std::shared_ptr<const Snapshot>> retired;
-};
+enum class Phase { Idle, Connecting, Connected };
+// Lock-free: registry() is read from everywhere (views, lock bodies, tool
+// workers), so the connect claim is one atomic and the first connect's
+// result is published once. No capability on the catalog path.
+std::atomic<Phase>& connect_phase() { static std::atomic<Phase> p{Phase::Idle}; return p; }
+maya::published<const std::vector<ToolDef>>& initial_mcp() {
+    static auto* s = new maya::published<const std::vector<ToolDef>>;
+    return *s;
+}
+// Leaked on purpose: snapshots live for the whole process, and tearing down
+// a long `prev` chain at exit would only recurse.
+maya::published<const Snapshot>& catalog() {
+    static auto* c = new maya::published<const Snapshot>;
+    return *c;
+}
 
-WireCache& wire_cache() { static WireCache c; return c; }
+void index(Snapshot& s) {
+    s.idx.reserve(s.tools.size());
+    for (const auto& tool : s.tools) s.idx.emplace(tool.name.value, &tool);
+}
 
-std::shared_ptr<const Snapshot> refresh_wire_cache(std::unique_lock<std::mutex>& lk,
-                                                   WireCache& c) {
-    if (!c.connected) {
-        if (c.connecting) {
-            // Another thread is mid-handshake. DO NOT WAIT: the connect is
-            // bounded by a 15 s deadline, and the caller may be the UI
-            // thread (needs_permission on a streaming tool call, a panel
-            // action) — blocking it here froze the whole app for the
-            // handshake's duration whenever input raced the startup warm.
-            // Serve agentty's native tools now; the full set appears on
-            // the first access after the connect publishes.
-            if (!c.native_only) {
-                auto ns = std::make_shared<Snapshot>();
-                ns->tools = native_registry();
-                ns->idx.reserve(ns->tools.size());
-                for (const auto& tool : ns->tools)
-                    ns->idx.emplace(tool.name.value, &tool);
-                c.native_only = std::move(ns);
-            }
-            return c.native_only;
-        }
-        // First caller pays for the connect — but WITHOUT the lock, so
-        // every other thread stays free. connect_initial_mcp() has its own
-        // serialization (bridge.cpp g_connect_mu); `connecting` keeps a
-        // second cold caller from queuing on that inner mutex too.
-        c.connecting = true;
-        lk.unlock();
+// Served while another thread is mid-connect, so nobody waits on it.
+std::shared_ptr<const Snapshot> native_only() {
+    static const std::shared_ptr<const Snapshot> s = [] {
+        auto ns = std::make_shared<Snapshot>();
+        ns->tools = native_registry();
+        index(*ns);
+        return std::shared_ptr<const Snapshot>(std::move(ns));
+    }();
+    return s;
+}
+
+std::shared_ptr<const Snapshot> refresh_wire_cache() {
+    // The first caller connects external MCP; anyone arriving meanwhile gets
+    // the native tools right away (it may be the UI thread, and the connect
+    // can take up to 15 s).
+    enum class Claim { Mine, Busy, Done };
+    const Claim claim = [] {
+        Phase expect = Phase::Idle;
+        if (connect_phase().compare_exchange_strong(expect, Phase::Connecting))
+            return Claim::Mine;
+        return expect == Phase::Connected ? Claim::Done : Claim::Busy;
+    }();
+    if (claim == Claim::Busy) return native_only();
+    if (claim == Claim::Mine) {
         std::vector<ToolDef> ext;
         try {
             ext = connect_initial_mcp();
         } catch (...) {
-            lk.lock();
-            c.connecting = false;
+            connect_phase().store(Phase::Idle);
             throw;
         }
-        lk.lock();
-        c.initial_mcp = std::move(ext);
-        c.connecting  = false;
-        c.connected   = true;
-        // Force a rebuild below: the pool generation may still equal the
-        // pre-connect value (0), so the equality fast path must not serve
-        // a pre-connect snapshot.
-        if (c.current) { c.retired.push_back(c.current); c.current.reset(); }
+        initial_mcp().publish(std::make_shared<const std::vector<ToolDef>>(std::move(ext)));
+        connect_phase().store(Phase::Connected);
     }
 
-    const unsigned long generation = mcp::mcp_generation();
-    if (c.current && c.generation == generation) return c.current;
+    for (;;) {
+        auto cur = catalog().current();
+        const unsigned long generation = mcp::mcp_generation();
+        if (cur && !cur->stale && cur->generation == generation) return cur;
 
-    std::vector<ToolDef> external = generation == 0
-        ? c.initial_mcp
-        : mcp::mcp_tools_live();
+        std::vector<ToolDef> external;
+        if (generation == 0) {
+            if (auto init = initial_mcp().current()) external = *init;
+        } else {
+            external = mcp::mcp_tools_live();
+        }
 
-    auto next = std::make_shared<Snapshot>();
-    next->tools.reserve(native_registry().size() + external.size());
-    next->tools.insert(next->tools.end(), native_registry().begin(), native_registry().end());
+        auto next = std::make_shared<Snapshot>();
+        next->tools.reserve(native_registry().size() + external.size());
+        next->tools.insert(next->tools.end(), native_registry().begin(), native_registry().end());
 
-    // External names are stable and namespaced, but still reject duplicates
-    // defensively rather than sending ambiguous schemas to a model provider.
-    std::unordered_map<std::string, bool> names;
-    names.reserve(next->tools.capacity());
-    for (const auto& tool : next->tools) names.emplace(tool.name.value, true);
-    for (auto& tool : external) {
-        if (!names.emplace(tool.name.value, true).second) continue;
-        next->tools.push_back(std::move(tool));
+        // External names are namespaced, but still drop duplicates rather
+        // than send ambiguous schemas to a provider.
+        std::unordered_map<std::string, bool> names;
+        names.reserve(next->tools.capacity());
+        for (const auto& tool : next->tools) names.emplace(tool.name.value, true);
+        for (auto& tool : external) {
+            if (!names.emplace(tool.name.value, true).second) continue;
+            next->tools.push_back(std::move(tool));
+        }
+        index(*next);
+        next->generation = generation;
+        next->prev = cur;
+
+        std::shared_ptr<const Snapshot> out = std::move(next);
+        if (catalog().publish_if(cur, out)) return out;
+        // Someone else published (a rebuild or an invalidation); re-check.
     }
+}
 
-    next->idx.reserve(next->tools.size());
-    for (const auto& tool : next->tools)
-        next->idx.emplace(tool.name.value, &tool);
-
-    if (c.current) c.retired.push_back(c.current);
-    c.current = std::move(next);
-    c.generation = generation;
-    return c.current;
+// Mark the current catalog stale so the next access rebuilds it.
+void invalidate_catalog() {
+    for (;;) {
+        auto cur = catalog().current();
+        if (!cur) return;
+        auto marker = std::make_shared<Snapshot>();
+        marker->stale = true;
+        marker->prev = cur;
+        if (catalog().publish_if(cur, std::move(marker))) return;
+    }
 }
 } // namespace
 
@@ -270,12 +270,7 @@ std::string unknown_tool_error(std::string_view name) {
 }
 
 const ToolDef* find(std::string_view name) {
-    auto& cache = wire_cache();
-    std::shared_ptr<const Snapshot> snapshot;
-    {
-        std::unique_lock<std::mutex> lock(cache.mu);
-        snapshot = refresh_wire_cache(lock, cache);
-    }
+    const auto snapshot = refresh_wire_cache();
     if (auto it = snapshot->idx.find(std::string{name}); it != snapshot->idx.end())
         return it->second;
     // Miss: retry once under the canonical name so a legacy alias resolves.
@@ -286,32 +281,36 @@ const ToolDef* find(std::string_view name) {
 }
 
 const std::vector<ToolDef>& wire_tools() {
-    auto& cache = wire_cache();
-    std::shared_ptr<const Snapshot> snapshot;
-    {
-        std::unique_lock<std::mutex> lock(cache.mu);
-        snapshot = refresh_wire_cache(lock, cache);
-    }
+    const auto snapshot = refresh_wire_cache();
     return snapshot->tools;
 }
 
 std::vector<ToolDef> wire_tools_snapshot() {
-    // Hold the snapshot's shared_ptr across the copy so a concurrent
-    // reload swapping c.current can't free it mid-copy, and RETURN a value
-    // the caller owns — no reference into cache memory escapes. This is the
-    // safe accessor for any thread that may overlap reload_mcp_plugins().
-    auto& cache = wire_cache();
-    std::shared_ptr<const Snapshot> snapshot;
-    {
-        std::unique_lock<std::mutex> lock(cache.mu);
-        snapshot = refresh_wire_cache(lock, cache);
-    }
+    // A copy the caller owns; safe on any thread that may overlap a reload.
+    const auto snapshot = refresh_wire_cache();
     return snapshot->tools;   // deep copy while snapshot keeps it alive
+}
+
+bool withheld_by_policy(const ToolDef& tool, bool web_search_enabled) {
+    return !web_search_enabled && tool.origin == ToolOrigin::Native
+        && tool.name.value == "web_search";
+}
+
+bool withheld_by_policy(const ToolDef& tool) {
+    return withheld_by_policy(
+        tool, web_search_cfg::mode(web_search_policy::current()) != web_search_cfg::Mode::Off);
 }
 
 std::vector<const ToolDef*> select_wire_tools(
     std::string_view query, std::size_t max_external) {
-    const auto& catalog = wire_tools();
+    return select_wire_tools_from(wire_tools(), query, max_external,
+                                  web_search_cfg::mode(web_search_policy::current())
+                                      != web_search_cfg::Mode::Off);
+}
+
+std::vector<const ToolDef*> select_wire_tools_from(
+    const std::vector<ToolDef>& catalog, std::string_view query, std::size_t max_external,
+    bool web_search_enabled) {
     std::vector<const ToolDef*> selected;
     std::vector<std::pair<int, const ToolDef*>> candidates;
     selected.reserve(catalog.size());
@@ -333,6 +332,14 @@ std::vector<const ToolDef*> select_wire_tools(
         // schema) never enter the wire list — the proxy already injected
         // their schema into the request; ours would collide with it.
         if (!tool.advertise) continue;
+        // Settings → Web Search can switch web_search off. Dropped here, by
+        // name and before the native fast path, so it leaves the wire in every
+        // mode that builds a request through this function. Removing it keeps
+        // the remaining tools in catalog order, so the tools block stays
+        // byte-stable from one turn to the next once the setting is chosen.
+        // The same predicate gates `agentty mcp-serve` (mcp/serve.cpp).
+        if (withheld_by_policy(tool, web_search_enabled))
+            continue;
         if (tool.origin == ToolOrigin::Native || tool.always_expose) {
             selected.push_back(&tool);
             continue;
@@ -355,8 +362,16 @@ std::vector<const ToolDef*> select_wire_tools(
     }
     std::stable_sort(candidates.begin(), candidates.end(),
         [](const auto& a, const auto& b) { return a.first > b.first; });
-    for (std::size_t i = 0; i < max_external; ++i)
-        selected.push_back(candidates[i].second);
+    // Score decides WHICH tools make the cut, never their ORDER on the wire.
+    // The tools block is the head of the prompt-cache prefix (tools → system
+    // → messages), so emitting in score order reordered it on every user
+    // message even when the chosen set was the same, busting the whole cache.
+    // Emit the chosen ones in catalog order: same set, same bytes.
+    std::vector<const ToolDef*> chosen;
+    chosen.reserve(max_external);
+    for (std::size_t i = 0; i < max_external; ++i) chosen.push_back(candidates[i].second);
+    std::ranges::sort(chosen, std::less<>{});   // catalog is one contiguous vector
+    for (const auto* t : chosen) selected.push_back(t);
     return selected;
 }
 
@@ -365,53 +380,46 @@ unsigned long mcp_generation() noexcept {
 }
 
 std::size_t reload_mcp_plugins() {
-    // Serialize + coalesce reloads. Each plugin add/remove/toggle fires this
-    // on a detached thread; the connect handshake can take seconds (bounded
-    // by the bridge's 15s deadline). Without a guard, rapid toggles (disable
-    // then re-enable) stack multiple reloads that each re-spawn the server
-    // and race on the process-wide pool handle — the observed hang.
-    //
-    // Design: one reload runs at a time (reload_mu). A request that arrives
-    // while a reload is in flight sets `pending` and returns immediately —
-    // the running reload will loop once more to pick up the newer config,
-    // so no edit is ever lost. This is the classic coalescing-worker
-    // pattern: at most one extra pass, never a lost update, never a stack
-    // of concurrent spawns.
-    static std::mutex reload_mu;
-    static std::atomic<bool> pending{false};
+    // One reload at a time. Each plugin toggle fires this on its own thread
+    // and a reconnect can take seconds, so a request that lands mid-reload
+    // just sets `pending` and returns; the running reload loops once more to
+    // pick up the newer config. Checking `pending` and clearing `running`
+    // happen in one CAS, so no request is lost.
+    // Both flags live in one atomic word, so each step is a single CAS and
+    // no lock (or capability) is needed on this path.
+    constexpr unsigned kRunning = 1u, kPending = 2u;
+    static std::atomic<unsigned> state{0};
 
-    std::unique_lock<std::mutex> lk(reload_mu, std::try_to_lock);
-    if (!lk.owns_lock()) {
-        pending.store(true, std::memory_order_release);
-        return 0;   // the in-flight reload will re-run for our edit
+    unsigned cur = state.load();
+    for (;;) {
+        const unsigned want = (cur & kRunning) ? (cur | kPending) : kRunning;
+        if (state.compare_exchange_weak(cur, want)) break;
     }
+    if (cur & kRunning) return 0;   // someone else is reloading; they'll loop
 
     std::size_t n = 0;
-    do {
-        pending.store(false, std::memory_order_release);
+    for (;;) {
+        state.fetch_and(~kPending);
         n = mcp::mcp_reload();
-        {
-            auto& c = wire_cache();
-            std::lock_guard<std::mutex> clk(c.mu);
-            c.generation = static_cast<unsigned long>(-1);
+        invalidate_catalog();
+        unsigned s = state.load();
+        bool again = false;
+        for (;;) {
+            again = (s & kPending) != 0;
+            if (again) break;   // keep running; the next pass clears pending
+            if (state.compare_exchange_weak(s, s & ~kRunning)) break;
         }
-        // If a toggle landed during mcp_reload(), loop once more so the
-        // config it wrote is reflected. Bounded: each pass clears the flag
-        // first, so it only re-runs for edits that arrived AFTER this pass
-        // started reading.
-    } while (pending.load(std::memory_order_acquire));
+        if (!again) break;
+    }
     return n;
 }
 
-void invalidate_mcp_catalog() {
-    // No re-spawn: bump the pool generation (so refresh_wire_cache
-    // rebuilds) and drop the published snapshot. project_tools re-reads the
-    // live tools.exclude on the rebuild, so an enable/disable toggle takes
-    // effect on the next catalog access with zero server churn.
+void invalidate_mcp_catalog(Io) {
+    // No re-spawn: bump the pool generation and mark the catalog stale.
+    // project_tools re-reads tools.exclude on the rebuild, so an
+    // enable/disable toggle lands on the next access with no server churn.
     mcp::mcp_bump_generation();
-    auto& c = wire_cache();
-    std::lock_guard<std::mutex> clk(c.mu);
-    c.generation = static_cast<unsigned long>(-1);
+    invalidate_catalog();
 }
 
 } // namespace agentty::tools

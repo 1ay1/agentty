@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
 # resync.sh — pull every in-tree submodule to its tracking branch, then rebuild.
 #
-# Normal builds deliberately DO NOT touch the submodules (so an unchanged maya /
-# mcp-cpp / rag-cpp / acp-cpp never triggers a needless recompile of the ~64 TUs
-# that include their headers). Run THIS when you actually want the latest
-# submodule code:
+# Normal builds deliberately DO NOT touch the submodules (so an unchanged
+# third_party/maya / mcp-cpp / rag-cpp / acp-cpp never triggers a needless
+# recompile of the ~64 TUs that include their headers). Run THIS when you
+# actually want the latest submodule code:
 #
 #   ./resync.sh              # sync all submodules + incremental rebuild
 #   ./resync.sh -B build-rel # use a specific build dir (default: build)
@@ -43,7 +43,7 @@ if [ ! -d "$BUILD_DIR" ]; then
   exit 1
 fi
 
-echo ">> syncing submodules (maya, mcp-cpp, acp-cpp, rag-cpp) …"
+echo ">> syncing submodules (third_party/{maya,mcp-cpp,acp-cpp,rag-cpp}) …"
 cmake --build "$BUILD_DIR" --target submodules_sync
 
 echo ">> incremental rebuild (-j$JOBS) …"

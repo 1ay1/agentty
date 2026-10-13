@@ -1,7 +1,7 @@
 // Smoke test for the line-DP fuzzy matcher. Builds against the mcp-cpp
 // fuzzy_match TU directly (no GoogleTest dependency). That TU is the SINGLE
 // source of truth for the edit tool's matcher — the agentty-local fork was
-// removed; the `edit` tool (mcp-cpp/src/tools/fs_edit.cpp) uses this one.
+// removed; the `edit` tool (third_party/mcp-cpp/src/tools/fs_edit.cpp) uses this one.
 //
 // Cases mirror Zed's StreamingFuzzyMatcher test suite — they're the
 // regressions we want to keep passing.

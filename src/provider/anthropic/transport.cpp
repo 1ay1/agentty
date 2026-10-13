@@ -507,7 +507,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         body_str.replace(pos, kDumpedPlaceholder.size(), messages_str);
     }
 
-    AGT_LOG(Wire, Trace, "anthropic.request.body", "raw={}", body_str);
+    AGT_LOG(Wire, Trace, "anthropic.request.body", "bytes={} raw={}", body_str.size(), ::agentty::logx::body(body_str));
 
     StreamCtx ctx;
     ctx.sink = std::move(sink);
@@ -557,7 +557,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // but finish_stream needs it to distinguish a user cancel from a transport
     // error at the post-loop.
     http::CancelTokenPtr cancel_for_end = cancel;
-    auto result = http::default_client().stream(hreq, std::move(handler),
+    auto result = http::default_client(::agentty::IoAccess::grant()).stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
     // Uniform end-of-turn pair via the scaffold; thinking_deltas appended so
@@ -603,12 +603,13 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             return std::string{"http: "} + result.error().render();
         },
         .on_any_end = [&ctx]() {
-            if (ctx.in_tool_use) {
-                ctx.sink(StreamToolUseEnd{ToolCallId{ctx.current_tool_id}});
-                ctx.in_tool_use = false;
-                ctx.current_tool_id.clear();
-                ctx.current_tool_name.clear();
-            }
+            // The stream ended without the server closing its blocks — an
+            // abort, a transport error, a truncated response. Close every
+            // one that is still open; a tool call left pending here wedges
+            // the turn. Taking the lot, so there is no order to get wrong.
+            for (const auto& b : ctx.tool_blocks)
+                ctx.sink(StreamToolUseEnd{ToolCallId{b.id}});
+            ctx.tool_blocks.clear();
         },
     });
 }
@@ -635,7 +636,7 @@ std::vector<Msg> parse_sse_for_test(
     return out;
 }
 
-std::vector<ModelInfo> list_models(const AuthHeader& auth) {
+std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth) {
     const bool is_oauth = std::holds_alternative<BearerHeader>(auth);
 
     // Claude Code surfaces a 1M-context `[1m]` VARIANT per suffix-capable
@@ -677,7 +678,7 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth) {
     tos.connect = std::chrono::milliseconds(5'000);
     tos.total   = std::chrono::milliseconds(10'000);
 
-    auto resp = http::default_client().send(hreq, tos);
+    auto resp = http::default_client(io).send(hreq, tos);
     if (!resp || resp->status != 200) return seed();
 
     try {

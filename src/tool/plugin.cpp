@@ -1,4 +1,4 @@
-// plugin.cpp — the MCP plugin manager. See plugin.hpp for the contract.
+// plugin.cpp â€” the MCP plugin manager. See plugin.hpp for the contract.
 // The editing functions are pure JSON-file surgery (testable without a
 // terminal); cli() is the argv shell over them.
 
@@ -6,18 +6,23 @@
 #include "agentty/util/user_root.hpp"
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kMcpApprovals â€” the one name
+#include "agentty/auth/auth.hpp"        // CrossProcessFileLock
+
+#include "agentty/util/sendable.hpp"  // json is Sendable
 
 #include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #ifndef _WIN32
@@ -34,23 +39,32 @@ namespace agentty::tools::plugin {
 
 namespace {
 
-// All config MUTATIONS (add/remove/toggle) serialize behind this mutex. Each
-// mutator is a load→modify→store cycle with no cross-process CAS; the reducer
-// fires them on DETACHED worker threads (a "disable tool + disable server"
-// pair, or rapid toggles), so without serialization two loads race and the
-// second store clobbers the first's edit (classic lost update). One in-process
-// mutex makes every load+store atomic w.r.t. other agentty mutations. (A
-// concurrent EXTERNAL editor is still handled by the unique-temp + atomic
-// rename in store(), so at worst one side's write wins wholesale — never a
-// torn file.)
-[[nodiscard]] std::mutex& mutation_mutex() {
-    static std::mutex m;
+// All config MUTATIONS (add/remove/toggle) serialize behind one lock. Each
+// mutator is a loadâ†’modifyâ†’store cycle, and the reducer fires them on
+// DETACHED worker threads (a "disable tool + disable server" pair, or rapid
+// toggles), so without serialization two loads race and the second store
+// clobbers the first's edit (classic lost update).
+//
+// That lock covers THIS process. It is not enough on its own: two agentty
+// instances in one workspace -- a TUI and `agentty plugin add` in another
+// terminal, or two panes -- have separate locks and race exactly the same
+// way. Measured before fixing: 20 of 20 concurrent `plugin add` pairs lost
+// one of the two servers.
+//
+// So a mutator takes BOTH: an in-process lane against our own threads, then
+// auth::CrossProcessFileLock against other agentty processes. See mutate().
+//
+// The lane is a LEAF lock: its body does file IO and nothing else, so the
+// public mutators take `const maya::below<maya::leaf>&`.
+struct Mutations {};
+[[nodiscard]] maya::guarded<Mutations>& mutations() {
+    static maya::guarded<Mutations> m;
     return m;
 }
 
 // Read an entry's `disabled` flag WITHOUT throwing on a malformed value. A
 // hand-edited `"disabled": "true"` (string, not bool) makes nlohmann's
-// value("disabled", false) throw type_error.302 — which would crash a toggle
+// value("disabled", false) throw type_error.302 â€” which would crash a toggle
 // or the connect loop. Treat any non-bool as "not disabled" (fail-open: a
 // garbled flag never silently hides a server).
 [[nodiscard]] bool entry_disabled(const json& entry) noexcept {
@@ -60,7 +74,7 @@ namespace {
 }
 
 // Read + parse the file. Distinguishes "absent" (fresh empty doc, ok=true)
-// from "present but broken" (ok=false — never rewrite a file we couldn't
+// from "present but broken" (ok=false â€” never rewrite a file we couldn't
 // parse; a typo'd hand-edit must not be destroyed by `plugin add`).
 struct Loaded {
     json doc = json::object();
@@ -72,6 +86,21 @@ struct Loaded {
     Loaded out;
     std::error_code ec;
     if (!fs::exists(path, ec) || ec) return out;
+    // exists() is true for a DIRECTORY, and opening one succeeds on Linux --
+    // the failure surfaces later as an exception out of the first read,
+    // which nlohmann's noexcept parse does not catch. `mkdir mcp.json` used
+    // to abort the process with `basic_filebuf::underflow error reading the
+    // file: Is a directory`, naming neither agentty nor the path.
+    //
+    // Treat it as "present but broken" rather than absent: ok=false is what
+    // stops every writer here from clobbering a file it could not read, and
+    // a directory in that position is exactly something we must not
+    // overwrite.
+    if (!fs::is_regular_file(path, ec)) {
+        out.existed = true;
+        out.ok = false;
+        return out;
+    }
     out.existed = true;
     std::ifstream f(path, std::ios::binary);
     if (!f) { out.ok = false; return out; }
@@ -94,9 +123,9 @@ struct Loaded {
     }
     // Write-then-rename for atomicity: a crash mid-write must not leave a
     // truncated mcp.json (which would then hit the ParseError refusal on
-    // every subsequent command — a self-inflicted lockout). The temp name is
-    // UNIQUE (pid + a monotonic counter) so two concurrent writers — our own
-    // detached mutators, or an external tool — never open, truncate, and
+    // every subsequent command â€” a self-inflicted lockout). The temp name is
+    // UNIQUE (pid + a monotonic counter) so two concurrent writers â€” our own
+    // detached mutators, or an external tool â€” never open, truncate, and
     // rename the SAME temp file (which would interleave into corruption).
     static std::atomic<unsigned long> seq{0};
     const fs::path tmp = target.string() + ".tmp."
@@ -110,6 +139,20 @@ struct Loaded {
         if (!f) { std::error_code rec; fs::remove(tmp, rec); return false; }
     }
     fs::rename(tmp, target, ec);
+#if defined(_WIN32)
+    // Windows refuses to replace a file that ANY process has open without
+    // FILE_SHARE_DELETE — and std::ifstream (every reader of this file,
+    // including is_server_disabled and the bridge) opens without it. A
+    // reader mid-load therefore made the rename fail with access denied /
+    // sharing violation and the edit was dropped (24 concurrent disables:
+    // 22 landed). Readers hold the file for microseconds, so a short
+    // bounded retry turns the transient collision into a delay.
+    for (int attempt = 0; ec && attempt < 50; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2 + attempt));
+        ec.clear();
+        fs::rename(tmp, target, ec);
+    }
+#endif
     if (ec) { std::error_code rec; fs::remove(tmp, rec); return false; }
     return true;
 }
@@ -126,20 +169,28 @@ struct Loaded {
 
 } // namespace
 
-fs::path config_path(bool project) {
+fs::path config_path(Io, bool project) {
+    return config_path(project, project ? fs::path{} : ::agentty::util::user_root());
+}
+
+fs::path config_path(bool project, const fs::path& user_root) {
     if (project) return fs::path{".agentty"} / "mcp.json";
-    auto root = ::agentty::util::user_root();
-    return (root.empty() ? fs::path{".agentty"} : root) / "mcp.json";
+    return (user_root.empty() ? fs::path{".agentty"} : user_root) / "mcp.json";
 }
 
 namespace {
-// Must match the bridge's kMcpApprovalsLeaf + hashing exactly — both sides
+// Must match the bridge's kMcpApprovalsLeaf + hashing exactly â€” both sides
 // read/write the SAME user-root store keyed by the SAME content hash.
-constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
+constexpr std::string_view kMcpApprovalsLeaf =
+    ::agentty::config::kMcpApprovals;
 
 // The current project mcp.json's content hash, or empty if there's no file.
-[[nodiscard]] std::string project_config_hash() {
-    const fs::path cfg = config_path(/*project=*/true);
+[[nodiscard]] std::string project_config_hash(Io io) {
+    const fs::path cfg = config_path(io, /*project=*/true);
+    // Same reason as load(): exists-and-opens is not the same as readable,
+    // and a directory here would throw out of the slurp below.
+    std::error_code ec;
+    if (!fs::is_regular_file(cfg, ec)) return {};
     std::ifstream in(cfg, std::ios::binary);
     if (!in) return {};
     std::string bytes((std::istreambuf_iterator<char>(in)),
@@ -148,18 +199,18 @@ constexpr char kMcpApprovalsLeaf[] = "mcp_approvals.json";
 }
 }  // namespace
 
-bool is_project_config_trusted() {
+bool is_project_config_trusted(Io io) {
     if (const char* e = std::getenv("AGENTTY_MCP_ALLOW_PROJECT");
         e && (e[0] == '1' || e[0] == 't' || e[0] == 'T'
            || e[0] == 'y' || e[0] == 'Y'))
         return true;
-    const std::string h = project_config_hash();
+    const std::string h = project_config_hash(io);
     if (h.empty()) return false;
     return scope::load_approvals(kMcpApprovalsLeaf).approved(h);
 }
 
-bool approve_project_config() {
-    const std::string h = project_config_hash();
+bool approve_project_config(Io io) {
+    const std::string h = project_config_hash(io);
     if (h.empty()) return false;   // nothing to approve
     scope::Approvals a = scope::load_approvals(kMcpApprovalsLeaf);
     a.approve(h);
@@ -168,7 +219,7 @@ bool approve_project_config() {
 
 // The spawn-identity hash for one server: the command + url + args that would
 // actually run. Canonical + stable so the file side (plugin.cpp) and the live
-// side (bridge connect loop) agree. Empty command AND url → empty hash.
+// side (bridge connect loop) agree. Empty command AND url â†’ empty hash.
 std::string server_spec_hash(const std::string& command,
                              const std::string& url,
                              const std::vector<std::string>& args) {
@@ -205,16 +256,16 @@ namespace {
 }
 }  // namespace
 
-bool is_server_trusted(const fs::path& path, const std::string& name) {
-    // Blanket grants first: the env opt-in, then a whole-file approval — both
+bool is_server_trusted(Io io, const fs::path& path, const std::string& name) {
+    // Blanket grants first: the env opt-in, then a whole-file approval â€” both
     // keep working, so nothing that trusted a config before regresses.
-    if (is_project_config_trusted()) return true;
+    if (is_project_config_trusted(io)) return true;
     const std::string h = server_hash_from_file(path, name);
-    if (h.empty()) return false;   // http/no-command server — not gated here
+    if (h.empty()) return false;   // http/no-command server â€” not gated here
     return scope::load_approvals(kMcpApprovalsLeaf).approved(h);
 }
 
-bool approve_server(const fs::path& path, const std::string& name) {
+bool approve_server(Io, const fs::path& path, const std::string& name) {
     const std::string h = server_hash_from_file(path, name);
     if (h.empty()) return false;   // nothing spawnable to vouch for
     scope::Approvals a = scope::load_approvals(kMcpApprovalsLeaf);
@@ -222,15 +273,54 @@ bool approve_server(const fs::path& path, const std::string& name) {
     return scope::save_approvals(kMcpApprovalsLeaf, a);
 }
 
-EditResult add_server(const fs::path& path, const ServerSpec& spec,
+namespace {
+// One loadâ†’editâ†’store cycle under both locks. `edit` gets the parsed doc
+// and returns nullopt to write it back, or a result to stop without writing.
+//
+// Order is fixed (in-process first, then cross-process) and every mutator
+// goes through here, so two agentty processes cannot deadlock against each
+// other -- there is only ever one file lock held at a time per cycle.
+//
+// The file lock is BEST-EFFORT by design (see auth.hpp): on a filesystem
+// where it cannot be taken, held() is false and we proceed anyway. store()'s
+// unique-temp + atomic rename still guarantees no torn file -- at worst one
+// side's write wins wholesale, as against a hand editor.
+enum class Need { Any, Existing };
+using Edit = std::optional<EditResult>;
+
+template <class F, class... Args>
+EditResult mutate(const maya::below<maya::leaf>& cap, const fs::path& path, Need need, F edit,
+                  Args... args) {
+    (void)edit;   // captureless: called as F{} inside the lock
+    return mutations().with(cap, [](Mutations&, std::string p, Need n, Args... a) {
+        const fs::path target{p};
+        auth::CrossProcessFileLock file{target};
+        Loaded l = load(target);
+        if (n == Need::Existing && !l.existed) return EditResult::NotFound;
+        if (!l.ok) return EditResult::ParseError;
+        if (auto stop = F{}(l.doc, std::move(a)...)) return *stop;
+        return store(target, l.doc) ? EditResult::Ok : EditResult::IoError;
+    }, path.string(), need, std::move(args)...);
+}
+
+// The servers object (created if absent), and a named entry or null.
+json& servers_of(json& doc) {
+    const char* key = servers_key(doc);
+    if (!doc.contains(key) || !doc[key].is_object()) doc[key] = json::object();
+    return doc[key];
+}
+json* existing_entry(json& doc, const std::string& name) {
+    const char* key = servers_key(doc);
+    if (!doc.contains(key) || !doc[key].is_object() || !doc[key].contains(name))
+        return nullptr;
+    return &doc[key][name];
+}
+} // namespace
+
+EditResult add_server(Io /*io*/, const maya::below<maya::leaf>& cap, const fs::path& path, const ServerSpec& spec,
                       bool force) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
-    Loaded l = load(path);
-    if (!l.ok) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object())
-        l.doc[key] = json::object();
-    auto& servers = l.doc[key];
+    return mutate(cap, path, Need::Any, [](json& doc, ServerSpec spec, bool force) -> Edit {
+    auto& servers = servers_of(doc);
     if (servers.contains(spec.name) && !force)
         return EditResult::AlreadyExists;
     json entry;
@@ -253,19 +343,30 @@ EditResult add_server(const fs::path& path, const ServerSpec& spec,
     }
     // Overwrite-in-place (force) replaces the entry wholesale (documented).
     servers[spec.name] = std::move(entry);
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+    return std::nullopt;
+    }, spec, force);
 }
 
-EditResult update_server(const fs::path& path, const ServerSpec& spec) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
-    Loaded l = load(path);
-    if (!l.existed) return EditResult::NotFound;
-    if (!l.ok) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object()
-        || !l.doc[key].contains(spec.name))
-        return EditResult::NotFound;
-    json& entry = l.doc[key][spec.name];
+EditResult add_server_raw(Io, const maya::below<maya::leaf>& cap, const fs::path& path, const std::string& name,
+                          const json& entry, bool force) {
+    return mutate(cap, path, Need::Any, [](json& doc, std::string name, json entry, bool force) -> Edit {
+    if (!entry.is_object()) return EditResult::ParseError;
+    auto& servers = servers_of(doc);
+    if (servers.contains(name) && !force)
+        return EditResult::AlreadyExists;
+    // Verbatim. Every key the source carried -- env, headers, timeoutMs,
+    // tools.exclude -- survives, because the schema is the same one agentty
+    // reads. Rebuilding the entry from a ServerSpec is what loses them.
+    servers[name] = std::move(entry);
+    return std::nullopt;
+    }, name, entry, force);
+}
+
+EditResult update_server(Io, const maya::below<maya::leaf>& cap, const fs::path& path, const ServerSpec& spec) {
+    return mutate(cap, path, Need::Existing, [](json& doc, ServerSpec spec) -> Edit {
+    json* found = existing_entry(doc, spec.name);
+    if (!found) return EditResult::NotFound;
+    json& entry = *found;
     if (!entry.is_object()) entry = json::object();
 
     // Rewrite only what the spec owns; foreign keys (env, headers,
@@ -290,20 +391,16 @@ EditResult update_server(const fs::path& path, const ServerSpec& spec) {
         entry.erase("url");
         entry.erase("passthrough");
     }
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+    return std::nullopt;
+    }, spec);
 }
 
-EditResult remove_server(const fs::path& path, const std::string& name) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
-    Loaded l = load(path);
-    if (!l.existed) return EditResult::NotFound;
-    if (!l.ok) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object()
-        || !l.doc[key].contains(name))
-        return EditResult::NotFound;
-    l.doc[key].erase(name);
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+EditResult remove_server(Io, const maya::below<maya::leaf>& cap, const fs::path& path, const std::string& name) {
+    return mutate(cap, path, Need::Existing, [](json& doc, std::string name) -> Edit {
+        if (!existing_entry(doc, name)) return EditResult::NotFound;
+        doc[servers_key(doc)].erase(name);
+        return std::nullopt;
+    }, name);
 }
 
 std::vector<ServerSpec> list_servers(const fs::path& path) {
@@ -327,23 +424,16 @@ std::vector<ServerSpec> list_servers(const fs::path& path) {
     return out;
 }
 
-EditResult set_server_disabled(const fs::path& path, const std::string& name,
+EditResult set_server_disabled(Io, const maya::below<maya::leaf>& cap, const fs::path& path, const std::string& name,
                               bool disabled) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
-    Loaded l = load(path);
-    if (!l.existed) return EditResult::NotFound;
-    if (!l.ok) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object()
-        || !l.doc[key].contains(name))
-        return EditResult::NotFound;
-    json& entry = l.doc[key][name];
-    if (!entry.is_object()) return EditResult::NotFound;
-    const bool cur = entry_disabled(entry);
-    if (cur == disabled) return EditResult::Ok;   // no-op-Ok
-    if (disabled) entry["disabled"] = true;
-    else          entry.erase("disabled");        // absent == enabled (clean)
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+    return mutate(cap, path, Need::Existing, [](json& doc, std::string name, bool disabled) -> Edit {
+        json* entry = existing_entry(doc, name);
+        if (!entry || !entry->is_object()) return EditResult::NotFound;
+        if (entry_disabled(*entry) == disabled) return EditResult::Ok;   // no-op-Ok
+        if (disabled) (*entry)["disabled"] = true;
+        else          entry->erase("disabled");   // absent == enabled (clean)
+        return std::nullopt;
+    }, name, disabled);
 }
 
 bool is_server_disabled(const fs::path& path, const std::string& name) {
@@ -357,18 +447,13 @@ bool is_server_disabled(const fs::path& path, const std::string& name) {
     return entry_disabled(entry);
 }
 
-EditResult set_tool_enabled(const fs::path& path, const std::string& server,
+EditResult set_tool_enabled(Io, const maya::below<maya::leaf>& cap, const fs::path& path, const std::string& server,
                             const std::string& bare, bool enabled) {
-    std::lock_guard<std::mutex> lk(mutation_mutex());
-    Loaded l = load(path);
-    if (!l.existed) return EditResult::NotFound;
-    if (!l.ok) return EditResult::ParseError;
-    const char* key = servers_key(l.doc);
-    if (!l.doc.contains(key) || !l.doc[key].is_object()
-        || !l.doc[key].contains(server))
-        return EditResult::NotFound;
-    json& entry = l.doc[key][server];
-    if (!entry.is_object()) return EditResult::NotFound;
+    return mutate(cap, path, Need::Existing,
+                  [](json& doc, std::string server, std::string bare, bool enabled) -> Edit {
+    json* found = existing_entry(doc, server);
+    if (!found || !found->is_object()) return EditResult::NotFound;
+    json& entry = *found;
 
     // tools.exclude is the disabled set. Enabling removes from it;
     // disabling adds. Preserve any tools.include/pin the user set.
@@ -392,7 +477,8 @@ EditResult set_tool_enabled(const fs::path& path, const std::string& server,
     excl = std::move(rebuilt);
     if (excl.empty()) tools.erase("exclude");
     if (tools.empty()) entry.erase("tools");
-    return store(path, l.doc) ? EditResult::Ok : EditResult::IoError;
+    return std::nullopt;
+    }, server, bare, enabled);
 }
 
 bool is_tool_disabled(const fs::path& path, const std::string& server,
@@ -426,18 +512,18 @@ namespace {
 
 int usage() {
     std::fprintf(stderr,
-        "usage: agentty plugin <verb> …   (a plugin IS an MCP server entry)\n"
+        "usage: agentty plugin <verb> â€¦   (a plugin IS an MCP server entry)\n"
         "\n"
-        "  add <name> --uvx <pypi-pkg> [extra args…]\n"
+        "  add <name> --uvx <pypi-pkg> [extra argsâ€¦]\n"
         "        Python plugin from PyPI, run via uv (auto-installs,\n"
-        "        isolated env): command = uvx <pkg> …\n"
-        "  add <name> --python <script.py> [extra args…]\n"
-        "        Local Python script: command = python3 <script> …\n"
-        "  add <name> --npx <npm-pkg> [extra args…]\n"
-        "        Node plugin from npm: command = npx -y <pkg> …\n"
+        "        isolated env): command = uvx <pkg> â€¦\n"
+        "  add <name> --python <script.py> [extra argsâ€¦]\n"
+        "        Local Python script: command = python3 <script> â€¦\n"
+        "  add <name> --npx <npm-pkg> [extra argsâ€¦]\n"
+        "        Node plugin from npm: command = npx -y <pkg> â€¦\n"
         "  add <name> --http <url>   (or --sse <url>)\n"
-        "        Remote server over HTTP/SSE — a url, no local command.\n"
-        "  add <name> -- <command> [args…]\n"
+        "        Remote server over HTTP/SSE â€” a url, no local command.\n"
+        "  add <name> -- <command> [argsâ€¦]\n"
         "        Anything else, verbatim argv.\n"
         "\n"
         "  options for add: --project (write ./.agentty/mcp.json instead of\n"
@@ -457,7 +543,7 @@ int usage() {
 
 } // namespace
 
-int cli(const std::vector<std::string>& argv) {
+int cli(Io io, const maya::unlocked& cap, const std::vector<std::string>& argv) {
     if (argv.empty()) return usage();
     const std::string& verb = argv[0];
 
@@ -469,7 +555,7 @@ int cli(const std::vector<std::string>& argv) {
         else if (argv[i] == "--force")   force = true;
         else rest.push_back(argv[i]);
     }
-    const fs::path path = config_path(project);
+    const fs::path path = config_path(io, project);
 
     if (verb == "list") {
         auto servers = list_servers(path);
@@ -485,16 +571,16 @@ int cli(const std::vector<std::string>& argv) {
             for (const auto& a : s.args) detail += " " + a;
             if (detail.empty() && !s.url.empty()) detail = s.url;
             // For a project config, show whether each server is trusted to
-            // connect (✓) or is gated pending approval (—). User configs are
+            // connect (âœ“) or is gated pending approval (â€”). User configs are
             // always trusted, so no marker there. HTTP/SSE (url, no command)
             // servers spawn nothing and aren't gated, so no mark either.
             const char* mark = "";
             if (project && !s.command.empty())
-                mark = is_server_trusted(path, s.name) ? "\u2713 " : "\u2014 ";
+                mark = is_server_trusted(io, path, s.name) ? "\u2713 " : "\u2014 ";
             std::printf("  %s%-16s %s\n", mark, s.name.c_str(), detail.c_str());
         }
         if (project)
-            std::printf("\n\u2713 trusted · \u2014 pending approval "
+            std::printf("\n\u2713 trusted Â· \u2014 pending approval "
                         "(agentty plugin approve <name> --project)\n");
         return 0;
     }
@@ -510,12 +596,12 @@ int cli(const std::vector<std::string>& argv) {
                          "(pass --project); user servers are already trusted\n");
             return 1;
         }
-        if (is_server_trusted(path, rest[0])) {
+        if (is_server_trusted(io, path, rest[0])) {
             std::printf("'%s' is already trusted\n", rest[0].c_str());
             return 0;
         }
-        if (approve_server(path, rest[0])) {
-            std::printf("approved %s — restart agentty to connect it\n",
+        if (approve_server(io, path, rest[0])) {
+            std::printf("approved %s â€” restart agentty to connect it\n",
                         rest[0].c_str());
             return 0;
         }
@@ -527,7 +613,7 @@ int cli(const std::vector<std::string>& argv) {
 
     if (verb == "remove") {
         if (rest.size() != 1) return usage();
-        switch (remove_server(path, rest[0])) {
+        switch (remove_server(io, cap, path, rest[0])) {
         case EditResult::Ok:
             std::printf("removed %s from %s\n", rest[0].c_str(),
                         path.string().c_str());
@@ -537,7 +623,7 @@ int cli(const std::vector<std::string>& argv) {
                          rest[0].c_str(), path.string().c_str());
             return 1;
         case EditResult::ParseError:
-            std::fprintf(stderr, "%s is not valid JSON — fix it by hand "
+            std::fprintf(stderr, "%s is not valid JSON â€” fix it by hand "
                          "first (refusing to rewrite a broken file)\n",
                          path.string().c_str());
             return 1;
@@ -590,7 +676,7 @@ int cli(const std::vector<std::string>& argv) {
             spec.command = "python3";
             // Absolutise the script path: agentty's cwd at connect time is
             // whatever directory the user launches from, not where they ran
-            // `plugin add` — a relative path would break silently.
+            // `plugin add` â€” a relative path would break silently.
             std::error_code ec;
             fs::path script = fs::absolute(tail[0], ec);
             if (!ec) tail[0] = script.string();
@@ -601,7 +687,7 @@ int cli(const std::vector<std::string>& argv) {
             spec.args.push_back("-y");
             for (auto& t : tail) spec.args.push_back(std::move(t));
         } else if (recipe == "--http" || recipe == "--sse") {
-            // Remote transport — a url, no local command (so not trust-gated).
+            // Remote transport â€” a url, no local command (so not trust-gated).
             if (tail.empty()) return usage();
             if (tail[0].rfind("http://", 0) != 0 && tail[0].rfind("https://", 0) != 0) {
                 std::fprintf(stderr, "url must start with http:// or https://\n");
@@ -617,14 +703,14 @@ int cli(const std::vector<std::string>& argv) {
             return usage();
         }
 
-        switch (add_server(path, spec, force)) {
+        switch (add_server(io, cap, path, spec, force)) {
         case EditResult::Ok: {
             const std::string detail = spec.url.empty()
                 ? [&]{ std::string c = spec.command;
                        for (const auto& a : spec.args) c += " " + a;
                        return c; }()
                 : spec.url;
-            std::printf("added %-16s %s\n  → %s\n", spec.name.c_str(),
+            std::printf("added %-16s %s\n  â†’ %s\n", spec.name.c_str(),
                         detail.c_str(), path.string().c_str());
             std::printf("restart agentty to connect (tools appear as "
                         "mcp__%s__<tool>)\n", spec.name.c_str());
@@ -632,7 +718,7 @@ int cli(const std::vector<std::string>& argv) {
             // only stdio project servers need approval.
             if (project && spec.url.empty())
                 std::printf("note: project servers are untrusted until"
-                            " approved — run\n      agentty plugin approve %s"
+                            " approved â€” run\n      agentty plugin approve %s"
                             " --project\n", spec.name.c_str());
             return 0;
         }
@@ -642,7 +728,7 @@ int cli(const std::vector<std::string>& argv) {
                          spec.name.c_str(), path.string().c_str());
             return 1;
         case EditResult::ParseError:
-            std::fprintf(stderr, "%s is not valid JSON — fix it by hand "
+            std::fprintf(stderr, "%s is not valid JSON â€” fix it by hand "
                          "first (refusing to rewrite a broken file)\n",
                          path.string().c_str());
             return 1;

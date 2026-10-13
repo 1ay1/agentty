@@ -46,7 +46,9 @@ static std::size_t demo_tools_on_wire() {
 }  // namespace (fold)
 
 int main() {
+#ifdef SIGPIPE   // Windows has no SIGPIPE: a broken pipe is a write error
     std::signal(SIGPIPE, SIG_IGN);
+#endif
     ::setenv("AGENTTY_MCP_CONNECT_TIMEOUT_MS", "5000", 1);
     ::unsetenv("AGENTTY_MCP_TOOL_BUDGET");   // section 1 asserts the default
 
@@ -56,10 +58,12 @@ int main() {
     const char* bin = std::getenv("AGENTTY_DATE_SERVER");
     fs::path date_server = bin && *bin
         ? fs::path{bin}
-        : fs::path{"mcp-cpp/build/examples/date-mcp/date_server"};
+        : fs::path{"build/third_party/mcp-cpp/examples/date-mcp/date_server"};
     if (!fs::exists(date_server)) {
-        for (const char* c : {"../mcp-cpp/build/examples/date-mcp/date_server",
-                              "./mcp-cpp/build/examples/date-mcp/date_server"}) {
+        for (const char* c : {"third_party/mcp-cpp/examples/date-mcp/date_server",
+                              "../build/third_party/mcp-cpp/examples/date-mcp/date_server",
+                              "third_party/mcp-cpp/build/examples/date-mcp/date_server",
+                              "../third_party/mcp-cpp/build/examples/date-mcp/date_server"}) {
             if (fs::exists(c)) { date_server = c; break; }
         }
     }

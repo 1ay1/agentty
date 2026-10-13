@@ -5,7 +5,9 @@
 
 #include <cstdlib>
 #include <cstdio>
-#include <mutex>
+#include <maya/runtime.hpp>
+#include <set>
+#include <string>
 #include <system_error>
 
 #ifndef _WIN32
@@ -94,18 +96,19 @@ void migrate_file(const fs::path& from, const fs::path& to_dir) {
 // legacy ~/.config/agentty split root. Secrets land in credentials/,
 // caches in cache/. Anything unrecognized is left where it is — this
 // migrates the files agentty itself wrote, nothing else.
+fs::path subdir_under(const fs::path& root, const char* env, const char* leaf,
+                      bool owner_only);
+
 void migrate_legacy_config(const fs::path& root) {
     std::error_code ec;
     const fs::path legacy = legacy_config_dir();
     if (legacy.empty() || !fs::is_directory(legacy, ec)) return;
 
-    const fs::path creds = root / "credentials";
-    const fs::path cache = root / "cache";
-    fs::create_directories(creds, ec);
-    fs::create_directories(cache, ec);
-#ifndef _WIN32
-    ::chmod(creds.c_str(), S_IRWXU);
-#endif
+    // The same dirs the accessors resolve, overrides included. Takes the
+    // root as given: calling user_root() here would re-enter its call_once.
+    const fs::path creds = subdir_under(root, "AGENTTY_CREDENTIALS_DIR", "credentials", true);
+    const fs::path cache = subdir_under(root, "AGENTTY_CACHE_DIR", "cache", false);
+    if (creds.empty() || cache.empty()) return;
 
     // Secrets + per-provider state → credentials/. The .lock companions
     // are advisory-lock inodes; migrating them keeps lock paths beside
@@ -126,8 +129,8 @@ void migrate_legacy_config(const fs::path& root) {
     // so move-if-absent is the right semantics here too). agentty.log is
     // the pre-consolidation root-level sink; stderr.log lived in the
     // legacy config dir.
-    const fs::path logs = root / "logs";
-    fs::create_directories(logs, ec);
+    const fs::path logs = subdir_under(root, "AGENTTY_LOGS_DIR", "logs", false);
+    if (logs.empty()) return;
     migrate_file(legacy / "stderr.log", logs);
     migrate_file(root / "agentty.log", logs);
 
@@ -135,6 +138,75 @@ void migrate_legacy_config(const fs::path& root) {
     // if the user (or another tool) put anything else there.
     if (fs::is_directory(legacy, ec) && fs::is_empty(legacy, ec))
         fs::remove(legacy, ec);
+}
+
+// Resolve one overridable subdirectory.
+//
+// `$env` wins when set and non-empty; otherwise `leaf` under the root.
+// A RELATIVE override is resolved against the user root, never against
+// the process CWD: `AGENTTY_LOGS_DIR=logs2` has to mean one directory,
+// not a different one for every directory agentty is launched from.
+//
+// Failure to create the override is NOT silently papered over with the
+// default. A user who points logs at an unmounted drive and gets them in
+// ~/.agentty anyway has been given the wrong answer twice: the setting
+// did not take, and nothing said so. Warn once, then fall back — losing
+// diagnostics entirely is worse than writing them to the default place,
+// but only if the user is told which happened.
+fs::path resolve_subdir(const char* env, const char* leaf, bool owner_only) {
+    return subdir_under(user_root(), env, leaf, owner_only);
+}
+
+fs::path subdir_under(const fs::path& root, const char* env, const char* leaf,
+                      bool owner_only) {
+    if (root.empty()) return root;
+
+    fs::path p;
+    bool overridden = false;
+    if (const char* v = std::getenv(env); v && *v) {
+        fs::path given{v};
+        p = given.is_absolute() ? std::move(given) : root / given;
+        overridden = true;
+    } else {
+        p = root / leaf;
+    }
+
+    std::error_code ec;
+    fs::create_directories(p, ec);
+    if (overridden && !fs::is_directory(p, ec)) {
+        // maya::snapshot rather than a lock: this resolver is reached from
+        // anywhere (including under ranked locks) with no capability to
+        // thread, and the set only ever grows. Lock-free read-then-insert;
+        // two threads hitting the same broken override in the same instant
+        // may both warn, which is harmless.
+        static maya::snapshot<std::set<std::string>> warned;
+        const std::string key{env};
+        if (warned.load()->contains(key)) return root / leaf;
+        (void)warned.update([](const std::set<std::string>& old, const std::string& k) {
+            auto next = old;
+            next.insert(k);
+            return next;
+        }, key);
+        // create_directories() leaves `ec` CLEAR when the path already
+        // exists as a non-directory -- it did not fail, it had nothing to
+        // do -- so reporting ec here printed "Undefined error: 0" for the
+        // single most likely mistake (pointing the override at a file).
+        // Name that case directly and keep the errno text for the rest.
+        std::error_code exists_ec;
+        const bool in_the_way = fs::exists(p, exists_ec);
+        std::fprintf(stderr,
+            "agentty: warning: $%s='%s' is not usable (%s) — falling back to %s\n",
+            env, p.string().c_str(),
+            in_the_way ? "exists but is not a directory"
+                       : (ec ? ec.message().c_str() : "cannot create"),
+            (root / leaf).string().c_str());
+        p = root / leaf;
+        fs::create_directories(p, ec);
+    }
+#ifndef _WIN32
+    if (owner_only) ::chmod(p.c_str(), S_IRWXU);
+#endif
+    return p;
 }
 
 }  // namespace
@@ -180,46 +252,54 @@ fs::path user_root() {
         }
     }
 
-    std::error_code ec;
-    fs::create_directories(root, ec);
+    // Create once per resolved root, not per call. user_root() sits on the
+    // per-turn path (skills catalog, approvals, memory), and on Windows
+    // create_directories is several metadata queries even when the tree
+    // exists. The root can change mid-process (tests repoint AGENTTY_HOME),
+    // so remember WHICH path was ensured, not just that one was. A root
+    // deleted underneath a live process is recreated by the writer that
+    // next needs it (every writer creates its own parent dirs). A published
+    // immutable value: read lock-free every call, replaced on a change; two
+    // threads racing a change both create (idempotent) and both publish.
+    static maya::published<const fs::path> ensured;
+    if (const auto e = ensured.current(); !e || *e != root) {
+        std::error_code ec;
+        fs::create_directories(root, ec);
 #ifndef _WIN32
-    // Owner-only: the root holds conversation history, learned memory and
-    // (post-consolidation) credentials. One chmod is the whole security
-    // story of the single-root design.
-    ::chmod(root.c_str(), S_IRWXU);
+        // Owner-only: the root holds conversation history, learned memory and
+        // (post-consolidation) credentials. One chmod is the whole security
+        // story of the single-root design.
+        ::chmod(root.c_str(), S_IRWXU);
 #endif
+        if (!ec) ensured.publish(std::make_shared<const fs::path>(root));
+    }
     std::call_once(once, [&] { migrate_legacy_config(root); });
     return root;
 }
 
 fs::path user_credentials_dir() {
-    fs::path p = user_root();
-    if (p.empty()) return p;
-    p /= "credentials";
-    std::error_code ec;
-    fs::create_directories(p, ec);
-#ifndef _WIN32
-    ::chmod(p.c_str(), S_IRWXU);
-#endif
-    return p;
+    return resolve_subdir("AGENTTY_CREDENTIALS_DIR", "credentials", /*owner_only=*/true);
+}
+
+fs::path user_state_dir() {
+    return resolve_subdir("AGENTTY_STATE_DIR", "state", /*owner_only=*/false);
 }
 
 fs::path user_cache_dir() {
-    fs::path p = user_root();
-    if (p.empty()) return p;
-    p /= "cache";
-    std::error_code ec;
-    fs::create_directories(p, ec);
-    return p;
+    return resolve_subdir("AGENTTY_CACHE_DIR", "cache", /*owner_only=*/false);
 }
 
 fs::path user_logs_dir() {
-    fs::path p = user_root();
-    if (p.empty()) return p;
-    p /= "logs";
-    std::error_code ec;
-    fs::create_directories(p, ec);
-    return p;
+    return resolve_subdir("AGENTTY_LOGS_DIR", "logs", /*owner_only=*/false);
+}
+
+fs::path user_threads_dir() {
+    // Owner-only: conversation history is as sensitive as the credentials
+    // beside it. The default inherits 0700 from the root, but an override
+    // can point anywhere — including a path the user created 0755 — so
+    // this is the one place the bit has to be set explicitly rather than
+    // assumed.
+    return resolve_subdir("AGENTTY_THREADS_DIR", "threads", /*owner_only=*/true);
 }
 
 }  // namespace agentty::util

@@ -10,6 +10,10 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+
+#ifndef _WIN32
+#include <sys/stat.h>   // chmod — 0600 on the registry, like its siblings
+#endif
 #include <iterator>
 
 #include <nlohmann/json.hpp>
@@ -124,6 +128,27 @@ bool write_registry(const Registry& reg) {
         ofs.write(sealed->data(), static_cast<std::streamsize>(sealed->size()));
         if (!ofs) return false;
     }
+#ifndef _WIN32
+    // 0600, like every other file under credentials/.
+    //
+    // std::ofstream creates at 0666 & ~umask, so this landed 0644 while
+    // credentials.json, the provider-key vault and even the auth LOCK file are
+    // all explicitly 0600. Measured on a live install before fixing.
+    //
+    // The body is crypt::seal'd and machine-bound, so a readable copy is
+    // cryptographically useless and this is not a leak -- it is the
+    // defence-in-depth the siblings have and this did not. It also matters
+    // more than it looks: credentials/ is 0700 TODAY, so the mode is
+    // contained, but that containment is one `chmod 755` or one
+    // AGENTTY_HOME pointed at a pre-existing directory away from being the
+    // only thing standing between this file and another local account.
+    //
+    // chmod after write rather than open(O_CREAT, 0600): the payload is
+    // ciphertext, so the window between create and chmod exposes nothing,
+    // and this keeps the ofstream path that the comment above deliberately
+    // chose over the unexported private writer.
+    ::chmod(tmp.c_str(), S_IRUSR | S_IWUSR);
+#endif
     std::error_code ec;
     fs::rename(tmp, p, ec);
     if (ec) { fs::remove(tmp, ec); return false; }
@@ -134,7 +159,7 @@ bool write_registry(const Registry& reg) {
 
 std::string path() { return registry_path().string(); }
 
-std::vector<Account> list() {
+std::vector<Account> list(Io) {
     auto reg = read_registry();
     // Newest-saved first for a stable, useful default ordering in the picker.
     std::stable_sort(reg.all.begin(), reg.all.end(),
@@ -144,18 +169,18 @@ std::vector<Account> list() {
     return std::move(reg.all);
 }
 
-std::vector<Account> list_for(const std::string& provider) {
+std::vector<Account> list_for(Io io, const std::string& provider) {
     std::vector<Account> out;
-    for (auto& a : list())
+    for (auto& a : list(io))
         if (a.provider == provider) out.push_back(std::move(a));
     return out;
 }
 
-std::string active_label(const std::string& provider) {
+std::string active_label(Io, const std::string& provider) {
     return read_registry().active_for(provider);
 }
 
-std::optional<Account> get(const std::string& provider, const std::string& label) {
+std::optional<Account> get(Io /*io*/, const std::string& provider, const std::string& label) {
     for (auto& a : read_registry().all)
         if (a.provider == provider && a.label == label) return a;
     return std::nullopt;
@@ -196,7 +221,7 @@ bool set_active(const std::string& provider, const std::string& label) {
     return write_registry(reg);
 }
 
-bool remove(const std::string& provider, const std::string& label) {
+bool remove(Io /*io*/, const std::string& provider, const std::string& label) {
     auto reg = read_registry();
     const auto before = reg.all.size();
     std::erase_if(reg.all, [&](const Account& a) {

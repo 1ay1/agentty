@@ -13,6 +13,9 @@
 // a rebuild.
 
 #include "agentty/runtime/view/thread/conversation.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
+
+#include "agentty/util/logx.hpp"
 
 #include <filesystem>
 
@@ -33,6 +36,7 @@
 #include <maya/widget/turn.hpp>
 
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/helpers.hpp"   // ui::reasoning_shown
 #include "agentty/runtime/view/thread/activity_indicator.hpp"
 #include "agentty/runtime/view/thread/seam.hpp"
 #include "agentty/runtime/view/thread/turn/permission.hpp"
@@ -168,7 +172,13 @@ void build_live_tail(const Model& m, int& running_turn,
             // every frame for the whole duration of the active run.
             const bool is_last_run     = (run_end >= total);
             const bool reserve_slot   = m.s.active() && is_last_run;
-            const bool show_indicator = reserve_slot && tail_is_empty_placeholder;
+            // ...and nothing else is already saying "still working". A live
+            // reasoning block has its own spinner, its own meter and text
+            // arriving in it; the hex tape under that is a second animation
+            // for the same fact, and it costs the rows it occupies plus the
+            // handoff when real content lands.
+            const bool show_indicator = reserve_slot && tail_is_empty_placeholder
+                                        && !reasoning_shown(tail);
             if (show_indicator) {
                 using namespace maya::dsl;
                 maya::ActivityIndicator::Config ind;
@@ -180,7 +190,7 @@ void build_live_tail(const Model& m, int& running_turn,
                 if (const auto* a = active_ctx(m.s.phase)) {
                     ind.stream_bytes = a->live_delta_bytes;
                     if (a->first_delta_at.time_since_epoch().count() != 0) {
-                        auto now = std::chrono::steady_clock::now();
+                        auto now = maya::anim_now();
                         auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                          now - a->first_delta_at).count();
                         if (ts_ms >= 250) {
@@ -336,7 +346,7 @@ void build_queued_previews(const Model& m, int& running_turn,
                            std::vector<maya::Element>& out) {
     if (m.ui.composer.queued.empty()) return;
     out.reserve(out.size() + m.ui.composer.queued.size() * 2);
-    auto now = std::chrono::system_clock::now();
+    const auto now = m.wall_at(maya::anim_now());
     const std::size_t base_idx = m.d.current.messages.size();
     for (std::size_t qi = 0; qi < m.ui.composer.queued.size(); ++qi) {
         Message synthetic;
@@ -416,44 +426,29 @@ maya::Conversation::Config conversation_config(const Model& m) {
             cfg.live_tail.push_back(std::move(*e));
     }
 
-    // Optional shape probe. Set AGENTTY_VIEW_PROF=1 to log every
-    // conversation_config invocation's frozen/live_tail sizes plus
-    // a rough live-tail message-content sketch. One line per call.
-    static const bool view_prof = []{
-        const char* e = std::getenv("AGENTTY_VIEW_PROF");
-        return e && *e && *e != '0';
-    }();
-    if (view_prof) {
-        // Dev-only profiling log. Use the platform temp dir so the knob
-        // also works on Windows (which has no /tmp); computed once.
-        static std::FILE* out = []() -> std::FILE* {
-            std::error_code ec;
-            auto p = std::filesystem::temp_directory_path(ec);
-            if (ec) return nullptr;
-            p /= "agentty-view-prof.log";
-            return std::fopen(p.string().c_str(), "a");
-        }();
-        if (out) {
-            std::size_t live_msgs = (m.d.current.messages.size()
-                > m.ui.frozen_through)
-                ? (m.d.current.messages.size() - m.ui.frozen_through)
-                : 0;
-            std::size_t live_text_bytes = 0;
-            std::size_t live_tool_count = 0;
-            for (std::size_t i = m.ui.frozen_through;
-                 i < m.d.current.messages.size(); ++i) {
-                const auto& msg = m.d.current.messages[i];
-                live_text_bytes += msg.text.size() + msg.streaming_text.size();
-                live_tool_count += msg.tool_calls.size();
-            }
-            std::fprintf(out,
-                "[view] frozen=%zu live_tail=%zu live_msgs=%zu "
-                "live_text=%zu live_tools=%zu frozen_through=%zu msgs=%zu\n",
+    // Shape probe: every conversation_config invocation's frozen/live_tail
+    // sizes plus a rough live-tail content sketch. AGENTTY_LOG=perf=trace
+    // surfaces it — trace, because it is one line per view build.
+    if (::agentty::logx::enabled(::agentty::logx::Channel::Perf,
+                                 ::agentty::logx::Level::Trace)) {
+        std::size_t live_msgs = (m.d.current.messages.size()
+            > m.ui.frozen_through)
+            ? (m.d.current.messages.size() - m.ui.frozen_through)
+            : 0;
+        std::size_t live_text_bytes = 0;
+        std::size_t live_tool_count = 0;
+        for (std::size_t i = m.ui.frozen_through;
+             i < m.d.current.messages.size(); ++i) {
+            const auto& msg = m.d.current.messages[i];
+            live_text_bytes += msg.text.size() + msg.streaming_text.size();
+            live_tool_count += msg.tool_calls.size();
+        }
+        AGT_LOG_HOT(Perf, Trace, "view.shape",
+                "frozen={} live_tail={} live_msgs={} "
+                "live_text={} live_tools={} frozen_through={} msgs={}",
                 m.ui.frozen.size(), cfg.live_tail.size(), live_msgs,
                 live_text_bytes, live_tool_count, m.ui.frozen_through,
                 m.d.current.messages.size());
-            std::fflush(out);
-        }
     }
 
     // No separate in_flight indicator — the empty-placeholder

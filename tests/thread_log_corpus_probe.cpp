@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
         if (p.filename() == "index.json") continue;
         if (p.filename().string().find("acp_sessions") != std::string::npos) continue;
 
-        auto loaded = persistence::load_thread_file(p);
+        auto loaded = persistence::load_thread_file(::agentty::IoAccess::grant(), p);
         if (!loaded) { ++skipped; continue; }
 
         const std::string id = p.stem().string();

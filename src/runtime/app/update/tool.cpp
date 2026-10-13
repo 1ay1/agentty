@@ -13,7 +13,6 @@
 #include <utility>
 
 #include <maya/core/overload.hpp>
-#include <maya/core/cmd.hpp>      // maya::Cmd
 #include <maya/core/motion.hpp>   // anim::keep_animating — frame requests
 #include <nlohmann/json.hpp>
 
@@ -25,10 +24,19 @@
 #include "agentty/store/store.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/util/utf8.hpp"
+#include "agentty/util/logx.hpp"
+
+#if AGENTTY_MCP
+#include <mcp/tools/util/bash_validate.hpp>
+#endif
 
 namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
+
+// After this many shell detours in a row the tip gets a plain reminder on
+// top. 3: one detour is noise, two can be a one-off, three is the habit.
+inline constexpr int kDetourReminderAt = 3;
 
 using json = nlohmann::json;
 
@@ -288,8 +296,9 @@ void apply_tool_output(Model& m, const ToolCallId& id,
                        std::expected<std::string, tools::ToolError>&& result,
                        std::optional<FileChange>&& change,
                        std::vector<FileChange>&& changes,
-                       std::vector<ImageContent>&& images) {
-    with_live_tool(m, id, [&](ToolUse& tc) {
+                       std::vector<ImageContent>&& images,
+                       std::uint64_t exec_seq) {
+    const bool landed = with_exec_tool(m, id, exec_seq, [&](ToolUse& tc) {
         // Idempotent: a tool already in a terminal state
         // (Done / Failed / Rejected) keeps that state. Realistic
         // ways a late ToolExecOutput can land here:
@@ -313,22 +322,47 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         // Element in m.ui.frozen is immutable — visible as a
         // permanently-Running spinner in scrollback.
         if (tc.is_terminal()) return;
-        auto now = std::chrono::steady_clock::now();
-        auto started = tc.started_at();
+        auto now = m.now;
         if (result) {
-            tc.status = ToolUse::Done{started, now,
-                clamp_output(std::move(*result)), std::move(images)};
+            // Drift reminder. Shell begets shell: after a shell inspection
+            // the next one is shell 81% of the time (22% after a native
+            // one). The per-call tip is easy to skim past once the habit has
+            // set in, so when detours chain, say so plainly at the point of
+            // decision (event-driven reminder, cf. OpenDev 2603.05344
+            // §2.3.4). Counted with substitutable(), the same gate the tip
+            // uses. Any other call resets the streak.
+            bool detour = false;
+#if AGENTTY_MCP
+            if (tc.name.value == "shell" && tc.args.is_object())
+                if (auto it = tc.args.find("command"); it != tc.args.end() && it->is_string())
+                    detour = ::mcp::tools::util::analyze_detour(it->get<std::string>()).substitutable();
+#endif
+            if (detour) {
+                if (++m.d.shell_detour_streak >= kDetourReminderAt)
+                    *result = "[reminder] shell detour #"
+                        + std::to_string(m.d.shell_detour_streak)
+                        + " in a row. the tip below names the exact native "
+                          "call; make that call next. native calls run in "
+                          "parallel and each gets its own card.\n"
+                        + std::move(*result);
+            } else {
+                m.d.shell_detour_streak = 0;
+            }
+            tc.settle_done(now, clamp_output(std::move(*result)),
+                           std::move(images));
         } else {
             // Render typed error as "[kind] detail" so the category
             // is visible in tool-card / history without losing the
             // human-readable detail. The model needs only the
             // string back; the kind is preserved structurally for
             // the future, when the view branches on category.
-            tc.status = ToolUse::Failed{started, now,
-                clamp_output(result.error().render())};
+            tc.settle_failed(now, clamp_output(result.error().render()));
         }
         release_streaming_buffers(tc);
     });
+    // A stale worker (its call was cancelled) must not queue diffs for
+    // review either: the user already walked away from that call.
+    if (exec_seq != 0 && !landed) return;
     // Queue the structured change(s) (edit / write / apply_patch / replace)
     // for diff-review. Multi-file tools (replace) fill `changes`; single-file
     // tools fill `change`. DEDUP per file: successive edits to the SAME path
@@ -370,12 +404,17 @@ void apply_tool_output(Model& m, const ToolCallId& id,
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason) {
     with_live_tool(m, id, [&](ToolUse& tc) {
-        auto now = std::chrono::steady_clock::now();
+        auto now = m.now;
         if (reason.empty()) {
             tc.status = ToolUse::Rejected{now};
         } else {
-            tc.status = ToolUse::Failed{tc.started_at(), now,
-                clamp_output(std::string{reason})};
+            // A reason means a policy/failure rejection. settle_failed keeps a
+            // real exec window if the tool had dispatched, and records NONE if
+            // it hadn't -- which for "User rejected this tool call" is always:
+            // the tool was sitting at the permission prompt. Copying with
+            // executing_since() here used to bake card birth in as a fake
+            // dispatch stamp and bill the whole prompt wait as tool time.
+            tc.settle_failed(now, clamp_output(std::string{reason}));
         }
         release_streaming_buffers(tc);
     });
@@ -393,9 +432,8 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
 // prompt is always *about* a specific pending tool call and the resolution
 // feeds back into the tool state machine — no clean split.
 
-Step tool_update(Model m, msg::ToolMsg tm) {
+Cmd tool_update(Model& m, msg::ToolMsg tm) {
     using maya::overload;
-    using maya::Cmd;
 
     return std::visit(overload{
         // ── Live tool progress (streaming subprocess output) ────────────
@@ -404,11 +442,11 @@ Step tool_update(Model m, msg::ToolMsg tm) {
         // and rely on the existing Tick subscription (active during
         // ExecutingTool) to re-render. Ignore if the tool has already
         // finalised (a late snapshot racing the terminal ToolExecOutput).
-        [&](ToolExecProgress& e) -> Step {
+        [&](ToolExecProgress& e) -> Cmd {
             // Frozen prefix is immutable — a late progress snapshot
             // for a turn that's already settled into m.ui.frozen
             // silently no-ops here.
-            with_live_tool(m, e.id, [&](ToolUse& tc) {
+            with_exec_tool(m, e.id, e.exec_seq, [&](ToolUse& tc) {
                 if (auto* r = std::get_if<ToolUse::Running>(&tc.status)) {
                     // Belt-and-braces terminal line-discipline. The in-tree
                     // subprocess runners already clean at the capture
@@ -448,21 +486,21 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                     // making progress, so the wedge net's cap restarts from
                     // here rather than from the (possibly many-minutes-ago)
                     // launch time.
-                    r->last_progress_at = std::chrono::steady_clock::now();
+                    r->last_progress_at = m.now;
                 }
             });
             // If the user is watching the Ctrl+O viewer, keep its Live row
             // (row 0) tailing this fresh output in place.
             resync_live_tool_viewer(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
         // ── Per-tool wall-clock watchdog ──────────────────────────────────
-        [&](ToolTimeoutCheck& e) -> Step {
+        [&](ToolTimeoutCheck& e) -> Cmd {
             bool flipped = false;
             with_live_tool(m, e.id, [&](ToolUse& tc) {
                 if (tc.is_terminal()) return;
-                auto now = std::chrono::steady_clock::now();
+                auto now = m.now;
                 const auto* sp = tools::spec::lookup(tc.name.value);
                 auto secs = sp ? sp->max_seconds : std::chrono::seconds{0};
                 std::string reason;
@@ -481,29 +519,44 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                         "thread may continue in the background; its "
                         "result will be discarded if it ever returns.";
                 }
-                tc.status = ToolUse::Failed{
-                    tc.started_at(), now, std::move(reason)};
+                tc.settle_failed(now, std::move(reason));
                 flipped = true;
             });
-            if (!flipped) return done(std::move(m));
+            if (!flipped) return Cmd::none();
             auto cmd = cmd::kick_pending_tools(m);
-            return {std::move(m), std::move(cmd)};
+            return cmd;
         },
 
         // ── Tool execution result ───────────────────────────────────────
-        [&](ToolExecOutput& e) -> Step {
+        [&](ToolExecOutput& e) -> Cmd {
+            // A worker whose call was cancelled or settled; its id may now
+            // belong to a different call. Drop it whole.
+            if (!tool_exec_is_current(m, e.id, e.exec_seq)) {
+                AGT_LOG(Tool, Info, "tool.stale_result",
+                        "id={} seq={} dropped", e.id.value, e.exec_seq);
+                return Cmd::none();
+            }
             // todo's side effect on the UI's plan state — runs only
             // when the call actually succeeded; failures don't synthesise
             // a plan. The final exact state lands here even if the live
             // streaming sync (stream.cpp) raced a partial array.
             if (e.result) {
-                for (const auto& msg_ : m.d.current.messages)
-                    for (const auto& tc : msg_.tool_calls)
-                        if (tc.id == e.id && tc.name == "todo")
-                            sync_todo_state_from_args(m, tc.args);
+                // Newest-first and stop at the match: the call is in the
+                // current turn, so this is O(1) in practice instead of a
+                // walk over every tool call in the thread per result.
+                bool found = false;
+                for (auto mit = m.d.current.messages.rbegin();
+                     !found && mit != m.d.current.messages.rend(); ++mit)
+                    for (const auto& tc : mit->tool_calls)
+                        if (tc.id == e.id) {
+                            if (tc.name == "todo") sync_todo_state_from_args(m, tc.args);
+                            found = true;
+                            break;
+                        }
             }
             apply_tool_output(m, e.id, std::move(e.result), std::move(e.change),
-                              std::move(e.changes), std::move(e.images));
+                              std::move(e.changes), std::move(e.images),
+                              e.exec_seq);
             // If the Ctrl+O viewer is open, refresh it so the Live row settles
             // into a finished entry the instant this tool completes.
             resync_live_tool_viewer(m);
@@ -511,16 +564,16 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // Cooperating-host follow-along: when running on an editor PTY
             // (Emacs/vterm) that watches for our OSC, tell it which file the
             // agent just touched so it can open / reveal / diff it natively.
-            // Frame-safe (maya Cmd::emit_osc, out-of-band), and a complete
-            // no-op on a normal terminal (integration_active() is false).
-            maya::Cmd<Msg> host_cmd = maya::Cmd<Msg>::none();
-            if (ui::host::integration_active()) {
+            // Frame-safe (maya cmd::emit_osc, out-of-band), and a complete
+            // no-op on a normal terminal (m.env.host_integration is false).
+            Cmd host_cmd = Cmd::none();
+            if (m.env.host_integration) {
                 for (const auto& msg_ : m.d.current.messages) {
                     bool done_scan = false;
                     for (const auto& tc : msg_.tool_calls) {
                         if (tc.id != e.id || !tc.is_done()) continue;
                         if (auto osc = file_event_osc_for(tc))
-                            host_cmd = maya::Cmd<Msg>::emit_osc(kHostOsc, *osc);
+                            host_cmd = cmd::emit_osc(kHostOsc, *osc);
                         done_scan = true; break;
                     }
                     if (done_scan) break;
@@ -550,25 +603,25 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // the output; StreamFinished → finalize_turn runs the normal
             // kick and finds this tool already terminal.
             if (m.s.is_streaming()) {
-                if (host_cmd.is_none()) return done(std::move(m));
-                return {std::move(m), std::move(host_cmd)};
+                if (host_cmd.is_none()) return Cmd::none();
+                return host_cmd;
             }
             auto kick = cmd::kick_pending_tools(m);
             if (host_cmd.is_none())
-                return {std::move(m), std::move(kick)};
-            return {std::move(m), maya::Cmd<Msg>::batch(
-                std::vector<maya::Cmd<Msg>>{std::move(kick), std::move(host_cmd)})};
+                return kick;
+            return Cmd::batch(
+                std::move(kick), std::move(host_cmd));
         },
 
         // ── Permission ──────────────────────────────────────────────
-        [&](PermissionApprove) -> Step {
-            if (!m.d.pending_permission) return done(std::move(m));
+        [&](PermissionApprove) -> Cmd {
+            if (!m.d.pending_permission) return Cmd::none();
             auto id = m.d.pending_permission->id;
             // Permission only ever fires against a tool in the live
             // tail — a frozen turn is by definition past every pending
             // permission. with_live_tool's frozen-prefix gate is the
             // structural guarantee of that invariant.
-            with_live_tool(m, id, [&](ToolUse& tc) {
+            with_live_tool(m, id, [&, shown = m.d.pending_permission->def_hash](ToolUse& tc) {
                 // Mark approval as type state: Pending → Approved.
                 // kick_pending_tools then treats Approved as
                 // "permission already granted" and routes through
@@ -577,20 +630,24 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                 // freshly approved Write/Bash waits for it instead
                 // of racing.
                 tc.status = ToolUse::Approved{tc.started_at()};
+                // What the user actually saw. If the catalog is rebuilt
+                // between here and the launch, execute_approved refuses
+                // rather than running a different tool under this name.
+                tc.approved_def_hash = shown;
             });
             m.d.pending_permission.reset();
-            return {std::move(m), cmd::kick_pending_tools(m)};
+            return cmd::kick_pending_tools(m);
         },
-        [&](PermissionReject) -> Step {
-            if (!m.d.pending_permission) return done(std::move(m));
+        [&](PermissionReject) -> Cmd {
+            if (!m.d.pending_permission) return Cmd::none();
             auto id = m.d.pending_permission->id;
             mark_tool_rejected(m, id, "User rejected this tool call.");
             m.d.pending_permission.reset();
             auto cmd = cmd::kick_pending_tools(m);
-            return {std::move(m), std::move(cmd)};
+            return cmd;
         },
-        [&](PermissionApproveAlways) -> Step {
-            if (!m.d.pending_permission) return done(std::move(m));
+        [&](PermissionApproveAlways) -> Cmd {
+            if (!m.d.pending_permission) return Cmd::none();
             auto id   = m.d.pending_permission->id;
             auto name = m.d.pending_permission->tool_name;
             // Record a session-scoped grant for this tool NAME so every
@@ -602,26 +659,51 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // re-prompt. Mirrors Zed's per-session allow-list with live
             // sibling propagation.
             m.d.session_grants.insert(name.value);
+            // And WHAT was approved, not just its name. A standing grant on a
+            // bare name covers whatever that name resolves to later, which
+            // for an MCP tool is the server's choice -- so the grant carries
+            // the fingerprint of the definition the user saw, and
+            // execute_approved refuses if it changes.
+            const auto granted_hash = m.d.pending_permission->def_hash;
+            if (granted_hash != 0) m.d.grant_def_hash[name.value] = granted_hash;
             // Persist the grant (Zed's always_allow rules): reload-proof.
-            // Load-modify-save so we never clobber provider keys etc.
+            // Onto the record, so the next whole-record save carries it
+            // instead of writing a copy that predates it.
+            //
+            // Stored as "name@<hex>" so the definition survives a restart
+            // too. A bare name (an older build's entry, or a hand-edited
+            // settings.json) still loads and means "any definition".
+            Cmd grant_save = Cmd::none();
             {
-                auto s = deps().load_settings();
-                if (std::find(s.always_allow_tools.begin(),
-                              s.always_allow_tools.end(), name.value)
-                        == s.always_allow_tools.end()) {
-                    s.always_allow_tools.push_back(name.value);
-                    deps().save_settings(s);
+                auto& allow = m.d.persisted.always_allow_tools;
+                std::string entry = name.value;
+                if (granted_hash != 0)
+                    entry += "@" + std::format("{:016x}", granted_hash);
+                const auto same_tool = [&](const std::string& e) {
+                    const auto at = e.rfind('@');
+                    return (at == std::string::npos ? e : e.substr(0, at))
+                           == name.value;
+                };
+                auto it = std::find_if(allow.begin(), allow.end(), same_tool);
+                if (it == allow.end()) {
+                    allow.push_back(std::move(entry));
+                    grant_save = save_record(m);
+                } else if (*it != entry) {
+                    *it = std::move(entry);   // re-granted for a new definition
+                    grant_save = save_record(m);
                 }
             }
             m.s.status = name.value + ": always allowed (persists \xc2\xb7 "
                          "Shift+Tab profile cycle resets)";
-            m.s.status_until = std::chrono::steady_clock::now()
+            m.s.status_until = m.now
                              + std::chrono::seconds{4};
-            with_live_tool(m, id, [&](ToolUse& tc) {
+            with_live_tool(m, id, [&, shown = m.d.pending_permission->def_hash](ToolUse& tc) {
                 tc.status = ToolUse::Approved{tc.started_at()};
+                tc.approved_def_hash = shown;   // see PermissionApprove
             });
             m.d.pending_permission.reset();
-            return {std::move(m), cmd::kick_pending_tools(m)};
+            return Cmd::batch(std::move(grant_save),
+                              cmd::kick_pending_tools(m));
         },
     }, tm);
 }

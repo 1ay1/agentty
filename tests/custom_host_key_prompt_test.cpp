@@ -25,6 +25,7 @@
 #include <string>
 
 #include "agtest.hpp"
+#include "agtest_fx.hpp"
 
 namespace fs = std::filesystem;
 namespace login = agentty::ui::login;
@@ -36,7 +37,7 @@ namespace app = agentty::app;
 // CustomHostInput arm only calls deps().load_settings() and deps().auth.
 static void install_stub_deps(agentty::store::Settings& s) {
     app::install_deps(app::Deps{
-        .stream         = [](auto, auto) {},
+        .stream         = [](const maya::unlocked&, auto, auto) {},
         .save_thread    = [](const auto&) {},
         .delete_thread  = [](const auto&) {},
         .load_threads   = [] { return std::vector<agentty::Thread>{}; },
@@ -60,16 +61,16 @@ TEST_CASE("custom host key prompt transitions") {
     fs::create_directories(tmp_xdg, mkdir_ec);
     ::setenv("AGENTTY_HOME", tmp_xdg.c_str(), 1);
     // Ensure parse_selection's custom_auth_header() read is deterministic.
-    agentty::provider::set_custom_auth_header("");
+    agentty::provider::set_custom_auth_header(::agentty::IoAccess::grant(), "");
 
     // ── Case 1: TLS host, no saved key → ApiKeyInput with empty key field ──
     {
         agentty::store::Settings s;
         install_stub_deps(s);
         agentty::Model m;
+        m.d.persisted = s;   // the record, as init() seeds it
         m.ui.login = login::CustomHostInput{.host_input = "https://chat.example.org/api"};
-        auto [m2, cmd] = app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
+        auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
         auto* api = std::get_if<login::ApiKeyInput>(&m2.ui.login);
         check(api != nullptr,
               "1: TLS host transitions to ApiKeyInput (not committed)");
@@ -93,9 +94,9 @@ TEST_CASE("custom host key prompt transitions") {
         s.provider_keys["https://chat.example.org/api"] = "sk-test-key";
         install_stub_deps(s);
         agentty::Model m;
+        m.d.persisted = s;   // the record, as init() seeds it
         m.ui.login = login::CustomHostInput{.host_input = "https://chat.example.org/api"};
-        auto [m2, cmd] = app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
+        auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
         auto* api = std::get_if<login::ApiKeyInput>(&m2.ui.login);
         check(api != nullptr,
               "2: TLS host with saved key still transitions to ApiKeyInput");
@@ -114,11 +115,11 @@ TEST_CASE("custom host key prompt transitions") {
         agentty::store::Settings s;
         install_stub_deps(s);
         agentty::Model m;
+        m.d.persisted = s;   // the record, as init() seeds it
         m.d.available_models.push_back(agentty::ModelInfo{
             .id = agentty::ModelId{"old-model"}, .display_name = "old"});
         m.ui.login = login::CustomHostInput{.host_input = "localhost:8080"};
-        auto [m2, cmd] = app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
+        auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
         auto* hp = std::get_if<login::HostProbing>(&m2.ui.login);
         check(hp != nullptr,
               "3: non-TLS host enters HostProbing (probe before commit)");
@@ -133,8 +134,15 @@ TEST_CASE("custom host key prompt transitions") {
         ok.ok = true;
         ok.models_path = "/v1/models";
         ok.model_count = 2;
-        auto [m3, cmd3] = app::detail::login_update(
-            std::move(m2), msg::LoginMsg{std::move(ok)});
+        auto [m3, cmd3] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m2), msg::LoginMsg{std::move(ok)});
+        // The keyless-host save is an EFFECT; play the host and run it, or
+        // the assertion below is checking a write nobody performed.
+        {
+            agtest::fx::Store store;
+            store.settings = s;
+            agtest::fx::run(cmd3, store);
+            s = store.settings;
+        }
         check(std::holds_alternative<login::Closed>(m3.ui.login),
               "3: probe success commits (modal closes)");
         check(m3.s.models_loading,
@@ -152,9 +160,9 @@ TEST_CASE("custom host key prompt transitions") {
         agentty::store::Settings s;
         install_stub_deps(s);
         agentty::Model m;
+        m.d.persisted = s;   // the record, as init() seeds it
         m.ui.login = login::CustomHostInput{.host_input = "http://10.0.0.5:5000/custom"};
-        auto [m1, cmd1] = app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
+        auto [m1, cmd1] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
         auto* hp = std::get_if<login::HostProbing>(&m1.ui.login);
         check(hp != nullptr, "4: http:// host enters HostProbing");
         agentty::HostProbed bad;
@@ -162,8 +170,7 @@ TEST_CASE("custom host key prompt transitions") {
         bad.spec = "http://10.0.0.5:5000/custom";
         bad.ok = false;
         bad.error = "nothing listening";
-        auto [m2, cmd2] = app::detail::login_update(
-            std::move(m1), msg::LoginMsg{std::move(bad)});
+        auto [m2, cmd2] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m1), msg::LoginMsg{std::move(bad)});
         auto* ch = std::get_if<login::CustomHostInput>(&m2.ui.login);
         check(ch != nullptr,
               "4: probe failure returns to the host input");
@@ -174,8 +181,7 @@ TEST_CASE("custom host key prompt transitions") {
         agentty::HostProbed stale;
         stale.attempt_id = 9999;
         stale.ok = true;
-        auto [m3, cmd3] = app::detail::login_update(
-            std::move(m2), msg::LoginMsg{std::move(stale)});
+        auto [m3, cmd3] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m2), msg::LoginMsg{std::move(stale)});
         check(std::holds_alternative<login::CustomHostInput>(m3.ui.login),
               "4: stale probe result is a no-op");
         (void)cmd1; (void)cmd2; (void)cmd3;
@@ -186,15 +192,14 @@ TEST_CASE("custom host key prompt transitions") {
         agentty::store::Settings s;
         install_stub_deps(s);
         agentty::Model m;
+        m.d.persisted = s;   // the record, as init() seeds it
         // First submit a TLS host to land in ApiKeyInput.
         m.ui.login = login::CustomHostInput{.host_input = "https://chat.example.org/api"};
-        auto [m1, cmd1] = app::detail::login_update(
-            std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
+        auto [m1, cmd1] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
         check(std::holds_alternative<login::ApiKeyInput>(m1.ui.login),
               "5: setup — TLS host entered ApiKeyInput");
         // Now press Esc (CloseLogin).
-        auto [m2, cmd2] = app::detail::login_update(
-            std::move(m1), msg::LoginMsg{agentty::CloseLogin{}});
+        auto [m2, cmd2] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m1), msg::LoginMsg{agentty::CloseLogin{}});
         check(std::holds_alternative<login::Closed>(m2.ui.login),
               "5: Esc at key prompt closes the modal");
         check(!m2.s.models_loading,

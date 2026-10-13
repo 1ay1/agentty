@@ -4,6 +4,7 @@
 // owns every chrome decision. Shared scaffolding: panels_prologue.hpp.
 
 #include "panels_prologue.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
 
 namespace agentty::ui {
 
@@ -21,10 +22,10 @@ Element checkpoints_panel(const Model& m) {
 
     // Relative "time ago" from a wall-clock ms stamp — local to the view;
     // no shared helper exists and the grammar here is picker-specific.
-    auto ago = [](std::int64_t ts_ms) -> std::string {
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        m.wall_at(maya::anim_now()).time_since_epoch()).count();
+    auto ago = [now](std::int64_t ts_ms) -> std::string {
         if (ts_ms <= 0) return {};
-        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
         std::int64_t s = (now - ts_ms) / 1000;
         if (s < 0)     s = 0;
         if (s < 45)    return "just now";

@@ -11,7 +11,7 @@
 > is incremental — fix pin 1 first, then pin 2, etc.
 >
 > Pair this with [`RENDERING.md`](RENDERING.md) (the data-adapter
-> story) and `maya/docs/rendering-modes.md` (how `Mode::Inline`
+> story) and `third_party/maya/docs/rendering-modes.md` (how `Mode::Inline`
 > differs from `Mode::Fullscreen`). This file is the *integration*
 > view: what agentty must do, what maya must do, and why each
 > decision is the only one that works.
@@ -105,9 +105,9 @@ auto base = (vstack()
   widget owns its own grow (see pin 2).
 
 **Why.** Maya's inline renderer commits viewport overflow row-by-row
-into the terminal's native scrollback (see `maya/src/render/serialize.cpp`'s
+into the terminal's native scrollback (see `third_party/maya/src/render/serialize.cpp`'s
 case-B path and the `compose_inline_frame` notes in
-`maya/src/render/serialize.cpp:345+`). For that mechanism to work,
+`third_party/maya/src/render/serialize.cpp:345+`). For that mechanism to work,
 layout **must** be allowed to grow past the viewport. If anything
 clips or compresses the thread:
 
@@ -190,7 +190,7 @@ All three call `gap_row()` — defined ONCE in
 builder and the live-tail builder; the pre-seam byte-identical copies
 guarded by "MUST stay identical" comments are gone) — which forwards
 to `maya::Conversation::divider()` (defined in
-`maya/include/maya/widget/conversation.hpp`). That static
+`third_party/maya/include/maya/widget/conversation.hpp`). That static
 function returns a width-aware indented `─` rule with a fixed
 `hash_id` of `"maya.conversation.divider"`.
 
@@ -394,7 +394,7 @@ static bool needs_warmup(const Model& m) {
 ```
 
 ### 6e. Maya-side consumer
-`maya/include/maya/app/app.hpp` (the `run<P>` loop, around the
+`third_party/maya/include/maya/app/app.hpp` (the `run<P>` loop, around the
 `view(model)` call):
 
 ```cpp
@@ -410,7 +410,7 @@ auto status = rt.render(view_root);
 ```
 
 ### 6f. Maya-side implementation
-`maya/src/app/app.cpp` — `Runtime::warmup_render(const Element&)`,
+`third_party/maya/src/app/app.cpp` — `Runtime::warmup_render(const Element&)`,
 right after `Runtime::render`'s closing brace (around line 559).
 Same `pool_`, same width as `canvas_`; renders into a scratch
 canvas that's dropped at function end. The `thread_local`
@@ -466,7 +466,7 @@ per-frame multi-ms territory.
 
 ### 7a. Canvas shrink (maya side)
 
-**Pin location.** `maya/src/app/app.cpp` — `Runtime::render`, inline
+**Pin location.** `third_party/maya/src/app/app.cpp` — `Runtime::render`, inline
 path, around line 320:
 
 ```cpp
@@ -610,8 +610,8 @@ streaming starts on a fresh assistant turn.
 You don't normally touch this, but understanding it helps when
 something looks wrong on the wire.
 
-**Pin location.** `maya/include/maya/render/inline_frame.hpp` and
-`maya/src/render/inline_frame.cpp`.
+**Pin location.** `third_party/maya/include/maya/render/inline_frame.hpp` and
+`third_party/maya/src/render/inline_frame.cpp`.
 
 Six type-states: `Empty → Fresh → Synced → (Stale | HardReset) → Sealed`.
 The runtime stores an `InlineCoherence` variant. Every legal
@@ -688,21 +688,21 @@ that pin from this doc.
 
 | Concern                                      | File                                                            |
 |----------------------------------------------|------------------------------------------------------------------|
-| Mode + outer layout                          | `maya/include/maya/widget/app_layout.hpp`                       |
+| Mode + outer layout                          | `third_party/maya/include/maya/widget/app_layout.hpp`                       |
 | Borrowed frozen prefix wiring                | `src/runtime/view/thread/conversation.cpp`                       |
 | Frozen builder + trim                        | `src/runtime/app/update/frozen.cpp`                              |
-| ScrollbackLedger + ScrollbackDebt            | `maya/include/maya/render/scrollback_ledger.hpp`                 |
+| ScrollbackLedger + ScrollbackDebt            | `third_party/maya/include/maya/render/scrollback_ledger.hpp`                 |
 | Freeze-seam row builders (ONE definition)    | `include/agentty/runtime/view/thread/seam.hpp`                   |
-| Divider source of truth                      | `maya/include/maya/widget/conversation.hpp` (`divider_rule`)    |
+| Divider source of truth                      | `third_party/maya/include/maya/widget/conversation.hpp` (`divider_rule`)    |
 | `needs_warmup_render` field                  | `include/agentty/runtime/model.hpp`                              |
 | `needs_warmup_render` set                    | `src/runtime/app/update/picker.cpp` (`ThreadLoaded`)             |
 | `needs_warmup_render` clear                  | `src/runtime/app/update.cpp` (top of `update`)                   |
 | Program hook                                 | `include/agentty/runtime/app/program.hpp`                        |
-| Maya warmup consumer (run loop)              | `maya/include/maya/app/app.hpp` (`Program<P>::run`)             |
-| Maya warmup implementation                   | `maya/src/app/app.cpp` (`Runtime::warmup_render`)                |
-| Canvas shrink trigger                        | `maya/src/app/app.cpp` (`Runtime::render`, inline path)         |
-| Inline state machine (read-only)             | `maya/include/maya/render/inline_frame.hpp`                      |
-| Compose / serialize internals (read-only)    | `maya/src/render/serialize.cpp` (`compose_inline_frame_impl`)   |
+| Maya warmup consumer (run loop)              | `third_party/maya/include/maya/app/app.hpp` (`Program<P>::run`)             |
+| Maya warmup implementation                   | `third_party/maya/src/app/app.cpp` (`Runtime::warmup_render`)                |
+| Canvas shrink trigger                        | `third_party/maya/src/app/app.cpp` (`Runtime::render`, inline path)         |
+| Inline state machine (read-only)             | `third_party/maya/include/maya/render/inline_frame.hpp`                      |
+| Compose / serialize internals (read-only)    | `third_party/maya/src/render/serialize.cpp` (`compose_inline_frame_impl`)   |
 
 ---
 

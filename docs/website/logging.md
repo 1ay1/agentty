@@ -34,9 +34,11 @@ Either way the file is `~/.agentty/logs/agentty.log`.
 | Custom host / local server won't answer | `grep 'http\.\|provider.select' ~/.agentty/logs/agentty.log` |
 | Turn failed and you don't know why | `grep 'stream\.' ~/.agentty/logs/agentty.log` |
 | A tool keeps failing | `grep 'tool.exec' ~/.agentty/logs/agentty.log` |
+| A tool **hung** (no outcome was ever logged) | `grep 'tool.dispatch' ~/.agentty/logs/agentty.log` — a `dispatch` with no matching `exec` is the wedge |
 | Plugin tools missing | `grep 'mcp.connect' ~/.agentty/logs/agentty.log` |
 | Signed out unexpectedly | `grep 'auth.refresh' ~/.agentty/logs/agentty.log` |
 | Settings / history not persisting | `grep 'settings.save\|thread.save' ~/.agentty/logs/agentty.log` |
+| **Something feels slow** | `AGENTTY_LOG=perf=debug agentty`, then `grep 'turn.ttft\|thread.load' …` |
 | Everything, maximum detail | `AGENTTY_LOG=trace agentty` |
 
 ## Quick start
@@ -86,11 +88,42 @@ filter of `warn` passes `warn` and `error`; `off` silences a channel entirely.
 | `smart` | Smart Mode routing decisions |
 | `net` | sockets, TLS, proxy, prewarm, and per-attempt **connect failures** with the endpoint tried |
 | `model` | **provider/model heterogeneity**: which dialect adapter a turn routed through, what effort survived the capability clamp, capability facts learned from provider rejections, weak-model fallbacks, tool-call salvage |
+| `perf` | timings and cache accounting: TTFT per model, tool-batch width, thread-load and view-build cost, per-frame stream pacing. Answers "why was that slow", which is a different question from "what did it do" |
 | `general` | uncategorised (swallowed exceptions land here) |
+
+### What it costs
+
+The numbers matter because they decide whether you can leave something
+on. Measured `-O2 -DNDEBUG`:
+
+| | Cost |
+|---|---|
+| A site that **doesn't** fire | **~0.5 ns** — one relaxed atomic load |
+| A site that **does** fire | **~1.3 µs** — format, redact, one `write(2)` |
+| A whole healthy release session, no variable set | **~200 bytes** |
+
+The gap is what makes "instrument everything" free: the macro checks the
+filter *before* evaluating its arguments, so a disabled
+`AGT_LOG(..., "{}", expensive())` never calls `expensive()`. Release
+defaults to `warn`, so the whole fleet of debug/trace sites sits on the
+0.5 ns path.
+
+The same gap is why a site on a per-frame path logs at `trace`, never
+`debug` — at 1.3 µs, a per-token log costs milliseconds per thousand
+tokens. That rule is enforced by the compiler: `AGT_LOG_HOT` won't build
+at any level but `trace`.
+
+:::note Everything works on a release build
+No log site is compiled out. All of them are in the shipped binary — the
+build type only changes the *default* level (`warn` for release, `trace`
+otherwise). `AGENTTY_LOG=trace` on a release binary gives you exactly
+what a debug build gives you, which is the point: you can ask a user
+running the released binary for a full trace.
+:::
 
 ### Where it writes
 
-- `AGENTTY_LOG_FILE=<path>` sets the file explicitly.
+- `--log-file <path>` sets the file explicitly.
 - Otherwise: `~/.agentty/logs/agentty.log` (or `$AGENTTY_HOME/logs/`). So
   `AGENTTY_LOG=debug agentty` just works — no path needed.
 - Append-only, rotated once at startup past **32 MB** (the previous log
@@ -126,8 +159,8 @@ questions — grep for the tag, not for prose:
 
 | Site | Answers |
 |------|---------|
-| `startup` | Which version / OS / build is this? *(always present)* |
-| `provider.select` | Which provider and endpoint was active? *(always present)* |
+| `startup` | Which version / OS / build is this? *(`warn` — kept by default)* |
+| `provider.select` | Which provider and endpoint was active? *(`warn` — kept by default)* |
 | `stream.end` | How did this turn end? `clean_close` · `cancelled` · `http_error` · `transport_error` · `already_terminated` |
 | `stream.http_error` / `stream.transport_error` | The exact failure text the user saw |
 | `stream.error` | How the reducer classified a failure (drives retry-vs-surface) |
@@ -138,6 +171,8 @@ questions — grep for the tag, not for prose:
 | `salvage.tool_call` / `salvage.dropped_*` | A tool call recovered from (or lost in) leaked content JSON — the "model ignores tools" signature |
 | `responses.tool_args_unroutable` | Tool arguments arrived but couldn't be attached to a call — the upstream shape of every `invalid args` report on the Responses dialect |
 | `copilot.models.*` / `copilot.auto_session.*` | Why Copilot fell back to the bundled catalog / lost its Auto session |
+| `tool.dispatch` | Every tool call **before** it runs: name, `seq`, and args (behind `AGENTTY_LOG_BODIES`). A `dispatch` with no matching `tool.exec` at the same `seq` is a tool that hung, blocked on a prompt, or took the process down — the one case `tool.exec` can never record |
+| `tool.pre_hook_blocked` | A `pre_tool` hook refused the call, and the reason it gave |
 | `tool.exec` | Every tool call: name, duration, outcome, and the **arguments** on failure |
 | `mcp.connect` | Did each plugin server connect, and how many tools did it advertise? |
 | `auth.refresh` | Did the OAuth token refresh succeed? |
@@ -307,15 +342,27 @@ handler dumps that ring to stderr right after the backtrace:
 Every crash report ships with *what was happening right before it*, at
 essentially zero steady-state cost. Capture it with `agentty 2> crash.log`.
 
-## Legacy variable
+## Retired variables
 
-`AGENTTY_DEBUG_LOG=<path>` (the older single-file debug var) still works: it
-sets the log file *and* implies `AGENTTY_LOG=debug` when `AGENTTY_LOG` is
-unset. Existing scripts keep working; new setups should prefer `AGENTTY_LOG`.
+The environment holds exactly **two** logging variables, and both answer the
+same question — *what to capture*: `AGENTTY_LOG` and `AGENTTY_LOG_BODIES`.
+*Where* it goes is `--log-file`, a flag, because a destination is not a capture
+policy and a flag is the part that shows up in `--help`.
 
-Retired in favour of the single log: `AGENTTY_DEBUG_API`, `AGENTTY_DEBUG_FILE`,
-and `AGENTTY_ACP_TRACE`. Their output now lands on the `wire` and `acp`
-channels above.
+Removed, with their replacements:
+
+| Was | Now |
+|-----|-----|
+| `AGENTTY_LOG_FILE=<path>` | `--log-file <path>` |
+| `AGENTTY_DEBUG_LOG=<path>` | `--log-file <path>` plus `AGENTTY_LOG=debug` |
+| `AGENTTY_DEBUG_API`, `AGENTTY_DEBUG_FILE` | the `wire` channel |
+| `AGENTTY_ACP_TRACE` | the `acp` channel |
+| `AGENTTY_CACHE_PROF`, `AGENTTY_LOAD_PROF`, `AGENTTY_STREAM_PROF`, `AGENTTY_VIEW_PROF` | the `perf` channel |
+
+The `_PROF` four each used to `fopen` their own file under `/tmp`, which put
+the timings outside the level filter, the crash ring and redaction — and meant
+four more names to know. Use `AGENTTY_LOG=perf=debug` (or `perf=trace` for the
+per-frame pacing lines, which fire on every streaming frame).
 
 ## Debugging model heterogeneity
 
@@ -463,7 +510,7 @@ Worth knowing:
   interleave:
 
   ```bash
-  AGENTTY_LOG_FILE=/tmp/agentty-$$.log ./build/agentty
+  --log-file /tmp/agentty-$$.log ./build/agentty
   ```
 
 Suggested muscle memory — the whole workflow is: see bug → mark → snapshot
@@ -517,7 +564,7 @@ agentty diagnostics            # then collect
 ### Manual collection
 
 ```bash
-AGENTTY_LOG=trace AGENTTY_LOG_FILE=/tmp/agentty.log agentty
+AGENTTY_LOG=trace agentty --log-file /tmp/agentty.log
 # reproduce, then attach /tmp/agentty.log
 ```
 

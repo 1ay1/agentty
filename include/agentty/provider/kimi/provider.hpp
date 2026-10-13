@@ -19,6 +19,7 @@
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/openai/transport.hpp"  // openai::Endpoint
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider::kimi {
 
@@ -26,7 +27,8 @@ class KimiProvider {
 public:
     KimiProvider() = default;
 
-    provider::StreamResult stream(provider::Request req, provider::EventSink sink);
+    provider::StreamResult stream(const maya::unlocked& cap, provider::Request req,
+                                  provider::EventSink sink);
 
     // Builds the Kimi inference Endpoint. Shared by stream() and list_models().
     static provider::openai::Endpoint make_endpoint();
@@ -40,10 +42,11 @@ static_assert(provider::Provider<KimiProvider>);
 
 // The account's live model catalog from Kimi's /models (falls back to a small
 // bundled list when offline / not signed in).
-[[nodiscard]] std::vector<ModelInfo> list_models();
+// Refreshes the OAuth token (rank-ordered lock), so the caller holds no lock.
+[[nodiscard]] std::vector<ModelInfo> list_models(Io, const maya::unlocked& cap);
 
 // The account's default model slug (first catalog entry) or a safe fallback.
-[[nodiscard]] std::string default_model();
+[[nodiscard]] std::string default_model(Io, const maya::unlocked& cap);
 
 // Drop the cached model catalog so the next list_models() re-fetches.
 void invalidate_model_cache();

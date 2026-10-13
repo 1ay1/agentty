@@ -16,7 +16,7 @@
 
 #include <maya/style/schemes.hpp>
 #include <maya/core/render_context.hpp>
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include "agentty/runtime/view/view.hpp"
 
@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
     const int msgs     = argc > 2 ? std::atoi(argv[2]) : 60;
 
     app::install_deps(app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const Thread&) {},
         .delete_thread = [](const ThreadId&) {},
         .load_threads  = [] { return std::vector<Thread>{}; },

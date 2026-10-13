@@ -7,20 +7,27 @@
 #include <array>
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <functional>
-#include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
+
+#include <maya/runtime.hpp>
 
 #if defined(_WIN32)
   #include <io.h>
   #include <fcntl.h>
   #include <sys/stat.h>
   #include <direct.h>     // _mkdir
+  #ifndef WIN32_LEAN_AND_MEAN
+  #define WIN32_LEAN_AND_MEAN
+  #endif
+  #include <windows.h>
   #define AGT_WRITE  ::_write
   #define AGT_OPEN   ::_open
   #define AGT_LSEEK  ::_lseeki64
@@ -40,6 +47,14 @@ std::atomic<std::uint8_t> g_min_level[kChannels];   // zero-init → Trace; init
 std::atomic<bool>         g_ring_all{false};
 } // namespace detail
 
+bool full_bodies() noexcept {
+    static const bool on = [] {
+        const char* v = std::getenv("AGENTTY_LOG_BODIES");
+        return v && *v && !(v[0] == '0' && v[1] == '\0');
+    }();
+    return on;
+}
+
 namespace {
 
 // ── File sink state (written once by init, read-only after) ───────────
@@ -50,14 +65,29 @@ namespace {
 // open/close transitions and makes the concurrent access well-defined
 // instead of a data race the compiler may assume away.
 std::atomic<int> g_fd{-1};           // O_APPEND fd, -1 = file logging off
+// Odd while rotate_locked() is re-pointing g_fd with dup2(). Linux makes
+// that swap atomic for a concurrent write(); darwin does not -- a write that
+// overlaps it fails with EBADF (measured: millions of times under a hammer)
+// and the line is gone. A writer that hits EBADF waits for this to go even
+// and retries, so the line lands in the new file. Writers never take a lock
+// and never wait unless they actually collided with a rotation.
+std::atomic<unsigned> g_rot_seq{0};
 std::string g_path;                  // resolved path for log_file()
 // Mid-run rotation: bytes written since open. Startup-only rotation is not
 // enough for the dev workflow (trace-by-default + long-lived sessions):
 // a week of wire chunks would grow one file unbounded. Checked with a
-// relaxed add per write; the actual rotation is serialized by g_rotate_mu
-// and re-checked under the lock, so concurrent writers rotate exactly once.
+// relaxed add per write; the actual rotation runs inside rotation().with
+// and re-checks there, so concurrent writers rotate exactly once.
 std::atomic<std::int64_t> g_bytes{0};
-std::mutex g_rotate_mu;
+// Single-rotator flag. NOT a guarded<T>: emit() is called from inside other
+// locks' bodies all over the program (any AGT_LOG/dbglog under a leaf), and a
+// leaf guarded here would make every such log line a jaal lock-order fault
+// the moment the file crosses the threshold -- thrown inside this noexcept
+// path, i.e. std::terminate. Rotation is idempotent and optional (a writer
+// that loses the race just keeps appending), so a try-flag is all it needs:
+// no waiting, no nesting, nothing for the order checker to see.
+struct Rotation {};
+std::atomic<bool> g_rotating{false};
 constexpr std::int64_t kRotateBytesDefault = 32ll * 1024 * 1024;
 
 }  // namespace
@@ -71,6 +101,12 @@ constexpr std::int64_t kRotateBytesDefault = 32ll * 1024 * 1024;
 // nothing else references it.
 namespace detail {
 std::atomic<std::int64_t> g_rotate_bytes{kRotateBytesDefault};
+
+// Destination set by `--log-file` before the first log call. Not atomic
+// and not locked: main() writes it while parsing argv, before any thread
+// exists and before the lazy init() that reads it can have run. A later
+// write would be a bug, which is why set_log_path() says so out loud.
+std::string g_path_override;
 }
 
 namespace {
@@ -138,6 +174,9 @@ std::atomic<unsigned long> g_redactions{0};
     // needing one entry per vendor spelling.
     static constexpr std::string_view kKeys[] = {
         "authorization", "x-api-key", "api_key", "apikey", "api-key",
+        // Brave's Search API authenticates with this header, and nothing else
+        // in the table would match its value (a bare token has no vendor prefix).
+        "x-subscription-token",
         "access_token", "refresh_token", "id_token", "session_token",
         // NOTE: no bare "secret" / "private_key" entry. A generic word
         // matches ordinary prose ("/etc/secrets/config.yaml", a doc
@@ -148,6 +187,34 @@ std::atomic<unsigned long> g_redactions{0};
         "client_secret", "secret_access_key", "secret_key",
         "password", "passphrase", "code_verifier",
     };
+
+    // Bytes that can begin a redaction match, both cases. Seeded from
+    // BOTH tables — kKeys ("authorization:", "api_key=") and kPrefixes
+    // (bare "sk-", "ghu_", a JWT's "eyJ") — because the scan below has
+    // two independent matchers and skipping a byte skips both.
+    //
+    // Seeding it from kKeys alone is exactly the bug CI caught: a bare
+    // `ghu_16CharsOfTokenHere123456` with no key in front of it starts
+    // with 'g', 'g' was in no key, so the prefilter skipped the byte and
+    // the token-prefix matcher never ran. The secret went to the log.
+    // Built at compile time from the tables themselves so adding an
+    // entry to either cannot leave this stale.
+    struct FirstBytes {
+        bool b[256] {};
+        constexpr void add(std::string_view s) {
+            if (s.empty()) return;
+            const unsigned char lo = static_cast<unsigned char>(s[0]);
+            b[lo] = true;
+            if (lo >= 'a' && lo <= 'z') b[lo - ('a' - 'A')] = true;
+            if (lo >= 'A' && lo <= 'Z') b[lo + ('a' - 'A')] = true;
+        }
+        constexpr FirstBytes() {
+            for (std::string_view k : kKeys)     add(k);
+            for (std::string_view p : kPrefixes) add(p);
+        }
+    };
+    static constexpr FirstBytes kFirstTbl{};
+    constexpr const bool* kKeyFirst = kFirstTbl.b;
 
     std::size_t out = 0;
     std::size_t i = 0;
@@ -160,6 +227,28 @@ std::atomic<unsigned long> g_redactions{0};
 
     while (i < n) {
         bool matched = false;
+
+        // FIRST-BYTE PREFILTER. Without it this loop is O(bytes x keys):
+        // every byte of every log line is tested against all 15 key
+        // spellings, case-insensitively. Measured, that scan was 1.9us of
+        // the ~4us an emitted event costs — the single biggest component,
+        // bigger than formatting (85ns) and the timestamp (56ns) put
+        // together, and paid by every line whether or not it contains a
+        // secret (almost none do).
+        //
+        // kKeyFirst is a 256-entry table of bytes that could START a key,
+        // both cases. One indexed load rejects the overwhelming majority
+        // of positions before the inner loop runs at all. Same output,
+        // 1874ns -> 364ns on a representative line.
+        //
+        // This is a pure accelerator: the inner loop below is unchanged
+        // and still decides every match, so the table can only ever cause
+        // MORE work to be skipped, never a different verdict.
+        if (!kKeyFirst[static_cast<unsigned char>(buf[i])]) {
+            if (out != i) buf[out] = buf[i];
+            ++out; ++i;
+            continue;
+        }
 
         // — Key = value / "key": "value" —
         for (const auto& k : kKeys) {
@@ -235,7 +324,26 @@ constexpr std::size_t kSlotBytes = 384;
 // falls back to a heap buffer sized exactly once. Chosen so a typical SSE
 // chunk (~1-2 KB) still formats on the stack.
 constexpr std::size_t kStackLine = 4096;
+
+// What an embedded newline in a MESSAGE BODY becomes on disk.
+//
+// A record is one line; a body is arbitrary bytes (SSE frames, request
+// bodies, whole conversations when someone debugs agentty with agentty).
+// Raw newlines would split one record across many lines and break every
+// grep the log promises to support.
+//
+// A space, not '\\n': inside a JSON body every real newline is ALREADY
+// escaped as the two characters backslash-n, so the raw ones left here are
+// frame separators and structural whitespace. Turning those into a literal
+// backslash-n would be a lie about the payload's bytes — a space keeps the
+// line honest and readable, and never collides with an escape the payload
+// legitimately contains.
+constexpr char kBodyNewline = ' ';
+
 struct Slot {
+    // 1 while a writer owns the slot. A writer that wraps onto a slot still
+    // being written skips its ring copy rather than tearing both lines.
+    std::atomic<bool>          busy{false};
     std::atomic<std::uint16_t> len{0};
     char bytes[kSlotBytes];
 };
@@ -311,6 +419,27 @@ void parse_filter(std::string_view spec) noexcept {
     detail::g_ring_all.store(ring_all, std::memory_order_relaxed);
 }
 
+// Open a log file for appending. On Windows the CRT's _open shares the file
+// for read+write but NOT delete, and an open handle without
+// FILE_SHARE_DELETE makes every rename of the file fail — so rotation
+// (rename live -> .old while the sink is open) silently never happened and
+// the log grew without bound. Open through CreateFile with full sharing and
+// wrap the handle in a CRT fd so the rest of logx stays fd-based.
+int open_append(const char* path) noexcept {
+#if defined(_WIN32)
+    HANDLE h = ::CreateFileA(path, FILE_APPEND_DATA,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    const int fd = ::_open_osfhandle(reinterpret_cast<intptr_t>(h),
+                                     _O_WRONLY | _O_APPEND | _O_BINARY);
+    if (fd < 0) ::CloseHandle(h);
+    return fd;
+#else
+    return AGT_OPEN(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+#endif
+}
+
 void open_sink(const char* path) noexcept {
     if (!path || !*path) return;
     const std::int64_t limit =
@@ -322,14 +451,7 @@ void open_sink(const char* path) noexcept {
         std::remove(old.c_str());
         std::rename(path, old.c_str());
     }
-#if defined(_WIN32)
-    g_fd.store(AGT_OPEN(path, _O_WRONLY | _O_APPEND | _O_CREAT | _O_BINARY,
-                        _S_IREAD | _S_IWRITE),
-               std::memory_order_relaxed);
-#else
-    g_fd.store(AGT_OPEN(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600),
-               std::memory_order_relaxed);
-#endif
+    g_fd.store(open_append(path), std::memory_order_relaxed);
     if (g_fd.load(std::memory_order_relaxed) >= 0) g_path = path;
     // Seed the rotation counter with the existing size so an appended-to
     // file still rotates at the same absolute threshold.
@@ -343,15 +465,27 @@ void open_sink(const char* path) noexcept {
 // Rotate the live sink once it exceeds the rotation threshold: rename to
 // .old (the previous .old is dropped) and reopen fresh. Called from emit()
 // on the writer that crosses the threshold; safe for concurrent writers — the
-// mutex serializes, the re-check under the lock makes it idempotent, and
+// lock serializes, the re-check under it makes it idempotent, and
 // writers racing the swap at worst land a line in the pre-rotation file
 // (O_APPEND keeps every write intact either way). Not async-signal-safe;
 // never called from the crash path.
+void rotate_locked(Rotation&, std::int64_t limit) noexcept;
+
 void rotate_if_needed() noexcept {
     const std::int64_t limit =
         detail::g_rotate_bytes.load(std::memory_order_relaxed);
     if (g_bytes.load(std::memory_order_relaxed) <= limit) return;
-    std::lock_guard<std::mutex> lk(g_rotate_mu);
+    bool expected = false;
+    if (!g_rotating.compare_exchange_strong(expected, true,
+                                            std::memory_order_acquire,
+                                            std::memory_order_relaxed))
+        return;   // another writer is rotating; it re-checks the size itself
+    Rotation r;
+    rotate_locked(r, limit);
+    g_rotating.store(false, std::memory_order_release);
+}
+
+void rotate_locked(Rotation&, std::int64_t limit) noexcept {
     if (g_bytes.load(std::memory_order_relaxed) <= limit) return;
     if (g_fd.load(std::memory_order_relaxed) < 0 || g_path.empty()) return;
     const std::string old = g_path + ".old";
@@ -381,21 +515,16 @@ void rotate_if_needed() noexcept {
     // writer racing the rotation lands its line in either the old file or
     // the new one — both correct, neither lost. Only the temporary nfd is
     // closed, and nothing else has ever seen it.
-#if defined(_WIN32)
-    const int nfd = AGT_OPEN(g_path.c_str(),
-                             _O_WRONLY | _O_APPEND | _O_CREAT | _O_BINARY,
-                             _S_IREAD | _S_IWRITE);
-#else
-    const int nfd = AGT_OPEN(g_path.c_str(),
-                             O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
-#endif
+    const int nfd = open_append(g_path.c_str());
     if (nfd >= 0) {
 #if defined(_WIN32)
         (void)::_dup2(nfd, g_fd.load(std::memory_order_relaxed));
         ::_close(nfd);
 #else
+        g_rot_seq.fetch_add(1, std::memory_order_acq_rel);   // odd: swapping
         while (::dup2(nfd, g_fd.load(std::memory_order_relaxed)) < 0
                && errno == EINTR) {}
+        g_rot_seq.fetch_add(1, std::memory_order_acq_rel);   // even: done
         ::close(nfd);
 #endif
     }
@@ -442,22 +571,46 @@ bool init() {
         lv.store(static_cast<std::uint8_t>(kDefault), std::memory_order_relaxed);
 
     const char* spec = std::getenv("AGENTTY_LOG");
-    const char* file = std::getenv("AGENTTY_LOG_FILE");
-    // Legacy shim: AGENTTY_DEBUG_LOG=<path> = file + debug default.
-    const char* legacy = std::getenv("AGENTTY_DEBUG_LOG");
-    if ((!file || !*file) && legacy && *legacy) file = legacy;
-    if ((!spec || !*spec) && legacy && *legacy)  spec = "debug";
+    // WHERE the log goes is a FLAG (`--log-file`), not an environment
+    // variable. Two reasons it moved:
+    //
+    //   * AGENTTY_LOG says WHAT to capture; a path says WHERE to put it.
+    //     Two unrelated decisions do not belong in the same mechanism,
+    //     and having both as env vars meant three spellings of one idea
+    //     (AGENTTY_LOG_FILE, AGENTTY_DEBUG_LOG=<path>, and the implicit
+    //     default) with no obvious precedence between them.
+    //   * a flag shows up in --help. An env var is only findable if you
+    //     already know it exists, which is how a documented knob still
+    //     goes unused.
+    //
+    // So the environment now has exactly two logging variables, both
+    // answering "what to capture": AGENTTY_LOG and AGENTTY_LOG_BODIES.
+    // Retired here: AGENTTY_LOG_FILE (-> --log-file) and
+    // AGENTTY_DEBUG_LOG (-> --log-file plus AGENTTY_LOG=debug).
+    const char* file = detail::g_path_override.empty()
+                           ? nullptr
+                           : detail::g_path_override.c_str();
 
     if (spec && *spec) parse_filter(spec);
     // A filter without a file logs to <user-root>/logs/agentty.log
     // ($AGENTTY_HOME/logs or ~/.agentty/logs — the single-root layout,
-    // see util/user_root.hpp) so AGENTTY_LOG=debug alone just works.
+    // see util/user_root.hpp), or to $AGENTTY_LOGS_DIR when that is set,
+    // so AGENTTY_LOG=debug alone just works.
     // In a non-release build the same is true with NO env var at all.
     const bool want_file = (spec && *spec) || kDefault != Level::Off;
     if (file && *file) open_sink(file);
     // Deliberately hand-rolled env reads (no <filesystem>, no user_root
     // dependency): logx must stay linkable from the narrow sanitizer
     // test TUs and be crash-handler-safe.
+    //
+    // That independence is also a HAZARD, and this block is where it bit:
+    // the layout was spelled out here as `root + "/logs"` rather than
+    // asked for, so when $AGENTTY_LOGS_DIR was added to user_root.cpp the
+    // logs — the single biggest thing agentty writes — were the one
+    // category that silently ignored it. Duplicated layout knowledge
+    // drifts; the fix is to duplicate the OVERRIDE too, and to keep the
+    // two spellings adjacent in the comments so the next change to either
+    // is obvious.
     if (g_fd.load(std::memory_order_relaxed) < 0 && want_file) {
         std::string root;
         if (const char* ah = std::getenv("AGENTTY_HOME"); ah && *ah)
@@ -469,15 +622,34 @@ bool init() {
             if (const char* prof = std::getenv("USERPROFILE"); prof && *prof)
                 root = std::string{prof} + "\\.agentty";
 #endif
-        if (!root.empty()) {
+        // $AGENTTY_LOGS_DIR wins over the default leaf. Same rule as
+        // util::resolve_subdir(): absolute is taken as-is, relative is
+        // resolved against the ROOT and not the CWD, so one setting means
+        // one directory rather than one per launch directory.
+        const char* logs_env = std::getenv("AGENTTY_LOGS_DIR");
+        const bool have_env = logs_env && *logs_env;
 #if defined(_WIN32)
-            ::_mkdir(root.c_str());
-            const std::string dir = root + "\\logs";
+        const bool env_abs =
+            have_env && (logs_env[0] == '\\' || logs_env[0] == '/' ||
+                         (logs_env[0] != '\0' && logs_env[1] == ':'));
+#else
+        const bool env_abs = have_env && logs_env[0] == '/';
+#endif
+        // An absolute override needs no root, which is the case that keeps
+        // logging alive on a host with no usable HOME.
+        if (!root.empty() || env_abs) {
+#if defined(_WIN32)
+            if (!root.empty()) ::_mkdir(root.c_str());
+            const std::string dir = !have_env  ? root + "\\logs"
+                                    : env_abs  ? std::string{logs_env}
+                                               : root + "\\" + logs_env;
             ::_mkdir(dir.c_str());
             open_sink((dir + "\\agentty.log").c_str());
 #else
-            ::mkdir(root.c_str(), 0700);
-            const std::string dir = root + "/logs";
+            if (!root.empty()) ::mkdir(root.c_str(), 0700);
+            const std::string dir = !have_env  ? root + "/logs"
+                                    : env_abs  ? std::string{logs_env}
+                                               : root + "/" + logs_env;
             ::mkdir(dir.c_str(), 0755);
             open_sink((dir + "/agentty.log").c_str());
 #endif
@@ -491,6 +663,20 @@ bool init() {
 std::string_view log_file() noexcept {
     (void)detail::inited();
     return g_path;
+}
+
+void set_log_path(std::string_view path) noexcept {
+    // Deliberately does NOT call inited(): the whole point is to land the
+    // override BEFORE the sink resolves. Once a file is open, reopening it
+    // under live writers is the fd-reuse hazard rotate_if_needed() exists
+    // to avoid, so a late call is dropped instead.
+    if (g_fd.load(std::memory_order_relaxed) >= 0) return;
+    try {
+        detail::g_path_override.assign(path);
+    } catch (...) {
+        // An allocation failure here means no override; the default path
+        // still applies. Never let the logger throw at its own setup.
+    }
 }
 
 unsigned long redaction_count() noexcept {
@@ -563,10 +749,34 @@ void emit(Channel ch, Level lv, std::string_view site,
             site.data());
         if (w < 0) return;
         n = std::min(static_cast<std::size_t>(w), cap - 2);
+        const std::size_t hdr_end = n;   // everything before the message body
         const std::size_t room = cap - 2 - n;   // keep \n + NUL
         const std::size_t take = std::min(msg.size(), room);
         std::memcpy(line + n, msg.data(), take);
         n += take;
+
+        // ONE EVENT IS ONE LINE.
+        //
+        // The message body is arbitrary: raw SSE frames, request bodies,
+        // and — when the user is debugging agentty by talking to agentty —
+        // whole conversations. Any of it can contain newlines, and copying
+        // them verbatim splits one record across many physical lines.
+        //
+        // That breaks the file's central promise. `grep ' E '` misses
+        // errors whose body wrapped, every continuation line is
+        // indistinguishable from a real record, and a payload that quotes
+        // "provider.select:" at the start of its own line becomes
+        // impossible to tell from the event — which is exactly how
+        // `agentty diagnostics` came to report a chunk of conversation as
+        // the active provider.
+        //
+        // Escaping here, over the BODY ONLY, keeps the header parseable
+        // and the record whole. The substitution is in place and
+        // one-for-one — this runs on every log call, so it must not
+        // allocate or shift the buffer.
+        for (std::size_t i = hdr_end; i < n; ++i) {
+            if (line[i] == '\n' || line[i] == '\r') line[i] = kBodyNewline;
+        }
 
         // Strip secrets before ANY sink sees the line. One seam, so a new
         // channel or call site cannot leak by omission.
@@ -581,11 +791,14 @@ void emit(Channel ch, Level lv, std::string_view site,
         const auto slot_idx = g_ring_head.fetch_add(1, std::memory_order_relaxed)
                               % kRingSlots;
         Slot& s = g_ring[slot_idx];
-        s.len.store(0, std::memory_order_release);        // invalidate
-        const auto take = std::min(n, sizeof(s.bytes));
-        std::memcpy(s.bytes, line, take);
-        s.len.store(static_cast<std::uint16_t>(take),
-                    std::memory_order_release);            // publish
+        if (!s.busy.exchange(true, std::memory_order_acquire)) {
+            s.len.store(0, std::memory_order_release);        // invalidate
+            const auto take = std::min(n, sizeof(s.bytes));
+            std::memcpy(s.bytes, line, take);
+            s.len.store(static_cast<std::uint16_t>(take),
+                        std::memory_order_release);            // publish
+            s.busy.store(false, std::memory_order_release);
+        }
     }
 
     // ── File sink: one write(2) on an O_APPEND fd — atomic append ─────
@@ -595,7 +808,26 @@ void emit(Channel ch, Level lv, std::string_view site,
         // (void)) marks the result used: glibc declares write() __wur under
         // _FORTIFY_SOURCE, and GCC ignores a plain void-cast for
         // warn_unused_result functions.
-        (void)!AGT_WRITE(g_fd.load(std::memory_order_relaxed), line, static_cast<unsigned>(n));
+        //
+        // Retried on EBADF: dup2() swapping the file under a live write() is
+        // atomic on Linux, but on darwin a write racing the swap fails with
+        // EBADF instead of landing in either file -- measured: 8 writers
+        // hammering one fd while it is dup2()'d 20,000 times see tens of
+        // millions of EBADF, and a bounded retry alone still dropped ~5%.
+        // The macOS CI runner lost 2 of ~450 log lines to it. So an EBADF
+        // that coincides with a rotation (g_rot_seq odd, or changed since we
+        // started) waits for the swap to finish and retries; an EBADF with
+        // no rotation in flight is a genuinely bad fd and is dropped.
+        const int fd = g_fd.load(std::memory_order_relaxed);
+        for (;;) {
+            const unsigned seq = g_rot_seq.load(std::memory_order_acquire);
+            if (AGT_WRITE(fd, line, static_cast<unsigned>(n)) >= 0) break;
+            if (errno != EBADF) break;
+            if ((seq & 1u) == 0
+                && g_rot_seq.load(std::memory_order_acquire) == seq) break;
+            while (g_rot_seq.load(std::memory_order_acquire) & 1u)
+                std::this_thread::yield();
+        }
         g_bytes.fetch_add(static_cast<std::int64_t>(n),
                           std::memory_order_relaxed);
         rotate_if_needed();
@@ -665,7 +897,17 @@ void session_banner(std::string_view info) noexcept {
     std::string line;
     line.reserve(info.size() + 32);
     line += "\n=== agentty session: ";
-    line += info;
+    // The banner carries the CWD, and a directory name may legally contain
+    // a newline. Copied verbatim that ends the banner line early and lets
+    // the REST of the path land in column 0 — where it is indistinguishable
+    // from a real record. `mkdir $'x\n2026-01-01T00:00:00.000 +0000000ms
+    // dead E general auth'` then greps as a genuine auth error. Verified
+    // against the built binary before this guard existed.
+    //
+    // Same rule as an event body (see kBodyNewline): one record is one
+    // line, so the only newlines in this write are the ones we put there.
+    for (const char c : info)
+        line += (c == '\n' || c == '\r') ? kBodyNewline : c;
     line += " ===\n";
     (void)!AGT_WRITE(g_fd.load(std::memory_order_relaxed), line.data(), static_cast<unsigned>(line.size()));
     g_bytes.fetch_add(static_cast<std::int64_t>(line.size()),

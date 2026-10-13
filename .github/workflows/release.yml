@@ -132,17 +132,31 @@ jobs:
             sleep $((attempt * 10))
           done
           git submodule update --init --recursive --force
-      - name: Build static binary (Alpine 3.21 / musl / GCC 14)
+      - name: Build static binary (Alpine edge / musl / clang 22)
         run: |
           docker run --rm --platform linux/amd64 \
             -e CMARCH='sse2' \
-            -v "$PWD":/src -w /src alpine:3.21 sh -c '
+            -v "$PWD":/src -w /src alpine:edge sh -c '
               set -ex
-              apk add --no-cache build-base cmake ninja git linux-headers pkgconfig \
+              # alpine:edge + clang 22, NOT 3.21 + gcc: maya vendors jaal, which
+              # needs C++26 structured binding packs (P1061) to check messages
+              # are Sendable, and without them its meta/fields.hpp is a hard
+              # #error. P1061 needs gcc 16 or clang 22. Alpine has no gcc 16 in
+              # any branch (3.23 and edge both cap at gcc 15), so the musl legs
+              # go to clang 22, which edge does carry. musl is what matters here
+              # — it is what makes the binary fully static — and edge keeps it.
+              # Package names differ from 3.21: lld is versioned (lld22),
+              # pkgconfig is pkgconf, and `ninja` in main is the samurai
+              # package (it provides cmd:ninja). build-base pulls the musl
+              # headers, binutils and make that dropping gcc would otherwise
+              # take with it.
+              apk add --no-cache build-base clang22 clang22-static lld22 llvm22 \
+                cmake samurai git linux-headers pkgconf \
                 openssl-dev openssl-libs-static nghttp2-dev nghttp2-static zlib-static
               git config --global --add safe.directory /src
               rm -rf build-rel
               cmake -S . -B build-rel -GNinja -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
                     -DAGENTTY_STANDALONE=ON -DAGENTTY_FULLY_STATIC=ON \
                     -DAGENTTY_AUTO_PULL_MAYA=OFF -DAGENTTY_USE_MIMALLOC=OFF \
                     -DAGENTTY_ARCH="$CMARCH"
@@ -214,19 +228,33 @@ jobs:
             sleep $((attempt * 10))
           done
           git submodule update --init --recursive --force
-      - name: Build static binary (Alpine 3.21 / musl / GCC 14)
+      - name: Build static binary (Alpine edge / musl / clang 22)
         # Host is already arm64, so a plain alpine:3.21 container builds
         # natively — no --platform, no QEMU.
         run: |
           docker run --rm \
             -e CMARCH='native' \
-            -v "$PWD":/src -w /src alpine:3.21 sh -c '
+            -v "$PWD":/src -w /src alpine:edge sh -c '
               set -ex
-              apk add --no-cache build-base cmake ninja git linux-headers pkgconfig \
+              # alpine:edge + clang 22, NOT 3.21 + gcc: maya vendors jaal, which
+              # needs C++26 structured binding packs (P1061) to check messages
+              # are Sendable, and without them its meta/fields.hpp is a hard
+              # #error. P1061 needs gcc 16 or clang 22. Alpine has no gcc 16 in
+              # any branch (3.23 and edge both cap at gcc 15), so the musl legs
+              # go to clang 22, which edge does carry. musl is what matters here
+              # — it is what makes the binary fully static — and edge keeps it.
+              # Package names differ from 3.21: lld is versioned (lld22),
+              # pkgconfig is pkgconf, and `ninja` in main is the samurai
+              # package (it provides cmd:ninja). build-base pulls the musl
+              # headers, binutils and make that dropping gcc would otherwise
+              # take with it.
+              apk add --no-cache build-base clang22 clang22-static lld22 llvm22 \
+                cmake samurai git linux-headers pkgconf \
                 openssl-dev openssl-libs-static nghttp2-dev nghttp2-static zlib-static
               git config --global --add safe.directory /src
               rm -rf build-rel
               cmake -S . -B build-rel -GNinja -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
                     -DAGENTTY_STANDALONE=ON -DAGENTTY_FULLY_STATIC=ON \
                     -DAGENTTY_AUTO_PULL_MAYA=OFF -DAGENTTY_USE_MIMALLOC=OFF \
                     -DAGENTTY_ARCH="$CMARCH"
@@ -300,17 +328,31 @@ jobs:
           git submodule update --init --recursive --force
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
-      - name: Build static binary (Alpine 3.21 / musl / GCC 14)
+      - name: Build static binary (Alpine edge / musl / clang 22)
         run: |
           docker run --rm --platform linux/386 \
             -e CMARCH='sse2' \
-            -v "$PWD":/src -w /src alpine:3.21 sh -c '
+            -v "$PWD":/src -w /src alpine:edge sh -c '
               set -ex
-              apk add --no-cache build-base cmake ninja git linux-headers pkgconfig \
+              # alpine:edge + clang 22, NOT 3.21 + gcc: maya vendors jaal, which
+              # needs C++26 structured binding packs (P1061) to check messages
+              # are Sendable, and without them its meta/fields.hpp is a hard
+              # #error. P1061 needs gcc 16 or clang 22. Alpine has no gcc 16 in
+              # any branch (3.23 and edge both cap at gcc 15), so the musl legs
+              # go to clang 22, which edge does carry. musl is what matters here
+              # — it is what makes the binary fully static — and edge keeps it.
+              # Package names differ from 3.21: lld is versioned (lld22),
+              # pkgconfig is pkgconf, and `ninja` in main is the samurai
+              # package (it provides cmd:ninja). build-base pulls the musl
+              # headers, binutils and make that dropping gcc would otherwise
+              # take with it.
+              apk add --no-cache build-base clang22 clang22-static lld22 llvm22 \
+                cmake samurai git linux-headers pkgconf \
                 openssl-dev openssl-libs-static nghttp2-dev nghttp2-static zlib-static
               git config --global --add safe.directory /src
               rm -rf build-rel
               cmake -S . -B build-rel -GNinja -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_C_COMPILER=clang-22 -DCMAKE_CXX_COMPILER=clang++-22 \
                     -DAGENTTY_STANDALONE=ON -DAGENTTY_FULLY_STATIC=ON \
                     -DAGENTTY_AUTO_PULL_MAYA=OFF -DAGENTTY_USE_MIMALLOC=OFF \
                     -DAGENTTY_ARCH="$CMARCH"
@@ -369,14 +411,45 @@ jobs:
           git -C "$env:VCPKG_INSTALLATION_ROOT" reset --hard FETCH_HEAD
           & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat"
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl nghttp2 --triplet x64-windows-static
+      - name: MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
       - name: Configure + build
         shell: pwsh
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release `
+          # NINJA, not the default Visual Studio generator — the same choice
+          # the CI lane makes, for one reason that only shows up here.
+          #
+          # v0.9.15's release died with ~40 x `error C2385: ambiguous access
+          # of 'attach' / 'on_ready' / 'present' / ...` in jaal's run.hpp,
+          # while the CI MSVC lane compiled the identical commit clean. The
+          # difference was the generator.
+          #
+          # jaal detects optional host hooks by NAME using a deliberate
+          # ambiguity (meta/declares.hpp): mix the host with a `pill` struct
+          # declaring the same name and ask whether `&mixin<T>::hook` is
+          # formable. If the host declares it too the lookup is ambiguous,
+          # the requires-expression is false, and that FALSE is the signal.
+          # Under MSBuild that ambiguity surfaced as a hard C2385 instead of
+          # a substitution failure; under Ninja it does not.
+          #
+          # Beyond this, MSBuild was the wrong tool anyway: it parallelises
+          # across PROJECTS rather than translation units (agentty is a few
+          # object libraries, so the runner sits mostly idle), and being a
+          # multi-config generator it ignored CMAKE_BUILD_TYPE on configure
+          # — which worked only because --config repeated the same value.
+          #
+          # Keep this in step with the `windows compile (msvc)` lane in
+          # ci.yml. A release that builds differently from CI is a release
+          # CI cannot vouch for, which is exactly what happened.
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
             -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows-static
-          cmake --build build --config Release -j
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
+            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW
+          cmake --build build
       - name: Smoke test retrieval engine
         shell: pwsh
         run: |
@@ -958,14 +1031,54 @@ jobs:
           fi
           cp PKGBUILD aur/PKGBUILD
           cd aur
-          # .SRCINFO must mirror the PKGBUILD; generate it via makepkg if the
-          # runner has it, else hand-write the minimal fields the AUR requires.
-          if command -v makepkg >/dev/null 2>&1; then
-            makepkg --printsrcinfo > .SRCINFO
-          else
-            printf 'pkgbase = agentty-bin\n\tpkgdesc = Blazing-fast Claude in your terminal\n\tpkgver = %s\n\tpkgrel = 1\n\turl = https://github.com/1ay1/agentty\n\tarch = x86_64\n\tarch = aarch64\n\tlicense = MIT\n\tprovides = agentty\n\tconflicts = agentty\n\tsource_x86_64 = agentty-%s-x86_64::https://github.com/1ay1/agentty/releases/download/v%s/agentty-linux-x86_64\n\tsha256sums_x86_64 = %s\n\tsource_aarch64 = agentty-%s-aarch64::https://github.com/1ay1/agentty/releases/download/v%s/agentty-linux-aarch64\n\tsha256sums_aarch64 = %s\n\npkgname = agentty-bin\n' \
-              "$V" "$V" "$V" "$x64" "$V" "$V" "$arm" > .SRCINFO
+          # .SRCINFO MUST be generated by makepkg from the PKGBUILD, never
+          # hand-written.
+          #
+          # This used to fall back to a printf of "the minimal fields the AUR
+          # requires" when the runner had no makepkg -- and ubuntu-latest never
+          # has makepkg, so the fallback was not a fallback, it was the only
+          # path that ever ran. Being a SECOND source of truth, it drifted the
+          # moment the PKGBUILD gained anything: the long pkgdesc and both
+          # optdepends existed in the PKGBUILD for releases while the AUR
+          # served the short description and no optional deps (reported by a
+          # user against 0.9.15, still live on 0.9.17).
+          #
+          # Worse than cosmetic: AUR helpers like pikaur regenerate .SRCINFO
+          # in their local clone when building, so a committed file that does
+          # not match what makepkg produces makes `git pull` CONFLICT on every
+          # new release, breaking updates rather than just looking wrong.
+          #
+          # So: run the real generator in an Arch container. No fallback, by
+          # design -- if it cannot run we fail loudly instead of publishing a
+          # file that silently disagrees with the PKGBUILD. makepkg refuses to
+          # run as root, hence the unprivileged build user.
+          #
+          # The generator copies the PKGBUILD to a container-local dir and
+          # prints to STDOUT, which the host redirects. It does NOT chown the
+          # bind mount, and mounts it read-only so it cannot.
+          #
+          # That matters: the previous version ran `chown -R build /pkg` on the
+          # mount, and a bind mount shares UIDs numerically with the host. So
+          # it handed the clone directory to the container's build uid, the
+          # runner lost write permission on the DIRECTORY, and the next line
+          # died with "mv: cannot move '.SRCINFO.gen' to '.SRCINFO':
+          # Permission denied" -- which is what kept agentty-bin on the AUR
+          # pinned at 0.9.17 while every other channel shipped 0.9.18.
+          docker run --rm -v "$PWD:/pkg:ro" archlinux:base-devel sh -c '
+            set -eu
+            useradd -m build
+            mkdir -p /tmp/gen
+            cp /pkg/PKGBUILD /tmp/gen/PKGBUILD
+            chown -R build /tmp/gen
+            su build -c "cd /tmp/gen && makepkg --printsrcinfo"
+          ' > .SRCINFO.gen
+          mv .SRCINFO.gen .SRCINFO
+          # Prove it round-trips: what we are about to commit must be exactly
+          # what a user's makepkg regenerates, or the pikaur conflict is back.
+          if ! grep -q '^pkgbase = agentty-bin$' .SRCINFO; then
+            echo "::error::.SRCINFO generation produced nothing usable"; exit 1
           fi
+          echo "generated .SRCINFO:"; cat .SRCINFO
           git config user.name agentty-ci; git config user.email noreply@github.com
           git add PKGBUILD .SRCINFO
           git commit -m "agentty $V" || { echo "no change"; exit 0; }
@@ -986,6 +1099,11 @@ jobs:
             echo "::error::AUR push failed and AUR is NOT reporting maintenance — likely an SSH auth problem (AUR_SSH_KEY) or the account lost write access to agentty-bin. Fix it; do not ignore."
             exit 1
           fi
+          # Say so. Without this the step's last output is the `git commit`
+          # line, so a log that ends there is ambiguous between "pushed" and
+          # "exited early" — which is exactly the diagnosis #50 cost, for a
+          # push that had in fact worked.
+          echo "✓ AUR agentty-bin pushed at $V"
 
   # Submit the Windows .msi to the winget community repo. winget is the
   # zero-cost, no-SmartScreen-warning install path: `winget install agentty`.
@@ -998,7 +1116,19 @@ jobs:
   #     renders packaging/winget/*.yaml from the CMake version + the built
   #     .msi's real SHA256/ProductCode and opens the initial PR via the API.
   # Either way the submitted version is the central CMake project VERSION.
-  # Requires WINGET_TOKEN (classic PAT, public_repo scope); skipped if absent.
+  # Requires WINGET_TOKEN; skipped if absent.
+  #
+  # SCOPES: classic PAT with `public_repo` AND `workflow`. public_repo alone
+  # is NOT enough and fails in a way that looks unrelated: komac must first
+  # sync the 1ay1/winget-pkgs fork with upstream, upstream carries files under
+  # .github/workflows/, and GitHub refuses a token without `workflow` scope to
+  # push those — surfacing as "1ay1 does not have the correct permissions to
+  # execute `UpdateRef` / failed to sync upstream changes". That is what broke
+  # v0.9.3, and because the step was continue-on-error the job still reported
+  # success; only verify-release caught it.
+  #
+  # If the fork has drifted far enough that komac gives up, resync it by hand:
+  #   gh api repos/1ay1/winget-pkgs/merge-upstream -X POST -f branch=master
   publish-winget:
     name: publish to winget
     needs: [prepare, checksums-final, build-windows]
@@ -1011,6 +1141,40 @@ jobs:
       PKGID: agentty.agentty
     steps:
       - uses: actions/checkout@v5
+
+      # Fast-forward our winget-pkgs fork onto upstream BEFORE submitting.
+      #
+      # This is the step that makes winget publishing unattended.
+      # microsoft/winget-pkgs takes hundreds of commits a week, and a fork
+      # only advances when something syncs it — so ours drifts until komac
+      # cannot rebase onto it and the submission fails. Measured at
+      # v0.9.13: the fork was 552 commits behind, and a single
+      # merge-upstream call fixed it.
+      #
+      # Before this, the failure message asked a human to regenerate
+      # WINGET_TOKEN and sync by hand on every release. That advice led
+      # with the wrong cause — the token was fine, the fork was stale — so
+      # the token got rotated, the fork got synced as a side effect, and
+      # the same failure returned on the next tag.
+      #
+      # Idempotent and cheap: an already-current fork just reports
+      # "already merged". continue-on-error because a sync failure is not
+      # necessarily terminal — the submit below may still succeed, and if
+      # it doesn't, the classify step reports the real reason.
+      - name: Sync the winget-pkgs fork with upstream
+        if: ${{ env.WINGET_TOKEN != '' }}
+        continue-on-error: true
+        run: |
+          behind() {
+            gh api repos/1ay1/winget-pkgs/compare/microsoft:master...1ay1:master \
+              --jq '.behind_by' 2>/dev/null || echo '?'
+          }
+          echo "fork was $(behind) commits behind upstream"
+          gh api repos/1ay1/winget-pkgs/merge-upstream -X POST -f branch=master \
+            || echo "merge-upstream failed — continuing; submit will report"
+          echo "fork is now $(behind) commits behind upstream"
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
 
       # Does agentty.agentty already have a manifest folder upstream? Drives
       # which of the two paths below actually runs.
@@ -1029,10 +1193,19 @@ jobs:
       # UPDATE path — package already exists upstream.
       - name: Update manifest (winget-releaser)
         if: ${{ env.WINGET_TOKEN != '' && steps.exists.outputs.present == 'true' }}
-        # Non-fatal: winget is publish-once-per-version. A manual re-dispatch
-        # for an already-submitted version makes komac error on the
-        # duplicate; that's a no-op, not a release-breaking failure. The
-        # tagged-release path submits each version exactly once.
+        id: winget_update
+        # Non-fatal HERE, but NOT silent — see the classify step below.
+        #
+        # winget is publish-once-per-version, so a manual re-dispatch for an
+        # already-submitted version makes komac error on the duplicate; that
+        # genuinely is a no-op. But this flag was swallowing every other cause
+        # too. v0.9.3 failed with "1ay1 does not have the correct permissions
+        # to execute `UpdateRef` / failed to sync upstream changes" and the job
+        # still reported success — the only reason anyone noticed is that
+        # verify-release checks the LIVE channel and went red.
+        #
+        # So: keep the step non-fatal, then read its outcome and fail on
+        # anything that is not the benign duplicate.
         continue-on-error: true
         uses: vedantmgoyal9/winget-releaser@main
         with:
@@ -1047,6 +1220,46 @@ jobs:
           release-tag: ${{ needs.prepare.outputs.tag }}
           installers-regex: 'agentty-windows-x86_64\.msi$'
           token: ${{ secrets.WINGET_TOKEN }}
+
+      # A failed update is only acceptable if the version was ALREADY there.
+      - name: Classify a winget update failure
+        if: ${{ steps.winget_update.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          V: ${{ needs.prepare.outputs.version }}
+        run: |
+          # Ask the only question that matters: is this version on winget now?
+          # If a PR exists (open or merged) the duplicate-submission theory
+          # holds and the failure is genuinely a no-op. If not, the submission
+          # really did fail and the release must say so.
+          prs=$(gh search prs --repo microsoft/winget-pkgs \
+                  "agentty.agentty version $V" --limit 5 \
+                  --json state --jq 'length' 2>/dev/null || echo 0)
+          if [ "${prs:-0}" -gt 0 ]; then
+            echo "winget-releaser failed but $V is already submitted — duplicate, ignoring"
+            exit 0
+          fi
+          echo "::error::winget submission FAILED and no PR exists for $V."
+          # Report the fork's ACTUAL state instead of guessing. The old text
+          # led with "regenerate WINGET_TOKEN", which was the wrong cause
+          # every time it fired: the token was fine and the fork was stale.
+          # Rotating the token appeared to fix it only because syncing the
+          # fork by hand was step two of the same instructions.
+          behind=$(gh api repos/1ay1/winget-pkgs/compare/microsoft:master...1ay1:master \
+                     --jq '.behind_by' 2>/dev/null || echo '?')
+          echo "::error::1ay1/winget-pkgs is $behind commits behind upstream (the sync"
+          echo "::error::step at the top of this job should have brought it to 0)."
+          if [ "${behind:-0}" != "0" ] && [ "$behind" != "?" ]; then
+            echo "::error::The fork is STALE and the automatic sync did not take. That"
+            echo "::error::usually means WINGET_TOKEN cannot fast-forward it — a classic"
+            echo "::error::PAT needs 'repo' AND 'workflow', because upstream carries"
+            echo "::error::.github/workflows/*.yml. Check the sync step's log above."
+          else
+            echo "::error::The fork is current, so this is NOT a stale-fork or token-scope"
+            echo "::error::problem. Read komac's output above for the real reason"
+            echo "::error::(manifest schema change, validation failure, upstream policy)."
+          fi
+          exit 1
 
       # FIRST-SUBMISSION path — package not yet upstream. Render the templates
       # from the central version + the exact built .msi and open the initial PR.
@@ -1342,9 +1555,73 @@ jobs:
           # ---- 4. AUR: PKGBUILD pkgver is this version ----
           echo "::group::aur"
           if [ -n "$AUR_SSH_KEY" ]; then
-            pk=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=agentty-bin" 2>/dev/null || true)
+            # RETRY before declaring drift. cgit serves from a mirror that
+            # lags the git push by up to a minute or two, so a single read
+            # right after publish-aur finishes routinely shows the PREVIOUS
+            # version. That fired on v0.9.4 and v0.9.5 back to back — both
+            # times the package was already correct by the time anyone
+            # looked, and both times the release went red for it.
+            #
+            # A gate that cries wolf on healthy releases is worse than no
+            # gate: it trains you to ignore the one red X that matters. So
+            # give the mirror ~90s to catch up before believing it.
+            pk=""
+            for attempt in 1 2 3 4 5 6; do
+              pk=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=agentty-bin" 2>/dev/null || true)
+              printf '%s\n' "$pk" | grep -qE "^pkgver=${V}$" && break
+              [ "$attempt" -lt 6 ] && sleep 15
+            done
             if printf '%s\n' "$pk" | grep -qE "^pkgver=${V}$"; then
               ok "AUR agentty-bin @ $V"
+              # ---- 4b. .SRCINFO must MATCH that PKGBUILD ----
+              #
+              # Version alone is not health. .SRCINFO is what the AUR web UI
+              # and every helper reads for metadata, and it is a SEPARATE
+              # file -- so it can carry the right pkgver and still describe a
+              # different package. It did, for releases: the long pkgdesc and
+              # both optdepends were in the PKGBUILD while the AUR served the
+              # short description and no optional deps.
+              #
+              # That breaks UPDATES, not just appearances: helpers like pikaur
+              # regenerate .SRCINFO in their local clone when building, so a
+              # published file that disagrees with what makepkg produces makes
+              # `git pull` conflict on every new release.
+              #
+              # So regenerate from the PUBLISHED PKGBUILD with the real
+              # makepkg and diff. This is the check that was missing; nothing
+              # compared content, which is why a user had to report it.
+              si=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=agentty-bin" 2>/dev/null || true)
+              if [ -z "$si" ]; then
+                echo "::warning::could not fetch AUR .SRCINFO — skipping the content check"
+              else
+                rm -rf /tmp/srcchk && mkdir -p /tmp/srcchk
+                printf '%s\n' "$pk" > /tmp/srcchk/PKGBUILD
+                printf '%s\n' "$si" > /tmp/srcchk/.SRCINFO.live
+                # Same shape as the publish step: generate in a
+                # container-local dir and print to stdout. Must not chown the
+                # bind mount -- that gives /tmp/srcchk to the container's build
+                # uid and the runner can then neither write .SRCINFO.want nor
+                # reliably read it back for the diff.
+                if docker run --rm -v /tmp/srcchk:/pkg:ro archlinux:base-devel sh -c '
+                     set -eu
+                     useradd -m build
+                     mkdir -p /tmp/gen
+                     cp /pkg/PKGBUILD /tmp/gen/PKGBUILD
+                     chown -R build /tmp/gen
+                     su build -c "cd /tmp/gen && makepkg --printsrcinfo"
+                   ' > /tmp/srcchk/.SRCINFO.want 2>/tmp/srcchk/gen.err; then
+                  if diff -u /tmp/srcchk/.SRCINFO.live /tmp/srcchk/.SRCINFO.want > /tmp/srcchk/diff; then
+                    ok "AUR .SRCINFO matches its PKGBUILD"
+                  else
+                    echo "--- published .SRCINFO vs makepkg output ---"
+                    cat /tmp/srcchk/diff
+                    bad "AUR .SRCINFO is out of sync with the PKGBUILD (breaks pikaur-style updates) — run the reconcile-manifests workflow"
+                  fi
+                else
+                  echo "::warning::could not run makepkg to validate .SRCINFO"
+                  sed -n '1,20p' /tmp/srcchk/gen.err 2>/dev/null || true
+                fi
+              fi
             elif [ -z "$pk" ] || printf '%s\n' "$pk" | grep -qi 'AUR is down\|maintenance'; then
               # cgit itself is unreachable/down for maintenance — an upstream
               # outage, not a drifted package. publish-aur already soft-skips
@@ -1366,8 +1643,30 @@ jobs:
             if gh api "repos/microsoft/winget-pkgs/contents/manifests/a/agentty/agentty/$V" >/dev/null 2>&1; then
               ok "winget manifest merged @ $V"
             else
-              me=$(GH_TOKEN=$WINGET_TOKEN gh api user -q .login 2>/dev/null || echo 1ay1)
-              prs=$(GH_TOKEN=$WINGET_TOKEN gh pr list --repo microsoft/winget-pkgs --author "$me" --state all --search "agentty.agentty version $V in:title" --json number,state -q '.[] | "\(.number):\(.state)"' 2>/dev/null || true)
+              # Any PR for this VERSION counts, regardless of author.
+              #
+              # Scoping this to `--author $me` was wrong twice over. It missed
+              # third-party updater bots (0.9.2 actually reached winget via
+              # damn-good-b0t after our own submission had failed), and when
+              # the token is broken `gh api user` falls back to a guessed
+              # login, so the search silently looks for the wrong person.
+              #
+              # The question is "is this version submitted", not "did we
+              # submit it" — and the publish job now fails loudly on its own
+              # when OUR submission breaks, so this no longer has to infer it.
+              #
+              # RETRY, same reason as the AUR check above: komac opens the PR
+              # and GitHub's search index takes a little while to return it,
+              # so a read immediately after publish-winget finishes can come
+              # back empty for a submission that landed fine.
+              prs=""
+              for attempt in 1 2 3 4 5 6; do
+                prs=$(GH_TOKEN=$WINGET_TOKEN gh search prs --repo microsoft/winget-pkgs \
+                        "agentty.agentty version $V" --limit 5 \
+                        --json number,state -q '.[] | "\(.number):\(.state)"' 2>/dev/null || true)
+                [ -n "$prs" ] && break
+                [ "$attempt" -lt 6 ] && sleep 15
+              done
               if [ -n "$prs" ]; then ok "winget PR open/merged for $V ($prs)"; else bad "winget: no PR found for version $V"; fi
             fi
           else skip "winget"; fi

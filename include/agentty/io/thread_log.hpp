@@ -132,6 +132,14 @@ public:
     // consistent).
     bool append(const Message& m);
 
+    // Drop every message from index `n` on. O(1): the offsets say exactly
+    // where line n starts, so both files are cut with one resize each and
+    // nothing is re-encoded. This is what lets a save replace only the
+    // part of the thread that changed (the open turn, a tool that just
+    // settled) and then append() it again, instead of rewrite()-ing the
+    // whole history every round. n >= size() is a no-op.
+    bool truncate_to(std::size_t n);
+
     // Replace the entire log. Needed by the paths that genuinely rewrite
     // history — compaction, message edit, fork — and by migration. O(n),
     // but rare and user-initiated.

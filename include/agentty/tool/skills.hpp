@@ -66,12 +66,14 @@
 // SKILL.md skips the entry.
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "agentty/scope/scope.hpp"
 #include "agentty/tool/effects.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::tools::skills {
 
@@ -97,6 +99,12 @@ struct Skill {
     std::string origin;
     bool        user_only = false; // `disable-model-invocation`: hidden from the
                                    // model-facing catalog, loadable explicitly
+    // Non-zero when SKILL.md is PRESENT but larger than kMaxBodyBytes, so
+    // nothing could be loaded from it. The entry exists purely to be
+    // reported: an oversized skill used to vanish with `0 warning(s)` and
+    // the author had no way to tell it from a path typo. Such a skill is
+    // never usable -- it carries no name, description or body.
+    std::uintmax_t oversized_bytes = 0;
     std::filesystem::path dir; // absolute skill directory (tier-3 base path)
     // Spec-derived name: the path below the discovery root with segments
     // joined by '-' — for a root-level skill this IS the leaf directory
@@ -120,12 +128,12 @@ struct Skill {
 // is cached process-wide keyed by the roots' AND each SKILL.md's mtime
 // (an in-place edit to a skill is picked up next turn). Project skills
 // shadow user skills with the same name.
-[[nodiscard]] const std::vector<Skill>& all();
+[[nodiscard]] std::vector<Skill> all(Io);
 
 // Look up one skill by exact name. nullptr if absent. Finds
 // `disable-model-invocation` skills too (explicit lookup is allowed;
 // only the catalog hides them).
-[[nodiscard]] const Skill* find(std::string_view name);
+[[nodiscard]] std::optional<Skill> find(Io, std::string_view name);
 
 // Render the compact tier-1 catalog block for the system prompt:
 //   <skills>
@@ -136,24 +144,53 @@ struct Skill {
 // Skills flagged `disable-model-invocation` are omitted entirely (hidden
 // beats listed-but-blocked: the model never wastes a turn on them).
 // Empty string when no eligible skills exist (no block emitted).
-[[nodiscard]] std::string catalog_block();
+[[nodiscard]] std::string catalog_block(Io);
 
 // Render one skill's tier-2 activation payload: the body wrapped in
 // <skill_content name="...">, the absolute skill directory (so the model
 // can resolve relative references), the compatibility note when present,
 // and the <skill_resources> listing of bundled files. This is what the
 // `skill` tool returns.
-[[nodiscard]] std::string activation_payload(const Skill& s);
+[[nodiscard]] std::string activation_payload(Io, const Skill& s);
+// The same against an approvals store the caller already has: pure.
+[[nodiscard]] std::string activation_payload(const Skill& s, const scope::Approvals& approvals);
 
-// ── Activation tracking (spec: deduplicate activations) ──────────────
+// ── Activation: derived from the transcript, not stored ──────────────
 // Once a skill body is in the conversation, re-injecting it doubles the
-// token cost for zero signal. `note_activated` returns true the FIRST
-// time a name is recorded (caller should return the full payload) and
-// false on repeats (caller returns a short already-active sentinel).
-// `reset_activations` clears the set — called on thread swap / new
-// thread / session load, where the old tool_results leave context.
-[[nodiscard]] bool note_activated(std::string_view name);
-void reset_activations();
+// token cost for zero signal, so a second load returns a short "already
+// active" sentinel instead.
+//
+// "Already active" means: a <skill_content name="X"> block is in a message
+// the model can still SEE. That is a fact about the transcript, so it is
+// computed from the transcript — never kept in a separate set.
+//
+// It used to be a process-global set (note_activated / reset_activations),
+// and a set that only approximates the transcript drifts from it:
+//   * after /compact the tool_result holding the body is summarised away,
+//     but the set still said "active", so the model was told the
+//     instructions were "in an earlier tool_result" that no longer existed
+//     and never got them back;
+//   * resuming a thread started the set empty, so a body still in plain
+//     view was injected a second time;
+//   * every thread switch, new thread and fork had to remember to call
+//     reset_activations(), from inside the reducer.
+// Deriving it removes all three: there is nothing to reset, and the answer
+// is whatever the model actually sees.
+//
+// `visible` is the wire-visible messages' text: what the model is sent
+// (the latest compaction applied). Callers build it from the Thread; the
+// skill TOOL, which runs on a worker with no Thread, receives the derived
+// set as part of its dispatch.
+[[nodiscard]] bool is_active_in(std::string_view name,
+                                const std::vector<std::string_view>& visible);
+
+// Every skill name with a body in `visible`, for a caller that needs the
+// whole set at once (the tool dispatch). Same rule as is_active_in.
+[[nodiscard]] std::vector<std::string>
+active_in(const std::vector<std::string_view>& visible);
+
+// The skill tool's "already active" set travels with the call:
+// tools::CallContext::active_skills, derived from the visible transcript.
 
 // ── Spec validation (the spec's `skills-ref validate` equivalent) ────
 // Lint one skill against the agentskills.io constraints. Loading stays
@@ -253,11 +290,11 @@ struct Shadowed {
 
 // Every skill dropped for a name collision during the last discovery.
 // Empty in the overwhelming majority of installs.
-[[nodiscard]] const std::vector<Shadowed>& shadowed();
+[[nodiscard]] std::vector<Shadowed> shadowed(Io);
 
 // Is this name claimed by more than one directory in the SAME scope?
 // That is the case worth flagging — cross-scope shadowing is intended.
-[[nodiscard]] bool shadowed_within_scope(std::string_view name);
+[[nodiscard]] bool shadowed_within_scope(Io, std::string_view name);
 
 // Is this name safe to use as a directory name?
 //
@@ -332,15 +369,17 @@ struct Finding {
 // The approvals store leaf, under the USER root — a cloned repo cannot
 // write here, so it cannot pre-approve its own skills.
 inline constexpr std::string_view kApprovalsLeaf = "skills_approved.json";
+// NOTE: config::kSkillsApprovals is the same name, declared in the inventory.
+// A static_assert in skills_cli.cpp keeps the two from drifting.
 
 // Load / persist the skill approvals store (kApprovalsLeaf under the user
 // root). Separate from hooks' and MCP's stores on purpose: approving a
 // skill must not silently approve an MCP server.
-[[nodiscard]] scope::Approvals load_approvals();
+[[nodiscard]] scope::Approvals load_approvals(Io);
 void                           save_approvals(const scope::Approvals&);
 
 // Convenience: resolve a skill's trust against the persisted store.
-[[nodiscard]] scope::Trust trust_of(const Skill& s) noexcept;
+[[nodiscard]] scope::Trust trust_of(Io, const Skill& s) noexcept;
 
 // The exact bytes an approval is keyed by: body + declared effects. Exposed
 // so the consent UI can show the user what they are approving, and so a
@@ -365,7 +404,7 @@ int cli(const std::vector<std::string>& argv);
 // with lint diagnostics. Returns 0 when every skill is clean, 1 when
 // any diagnostic fired — usable in CI exactly like `skills-ref
 // validate`, with zero extra tooling.
-int cmd_skills();
+int cmd_skills(Io);
 
 inline constexpr std::size_t kMaxSkills     = 64;
 inline constexpr std::size_t kMaxBodyBytes  = 64 * 1024;

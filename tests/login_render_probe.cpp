@@ -10,7 +10,7 @@
 #include <cstring>
 #include <string>
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 #include <maya/core/render_context.hpp>
 
 #include "agentty/runtime/login.hpp"

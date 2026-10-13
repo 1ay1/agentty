@@ -5,8 +5,12 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <sstream>
+#include <stop_token>
 #include <string_view>
+
+#include <maya/runtime.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -15,6 +19,7 @@
 #include "agentty/domain/catalog.hpp"   // set_catalog_reasoning / set_catalog_effort_set
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/teardown.hpp"
 
 namespace agentty::modelsdev {
 
@@ -235,7 +240,7 @@ int refresh() {
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(8'000);
     tos.total   = std::chrono::milliseconds(60'000);
-    auto resp = http::default_client().send(req, tos);
+    auto resp = http::default_client(::agentty::IoAccess::grant()).send(req, tos);
     if (!resp || resp->status != 200 || resp->body.empty()) {
         // Network down / endpoint moved: fall back to whatever is cached.
         load_cached();
@@ -256,6 +261,65 @@ int refresh() {
         if (ec) fs::remove(tmp, ec);
     }
     return n;
+}
+
+// ── Background refresh (same pattern as blob_gc.cpp) ────────────────
+namespace {
+// This subsystem's OWN pool: join_background_refresh() promises ITS fetch is
+// done, and a shared pool cannot be joined one job at a time. See blob_gc.cpp
+// for the same reasoning — these two stay deliberately identical.
+//
+// Replaces a mutex + condition variable + raw worker + stop flag whose
+// shutdown detached the worker whenever the fetch was still in flight, which
+// is precisely a network call left running against statics the CRT is
+// destroying. pool::shutdown asks it to stop, waits inside a bounded grace,
+// then abandons safely.
+maya::pool& refresh_pool() {
+    static maya::pool p{/*max_workers=*/1};   // one refresh, ever
+    return p;
+}
+constexpr auto kStartDelay = std::chrono::seconds(5);
+}  // namespace
+
+void start_background_refresh(bool no_net) {
+    // Register the join the moment background work is about to exist, rather
+    // than relying on main() to know this subsystem is threaded. main()'s
+    // hand-written teardown list is the thing that misses one: settings_cache
+    // shipped with a join nobody called, and its worker sat joinable in a
+    // function-local static until the destructor terminated the process at
+    // exit.
+    //
+    // refresh_pool() is a function-local static that lives to process exit, so
+    // the callback can never outlive its target and needs no cancel(). The
+    // whole start runs once per process.
+    static std::once_flag once;
+    std::call_once(once, [no_net] {
+        util::teardown::on_shutdown("modelsdev.refresh",
+                                    [](const maya::unlocked& cap) { join_background_refresh(cap); });
+
+    // Isolated: refresh() is a network fetch, so it may never return and must
+    // not occupy a shared worker.
+    refresh_pool().post_isolated([](std::stop_token st, bool no_net) {
+        // A process that exits at once never dials at all. One cancellation
+        // channel — the token — instead of a second stop flag to notify.
+        if (maya::delay_for(st, kStartDelay)) return;
+        try {
+            load_cached();
+            // Re-check: the cache load is the cheap half, and shutdown may
+            // have been requested while it ran. No point starting a dial we
+            // are about to abandon.
+            if (!no_net && !st.stop_requested()) {
+                try { (void)refresh(); } catch (...) {}
+            }
+        } catch (const std::exception& e) {
+            util::dbglog("modelsdev.refresh", e.what());
+        } catch (...) {}
+    }, no_net);
+    });
+}
+
+void join_background_refresh(const maya::unlocked& cap) noexcept {
+    (void)refresh_pool().shutdown(cap);   // requests stop, waits within the grace
 }
 
 } // namespace agentty::modelsdev

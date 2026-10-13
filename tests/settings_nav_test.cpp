@@ -37,7 +37,7 @@ store::Settings g_settings;
 
 void install_stub_deps() {
     app::install_deps(app::Deps{
-        .stream         = [](auto, auto) {},
+        .stream         = [](const maya::unlocked&, auto, auto) {},
         .save_thread    = [](const Thread&) {},
         .delete_thread  = [](const auto&) {},
         .load_threads   = [] { return std::vector<Thread>{}; },

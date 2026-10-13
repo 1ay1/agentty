@@ -7,6 +7,8 @@
 
 #include <string>
 
+#include "agentty/util/io.hpp"
+
 namespace agentty::provider {
 
 struct Selection;
@@ -14,6 +16,6 @@ struct Selection;
 // Build the product-level system prompt for a selected backend. Hosted capable
 // models share the full agent prompt; constrained local endpoints receive the
 // compact local profile. External ACP agents own their own prompt/session.
-[[nodiscard]] std::string system_prompt_for(const Selection& selection);
+[[nodiscard]] std::string system_prompt_for(Io, const Selection& selection);
 
 } // namespace agentty::provider

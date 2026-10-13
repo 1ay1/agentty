@@ -89,6 +89,36 @@ struct MessageMdCache {
     std::size_t                               last_settled_size =
         static_cast<std::size_t>(-1);
 
+    // The motion level this widget's reveal-fx policy was configured with.
+    //
+    // Per-WIDGET, because the question "must I re-apply the policy" is
+    // per-widget. It used to be a compare-and-reset latch local to
+    // cached_markdown_for(), which runs SEVERAL times per frame -- once per
+    // streaming widget (the reasoning "#r" lane, the answer lane, and one per
+    // sub-turn in a multi-message turn). The first caller consumed the change
+    // and every later widget that frame read "unchanged", so toggling motion
+    // mid-stream applied to the reasoning block and left the answer
+    // animating.
+    //
+    // A process-global "changed this frame" flag fixes that and introduces
+    // worse problems: it is sticky across anything that does not publish
+    // every frame, so it leaks between tests and between a panel frame and a
+    // thread frame. Storing the applied value HERE needs no frame semantics
+    // at all -- a widget re-applies exactly when what it has differs from
+    // what is in force, which is the actual condition.
+    //
+    // -1 = nothing applied yet (a fresh widget configures unconditionally).
+    int                                       applied_motion = -1;
+
+    // Set once the reasoning->answer seam glide has been armed for this
+    // slot. The trigger is a state TRANSITION (reasoning settles when the
+    // answer's first byte lands), not a byte arrival, so it cannot live
+    // under the sizes-changed gate -- reasoning's source stops growing at
+    // exactly that moment, which is why the seam was previously unbounded.
+    // Latched so the deadline is stamped once; re-arming each frame would
+    // keep pushing it back and the cursor would never land.
+    bool                                      seam_glide_armed = false;
+
     // ── Reveal bookkeeping ──
     //
     // There is no host-side typewriter cursor: cached_markdown_for feeds
@@ -360,27 +390,19 @@ public:
     // own without being destroyed.
     void clear_settled() noexcept { entries_.clear(); }
 
-    // Drop only what a THEME change invalidates, keeping what it does not.
+    // (There is deliberately no invalidate_colours() here any more.)
     //
-    // A settled entry holds two things: `finalized`, a built Element with
-    // colours already resolved, and `streaming`, the StreamingMarkdown
-    // widget that produced it. A new theme invalidates the first and is
-    // irrelevant to the second — markdown structure does not depend on what
-    // colour a heading is.
+    // It used to drop each settled entry's built Element on a theme change,
+    // because that Element had the outgoing palette RESOLVED into it and
+    // nothing else would ever invalidate it — a theme switch changes no
+    // bytes, so no content-keyed cache notices.
     //
-    // clear_settled() drops both, which forces settle_message_md() to
-    // re-parse every kept message from source on the next rebuild. That is
-    // the dominant cost of a theme swap (37-82 ms on a real transcript) and
-    // it is spent re-deriving something that did not change. Keeping the
-    // widget lets the rebuild go straight to build(), which resolves slots
-    // against the new theme and is the only work a recolour actually needs.
-    void invalidate_colours() noexcept {
-        for (auto& [key, entry] : entries_) entry.md.finalized.reset();
-        // Pinned entries are untouched on purpose: they hold the live reveal
-        // widget for the turn being streamed right now, and they rebuild from
-        // that widget every frame anyway, so they follow the new theme
-        // without being disturbed.
-    }
+    // Colours are late-bound now (docs/LATE_BINDING.md): a built Element
+    // carries symbolic slots and resolves at PAINT, so it is simply not
+    // stale under a new theme and there is nothing to invalidate. If you
+    // find yourself wanting this function back, the real question is which
+    // value got resolved too early — MAYA_ASSERT_LATE_BOUND in
+    // maya/style/binding.hpp is where that gets caught.
 
 private:
     // One payload type, two homes. A key lives in AT MOST ONE of these at

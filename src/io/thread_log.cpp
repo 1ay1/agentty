@@ -282,7 +282,7 @@ bool ThreadLog::write_index_() const {
     std::string buf(offsets_.size() * kOffsetWidth, '\0');
     for (std::size_t i = 0; i < offsets_.size(); ++i)
         put_u64_le(buf.data() + i * kOffsetWidth, offsets_[i]);
-    return persistence::write_json_atomic(idx_, buf);
+    return persistence::write_json_atomic(::agentty::IoAccess::grant(), idx_, buf);
 }
 
 bool ThreadLog::append_offset_(std::uint64_t at) const {
@@ -306,7 +306,7 @@ bool ThreadLog::set_meta(const Thread& t) {
     meta_thread_ = t;
     meta_thread_.messages.clear();
     try {
-        return persistence::write_json_atomic(
+        return persistence::write_json_atomic(::agentty::IoAccess::grant(), 
             meta_, persistence::thread_meta_to_json(meta_thread_).dump(2));
     } catch (const std::exception& e) {
         AGT_LOG(General, Error, "thread_log.meta",
@@ -448,6 +448,42 @@ bool ThreadLog::append(const Message& m) {
     return true;
 }
 
+bool ThreadLog::truncate_to(std::size_t n) {
+    if (n >= offsets_.size()) return true;
+    const std::uint64_t cut = offsets_[n];
+
+    // Log FIRST, index second. A crash between the two leaves an index
+    // whose offset n equals the new log size, which open() already rejects
+    // (offsets_.back() >= log_bytes) and rebuilds by scanning. The other
+    // order would leave a short index over a long log, and the last indexed
+    // message would silently absorb the lines after it.
+    std::error_code ec;
+    fs::resize_file(log_, static_cast<std::uintmax_t>(cut), ec);
+    if (ec) {
+        AGT_LOG(General, Error, "thread_log.truncate",
+                "cannot cut {} at {}: {}", log_.string(), cut, ec.message());
+        return false;
+    }
+    offsets_.resize(n);
+    // Everything after `cut` is gone, including any torn final line.
+    torn_tail_at_ = kNoTear;
+
+    // The index may be shorter than offsets_ if an earlier append_offset_
+    // failed; resizing it would pad with zeros. Rewrite it whole in that
+    // case (rare, O(n) of 8-byte entries), otherwise cut it in place.
+    const auto want = static_cast<std::uintmax_t>(n) * kOffsetWidth;
+    if (file_size_or_zero(idx_) >= want) {
+        fs::resize_file(idx_, want, ec);
+        if (!ec) return true;
+    }
+    if (!write_index_()) {
+        AGT_LOG(General, Warn, "thread_log.truncate",
+                "index cut failed for {} (will rebuild on next open)",
+                log_.string());
+    }
+    return true;
+}
+
 bool ThreadLog::rewrite(const std::vector<Message>& msgs) {
     std::string body;
     std::vector<std::uint64_t> offs;
@@ -464,7 +500,7 @@ bool ThreadLog::rewrite(const std::vector<Message>& msgs) {
     // Both files land atomically. write_json_atomic is temp+fsync+rename,
     // so an interrupted rewrite leaves the previous log AND its matching
     // index in place — never a new log with an old index.
-    if (!persistence::write_json_atomic(log_, body)) return false;
+    if (!persistence::write_json_atomic(::agentty::IoAccess::grant(), log_, body)) return false;
     offsets_ = std::move(offs);
     torn_tail_at_ = kNoTear;   // a full rewrite always ends cleanly
     if (!write_index_()) {

@@ -20,6 +20,8 @@
 // that frames one tool call in its own wire language. Everything asserted is
 // dialect-independent — that is the point.
 
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -182,6 +184,91 @@ struct OllamaNative {
 const std::string kArgs =
     R"({"pattern":"foo\"bar","glob":"src/**/*.cpp","opts":{"word":true}})";
 
+// ── Hostile framing: the same call, sent the way a BROKEN server sends it ──
+//
+// The contract above uses well-formed wire. Every tool-call bug this project
+// has shipped came from the other kind, and a survey of other harnesses says
+// it is universal, not our incompetence: openai-python #3377 (fragments
+// keyed on arrival order instead of index), opik #8360 (streamed tool calls
+// dropped entirely), strands #3950, crewai, azure-ai, theia, llm-gateway
+// #136 (empty id on continuations). Same field, same handful of mistakes.
+//
+// The root cause is a property of the DIALECT, not of any server: Chat
+// Completions carries several distinct facts on fields that do not say what
+// they are. `arguments` is a fragment or a whole snapshot. `id` is the
+// identity or an empty restatement. `index` is the parallel-call key or
+// absent. Anthropic names its fragments in the type and Responses separates
+// them by event, which is exactly why neither has this bug class.
+//
+// So the decoder cannot be "correct" against a spec — it has to be correct
+// against the wire that real servers emit. These cases pin the shapes that
+// have actually broken someone, and they run against EVERY dialect that can
+// express them, so a fix in one decoder cannot quietly skip another.
+struct Hostile {
+    // A continuation chunk restates `id` as empty instead of omitting it.
+    static Decoded chat_empty_id(const std::string& name, const std::string& args) {
+        const auto mid = args.size() / 2;
+        auto tc = [&](const std::string& head, const std::string& a) {
+            return R"({"choices":[{"delta":{"tool_calls":[{"index":0,)"
+                   + head + R"("function":{)" + a + "}}]}}]}";
+        };
+        std::string bytes;
+        bytes += "data: " + tc(R"("id":"call_1",)",
+                               R"("name":")" + name + R"(","arguments":")" "\"")
+                 + "\n\n";
+        bytes += "data: " + tc(R"("id":"",)",
+                               R"("arguments":)" + json(args.substr(0, mid)).dump())
+                 + "\n\n";
+        bytes += "data: " + tc(R"("id":"",)",
+                               R"("arguments":)" + json(args.substr(mid)).dump())
+                 + "\n\n";
+        bytes += R"(data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]})"
+                 "\n\n" "data: [DONE]\n\n";
+        return decode(provider::openai::parse_sse_for_test(bytes, {name}));
+    }
+
+    // Token-by-token fragmentation fine enough that a fragment equals a
+    // PREFIX of the buffer — issue #48. `{"` opening a nested object when
+    // the accumulated value already starts `{"`.
+    static Decoded chat_prefix_fragments(const std::string& name,
+                                         const std::string& args) {
+        std::string bytes;
+        bytes += R"(data: {"choices":[{"delta":{"tool_calls":[{"index":0,)"
+                 R"("id":"call_1","function":{"name":")" + name +
+                 R"(","arguments":""}}]}}]})" "\n\n";
+        // One byte at a time: the most adversarial framing a server can pick,
+        // and what llama.cpp approximates.
+        for (char c : args) {
+            bytes += "data: " +
+                std::string{R"({"choices":[{"delta":{"tool_calls":[{"index":0,)"
+                            R"("function":{"arguments":)"}
+                + json(std::string(1, c)).dump() + "}}]}}]}" + "\n\n";
+        }
+        bytes += R"(data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]})"
+                 "\n\n" "data: [DONE]\n\n";
+        return decode(provider::openai::parse_sse_for_test(bytes, {name}));
+    }
+};
+
+TEST_CASE("conformance: hostile framing round-trips the same arguments") {
+    // Whatever the server does to the framing, the tool layer must receive
+    // exactly what the model authored.
+    for (auto make : {&Hostile::chat_empty_id, &Hostile::chat_prefix_fragments}) {
+        const auto d = make("grep", kArgs);
+        // Parsed into a local: doctest re-expands its macro argument, so a
+        // `(void)` cast inside REQUIRE_NOTHROW never reaches the real call
+        // and GCC still warns -Wunused-result. See check_contract() below.
+        json parsed;
+        REQUIRE_NOTHROW(parsed = json::parse(d.args));
+        CHECK(parsed == json::parse(kArgs));
+        // Announced once, closed once — the reducer pairs tool_use with
+        // tool_result on exactly these, so a dropped End hangs the turn.
+        CHECK(d.starts == 1);
+        CHECK(d.ends == 1);
+        CHECK(d.name == "grep");
+    }
+}
+
 template <class D>
 void check_contract() {
     for (auto st : {Style::Fragments, Style::Snapshot, Style::Both}) {
@@ -200,12 +287,16 @@ void check_contract() {
         //    (`{...}{...}`) fails to parse at all, so this still catches the
         //    duplicate-emission bug it was written for.
         //
-        //    The (void) cast is load-bearing: REQUIRE_NOTHROW evaluates the
-        //    expression for its THROW behaviour only, so the nodiscard
-        //    return would otherwise warn (-Wunused-result) once per dialect
-        //    instantiation of this template.
-        REQUIRE_NOTHROW((void)json::parse(d.args));
-        CHECK(json::parse(d.args) == json::parse(kArgs));
+        //    Parsed ONCE into a local, rather than inside REQUIRE_NOTHROW.
+        //    doctest re-expands its argument, so a `(void)` cast there does
+        //    not reach the real call and GCC still warns -Wunused-result --
+        //    once per dialect instantiation of this template, which is most
+        //    of the build noise this file used to produce. Binding the
+        //    result uses it for real, and the CHECK below is what would
+        //    have failed on a throw anyway.
+        json parsed;
+        REQUIRE_NOTHROW(parsed = json::parse(d.args));
+        CHECK(parsed == json::parse(kArgs));
 
         // 3. The call is announced once and closed once — the reducer pairs
         //    tool_use with tool_result on exactly these.
@@ -310,4 +401,224 @@ TEST_CASE("conformance: shared streaming timeout ladder") {
     // The one legitimate knob: local servers get a longer idle.
     CHECK(provider::stream_timeouts(std::chrono::milliseconds(600'000)).idle
           == std::chrono::milliseconds(600'000));
+}
+
+// ── The reasoning toggle, asserted against EVERY dialect ────────────────
+//
+// This suite existed and still missed a bug: reasoning arrived on Copilot's
+// gpt-* models with the toggle OFF, because the Responses codec never read
+// Request::show_reasoning. Three transports honoured it, one didn't, and
+// nothing cross-checked — the contract only covered tool calls.
+//
+// That is the general shape: a Request field is a PROMISE to the user, and
+// a promise kept by three of four implementations is worse than one kept by
+// none, because it looks arbitrary. So the axis gets the same treatment tool
+// calls got — state it once, instantiate per dialect.
+//
+// Two legitimate strategies, and the contract accepts both:
+//
+//   SUPPRESS AT SOURCE   Anthropic asks the server not to send it
+//                        (`thinking.display`), so nothing arrives to filter.
+//   FILTER AT DECODE     Chat/Ollama/Responses receive it either way and
+//                        drop the text on the way to the reducer.
+//
+// What both must produce is the same OBSERVABLE: no reasoning text reaches
+// the reducer when the user hid it. How a dialect gets there is its own
+// business; that it gets there is not.
+namespace reasoning {
+
+// Reasoning text that survived to the reducer, and whether ANY liveness
+// signal still fired.
+//
+// Liveness is counted across BOTH carriers on purpose. A dialect may keep
+// the turn alive with an empty-text ThinkingDelta (chat, responses) or with
+// a StreamHeartbeat (ollama); the reducer resets last_event_at on either, so
+// both satisfy the requirement. Asserting one spelling would be pinning a
+// mechanism instead of the guarantee — and would have failed a dialect that
+// is behaving correctly, which is how a contract loses its authority.
+struct Seen {
+    std::string text;
+    int         liveness = 0;
+};
+
+Seen collect(const std::vector<Msg>& msgs) {
+    Seen s;
+    for (const auto& m : msgs) {
+        if (auto* t = leaf<StreamThinkingDelta>(m)) { s.text += t->text; ++s.liveness; }
+        if (leaf<StreamHeartbeat>(m))               { ++s.liveness; }
+    }
+    return s;
+}
+
+// Each dialect frames the same turn: a reasoning burst, then an answer.
+Seen chat(bool show) {
+    const std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"pondering\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    return collect(provider::openai::parse_sse_for_test(
+        sse, {}, false, false, show));
+}
+
+Seen responses(bool show) {
+    const std::vector<std::string> sse{
+        R"({"type":"response.reasoning_summary_text.delta","delta":"pondering"})",
+        R"({"type":"response.output_text.delta","delta":"answer"})",
+        R"({"type":"response.completed","response":{"usage":{}}})"};
+    return collect(provider::chatgpt::parse_sse_for_test(sse, show));
+}
+
+Seen ollama(bool show) {
+    const std::string nd =
+        R"({"message":{"role":"assistant","thinking":"pondering"},"done":false})" "\n"
+        R"({"message":{"role":"assistant","content":"answer"},"done":true})" "\n";
+    return collect(provider::ollama::parse_ndjson_for_test(
+        nd, {}, false, false, show));
+}
+
+}  // namespace reasoning
+
+TEST_CASE("conformance: hiding reasoning hides it on every dialect") {
+    struct Case { const char* id; reasoning::Seen (*run)(bool); };
+    for (const Case c : {Case{"openai-chat",      &reasoning::chat},
+                         Case{"openai-responses", &reasoning::responses},
+                         Case{"ollama-native",    &reasoning::ollama}}) {
+        INFO("dialect = " << std::string{c.id});
+
+        // Shown: the text reaches the reducer.
+        const auto on = c.run(true);
+        CHECK(on.text.find("pondering") != std::string::npos);
+
+        // Hidden: no reasoning TEXT survives…
+        const auto off = c.run(false);
+        CHECK(off.text.empty());
+
+        // …but SOME liveness signal still fires. Swallowing the event
+        // entirely makes a long silent reasoning phase look like a dead
+        // stream, and the retry watchdog acts on that.
+        CHECK(off.liveness > 0);
+    }
+}
+
+TEST_CASE("conformance: hiding reasoning never disturbs the answer") {
+    // The regression guard. Suppression must touch exactly one channel.
+    const std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    std::string text;
+    for (const auto& m : provider::openai::parse_sse_for_test(
+             sse, {}, false, false, /*show_reasoning=*/false))
+        if (auto* t = leaf<StreamTextDelta>(m)) text += t->text;
+    CHECK(text == "hello world");
+}
+
+// ── The REQUEST half of the contract ─────────────────────────────────
+//
+// Everything above asserts what a dialect DECODES. This asserts what it
+// ENCODES, which is where the quieter class of bug lives.
+//
+// A field on the neutral `provider::Request` is a promise to the user:
+// they set an output cap, or a reasoning tier, and expect it to apply.
+// A promise kept by three implementations of four is WORSE than one that
+// was never made — it looks correct to whoever wrote it and arbitrary to
+// whoever happens to be on the dialect that ignores it, with nothing in
+// the UI distinguishing the two.
+//
+// That is not hypothetical. The reasoning toggle shipped honoured on
+// three transports and ignored on the fourth, and `max_tokens` was sent
+// by Chat, Anthropic and Ollama but silently dropped by Responses —
+// found by writing this test, not by a report.
+//
+// Only Responses exposes a pure body builder today; the other three
+// assemble their body inside the stream function, so a behavioural
+// assertion cannot reach them. Rather than skip them, check the SOURCE
+// for the field being read at all. Coarse on purpose: it cannot prove
+// the value is used correctly, but it does prove nobody deleted the only
+// line that looks at it.
+
+TEST_CASE("conformance: max_tokens reaches the wire on the responses dialect") {
+    provider::Request req;
+    req.model = "gpt-5.4";
+    Message u; u.role = Role::User; u.text = "hi";
+    req.messages.push_back(u);
+
+    // Set: the cap appears, under this dialect's spelling.
+    req.max_tokens = 4096;
+    const json capped = provider::chatgpt::build_body_for_test(req);
+    REQUIRE(capped.contains("max_output_tokens"));
+    CHECK(capped["max_output_tokens"] == 4096);
+
+    // Unset: the field is omitted entirely. 0 means "no opinion", and the
+    // server's default beats a number we invented.
+    req.max_tokens = 0;
+    CHECK(!provider::chatgpt::build_body_for_test(req).contains("max_output_tokens"));
+}
+
+TEST_CASE("conformance: every dialect reads every promised request field") {
+    // The structural half. One row per (dialect, field) with the token
+    // that proves the field is consulted.
+    //
+    // If a dialect genuinely cannot express a field, that is a legitimate
+    // answer — but it has to be written down HERE, with the reason, not
+    // left as an absence somebody has to notice.
+    struct Row {
+        const char* file;
+        const char* field;
+        const char* evidence;   // empty = documented as inexpressible
+        const char* note;
+    };
+    static constexpr Row kRows[] = {
+        // max_tokens — the output cap.
+        {"openai/transport.cpp",    "max_tokens", "req.max_tokens",
+         "Chat Completions: max_tokens / max_completion_tokens."},
+        {"anthropic/transport.cpp", "max_tokens", "req.max_tokens",
+         "Anthropic requires max_tokens; also clamps the thinking budget "
+         "strictly below it."},
+        {"ollama/transport.cpp",    "max_tokens", "req.max_tokens",
+         "Ollama spells it options.num_predict."},
+        {"responses/codec.cpp",     "max_tokens", "req.max_tokens",
+         "Responses spells it max_output_tokens. Was MISSING until this "
+         "test was written — the promise was kept by 3 of 4."},
+
+        // effort — the reasoning tier, and the SSOT for whether reasoning
+        // is requested at all (see docs/COPILOT_RESPONSES.md §6.1).
+        {"openai/transport.cpp",    "effort", "req.effort",
+         "reasoning_effort, with capability discovery on rejection."},
+        {"ollama/transport.cpp",    "effort", "req.effort",
+         "maps onto the native think parameter."},
+        {"responses/codec.cpp",     "effort", "req.effort",
+         "reasoning.effort; empty tier omits the whole reasoning object."},
+        {"anthropic/transport.cpp", "effort", "req.effort",
+         "gates extended thinking and sizes budget_tokens."},
+
+        // show_reasoning — whether the user wants to SEE it.
+        {"openai/transport.cpp",    "show_reasoning", "req.show_reasoning",
+         "filters reasoning_content at decode."},
+        {"ollama/transport.cpp",    "show_reasoning", "req.show_reasoning",
+         "gates swallowed <think> spans."},
+        {"responses/codec.cpp",     "show_reasoning", "req.show_reasoning",
+         "gates reasoning_summary_text deltas."},
+    };
+
+    const std::filesystem::path root{AGENTTY_SRC_ROOT};
+    for (const auto& r : kRows) {
+        const auto path = root / "src" / "provider" / r.file;
+        INFO("dialect = " << r.file << "  field = " << r.field);
+        REQUIRE(std::filesystem::exists(path));
+
+        std::ifstream in(path);
+        REQUIRE(in);
+        const std::string src((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+
+        CHECK_MESSAGE(src.find(r.evidence) != std::string::npos,
+            r.file << " never reads `" << r.evidence << "`. " << r.note
+                   << "  A Request field is a promise to the user; kept by "
+                      "some dialects and not others, it looks arbitrary to "
+                      "them and correct to us. Either honour it here, or "
+                      "change this row to record why this wire cannot "
+                      "express it.");
+    }
 }

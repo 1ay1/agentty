@@ -13,9 +13,13 @@
 
 #include "agtest.hpp"
 
+#include <functional>
+#include <maya/widget/reasoning.hpp>
+
 #include <cstdlib>   // setenv — the reveal tests pin the effect explicitly
 
 #include "agentty/runtime/model.hpp"
+#include "agentty/domain/ui_live.hpp"   // the Thinking pref gates the block
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/view/thread/thread.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
@@ -97,7 +101,7 @@ TEST_CASE("reasoning: unified accessor precedence") {
 
 TEST_CASE("reasoning: settled turn shows the full reasoning, not a fold") {
     Model m;
-    m.d.show_reasoning = true;   // the global ^R switch is on
+    // Thinking::Collapsed (the default) SHOWS the block; only Hidden suppresses it.
     Message a = assistant("Here is the FINAL_ANSWER_MARKER.");
     // Reasoning arrived (any provider) and the answer is present => SETTLED:
     // render the FULL streamed reasoning (no fold), under a "Reasoned" header.
@@ -120,9 +124,100 @@ TEST_CASE("reasoning: settled turn shows the full reasoning, not a fold") {
           "settled reasoning keeps ALL lines — it does not fold to a summary");
 }
 
+TEST_CASE("reasoning: the meter footer lines up with the body text") {
+    // The footer used to be a filled CHIP, and the band carried its own
+    // one-column pad, so "✦ Reasoned" started one column RIGHT of the prose
+    // it was summarizing. Same box, same padding, two different left edges.
+    // Pin the columns equal: the footer is a label for the body, and a label
+    // that does not share the body's margin reads as a stray indented line.
+    Model m;
+    Message a = assistant("answer");
+    a.thinking = "BODYMARKER reasoning line that the footer sits under.";
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = phase::Idle{};
+
+    const std::string out = render_text(m);
+
+    auto indent_of = [&out](std::string_view needle) -> int {
+        const std::size_t at = out.find(needle);
+        if (at == std::string::npos) return -1;
+        const std::size_t bol = out.rfind('\n', at) + 1; // npos+1 == 0 == start
+        int col = 0;
+        for (std::size_t i = bol; i < out.size() && out[i] != '\n'; ++i) {
+            if (out[i] != ' ') break;
+            ++col;
+        }
+        return col;
+    };
+
+    const int body   = indent_of("BODYMARKER");
+    const int footer = indent_of("Reasoned");
+    check(body >= 0, "body line rendered");
+    check(footer >= 0, "footer line rendered");
+    check(body == footer,
+          "footer indent must equal the body indent (no chip pad shift)");
+}
+
+// The swept meter, checked at the widget rather than through render_text():
+// the sweep is carried entirely by per-character fg colors, and the text dump
+// has no colors in it. Walks the built block for its meter row and counts
+// distinct ink.
+TEST_CASE("reasoning: the live meter carries a per-character sweep") {
+    auto meter_runs = [](bool sweep) {
+        maya::ReasoningStream::Config cfg;
+        cfg.boxed        = true;
+        cfg.meter_below  = true;
+        cfg.meter_sweep  = sweep;
+        cfg.meter_rate   = true;
+        maya::ReasoningStream rs{cfg};
+        rs.set_live(true);
+        rs.set_char_hint(600);
+        rs.set_elapsed_ms(6200);
+        rs.set_content("some reasoning");
+
+        // The block is a bordered box whose rows are body / blank / meter.
+        // The meter is the one TextElement holding the live word.
+        maya::Element e = rs.build();
+        std::vector<maya::StyledRun> found;
+        std::function<void(const maya::Element&)> walk =
+            [&](const maya::Element& el) {
+                if (const auto* t = maya::as_text(el)) {
+                    if (t->content.find("Thinking") != std::string::npos)
+                        found = t->runs;
+                    return;
+                }
+                if (const auto* b = maya::as_box(el))
+                    for (const auto& c : b->children) walk(c);
+                if (const auto* l = maya::as_list(el))
+                    for (const auto& c : l->items) walk(c);
+            };
+        walk(e);
+        return found;
+    };
+
+    const auto plain = meter_runs(false);
+    const auto swept = meter_runs(true);
+    check(!plain.empty(), "the meter row was found and is styled");
+    check(swept.size() > plain.size(),
+          "sweep explodes the meter into per-character runs");
+
+    // The crest is a gradient, not a two-tone flip. Only >= 2 is pinned: on
+    // an RGB theme the blend is smooth (many inks), but under theme::native
+    // the stops have no channels and lerp_color SNAPS by design, so the band
+    // is two-tone there. Both are correct; the count is not.
+    std::vector<maya::Color> inks;
+    for (const auto& r : swept) {
+        if (!r.style.fg) continue;
+        bool seen = false;
+        for (const auto& c : inks) seen = seen || (c == *r.style.fg);
+        if (!seen) inks.push_back(*r.style.fg);
+    }
+    check(inks.size() >= 2,
+          "the band varies ink across the row, it is not one flat color");
+}
+
 TEST_CASE("reasoning: no block when the turn never reasoned") {
     Model m;
-    m.d.show_reasoning = true;
     m.d.current.messages.push_back(assistant("PLAIN_ANSWER no reasoning here."));
     m.s.phase = phase::Idle{};
     const std::string out = render_text(m);
@@ -131,18 +226,36 @@ TEST_CASE("reasoning: no block when the turn never reasoned") {
     check(has(out, "PLAIN_ANSWER"), "the plain answer still renders");
 }
 
-TEST_CASE("reasoning: the ^R switch hides the block even when text exists") {
+// Appearance's Thinking row is the ONE switch over the reasoning block.
+//
+// This used to set m.d.show_reasoning = false and call it "the global switch
+// (the default)". That flag had no control behind it: ^R opens diff review,
+// and nothing dispatched ModelsToggleShowReasoning, so the value was frozen
+// at whatever settings.json held. The test passed and the feature was
+// unreachable — it pinned a gate the user could not operate, which is how a
+// stale `true` ended up showing reasoning to people who had chosen Hidden.
+TEST_CASE("reasoning: the Appearance switch hides the block even when text exists") {
     Model m;
-    m.d.show_reasoning = false;   // global switch OFF (the default)
+    // publish(), not just the Model field: render_text() builds the configs
+    // directly and never calls view(), which is what normally republishes
+    // the prefs each frame. Restored at the end so the slot does not leak
+    // into another test in the same binary.
+    const auto saved = agentty::ui_prefs::current();
+    auto prefs = saved;
+    prefs.thinking = agentty::ui_prefs::Thinking::Hidden;
+    agentty::ui_prefs::publish(prefs);
+    m.d.persisted.ui.thinking = agentty::ui_prefs::Thinking::Hidden;
     Message a = assistant("Here is the ANSWER_STILL_SHOWN.");
     a.thinking = "lots of hidden reasoning the user chose not to see";
     m.d.current.messages.push_back(std::move(a));
     m.s.phase = phase::Idle{};
     const std::string out = render_text(m);
+    agentty::ui_prefs::publish(saved);
+
     check(!has(out, "Reasoned"),
-          "reasoning block is suppressed when show_reasoning is off");
+          "reasoning block is suppressed when Thinking is Hidden");
     check(!has(out, "hidden reasoning"),
-          "reasoning text never reaches the screen when the switch is off");
+          "reasoning text never reaches the screen when Thinking is Hidden");
     check(has(out, "ANSWER_STILL_SHOWN"),
           "the answer renders normally regardless of the reasoning switch");
 }
@@ -163,7 +276,6 @@ TEST_CASE("reasoning: body reveals incrementally, not all at once") {
         full += "word" + std::to_string(i) + " ";
 
     Model m;
-    m.d.show_reasoning = true;
     m.s.phase = phase::Streaming{phase::Active{}};
 
     Message a;
@@ -215,7 +327,6 @@ TEST_CASE("reasoning: reveal glides, not cut short when the answer follows") {
     for (int i = 0; i < 80; ++i) full += "tok" + std::to_string(i) + " ";
 
     Model m;
-    m.d.show_reasoning = true;
     m.s.phase = phase::Streaming{phase::Active{}};
     Message a; a.role = Role::Assistant; a.id = MessageId{"glide1"};
     m.d.current.messages.push_back(a);

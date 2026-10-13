@@ -60,25 +60,88 @@ namespace detail {
 // A named slot in the live theme. Converts to a colour on use, which is what
 // makes it substitutable for the constant it replaced.
 //
-// The read yields LitColor: a Theme field is already resolved by
-// construction, so a token cannot hand a caller something still symbolic.
-// Both conversions are offered because a token has to drop into BOTH a
-// `LitColor` slot (blending, Theme fields) and a `Color` one (widget Config
-// defaults, Style::with_fg) without a cast at ~700 call sites.
+// TWO conversions, and the difference between them is the whole invariant:
+//
+//   • operator Color — hands back the SYMBOLIC slot. Nothing is resolved.
+//     maya resolves it at PAINT time in Style::to_sgr(), against whatever
+//     theme is live THEN. This is the conversion that matters: Style::fg is
+//     an optional<Color>, so a widget built today paints under the theme
+//     that is live when it is painted, not the one that was live when it was
+//     built. An Element can therefore be stored for the rest of the session
+//     and still follow a theme switch.
+//
+//   • operator LitColor — resolves against the live theme NOW. Needed where
+//     a caller wants CHANNELS (a blend, a contrast check) or must assign
+//     into a Theme field, which holds LitColor by definition. This is
+//     EARLY BINDING: whatever you put the result into is pinned to today's
+//     palette and has to be rebuilt on a theme change.
+//
+// Early binding is what made live theme switching look intermittent. A
+// committed markdown block is a stored, already-rendered Element; when its
+// colours were resolved at build time it kept the palette of the moment it
+// was built, and no later switch could reach it — the bytes never change, so
+// nothing goes dirty and every cache tier replays the same Element. Anything
+// rebuilt per frame (composer, spinner, welcome screen) followed the new
+// theme correctly, which is exactly what made the failure look random.
+//
+// So: prefer the Color conversion. Reach for LitColor only when you need
+// channels, and then only for something short-lived.
 //
 // The cost is that a bare `ui::fg == c` is ambiguous — two user-defined
 // conversions, neither better. Spell it `ui::fg() == c` to name the read;
 // that is the only place callers notice, and it reads better anyway.
 struct Slot {
+    // The symbolic identity. This is the slot itself, not a colour.
+    maya::ThemeSlot slot;
+    // Resolve-now escape hatch, kept as a function pointer so the token
+    // stays a structural-NTTP-friendly literal type.
     maya::LitColor (*read)() noexcept;
+
     [[nodiscard]] operator maya::LitColor() const noexcept { return read(); }  // NOLINT(google-explicit-constructor)
-    [[nodiscard]] operator maya::Color() const noexcept { return read(); }  // NOLINT(google-explicit-constructor)
+    // LATE-BOUND on purpose — see above. Do not "simplify" this to read().
+    [[nodiscard]] operator maya::Color() const noexcept {  // NOLINT(google-explicit-constructor)
+        return maya::Color::slot(slot);
+    }
     [[nodiscard]] maya::LitColor operator()() const noexcept { return read(); }
+    // The symbolic form, spelled explicitly for call sites that want to be
+    // unambiguous about which binding they are asking for.
+    [[nodiscard]] maya::Color symbolic() const noexcept {
+        return maya::Color::slot(slot);
+    }
 };
 
 [[nodiscard]] inline const maya::Theme& thm() noexcept { return ui_prefs::theme(); }
 
+// field → ThemeSlot, generated from maya's OWN table.
+//
+// AGENTTY_THEME_SLOT(x) is spelled with a Theme FIELD name (`thm().x`), but a
+// symbolic colour needs the matching ThemeSlot ENUMERATOR. Deriving one
+// constant per field from MAYA_THEME_SLOTS means the two halves of a token —
+// what it resolves to now, and what it names symbolically — are guaranteed to
+// be the same slot. Naming a field maya does not have is a compile error
+// here, not a colour that silently paints wrong somewhere downstream.
+#define X(f, E) inline constexpr maya::ThemeSlot slot_of_field_##f = maya::ThemeSlot::E;
+MAYA_THEME_SLOTS(X)
+#undef X
+
 }  // namespace detail
+
+// The invariant, pinned where it can be read.
+//
+// A token's Color conversion is what widget Config defaults and
+// Style::with_fg() pick up, so it is the one that ends up inside stored
+// Elements (committed markdown blocks, the frozen scrollback ledger). If it
+// ever resolves, every widget built today freezes today's palette and a live
+// theme switch stops reaching settled content — the exact bug this shape
+// exists to prevent. The LitColor conversion stays early-bound on purpose
+// and is only for blending / Theme-field assignment, which need channels.
+static_assert(
+    std::is_same_v<decltype(static_cast<maya::Color>(std::declval<detail::Slot>())),
+                   maya::Color>,
+    "ui::Slot must convert to a SYMBOLIC maya::Color");
+static_assert(maya::binding::no_early_binding_v<maya::Color>,
+              "and that Color must itself be late-bound — see "
+              "maya/style/binding.hpp");
 
 }  // namespace agentty::ui
 
@@ -93,9 +156,14 @@ struct maya::is_theme_token<::agentty::ui::detail::Slot> : std::true_type {};
 
 namespace agentty::ui {
 
+// Define a token from a Theme FIELD name. The matching ThemeSlot enumerator
+// is looked up from maya's own field↔enumerator table (MAYA_THEME_SLOTS), so
+// the symbolic identity and the resolve-now path can never name different
+// slots — there is one list, in maya, and both halves read it.
 #define AGENTTY_THEME_SLOT(field) \
-    ::agentty::ui::detail::Slot{ []() noexcept { \
-        return ::agentty::ui::detail::thm().field; } }
+    ::agentty::ui::detail::Slot{ ::agentty::ui::detail::slot_of_field_##field, \
+        []() noexcept { \
+            return ::agentty::ui::detail::thm().field; } }
 
 // Prose that the user is actually READING maps to the theme's `text` slot,
 // which native resolves to the terminal's default foreground — maximum

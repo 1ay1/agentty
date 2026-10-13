@@ -23,6 +23,7 @@
 // republished — rather than being generic smoke tests.
 
 #include "agentty/util/snapshot.hpp"
+#include "agtest_cap.hpp"
 #include "agentty/util/teardown.hpp"
 
 #include <atomic>
@@ -133,7 +134,7 @@ void snapshot_handle_outlives_producer() {
 // worker and drained from main()'s scope guard, so registration races the
 // drain by construction.
 void teardown_registration_race() {
-    teardown::run();                       // clean slate
+    teardown::run(agtest::cap());                       // clean slate
 
     std::atomic<int> fired{0};
     std::barrier sync(kThreads);
@@ -143,7 +144,7 @@ void teardown_registration_race() {
             sync.arrive_and_wait();
             for (int i = 0; i < 200; ++i) {
                 const auto tok = teardown::on_shutdown(
-                    "racer", [&] { fired.fetch_add(1, std::memory_order_relaxed); });
+                    "racer", [&](const maya::unlocked&) { fired.fetch_add(1, std::memory_order_relaxed); });
                 // Half withdraw, half leave it for the drain — exercises the
                 // cancel/run interleaving that a scoped registrant hits.
                 if (i % 2 == 0) teardown::cancel(tok);
@@ -152,11 +153,11 @@ void teardown_registration_race() {
     }
     // Drain concurrently with the registrations above.
     for (int i = 0; i < 50; ++i) {
-        teardown::run();
+        teardown::run(agtest::cap());
         std::this_thread::yield();
     }
     for (auto& t : ts) t.join();
-    teardown::run();                       // final drain
+    teardown::run(agtest::cap());                       // final drain
 
     check(teardown::pending() == 0, "teardown registry not drained");
     std::printf("  teardown registry: %d actions fired\n", fired.load());

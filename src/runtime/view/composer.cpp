@@ -155,8 +155,7 @@ DisplayText clip_long_lines(DisplayText in) {
 bool composer_uses_hardware_caret(const Model& m) noexcept {
     // AGENTTY_PAINTED_CARET=1 opts out wholesale (broken-DECTCEM terminals,
     // or users who prefer the painted block).
-    static const bool painted_caret_env =
-        std::getenv("AGENTTY_PAINTED_CARET") != nullptr;
+    const bool painted_caret_env = m.env.painted_caret;
     const auto state = composer_state(m);
     const bool agent_active =
         state == maya::Composer::State::Streaming ||
@@ -385,7 +384,7 @@ maya::Composer::Config composer_config(const Model& m) {
         // until some other hashed axis happens to move.
         .add(std::string_view{m.d.model_id.value})
         .add(std::string_view{m.s.smart_turn_model.value})
-        .add(provider::active().provider_id())
+        .add(m.d.selection.provider_id())
         .add(static_cast<std::uint64_t>(cfg.hardware_caret ? 1 : 0))
         .add(static_cast<std::uint64_t>(cfg.min_body_rows))
         .add(static_cast<std::uint64_t>(

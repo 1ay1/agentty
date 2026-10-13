@@ -20,7 +20,7 @@
 #include "agentty/io/persistence.hpp"
 
 #include <maya/core/render_context.hpp>
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include <chrono>
 #include <cstdio>
@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
     const int    msgs         = argc > 3 ? std::atoi(argv[3]) : 100;
 
     app::install_deps(app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const Thread&) {},
         .delete_thread = [](const ThreadId&) {},
         .load_threads  = [] { return std::vector<Thread>{}; },
@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
     // real session performs.
     const char* thread_path = argc > 4 ? argv[4] : std::getenv("AGENTTY_THREAD");
     if (thread_path && *thread_path) {
-        auto t = persistence::load_thread_file(thread_path);
+        auto t = persistence::load_thread_file(::agentty::IoAccess::grant(), thread_path);
         if (t) {
             m.d.current = std::move(*t);
             std::printf("loaded %s: %zu messages\n",

@@ -4,7 +4,7 @@
 //
 // Implements the `AcpBackend` contract (provider/acp_backend.hpp) by driving a
 // *remote* ACP agent — `claude-agent-acp`, `codex-acp`, or any conforming
-// `agentclientprotocol` agent — over acp-cpp's editor-side `AgentConnection`.
+// `agentclientprotocol` agent — over an rpc::Peer.
 // agentty is the CLIENT (editor); the subprocess is the AGENT (LLM side).
 //
 // This is the INBOUND direction of the same `acp::SessionUpdate` vocabulary
@@ -19,13 +19,11 @@
 //      refusal / cancelled), applying the terminal-event discipline exactly
 //      once — no spurious "cancelled" on a clean turn.
 //
-// WHY it drives an already-connected `AgentConnection` rather than spawning:
-// the connection (transport + subprocess + `initialize`) is a separate
-// lifecycle concern. Injecting it keeps this class (a) unit-testable against an
-// in-memory `FdTransport` pair wired to a fake agent, with zero subprocess or
-// sandbox dependency, and (b) reusable for a native-pipe agent, a socket
-// agent, or a test double. `spawn_acp_agent()` (see the .cpp) is the
-// convenience factory that produces a connected handle for production.
+// It drives an already-connected peer rather than spawning one: the
+// subprocess and `initialize` are a separate lifecycle. That keeps it
+// testable against an in-memory channel wired to a fake agent, and usable
+// over any byte channel. `spawn_acp_agent()` (see the .cpp) produces a
+// connected handle for production.
 //
 // The Claude reference adapter (claude-agent-acp/src/acp-agent.ts) is the model
 // this mirrors: a thin protocol translator that owns exactly one quirk surface
@@ -33,23 +31,24 @@
 //
 // See docs/internal-acp-backends.md — this header is §6, step 5 of that plan.
 
-#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include <acp/agent.hpp>          // acp::AgentConnection, acp::ClientHandlers
+#include <maya/runtime.hpp>
+
 #include <acp/methods.hpp>        // acp::StopReason, PromptParams, NewSessionParams
+#include <acp/protocol.hpp>       // the method table, jsonrpc::Router
 #include <acp/updates.hpp>        // acp::SessionUpdate, SessionUpdateMsg
 
 #include "agentty/io/http.hpp"                 // http::CancelTokenPtr
 #include "agentty/provider/acp_backend.hpp"    // AcpBackend, TurnSink, TurnResult
 #include "agentty/provider/provider.hpp"       // provider::Request
+#include "agentty/rpc/peer.hpp"                // rpc::Peer, rpc::Dispatch
 
 namespace agentty::provider {
 
@@ -123,19 +122,17 @@ struct ExternalAcpOptions {
 
 class ExternalAcpBackend final : public AcpBackend {
 public:
-    // Construct the backend BEFORE its connection exists. This is required by
-    // the spawn flow: acp::AgentConnection installs handlers at construction,
-    // and those handlers are produced by make_handlers() below (which closes
-    // over this backend) — so the backend must exist first. Call connect() once
-    // the connection is built and initialized. prompt() before connect() fails
-    // cleanly.
+    // Construct the backend BEFORE its peer exists: the peer's dispatch comes
+    // from make_dispatch() below, which closes over this backend. Call
+    // connect() once the peer is started and initialized. prompt() before
+    // connect() fails cleanly.
     explicit ExternalAcpBackend(ExternalAcpOptions opts);
 
-    // Bind the (already-initialized) connection. `conn` MUST outlive this
-    // backend — ownership stays with the caller (usually SpawnedAcpAgent).
-    void connect(acp::AgentConnection& conn) noexcept;
+    // Bind the (already-initialized) peer. It MUST outlive this backend's
+    // use of it; ownership stays with the caller (usually SpawnedAcpAgent).
+    void connect(rpc::Peer& peer) noexcept;
 
-    // Non-copyable, non-movable — handlers close over `this`.
+    // Non-copyable, non-movable — the dispatch closes over `this`.
     ExternalAcpBackend(const ExternalAcpBackend&)            = delete;
     ExternalAcpBackend& operator=(const ExternalAcpBackend&) = delete;
 
@@ -143,7 +140,11 @@ public:
 
     // AcpBackend contract. Drives one round; streams SessionUpdates to `sink`;
     // returns the round's TurnResult. Thread-compatible: one round at a time.
-    TurnResult prompt(const Request&              req,
+    // ExternalAcpBackend's turn: send session/prompt and stream session/update
+    // into `sink` until the PromptResult. Exactly one terminal event.
+    // Blocks on the agent's reply: `unlocked`.
+    TurnResult prompt(const maya::unlocked&       cap,
+                      const Request&              req,
                       const TurnSink&             sink,
                       const http::CancelTokenPtr& cancel) override;
 
@@ -151,43 +152,52 @@ public:
     // until then, or in per-round mode).
     [[nodiscard]] std::string session_id() const;
 
-    // Build the acp::ClientHandlers that route the agent's inbound callbacks
-    // (session/update → active sink; fs/* + terminal/* + request_permission →
-    // delegate). acp::AgentConnection installs handlers at CONSTRUCTION only, so
-    // the spawn factory calls this to obtain them BEFORE the connection is
-    // built, and hands the same connection back to the backend. The handlers
-    // close over `this`, so this backend MUST outlive the connection.
-    [[nodiscard]] acp::ClientHandlers make_handlers();
+    // How the agent's calls reach us (session/update → active sink; fs/*,
+    // terminal/*, request_permission → delegate). The spawn factory builds
+    // the peer with it. It closes over `this`, so this backend MUST outlive
+    // the peer.
+    [[nodiscard]] rpc::Dispatch make_dispatch();
 
 private:
-    // Ensure a live session exists; opens one via `session/new` if needed.
-    // Returns the session id, or std::nullopt on failure (fills `err`).
-    std::optional<acp::SessionId> ensure_session_(const Request& req,
+    // What a router handler gets: the backend, and the reader thread's
+    // capability for the call it is answering (it lives on the reader's
+    // stack for exactly that call).
+    struct Ctx {
+        ExternalAcpBackend&   self;
+        const maya::unlocked& cap;
+    };
+    using Router = ::jsonrpc::Router<Ctx>;
+    Router make_router() const;
+
+    std::optional<acp::SessionId> ensure_session_(const maya::unlocked& cap,
+                                                  const Request& req,
                                                   std::optional<TurnError>& err);
 
-    acp::AgentConnection* conn_ = nullptr;   // set by connect(); non-owning
-    ExternalAcpOptions    opts_;
+    rpc::Peer*         peer_ = nullptr;   // set once by connect()
+    ExternalAcpOptions opts_;
+    Router             router_;
 
-    mutable std::mutex          mu_;
-    std::optional<acp::SessionId> session_;
+    // The reused session id: set once, read every round. A snapshot.
+    maya::snapshot<std::optional<std::string>> session_;
 
-    // The sink for the round currently in flight. session/update arrives on the
-    // transport's reader thread, so `prompt()` publishes the active sink here
-    // for the duration of the round and clears it on exit. A null sink drops
-    // updates (e.g. a late notification after the round settled) rather than
-    // crashing — matching the "emit terminal exactly once" invariant.
-    std::mutex                              sink_mu_;
-    std::function<void(acp::SessionUpdate)> active_sink_;
+    // The round in flight. session/update arrives on the peer's reader,
+    // which joins `inflight` before calling `sink`. prompt() takes the
+    // round on exit and waits for in-flight calls, so the sink (which points at
+    // prompt's stack) is never called after it returns. No round: updates drop.
+    struct Round {
+        std::function<void(acp::SessionUpdate)> sink;
+        maya::stop_group                        inflight;
+    };
+    maya::published<Round> round_;
 
-    // Terminal lifecycle state. terminal/create runs the command synchronously
-    // (via the delegate) and caches its result here under a generated id;
-    // terminal/output + terminal/wait_for_exit read it back; terminal/release
-    // drops it. Guarded by its own mutex — terminal callbacks arrive on the
-    // transport reader thread, independent of the round's sink.
+    // terminal/create runs the command synchronously (via the delegate) and
+    // keeps its result here under a fresh id until terminal/release.
     struct TerminalState { std::string output; int exit_code = 0; bool truncated = false; };
-    std::mutex                                       term_mu_;
-    std::unordered_map<std::string, TerminalState>   terminals_;
-    std::uint64_t                                    next_terminal_id_ = 1;
+    struct Terminals {
+        std::unordered_map<std::string, TerminalState> by_id;
+        std::uint64_t                                  next_id = 1;
+    };
+    maya::guarded<Terminals> terminals_;
 };
 
 // ── Turn-level StopReason mapping (pure, testable) ───────────────────────────
@@ -198,49 +208,45 @@ private:
 [[nodiscard]] StopReason map_acp_stop_reason(acp::StopReason r) noexcept;
 
 // ── Subprocess factory ───────────────────────────────────────────────────────
-// A connected, initialized agent + the process/transport that backs it. Destroy
-// it to tear the agent down (closes pipes, waits/kills the child).
+// A connected, initialized agent and the process behind it. Destroy it to
+// tear the agent down (closes pipes, waits/kills the child).
 struct SpawnedAcpAgent {
-    std::unique_ptr<acp::AgentConnection> connection;
-    // Opaque lifetime holder for the subprocess + transport threads. It is
-    // deliberately reset BEFORE connection: the reader calls into the
-    // connection engine and must be stopped/joined while that engine is alive.
+    std::unique_ptr<rpc::Peer> connection;
+    // Opaque owner of the subprocess. Reset after the peer: the peer's
+    // reader reads the child's stdout stream.
     std::shared_ptr<void> process;
 
     SpawnedAcpAgent() = default;
-    SpawnedAcpAgent(std::unique_ptr<acp::AgentConnection> conn,
-                    std::shared_ptr<void> holder)
-        : connection(std::move(conn)), process(std::move(holder)) {}
     SpawnedAcpAgent(SpawnedAcpAgent&&) noexcept = default;
     SpawnedAcpAgent& operator=(SpawnedAcpAgent&&) noexcept = default;
     SpawnedAcpAgent(const SpawnedAcpAgent&) = delete;
     SpawnedAcpAgent& operator=(const SpawnedAcpAgent&) = delete;
     ~SpawnedAcpAgent() { reset(); }
 
-    void reset() noexcept {
-        process.reset();
-        connection.reset();
-    }
+    void reset() noexcept;
 
     [[nodiscard]] bool ok() const noexcept { return connection != nullptr; }
 };
 
 // Spawn `argv[0]` (e.g. "claude-agent-acp" or "codex-acp") with the remaining
-// args as an ACP agent subprocess, wire its stdio to an acp::AgentConnection
-// over acp's StdioTransport (portable: POSIX fork/exec/pipe, Windows
-// CreateProcess/CreatePipe via mcp::cap::ChildProcess), install `handlers`, run
-// `initialize`, and return the connected handle. On failure returns a
-// SpawnedAcpAgent with a null connection and `err` filled.
+// args as an ACP agent subprocess (util::ChildProcess: fork/exec/pipe on
+// POSIX, CreateProcess on Windows), run an rpc::Peer over its stdio with
+// `dispatch`, run `initialize`, and return the connected handle. On failure
+// returns a SpawnedAcpAgent with a null connection and `err` filled.
 //
-// PRODUCTION FLOW (resolves the ctor/handlers/connection cycle):
+// PRODUCTION FLOW (resolves the backend/dispatch/peer cycle):
 //     ExternalAcpBackend backend{opts};
-//     auto agent = spawn_acp_agent(argv, init, backend.make_handlers(), err);
+//     auto agent = spawn_acp_agent(argv, init, backend.make_dispatch(), err);
 //     if (!agent.ok()) { /* handle err */ }
 //     backend.connect(*agent.connection);
 //     // ... backend.prompt(...) ...  (keep `agent` alive for the backend's life)
-[[nodiscard]] SpawnedAcpAgent spawn_acp_agent(const std::vector<std::string>& argv,
+// Spawn `argv` as an ACP agent, run an rpc::Peer over its stdio, and complete
+// the `initialize` handshake. On failure returns !ok() and sets `err`.
+// Waits for the handshake: `unlocked`.
+[[nodiscard]] SpawnedAcpAgent spawn_acp_agent(const maya::unlocked&           cap,
+                                              const std::vector<std::string>& argv,
                                               const acp::InitializeParams&    init,
-                                              acp::ClientHandlers             handlers,
+                                              rpc::Dispatch                   dispatch,
                                               std::string&                    err);
 
 } // namespace agentty::provider

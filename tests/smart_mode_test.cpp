@@ -126,18 +126,18 @@ TEST_CASE("smart_mode") {
         // The escape hatches suppress exactly one layer each and leave the
         // others running — that is the point of having three of them.
         cfg.enabled = true;
-        setenv("AGENTTY_SMART_NO_ORCHESTRATE", "1", 1);
+        cfg.no_orchestrate = true;
         CHECK(cfg.internal_routing() && !cfg.orchestration() && cfg.subagent_routing(),
               "escape hatch: NO_ORCHESTRATE disables only orchestration");
-        unsetenv("AGENTTY_SMART_NO_ORCHESTRATE");
-        setenv("AGENTTY_SMART_NO_INTERNAL", "1", 1);
+        cfg.no_orchestrate = false;
+        cfg.no_internal = true;
         CHECK(!cfg.internal_routing() && cfg.orchestration() && cfg.subagent_routing(),
               "escape hatch: NO_INTERNAL disables only internal routing");
-        unsetenv("AGENTTY_SMART_NO_INTERNAL");
-        setenv("AGENTTY_SMART_NO_SUBAGENTS", "1", 1);
+        cfg.no_internal = false;
+        cfg.no_subagents = true;
         CHECK(cfg.internal_routing() && cfg.orchestration() && !cfg.subagent_routing(),
               "escape hatch: NO_SUBAGENTS disables only subagent routing");
-        unsetenv("AGENTTY_SMART_NO_SUBAGENTS");
+        cfg.no_subagents = false;
         CHECK(cfg.internal_routing() && cfg.orchestration() && cfg.subagent_routing(),
               "escape hatches are not sticky");
     }
@@ -241,91 +241,47 @@ TEST_CASE("smart_mode") {
     }
 
     // ── AGENTTY_SMART_MODE session pin ────────────────────────
+    // Parsing only: the domain no longer reads the environment.
+    // settings::registry::read_env calls this with getenv's answer.
     {
-        auto reset = [] {
-            unsetenv("AGENTTY_SMART_MODE");
-            unsetenv("AGENTTY_SMART_ENABLED");
-        };
-        reset();
-        CHECK(!sm::tuning::enabled_override().has_value(),
+        CHECK(!sm::tuning::parse_enabled(nullptr).has_value(),
               "env pin: unset → no override (settings govern)");
-        setenv("AGENTTY_SMART_MODE", "1", 1);
-        CHECK(sm::tuning::enabled_override() == std::optional<bool>{true},
-              "env pin: AGENTTY_SMART_MODE=1 → forced on");
-        setenv("AGENTTY_SMART_MODE", "0", 1);
-        CHECK(sm::tuning::enabled_override() == std::optional<bool>{false},
-              "env pin: AGENTTY_SMART_MODE=0 → forced off");
-        setenv("AGENTTY_SMART_MODE", "false", 1);
-        CHECK(sm::tuning::enabled_override() == std::optional<bool>{false},
+        CHECK(!sm::tuning::parse_enabled("").has_value(),
+              "env pin: empty → no override");
+        CHECK(sm::tuning::parse_enabled("1") == std::optional<bool>{true},
+              "env pin: 1 → forced on");
+        CHECK(sm::tuning::parse_enabled("0") == std::optional<bool>{false},
+              "env pin: 0 → forced off");
+        CHECK(sm::tuning::parse_enabled("false") == std::optional<bool>{false},
               "env pin: 'false' → off");
-        setenv("AGENTTY_SMART_MODE", "on", 1);
-        CHECK(sm::tuning::enabled_override() == std::optional<bool>{true},
+        CHECK(sm::tuning::parse_enabled("on") == std::optional<bool>{true},
               "env pin: any non-falsy value → on");
-        reset();
-        // ONE env name. The former AGENTTY_SMART_ENABLED alias is gone: a
-        // second spelling is a second source of truth, and "which wins"
-        // is a question no user should have to ask.
-        setenv("AGENTTY_SMART_ENABLED", "1", 1);
-        CHECK(!sm::tuning::enabled_override().has_value(),
-              "env pin: AGENTTY_SMART_ENABLED is NOT read (alias removed)");
-        reset();
+        CHECK(sm::tuning::parse_disabled("1") && !sm::tuning::parse_disabled("off")
+                  && !sm::tuning::parse_disabled(nullptr),
+              "escape hatch: on unless unset or falsy");
     }
 
-    // ── Numeric routing policy: env over stored, both clamped ───────────
-    // These three were env-ONLY, which made them undiscoverable and reset
-    // every shell. They are persisted settings now, and the env vars became
-    // session OVERRIDES rather than the only way in. Three properties:
-    //
-    //   1. unset env ⇒ nullopt, so the caller falls through to the stored
-    //      value. env_int() would have substituted the default here and
-    //      silently overridden whatever the user configured — which is the
-    //      whole reason for the _env()/optional split.
-    //   2. a set env value wins, clamped to the row's range.
+    // ── Numeric routing policy: parsing, clamped ───────────
+    //   1. unset ⇒ nullopt, so the caller falls through to the stored value.
+    //   2. a set value is clamped to the row's range.
     //   3. a malformed value reads as unset, so a typo in a shell profile
     //      leaves the configured value standing rather than resetting it.
     {
-        auto reset = [] {
-            unsetenv("AGENTTY_SMART_DEEP_MARGIN");
-            unsetenv("AGENTTY_SMART_BIAS_CLAMP");
-            unsetenv("AGENTTY_SMART_COMPLEX_THRESHOLD");
-        };
-        reset();
-        CHECK(!sm::tuning::deep_margin_env().has_value(),
+        namespace d = sm::tuning::detail;
+        using sm::tuning::kDeepMarginMin;
+        using sm::tuning::kDeepMarginMax;
+        CHECK(!d::parse_int(nullptr, kDeepMarginMin, kDeepMarginMax).has_value(),
               "tuning: unset ⇒ no override, the stored value governs");
-        CHECK(!sm::tuning::bias_clamp_env().has_value(),
-              "tuning: unset ⇒ no override (bias clamp)");
-        CHECK(!sm::tuning::complex_threshold_env().has_value(),
-              "tuning: unset ⇒ no override (complex threshold)");
-
-        setenv("AGENTTY_SMART_DEEP_MARGIN", "5", 1);
-        CHECK(sm::tuning::deep_margin_env() == std::optional<int>{5},
+        CHECK(d::parse_int("5", kDeepMarginMin, kDeepMarginMax) == std::optional<int>{5},
               "tuning: a set value is read");
-
-        // Out of range is CLAMPED, never rejected-then-forgotten: the config
-        // must not be able to hold a value the UI could not produce.
-        setenv("AGENTTY_SMART_DEEP_MARGIN", "999", 1);
-        CHECK(sm::tuning::deep_margin_env()
-                  == std::optional<int>{sm::tuning::kDeepMarginMax},
+        CHECK(d::parse_int("999", kDeepMarginMin, kDeepMarginMax)
+                  == std::optional<int>{kDeepMarginMax},
               "tuning: above range clamps to the max");
-        setenv("AGENTTY_SMART_DEEP_MARGIN", "-7", 1);
-        CHECK(sm::tuning::deep_margin_env()
-                  == std::optional<int>{sm::tuning::kDeepMarginMin},
+        CHECK(d::parse_int("-7", kDeepMarginMin, kDeepMarginMax)
+                  == std::optional<int>{kDeepMarginMin},
               "tuning: below range clamps to the min");
-
-        setenv("AGENTTY_SMART_DEEP_MARGIN", "not-a-number", 1);
-        CHECK(!sm::tuning::deep_margin_env().has_value(),
+        CHECK(!d::parse_int("not-a-number", kDeepMarginMin, kDeepMarginMax).has_value(),
               "tuning: a malformed value reads as unset, not as a reset");
-
-        // The bare accessors still work for callers with no config in hand,
-        // and agree with the named defaults.
-        reset();
-        CHECK(sm::tuning::deep_margin()       == sm::tuning::kDeepMarginDefault,
-              "tuning: bare accessor is the shipped default when unset");
-        CHECK(sm::tuning::bias_clamp()        == sm::tuning::kBiasClampDefault,
-              "tuning: bare accessor (bias clamp)");
-        CHECK(sm::tuning::complex_threshold() == sm::tuning::kComplexDefault,
-              "tuning: bare accessor (complex threshold)");
-        reset();
     }
 
     // ── RoleConfig carries the resolved policy ────────────────────────
@@ -513,6 +469,137 @@ TEST_CASE("smart_mode") {
 // never the model. A 577-turn trace: role=strategic 501, role=none 76,
 // Implementation and Utility never, ZERO `task` calls (the only other way to
 // reach them) — while 142 of those turns (25%) were scored trivial/simple.
+TEST_CASE("smart_mode: a pinned --model wins every role") {
+    // #70: `agentty run --model X` bound the main turn and nothing else.
+    // Compaction and read-only subagents still asked the tier router, so a
+    // harness got billed for a model it never named -- and the reporter's
+    // spend limit was what caught it, not any output agentty produced.
+    //
+    // Smart Mode answers "optimise cost for me" (a preference). The pin
+    // answers "is --model binding" (a contract). They were one switch, which
+    // is why turning Smart Mode OFF did not stop routing: it fell through to
+    // the tier router instead.
+    std::vector<agentty::ModelInfo> catalog;
+    catalog.push_back({.id = agentty::ModelId{"claude-opus-4-5"}});
+    catalog.push_back({.id = agentty::ModelId{"claude-haiku-4-5"}});
+
+    const std::string parent = "claude-opus-4-5";
+
+    // Unpinned: a Cheap-floor role routes DOWN. This is the default and
+    // stays the default -- the TUI never passes --model.
+    {
+        sm::RoleConfig cfg;
+        cfg.enabled = false;
+        CHECK(sm::utility_model(parent, catalog, cfg) == "claude-haiku-4-5");
+    }
+
+    // Pinned: every role runs on what the user named.
+    {
+        sm::RoleConfig cfg;
+        cfg.enabled = false;
+        cfg.pinned_model = true;
+        CHECK_MESSAGE(sm::utility_model(parent, catalog, cfg) == parent,
+                      "compaction honours the pin");
+        CHECK_MESSAGE(sm::role_model(parent, catalog, cfg,
+                                     agentty::ModelCapabilities::Tier::Mid) == parent,
+                      "read-only subagents honour the pin");
+        CHECK_MESSAGE(sm::role_model(parent, catalog, cfg,
+                                     agentty::ModelCapabilities::Tier::Cheap) == parent,
+                      "the cheapest floor honours it too");
+    }
+
+    // The pin outranks an explicitly pinned Smart Mode slot: the command
+    // line is more specific than a saved preference.
+    {
+        sm::RoleConfig cfg;
+        cfg.enabled = true;
+        cfg.pinned_model = true;
+        cfg.utility.set = true;
+        cfg.utility.model = "claude-haiku-4-5";
+        CHECK(sm::utility_model(parent, catalog, cfg) == parent);
+
+        // ...and without the pin, that slot still wins. The pin ADDS a rule,
+        // it does not replace Smart Mode.
+        cfg.pinned_model = false;
+        CHECK(sm::utility_model(parent, catalog, cfg) == "claude-haiku-4-5");
+    }
+
+    // resolve_role() must honour the pin too, and this is the arm the
+    // original fix MISSED -- it was added to role_model() only.
+    //
+    // That left the bug alive in the two paths that matter most, because
+    // resolve_role is what the MAIN TURN goes through (cmd_factory's
+    // resolve_turn_routing) and what Layer 3b uses for subagent roles. And
+    // the main turn does not always ask for Strategic: main_turn_role()
+    // scores the turn, so a trivial prompt resolves as Implementation or
+    // Utility -- which, with Smart Mode on, answered on sonnet/haiku while
+    // the user had pinned opus. Exactly the reported symptom, surviving the
+    // fix that was supposed to end it.
+    //
+    // Every role, pinned, with Smart Mode ON and slots configured against
+    // it: the answer is the parent, always.
+    {
+        sm::RoleConfig cfg;
+        cfg.enabled = true;
+        cfg.pinned_model = true;
+        cfg.implementation.set = true;
+        cfg.implementation.model = "claude-sonnet-4-5";
+        cfg.implementation.provider = "anthropic";
+        cfg.utility.set = true;
+        cfg.utility.model = "claude-haiku-4-5";
+        cfg.utility.provider = "anthropic";
+
+        for (const auto role : {sm::ModelRole::Strategic,
+                                sm::ModelRole::Implementation,
+                                sm::ModelRole::Utility}) {
+            const auto p = sm::resolve_role(role, parent, Effort::None,
+                                            catalog, cfg, "anthropic");
+            CHECK_MESSAGE(p.model == parent,
+                          "resolve_role honours --model for every role");
+            CHECK_MESSAGE(!p.cross_provider(),
+                          "a pinned role never retargets the provider");
+        }
+
+        // Unpinned, the same config routes as Smart Mode intends -- proving
+        // the assertions above are about the PIN and not about a resolver
+        // that stopped routing altogether.
+        cfg.pinned_model = false;
+        CHECK(sm::resolve_role(sm::ModelRole::Implementation, parent,
+                               Effort::None, catalog, cfg, "anthropic").model
+              == "claude-sonnet-4-5");
+        CHECK(sm::resolve_role(sm::ModelRole::Utility, parent,
+                              Effort::None, catalog, cfg, "anthropic").model
+              == "claude-haiku-4-5");
+    }
+
+    // A single-model account is unaffected either way -- the router never
+    // routes UP, so there is nothing to pin against.
+    {
+        std::vector<agentty::ModelInfo> only;
+        only.push_back({.id = agentty::ModelId{"claude-opus-4-5"}});
+        sm::RoleConfig cfg;
+        CHECK(sm::utility_model(parent, only, cfg) == parent);
+        cfg.pinned_model = true;
+        CHECK(sm::utility_model(parent, only, cfg) == parent);
+    }
+
+    // AGENTTY_SMART_NO_INTERNAL is documented as "compaction/titles stay on
+    // the main model". It used to gate only the Smart Mode slot, leaving the
+    // tier fallback running -- so the promise was false and the reporter had
+    // set it expecting exactly this.
+    {
+        sm::RoleConfig cfg;
+        cfg.enabled = true;
+        cfg.no_internal = true;   // what AGENTTY_SMART_NO_INTERNAL=1 sets
+        CHECK_MESSAGE(sm::utility_model(parent, catalog, cfg) == parent,
+                      "NO_INTERNAL keeps utility turns on the main model");
+        cfg.no_internal = false;
+        CHECK_MESSAGE(sm::utility_model(parent, catalog, cfg)
+                          == "claude-haiku-4-5",
+                      "and unsetting it restores the downgrade");
+    }
+}
+
 TEST_CASE("smart_mode: the main turn follows its complexity") {
     using sm::Complexity;
     using sm::ModelRole;

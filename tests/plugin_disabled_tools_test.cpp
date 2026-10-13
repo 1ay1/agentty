@@ -10,6 +10,7 @@
 // This drives the REAL producer: connect a working stdio server (populating
 // the cache), snapshot, disable it, re-snapshot, and assert the tools persist.
 
+#include "agtest_cap.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/mcp/client.hpp"
 #include "agentty/tool/plugin.hpp"
@@ -43,7 +44,9 @@ static std::size_t tool_count_for(const std::string& server) {
 }  // namespace (fold)
 
 int main() {
+#ifdef SIGPIPE   // Windows has no SIGPIPE: a broken pipe is a write error
     std::signal(SIGPIPE, SIG_IGN);
+#endif
     ::setenv("AGENTTY_MCP_CONNECT_TIMEOUT_MS", "5000", 1);
 
     // Use the real, always-connecting date_server example binary. A scripted
@@ -53,11 +56,15 @@ int main() {
     const char* bin = std::getenv("AGENTTY_DATE_SERVER");
     fs::path date_server = bin && *bin
         ? fs::path{bin}
-        : fs::path{"mcp-cpp/build/examples/date-mcp/date_server"};
+        : fs::path{"build/third_party/mcp-cpp/examples/date-mcp/date_server"};
     if (!fs::exists(date_server)) {
-        // Try relative to the source tree root guesses.
-        for (const char* c : {"../mcp-cpp/build/examples/date-mcp/date_server",
-                              "./mcp-cpp/build/examples/date-mcp/date_server"}) {
+        // Try relative to the source tree root guesses. The submodules live
+        // under third_party/, so agentty's build tree mirrors that path;
+        // mcp-cpp's own standalone build tree is the second family.
+        for (const char* c : {"third_party/mcp-cpp/examples/date-mcp/date_server",
+                              "../build/third_party/mcp-cpp/examples/date-mcp/date_server",
+                              "third_party/mcp-cpp/build/examples/date-mcp/date_server",
+                              "../third_party/mcp-cpp/build/examples/date-mcp/date_server"}) {
             if (fs::exists(c)) { date_server = c; break; }
         }
     }
@@ -102,7 +109,7 @@ int main() {
           + std::to_string(connected) + ")");
 
     // 2. Disable the whole server, reload (it no longer connects).
-    check(tools::plugin::set_server_disabled(cfg, "demo", true)
+    check(tools::plugin::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "demo", true)
               == tools::plugin::EditResult::Ok, "disable succeeds");
     (void)tools::reload_mcp_plugins();
 
@@ -114,7 +121,7 @@ int main() {
           + std::to_string(disabled) + ") — no vanishing tree");
 
     // 4. Re-enable → back to live, still kN.
-    check(tools::plugin::set_server_disabled(cfg, "demo", false)
+    check(tools::plugin::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "demo", false)
               == tools::plugin::EditResult::Ok, "re-enable succeeds");
     (void)tools::reload_mcp_plugins();
     const std::size_t reenabled = tool_count_for("demo");
@@ -127,7 +134,7 @@ int main() {
     //    count enabled vs disabled — disabling must DROP it by kN.
     {
         auto m_on = mcp::plugin_model();
-        (void)tools::plugin::set_server_disabled(cfg, "demo", true);
+        (void)tools::plugin::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "demo", true);
         (void)tools::reload_mcp_plugins();
         auto m_off = mcp::plugin_model();
         check(m_off.wire_tool_count + kN == m_on.wire_tool_count,
@@ -140,7 +147,7 @@ int main() {
             if (s.name == "demo")
                 for (const auto& t : s.tools) if (t.over_budget) any_ob = true;
         check(!any_ob, "budget: a disabled server's tools are never over_budget");
-        (void)tools::plugin::set_server_disabled(cfg, "demo", false);
+        (void)tools::plugin::set_server_disabled(::agentty::IoAccess::grant(), agtest::cap(), cfg, "demo", false);
         (void)tools::reload_mcp_plugins();
     }
 

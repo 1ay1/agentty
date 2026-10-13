@@ -40,8 +40,8 @@ LongLived long_lived_slot(const Selection& sel) {
     return sel.row ? sel.row->route : RouteSlot::None;
 }
 
-StreamResult dispatch_stream(const ProviderRouter& router, const Selection& sel,
-                             Request req, EventSink sink) {
+StreamResult dispatch_stream(const maya::unlocked& cap, const ProviderRouter& router,
+                             const Selection& sel, Request req, EventSink sink) {
     // THE turn fingerprint. One Debug line naming every heterogeneity
     // decision that shaped this request BEFORE any bytes hit the wire:
     // which adapter, which model id, what effort survived the clamp,
@@ -60,7 +60,7 @@ StreamResult dispatch_stream(const ProviderRouter& router, const Selection& sel,
     //    main() to stream_external_acp) so dispatch has no dependency on the
     //    acp TU. The agent id travels on the Selection.
     if (sel.kind == Kind::ExternalAcp) {
-        return router.external_acp(sel.acp_agent_id, std::move(req), std::move(sink));
+        return router.external_acp(cap, sel.acp_agent_id, std::move(req), std::move(sink));
     }
 
     // 2) Long-lived native provider (Anthropic, ChatGPT/Codex): holds
@@ -80,7 +80,7 @@ StreamResult dispatch_stream(const ProviderRouter& router, const Selection& sel,
                                  + "' is not bound", std::nullopt}});
             return StreamResult::failed("unbound provider slot");
         }
-        return fn(std::move(req), std::move(sink));
+        return fn(cap, std::move(req), std::move(sink));
     }
 
     // 3) Per-call transport, built fresh from the active Endpoint so a
@@ -88,21 +88,31 @@ StreamResult dispatch_stream(const ProviderRouter& router, const Selection& sel,
     //    its native /api/chat NDJSON dialect; every other OpenAI-compatible
     //    endpoint (openai/groq/openrouter/together/cerebras/llama.cpp/custom)
     //    goes through the shared OpenAI transport.
-    if (sel.openai_endpoint.native_api) {
+    // 11434 is Ollama's PORT, not proof of its protocol: llama.cpp can be
+    // told to serve there, and then /api/chat 404s every turn (#73). Ask the
+    // host once; if it has no /api/tags, treat it as OpenAI-compatible.
+    if (openai::endpoint_speaks_native(::agentty::IoAccess::grant(), sel.openai_endpoint)) {
         ollama::OllamaProvider p{sel.openai_endpoint};
-        return p.stream(std::move(req), std::move(sink));
+        return p.stream(cap, std::move(req), std::move(sink));
     }
-    openai::OpenAIProvider p{sel.openai_endpoint};
-    return p.stream(std::move(req), std::move(sink));
+    openai::Endpoint ep = sel.openai_endpoint;
+    if (ep.native_api) {
+        ep.native_api  = false;
+        ep.path        = "/v1/chat/completions";
+        ep.models_path = "/v1/models";
+    }
+    openai::OpenAIProvider p{ep};
+    return p.stream(cap, std::move(req), std::move(sink));
 }
 
-StreamResult dispatch_stream(const ProviderRouter& router, Request req, EventSink sink) {
+StreamResult dispatch_stream(const maya::unlocked& cap, const ProviderRouter& router,
+                             Request req, EventSink sink) {
     // Dispatch on the LIVE selection so a picker switch retargets the next
     // request with no seam rebuild. active() hands back a by-value snapshot
     // taken under the selection mutex, so the stream worker can't observe a
     // torn mid-select() endpoint.
     const Selection sel = active();
-    return dispatch_stream(router, sel, std::move(req), std::move(sink));
+    return dispatch_stream(cap, router, sel, std::move(req), std::move(sink));
 }
 
 } // namespace agentty::provider

@@ -20,6 +20,7 @@
 #include "agentty/util/image_dims.hpp"   // image_dimensions — lift-time trace
 #include "agentty/tool/commands.hpp"
 #include "agentty/runtime/view/helpers.hpp"
+#include "agentty/io/persistence.hpp"   // title_from_first_message (pure)
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/copilot/provider.hpp"
 #include "agentty/provider/registry.hpp"
@@ -34,15 +35,28 @@ namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
 
-Step submit_message(Model m) {
-    using maya::Cmd;
+Cmd submit_message(Model& m) {
+    // Perf stamps: `AGENTTY_LOG=perf=debug` reveals where the first-turn
+    // keystroke-to-stream latency goes (git spawn, slash/skill disk scan,
+    // credential resolve, wire-tool build). Each stage logs its delta.
+    // A STOPWATCH, not the fold's time. It measures how long this reducer
+    // itself runs, so it needs two readings of a real clock; m.now is one
+    // instant for the whole fold and would make every interval zero. It only
+    // feeds a debug log line, never the Model, so it can't affect a replay.
+    // The elm_purity allowlist carries submit.cpp's `clock` grant for this.
+    const auto t_submit0 = std::chrono::steady_clock::now();
+    auto perf_stamp = [&](const char* stage) {
+        const auto dt = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t_submit0).count();
+        AGT_LOG(Perf, Debug, "submit.stage", "stage={} ms={:.2f}", stage, dt);
+    };
     // Composer is non-empty if it has typed text OR an attachment chip.
     // Even an "empty-looking" buffer with chips should submit — those
     // chips ARE the message (a single dropped @file or paste, with no
     // surrounding prose). The expand pass below pulls each chip's body
     // into the wire text.
     if (m.ui.composer.text.empty() && m.ui.composer.attachments.empty())
-        return done(std::move(m));
+        return Cmd::none();
 
     // No model resolved yet — don't start a turn. Sending `"model": ""` to a
     // local OpenAI-compatible server (llama.cpp / vLLM) is rejected, and the
@@ -56,9 +70,9 @@ Step submit_message(Model m) {
         m.s.status = m.s.models_loading
             ? "loading models\xe2\x80\xa6 pick one (^/) before sending"
             : "no model selected \xe2\x80\x94 open the model picker (^/) first";
-        m.s.status_until = std::chrono::steady_clock::now()
+        m.s.status_until = m.now
                          + std::chrono::seconds{4};
-        return done(std::move(m));
+        return Cmd::none();
     }
     // STALE-model guard for LOCAL providers. settings.json's per-provider
     // model map recalls the last-picked id PER SPEC STRING — so switching
@@ -70,7 +84,7 @@ Step submit_message(Model m) {
     // TLS providers are exempt: their catalogs are advisory (aliases, dated
     // variants and gateway rewrites legitimately stream fine unlisted).
     {
-        const auto& sel = provider::active();
+        const auto& sel = m.d.selection;
         const bool local_openai = sel.kind == provider::Kind::OpenAI
                                && !sel.openai_endpoint.use_tls;
         if (local_openai && !m.d.available_models.empty()) {
@@ -80,9 +94,9 @@ Step submit_message(Model m) {
             if (!listed) {
                 m.s.status = "model '" + m.d.model_id.value
                            + "' isn't served by this host \xe2\x80\x94 pick one (^/)";
-                m.s.status_until = std::chrono::steady_clock::now()
+                m.s.status_until = m.now
                                  + std::chrono::seconds{5};
-                return done(std::move(m));
+                return Cmd::none();
             }
         }
     }
@@ -101,9 +115,13 @@ Step submit_message(Model m) {
         m.s.status = "kept " + std::to_string(files)
                    + (files == 1 ? " edited file" : " edited files")
                    + " from last turn";
-        m.s.status_until = std::chrono::steady_clock::now()
+        m.s.status_until = m.now
                          + std::chrono::seconds{3};
         m.d.pending_changes.clear();
+        // The changes are gone either way — an armed X two-press guard from
+        // the changes strip must not survive into the next turn and fire on
+        // some unrelated later keypress.
+        m.d.reject_all_armed = false;
     }
 
     // ── Slash-command expansion ──────────────────────────────────
@@ -115,7 +133,8 @@ Step submit_message(Model m) {
     // message must keep working). Attachment chips survive: only .text is
     // rewritten, placeholders inside it are left intact (a command body
     // does not carry chips, so expansion cannot orphan one).
-    if (auto expanded = tools::commands::try_expand(m.ui.composer.text)) {
+    if (auto expanded = tools::commands::try_expand(m.ui.composer.text,
+                                                    m.ui.library.commands)) {
         m.ui.composer.text   = std::move(*expanded);
         m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
     }
@@ -199,7 +218,7 @@ Step submit_message(Model m) {
     // The handler drains this queue once new creds are live.
     if (m.s.active() || m.s.oauth_refresh_in_flight) {
         m.ui.composer.queued.push_back(drain_composer(m));
-        return done(std::move(m));
+        return Cmd::none();
     }
 
     // No auto-compaction on submit. Earlier versions queued the
@@ -274,13 +293,19 @@ Step submit_message(Model m) {
         auto sp  = user.text.find_first_of(" \t\n");
         auto tok = user.text.substr(1, sp == std::string::npos
                                            ? std::string::npos : sp - 1);
-        if (const auto* sk = tools::skills::find(tok)) {
+        const auto* sk = m.ui.library.skill(tok);
+        if (sk) {
             std::string rest = sp == std::string::npos
                 ? std::string{}
                 : std::string{user.text.substr(sp + 1)};
             std::string expanded;
-            if (tools::skills::note_activated(sk->name)) {
-                expanded  = tools::skills::activation_payload(*sk);
+            // "Already active" is derived from what the model can see, not
+            // from a session set: after /compact the old body is summarised
+            // away and the skill must be loaded again, which a stored set
+            // got wrong (tools/skills.hpp, "derived from the transcript").
+            if (!tools::skills::is_active_in(sk->name,
+                                             ::agentty::visible_text(m.d.current))) {
+                expanded  = tools::skills::activation_payload(*sk, m.ui.library.skill_approvals);
                 expanded += "\n\nFollow the skill instructions above";
                 expanded += rest.empty() ? "." : " for this task: " + rest;
             } else {
@@ -316,7 +341,7 @@ Step submit_message(Model m) {
             }
             title_src.push_back(user.text[i++]);
         }
-        m.d.current.title = deps().title_from(title_src);
+        m.d.current.title = persistence::title_from_first_message(title_src);
     }
 
     // ── Git checkpoint (Zed-agent behavior) ─────────────────────────
@@ -329,8 +354,12 @@ Step submit_message(Model m) {
     // (cfg.checkpoint_above), and "Rewind to checkpoint" in the palette
     // restores the files + truncates the transcript back to this point.
     // Outside a git repo this is a no-op — no id, no divider, no worker.
+    //
+    // The repo answer is on the Model once startup's probe lands
+    // (RepoProbed). Before that, skip the checkpoint for this turn rather than
+    // ask git from the reducer.
     std::optional<std::string> checkpoint_to_create;
-    if (workspace::in_git_repo()) {
+    if (m.ui.git_repo.value_or(false)) {
         user.checkpoint_id  = CheckpointId{user.id.value};
         checkpoint_to_create = user.id.value;
     }
@@ -345,7 +374,7 @@ Step submit_message(Model m) {
         // picker) if present, else the global RAG mode. FirstTurnOnly injects
         // only when the thread has no prior assistant turn yet (this user
         // message is the first). Off never injects; On always. A shell
-        // AGENTTY_RAG_PROACTIVE override still wins inside proactive_enabled().
+        // AGENTTY_RAG_PROACTIVE override (Model::env) beats the global mode.
         bool proactive_on = false;
         {
             const bool first_turn = std::none_of(
@@ -365,8 +394,13 @@ Step submit_message(Model m) {
                     case store::RagMode::FirstTurnOnly: proactive_on = first_turn; break;
                 }
             } else {
-                proactive_on = tools::proactive_enabled();
-                if (proactive_on && tools::proactive_first_turn_only())
+                // From the Model: the launch env override, else the saved
+                // RAG setting (default off until the pane is configured).
+                const auto& rag = m.d.persisted.rag;
+                proactive_on = m.env.rag_proactive_override.value_or(
+                    rag.configured && rag.proactive && rag.mode != store::RagMode::Off);
+                if (proactive_on && rag.configured
+                    && rag.mode == store::RagMode::FirstTurnOnly)
                     proactive_on = first_turn;
             }
         }
@@ -475,7 +509,7 @@ Step submit_message(Model m) {
     placeholder.role = Role::Assistant;
     m.d.current.messages.push_back(std::move(placeholder));
 
-    m.d.current.updated_at = std::chrono::system_clock::now();
+    m.d.current.updated_at = m.wall_now();
 
     // Idle → Streaming. The fresh phase::Active replaces the prior
     // turn's context wholesale (Idle had none): zero retry counters,
@@ -487,7 +521,7 @@ Step submit_message(Model m) {
     // banner) would change status_bar height by one row when
     // StreamStarted fires, producing a visible "new turn appears at
     // viewport bottom and then realigns" two-frame flicker.
-    auto now = std::chrono::steady_clock::now();
+    auto now = m.now;
     phase::Active ctx;
     ctx.started       = now;
     ctx.last_event_at = now;
@@ -513,22 +547,23 @@ Step submit_message(Model m) {
     // When there's no probe (fast hedge hit, or a non-knowledge query) we
     // launch immediately as before — zero added latency on the common path.
     const bool defer_for_retrieval = !proactive_probe.empty();
-    maya::Cmd<Msg> launch;
+    Cmd launch;
     if (defer_for_retrieval) {
         m.s.status       = "retrieving context\xE2\x80\xA6";   // …
         m.s.status_until = {};   // sticky until the block lands
         // The launch is issued by the ProactiveContextReady handler once the
         // grounding is in the transcript. Here we only kick the retrieval.
-        launch = Cmd<Msg>::task_isolated(
-            [probe = std::move(proactive_probe)]
-            (std::function<void(Msg)> dispatch) {
+        launch = Cmd::task_isolated(
+            [](maya::Sink<Msg> out, std::stop_token, std::string probe) {
                 auto hit = tools::proactive_retrieve_blocking(probe, /*k=*/3);
-                dispatch(Msg{ProactiveContextReady{
+                out.send(Msg{ProactiveContextReady{
                     hit ? std::move(hit->block) : std::string{},
                     hit ? hit->confidence : -1.0}});
-            });
+            }, std::move(proactive_probe));
     } else {
+        perf_stamp("pre_launch_stream");
         launch = cmd::launch_stream(m);
+        perf_stamp("post_launch_stream");
     }
     // No commit_scrollback_overflow here. Submit is not a wholesale
     // model swap — it appends to the existing transcript, so maya's
@@ -541,7 +576,7 @@ Step submit_message(Model m) {
     // has actually overflowed, the bookkeeping turns valid scrollback
     // mirror rows into "forget these" and the next diff re-emits
     // them, surfacing as duplicate cards in scrollback.
-    std::vector<Cmd<Msg>> parts;
+    std::vector<Cmd> parts;
     if (!trim.is_none()) parts.push_back(std::move(trim));
     // Worktree snapshot rides the same batch as the stream launch: it
     // runs concurrently with the request's TTFB window, so by the time
@@ -549,26 +584,20 @@ Step submit_message(Model m) {
     // Failure is silent by design — the rewind path re-verifies the ref
     // exists and surfaces a toast there instead.
     if (checkpoint_to_create) {
-        parts.push_back(Cmd<Msg>::task_isolated(
-            [id = std::move(*checkpoint_to_create)]
-            (std::function<void(Msg)>) {
-                (void)workspace::create_checkpoint(id);
-            }));
+        parts.push_back(Cmd::task_isolated(
+            [](const maya::unlocked& cap, maya::Sink<Msg>, std::stop_token, std::string id) {
+                (void)workspace::create_checkpoint(cap, id);
+            }, std::move(*checkpoint_to_create)));
     }
     parts.push_back(std::move(launch));
     auto cmd = parts.size() == 1
         ? std::move(parts.front())
-        : Cmd<Msg>::batch(std::move(parts));
-    return {std::move(m), std::move(cmd)};
+        : Cmd::batch(std::move(parts));
+    return cmd;
 }
 
-std::string active_provider_id() {
-    const auto& sel = provider::active();
-    if (sel.kind == provider::Kind::OpenAI)
-        return sel.openai_endpoint.label;
-    if (sel.kind == provider::Kind::ExternalAcp)
-        return sel.acp_agent_id;
-    return std::string{provider::default_provider_id()};
+std::string active_provider_id(const Model& m) {
+    return m.d.selection.catalog_id();
 }
 
 // ── Entitlement accessors (see internal.hpp / domain/entitlement.hpp) ────
@@ -577,30 +606,32 @@ std::string active_provider_id() {
 // cannot key an account-scoped fact by provider alone — the exact defect of
 // the legacy account-blind bool this layer replaces.
 namespace {
-std::pair<std::string, std::string> entitlement_scope(std::string_view provider) {
-    std::string pid = provider.empty() ? active_provider_id()
-                                       : std::string{provider};
+std::pair<std::string, std::string> entitlement_scope(
+    const auth::AuthView& accounts, std::string_view provider) {
+    std::string pid{provider};
     // The registry's active label for this provider. Empty is legitimate and
     // means "the only account" — a single-account user keys under "", which
     // is why this needs no migration for the common case.
-    std::string acct = auth::accounts::active_label(pid);
+    std::string acct = accounts.active_account(pid);
     return {std::move(pid), std::move(acct)};
 }
 } // namespace
 
 bool entitlement_blocked(const store::Settings& s,
+                         const auth::AuthView& accounts,
                          domain::entitlement::Fact f,
-                         std::string_view model_id,
-                         std::string_view provider) {
-    const auto [pid, acct] = entitlement_scope(provider);
+                         std::string_view provider,
+                         std::string_view model_id) {
+    const auto [pid, acct] = entitlement_scope(accounts, provider);
     return domain::entitlement::blocked(s.entitlements, f, pid, acct, model_id);
 }
 
 bool entitlement_record_blocked(store::Settings& s,
+                                const auth::AuthView& accounts,
                                 domain::entitlement::Fact f,
-                                std::string_view model_id,
-                                std::string_view provider) {
-    const auto [pid, acct] = entitlement_scope(provider);
+                                std::string_view provider,
+                                std::string_view model_id) {
+    const auto [pid, acct] = entitlement_scope(accounts, provider);
     const bool is_new = domain::entitlement::record_blocked(
         s.entitlements, f, pid, acct, model_id);
     if (is_new)
@@ -612,13 +643,13 @@ bool entitlement_record_blocked(store::Settings& s,
     return is_new;
 }
 
-std::string model_for_provider(std::string_view spec) {
+std::string model_for_provider(const store::Settings& s,
+                               std::string_view spec) {
     const bool is_chatgpt =
         spec == "codex" || spec == "chatgpt" || spec == "codex-cli";
     const bool is_copilot = spec == "copilot";
 
     // 1) Recall the model the user last used on this provider.
-    auto s = deps().load_settings();
     if (auto it = s.provider_models.find(std::string{spec});
         it != s.provider_models.end() && !it->second.empty()) {
         // ChatGPT's line-up is server-driven and changes over time: a slug the
@@ -676,14 +707,26 @@ void reset_composer_draft(ComposerState& c) {
     c.queued.clear();
 }
 
-void persist_settings(const Model& m) {
-    // Load-modify-save: preserve provider, provider_keys, and the
-    // per-provider model map that this function doesn't own. Building a
-    // fresh Settings{} here would silently wipe the active provider on
-    // every model-picker select.
-    auto s = deps().load_settings();
+// The ONE place settings reach the store. See the contract on the
+// declaration in update/internal.hpp.
+[[nodiscard]] Cmd save_record(Model& m) {
+    return Cmd(SaveSettings{m.d.persisted});
+}
+
+[[nodiscard]] Cmd persist_settings(Model& m) {
+    // Sync the settings that still live as separate Domain members INTO the
+    // record, then save the record. The scattered members are what has not
+    // migrated into `m.d.persisted` yet; until they do, this is the function
+    // that reconciles them.
+    auto& s = m.d.persisted;
     s.model_id = m.d.model_id;
     s.profile  = m.d.profile;
+    // The ACTIVE provider, so a relaunch comes back where the user left off.
+    // This used to be written ONLY by the `--provider` CLI flag, which meant
+    // switching provider in the picker persisted the per-provider model but
+    // not the provider itself — every restart fell back to the default.
+    if (const std::string pid = active_provider_id(m); !pid.empty())
+        s.provider = pid;
     // MERGE favorites, don't rebuild: `favorite_models` is one GLOBAL list
     // spanning every provider, but m.d.available_models only holds the
     // catalog of the provider loaded right now. Rebuilding the list from
@@ -702,54 +745,57 @@ void persist_settings(const Model& m) {
     // Record this model as the active provider's last-used selection so a
     // later switch back to it restores exactly this model.
     if (!m.d.model_id.empty())
-        s.provider_models[active_provider_id()] = m.d.model_id.value;
-    s.effort = std::string{effort_wire(m.d.effort)};
+        s.provider_models[active_provider_id(m)] = m.d.model_id.value;
+    s.effort = std::string{effort_to_wire_setting(m.d.effort)};
     // Smart Mode: the whole config, one assignment. While the
     // AGENTTY_SMART_MODE session pin is active the in-memory `enabled` flag is
     // the ENV's value, not the user's choice — so the persisted preference is
     // kept as it was, and the pin never leaks into config.
-    const bool keep_enabled = smart::tuning::enabled_override().has_value();
+    const bool keep_enabled = m.env.settings.smart_enabled.has_value();
     const bool was_enabled  = s.smart.enabled;
     s.smart = m.d.smart;
     if (keep_enabled) s.smart.enabled = was_enabled;
-    deps().save_settings(s);
-    // Keep the subagent role-router (Layer 3b) in step with any Smart Mode
-    // change the user just made in the overlay.
-    tools::subagent::set_smart(m.d.smart);
-    // …and the provider those pins are scoped to, so a worker resolves the
-    // same slot the main turn would.
-    tools::subagent::set_provider(active_provider_id());
+    auto save = save_record(m);
+    // The subagent role-router (Layer 3b) and the provider its pins are scoped
+    // to follow from the Model; the dispatch seam publishes them after this
+    // fold (update.cpp, publish_derived).
+    return save;
 }
 
-std::pair<Model, maya::Cmd<Msg>>
-commit_provider_switch(Model m, std::string_view spec,
-                       auth::AuthHeader new_auth, std::string_view label,
+Cmd
+commit_provider_switch(Model& m, std::string_view spec,
+                       std::string_view label,
                        std::string_view desired_model,
                        bool open_panel) {
-    using maya::Cmd;
     const std::string spec_s{spec};
 
-    // (1) File the OUTGOING model under its canonical provider id BEFORE
-    //     provider::select swaps active() out from under us, so a later
-    //     switch back restores exactly this model.
-    const std::string outgoing_id = active_provider_id();
+    // (1) File the OUTGOING model under its canonical provider id BEFORE the
+    //     selection changes below, so a later switch back restores exactly
+    //     this model.
+    const std::string outgoing_id = active_provider_id(m);
 
-    // (2) Install the new selection (process-global; the stream seam reads
-    //     active() at call time).
-    provider::select(provider::parse_selection(spec_s));
+    // (2) Change the active provider — in the MODEL, which owns it.
+    //
+    //     It used to be provider::select(), a process-global write from
+    //     inside update. The global still exists, for code off the loop (the
+    //     stream worker, ACP, main), but it is a published copy now: the
+    //     dispatch seam writes it after this fold (update.cpp,
+    //     publish_derived). Everything below in THIS fold — the prewarm
+    //     target, the model fetch, the credential, the toast — reads
+    //     m.d.selection, so it sees the new provider, not the one being left.
+    m.d.selection = provider::parse_selection(spec_s);
 
-    // (2b) Prewarm TLS/DNS to the NEWLY-active provider's host on a detached
-    //      thread, so the first turn after a live switch is as fast as a cold
-    //      start's prewarmed first turn. Uniform for Claude and ChatGPT/Codex;
-    //      a no-op for locals / ACP. Fire-and-forget.
-    provider::prewarm_active_provider();
+    // (2b) Prewarm TLS/DNS to the NEWLY-active provider's host, so the first
+    //      turn after a live switch is as fast as a cold start's. Returned as
+    //      an effect (batched below); it reads m.d.selection, set just above.
+    Cmd prewarm = cmd::prewarm_provider(m);
 
+    Cmd recall_save = Cmd::none();
     {
-        auto settings = deps().load_settings();
         if (!m.d.model_id.empty())
-            settings.provider_models[outgoing_id] = m.d.model_id.value;
-        settings.provider = spec_s;
-        deps().save_settings(settings);
+            m.d.persisted.provider_models[outgoing_id] = m.d.model_id.value;
+        m.d.persisted.provider = spec_s;
+        recall_save = save_record(m);
     }
 
     // (3) Make a valid model active for the NEW backend. Priority:
@@ -760,11 +806,10 @@ commit_provider_switch(Model m, std::string_view spec,
     //     provider+model switch instead of "switch provider, then land on
     //     whatever the recall/default was."
     std::string next{desired_model};
-    if (next.empty()) next = model_for_provider(spec_s);
+    if (next.empty()) next = model_for_provider(m.d.persisted, spec_s);
     if (!next.empty()) {
         m.d.model_id    = ModelId{next};
-        m.s.context_max = resolved_context_max(m, detail::active_provider_id());
-        tools::subagent::set_model(m.d.model_id.value);
+        m.s.context_max = resolved_context_max(m, detail::active_provider_id(m));
     } else {
         // No model resolvable for the new backend yet (ChatGPT catalog not
         // reached, Ollama, …). CLEAR the model id — carrying the OUTGOING
@@ -773,7 +818,6 @@ commit_provider_switch(Model m, std::string_view spec,
         // wrote `codex → claude-opus-*`). An empty id is skipped by
         // persist_settings and ModelsLoaded auto-selects the first available.
         m.d.model_id = ModelId{""};
-        tools::subagent::set_model("");
     }
 
     // (4) Re-clamp the reasoning-effort tier to what the (possibly new)
@@ -795,9 +839,11 @@ commit_provider_switch(Model m, std::string_view spec,
     // (5) Persist the FULL settings shape (provider + per-provider model +
     //     effort + favorites) through the one owner so effort is never
     //     dropped on a hop, then swap the Deps auth and refetch models.
-    persist_settings(m);
+    auto settings_save = persist_settings(m);
 
-    app::switch_provider(std::move(new_auth));
+    // The live header for the new backend is resolved by the host after this
+    // fold (InstallAuth), not read here.
+    Cmd install = Cmd(InstallAuth{.provider = spec_s});
     m.d.available_models.clear();
     m.s.models_loading = true;
 
@@ -808,13 +854,11 @@ commit_provider_switch(Model m, std::string_view spec,
     // 401 → reactive refresh → retry, i.e. a visibly slow first turn — or
     // a hard error when the refresh path had any other problem). Same
     // registry-driven gate: only rows that opt into proactive refresh.
-    maya::Cmd<Msg> refresh_cmd = Cmd<Msg>::none();
+    Cmd refresh_cmd = Cmd::none();
     if (const auto* prow = provider::preset_for(spec_s);
         prow && prow->oauth_proactive_refresh && !m.s.oauth_refresh_in_flight) {
-        if (auto tok = auth::oauth_proactive_refresh_token()) {
-            m.s.oauth_refresh_in_flight = true;
-            refresh_cmd = cmd::refresh_oauth(std::move(*tok));
-        }
+        m.s.oauth_refresh_in_flight = true;
+        refresh_cmd = cmd::refresh_oauth_if_due();
     }
 
     // Open the model picker immediately so the user sees "Loading models…"
@@ -832,7 +876,7 @@ commit_provider_switch(Model m, std::string_view spec,
     // choice already made. Skip it — the desired model installs on ModelsLoaded
     // — and give a "Switching to X…" toast instead.
     const bool have_desired = !desired_model.empty();
-    if (open_panel && provider::active().kind != provider::Kind::ExternalAcp
+    if (open_panel && m.d.selection.kind != provider::Kind::ExternalAcp
         && !have_desired)
         m.ui.panel.descend(pn::Models{{0, ""}});
 
@@ -846,7 +890,7 @@ commit_provider_switch(Model m, std::string_view spec,
               + "  \xc2\xb7  " + std::string{label} + "\xe2\x80\xa6"
         : "provider \xe2\x86\x92 " + std::string{label};
     {
-        const auto& sel = provider::active();
+        const auto& sel = m.d.selection;
         if (!have_desired && sel.kind == provider::Kind::OpenAI
             && !sel.openai_endpoint.use_tls)
             toast_text += "  (" + sel.openai_endpoint.host + ":"
@@ -855,19 +899,18 @@ commit_provider_switch(Model m, std::string_view spec,
     }
     auto toast = set_status_toast(m, std::move(toast_text),
                                   std::chrono::seconds{4});
-    return {std::move(m),
-            Cmd<Msg>::batch(std::move(toast), cmd::fetch_models(),
-                            std::move(refresh_cmd))};
+    return Cmd::batch(std::move(recall_save), std::move(settings_save),
+                      std::move(prewarm), std::move(toast), cmd::fetch_models(m),
+                      std::move(refresh_cmd), std::move(install));
 }
 
-maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
+Cmd set_status_toast(Model& m, std::string text,
                                 std::chrono::seconds ttl) {
-    using maya::Cmd;
     m.s.status = std::move(text);
-    auto now = std::chrono::steady_clock::now();
+    auto now = m.now;
     m.s.status_until = now + ttl;
     auto stamp = m.s.status_until;
-    return Cmd<Msg>::after(
+    return Cmd::after(
         std::chrono::duration_cast<std::chrono::milliseconds>(ttl)
             + std::chrono::milliseconds{50},
         Msg{ClearStatus{stamp}});

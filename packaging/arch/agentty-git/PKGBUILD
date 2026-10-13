@@ -6,7 +6,7 @@
 # release binary. Users who want to ride HEAD (and get Arch's ABI/security
 # updates for OpenSSL et al. via normal `pacman -Syu`) want this package.
 #
-# Network policy: everything is fetched by makepkg in source=() — the four
+# Network policy: everything is fetched by makepkg in source=() — the five
 # git submodules are wired to the local clones in prepare(), and the three
 # CMake-FetchContent deps (nlohmann_json / simdjson / mimalloc, pinned by
 # the build system to exact tags) are provided as checksummed tarballs via
@@ -44,13 +44,19 @@ _mimalloc_tag=v3.4.5
 
 source=("$_pkgname::git+https://github.com/1ay1/agentty.git"
         'git+https://github.com/1ay1/maya.git'
+        'git+https://github.com/1ay1/jaal.git'
         'git+https://github.com/1ay1/acp-cpp.git'
         'git+https://github.com/1ay1/mcp-cpp.git'
         'git+https://github.com/1ay1/rag-cpp.git'
+        'git+https://github.com/1ay1/claybin.git'
+        'git+https://github.com/1ay1/jsonrpc-cpp.git'
         "nlohmann_json-${_json_tag}.tar.gz::https://github.com/nlohmann/json/archive/${_json_tag}.tar.gz"
         "simdjson-${_simdjson_tag}.tar.gz::https://github.com/simdjson/simdjson/archive/${_simdjson_tag}.tar.gz"
         "mimalloc-${_mimalloc_tag}.tar.gz::https://github.com/microsoft/mimalloc/archive/${_mimalloc_tag}.tar.gz")
 sha256sums=('SKIP'
+            'SKIP'
+            'SKIP'
+            'SKIP'
             'SKIP'
             'SKIP'
             'SKIP'
@@ -67,13 +73,29 @@ pkgver() {
 prepare() {
     cd "$_pkgname"
     # Point every submodule at the local mirror makepkg already cloned, so
-    # `submodule update` never touches the network.
+    # `submodule update` never touches the network. These keys are submodule
+    # NAMES, not paths — the checkouts live under third_party/ but the names in
+    # .gitmodules are still bare, so they don't carry the prefix.
     git submodule init
     git config submodule.maya.url    "$srcdir/maya"
     git config submodule.acp-cpp.url "$srcdir/acp-cpp"
     git config submodule.mcp-cpp.url "$srcdir/mcp-cpp"
     git config submodule.rag-cpp.url "$srcdir/rag-cpp"
+    # claybin is the in-process sandbox backend, and it is NOT optional:
+    # AgenttySubmodules.cmake raises FATAL_ERROR when third_party/claybin is
+    # empty, so leaving it unwired failed at CONFIGURE rather than at link.
+    git config submodule.claybin.url "$srcdir/claybin"
+    git config submodule.jsonrpc-cpp.url "$srcdir/jsonrpc-cpp"
     git -c protocol.file.allow=always submodule update
+
+    # maya carries jaal as its OWN submodule, and agentty links maya::app,
+    # which IS maya + jaal — so a non-recursive update builds nothing. Wire
+    # jaal to its local mirror too, from inside maya, then update there.
+    # Recursing from the top would re-fetch maya's nested remote over the
+    # network, which makepkg forbids.
+    git -C third_party/maya submodule init
+    git -C third_party/maya config submodule.third_party/jaal.url "$srcdir/jaal"
+    git -C third_party/maya -c protocol.file.allow=always submodule update
 }
 
 build() {

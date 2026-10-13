@@ -24,9 +24,13 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <maya/runtime.hpp>
+#include "agentty/util/io.hpp"
 
 namespace agentty::http {
 
@@ -37,14 +41,37 @@ namespace agentty::http {
 // boundary and between poll() waits, so a trip lands within a few ms on a
 // live connection and immediately on an idle one (the socket is shut down,
 // which wakes poll()).
+//
+// BACKED BY A std::stop_source, not a bare atomic flag. A flag can only be
+// POLLED, so anything that wanted to react to a cancel — rather than check
+// for one inside its own loop — had to grow a thread that slept and
+// rechecked. agentty had two: the ACP server's tool wait (50 ms) and the
+// subagent stream's parent-cancel bridge (20 ms). token() hands out a real
+// std::stop_token, so those become stop_callbacks and condition-variable
+// waits that wake the instant cancel() is called.
+//
+// The cost is nothing on the hot path. is_cancelled() is the same single
+// acquire load it was (stop_requested() is one atomic read in every
+// implementation), and the I/O loop keeps calling it exactly as before.
 class CancelToken {
 public:
-    void cancel() noexcept { flag_.store(true, std::memory_order_release); }
+    CancelToken() = default;
+    // Shared between threads through a pointer; swapping the whole source
+    // under a watcher would be a race, so it can't be assigned or copied.
+    CancelToken(const CancelToken&)            = delete;
+    CancelToken& operator=(const CancelToken&) = delete;
+
+    void cancel() noexcept { src_.request_stop(); }
     [[nodiscard]] bool is_cancelled() const noexcept {
-        return flag_.load(std::memory_order_acquire);
+        return src_.stop_requested();
+    }
+    /// The same signal as a std::stop_token: register a stop_callback on it,
+    /// or hand it to maya::delay_for, instead of polling.
+    [[nodiscard]] std::stop_token token() const noexcept {
+        return src_.get_token();
     }
 private:
-    std::atomic<bool> flag_{false};
+    std::stop_source src_;
 };
 using CancelTokenPtr = std::shared_ptr<CancelToken>;
 
@@ -328,6 +355,11 @@ struct Timeouts {
 // Build-time version, baked from CMakeLists.txt's PROJECT_VERSION via
 // -DAGENTTY_VERSION. The fallback exists only for hand-invoked compiler
 // runs that bypass our CMake — keep the binary self-describing.
+//
+// This macro is the raw build input for the User-Agent strings. agentty's
+// identity as a remote service RECORDS it — product name and homepage URL —
+// lives in util/identity.hpp, which is what app attribution sends (see
+// ProviderDescriptor::attribution).
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"
 #endif
@@ -382,8 +414,8 @@ public:
     // OpenSSL static state is torn down under it — a data race that surfaces as
     // heap corruption (Windows STATUS_HEAP_CORRUPTION 0xC0000374) when the app
     // exits within milliseconds of launch (e.g. immediate pipe-stdin EOF).
-    // Idempotent; safe to call with no prewarm in flight.
-    void join_prewarm() noexcept;
+    // Idempotent; safe to call with no prewarm in flight. Joins: `unlocked`.
+    void join_prewarm(const maya::unlocked& cap) noexcept;
 
 private:
     struct Impl;
@@ -391,8 +423,9 @@ private:
 };
 
 // Process-wide default client — lazy, constructed on first access, shared
-// across all call sites. Equivalent to Zed's `GlobalHttpClient`.
-[[nodiscard]] Client& default_client();
+// across all call sites. Equivalent to Zed's `GlobalHttpClient`. Dialing out
+// is IO, so getting it takes an Io.
+[[nodiscard]] Client& default_client(Io);
 
 namespace test {
 // Pure incremental HTTP/1 chunk decoder seam used by framing regressions.
@@ -403,3 +436,12 @@ is_chunked(const Headers& headers);
 } // namespace test
 
 } // namespace agentty::http
+
+// CancelToken is a shared mutable object, and Sendable refuses shared_ptr by
+// default for that reason. Sharing is the point here: one side trips it (Esc,
+// a new turn, session/cancel) while a worker watches it. It holds only a
+// std::stop_source, which is built for exactly that, so the pointer may cross.
+MAYA_SENDABLE(agentty::http::CancelTokenPtr);
+// And for the same reason it is Sync: one std::stop_source, used only through
+// its thread-safe calls, and the class has no assignment that swaps it.
+MAYA_SYNC(agentty::http::CancelToken);

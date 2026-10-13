@@ -102,6 +102,10 @@ std::string get(const smart::RoleConfig& s, const SettingDef& d) {
     return get_impl(s, d);
 }
 
+std::string get(const web_search_cfg::Config& c, const SettingDef& d) {
+    return get_impl(c, d);
+}
+
 // ── Write ────────────────────────────────────────────────────────────────
 
 namespace {
@@ -134,6 +138,19 @@ bool set_impl(C& c, const SettingDef& d, std::string_view value) {
                 field = static_cast<M>(std::clamp(x, d.min, d.max));
                 ok = true;
             } catch (...) {}
+        }
+        else if (d.type == Type::Text) {
+            // Free text: any value is representable, so the write always
+            // lands. Control characters are dropped — a pasted newline would
+            // otherwise round-trip into settings.json and onto the pane as a
+            // second line the single-line field cannot show.
+            std::string clean;
+            clean.reserve(value.size());
+            for (char ch : value)
+                if (static_cast<unsigned char>(ch) >= 0x20 && ch != 0x7f)
+                    clean.push_back(ch);
+            field = std::move(clean);
+            ok = true;
         }
         else {
             // Enum: the value must be one of the declared options, or a typo
@@ -181,17 +198,17 @@ void reset_impl(C& c, const C& dflt, const SettingDef& d) {
 }
 
 template <class C>
-void apply_env_impl(C& c) {
+void apply_env_impl(C& c, const EnvSnapshot& env) {
     for (const auto& d : kSettings) {
         if (d.env.empty()) continue;
-        const char* raw = std::getenv(std::string{d.env}.c_str());
-        if (!raw || !raw[0]) continue;
+        const std::string* raw = env.find(d.env);
+        if (!raw) continue;
         // A malformed env value is IGNORED, not fatal and not silently
         // coerced: the shipped default stands, which is the least surprising
         // behaviour for a typo in a shell profile. A row belonging to the
         // OTHER config struct is skipped by with_slot, so each overload
         // applies exactly the rows it owns.
-        (void)set_impl(c, d, raw);
+        (void)set_impl(c, d, *raw);
     }
 }
 
@@ -205,6 +222,10 @@ bool set(smart::RoleConfig& s, const SettingDef& d, std::string_view value) {
     return set_impl(s, d, value);
 }
 
+bool set(web_search_cfg::Config& c, const SettingDef& d, std::string_view value) {
+    return set_impl(c, d, value);
+}
+
 // ── Defaults ─────────────────────────────────────────────────
 
 bool is_default(const store::RagConfig& c, const SettingDef& d) {
@@ -216,6 +237,11 @@ bool is_default(const smart::RoleConfig& s, const SettingDef& d) {
     return is_default_impl(s, kDefaults, d);
 }
 
+bool is_default(const web_search_cfg::Config& c, const SettingDef& d) {
+    static const web_search_cfg::Config kDefaults{};
+    return is_default_impl(c, kDefaults, d);
+}
+
 void reset(store::RagConfig& c, const SettingDef& d) {
     reset_impl(c, defaults(), d);
 }
@@ -225,15 +251,55 @@ void reset(smart::RoleConfig& s, const SettingDef& d) {
     reset_impl(s, kDefaults, d);
 }
 
+void reset(web_search_cfg::Config& c, const SettingDef& d) {
+    static const web_search_cfg::Config kDefaults{};
+    reset_impl(c, kDefaults, d);
+}
+
 // ── Environment ─────────────────────────────────────────────
 
-void apply_env(store::RagConfig& c) { apply_env_impl(c); }
-void apply_env(smart::RoleConfig& s) { apply_env_impl(s); }
+EnvSnapshot read_env(Io) {
+    EnvSnapshot e;
+    for (const auto& d : kSettings) {
+        if (d.env.empty()) continue;
+        const std::string var{d.env};
+        if (const char* raw = std::getenv(var.c_str()); raw && raw[0])
+            e.set.emplace_back(var, raw);
+    }
+    namespace t = smart::tuning;
+    e.smart_enabled        = t::parse_enabled(std::getenv("AGENTTY_SMART_MODE"));
+    e.smart_no_internal    = t::parse_disabled(std::getenv("AGENTTY_SMART_NO_INTERNAL"));
+    e.smart_no_orchestrate = t::parse_disabled(std::getenv("AGENTTY_SMART_NO_ORCHESTRATE"));
+    e.smart_no_subagents   = t::parse_disabled(std::getenv("AGENTTY_SMART_NO_SUBAGENTS"));
+    return e;
+}
 
-std::string env_override(const SettingDef& d) {
+void apply_env(store::RagConfig& c, const EnvSnapshot& env) { apply_env_impl(c, env); }
+void apply_env(smart::RoleConfig& s, const EnvSnapshot& env) {
+    apply_env_impl(s, env);
+    s.no_internal    = env.smart_no_internal;
+    s.no_orchestrate = env.smart_no_orchestrate;
+    s.no_subagents   = env.smart_no_subagents;
+}
+void apply_env(Io io, store::RagConfig& c) { apply_env(c, read_env(io)); }
+void apply_env(Io io, smart::RoleConfig& s) { apply_env(s, read_env(io)); }
+void apply_env(web_search_cfg::Config& c, const EnvSnapshot& env) {
+    apply_env_impl(c, env);
+    // AGENTTY_WEB_SEARCH also takes the boolean spellings people reach for
+    // (0/1/true/false/yes/no). False is Off; true means "search available",
+    // which is Auto, not On (On would start clamping counts).
+    if (const std::string* raw = env.find("AGENTTY_WEB_SEARCH")) {
+        const std::string v = lower(*raw);
+        bool b{};
+        if (v != "on" && v != "off" && parse_bool(v, b))
+            c.mode_text = b ? "auto" : "off";
+    }
+}
+void apply_env(Io io, web_search_cfg::Config& c) { apply_env(c, read_env(io)); }
+
+std::string env_override(const SettingDef& d, const EnvSnapshot& env) {
     if (d.env.empty()) return {};
-    const char* raw = std::getenv(std::string{d.env}.c_str());
-    return (raw && raw[0]) ? std::string{d.env} : std::string{};
+    return env.find(d.env) ? std::string{d.env} : std::string{};
 }
 
 } // namespace agentty::settings::registry

@@ -1,7 +1,7 @@
 #pragma once
-// agentty::tools::plugin — the MCP plugin manager (`agentty plugin …`).
+// agentty::tools::plugin â€” the MCP plugin manager (`agentty plugin â€¦`).
 //
-// A "plugin" in agentty IS an MCP server entry in mcp.json — there is no
+// A "plugin" in agentty IS an MCP server entry in mcp.json â€” there is no
 // separate plugin runtime, registry, or manifest format. This module is
 // the thin ergonomic layer over that fact: it edits mcp.json cleanly so
 // users never hand-write JSON, with recipes for the common runtimes:
@@ -20,16 +20,20 @@
 // cloned-repo configs running code, not against the user's own edits).
 //
 // Editing contract (pinned by plugin_config_test):
-//   • Round-trip safe: every key this module does not own (other servers,
-//     "servers" spelling, unknown top-level keys, per-server env/url/…)
+//   â€¢ Round-trip safe: every key this module does not own (other servers,
+//     "servers" spelling, unknown top-level keys, per-server env/url/â€¦)
 //     is preserved byte-for-byte in JSON value terms.
-//   • add on an existing name fails unless --force (no silent clobber).
-//   • remove of an absent name is a distinct "not found" outcome.
-//   • A missing file is created (with parent dirs) on first add.
+//   â€¢ add on an existing name fails unless --force (no silent clobber).
+//   â€¢ remove of an absent name is a distinct "not found" outcome.
+//   â€¢ A missing file is created (with parent dirs) on first add.
 
 #include <filesystem>
 #include <string>
 #include <vector>
+
+#include <nlohmann/json_fwd.hpp>
+#include <maya/runtime.hpp>
+#include "agentty/util/io.hpp"
 
 namespace agentty::tools::plugin {
 
@@ -49,37 +53,59 @@ enum class EditResult : std::uint8_t {
     Ok,
     AlreadyExists,   // add without --force onto an existing name
     NotFound,        // remove of an absent name
-    ParseError,      // existing file is not valid JSON — refuse to touch it
+    ParseError,      // existing file is not valid JSON â€” refuse to touch it
     IoError,         // cannot read/write the path
 };
 
 // Add `spec` to the mcpServers object of the JSON file at `path`,
 // creating the file if absent. Preserves every other key. `force`
 // overwrites an existing entry of the same name.
-[[nodiscard]] EditResult add_server(const std::filesystem::path& path,
+[[nodiscard]] EditResult add_server(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
                                     const ServerSpec& spec, bool force);
 
+// Add a RAW server entry, verbatim, preserving every key it carries.
+//
+// add_server() builds its entry from a ServerSpec, which models only the
+// fields agentty's own `plugin add` flow can set (command/args/url/type).
+// That is right for a CLI where a human types the arguments, and WRONG for
+// adoption: `mcp.json` is one schema shared across tools, so an entry we
+// copy from another client may legitimately carry `env`, `headers`,
+// `timeoutMs`, `connectTimeoutMs` or `tools.exclude` -- all of which
+// agentty's own connect path reads. Re-deriving a spec and rebuilding an
+// entry from it silently drops them.
+//
+// Dropping `env` is the worst of those. A server configured with an API key
+// in its env block imports looking complete, then fails at spawn with an
+// auth error that names nothing. A lossy import is worse than a refused one.
+//
+// So import does not translate. It validates (the caller checks there is a
+// command or a url) and copies. Same no-clobber contract as add_server.
+[[nodiscard]] EditResult add_server_raw(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
+                                        const std::string& name,
+                                        const nlohmann::json& entry,
+                                        bool force);
+
 // Edit an EXISTING entry in place, preserving every key the spec doesn't
-// own (env blocks, headers, timeoutMs, tools.exclude — anything the user
+// own (env blocks, headers, timeoutMs, tools.exclude â€” anything the user
 // hand-wrote). add_server(force=true) replaces the entry WHOLESALE, which
 // is right for the CLI's re-add but wrong for a form's Save: saving a URL
 // tweak must not delete the env block beside it. Only the fields the
 // ServerSpec models (command/args/url/type/passthrough) are rewritten;
 // absent-in-spec transport keys are erased only when the KIND owns them
 // (a stdio spec clears url; an http spec clears command/args).
-[[nodiscard]] EditResult update_server(const std::filesystem::path& path,
+[[nodiscard]] EditResult update_server(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
                                        const ServerSpec& spec);
 
 // Remove the named server. Preserves everything else.
-[[nodiscard]] EditResult remove_server(const std::filesystem::path& path,
+[[nodiscard]] EditResult remove_server(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
                                        const std::string& name);
 
-// Enable/disable a WHOLE server without removing it — persisted as the
+// Enable/disable a WHOLE server without removing it â€” persisted as the
 // server's top-level `disabled` flag in mcp.json (the bridge already skips a
 // disabled server on connect). This is the primary Enter action on a plugin
 // row: a reversible on/off, distinct from the destructive remove. No-op-Ok if
 // already in the desired state.
-[[nodiscard]] EditResult set_server_disabled(const std::filesystem::path& path,
+[[nodiscard]] EditResult set_server_disabled(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
                                              const std::string& name,
                                              bool disabled);
 
@@ -96,7 +122,7 @@ list_servers(const std::filesystem::path& path);
 // disabled tool is dropped from the wire catalog on the next reload.
 // `bare` is the tool's short name (e.g. "current_date", NOT the
 // mcp__server__tool form). No-op-Ok if already in the desired state.
-[[nodiscard]] EditResult set_tool_enabled(const std::filesystem::path& path,
+[[nodiscard]] EditResult set_tool_enabled(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
                                           const std::string& server,
                                           const std::string& bare,
                                           bool enabled);
@@ -112,11 +138,13 @@ list_servers(const std::filesystem::path& path);
 [[nodiscard]] std::vector<std::string>
 disabled_tools(const std::filesystem::path& path, const std::string& server);
 
-// The config path for a scope. user → ~/.agentty/mcp.json,
-// project → ./.agentty/mcp.json.
-[[nodiscard]] std::filesystem::path config_path(bool project);
+// The config path for a scope. user â†’ ~/.agentty/mcp.json,
+// project â†’ ./.agentty/mcp.json.
+[[nodiscard]] std::filesystem::path config_path(Io, bool project);
+// The same, given the user root the caller already resolved. Pure.
+[[nodiscard]] std::filesystem::path config_path(bool project, const std::filesystem::path& user_root);
 
-// ── Project-config trust (the RCE gate) ─────────────────────────────────
+// â”€â”€ Project-config trust (the RCE gate) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // A workspace-local ./.agentty/mcp.json can ride in on a clone and spawn
 // arbitrary commands, so its servers don't connect until the human vouches
 // for it: either AGENTTY_MCP_ALLOW_PROJECT=1, or an approval of the file's
@@ -124,27 +152,27 @@ disabled_tools(const std::filesystem::path& path, const std::string& server);
 // it (the MCPoison fix). Approvals persist under ~/.agentty, so a clone can
 // neither approve itself nor keep an approval valid after its bytes change.
 //
-// is_project_config_trusted() — would the project config connect right now?
-// approve_project_config()    — record trust for the CURRENT project config's
+// is_project_config_trusted() â€” would the project config connect right now?
+// approve_project_config()    â€” record trust for the CURRENT project config's
 //                               content; returns false if there's no project
 //                               config or the store can't be written.
-[[nodiscard]] bool is_project_config_trusted();
-[[nodiscard]] bool approve_project_config();
+[[nodiscard]] bool is_project_config_trusted(Io);
+[[nodiscard]] bool approve_project_config(Io);
 
-// Per-server trust — finer than the whole-file gate. Trust is bound to ONE
+// Per-server trust â€” finer than the whole-file gate. Trust is bound to ONE
 // server's spec (its command + args), so approving `date` doesn't bless a
 // later-added `db`, and editing `date`'s command re-gates only `date`. A
 // server counts as trusted if the blanket env opt-in is set, OR the whole
 // project file is approved, OR this server's own spec hash is approved.
-//   is_server_trusted(name) — would THIS project server connect right now?
-//   approve_server(name)    — record trust for this server's current spec;
+//   is_server_trusted(name) â€” would THIS project server connect right now?
+//   approve_server(name)    â€” record trust for this server's current spec;
 //                             false if the server/config is absent or unwritable.
-[[nodiscard]] bool is_server_trusted(const std::filesystem::path& path,
+[[nodiscard]] bool is_server_trusted(Io, const std::filesystem::path& path,
                                      const std::string& name);
-[[nodiscard]] bool approve_server(const std::filesystem::path& path,
+[[nodiscard]] bool approve_server(Io, const std::filesystem::path& path,
                                   const std::string& name);
 
-// The spawn-identity hash for one server's spec (command + url + args) — the
+// The spawn-identity hash for one server's spec (command + url + args) â€” the
 // bytes that would actually run. The bridge's connect loop builds these from
 // the LIVE spec and checks the result against the approvals store, so
 // file-side and live-side agree on identity. Empty when command AND url are
@@ -153,9 +181,9 @@ disabled_tools(const std::filesystem::path& path, const std::string& server);
                                            const std::string& url,
                                            const std::vector<std::string>& args);
 
-// The `agentty plugin` CLI: verb ∈ {add, remove, list} with the argv tail
+// The `agentty plugin` CLI: verb âˆˆ {add, remove, list} with the argv tail
 // after the verb. Returns a process exit code. Prints results/errors and,
 // after a successful add, a short "restart to connect / trust gate" note.
-int cli(const std::vector<std::string>& argv);
+int cli(Io, const maya::unlocked&, const std::vector<std::string>& argv);
 
 } // namespace agentty::tools::plugin

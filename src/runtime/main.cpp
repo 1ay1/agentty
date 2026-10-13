@@ -45,6 +45,7 @@
 
 #ifndef _WIN32
 #include <unistd.h>   // isatty (headless `run` stdin detection)
+#include <poll.h>     // poll (non-blocking stdin peek, see the run subcommand)
 #else
 #include <io.h>
 #include <process.h>  // _getpid
@@ -61,17 +62,38 @@
 #endif
 }
 
+#ifdef _WIN32
+// Are we running under Wine rather than real Windows?
+//
+// Detected the way Wine itself documents: ntdll exports wine_get_version() and
+// nothing on genuine Windows does. Cheap, no registry poke, no side effects.
+[[nodiscard]] inline bool running_under_wine() {
+    auto* ntdll = ::GetModuleHandleA("ntdll.dll");
+    return ntdll && ::GetProcAddress(ntdll, "wine_get_version");
+}
+#else
+[[nodiscard]] inline bool running_under_wine() { return false; }
+#endif
+
 #include <maya/maya.hpp>
+#include <maya/host/run.hpp>   // maya::run: the jaal host
+#include <maya/platform/io.hpp>   // query_terminal_size (sandbox banner)
+#include "agentty/runtime/app/host.hpp"   // agentty::app::Host
 
 #include "agentty/acp/server.hpp"
 #include "agentty/airgap/airgap.hpp"
 #include "agentty/util/logx.hpp"   // flight recorder dump in crash handler
 #include "agentty/util/teardown.hpp"
+#include "agentty/util/storage_lock.hpp"
+#include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/view/palette.hpp"   // ui::status_warn — themed banner
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
+#include "agentty/i18n/startup.hpp"   // i18n::init — before anything renders
+#include "agentty/io/blob_gc.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/mcp/serve.hpp"
 #include "agentty/mcp/oauth.hpp"
@@ -90,23 +112,31 @@
 #include "agentty/provider/dispatch.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
+#include "agentty/tool/web_search_policy.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/config/inventory.hpp"   // config::cmd_config
+#if defined(AGENTTY_MCP)
+#include "agentty/mcp/import.hpp"         // mcp::import_::cli
+#endif
 #include "agentty/tool/commands.hpp"
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
-#include "agentty/workspace/files.hpp"     // join_workspace_prewarm
-#include "agentty/workspace/symbols.hpp"   // join_workspace_symbols_prewarm
+#include "agentty/workspace/files.hpp"
+#include "agentty/workspace/checkpoint.hpp"
+#include "agentty/workspace/symbols.hpp"
+#include "agentty/util/modelsdev.hpp"       // join_background_refresh
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/subagent.hpp"
 #include "agentty/tool/mcp_tools_bridge.hpp"
+#include "agentty/runtime/run_cli.hpp"
 
 // Forward decl (mcp_tools_backends.hpp pulls in <mcp/tools/host.hpp>, whose
 // ::mcp namespace collides with agentty::mcp inside main.cpp's usings).
 namespace agentty::tools {
-std::string run_one_shot(const std::string& prompt,
-                         const std::string& agent_type,
-                         bool& is_error);
+// Validates `--agent` before any work happens (see the run subcommand).
+bool is_known_agent_type(std::string_view name);
+std::string known_agent_types();
 // Stops the RAG retriever's background warm at teardown (see call site below).
 void rag_shutdown();
 }
@@ -213,10 +243,10 @@ extern "C" void agentty_release_crash_handler(int sig) {
     }
     in_handler = 1;
 
-    static const char hdr[] = "\n=== agentty crash ===\n";
 #if defined(_WIN32)
     (void)agentty::logx::dump_flight_recorder(2);
 #else
+    static const char hdr[] = "\n=== agentty crash ===\n";
     (void)!write(2, hdr, sizeof(hdr) - 1);
     (void)agentty::logx::dump_flight_recorder(2);
 #endif
@@ -265,6 +295,38 @@ void install_crash_handler() {
 #endif
 }
 #endif
+
+void fputs_utf8(FILE* f, std::string_view s) {
+#if defined(_WIN32)
+    const int fd = fileno(f);
+    if (fd >= 0 && ::_isatty(fd)) {
+        const intptr_t raw = ::_get_osfhandle(fd);
+        if (raw != -1) {
+            HANDLE h = reinterpret_cast<HANDLE>(raw);
+            DWORD mode = 0;
+            if (::GetConsoleMode(h, &mode)) {
+                const int need = ::MultiByteToWideChar(
+                    CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                    nullptr, 0);
+                if (need > 0) {
+                    std::wstring wide(static_cast<size_t>(need), L'\0');
+                    if (::MultiByteToWideChar(
+                            CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                            wide.data(), need) == need) {
+                        DWORD written = 0;
+                        if (::WriteConsoleW(h, wide.data(),
+                                            static_cast<DWORD>(wide.size()),
+                                            &written, nullptr)) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
+    std::fwrite(s.data(), 1, s.size(), f);
+}
 
 void print_version() {
     std::printf("agentty %s\n", AGENTTY_VERSION);
@@ -346,9 +408,9 @@ int cmd_diagnostics() {
         // this subsystem's most common invisible failure.
         namespace eb = agentty::rag::embed;
         eb::EmbedConfig ec;
-        eb::apply_env(ec);
+        eb::apply_env(::agentty::IoAccess::grant(), ec);
         try {
-            const auto s = agentty::persistence::load_settings();
+            const auto s = agentty::persistence::load_settings(::agentty::IoAccess::grant());
             if (!s.rag.embed_backend.empty()) {
                 ec.backend = eb::backend_from_id(s.rag.embed_backend);
                 if (!s.rag.embed_model.empty()) ec.model = s.rag.embed_model;
@@ -392,20 +454,46 @@ int cmd_diagnostics() {
                 std::filesystem::path{std::string{lf}}, sec)) {
             std::ifstream in{std::string{lf}, std::ios::binary};
             std::string ln, startup, provider;
+            // Match the SITE FIELD, not any substring of the line.
+            //
+            // The log interleaves events with raw wire bytes, and a request
+            // body routinely quotes text the user typed — including, when the
+            // user is debugging agentty, the literal string "provider.select:".
+            // A bare find() over the whole line therefore matched a request
+            // body and reported a chunk of conversation as the active
+            // provider. Observed, not hypothetical.
+            //
+            // Every line is "<ts> <uptime> <tid> <level> <channel> <site>: …",
+            // so the site is preceded by a space and a channel name. Requiring
+            // the level letter and a following colon pins it to the field.
+            const auto is_event = [](const std::string& line,
+                                     std::string_view site) {
+                const auto at = line.find(site);
+                if (at == std::string::npos) return false;
+                // A payload hit sits deep in a JSON blob; a real site field
+                // sits in the header, within the first ~64 columns.
+                if (at > 64) return false;
+                // and is followed immediately by the ':' the format demands
+                return line.compare(at + site.size(), 1, ":") == 0;
+            };
             while (std::getline(in, ln)) {
-                if (ln.find("startup:") != std::string::npos)         startup  = ln;
-                if (ln.find("provider.select:") != std::string::npos) provider = ln;
+                if (is_event(ln, "startup"))         startup  = ln;
+                if (is_event(ln, "provider.select")) provider = ln;
             }
-            // These are Info-level, so a default release run (Warn+) does not
-            // capture them. Say so rather than printing a bare "(not
-            // captured)", which reads like a bug in the collector.
+            // Both of these are Warn — the tier a default release build
+            // keeps — so "missing" does NOT mean the level was too low. It
+            // means logging was turned off, or the log rotated past them
+            // (they are written once, at startup, and a 32 MB rotation mid-
+            // session drops the head of the file). Advising AGENTTY_LOG=info
+            // here, as this used to, sends the user to change a setting that
+            // was never the cause.
             out += (startup.empty()
-                        ? std::string{"startup: (not captured \u2014 Info level; "
-                                      "set AGENTTY_LOG=info for this)"}
+                        ? std::string{"startup: (not in the log \u2014 logging was off, "
+                                      "or the file rotated past the banner)"}
                         : startup) + "\n";
             out += (provider.empty()
-                        ? std::string{"provider: (not captured \u2014 Info level; "
-                                      "set AGENTTY_LOG=info for this)"}
+                        ? std::string{"provider: (not in the log \u2014 logging was off, "
+                                      "or no provider was selected this session)"}
                         : provider) + "\n";
         } else {
             out += "(no log captured \u2014 see the NOTE below)\n";
@@ -444,6 +532,34 @@ int cmd_diagnostics() {
             out += "(flight recorder unavailable)\n";
         }
     }
+    }
+
+    // Where bytes live, and how many. Generated from the SAME inventory
+    // `agentty config` prints, so a bug report can never describe a layout
+    // the binary does not have -- and "my disk is full" / "can I move this"
+    // arrives already answered instead of needing a round trip.
+    section("storage");
+    for (const auto& e : agentty::config::inventory()) {
+        const auto r = agentty::config::describe(e);
+        if (!r.write) continue;
+        out += std::string{e.name};
+        out += ": ";
+        if (!r.write->error.empty()) {
+            out += "unresolved (" + r.write->error + ")\n";
+            continue;
+        }
+        out += r.write->path;
+        if (r.write->measured) {
+            char buf[48];
+            std::snprintf(buf, sizeof buf, "  (%.1f MB)",
+                          static_cast<double>(r.write->bytes) / (1024.0 * 1024.0));
+            out += buf;
+        } else if (r.write->shared_dir) {
+            out += "  (shared)";
+        }
+        if (r.write->origin != agentty::dirs::Origin::Default)
+            out += "  [overridden]";
+        out += "\n";
     }
 
     section("log");
@@ -500,97 +616,223 @@ int cmd_diagnostics() {
     return 0;
 }
 
+// ── Help, laid out ─────────────────────────────────────────────────
+//
+// This was ~97 string literals in one fprintf with the description
+// column aligned by hand-counted spaces, and a wrap width baked in at
+// ~78 columns — so a narrow terminal double-wrapped every entry and a
+// wide one wasted half the screen. Adding a flag meant re-counting
+// spaces.
+//
+// maya renders this shape without a runtime (Ink's renderToString), so
+// the source carries CONTENT and the layout engine decides geometry.
+//
+// PLAIN TEXT ON PURPOSE. maya is used here as a FORMATTER, not a
+// styler: no colour, no bold, no escape sequences, and the same bytes
+// whether stdout is a terminal, a pipe, or a file. CLI output is an
+// interface — something greps it, something pastes it into an issue —
+// and styling only adds ways for that to break. The one thing a layout
+// engine gives us that printf cannot is a description column that
+// reflows to the ACTUAL terminal width, which is the bug this fixes.
+//
+// (maya::print() is deliberately not used: it writes cursor and
+// tmux-passthrough sequences even into a pipe — measured — so
+// `agentty --help | less` would be garbage.)
+namespace help_ui {
+
+using namespace maya::dsl;
+
+// One row: name in the left gutter, description wrapping in the right.
+maya::Element entry(std::string name, std::string desc, int gutter) {
+    // width() alone is a REQUEST, not a clamp: a name longer than the
+    // gutter ("  mcp-logout <srv>") pushes the description column right
+    // and the row stops lining up with its neighbours. Pinning min and
+    // max to the same value makes the gutter exact, so descriptions —
+    // including wrapped continuation lines — all start at one column.
+    //
+    // A name that does not FIT the gutter is a different problem, and
+    // the clamp alone makes it worse: the name wraps inside its own
+    // column and the second line collides with the description. That is
+    // a content bug (shorten the name), but it should degrade into
+    // something readable rather than a scramble, so an overlong name
+    // gets its own line with the description indented underneath.
+    const int name_w = static_cast<int>(maya::unicode::str_width(name));
+    if (name_w >= gutter) {
+        auto indent = maya::hstack();
+        indent.width(maya::Dimension::fixed(gutter));
+        indent.min_width(maya::Dimension::fixed(gutter));
+        indent.max_width(maya::Dimension::fixed(gutter));
+        auto rest = maya::hstack();
+        rest.grow();
+        auto second = maya::hstack();
+        auto stack = maya::vstack();
+        return stack(text(std::move(name)),
+                     second(indent(text("")), rest(text(std::move(desc)))));
+    }
+
+    auto left = maya::hstack();
+    left.width(maya::Dimension::fixed(gutter));
+    left.min_width(maya::Dimension::fixed(gutter));
+    left.max_width(maya::Dimension::fixed(gutter));
+    auto right = maya::hstack();
+    right.grow();
+    auto row = maya::hstack();
+    return row(left(text(std::move(name))), right(text(std::move(desc))));
+}
+
+maya::Element heading(std::string s) { return text(std::move(s)); }
+maya::Element blank() { return text(""); }
+
+} // namespace help_ui
+
 void print_usage() {
-    std::fprintf(stderr,
-        "agentty %s\n"
-        "\n"
-        "usage: agentty [subcommand] [options]\n"
-        "\n"
-        "subcommands:\n"
-        "  login             Authenticate (API key, or OAuth via claude.ai)\n"
-        "  logout            Remove saved credentials\n"
-        "  status            Show current auth status\n"
-        "  airgap            Launch agentty on an air-gapped host via SSH tunnel\n"
-        "                    (`agentty airgap --help` for details)\n"
-        "  acp               Run as an ACP agent over stdio (for Zed et al.)\n"
-        "  run [PROMPT]      Headless one-shot: run PROMPT through the full\n"
-        "                    agent loop (tools, sandbox) and print the final\n"
-        "                    answer to stdout. PROMPT `-` or absent reads\n"
-        "                    stdin: `git diff | agentty run \"review this\"`.\n"
-        "                    --agent TYPE picks the role (general default,\n"
-        "                    explorer/reviewer/tester/coder). Exit 1 on error.\n"
-        "  mcp-serve         Serve agentty's native tools over MCP (stdio).\n"
-        "                    Point any MCP client at `agentty mcp-serve`.\n"
-        "  mcp-login <srv>   Authorize an OAuth-gated MCP server from mcp.json\n"
-        "                    (2026-07-28 OAuth 2.1 + PKCE via your browser).\n"
-        "  mcp-logout <srv>  Remove a stored MCP server token.\n"
-        "  mcp-status        List MCP servers and their authorization state.\n"
-        "  diagnostics       Collect a redacted diagnostic bundle for a bug\n"
-        "                    report (build info, logs, config \u2014 no secrets)\n"
-        "  skills            List discovered skills with spec-lint diagnostics\n"
-        "                    (exit 1 on warnings — CI-friendly validate)\n"
-        "  hooks [list]      Show configured lifecycle hooks + approval state\n"
-        "  hooks approve     Inspect + approve the active hooks file (hooks\n"
-        "                    NEVER run unapproved; any change re-gates)\n"
-        "  plugin add|list|remove|approve\n"
-        "                    Manage plugins — a plugin IS an MCP server\n"
-        "                    (any language, mcp.json entry): `agentty plugin\n"
-        "                    add today --python today.py`, `--uvx pkg`,\n"
-        "                    `--npx pkg`, `--http <url>`, or `-- cmd args`;\n"
-        "                    add --project for the repo config (approve it\n"
-        "                    with `plugin approve <name> --project`). Docs:\n"
-        "                    /docs/plugins\n"
-        "  rag-bench [dir]   Benchmark search_docs retrieval on your own corpus\n"
-        "                    (recall@k / MRR / nDCG per pipeline stage)\n"
-        "  update            Update agentty to the latest release\n"
-        "                    (--check: only report, don't install)\n"
-        "  version           Print the agentty version and exit\n"
-        "  help              Show this message\n"
-        "\n"
-        "options:\n"
-        "  -k, --key KEY       API-key override for this session\n"
-        "  -m, --model ID      Model id (e.g. claude-opus-4-5)\n"
-        "  -w, --workspace DIR Sandbox filesystem tools to this directory\n"
-        "                      (default: cwd). Tools refuse paths outside it.\n"
-        "                      Pass `--workspace /` to disable the gate.\n"
-        "      --sandbox MODE  Wrap bash/diagnostics in an OS-native sandbox\n"
-        "                      (Linux: bwrap, macOS: sandbox-exec).\n"
-        "                      MODE = auto (default: use if available),\n"
-        "                             on  (require backend; fail otherwise),\n"
-        "                             off (disable wrapping).\n"
-        "  -p, --profile MODE  ACP permission tier (Zed shows the prompts):\n"
-        "                             ask     (default: prompt write/exec/net),\n"
-        "                             minimal (also prompt reads),\n"
-        "                             write   (never prompt reads).\n"
-        "      --provider P    LLM backend. anthropic (default, OAuth/Pro/Max)\n"
-        "                      or an OpenAI-compatible one: openai | codex | groq |\n"
-        "                      openrouter | together | cerebras | deepseek | xai |\n"
-        "                      mistral | gemini | fireworks | ollama | llama.cpp,\n"
-        "                      or a raw host[:port] for any other\n"
-        "                      OpenAI-compatible server. Reads OPENAI_API_KEY\n"
-        "                      (or the provider-specific *_API_KEY) / -k for\n"
-        "                      the key; local backends need no key. Persisted\n"
-        "                      like -m. (Switch live in-app with Ctrl-P \xe2\x80\x94 the\n"
-        "                      picker has a \"Custom host\xe2\x80\xa6\" entry too.)\n"
-        "                      chatgpt talks to ChatGPT natively via the\n"
-        "                      reverse-engineered OAuth login (`agentty login`\n"
-        "                      \xe2\x86\x92 ChatGPT); no Codex binary is needed.\n"
-        "                      copilot and kimi sign in the same way via their\n"
-        "                      device-flow OAuth (`agentty login` \xe2\x86\x92 GitHub\n"
-        "                      Copilot / Kimi) \xe2\x80\x94 no API key needed.\n"
-        "                      Note: hosted Claude output is watermarked per\n"
-        "                      the EU AI Act (invisible, no opt-out, set\n"
-        "                      server-side). Local/open-weight backends\n"
-        "                      (ollama, llama.cpp) carry no provider watermark.\n"
-        "  -V, --version       Print the agentty version and exit.\n"
-        "      --auth-header N Auth header NAME for OpenAI-compatible backends\n"
-        "                      whose gateway doesn't accept `Authorization:\n"
-        "                      Bearer` (e.g. X-API-Key). The key (-k /\n"
-        "                      OPENAI_API_KEY) is sent raw under that name.\n"
-        "                      Session-scoped like -k; default: Bearer.\n"
-        "  -h, --help          Show this message.\n"
-        "\n",
-        AGENTTY_VERSION);
+    using namespace help_ui;
+    constexpr int kCmdGutter  = 20;   // "  mcp-logout <srv>  "
+    constexpr int kOptGutter  = 23;   // "  -w, --workspace DIR " + a space
+
+    auto doc = maya::vstack();
+    doc.gap(0);
+    auto body = doc(
+        text(std::string{"agentty "} + AGENTTY_VERSION) | Bold,
+        blank(),
+        text("usage: agentty [subcommand] [options]") | Dim,
+        blank(),
+        heading("subcommands"),
+        entry("  login", "Authenticate (API key, or OAuth via claude.ai)", kCmdGutter),
+        entry("  logout", "Remove saved credentials", kCmdGutter),
+        entry("  status", "Show current auth status", kCmdGutter),
+        entry("  airgap", "Launch agentty on an air-gapped host via SSH tunnel "
+                          "(`agentty airgap --help` for details)", kCmdGutter),
+        entry("  acp", "Run as an ACP agent over stdio (for Zed et al.)", kCmdGutter),
+        entry("  run [PROMPT]", "Headless one-shot: run PROMPT through the full agent "
+                                "loop (tools, sandbox) and print only the answer to "
+                                "stdout. PROMPT `-` or absent reads stdin: "
+                                "`git diff | agentty run \"review this\"`. Flags: "
+                                "--agent TYPE (general, explorer, reviewer, tester, "
+                                "coder), --json, -o FILE, --max-turns N, --timeout "
+                                "5m, --effort LEVEL, --read-only, --no-network, "
+                                "--save, --resume ID|last, --events jsonl (tools, "
+                                "reasoning, text on stderr), -v. Exit 0 ok, 1 failed "
+                                "or out of turns, 2 bad usage, 3 provider/auth, 4 "
+                                "no such thread, 5 context full, 124 timeout, 130 "
+                                "Ctrl-C.",
+              kCmdGutter),
+        entry("  mcp-serve", "Serve agentty's native tools over MCP (stdio). Point any "
+                             "MCP client at `agentty mcp-serve`.", kCmdGutter),
+        entry("  mcp import", "Copy another tool's MCP servers into "
+                             "~/.agentty/mcp.json (`--from junie|claude|cursor|"
+                             "vscode`, `--dry-run`). No args lists what each "
+                             "tool offers.", kCmdGutter),
+        entry("  mcp-login <srv>", "Authorize an OAuth-gated MCP server from mcp.json "
+                                   "(2026-07-28 OAuth 2.1 + PKCE via your browser).",
+              kCmdGutter),
+        entry("  mcp-logout <srv>", "Remove a stored MCP server token.", kCmdGutter),
+        entry("  mcp-status", "List MCP servers and their authorization state.", kCmdGutter),
+        entry("  diagnostics", "Collect a redacted diagnostic bundle for a bug report "
+                               "(build info, logs, config \u2014 no secrets)", kCmdGutter),
+        entry("  skills", "List discovered skills with spec-lint diagnostics "
+                          "(exit 1 on warnings \u2014 CI-friendly validate)", kCmdGutter),
+        entry("  config [what]", "Every folder agentty reads or writes, where it is and "
+                                "how big. `config <name>` for one, `config env` for the "
+                                "storage variables", kCmdGutter),
+        entry("  config move", "`config move <dir> <path>`: move a folder's data "
+                              "safely, then print the export line to add", kCmdGutter),
+        entry("  config doctor", "Check storage permissions and variables", kCmdGutter),
+        entry("  config clean", "List files old versions left behind (--yes deletes)",
+              kCmdGutter),
+        entry("  hooks [list]", "Show configured lifecycle hooks + approval state", kCmdGutter),
+        entry("  hooks approve", "Inspect + approve the active hooks file (hooks NEVER "
+                                 "run unapproved; any change re-gates)", kCmdGutter),
+        entry("  plugin <verb>",
+              "Manage plugins (add | list | remove | approve) \u2014 a plugin IS an MCP "
+              "server, any language, one mcp.json entry: `agentty plugin add today "
+              "--python today.py`, `--uvx pkg`, `--npx pkg`, `--http <url>`, or "
+              "`-- cmd args`; add --project for the repo config (approve it with "
+              "`plugin approve <name> --project`). Docs: /docs/plugins", kCmdGutter),
+        entry("  rag-bench [dir]", "Benchmark search_docs retrieval on your own corpus "
+                                   "(recall@k / MRR / nDCG per pipeline stage)", kCmdGutter),
+        entry("  update", "Update agentty to the latest release "
+                          "(--check: only report, don't install)", kCmdGutter),
+        entry("  version", "Print the agentty version and exit", kCmdGutter),
+        entry("  help", "Show this message", kCmdGutter),
+        blank(),
+        heading("options"),
+        entry("  -k, --key KEY", "API-key override for this session", kOptGutter),
+        entry("  -m, --model ID", "Model id (e.g. claude-opus-4-5)", kOptGutter),
+        entry("  -w, --workspace DIR", "Sandbox filesystem tools to this directory "
+                                       "(default: cwd). Tools refuse paths outside it. "
+                                       "Pass `--workspace /` to disable the gate.", kOptGutter),
+        entry("      --sandbox MODE", "Wrap bash/diagnostics in an OS-native sandbox "
+                                      "(Linux: claybin or bwrap, macOS: claybin or "
+                                      "sandbox-exec). MODE = auto "
+                                      "(default: use if available), on (require backend; "
+                                      "fail otherwise), off (disable wrapping).", kOptGutter),
+        entry("      --sandbox-backend B", "Sandbox implementation: claybin (default, "
+                                            "in-process; Linux adds seccomp + landlock + "
+                                            "cgroup2, macOS uses seatbelt + rlimits) or the "
+                                            "platform fallback \u2014 bwrap on Linux (the "
+                                            "bubblewrap binary; mount namespaces only), "
+                                            "sandbox-exec on macOS (one fixed profile). A "
+                                            "host that cannot run claybin falls back "
+                                            "automatically. Most Sandbox settings only apply "
+                                            "under claybin \u2014 the fallbacks cannot express "
+                                            "them. Settable in the Sandbox settings pane too.",
+              kOptGutter),
+        entry("      --log-file PATH", "Write the diagnostic log here instead of "
+                                       "~/.agentty/logs/agentty.log (or "
+                                       "$AGENTTY_LOGS_DIR, to move just the logs off "
+                                       "the config disk). What gets captured "
+                                       "is AGENTTY_LOG (default: warnings and errors) \u2014 "
+                                       "e.g. AGENTTY_LOG=debug, or AGENTTY_LOG=wire=trace "
+                                       "for raw HTTP bytes.", kOptGutter),
+        entry("      --events jsonl", "Headless `run`: one JSON object per line on stderr: "
+                                      "`turn` at each model turn, `reasoning` and `text` "
+                                      "as the model writes them, `tool` per tool call "
+                                      "(tool, ms, ok, err, args_sha). stdout keeps the "
+                                      "answer, so both can be captured.", kOptGutter),
+        entry("  -p, --profile MODE", "ACP permission tier (Zed shows the prompts): "
+                                      "ask (default: prompt write/exec/net), minimal "
+                                      "(also prompt reads), write (never prompt reads).",
+              kOptGutter),
+        entry("      --provider P", "LLM backend. anthropic (default, OAuth/Pro/Max) or an "
+                                    "OpenAI-compatible one: openai | codex | groq | "
+                                    "openrouter | together | cerebras | deepseek | xai | "
+                                    "mistral | gemini | fireworks | ollama | llama.cpp, or "
+                                    "a raw host[:port] for any other OpenAI-compatible "
+                                    "server. Reads OPENAI_API_KEY (or the "
+                                    "provider-specific *_API_KEY) / -k for the key; local "
+                                    "backends need no key. Persisted like -m. (Switch live "
+                                    "in-app with Ctrl-P \u2014 the picker has a "
+                                    "\"Custom host\u2026\" entry too.) chatgpt talks to ChatGPT "
+                                    "natively via the reverse-engineered OAuth login "
+                                    "(`agentty login` \u2192 ChatGPT); no Codex binary is "
+                                    "needed. copilot and kimi sign in the same way via "
+                                    "their device-flow OAuth (`agentty login` \u2192 GitHub "
+                                    "Copilot / Kimi) \u2014 no API key needed. Note: hosted "
+                                    "Claude output is watermarked per the EU AI Act "
+                                    "(invisible, no opt-out, set server-side). "
+                                    "Local/open-weight backends (ollama, llama.cpp) carry "
+                                    "no provider watermark.", kOptGutter),
+        entry("  -V, --version", "Print the agentty version and exit.", kOptGutter),
+        entry("      --auth-header N", "Auth header NAME for OpenAI-compatible backends "
+                                       "whose gateway doesn't accept `Authorization: "
+                                       "Bearer` (e.g. X-API-Key). The key (-k / "
+                                       "OPENAI_API_KEY) is sent raw under that name. "
+                                       "Session-scoped like -k; default: Bearer.", kOptGutter),
+        entry("  -h, --help", "Show this message.", kOptGutter),
+        blank());
+
+    // ONE output path, plain, everywhere. The only thing that varies is
+    // the width we lay out for: a real terminal gets its own, anything
+    // else gets 80. Clamped to [60, 100] because neither extreme reads
+    // well — below 60 the description column is too narrow to be worth
+    // having, and beyond 100 the eye loses the line on the way back.
+    int w = 80;
+    if (::isatty(fileno(stderr))) {
+        const int tw = maya::detail::detect_terminal_width();
+        if (tw > 0) w = std::clamp(tw, 60, 100);
+    }
+    std::fputs(maya::render_to_string(body, w).c_str(), stderr);
 }
 
 struct Args {
@@ -599,6 +841,14 @@ struct Args {
     std::string cli_model;
     std::string cli_workspace;
     std::string cli_sandbox;   // "auto" | "on" | "off"; empty = auto default
+    // "bwrap" (default) | "claybin". Linux only. Both backends are always
+    // linked -- claybin is a required submodule -- so this is a pure runtime
+    // choice, and it OVERRIDES the backend saved in the Sandbox pane.
+    std::string cli_sandbox_backend;
+    // UI language for THIS run, as a BCP-47 tag ("de", "pt-BR", "zh-CN").
+    // Beats the saved setting and the environment, like every other flag:
+    // what the user typed this run is not second-guessed.
+    std::string cli_lang;
     std::string cli_profile;   // "write" | "ask" | "minimal"; ACP only
     std::string cli_provider;  // "anthropic" | "openai" | "ollama" | "llama.cpp" | host[:port]
     std::string cli_auth_header; // custom auth header NAME (e.g. "X-API-Key")
@@ -607,7 +857,19 @@ struct Args {
     std::string cli_mcp_metadata; // mcp-login: explicit resource-metadata URL
     std::string cli_mcp_client_id; // mcp-login: pre-registered / CIMD client_id
     std::string cli_run_prompt;    // run: the one-shot prompt (positional)
+    bool cli_run_prompt_claimed = false;  // ...and whether the scan took one
+                                          // (an empty prompt is still a claim)
     std::string cli_run_agent;     // run: --agent explorer|reviewer|…|general
+    std::string cli_run_output;    // run: -o FILE
+    std::string cli_run_max_turns; // run: --max-turns N (validated later)
+    std::string cli_run_timeout;   // run: --timeout 90s|5m|1h
+    bool cli_run_json = false;     // run: --json
+    bool cli_run_verbose = false;  // run: -v
+    bool cli_run_read_only = false;   // run: --read-only
+    bool cli_run_no_network = false;  // run: --no-network
+    bool cli_run_save = false;        // run: --save
+    std::string cli_run_effort;       // run: --effort LEVEL
+    std::string cli_run_resume;       // run: --resume ID|last
     std::vector<std::string> plugin_argv;  // plugin: verb + tail, verbatim
     int         airgap_argc = 0;
     char**      airgap_argv = nullptr;   // borrowed from main's argv
@@ -622,6 +884,11 @@ Args parse_args(int argc, char** argv) {
          || a == "acp" || a == "skills" || a == "mcp-serve"
          || a == "diagnostics") {
             out.subcommand = std::move(a);
+        } else if (a == "config") {
+            // `agentty config [concern]` — the optional concern rides in
+            // plugin_argv, the same verbatim-tail channel `plugin` uses.
+            out.subcommand = std::move(a);
+            while (i + 1 < argc) out.plugin_argv.emplace_back(argv[++i]);
         } else if (a == "update") {
             // `agentty update [--check]` — --check rides in cli_run_agent
             // (reused scratch; update has no agent).
@@ -636,6 +903,11 @@ Args parse_args(int argc, char** argv) {
             out.subcommand = std::move(a);
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 out.cli_run_agent = argv[++i];
+        } else if (a == "mcp") {
+            // `agentty mcp import [...]` — verb + tail ride verbatim in
+            // plugin_argv, the same channel `plugin` and `config` use.
+            out.subcommand = std::move(a);
+            while (i + 1 < argc) out.plugin_argv.emplace_back(argv[++i]);
         } else if (a == "mcp-login" || a == "mcp-logout" || a == "mcp-status") {
             // `agentty mcp-login <server> [--metadata <url>] [--client-id <id>]`
             out.subcommand = std::move(a);
@@ -657,16 +929,82 @@ Args parse_args(int argc, char** argv) {
             // A missing / `-` prompt reads stdin (pipe usage:
             // `git diff | agentty run -` or `… | agentty run`).
             out.subcommand = std::move(a);
-            while (i + 1 < argc) {
-                std::string opt = argv[i + 1];
-                if (opt == "--agent" && i + 2 < argc) {
-                    out.cli_run_agent = argv[i += 2];
-                } else if (opt[0] != '-' || opt == "-") {
-                    if (out.cli_run_prompt.empty()) out.cli_run_prompt = argv[++i];
-                    else break;   // extra positional → top-level flags below
-                } else {
-                    break;        // -m/-w/… handled by the outer loop
+            // Scan the WHOLE tail, not just the leading run of arguments.
+            //
+            // This used to `break` on the first option it didn't own so the
+            // outer loop could see -m/-w/…, which meant a prompt positioned
+            // after one of those was never claimed here — it fell through to
+            // the outer loop and died as "unknown arg". So
+            //
+            //     agentty run --agent coder "prompt"        worked
+            //     agentty run -w dir "prompt"                did not
+            //
+            // and the rule ("a positional may not follow a global flag")
+            // was invisible: the error named the prompt, which was fine.
+            //
+            // Instead, walk every remaining argument and take only what this
+            // subcommand owns, leaving the rest in place. Options we skip
+            // stay in argv for the outer loop, which is already written to
+            // ignore what it has consumed — so order stops mattering without
+            // either loop needing to know about the other.
+            for (int j = i + 1; j < argc; ++j) {
+                const std::string opt = argv[j];
+                if (opt == "--agent" && j + 1 < argc) {
+                    out.cli_run_agent = argv[++j];
+                    continue;
                 }
+                if ((opt == "-o" || opt == "--output") && j + 1 < argc) {
+                    out.cli_run_output = argv[++j];
+                    continue;
+                }
+                if (opt == "--max-turns" && j + 1 < argc) {
+                    out.cli_run_max_turns = argv[++j];
+                    continue;
+                }
+                if (opt == "--timeout" && j + 1 < argc) {
+                    out.cli_run_timeout = argv[++j];
+                    continue;
+                }
+                if (opt == "--json")              { out.cli_run_json = true;    continue; }
+                if (opt == "-v" || opt == "--verbose") { out.cli_run_verbose = true; continue; }
+                if (opt == "--read-only")  { out.cli_run_read_only = true;  continue; }
+                if (opt == "--no-network") { out.cli_run_no_network = true; continue; }
+                if (opt == "--save")       { out.cli_run_save = true;       continue; }
+                if (opt == "--effort" && j + 1 < argc) {
+                    out.cli_run_effort = argv[++j];
+                    continue;
+                }
+                if (opt == "--resume" && j + 1 < argc) {
+                    out.cli_run_resume = argv[++j];
+                    continue;
+                }
+                // A non-flag (or a bare "-", which means stdin) is the
+                // prompt. Only the FIRST one: a second positional is a
+                // mistake worth reporting, not a second prompt to silently
+                // concatenate.
+                if (opt.empty() || opt[0] != '-' || opt == "-") {
+                    // `claimed`, not `!prompt.empty()`: an EMPTY positional
+                    // (`agentty run ""`) is still a prompt the scan took
+                    // ownership of. Keying off emptiness meant it could
+                    // never match itself in the unknown-arg check below, so
+                    // `agentty run ""` reported `unknown arg:` with a blank
+                    // name instead of the real "no prompt" error.
+                    if (!out.cli_run_prompt_claimed) {
+                        out.cli_run_prompt = opt;
+                        out.cli_run_prompt_claimed = true;
+                    }
+                    continue;
+                }
+                // A flag this subcommand doesn't own — and possibly its
+                // value. Skipping the value matters: in `-w dir "prompt"`
+                // the `dir` is a non-flag, so without this it would be
+                // taken as the prompt and the real prompt ignored.
+                //
+                // Any `-x VALUE` shape qualifies, which is safe because a
+                // false positive only costs us a candidate prompt that a
+                // later positional replaces — and the outer loop is the one
+                // that actually validates these flags.
+                if (j + 1 < argc && argv[j + 1][0] != '-') ++j;
             }
         } else if (a == "plugin" || a == "skill") {
             // `agentty plugin <verb> …` / `agentty skill <verb> …` — hand the
@@ -695,6 +1033,34 @@ Args parse_args(int argc, char** argv) {
             out.cli_workspace = argv[++i];
         } else if (a == "--sandbox" && i + 1 < argc) {
             out.cli_sandbox = argv[++i];
+        } else if (a == "--sandbox-backend" && i + 1 < argc) {
+            out.cli_sandbox_backend = argv[++i];
+        } else if (a == "--lang" && i + 1 < argc) {
+            out.cli_lang = argv[++i];
+        } else if (a == "--events" && i + 1 < argc) {
+            // Selects the headless machine-readable event stream. Applied
+            // to the environment rather than Args because the emitter
+            // lives in the tool backend, well below main() — and it reads
+            // the setting once, lazily, so setting it here during argv
+            // parsing is early enough for every consumer.
+            const std::string_view fmt = argv[++i];
+            if (fmt != "jsonl") {
+                std::fprintf(stderr,
+                    "unknown --events format: %.*s (only 'jsonl')\n",
+                    static_cast<int>(fmt.size()), fmt.data());
+                std::exit(2);
+            }
+#if defined(_WIN32)
+            _putenv_s("AGENTTY_EVENTS", "jsonl");
+#else
+            ::setenv("AGENTTY_EVENTS", "jsonl", 1);
+#endif
+        } else if (a == "--log-file" && i + 1 < argc) {
+            // Applied immediately, not stashed on Args: the log sink
+            // resolves lazily on its FIRST use, and something between
+            // here and the end of parsing may log. Setting it now is
+            // what guarantees the override lands before the file opens.
+            ::agentty::logx::set_log_path(argv[++i]);
         } else if ((a == "-p" || a == "--profile") && i + 1 < argc) {
             out.cli_profile = argv[++i];
         } else if (a == "--provider" && i + 1 < argc) {
@@ -711,6 +1077,30 @@ Args parse_args(int argc, char** argv) {
             out.subcommand = "version";
             return out;
         } else {
+            // Arguments the `run` scan already claimed are not unknown — they
+            // arrive here because they sat after a global flag, and the
+            // scan deliberately leaves everything in place rather than
+            // reordering argv.
+            //
+            // This is what lets every placement work:
+            //
+            //     agentty run --agent coder "prompt"
+            //     agentty run -w dir "prompt"
+            //     agentty run --agent coder -w dir "prompt"
+            //
+            // Previously the scan stopped at the first flag it didn't own,
+            // so a prompt after -w/-m was never claimed and died here as
+            // "unknown arg" — an invisible rule, since the error named the
+            // prompt rather than the ordering.
+            if (out.subcommand == "run") {
+                if (a == "--agent" || a == "-o" || a == "--output"
+                    || a == "--max-turns" || a == "--timeout"
+                    || a == "--effort" || a == "--resume") { ++i; continue; }
+                if (a == "--json" || a == "-v" || a == "--verbose" || a == "--read-only"
+                    || a == "--no-network" || a == "--save") continue;
+                if (out.cli_run_prompt_claimed && a == out.cli_run_prompt)
+                    continue;
+            }
             std::fprintf(stderr, "unknown arg: %s\n\n", a.c_str());
             out.bad = true;
             return out;
@@ -786,10 +1176,33 @@ Utf8Argv recover_utf8_argv() {
 }
 #endif
 
-int main(int argc, char** argv) {
+namespace {
+// The program, from the one thread that starts holding no lock. Everything
+// main() did is here, unchanged, except that it can PROVE it holds no lock:
+// `cap` is the root capability every lock, wait and join below is checked
+// against. main() (at the bottom of this file) mints it, once.
+int run_main(int argc, char** argv, const maya::unlocked& cap) {
     using namespace agentty;
 
+    // Any setenv happens here, before a thread exists: setenv racing a getenv
+    // on another thread is undefined. The old opt-in spelling for maya's
+    // gate abort was MAYA_NO_GATE_ABORT=0/false; translate it.
+    if (const char* g = std::getenv("MAYA_NO_GATE_ABORT");
+        g && (std::string_view{g} == "0" || std::string_view{g} == "false")) {
+#if defined(_WIN32)
+        _putenv_s("MAYA_GATE_ABORT", "1");
+#else
+        setenv("MAYA_GATE_ABORT", "1", /*overwrite=*/0);
+#endif
+    }
+
     install_crash_handler();
+
+    // AGENTTY_FORCE_EFFORT and AGENTTY_MAX_OUTPUT_TOKENS into the capability
+    // registry, once, for every mode (TUI, run, acp). The domain does not
+    // read the environment.
+    set_effort_force(parse_effort_force(std::getenv("AGENTTY_FORCE_EFFORT")));
+    set_max_output_override(parse_max_output(std::getenv("AGENTTY_MAX_OUTPUT_TOKENS")));
 
     // ── Teardown, on EVERY exit path ────────────────────────────────────
     //
@@ -805,9 +1218,36 @@ int main(int argc, char** argv) {
     // statics while those statics are still alive. Subsystems register
     // themselves at the moment they start a thread (util::teardown), so this
     // stays correct as subsystems are added — nobody has to update a list.
+    //
+    // The guard holds a reference to run_main's capability: it is destroyed
+    // at the end of run_main's frame, where the capability is still valid
+    // and no lock is held (every lock body is a nested scope that has ended).
     struct TeardownGuard {
-        ~TeardownGuard() { util::teardown::run(); }
-    } teardown_guard;
+        const maya::unlocked& cap;
+        ~TeardownGuard() {
+            // These four run on EVERY exit path, not just the normal one.
+            //
+            // They used to sit inline after jaal::run() returns, which covers
+            // a clean quit and nothing else: an early `return` from a
+            // subcommand, a failed Screen::open, or an exception unwinding
+            // main() all skipped them and left a background thread running
+            // into CRT/OpenSSL/mimalloc atexit teardown. That is the
+            // 0xC0000005 the MSYS2 pipe-stdin smoke test hits
+            // intermittently: `type NUL | agentty.exe` closes stdin before
+            // the TUI has drawn, so the prewarm dial and the workspace walks
+            // are still starting up while main() is already on its way out.
+            // Whether it faults depends on who wins, which is why it fails
+            // maybe one run in three on byte-identical code.
+            //
+            // Order matters: stop the workers that LOG before running the
+            // registry, because logx's own worker is one of the registered
+            // teardowns.
+            http::default_client(::agentty::IoAccess::grant()).join_prewarm(cap);
+            modelsdev::join_background_refresh(cap);
+            blobs::join_background_gc(cap);
+            util::teardown::run(cap);
+        }
+    } teardown_guard{cap};
 
 #if defined(_WIN32)
     Win32PerfTuning win32_perf;
@@ -862,23 +1302,6 @@ int main(int argc, char** argv) {
         agentty::logx::session_banner(banner);
     }
     if (args.bad)                    { print_usage(); return 2; }
-
-    // ── Scrollback-gate abort: opt-in for maya developers ──────────────────
-    // maya's debug-build invariant tripwires now default to SOFT-RECOVER
-    // (the same non-destructive recovery a Release build performs) and only
-    // std::abort() when MAYA_GATE_ABORT=1 is exported — two field SIGABRTs
-    // proved the old abort-by-default killed daily-driven Debug sessions on
-    // benign, self-healing gate trips. Back-compat: the previous opt-in
-    // spelling was MAYA_NO_GATE_ABORT=0/false; translate it so a maya
-    // developer's old launch alias still gets the loud abort.
-    if (const char* g = std::getenv("MAYA_NO_GATE_ABORT");
-        g && (std::string_view{g} == "0" || std::string_view{g} == "false")) {
-#if defined(_WIN32)
-        _putenv_s("MAYA_GATE_ABORT", "1");
-#else
-        setenv("MAYA_GATE_ABORT", "1", /*overwrite=*/0);
-#endif
-    }
 
     // ── Startup banner ────────────────────────────────────────────────
     // ONE line, first in every log, naming the build and the machine.
@@ -971,15 +1394,27 @@ int main(int argc, char** argv) {
                     c.latest.c_str());
         return 0;
     }
-    if (args.subcommand == "login")  return auth::cmd_login();
-    if (args.subcommand == "logout") return auth::cmd_logout();
-    if (args.subcommand == "status") return auth::cmd_status();
-    if (args.subcommand == "skills") return tools::skills::cmd_skills();
+    if (args.subcommand == "login")  return auth::cmd_login(IoAccess::grant(), cap);
+    if (args.subcommand == "logout") return auth::cmd_logout(IoAccess::grant(), cap);
+    if (args.subcommand == "status") return auth::cmd_status(IoAccess::grant(), cap);
+    if (args.subcommand == "skills") return tools::skills::cmd_skills(IoAccess::grant());
+    if (args.subcommand == "config") return config::cmd_config(args.plugin_argv);
+#if defined(AGENTTY_MCP)
+    if (args.subcommand == "mcp") {
+        if (args.plugin_argv.empty() || args.plugin_argv.front() != "import") {
+            std::fprintf(stderr, "usage: agentty mcp import [--from <tool>]"
+                                 " [--dry-run] [--force]\n");
+            return 1;
+        }
+        return mcp::import_::cli(::agentty::IoAccess::grant(), cap, {args.plugin_argv.begin() + 1,
+                                  args.plugin_argv.end()});
+    }
+#endif
     if (args.subcommand == "skill")  return tools::skills::cli(args.plugin_argv);
     if (args.subcommand == "hooks")  return tools::hooks::cli(args.cli_run_agent);
-    if (args.subcommand == "plugin") return tools::plugin::cli(args.plugin_argv);
+    if (args.subcommand == "plugin") return tools::plugin::cli(::agentty::IoAccess::grant(), cap, args.plugin_argv);
     if (args.subcommand == "mcp-login")
-        return mcp::oauth::cmd_mcp_login(args.cli_mcp_server, args.cli_mcp_metadata,
+        return mcp::oauth::cmd_mcp_login(::agentty::IoAccess::grant(), args.cli_mcp_server, args.cli_mcp_metadata,
                                          args.cli_mcp_client_id);
     if (args.subcommand == "mcp-logout")
         return mcp::oauth::cmd_mcp_logout(args.cli_mcp_server);
@@ -989,21 +1424,27 @@ int main(int argc, char** argv) {
         return rag::bench::run(args.cli_bench_root);
     if (args.subcommand == "airgap")
         return airgap::cmd_airgap(args.airgap_argc, args.airgap_argv);
+    // From here on this is a session (TUI, run, acp, mcp-serve), and it
+    // writes the store. Held to exit so `agentty config move` waits for us.
+    const auto store_lock = util::hold_store_shared();
 
     // Missing creds is no longer a fatal error: we install with an empty
     // auth header, init.cpp opens the in-app login modal, and the user
     // finishes signing in inside the TUI. The reducer's LoginExchanged /
     // LoginSubmit handlers call auth::update_auth() which live-swaps the
     // creds in the Deps without requiring a process restart.
-    auto creds = auth::resolve(args.cli_key);
+    auto creds = auth::resolve(IoAccess::grant(), args.cli_key);
 
     // Persist -m as the new default — but NOT in ACP mode, where the model
     // is an ephemeral per-subprocess override (handled below) that must not
     // clobber the TUI's saved model.
     if (!args.cli_model.empty() && args.subcommand != "acp") {
-        auto s = persistence::load_settings();
+        auto s = persistence::load_settings(::agentty::IoAccess::grant());
         s.model_id = ModelId{args.cli_model};
-        persistence::save_settings(s);
+        persistence::save_settings(::agentty::IoAccess::grant(), cap, s);
+        // An explicit --model binds every role, not just the main turn. Set
+        // here so the TUI's init() sees it too -- it takes no argv (#70).
+        smart::tuning::model_pinned() = true;
     }
 
     // ── Filesystem sandbox boundary ─────────────────────────────────────
@@ -1021,11 +1462,34 @@ int main(int argc, char** argv) {
                 args.cli_workspace.c_str());
             return 2;
         }
-        tools::util::set_workspace_root(std::move(req));
+        tools::util::set_workspace_root(::agentty::IoAccess::grant(), std::move(req));
     } else {
         std::error_code ec;
         auto cwd = std::filesystem::current_path(ec);
-        if (!ec) tools::util::set_workspace_root(std::move(cwd));
+        if (!ec) tools::util::set_workspace_root(::agentty::IoAccess::grant(), std::move(cwd));
+    }
+
+    // ── UI language ─────────────────────────────────────────────────────
+    // Before ANYTHING renders or prints, so a status line, an error, or a
+    // first paint cannot escape in the wrong language. Cheap: parse one
+    // embedded JSON catalog and store a pointer.
+    //
+    // Reads the saved setting through load_settings(), which is the same
+    // call the sandbox block below makes -- settings.json is read once and
+    // this is a field on it, not a second file.
+    //
+    // A failure here means the EMBEDDED English catalog did not parse, which
+    // is a build defect rather than a runtime condition. Not fatal: t()
+    // returns ids when no catalog is installed, so the app still runs and
+    // the ids on screen are an unmissable bug report. Refusing to start over
+    // a label table would be a worse trade.
+    {
+        const auto saved = persistence::load_settings(::agentty::IoAccess::grant()).ui.lang;
+        if (!i18n::init(args.cli_lang, saved)) {
+            std::fprintf(stderr,
+                "agentty: the embedded English string catalog failed to "
+                "parse; labels will show as ids. This is a build defect.\n");
+        }
     }
 
     // ── Bash / diagnostics sandbox ──────────────────────────────────────
@@ -1047,6 +1511,47 @@ int main(int argc, char** argv) {
                 args.cli_sandbox.c_str());
             return 2;
         }
+        // The saved policy, before init() -- init probes, and the policy
+        // decides what is worth probing for. A config that never touched the
+        // pane carries the shipped defaults, so this is a no-op for anyone
+        // who has not opened it.
+        //
+        // Loaded here rather than threaded down: this block runs once at
+        // startup, load_settings() is cached, and passing it through the two
+        // intervening scopes would be more plumbing than the one read costs.
+        //
+        // ORDER: set_config() also applies the policy's own backend choice,
+        // so it has to run BEFORE the CLI flag or an explicit
+        // --sandbox-backend would be silently overwritten by the saved one.
+        // A flag the user typed this run beats a setting they saved once.
+        {
+            auto sb = persistence::load_settings(::agentty::IoAccess::grant()).sandbox;
+            // `run --no-network`: no network for any command this run spawns.
+            // Only this process; the saved setting is untouched.
+            if (args.subcommand == "run" && args.cli_run_no_network) {
+                sb.net_mode   = sandbox_cfg::NetMode::None;
+                sb.configured = true;
+            }
+            tools::util::sandbox::set_config(sb);
+        }
+
+        // --sandbox-backend is retained but no longer selects anything:
+        // claybin is the only Linux engine. Kept rather than rejected so a
+        // script or alias carrying `--sandbox-backend=bwrap` keeps working;
+        // it says what it did instead of silently ignoring the flag.
+        if (!args.cli_sandbox_backend.empty()) {
+            if (args.cli_sandbox_backend == "bwrap") {
+                std::fprintf(stderr,
+                    "agentty: bwrap has been removed; using claybin, which is "
+                    "stronger on every measured capability (seccomp, landlock, "
+                    "cgroup2) and available wherever bwrap was.\n");
+            } else if (args.cli_sandbox_backend != "claybin") {
+                std::fprintf(stderr,
+                    "agentty: --sandbox-backend only accepts 'claybin' (got '%s')\n",
+                    args.cli_sandbox_backend.c_str());
+                return 2;
+            }
+        }
         bool ok = tools::util::sandbox::init(mode);
         if (!ok) {
             std::fprintf(stderr,
@@ -1054,20 +1559,158 @@ int main(int argc, char** argv) {
                 tools::util::sandbox::describe_state().c_str());
             return 2;
         }
+        // Only claybin can take the network away from a shell command. Without
+        // it --no-network would be a promise nobody keeps, so refuse.
+        if (args.subcommand == "run" && args.cli_run_no_network
+            && !(tools::util::sandbox::is_active()
+                 && tools::util::sandbox::detected_backend()
+                        == tools::util::sandbox::Backend::Claybin)) {
+            std::fprintf(stderr,
+                "agentty run: --no-network needs the claybin sandbox, which isn't active (%s)\n",
+                tools::util::sandbox::describe_state().c_str());
+            return 2;
+        }
+        // Claybin being ACTIVE is not the promise. It takes the network away
+        // with an empty netns, and a host that denies unprivileged user
+        // namespaces (Ubuntu 24.04's AppArmor default, many containers) gets
+        // no netns -- claybin degrades network.isolation and the command runs
+        // with full network. Ask the compiled posture what it can actually
+        // enforce and refuse unless the wall is strong. Fail closed.
+        if (args.subcommand == "run" && args.cli_run_no_network) {
+#if defined(__linux__) || defined(__APPLE__)
+            const auto rep = tools::util::sandbox::claybin_backend::describe(
+                tools::util::sandbox::claybin_posture_for_test());
+            bool net_strong = false;
+            std::string why = rep.ok ? "no report" : rep.detail;
+            for (const auto& w : rep.walls)
+                if (w.name == "network.isolation") {
+                    net_strong = w.strength == "strong";
+                    why = w.strength + (w.mechanism.empty() ? "" : " via " + w.mechanism);
+                }
+            if (!net_strong) {
+                std::fprintf(stderr,
+                    "agentty run: --no-network can't be enforced on this host "
+                    "(network isolation: %s). Network namespaces are "
+                    "unavailable -- often unprivileged user namespaces are "
+                    "disabled (sysctl kernel.apparmor_restrict_unprivileged_userns).\n",
+                    why.c_str());
+                return 2;
+            }
+#endif  // claybin hosts; elsewhere the is_active() gate above already refused
+        }
         // Status line so the user knows what they got. Stdout is fine —
         // maya runs after this returns, no clobbering.
-        std::fprintf(stderr, "agentty: %s\n",
-                     tools::util::sandbox::describe_state().c_str());
-    }
+        //
+        // OFF gets a banner, not a line. Every other state here is
+        // informational ("which wall is up"); off is the one where the next
+        // thing that happens is a model running commands against the real
+        // filesystem with nothing between them. A single line reading
+        // "sandbox: off" sat at the same visual weight as "sandbox: active
+        // (claybin)" and scrolled past before the first prompt — sail3r asked
+        // for something you cannot miss, and the asymmetry is real: being
+        // wrong about ON is a cosmetic bug, being wrong about OFF is the whole
+        // machine.
+        //
+        // Built as a maya Element and rendered with maya::print, not as raw
+        // escape codes. That is what lets the colour be a THEME TOKEN
+        // (ui::status_warn → ThemeSlot::Warning) instead of a hardcoded
+        // yellow: it resolves through the user's active scheme, so it stays
+        // legible on a light terminal and obeys NO_COLOR, and
+        // theme_discipline_test stays satisfied rather than needing an
+        // exception carved into it.
+        //
+        // maya::print is the static-output half of maya (print.hpp) — it
+        // renders a tree and returns; no alt-screen, no event loop, no
+        // terminal state to restore. Safe here, before the TUI exists.
+        //
+        // On stderr via render_to_string so it cannot be mistaken for tool
+        // output on stdout, which `agentty run` callers parse.
+        if (mode == tools::util::sandbox::Mode::Off) {
+            using namespace maya::dsl;
+            using maya::BorderStyle;
+            using maya::BorderTextPos;
+            using maya::BorderTextAlign;
+            const auto warn = ui::status_warn;
+            auto banner =
+                vstack()
+                    .padding(1, 2)
+                    .border(BorderStyle::Double)
+                    .border_color(warn)
+                    .border_text(" \xe2\x9a\xa0  SANDBOX IS OFF ",
+                                 BorderTextPos::Top, BorderTextAlign::Center)(
+                        text("Tool commands run UNCONFINED \xe2\x80\x94 "
+                             "they can read and write anything your user "
+                             "account can: every file, the network, your "
+                             "credentials.",
+                             ui::fg_bold(warn)),
+                        text(""),
+                        text("Re-enable with  --sandbox auto  "
+                             "or via Ctrl+K \xe2\x86\x92 Settings \xe2\x86\x92 Sandbox.",
+                             ui::fg_dim(ui::muted)));
+            // render_to_string_ansi, not maya::print: print() writes to
+            // STDOUT, and `agentty run` callers parse stdout. A banner there
+            // would corrupt the one stream a script reads.
+            //
+            // Colour only when it is wanted: the ansi variant ALWAYS emits
+            // SGR, so NO_COLOR and a non-tty stderr have to be honoured here
+            // rather than by the renderer. The plain variant draws the same
+            // box with the same text, just unstyled -- which is the right
+            // thing in a log file or a CI capture, where escape bytes are
+            // noise and the box drawing still reads fine.
+            const char* no_color = std::getenv("NO_COLOR");
+            const bool paint = ::isatty(fileno(stderr)) != 0
+                            && !(no_color && no_color[0]);
+            // The terminal's width (stderr's, since that's where this goes),
+            // capped at 74 so it doesn't sprawl on a wide one; the text wraps
+            // inside the box on a narrow one.
+            int width = 74;
+            if (::isatty(fileno(stderr))) {
+                // NativeHandle is an fd on POSIX but a HANDLE on Windows, so
+                // fileno() doesn't convert there.
+#if defined(_WIN32)
+                const maya::platform::NativeHandle err_h = ::GetStdHandle(STD_ERROR_HANDLE);
+#else
+                const maya::platform::NativeHandle err_h = fileno(stderr);
+#endif
+                const auto sz = maya::platform::query_terminal_size(err_h);
+                if (sz.width.raw() > 0) width = std::clamp(sz.width.raw(), 24, 74);
+            }
+            auto painted = paint
+                ? maya::render_to_string_ansi(std::move(banner), width)
+                : maya::render_to_string(std::move(banner), width);
+            // Both variants pad every row to `width`, so the final row is
+            // blank. Cut from the last border glyph -- the box drawing is the
+            // real end of the banner, and trailing-whitespace trimming misses
+            // the styled case (it ends in ESC[0m).
+            if (const auto end = painted.rfind("\xe2\x95\x9d");   // ╝
+                end != std::string::npos) {
+                const auto nl = painted.find('\n', end);
+                if (nl != std::string::npos) painted.resize(nl);
+            }
+            std::string framed;
+            framed.reserve(painted.size() + 2);
+            framed += '\n';
+            framed += painted;
+            framed += '\n';
+            fputs_utf8(stderr, framed);
+        } else {
+            std::fprintf(stderr, "agentty: %s\n",
+                         tools::util::sandbox::describe_state().c_str());
+        }
 
-    // ── Mirror the tool runtime into mcp-cpp ────────────────────────────
-    // The local tool set is now served by mcp-cpp's batteries-included
-    // toolset (see build_registry / mcp_tools_bridge). Mirror agentty's
-    // workspace-root boundary + sandbox mode into mcp's util layer so the
-    // bridged read/write/edit/bash/git tools enforce the SAME --workspace
-    // gate and bwrap/sandbox-exec isolation the native tools did. Must run
-    // before any tool can dispatch (TUI, ACP, and mcp-serve all reach this).
-    tools::wire_mcp_runtime(args.cli_sandbox);
+        // And say it plainly when the saved policy is not the thing running.
+        // The pane can save a syscall profile, port rules and cgroup caps,
+        // and only claybin speaks that language — under bwrap those rows are
+        // inert. Staying quiet here would leave the user believing in a wall
+        // that isn't there, which is the one failure mode a sandbox must not
+        // have.
+        if (!tools::util::sandbox::config_enforceable()) {
+            std::fprintf(stderr,
+                "agentty: a saved sandbox policy exists but the active backend "
+                "cannot enforce it — only claybin can. Pass "
+                "--sandbox-backend claybin to apply it.\n");
+        }
+    }
 
     // ── Resolve the active provider ──────────────────────────────
     // --provider wins; otherwise the saved setting; otherwise Anthropic.
@@ -1076,7 +1719,7 @@ int main(int argc, char** argv) {
     // through the OpenAI-compatible transport.
     std::string provider_spec = args.cli_provider;
     if (provider_spec.empty()) {
-        auto s = persistence::load_settings();
+        auto s = persistence::load_settings(::agentty::IoAccess::grant());
         provider_spec = s.provider;          // empty → anthropic
     } else if (args.subcommand != "acp") {
         // Canonicalise BEFORE the spec becomes a settings key: two spellings
@@ -1096,7 +1739,7 @@ int main(int argc, char** argv) {
         // the same treatment (filed with the spec on proof).
         const bool is_preset = provider::preset_for(provider_spec) != nullptr;
         if (is_preset) {
-            auto s = persistence::load_settings();
+            auto s = persistence::load_settings(::agentty::IoAccess::grant());
             s.provider = provider_spec;
             if (args.cli_model.empty()) {
                 if (auto it = s.provider_models.find(provider_spec);
@@ -1107,20 +1750,20 @@ int main(int argc, char** argv) {
                 // provider's recall so a later bare relaunch restores it.
                 s.provider_models[provider_spec] = args.cli_model;
             }
-            persistence::save_settings(s);
+            persistence::save_settings(::agentty::IoAccess::grant(), cap, s);
         } else {
             // Register for persist-on-success: the ModelsLoaded reducer
             // writes settings the moment this host answers a non-empty
             // model fetch. The -m recall (if any) is filed with it.
-            provider::set_unproven_spec(provider_spec, args.cli_model);
+            provider::set_unproven_spec(::agentty::IoAccess::grant(), provider_spec, args.cli_model);
         }
     }
     // Session-scoped --auth-header override; must be installed BEFORE
     // parse_selection so the initial Selection (and every live-switch
     // rebuild) stamps it onto the OpenAI-family Endpoint.
-    provider::set_custom_auth_header(args.cli_auth_header);
+    provider::set_custom_auth_header(::agentty::IoAccess::grant(), args.cli_auth_header);
     auto selection = provider::parse_selection(provider_spec);
-    provider::select(selection);
+    provider::select(::agentty::IoAccess::grant(), selection);
 
     // Auth header per provider, registry-driven. Anthropic uses the
     // OAuth/key creds resolved above; OpenAI-family backends read their
@@ -1136,17 +1779,37 @@ int main(int argc, char** argv) {
     if (!args.cli_key.empty()) {
         provider_auth = auth::AuthHeader{auth::ApiKeyHeader{args.cli_key}};
     } else {
-        provider_auth = provider::credentials::resolve(provider_spec);
+        provider_auth = provider::credentials::resolve(IoAccess::grant(), provider_spec);
     }
 
     // ── Wire the Provider + Store seams ─────────────────────────────────
-    // Both providers live on main's stack so whichever the install lambda
-    // captures by reference outlives maya::run / the ACP serve loop.
-    provider::anthropic::AnthropicProvider anthropic_provider;
-    provider::chatgpt::ChatGptProvider chatgpt_provider;
-    provider::copilot::CopilotProvider copilot_provider;
-    provider::kimi::KimiProvider           kimi_provider;
-    io::FsStore                            store;
+    // The long-lived providers are SHARED-OWNED, not stack objects captured
+    // by reference.
+    //
+    // They used to live on main's stack, on the reasoning that main outlives
+    // maya::run. That holds for every thread the runtime waits for — and
+    // subagents are precisely the threads it does not. A `task` runs on a
+    // Cmd::task_isolated thread, which jaal DETACHES (kernel/pool.hpp:
+    // isolated threads are "asked to stop but never waited for"), so one
+    // still inside cfg.stream() at quit kept calling into these objects
+    // while main unwound. Shutdown now asks it to stop and waits 1.5 s, but
+    // that wait is bounded on purpose — a thread wedged in a syscall is
+    // abandoned, and with a stack capture that abandonment was a
+    // use-after-free.
+    //
+    // shared_ptr closes it for good: the stream lambda holds its own strong
+    // reference, so an abandoned worker keeps the provider alive for exactly
+    // as long as it is still touching it, and the last one out destroys it.
+    // No ordering to get right, no grace period to tune, nothing to race.
+    // The cost is one allocation per provider at startup.
+    auto anthropic_provider =
+        std::make_shared<provider::anthropic::AnthropicProvider>();
+    auto chatgpt_provider =
+        std::make_shared<provider::chatgpt::ChatGptProvider>();
+    auto copilot_provider =
+        std::make_shared<provider::copilot::CopilotProvider>();
+    auto kimi_provider = std::make_shared<provider::kimi::KimiProvider>();
+    io::FsStore                            store{::agentty::IoAccess::grant()};
 
     // The seam: a single std::function the runtime calls. It dispatches on
     // provider::active() AT CALL TIME (not on a frozen branch), so the
@@ -1159,50 +1822,112 @@ int main(int argc, char** argv) {
     // (provider/dispatch.cpp) is the ONE routing point — it reads
     // provider::active() AT CALL TIME so the picker can live-switch the
     // backend mid-session and the next request targets it, with no seam
-    // rebuild. The two long-lived native providers are captured by ref;
-    // short-lived OpenAI-compat / Ollama transports are built per call inside
-    // dispatch from the active endpoint.
-    std::function<provider::StreamResult(provider::Request,
-                                         provider::EventSink)> stream_fn =
-        [&anthropic_provider, &chatgpt_provider, &copilot_provider, &kimi_provider]
-        (provider::Request req, provider::EventSink sink) {
+    // rebuild. The two long-lived native providers are captured BY VALUE as
+    // shared_ptr (see above: a detached subagent may outlive main, and a
+    // reference capture made that a use-after-free); short-lived
+    // OpenAI-compat / Ollama transports are built per call inside dispatch
+    // from the active endpoint.
+    // The router, assembled per call from the long-lived providers.
+    //
+    // Factored out because there are now TWO seams over it: `stream_fn`
+    // routes to whatever provider is active, and `stream_to_fn` routes to a
+    // NAMED one (a Smart Mode role pinned on another endpoint). Both must
+    // offer the identical set of transports, so they build from one place
+    // rather than each spelling out the four arms.
+    auto build_router =
+        [anthropic_provider, chatgpt_provider, copilot_provider, kimi_provider] {
             provider::ProviderRouter router;
             router.set(provider::LongLived::Anthropic,
-                       [&anthropic_provider](provider::Request r,
-                                             provider::EventSink s) {
-                           return anthropic_provider.stream(std::move(r), std::move(s));
+                       [anthropic_provider](const maya::unlocked& c, provider::Request r,
+                                            provider::EventSink s) {
+                           return anthropic_provider->stream(c, std::move(r), std::move(s));
                        })
                   .set(provider::LongLived::ChatGpt,
-                       [&chatgpt_provider](provider::Request r,
-                                           provider::EventSink s) {
-                           return chatgpt_provider.stream(std::move(r), std::move(s));
+                       [chatgpt_provider](const maya::unlocked& c, provider::Request r,
+                                          provider::EventSink s) {
+                           return chatgpt_provider->stream(c, std::move(r), std::move(s));
                        })
                   .set(provider::LongLived::Copilot,
-                       [&copilot_provider](provider::Request r,
-                                           provider::EventSink s) {
-                           return copilot_provider.stream(std::move(r), std::move(s));
+                       [copilot_provider](const maya::unlocked& c, provider::Request r,
+                                          provider::EventSink s) {
+                           return copilot_provider->stream(c, std::move(r), std::move(s));
                        })
                   .set(provider::LongLived::Kimi,
-                       [&kimi_provider](provider::Request r,
-                                        provider::EventSink s) {
-                           return kimi_provider.stream(std::move(r), std::move(s));
+                       [kimi_provider](const maya::unlocked& c, provider::Request r,
+                                       provider::EventSink s) {
+                           return kimi_provider->stream(c, std::move(r), std::move(s));
                        });
-            router.external_acp = [](const std::string& agent_id,
+            router.external_acp = [](const maya::unlocked& c, const std::string& agent_id,
                                      provider::Request r, provider::EventSink s) {
-                return provider::stream_external_acp(agent_id, std::move(r),
+                return provider::stream_external_acp(c, agent_id, std::move(r),
                                                      std::move(s));
             };
-            return provider::dispatch_stream(router, std::move(req),
+            return router;
+        };
+
+    // Both seams run on a turn worker (the TUI's turn task, a subagent, an
+    // ACP turn), which holds no lock and passes its `unlocked` in.
+    std::function<provider::StreamResult(const maya::unlocked&, provider::Request,
+                                         provider::EventSink)> stream_fn =
+        [build_router](const maya::unlocked& c, provider::Request req, provider::EventSink sink) {
+            return provider::dispatch_stream(c, build_router(), std::move(req),
                                              std::move(sink));
         };
+
+    // Dispatch to a NAMED provider — a Smart Mode role whose slot was pinned
+    // on an endpoint other than the active one.
+    //
+    // The auth is resolved HERE, from the target provider, which is the whole
+    // point: a `req.auth` arriving from the caller is the PARENT provider's
+    // credential and would 401 against anyone else. credentials::resolve()
+    // already answers for an arbitrary provider id, and returns empty for the
+    // oauth_native and local rows whose transports own their own tokens — so
+    // an empty answer is left alone rather than treated as a failure.
+    std::function<provider::StreamResult(const maya::unlocked&, const std::string&,
+                                         provider::Request,
+                                         provider::EventSink)> stream_to_fn =
+        [build_router](const maya::unlocked& c, const std::string& provider_id,
+                       provider::Request req, provider::EventSink sink) {
+            const auto sel = provider::parse_selection(provider_id);
+            auto cred = provider::credentials::resolve(IoAccess::grant(), provider_id);   // stream entry: on a worker
+            const bool have = !auth::bearer_token(cred).empty()
+                || std::holds_alternative<auth::BearerHeader>(cred);
+            if (have)
+                req.auth = sel.kind == provider::Kind::Anthropic
+                             ? auth::fresh_auth_header(IoAccess::grant(), c, cred)
+                             : std::move(cred);
+            AGT_LOG(Smart, Debug, "route.cross_provider",
+                    "provider={} model={} auth={}", provider_id, req.model,
+                    have ? "resolved" : "transport-owned");
+            return provider::dispatch_stream(c, build_router(), sel,
+                                             std::move(req), std::move(sink));
+        };
+    // Settings through the write-behind cache, as app::install does: the
+    // reducer never waits on disk. Lock order: Deps is an effect seam,
+    // called by the effect host and init() on the loop thread between steps
+    // (no lock held), so the seam re-states that as a capability root here.
+    auto settings_seam = maya::thread_root([&](const maya::unlocked& cap) {
+        return app::settings_cache::wrap(cap,
+            [&store] { return store.load_settings(); },
+            [&store](const maya::unlocked& c, const store::Settings& x) {
+                store.save_settings_quiet(c, x);
+            });
+    });
     app::install_deps(app::Deps{
-        .stream        = stream_fn,
+        .stream        = [stream_fn](const maya::unlocked& c, provider::Request r,
+                                     provider::EventSink s) {
+            (void)stream_fn(c, std::move(r), std::move(s));
+        },
         .save_thread   = [&store](const Thread& t) { store.save_thread(t); },
         .delete_thread = [&store](const ThreadId& id) { store.delete_thread(id); },
         .load_threads  = [&store] { return store.load_threads(); },
         .load_thread   = [&store](const ThreadId& id) { return store.load_thread(id); },
-        .load_settings = [&store] { return store.load_settings(); },
-        .save_settings = [&store](const store::Settings& x) { store.save_settings(x); },
+        .load_settings = [l = std::move(settings_seam.load)] {
+            return maya::thread_root([&](const maya::unlocked& c) { return l(c); });
+        },
+        .save_settings = [sv = std::move(settings_seam.save)](const store::Settings& x) {
+            maya::thread_root([&](const maya::unlocked& c) { sv(c, x); });
+        },
         .new_thread_id = [&store] { return store.new_id(); },
         .title_from    = [&store](std::string_view t) { return store.title_from(t); },
         .write_file    = [](const std::string& path, const std::string& contents) {
@@ -1222,7 +1947,7 @@ int main(int argc, char** argv) {
     // provider::active() at call time), so subagents work on Anthropic,
     // OpenAI-compat, and Ollama alike — not just the Anthropic transport.
     {
-        auto sa_settings = persistence::load_settings();
+        auto sa_settings = persistence::load_settings(::agentty::IoAccess::grant());
         std::string sa_model =
             !args.cli_model.empty()       ? args.cli_model
           : !sa_settings.model_id.empty() ? sa_settings.model_id.value
@@ -1240,14 +1965,103 @@ int main(int argc, char** argv) {
         // second hand-written copy of the slot mapping, which is precisely how
         // the two drifted.
         smart::RoleConfig sa_smart = sa_settings.smart;
-        if (auto ov = smart::tuning::enabled_override())
-            sa_smart.enabled = *ov;
-        settings::registry::apply_env(sa_smart);
+        const auto sa_env = settings::registry::read_env(::agentty::IoAccess::grant());
+        if (sa_env.smart_enabled) sa_smart.enabled = *sa_env.smart_enabled;
+        settings::registry::apply_env(sa_smart, sa_env);
+        // An explicit --model is a contract, not a hint: every role runs on
+        // it. Without this, `--model X` bound the main turn while compaction
+        // and read-only subagents still routed to whatever the catalog said
+        // was cheaper -- a harness got billed for a model it never named
+        // (#70).
+        sa_smart.pinned_model = smart::tuning::model_pinned();
+        // The model CATALOG, for the same reason and with the same history.
+        //
+        // The TUI pushes this from init() and again on every catalog load
+        // (set_candidates in init.cpp / models.cpp), but `agentty run` and
+        // `agentty acp` never build a Model — so they ran with an EMPTY
+        // candidate list, and everything that reads it silently degraded:
+        //
+        //   • context_window resolved to 0 on every headless turn, so the
+        //     Ollama transport could not size options.num_ctx and fell back
+        //     to the daemon's ~2k/4k default, truncating long runs.
+        //   • cheapest_capable_model() had nothing to choose from, so
+        //     read-only subagent roles never routed down to a cheap model.
+        //   • Smart Mode's role resolver had no candidates, so pinned slots
+        //     fell back to the parent model — the exact failure the comment
+        //     above describes for RoleConfig, one field over.
+        //
+        // ASK THE PROVIDER, don't guess. list_models_for dispatches on the
+        // same axes as the stream path (Wire dialect + oauth_native), so the
+        // catalog here cannot disagree with the transport that will serve the
+        // turn — and for a CUSTOM HOST it is the only way to learn anything
+        // at all, because no bundled catalog can know a private deployment's
+        // models or their windows. That is the whole point of the /v1/models
+        // ladder: a self-hosted gateway's window is knowable only from the
+        // gateway.
+        //
+        // HEADLESS ONLY. The TUI fetches this itself — init() seeds the
+        // bundled floor and ModelsLoaded pushes the live catalog the moment
+        // it lands, both through set_candidates — so fetching here too would
+        // put a synchronous network round trip in front of the first frame
+        // to produce a list that is about to be replaced. `agentty run` and
+        // `agentty acp` have no such refresh, which is exactly why they need
+        // it now.
+        std::vector<ModelInfo> sa_candidates;
+        const bool headless = args.subcommand == "run"
+                           || args.subcommand == "acp"
+                           || args.subcommand == "mcp-serve";
+        if (headless) {
+            // No Model to publish the web_search policy: load it from settings.
+            tools::web_search_policy::seed(::agentty::IoAccess::grant());
+            // Falls back to the provider's static seed when auth is empty or
+            // the network is unreachable, so an offline run still gets a
+            // floor. Wrapped anyway: a catalog fetch must never be the thing
+            // that stops a headless run from starting.
+            try {
+                sa_candidates = provider::list_models_for(::agentty::IoAccess::grant(), cap,
+                                                          provider::active(), provider_auth);
+            } catch (...) { /* fall through to the bundled floor below */ }
+        }
+        if (sa_candidates.empty())
+            sa_candidates = catalog::bundled(
+                provider::parse_selection(provider_spec).provider_id());
+        // Publish the windows process-wide, the same way the TUI's
+        // ModelsLoaded arm does — the bundled floor FIRST, then the live
+        // catalog over it.
+        //
+        // Union, not replace. A live /v1/models answer is the ceiling for
+        // what you can REACH, but it is not a superset of what you can
+        // NAME: Anthropic's live catalog moves as models ship, so a
+        // `-m claude-opus-4-5` pinned in settings (or passed on the command
+        // line) can outlive its row while the bundled floor still knows its
+        // window. Seeding the floor underneath means a retired-but-known id
+        // resolves its real window instead of 0 — and 0 is not "unknown"
+        // downstream, the Ollama transport reads it as "use my tiny
+        // default" and truncates the run.
+        // SKIP the picker-only `[1m]`/`[2m]` variant rows. They carry the
+        // SAME model id with a marker suffix, and the map's key normaliser
+        // strips that suffix — so seeding them writes 1000000 under the base
+        // id and every request for the plain model claims a 1M window it was
+        // never entitled to. The extended window is opt-in per turn, not a
+        // property of the id.
+        const auto seed_windows = [](const std::vector<ModelInfo>& rows) {
+            for (const auto& mi : rows) {
+                if (mi.id.value != agentty::wire_model_id(mi.id.value)) continue;
+                if (mi.context_window > 0)
+                    agentty::set_catalog_context_window(mi.id.value,
+                                                        mi.context_window);
+            }
+        };
+        seed_windows(catalog::bundled(
+            provider::parse_selection(provider_spec).provider_id()));
+        seed_windows(sa_candidates);
         tools::subagent::install(tools::subagent::Config{
             .auth = provider_auth,
             .model = std::move(sa_model),
             .installed = true,
+            .candidates = std::move(sa_candidates),
             .stream = stream_fn,
+            .stream_to = stream_to_fn,
             .smart = std::move(sa_smart)});
     }
 
@@ -1258,9 +2072,9 @@ int main(int argc, char** argv) {
     // wired above, so `bash`, `task`, the git_* family, etc. behave exactly
     // as they do in the TUI (filesystem tools stay sandboxed to --workspace).
     if (args.subcommand == "mcp-serve") {
-        provider::prewarm_active_provider();   // `task`/web tools reuse the warm session
-        int rc = mcp::serve_stdio();
-        persistence::flush_pending_saves();
+        provider::prewarm_active_provider(::agentty::IoAccess::grant());   // `task`/web tools reuse the warm session
+        int rc = mcp::serve_stdio(cap);
+        persistence::flush_pending_saves(::agentty::IoAccess::grant(), cap);
         return rc;
     }
 
@@ -1270,13 +2084,107 @@ int main(int argc, char** argv) {
     // bounded turns — and prints the final report to stdout. Perfect for
     // scripting/CI: `git diff | agentty run "review this change"`.
     if (args.subcommand == "run") {
+        // Reject a typo'd role BEFORE reading stdin or talking to a
+        // provider. resolve_agent_type() falls back to `general` on
+        // purpose — a model naming a role that doesn't exist should still
+        // get work done — but at a CLI that silently ran
+        // `--agent reviwer` as `general` and reported success, so the
+        // user got the wrong agent with no signal at all.
+        if (!args.cli_run_agent.empty()
+            && !tools::is_known_agent_type(args.cli_run_agent)) {
+            std::fprintf(stderr, "agentty run: unknown --agent '%s'\n  known: %s\n",
+                         args.cli_run_agent.c_str(),
+                         tools::known_agent_types().c_str());
+            return 2;
+        }
+        run_cli::Options ro;
+        ro.agent   = args.cli_run_agent;
+        ro.output  = args.cli_run_output;
+        ro.json    = args.cli_run_json;
+        ro.verbose = args.cli_run_verbose;
+        ro.read_only  = args.cli_run_read_only;
+        ro.no_network = args.cli_run_no_network;
+        ro.save       = args.cli_run_save;
+        if (const char* ev = std::getenv("AGENTTY_EVENTS"); ev && std::string_view{ev} == "jsonl")
+            ro.events = true;
+        if (!args.cli_run_effort.empty()) {
+            if (!run_cli::valid_effort(args.cli_run_effort)) {
+                std::fprintf(stderr, "agentty run: --effort wants low, medium, high, xhigh, max or auto, got '%s'\n",
+                             args.cli_run_effort.c_str());
+                return 2;
+            }
+            ro.effort = args.cli_run_effort;
+        }
+        if (!args.cli_run_resume.empty()) {
+            if (!run_cli::valid_resume(args.cli_run_resume)) {
+                std::fprintf(stderr, "agentty run: --resume wants a thread id (16 hex digits) or 'last', got '%s'\n",
+                             args.cli_run_resume.c_str());
+                return 2;
+            }
+            ro.resume = args.cli_run_resume;
+        }
+        if (!args.cli_run_max_turns.empty()) {
+            const auto n = run_cli::parse_count(args.cli_run_max_turns);
+            if (!n) {
+                std::fprintf(stderr, "agentty run: --max-turns wants a number from 1 to 500, got '%s'\n",
+                             args.cli_run_max_turns.c_str());
+                return 2;
+            }
+            ro.max_turns = *n;
+        }
+        if (!args.cli_run_timeout.empty()) {
+            const auto t = run_cli::parse_duration(args.cli_run_timeout);
+            if (!t) {
+                std::fprintf(stderr, "agentty run: --timeout wants a duration like 90, 90s, 5m or 1h, got '%s'\n",
+                             args.cli_run_timeout.c_str());
+                return 2;
+            }
+            ro.timeout = *t;
+        }
         std::string prompt = args.cli_run_prompt;
-        const bool want_stdin = prompt.empty() || prompt == "-";
+        // `-` asks for stdin explicitly; so does giving no positional at all.
+        // An EXPLICIT empty prompt (`agentty run ""`) does not: the scan
+        // claimed it, so the user did supply one, it just happens to be empty.
+        // Without this distinction `run ""` fell into the non-tty branch below
+        // and hung.
+        const bool want_stdin =
+            prompt == "-" || (prompt.empty() && !args.cli_run_prompt_claimed);
         std::string piped;
-        // Read piped stdin when the prompt asks for it (`-` / absent) OR
-        // when input is a pipe (attach `git diff | agentty run "review"`:
-        // the piped bytes become context appended after the prompt).
+        // Attach piped stdin when it exists. The idiom is `git diff | agentty
+        // run "review"` — the diff bytes become context after the prompt — so
+        // this must trigger on any non-tty stdin that has data.
+        //
+        // But `isatty == false` alone is not enough. A ctest child inherits
+        // the ctest agent's stdin, which stays open for the whole run: no
+        // writer ever closes it, no bytes ever arrive, and `cin.rdbuf()` on it
+        // waits forever. Measured: `cli_arg_order_test` fell into this exact
+        // shape and timed out ctest at 60 s, cascading 15 later tests into
+        // Not Run — every earlier case in that test appended `--help` (exits
+        // before touching stdin) or piped through `head` (closes early), so
+        // the ONE bare invocation (`agentty run ""`) was the trip.
+        //
+        // poll() with a zero timeout answers "is there data or EOF now?"
+        // without reading. Empty and open → skip; bytes ready or writer closed
+        // → drain (a closed pipe returns POLLHUP and cin hits EOF at once,
+        // matching the interactive case where a shell hands us a tty and
+        // there is nothing to drain). want_stdin bypasses the peek so
+        // `agentty run -` still waits, which is its whole point.
+        //
+        // Windows has no poll(); keep the old permissive behaviour there
+        // (drain any non-tty). No easy WaitForSingleObject dance reliably
+        // distinguishes an empty-but-open pipe from a ready one on every
+        // Windows console/redirect combination, and Windows CI never hit
+        // this shape.
+#ifndef _WIN32
+        auto stdin_has_data = []() noexcept {
+            pollfd pfd{fileno(stdin), POLLIN, 0};
+            return ::poll(&pfd, 1, 0) > 0
+                && (pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+        };
+        if (want_stdin || (!isatty(fileno(stdin)) && stdin_has_data())) {
+#else
         if (want_stdin || !isatty(fileno(stdin))) {
+#endif
             std::ostringstream ss;
             ss << std::cin.rdbuf();
             piped = ss.str();
@@ -1306,18 +2214,14 @@ int main(int argc, char** argv) {
             return 2;
         }
         // Slash commands work here too: `agentty run "/review src/x.cpp"`.
-        if (auto expanded = tools::commands::try_expand(prompt))
+        if (auto expanded = tools::commands::try_expand(IoAccess::grant(), prompt))
             prompt = std::move(*expanded);
 
-        provider::prewarm_active_provider();
-        bool is_error = false;
-        std::string report =
-            tools::run_one_shot(prompt, args.cli_run_agent, is_error);
-        std::fputs(report.c_str(), is_error ? stderr : stdout);
-        if (!report.empty() && report.back() != '\n')
-            std::fputc('\n', is_error ? stderr : stdout);
-        persistence::flush_pending_saves();
-        return is_error ? 1 : 0;
+        provider::prewarm_active_provider(::agentty::IoAccess::grant());
+        ro.prompt = std::move(prompt);
+        const int code = run_cli::run(cap, ro);
+        persistence::flush_pending_saves(::agentty::IoAccess::grant(), cap);
+        return code;
     }
 
     // ── ACP mode: run as a headless agent over stdio (Zed et al.) ───────
@@ -1325,7 +2229,7 @@ int main(int argc, char** argv) {
     // JSON-RPC; all diagnostics go to stderr so the protocol channel stays
     // clean. Reuses the same provider/tools/sandbox wired above.
     if (args.subcommand == "acp") {
-        auto settings = persistence::load_settings();
+        auto settings = persistence::load_settings(::agentty::IoAccess::grant());
         // -m wins for this subprocess WITHOUT persisting to settings (an ACP
         // agent shouldn't clobber the TUI's saved model). Otherwise fall back
         // to the saved model, then the built-in default.
@@ -1338,7 +2242,7 @@ int main(int argc, char** argv) {
         // reuses the SSL session + connection cache instead of paying the
         // ~150–300 ms handshake. Uniform for Anthropic and ChatGPT/Codex
         // alike. The TUI does the same before launching maya.
-        provider::prewarm_active_provider();
+        provider::prewarm_active_provider(::agentty::IoAccess::grant());
 
         // Permission profile gates which tools trigger a Zed approval prompt.
         // Default Ask: prompt for write/exec/net, auto-run reads. `minimal`
@@ -1355,29 +2259,38 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        // Fast fd transport: raw read(2)/writev(2) on stdin(0)/stdout(1).
-        // Bypasses std::iostream sync + per-message flush that std::cin/cout
-        // would impose. Ensure any buffered C++ stream output is flushed first
-        // so it can't interleave with the raw fd writes.
+        // Raw read(2)/write(2) on stdin(0)/stdout(1). Flush any buffered C++
+        // stream output first so it can't interleave with the raw writes.
         std::cout.flush();
 #if defined(_WIN32)
         // On Windows fds 0/1 default to TEXT mode, which would translate every
         // '\n' the JSON-RPC framing emits into "\r\n" and mangle the wire.
-        // Force BINARY so FdTransport's read(2)/write(2) see exact bytes.
         _setmode(_fileno(stdin),  _O_BINARY);
         _setmode(_fileno(stdout), _O_BINARY);
 #endif
-        ::acp::FdTransport transport = ::acp::FdTransport::process();
-        agentty::acp::AgentServer server(
-            transport,
-            stream_fn,
+        auto server = maya::co_owned<agentty::acp::AgentServer>::make(
+            agentty::rpc::fd_channel(0, 1),
+            [stream_fn](const maya::unlocked& c, provider::Request r, provider::EventSink s) {
+                (void)stream_fn(c, std::move(r), std::move(s));
+            },
             provider_auth,
             std::move(model_id),
             profile);
+        // Lets a session pick a model on any signed-in provider, not just
+        // the active one (Zed's model dropdown lists them all).
+        server->set_stream_to([stream_to_fn](const maya::unlocked& c, const std::string& pid,
+                                             provider::Request r, provider::EventSink s) {
+            (void)stream_to_fn(c, pid, std::move(r), std::move(s));
+        });
+        // After the editor runs `agentty login` for us, `authenticate` re-reads
+        // the store with this.
+        server->set_reauth([provider_spec] {
+            return provider::credentials::resolve(IoAccess::grant(), provider_spec);
+        });
         std::fprintf(stderr, "agentty: ACP agent ready on stdio (profile=%s)\n",
                      std::string(to_string(profile)).c_str());
-        int rc = server.serve();
-        persistence::flush_pending_saves();
+        int rc = server->serve(cap);
+        persistence::flush_pending_saves(::agentty::IoAccess::grant(), cap);
         return rc;
     }
 
@@ -1386,7 +2299,7 @@ int main(int argc, char** argv) {
     // + connection cache, skipping ~150–300 ms of first-byte handshake.
     // Uniform: whether the user launched on Claude or ChatGPT/Codex, the
     // active backend gets the head start — no provider is privileged.
-    provider::prewarm_active_provider();
+    provider::prewarm_active_provider(::agentty::IoAccess::grant());
 
     // ── Keep diagnostics OFF the rendered terminal ──────────────────────
     // agentty's TUI runs in INLINE mode (not the alt-screen), so anything
@@ -1398,18 +2311,33 @@ int main(int argc, char** argv) {
     // never touch the screen. Opt out with AGENTTY_NO_STDERR_REDIRECT=1
     // (e.g. when debugging startup). ACP / mcp-serve / run keep stderr as
     // their diagnostic channel and are handled above, before this point.
-    if (const char* off = std::getenv("AGENTTY_NO_STDERR_REDIRECT");
-        !(off && off[0] && off[0] != '0')) {
-        std::error_code lec;
-        std::filesystem::path logdir = util::user_logs_dir();   // ~/.agentty/logs
-        std::filesystem::create_directories(logdir, lec);
-        std::filesystem::path logpath = logdir / "stderr.log";
-        // Append so a crash's trailing output survives across sessions;
-        // truncation would lose the very lines you'd want post-mortem.
-        if (std::freopen(logpath.string().c_str(), "a", stderr)) {
-            std::setvbuf(stderr, nullptr, _IOLBF, 0);   // line-buffered
-            std::fprintf(stderr, "\n=== agentty session %ld ===\n",
-                         static_cast<long>(agentty_pid()));
+    //
+    // SKIPPED under Wine: freopen() on the inherited stderr handle crashes
+    // the process there, so the redirect costs us the whole binary to keep
+    // the frame clean. Wine is a development/CI target, not a user-facing
+    // one, and a slightly dirty frame beats not starting at all.
+    // The REAL stderr, kept across the redirect below. If maya can't take
+    // the terminal there is no frame to protect, and a reason that only
+    // lands in stderr.log is a silent exit 70 from the user's chair.
+#if defined(_WIN32)
+    const int real_stderr = _dup(_fileno(stderr));
+#else
+    const int real_stderr = ::dup(fileno(stderr));
+#endif
+    if (!running_under_wine()) {
+        if (const char* off = std::getenv("AGENTTY_NO_STDERR_REDIRECT");
+            !(off && off[0] && off[0] != '0')) {
+            std::error_code lec;
+            std::filesystem::path logdir = util::user_logs_dir();   // ~/.agentty/logs
+            std::filesystem::create_directories(logdir, lec);
+            std::filesystem::path logpath = logdir / "stderr.log";
+            // Append so a crash's trailing output survives across sessions;
+            // truncation would lose the very lines you'd want post-mortem.
+            if (std::freopen(logpath.string().c_str(), "a", stderr)) {
+                std::setvbuf(stderr, nullptr, _IOLBF, 0);   // line-buffered
+                std::fprintf(stderr, "\n=== agentty session %ld ===\n",
+                             static_cast<long>(agentty_pid()));
+            }
         }
     }
 
@@ -1451,28 +2379,22 @@ int main(int argc, char** argv) {
 
     // ── Frame-gate tracing ──────────────────────────────────────────────
     // Installed only when `ui` trace logging is on, because this fires once
-    // per event-loop iteration. With it on, the log answers the single most
-    // common rendering question directly — "the model changed but the screen
-    // didn't": you can see whether visual_hash moved and whether the frame
-    // was skipped, instead of bisecting by rebuilding maya.
+    // per event-loop iteration.
+    //
+    // The `frame` half is gone, and not by accident: maya's set_frame_trace
+    // was a global hook the old run loop called, and the new host reports the
+    // same thing as a RETURN VALUE instead — Screen::present_if hands back
+    // `Presented{.skipped = true}` when the visual hash matched. That is the
+    // better design (nothing global, no null check per frame), it just isn't
+    // reachable from main(): the host reads it, not the program. If we want
+    // the "model changed but the screen didn't" line back, it belongs in
+    // maya's host next to the present() call, not here.
+    //
+    // The emit side survives because it hooks the RENDERER, which the program
+    // still links directly: `emit` says whether the composed frame had any
+    // bytes, and an empty emit right after a model change is the exact
+    // signature of the diff concluding the wire already showed it.
     if (logx::recorded(logx::Channel::Ui, logx::Level::Trace)) {
-        maya::set_frame_trace([](std::uint64_t hash, bool skipped,
-                                 bool needs_render) noexcept {
-            // Identify the live theme by ADDRESS, not by reading its
-            // channels: r()/g()/b() on a non-Rgb LitColor reads a palette
-            // index as a colour channel (the theme-discipline invariant
-            // this repo enforces at test time). A pointer is enough for
-            // the only question here - did the painted palette change
-            // between frames.
-            const void* tf = static_cast<const void*>(&maya::theme::live());
-            AGT_LOG(Ui, Trace, "frame",
-                    "hash={:016x} {} needs_render={} theme={}",
-                    hash, skipped ? "SKIP" : "render", needs_render, tf);
-        });
-        // The emit side. `frame` says whether view() ran; `emit` says whether
-        // the composed frame had any bytes. A `render` followed by an EMPTY
-        // emit is the exact signature of "the model changed and the screen
-        // didn't" — the diff concluded the wire already showed it.
         maya::set_emit_trace([](const char* state, std::size_t bytes,
                                 bool empty) noexcept {
             AGT_LOG(Ui, Trace, "emit",
@@ -1481,8 +2403,30 @@ int main(int argc, char** argv) {
         });
     }
 
-    maya::run<app::AgenttyApp>({.title = "agentty", .fps = 0,
-                               .mode = maya::Mode::Inline, .backend = backend});
+    // Run on agentty's host: maya's terminal_host plus agentty's own
+    // effects (runtime/app/host.hpp). maya::run opens the terminal, installs
+    // maya's executor and runs the program on jaal; agentty never calls jaal.
+    {
+        maya::Options cfg{.title = "agentty", .fps = 0,
+                          .mode = maya::Mode::Inline, .backend = backend};
+        if (const int rc = maya::run<app::AgenttyApp, app::Host>(cfg);
+            rc == 70) {
+            // Couldn't take the terminal (or a fault stopped the program).
+            // The why went to stderr.log; say so where the user is looking.
+            if (real_stderr >= 0) {
+                const std::string msg =
+                    "agentty: couldn't start the terminal UI (exit 70). "
+                    "Is stdin/stdout a terminal? Details: "
+                    + (util::user_logs_dir() / "stderr.log").string() + "\n";
+#if defined(_WIN32)
+                (void)_write(real_stderr, msg.data(), static_cast<unsigned>(msg.size()));
+#else
+                (void)!::write(real_stderr, msg.data(), msg.size());
+#endif
+            }
+            return 70;
+        }
+    }
 
     // Tear down connected MCP plugin servers FIRST — before the blocking
     // flushes below. Closing each server's stdin (→ EOF) unblocks any
@@ -1494,36 +2438,31 @@ int main(int argc, char** argv) {
     // the second Ctrl-C.
     mcp::release_servers();
 
-    // Stop the RAG retriever's background warm NOW, not at static destruction.
-    // Its warm worker (a jthread that embeds the whole corpus) is otherwise
-    // joined when the function-local `static Retriever` in mcp_tools_backends
-    // is destroyed AFTER main returns — blocking ^C for 4–10 s on a large
-    // corpus. rag_shutdown() trips the cooperative cancel flag + joins the
-    // now-interruptible worker, so exit stays instant.
+    // The fast-exit joins (TLS prewarm dial, the workspace `@`/`#` walks,
+    // the modelsdev refresh, the blob GC) live in TeardownGuard's destructor
+    // at the top of main(), so they run on EVERY exit path rather than only
+    // this one. See the comment there for the 0xC0000005 they defend
+    // against.
+    //
+    // rag_shutdown() stays here, and BEFORE the guard fires: its warm worker
+    // lives on a function-local static that would otherwise only be stopped
+    // after main() returns, blocking ^C for 4-10 s on a large corpus.
+    // Tripping it now keeps exit instant.
     tools::rag_shutdown();
 
-    // Join any in-flight TLS prewarm dial BEFORE the process tears down. On a
-    // fast exit (e.g. immediate pipe-stdin EOF under MSYS2/mintty) the detached
-    // dial would otherwise still be inside SSL_connect when the CRT/OpenSSL
-    // static state is freed, corrupting the heap (Windows 0xC0000374). Trips
-    // the dial's cancel token then joins; a no-op if no prewarm ran.
-    http::default_client().join_prewarm();
-
-    // Same fast-exit race for the workspace `@`/`#` prewarms: init() kicks a
-    // filesystem walk and a symbol scan on background threads. On an immediate
-    // pipe-EOF exit (MSYS2/mintty smoke test) they'd still be running when the
-    // CRT/mimalloc atexit handlers free their captured state — a use-after-
-    // free that faults on Windows (0xC0000005). Join them before teardown.
-    join_workspace_prewarm();
-    join_workspace_symbols_prewarm();
+    // Join the blob GC before the flush below: both walk the threads dir,
+    // and letting them overlap during shutdown is the race this ordering
+    // exists to prevent. The guard would join it too, but that runs AFTER
+    // this function body — too late for the flush.
+    blobs::join_background_gc(cap);
 
     // Drain the async persistence queue. The Quit reducer arm enqueues
     // a final save_thread() right before maya returns; this blocks
     // until that (and any earlier-still-queued) write lands on disk.
-    persistence::flush_pending_saves();
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), cap);
     // Tear down any cached external ACP agent subprocesses (bounded even for a
     // wedged agent via ExternalAcpBackend's teardown watchdog).
-    provider::release_acp_agents();
+    provider::release_acp_agents(cap);
 
     // Everything ABOVE this line is a subsystem main() happens to know about;
     // the registry below covers everything that registered ITSELF when it
@@ -1531,6 +2470,16 @@ int main(int argc, char** argv) {
     // scope guard installed at the top of main() is what makes the same thing
     // happen on the ~20 CLI subcommand paths that return before ever getting
     // here. Calling run() twice is a no-op; the registry clears itself.
-    util::teardown::run();
+    util::teardown::run(cap);
     return 0;
+}
+
+}  // namespace
+
+// The process's root capability. main() is the one place a thread starts
+// that jaal didn't start, and it holds nothing yet. Everything else gets its
+// capability from here, from a job/task entry, or from a lock body.
+// (lint: cap_roots lists this file.)
+int main(int argc, char** argv) {
+    return maya::thread_root([&](const maya::unlocked& cap) { return run_main(argc, argv, cap); });
 }

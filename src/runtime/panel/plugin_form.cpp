@@ -39,16 +39,21 @@ form::Form build_form(const PluginFormInputs& in) {
     form::Builder b{add ? " Add plugin " : (" " + in.name + " ")};
 
     // ── Subtitle: the pane's one-line situation report ─────────────
+    //
+    // A connect failure is NOT a situation report — it is a message whose
+    // tail says what to fix, so it goes on `error` (which wraps) and the
+    // subtitle keeps describing the pane. Putting it here truncated it.
+    if (!in.error.empty()) b.error(in.error);
     if (add) {
         b.subtitle("pick a kind — the fields below follow");
     } else if (in.untrusted) {
         b.subtitle("untrusted project config — approve below to enable");
-    } else if (!in.error.empty()) {
-        b.subtitle(in.error);
     } else if (!in.enabled) {
         b.subtitle("disabled — nothing from this server is on the wire");
     } else if (in.kind == kKindPassthrough) {
         b.subtitle("forwards proxy-advertised tool calls to your URL");
+    } else if (!in.error.empty()) {
+        b.subtitle("not connected");
     } else {
         b.subtitle(in.connected ? "connected" : "connecting…");
     }

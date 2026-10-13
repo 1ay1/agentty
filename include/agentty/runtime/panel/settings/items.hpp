@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "agentty/runtime/panel/settings/categories.hpp"
+#include <maya/runtime.hpp>
+#include "agentty/util/io.hpp"
 
 namespace agentty { struct Model; }
 
@@ -35,6 +37,8 @@ enum class Action : std::uint8_t {
     OpenRag,       // General: open the RAG mode picker
     OpenAppearance,// General: open the Appearance pane (theme, density, motion)
     OpenSmart,     // General: open Smart Mode config
+    OpenSandbox,   // General: open the Sandbox pane (walls, syscalls, limits)
+    OpenWebSearch, // General: open Web Search (web_search policy and services)
 
     ToggleChangesStrip, // General: show/hide the persistent "N changes" banner
     // (No RemovePlugin: removal is the two-step `d` → SettingsListRemove
@@ -70,7 +74,7 @@ enum class Action : std::uint8_t {
 // went wrong before: Appearance was added to the enum, wired to a reducer,
 // given a row, and left out of the one switch that paints the handle.
 [[nodiscard]] constexpr bool opens_pane(Action a) noexcept {
-    return a >= Action::OpenRag && a <= Action::OpenSmart;
+    return a >= Action::OpenRag && a <= Action::OpenWebSearch;
 }
 
 struct Item {
@@ -126,12 +130,12 @@ struct AddResult { bool ok; std::string message; };
 // Plugins: parse a one-line "name command [args…]" spec and write it to
 // the user mcp.json via tools::plugin. `--python foo.py` / `--uvx pkg` /
 // `--npx pkg` shorthands are expanded exactly like the CLI.
-[[nodiscard]] AddResult add_plugin_from_line(const std::string& line);
+[[nodiscard]] AddResult add_plugin_from_line(Io, const maya::below<maya::leaf>&, const std::string& line);
 
 // Commands / Agents: create a starter <name>.md under the user root
 // (~/.agentty/commands or ~/.agentty/agents) with a minimal template, so
 // the user can open + edit it. Returns the path in `message` on success.
 // Refuses to overwrite an existing file.
-[[nodiscard]] AddResult create_starter(Category cat, const std::string& name);
+[[nodiscard]] AddResult create_starter(Io, Category cat, const std::string& name);
 
 } // namespace agentty::settings

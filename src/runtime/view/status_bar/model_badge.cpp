@@ -2,6 +2,9 @@
 
 #include <maya/widget/model_badge.hpp>
 
+#include <string>
+
+#include "agentty/provider/auth_state.hpp"
 #include "agentty/domain/model_name.hpp"
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/selection.hpp"
@@ -75,23 +78,64 @@ maya::Element model_badge_config(const Model& m) {
     // inverse_text was the obvious slot and the wrong one — under native it
     // is Default, the same colour as ordinary text, so the chip painted
     // normal foreground on a bright band (agentty #45).
-    const std::string prov = provider::provider_display_name(provider::active());
+    const auto& active_sel = m.d.selection;
+    const std::string prov = provider::provider_display_name(active_sel);
     const Style prov_style = ui::chip_style(name.color).with_bold();
 
+    // First-run honesty. If the user escaped out of the login modal (or
+    // launched for the first time with no env-var credentials), the active
+    // selection falls back to the Anthropic default -- but there's nothing
+    // signed in behind it. Showing "Anthropic Opus 4.5" there was a lie
+    // the status bar told confidently every launch: the next Enter would
+    // 401 against a credential the user never provided.
+    //
+    // Answered from the Model (the settings record + AuthView), so the
+    // view reads no credential files.
+    const bool authed = provider::signed_in(active_sel.provider_id(),
+                                            m.d.persisted, m.d.auth);
+    if (!authed) {
+        // Dimmed provider chip + a muted "-- sign in" where the model name
+        // would be. No family hue (there IS no model), no update chip, no
+        // effort chip: all three claim a running configuration we don't
+        // have. The provider name stays so the user can see which store
+        // the next `login` paste would route to; it's rendered with the
+        // muted hue, same as every other "disabled, actionable" chip.
+        const Style unauth_prov =
+            ui::chip_style(muted).with_bold();
+        return h(text(" " + prov + " ", unauth_prov),
+                 text(" "),
+                 text("\xe2\x80\x94 sign in", fg_dim(muted))).build();
+    }
+
     // Reasoning-effort chip: when a tier is active AND the model can reason,
-    // ride a compact "· ◇high" so the current effort is visible at a glance
+    // ride a compact "· ✦ xhigh" so the current effort is visible at a glance
     // without opening the picker — the same tier you set there (←/→). Uses
     // resolved_caps so it never shows on a model that can't take effort (or
     // where a stale pick would be dropped at send time). An empty Element
     // when absent, so it composes without a presence flag.
+    //
+    // The sigil is ✦, the same one the reasoning block wears in the thread,
+    // so one glyph means "reasoning" everywhere instead of a ◇ that appears
+    // nowhere else. It carries the accent and the tier stays muted: the
+    // chip then reads as a footnote on the model rather than a third peer
+    // in the row, and the two are no longer glued into one "◇xhigh" word.
     Element effort_chip = text("");
     if (m.d.effort != Effort::None && !model.empty()) {
         const auto caps = resolved_caps(model);
         if (effort_capable(caps))
-            effort_chip = h(text(" \xc2\xb7 ", fg_dim(muted)),
-                            text("\xe2\x97\x87" +
-                                 std::string{effort_label(m.d.effort)},
-                                 fg_dim(muted))).build();
+            effort_chip = h(text("  "),
+                            text("\xe2\x9c\xa6 ", fg_of(ui::role_brand)),
+                            // NOT fg_dim(muted). muted is already the
+                            // palette's grey (bright_black), and dimming it
+                            // again lands the tier a hair off the
+                            // background on a dark theme -- on Phosphor that
+                            // is #506258 dimmed against #0d1611, which is
+                            // the "I can't see the reasoning mode" report.
+                            // The sigil keeps the accent and carries the
+                            // eye; the tier only has to be READABLE once
+                            // the eye arrives, so plain muted is the floor.
+                            text(std::string{effort_label(m.d.effort)},
+                                 fg_of(muted))).build();
     }
 
     if (model.empty() || name.name.empty()) {
@@ -106,8 +150,17 @@ maya::Element model_badge_config(const Model& m) {
     // compact "⬆ vX.Y.Z" rides beside the model badge — bright enough to
     // notice, quiet enough to ignore. The palette's "Update agentty" (and
     // `agentty update`) are the actions; this chip is only the signal.
+    //
+    // After an update lands the chip does NOT vanish — it becomes
+    // "↺ v<new>", and stays until the process actually restarts. The
+    // download writes a new binary but this process keeps running the old
+    // one, so "updated" is only half true; the restart is the outstanding
+    // step and it needs a marker that outlives the status line.
     Element update_chip = text("");
-    if (!m.s.update_latest.empty())
+    if (!m.s.update_pending_restart.empty())
+        update_chip = text("  \xe2\x86\xba v" + m.s.update_pending_restart,
+                           fg_of(ui::status_warn));
+    else if (!m.s.update_latest.empty())
         update_chip = text("  \xe2\xac\x86 v" + m.s.update_latest,
                            fg_of(ui::status_ok));
 

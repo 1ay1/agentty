@@ -79,7 +79,7 @@ See [Providers › Custom hosts](/docs/providers#custom-hosts) for the full mode
 ## Turning on logs for a bug report
 
 ```bash
-AGENTTY_LOG=debug AGENTTY_LOG_FILE=/tmp/agentty.log agentty
+AGENTTY_LOG=debug agentty --log-file /tmp/agentty.log
 # reproduce, then attach /tmp/agentty.log
 ```
 
@@ -107,6 +107,10 @@ On any other terminal, attach by path (`@shot.png`) or set
 `AGENTTY_CLIPBOARD_CMD` to ferry the clipboard over SSH. Full setup, including
 the Linux `wl-clipboard` / `xclip` requirement and a troubleshooting table:
 [Clipboard & Images](/docs/clipboard).
+
+## agentty is using a lot of disk, or settings/history won't save
+
+Run `agentty config` to see every folder agentty uses and its size, and `agentty config doctor` to check each one is writable and private. Conversations are usually the bulk: move them with `agentty config move threads /some/big/disk` (then add the `export` line it prints), or expire old ones with `AGENTTY_THREADS_KEEP_DAYS=90`. `agentty config clean` lists files older versions left behind. See [Storage](/docs/storage).
 
 ## Garbled rendering
 

@@ -18,6 +18,26 @@
 
 #include <string>
 
+#include <maya/runtime.hpp>
+
+// ── Lock-order capabilities in tests ────────────────────────────────────────
+//
+// A test body is a thread root, the same as main(): it holds no lock when it
+// starts. agtest::cap() is that root, the ONE place the suite mints a
+// capability (tests/ is outside the lint's scan; this header is the reviewed
+// root for all of it). Use it only from test-body code, never from a helper
+// that a lock body could call:
+//
+//     persistence::save_thread(io, agtest::cap(), t);
+//     DynamicDispatch::execute(agtest::cap(), "read", args);
+//
+// The returned reference is to a capability that lives for the program: a
+// capability is a zero-size proof with no state, and a test thread holds
+// nothing between statements. (jaal::cap_access is the sanctioned maker;
+// tests are exempt from the minting ban the lint enforces on src/.)
+// (Defined in agtest_cap.hpp so standalone, non-doctest tests can share it.)
+#include "agtest_cap.hpp"
+
 // Legacy two-arg CHECK(cond, msg) → doctest CHECK_MESSAGE; one-arg CHECK(cond)
 // → doctest CHECK. Both wrap the predicate in an extra paren pair so doctest
 // does NOT try to decompose it — the legacy suite freely uses `CHECK(a && b)`
@@ -52,7 +72,14 @@
 // the occasional (bool, std::string).
 namespace agtest {
 inline void check(bool ok) { DOCTEST_CHECK(ok); }
-inline void check(bool ok, const char* what) { DOCTEST_CHECK_MESSAGE(ok, what); }
+// std::string, not the raw const char*. doctest streams a bare char pointer
+// as an ADDRESS, so every failure in every legacy test printed
+// "logged: 0x55ea50991fb0" instead of the message explaining what broke --
+// the one thing the second argument exists for. Costs an allocation on the
+// FAILURE path only (doctest builds the message lazily).
+inline void check(bool ok, const char* what) {
+    DOCTEST_CHECK_MESSAGE(ok, std::string{what ? what : ""});
+}
 inline void check(bool ok, const std::string& what) {
     DOCTEST_CHECK_MESSAGE(ok, what);
 }
@@ -93,7 +120,7 @@ public:
         else           ::unsetenv("HOME");
         std::error_code ec;
         std::filesystem::current_path(old_cwd_, ec);
-        if (!old_ws_.empty()) agentty::tools::util::set_workspace_root(old_ws_);
+        if (!old_ws_.empty()) agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), old_ws_);
     }
     ScopedEnvSandbox(const ScopedEnvSandbox&) = delete;
     ScopedEnvSandbox& operator=(const ScopedEnvSandbox&) = delete;
@@ -105,5 +132,58 @@ private:
 };
 } // namespace agtest
 using agtest::ScopedEnvSandbox;
+
+// A temp directory that deletes itself.
+//
+// Tests mint temp dirs constantly and almost none of them clean up: 47
+// distinct `agentty_*_` prefixes at last count, 3537 stale directories on this
+// box, enough to fill a 16 GB tmpfs and fail an unrelated build with "No space
+// left on device". The harness now sweeps the namespace on startup, but that
+// is a safety net with a 24-hour lag -- it keeps the box healthy, it does not
+// keep a single run clean.
+//
+// This is the fix at the source. `agtest::TempDir d{"mytest"}` gives a unique
+// directory under the shared prefix and removes it at scope exit, on every
+// path including an exception from a failing CHECK.
+//
+// Use it instead of hand-rolling temp_directory_path() / (prefix + stamp):
+//   - unique by construction (clock + a counter, so same-nanosecond calls in
+//     one binary cannot collide the way a bare timestamp can)
+//   - inside the `agentty_` namespace, so the sweep catches it even if the
+//     process is SIGKILLed before the destructor runs
+//   - impossible to forget, which the 47 prefixes prove is the actual problem
+#include <atomic>
+#include <chrono>
+#include <string>
+namespace agtest {
+class TempDir {
+public:
+    explicit TempDir(std::string_view label) {
+        static std::atomic<unsigned> seq{0};
+        const auto stamp = std::chrono::steady_clock::now()
+                               .time_since_epoch().count();
+        path_ = std::filesystem::temp_directory_path() /
+                ("agentty_" + std::string{label} + "_" +
+                 std::to_string(stamp) + "_" +
+                 std::to_string(seq.fetch_add(1)));
+        std::error_code ec;
+        std::filesystem::create_directories(path_, ec);
+    }
+    ~TempDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path_, ec);   // best effort
+    }
+    TempDir(const TempDir&) = delete;
+    TempDir& operator=(const TempDir&) = delete;
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
+    [[nodiscard]] std::string string() const { return path_.string(); }
+    operator const std::filesystem::path&() const noexcept { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+} // namespace agtest
+using agtest::TempDir;
 
 #endif // AGENTTY_TESTS_AGTEST_HPP

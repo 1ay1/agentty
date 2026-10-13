@@ -14,11 +14,16 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <stop_token>
 #include <optional>
 #include <string>
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/provider/chatgpt/oauth.hpp"
+#include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
+
+#include <maya/runtime.hpp>
 
 namespace agentty::provider::chatgpt {
 
@@ -39,9 +44,11 @@ struct CodexCredentials {
 
 // ── Token store (separate from the Anthropic credentials.json) ─────────────
 [[nodiscard]] std::filesystem::path codex_credentials_path();
+// Saves/clears take the store's leaf lock; the load is lock-free (atomic
+// rename), so views and signed-in probes can call it without a capability.
 [[nodiscard]] std::optional<CodexCredentials> load_codex_credentials();
-bool save_codex_credentials(const CodexCredentials& c);
-bool clear_codex_credentials();
+bool save_codex_credentials(const maya::below<maya::leaf>& cap, const CodexCredentials& c);
+bool clear_codex_credentials(const maya::below<maya::leaf>& cap);
 
 // ── Authorize URL ──────────────────────────────────────────────────────────
 // Pure: same (verifier, state) → same URL. Points at the loopback redirect.
@@ -58,7 +65,8 @@ struct CodexDeviceCode {
 };
 
 using CodexDeviceCodeSink = std::function<void(const CodexDeviceCode&)>;
-using CodexCancelProbe = std::function<bool()>;
+// Login stops when this is requested (Esc, a newer attempt, shutdown).
+using CodexCancelProbe = std::stop_token;
 
 // True when the environment requests device auth explicitly or identifies an
 // SSH session. AGENTTY_CHATGPT_DEVICE_AUTH=0/1 is an override for unusual
@@ -69,7 +77,7 @@ using CodexCancelProbe = std::function<bool()>;
 // them. The caller must save only after it confirms the attempt is still
 // active. `on_device_code` fires once before polling begins.
 [[nodiscard]] std::expected<CodexCredentials, auth::OAuthError>
-codex_login(int timeout_s = 900, CodexDeviceCodeSink on_device_code = {},
+codex_login(Io, int timeout_s = 900, CodexDeviceCodeSink on_device_code = {},
             CodexCancelProbe cancelled = {});
 
 // Explicit device flow with the same side-effect-free completion contract.
@@ -89,7 +97,9 @@ codex_refresh(const CodexCredentials& current);
 
 // Return a valid credential, refreshing in place (and persisting) if the
 // stored access token is stale. Worker-thread safe. Empty optional when no
-// ChatGPT credential is saved.
-[[nodiscard]] std::optional<CodexCredentials> codex_fresh_credentials();
+// ChatGPT credential is saved. Refreshes run one at a time on the
+// auth_refresh lane, which then takes the (leaf) store.
+[[nodiscard]] std::optional<CodexCredentials>
+codex_fresh_credentials(const locks::below_auth_refresh& cap);
 
 } // namespace agentty::provider::chatgpt

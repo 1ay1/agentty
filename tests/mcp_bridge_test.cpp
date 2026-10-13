@@ -1,13 +1,14 @@
 // mcp_bridge_test — end-to-end smoke for the agentty↔mcp-cpp capability
 // bridge. Spawns the mcp-cpp example MCP server (built into the submodule)
 // via a generated mcp.json, then drives agentty::mcp::mcp_tools() — proving
-// the whole chain: config parse → cap::StdioServerProvider spawn+handshake →
+// the whole chain: config parse → mcp::Connection spawn+handshake →
 // cap::Registry → synthesized ToolDef → execute() round-trips a tools/call.
 //
 // SKIPS (exit 0) when the example server binary isn't built, so the suite
 // stays green on machines that didn't build mcp-cpp examples. Set
 // AGENTTY_MCP_E2E_SERVER to point at a server binary explicitly.
 
+#include "agtest_cap.hpp"
 #include "agentty/mcp/client.hpp"
 
 #include <cstdio>
@@ -37,9 +38,16 @@ static std::string find_server() {
         if (fs::exists(e)) return e;
     }
     const char* candidates[] = {
-        "mcp-cpp/build/examples/mcp_server_example",
-        "../mcp-cpp/build/examples/mcp_server_example",
-        "mcp-cpp/build/examples/Release/mcp_server_example",
+        // agentty's own build tree: add_subdirectory(third_party/mcp-cpp)
+        // mirrors the source path, so the examples land under
+        // build/third_party/mcp-cpp/. Checked from the repo root and build/.
+        "build/third_party/mcp-cpp/examples/mcp_server_example",
+        "third_party/mcp-cpp/examples/mcp_server_example",
+        "../build/third_party/mcp-cpp/examples/mcp_server_example",
+        // mcp-cpp's own standalone build tree inside the submodule.
+        "third_party/mcp-cpp/build/examples/mcp_server_example",
+        "../third_party/mcp-cpp/build/examples/mcp_server_example",
+        "third_party/mcp-cpp/build/examples/Release/mcp_server_example",
     };
     std::error_code ec;
     for (const char* c : candidates)
@@ -117,7 +125,7 @@ int main() {
     CHECK(add != nullptr);
 
     if (add) {
-        auto r = add->execute(nlohmann::json{{"a", 17}, {"b", 25}});
+        auto r = add->execute(agtest::cap(), nlohmann::json{{"a", 17}, {"b", 25}}, agentty::tools::CallContext{});
         CHECK(r.has_value());
         if (r) {
             std::printf("  add(17,25) -> %s\n", r->text.c_str());
@@ -172,7 +180,7 @@ int main() {
     for (const auto& t : tools) if (t.name.value == "mcp_read_resource") read_res = &t;
     CHECK(read_res != nullptr);
     if (read_res) {
-        auto listing = read_res->execute(nlohmann::json::object());
+        auto listing = read_res->execute(agtest::cap(), nlohmann::json::object(), agentty::tools::CallContext{});
         CHECK(listing.has_value());
         if (listing) CHECK(listing->text.find("motd") != std::string::npos);
     }

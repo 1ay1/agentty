@@ -1,4 +1,5 @@
 #include "agentty/runtime/view/status_bar/token_stream_sparkline.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
 
 #include <algorithm>
 #include <chrono>
@@ -32,7 +33,7 @@ maya::TokenStreamSparkline::Config token_stream_sparkline_config(const Model& m)
     const bool is_streaming = m.s.is_streaming() && m.s.active();
 
     auto hist = ordered_rate_history(m.s);
-    auto now  = std::chrono::steady_clock::now();
+    auto now  = maya::anim_now();
     // Reach into the active ctx for the current sub-turn's live
     // counters; nullptr means "no active stream" → we'll fall back
     // to the historical sparkline.

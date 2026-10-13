@@ -27,9 +27,12 @@
 //       longer forces stream/login/diff to recompile.
 
 #include <chrono>
+#include <cstdint>
 #include <expected>
+#include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -66,7 +69,20 @@ struct ComposerCursorLeft {};
 struct ComposerCursorRight {};
 struct ComposerCursorHome {};
 struct ComposerCursorEnd {};
-struct ComposerPaste { std::string text; };
+struct ComposerPaste {
+    std::string text;
+    // Set when this paste already went through the image-path check (see
+    // ImagePathSniffed), so it is not sent round again.
+    bool path_checked = false;
+};
+// The worker looked at a pasted path. `path` is empty when it was not a
+// readable image; then the reducer pastes `text` as ordinary text.
+struct ImagePathSniffed {
+    std::string text;
+    std::string path;
+    std::string media_type;
+    std::string body;
+};
 // Fired ~1.2s after an escape-based clipboard read (OSC 5522 / OSC 52) was
 // emitted. If no paste reply arrived by then, the reducer surfaces an
 // ACTIONABLE diagnosis (which terminal, tmux, mosh, the exact env-var fix)
@@ -74,6 +90,8 @@ struct ComposerPaste { std::string text; };
 // lapsing and teaching the user nothing. `seq` matches the query that armed
 // it so a stale timeout never fires after a successful paste.
 struct ClipboardQueryTimeout { std::uint64_t seq = 0; };
+// The worker's answer to "why did that clipboard read go unanswered".
+struct ClipboardDiagnosed { std::string message; };
 // Recall queued messages back into the composer for editing. Bound to
 // Up-arrow when the composer is empty and queued messages exist.
 // Mirrors Claude Code's `Lc_` (binary offset 76303220): drains every
@@ -209,7 +227,15 @@ struct StreamThinkingDelta {
 // The reducer stashes it on the in-flight assistant Message so the follow-up
 // turn can replay it in `input[]` and preserve chain-of-thought across tool
 // rounds under store:false. Never rendered; wire-only.
-struct StreamReasoning { std::string encrypted; };
+// An opaque, ACCOUNT-SCOPED reasoning blob the backend asked us to replay on
+// the next turn. `site` records which host minted it (responses::Site::id).
+//
+// The pairing is the whole point: ciphertext from one backend sent to another
+// is a 400 that fails the entire request, not a field the server ignores
+// (openclaw#72602). Carrying the origin with the payload is what lets the
+// replay be decided rather than assumed — the two travel together or the
+// invariant is only a comment.
+struct StreamReasoning { std::string encrypted; std::string site; };
 // Mirrors Anthropic's message.usage shape. cache_* fields are non-zero only
 // when the request hit a cache_control breakpoint. Fields default to 0 so
 // callers that only care about input/output keep working.
@@ -238,6 +264,19 @@ enum class StopReason : std::uint8_t {
     ToolUse,        // model wants tool results before continuing
     MaxTokens,      // hit the output token cap mid-stream
     StopSequence,   // matched a configured stop_sequence
+    // Safety classifiers declined the request. Arrives as a NORMAL HTTP 200
+    // with a well-formed stream -- a thinking block, a handful of output
+    // tokens, and no content blocks at all. Nothing about the transport
+    // looks wrong, which is exactly why this needs its own value: folded
+    // into Unspecified it was "treat as a clean stream end", and a clean
+    // end with no content renders as an empty bubble. Observed live: a
+    // turn with out=4, no text, no tool calls, and no visible explanation.
+    Refusal,
+    // The response filled the model's context window (as opposed to the
+    // request's own max_tokens cap, which is MaxTokens). Same truncation
+    // semantics, different cause, and the fix the user needs differs:
+    // raising max_tokens cannot help here.
+    ContextExceeded,
     Unspecified,    // wire absent, empty, or unknown
 };
 
@@ -247,6 +286,9 @@ enum class StopReason : std::uint8_t {
         case StopReason::ToolUse:      return "tool_use";
         case StopReason::MaxTokens:    return "max_tokens";
         case StopReason::StopSequence: return "stop_sequence";
+        case StopReason::Refusal:      return "refusal";
+        case StopReason::ContextExceeded:
+            return "model_context_window_exceeded";
         case StopReason::Unspecified:  return "";
     }
     return "";
@@ -261,6 +303,13 @@ enum class StopReason : std::uint8_t {
     if (s == "tool_use")      return StopReason::ToolUse;
     if (s == "max_tokens")    return StopReason::MaxTokens;
     if (s == "stop_sequence") return StopReason::StopSequence;
+    if (s == "refusal")       return StopReason::Refusal;
+    if (s == "model_context_window_exceeded")
+        return StopReason::ContextExceeded;
+    // pause_turn: a server-tool sampling loop hit its iteration limit. We
+    // send no server tools, so it cannot arrive today; when it can, it needs
+    // RESUME semantics (send the assistant content back), not a stop. Left
+    // deliberately unmapped rather than given a value nothing implements.
     return StopReason::Unspecified;
 }
 
@@ -349,12 +398,21 @@ struct ToolExecOutput {
     // reducer stores them on ToolUse::Done so the wire renders them as image
     // blocks in this call's tool_result. Empty for text-only tools.
     std::vector<ImageContent> images;
+    // Which execution produced this result (ToolUse::Running::exec_seq).
+    // Tool ids are not unique across turns (gateways and our own synthetic
+    // ids restart at call_0), so a worker that outlives a cancel must not
+    // land its output on a new call that reuses the id. 0 = untagged.
+    std::uint64_t exec_seq = 0;
 };
 // Contains the FULL accumulated output, not a delta — the update handler can
 // assign unconditionally without maintaining append state. Coalesced at the
 // subprocess boundary (~100 ms) so a chatty command doesn't flood the event
 // queue with micro-updates.
-struct ToolExecProgress { ToolCallId id; std::string snapshot; };
+struct ToolExecProgress {
+    ToolCallId id;
+    std::string snapshot;
+    std::uint64_t exec_seq = 0;   // see ToolExecOutput::exec_seq
+};
 // Wall-clock watchdog for tool execution. Scheduled by kick_pending_tools
 // via Cmd::after when a non-subprocess tool transitions to Running. If the
 // tool has reached a terminal state by the time the check fires, this is
@@ -409,6 +467,16 @@ struct OpenModels {};
 // active provider's result isn't queued behind slower providers on the bounded
 // worker pool — the selected models refresh first, the rest trickle in.
 struct FusedRefreshOthers {};
+// Result of re-probing ONE model's live window on a local endpoint (see
+// cmd::probe_model_window). A llama.cpp router with one model resident at a
+// time only reports the loaded model's size, so the window is re-checked
+// after a switch and after each turn. `window` is 0 when the server couldn't
+// say (model not loaded yet); the reducer then keeps what it had.
+struct ModelWindowProbed {
+    std::string provider_id;
+    std::string model_id;
+    int         window = 0;
+};
 // ^L — force a full live refresh: mark EVERY authed provider's catalog stale
 // and refetch (active immediately, others deferred). The manual escape hatch
 // when a catalog is stale/failed and the user doesn't want to wait for the TTL
@@ -424,7 +492,7 @@ struct ModelsToggleFavorite {};
 // surface — there is no second picker.
 struct ModelsCycleEffort { int delta; };
 // Step the highlighted model's CONTEXT WINDOW override through a ladder of
-// common sizes (^W in the model picker), wrapping back to "auto".
+// common sizes, wrapping back to "auto".
 //
 // A cycle rather than a text prompt on purpose: the picker is a list with a
 // live filter, so a numeric entry mode would have to steal the keyboard from
@@ -433,13 +501,6 @@ struct ModelsCycleEffort { int delta; };
 // reversible without a separate clear action.
 struct ModelsCycleContext { int delta = +1; };
 struct ModelsToggleReasoning {};
-// Toggle whether the model's reasoning/thinking is SHOWN (^R). Flips the
-// persisted Settings.show_reasoning / Model.show_reasoning: renders the
-// reasoning block in the transcript for every provider AND asks Anthropic
-// for visible thinking (interleaved-thinking beta). Distinct from
-// ModelsToggleReasoning above, which flips a single model's effort
-// CAPABILITY override.
-struct ModelsToggleShowReasoning {};
 // ^/ — scope the browse/filter list to ONLY the provider of the currently
 // highlighted row (so you can drill into "just this provider's models").
 // Pressing it again when already scoped clears the scope (back to all
@@ -626,6 +687,35 @@ struct SmartModePaste { std::string text; };
 struct SmartModeAdvanced {};
 struct SmartModeClearSlot {};     // 'x' on a slot row: reset it to auto
 
+// ── Web Search (Settings → Web Search) ─────────────────────────
+// The web_search tool's policy: on/off, result count, ceiling, excluded
+// sites. One form pane, built from the settings registry's web_search.* rows;
+// every committed edit persists and is published to the tool layer as an
+// effect.
+//
+// ONE key message like Smart Mode and Retrieval: navigation, toggles and
+// text editing all come from the shared form layer.
+struct OpenWebSearch {};
+struct CloseWebSearch {};
+struct WebSearchKey { form::keys::Action action; };
+// Bracketed paste while the Web Search pane is open. The reducer lands it on
+// the focused text row (starting the edit, as typing does) and drops it
+// anywhere else -- an API key is the field pasting exists for.
+struct WebSearchPaste { std::string text; };
+// The API-key store is IO (a sealed file, and `secret-tool` when the OS
+// keystore is on), so the pane never touches it from the reducer: it is read
+// and written on a worker, and these carry the outcome back. None of them
+// carries a key. `gen` is the pane's keys_gen when the read started; a reply
+// to an older read (one that a store or a removal has since overtaken) is
+// dropped.
+struct WebSearchKeysRead {
+    std::uint64_t gen = 0;
+    // service id -> "stored" | "env: AGENTTY_WEB_SEARCH_KEY_..." | "" (none)
+    std::vector<std::pair<std::string, std::string>> origins;
+};
+struct WebSearchKeySaved   { std::string service; bool ok = true; };
+struct WebSearchKeyRemoved { std::string service; bool ok = true; };
+
 // ── Plugin editor (detail / add form) ──────────────────────────
 // Opened from the Plugins settings list: `e` on a server row → detail form
 // for THAT server; `a` → add form (kind-first: the kind choice rebuilds the
@@ -658,6 +748,43 @@ struct AppearanceThemeQuery { std::string text; };   // "" = backspace one
 struct AppearanceThemeCommit {};      // Enter: keep the highlighted scheme
 struct AppearanceThemeCancel {};      // Esc: restore the theme we came in on
 
+// ── Sandbox pane ─────────────────────────────────────────
+// What a command may touch: filesystem scope, network, syscall profile,
+// resource caps, and the trust-handoff policy.
+//
+// Unlike Appearance, this pane is NOT live. A boundary must not change under
+// a command that is already running, and a half-applied policy is a policy
+// nobody can reason about -- so edits accumulate in the form, the pane shows
+// the walls they WOULD produce (a compile, not a spawn), and SandboxSave
+// commits the whole config at once. That is also why there is a Save message
+// here and none in Appearance: a theme is judged by looking, a sandbox by
+// reading what it promises before you trust it.
+struct OpenSandbox {};
+struct CloseSandbox {};
+struct SandboxKey { form::keys::Action action; };
+// Recompile the preview from the current form. The reducer raises this after
+// any edit, so the wall report can never describe a config the rows no
+// longer say.
+struct SandboxRefreshPreview {};
+// Persist the form's config and install it for the rest of the session.
+struct SandboxSave {};
+
+// ── Path list editor ──────────────────────────────────────────
+//
+// The path rows ("Also readable", "Masked", allowed ports) were ONE text
+// field holding a comma-separated string. That is a serialisation format, not
+// an interface: you cannot see where one entry ends, a stray comma silently
+// changes the policy, and editing the third of four paths means cursoring
+// through the other three. For a security control whose whole job is being
+// legible, that is the wrong shape.
+//
+// So the row becomes a Pick that opens a real list: one entry per line, add
+// and remove as discrete acts. The parent form is untouched until the editor
+// commits, so Esc is a true cancel.
+struct SandboxEditList { std::string row_id; };   // open the editor for a row
+struct SandboxListKey  { form::keys::Action action; };
+struct SandboxListClose {};                       // commit back into the row
+
 // ── In-app login modal ───────────────────────────────────────────────────
 // Shown when the user starts agentty with no valid credentials, OR
 // triggered explicitly in-app to sign in or add an account.
@@ -684,6 +811,38 @@ struct HostProbed {
     int           model_count = 0;
     long          latency_ms = 0;
     std::string   error;
+    // The endpoint answered 401/403: the ADDRESS IS CORRECT, it just wants
+    // credentials. Distinct from every other failure, because the fix is
+    // "paste a key", not "fix the URL" — so the reducer sends the user to the
+    // key prompt instead of back to an address field that was already right.
+    // Without this, the most common paid-provider onboarding (type host, get
+    // 401) dumped you back into editing a URL you had typed correctly.
+    bool          needs_key = false;
+    // Did this host tell us a real context window, and if not, is that
+    // because we declined to ask?
+    //
+    // A local server is the only thing that knows its own RUNTIME window
+    // (llama.cpp's meta.n_ctx, LM Studio's loaded instance, Ollama's
+    // /api/ps) — no catalog can. When we get one, saying so at add time is
+    // the difference between trusting the number and wondering about it.
+    //
+    // When we DON'T, the reason matters. `probe_skipped` means the host
+    // did not look self-hosted, so the extra round-trips were withheld on
+    // purpose — which is correct for api.openai.com and wrong for the
+    // GPU box on someone's LAN reached by a public name. That is the one
+    // case worth offering a fix for, right where the user is looking.
+    int  window_tokens  = 0;      // 0 = none learned
+    bool probe_skipped  = false;  // true = host not classified self-hosted
+    // Set when a host at a PUBLIC-looking address answered a runtime route
+    // anyway — i.e. it is self-hosted despite not looking it.
+    //
+    // /props, /api/ps, loaded_instances and meta.n_ctx are not things a
+    // hosted API serves, so answering one is proof. Remembering the host
+    // here lets every later model refresh probe it too, which is the whole
+    // reason this would otherwise need a settings toggle: the server
+    // already told us what it is, so asking the user to confirm it would
+    // be asking them to repeat an answer we have.
+    std::string learned_self_hosted;   // "" = nothing learned
 };
 // Sign out of the ACTIVE provider: clear its on-disk credentials (Anthropic
 // credentials.json, or the Codex/ChatGPT token store), zero the live auth
@@ -723,7 +882,7 @@ struct LoginCursorLeft  {};
 struct LoginCursorRight {};
 struct LoginSubmit      {};
 // User pressed the "copy URL to clipboard" key while the OAuthCode
-// modal is up. The reducer issues a Cmd<Msg>::write_clipboard with
+// modal is up. The reducer issues a cmd::write_clipboard with
 // the active authorize URL, then surfaces a brief status toast so
 // the user has visual confirmation the keystroke registered.
 struct LoginCopyAuthUrl {};
@@ -741,6 +900,14 @@ struct LoginOpenBrowserAgain {};
 // `auth::TokenResult` so the reducer can distinguish ApiError /
 // Network / MissingToken without parsing strings.
 struct LoginExchanged   { agentty::auth::TokenResult result; };
+// The PKCE pair for an Anthropic OAuth login, minted by a Cmd (random bytes
+// are not something update can make). `error` set when the CSPRNG failed.
+struct LoginOAuthMinted {
+    agentty::auth::PkceVerifier verifier;
+    agentty::auth::OAuthState   state;
+    std::string                 authorize_url;
+    std::string                 error;
+};
 // The SSH/device flow dispatches this as soon as OpenAI allocates the
 // one-time code, while the same worker continues polling for approval.
 struct CodexDeviceCodeReady {
@@ -789,6 +956,16 @@ struct DeviceLoginDone {
 // leaves the queue intact so the user can retry through the in-app
 // login modal.
 struct TokenRefreshed   { agentty::auth::TokenResult result; };
+// cmd::refresh_oauth_if_due looked and the token was not near expiry (or not
+// refreshable). Clears the in-flight flag the reducer set when it asked.
+struct OAuthRefreshNotDue {};
+// The host re-read credential state (see LoadAuthView). `provider_keys` is
+// the key vault as it now stands: account ops write it on the host side, so
+// the reply carries it back into m.d.persisted.
+struct AuthViewLoaded {
+    agentty::auth::AuthView view;
+    std::map<std::string, std::string> provider_keys;
+};
 
 // Proactive pre-turn retrieval landed off-thread. Proactive RAG runs on the
 // submit path under a small wall-clock hedge so Enter never freezes (see
@@ -861,6 +1038,20 @@ struct RagEmbedTestDone {
     std::uint64_t gen = 0;
 };
 struct RagEmbedSave  {};                    // persist + live-apply
+// The stored API key for the pane's endpoint, read on a worker after open.
+struct RagEmbedKeyLoaded { std::string endpoint; std::string key; };
+// What the live retriever reported when the pane opened, read on a worker.
+// `gen` is the form's probe_gen then; a later edit or test supersedes it.
+struct RagEmbedStatusRead {
+    std::uint64_t gen = 0;
+    bool          ready = false;
+    bool          failed = false;
+    std::uint32_t dim = 0;
+    int           latency_ms = 0;
+    std::string   reason;
+};
+// The key write the save asked for; false when there was no secure store.
+struct RagEmbedKeySaved  { bool ok = true; };
 
 // ── Settings pickers (Ctrl+K → Plugins/Commands/Agents/Hooks) ──────
 // One shared list modal, parameterised by the config concern. Opening
@@ -885,9 +1076,52 @@ struct SettingsListPaste      { std::string text; }; // bracketed paste into the
 // the panel is a pure function of the Model (no plugin_model() at render
 // time). Mirrors the ThreadsLoaded{vec} pattern.
 struct PluginsUpdated         { mcp::PluginModel model; };
+
+// The result of a write to an mcp.json, reported back to the reducer that
+// asked for it.
+//
+// Reducers used to call tools::plugin::*() directly and branch on the return
+// value — a file read, a JSON rewrite and an atomic rename, all inside
+// update. Now a reducer returns cmd::edit_plugin(op), the write happens on a
+// worker, and this Msg carries the outcome back. Everything the reducer used
+// to do after a successful write (reload the plugin model, toast, close the
+// pane) happens when this arrives.
+//
+// `op` is echoed, not reconstructed, so the reply carries exactly what was
+// asked — the server name, the tool, the direction of a toggle — even if the
+// pane has since moved on.
+struct PluginEdited {
+    enum class Kind : std::uint8_t {
+        SetServerDisabled, SetToolEnabled, Approve, Remove, Add, Update,
+    };
+    enum class From : std::uint8_t { SettingsList, EditPane };
+    Kind        kind{};
+    From        from{};
+    std::string server;
+    std::string tool;          // SetToolEnabled only
+    bool        flag = false;  // SetServerDisabled: disabled; SetToolEnabled: enabled
+    bool        exit_commit = false;  // EditPane save: a field-exit, pane stays open
+    // Which config the edit pane was editing (project mcp.json vs the user
+    // one). Echoed so the reply can reopen the pane on the SAME scope, rather
+    // than reading it off whatever pane happens to be open when it lands.
+    bool        project = false;
+    // The outcome. `ok` folds approve_server's bool and EditResult::Ok into one
+    // answer; `already_exists` and `parse_error` are kept because the edit pane
+    // shows them inline on specific rows.
+    bool        ok = false;
+    bool        already_exists = false;
+    bool        parse_error    = false;
+};
 struct SettingsListBackspace  {};
 struct SettingsListSubmitInput{};              // Enter in add-mode → create
 struct SettingsListCancelInput{};              // Esc in add-mode → back to list
+// The add-mode create (a plugin into mcp.json, or a starter command/agent
+// file) ran as an effect; this is its answer.
+struct SettingsAddDone {
+    settings::Category concern{};
+    bool               ok = false;
+    std::string        message;
+};
 
 // ── Fork picker ──────────────────────────────────────────────
 // Branch the current thread into a FRESH one (near-zero context) and choose
@@ -900,6 +1134,13 @@ struct ForkMove  { int delta; };
 // Fork with the CURRENTLY-highlighted choice (the reducer reads the picker's
 // cursor). A leaf with no payload keeps the key handler from needing Model.
 struct ForkThread      {};
+// The worker wrote the parent's transcript (and let the read tool see it).
+// `path` is empty when the write failed. The fork is built on this reply.
+struct ForkTranscriptWritten {
+    std::string        parent_id;
+    fork_panel::Choice choice = fork_panel::Choice::RagOff;
+    std::string        path;
+};
 
 // ── Diff review ──────────────────────────────────────────────────────────
 struct OpenDiffReview {};
@@ -913,7 +1154,13 @@ struct DiffReviewPrevFile {};
 struct AcceptHunk {};
 struct RejectHunk {};
 struct AcceptAllChanges {};
-struct RejectAllChanges {};
+// Revert every pending change on disk. `confirmed` carries the INTENT past
+// the reducer's two-press guard: a key chord sends it false (first press
+// arms, second executes), while an explicitly chosen palette row — already a
+// multi-step open → select → Enter — sends it true and executes at once.
+// Keeping that on the message means no caller has to pre-stage guard state
+// in the Model and then re-enter update().
+struct RejectAllChanges { bool confirmed = false; };
 
 // ── Meta / session-level ─────────────────────────────────────────────────
 // CompactContext, Tick, Quit, NoOp, ClearStatus, CycleProfile,
@@ -968,10 +1215,18 @@ struct CheckpointDiffLoaded {
     int  insertions     = 0;
     int  deletions      = 0;
 };
+// The startup probe answered: is the workspace a git repo? Checkpoints read
+// this from the Model instead of asking git on the reducer thread.
+struct RepoProbed { bool in_repo = false; };
+// The on-disk library (skills, approvals, commands, hooks), read on a worker.
+struct LibraryLoaded { Library library; };
 // Terminal window focus changed (?1004 CSI I/O via maya Sub::on_focus).
 // Gates the hardware caret: an unfocused agentty parks + hides the real
 // cursor instead of leaving a blinking bar in an inactive pane.
 struct TerminalFocus { bool focused = true; };
+// The terminal's size, from the host: once at attach, then on every SIGWINCH.
+// The reducers' row math reads it from the Model instead of asking the tty.
+struct TerminalResized { int cols = 0; int rows = 0; };
 // Ctrl+U on the transcript — flip the newest retrieved-context card between
 // its compact one-line-per-source form and a full-passage-text expansion.
 // Carries the target message id so the reducer mutates exactly that card
@@ -982,7 +1237,7 @@ struct Quit {};
 struct NoOp {};
 // User-triggered "drop the renderer's cell cache and repaint from
 // scratch". Bound to Ctrl-L (universal terminal redraw convention).
-// Dispatches `Cmd::force_redraw()`, which mirrors the SIGWINCH
+// Dispatches `cmd::force_redraw()`, which mirrors the SIGWINCH
 // coherence-collapse — no scrollback wipe, just an in-place rebuild
 // of `prev_cells` from the current canvas. Doubles as a debug hatch
 // when something visibly desyncs.
@@ -1002,6 +1257,21 @@ struct UpdateCheckDone {
     bool        update_available = false;
     std::string latest;   // "0.3.1"
     std::string url;      // release page (used in the toast)
+};
+// Download progress during an in-TUI update (worker → UI).
+//
+// perform_update() has always taken a progress callback and `agentty update`
+// from a shell has always used it — it prints a live percentage. The TUI
+// passed no callback at all, so a ~15 MB download sat behind one frozen
+// "⬆ downloading…" line for the whole transfer. On a slow link that is
+// indistinguishable from a hang, and the one thing a user must not think
+// about a self-update is that it has hung.
+//
+// `total` is 0 when the server sent no Content-Length; the reducer shows
+// bytes-so-far rather than a percentage in that case.
+struct UpdateProgress {
+    std::size_t got   = 0;
+    std::size_t total = 0;   // 0 = unknown
 };
 // In-TUI update finished (worker → UI). Success shows the restart toast;
 // failure shows the error + a hint to run `agentty update` from a shell.
@@ -1038,7 +1308,8 @@ using ComposerMsg = std::variant<
     ComposerUndo, ComposerRedo,
     ComposerHistoryPrev, ComposerHistoryNext,
     ComposerImagePasteFromClipboard,
-    ComposerPaste, ClipboardQueryTimeout, ComposerRecallQueued,
+    ComposerPaste, ImagePathSniffed, ClipboardQueryTimeout, ClipboardDiagnosed,
+    ComposerRecallQueued,
     ComposerQueuePeekPrev, ComposerQueuePeekNext, ComposerQueuePopLast>;
 
 using StreamMsg = std::variant<
@@ -1075,11 +1346,10 @@ using ModelsMsg = std::variant<
     OpenModels, CloseModels, ModelsMove, ModelsJump,
     ModelsSelect, ModelsToggleFavorite,
     ModelsCycleEffort, ModelsCycleContext, ModelsToggleReasoning,
-    ModelsToggleShowReasoning,
     ModelsScopeProvider,
     ModelsFilterInput, ModelsFilterBackspace,
     ModelsLoaded, FusedCatalogLoaded, SwitchToPreviousModel, FusedRefreshOthers,
-    ModelsRefresh>;
+    ModelsRefresh, ModelWindowProbed>;
 
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,
@@ -1105,12 +1375,13 @@ using CodeBlockMsg = std::variant<
 
 using CheckpointMsg = std::variant<
     OpenCheckpoints, CloseCheckpoints, CheckpointsMove,
-    CheckpointsSelect, CheckpointDiffLoaded>;
+    CheckpointsSelect, CheckpointDiffLoaded, RepoProbed, LibraryLoaded>;
 
 using RagMsg = std::variant<
     OpenRag, CloseRag, RagAdvanced,
     RagEmbedClose, RagEmbedKey, RagEmbedPaste,
-    RagEmbedTest, RagEmbedTestDone, RagEmbedSave>;
+    RagEmbedTest, RagEmbedTestDone, RagEmbedSave,
+    RagEmbedKeyLoaded, RagEmbedKeySaved, RagEmbedStatusRead>;
 
 // Its own domain, not a corner of RagMsg: the stats viewer shares no state
 // and no reducer with retrieval, and folding unrelated panels into one
@@ -1123,11 +1394,12 @@ using SettingsListMsg = std::variant<
     OpenSettingsList, CloseSettingsList, SettingsListMove,
     SettingsListActivate, SettingsListAddStart, SettingsListRemove,
     SettingsListEditOpen,
-    SettingsListChar, SettingsListPaste, PluginsUpdated, SettingsListBackspace,
-    SettingsListSubmitInput, SettingsListCancelInput>;
+    SettingsListChar, SettingsListPaste, PluginsUpdated, PluginEdited,
+    SettingsListBackspace, SettingsListSubmitInput, SettingsListCancelInput,
+    SettingsAddDone>;
 
 using ForkMsg = std::variant<
-    OpenFork, CloseFork, ForkMove, ForkThread>;
+    OpenFork, CloseFork, ForkMove, ForkThread, ForkTranscriptWritten>;
 
 using TodoMsg = std::variant<
     OpenTodoModal, CloseTodoModal>;
@@ -1138,8 +1410,9 @@ using LoginMsg = std::variant<
     LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
     LoginCopyAuthUrl, LoginCopyCode, LoginOpenBrowserAgain,
-    LoginExchanged, CodexDeviceCodeReady, CodexLoginDone,
-    DeviceCodeReady, DeviceLoginDone, TokenRefreshed, HostProbed>;
+    LoginExchanged, LoginOAuthMinted, CodexDeviceCodeReady, CodexLoginDone,
+    DeviceCodeReady, DeviceLoginDone, TokenRefreshed, OAuthRefreshNotDue,
+    AuthViewLoaded, HostProbed>;
 
 using DiffReviewMsg = std::variant<
     OpenDiffReview, CloseDiffReview, DiffReviewMove, DiffReviewScroll,
@@ -1150,23 +1423,36 @@ using SmartModeMsg = std::variant<
     OpenSmartMode, CloseSmartMode, SmartModeKey, SmartModePaste,
     SmartModeAdvanced, SmartModeClearSlot>;
 
+// ── Web Search (web_search policy and services) ─────────────
+using WebSearchMsg = std::variant<
+    OpenWebSearch, CloseWebSearch, WebSearchKey, WebSearchPaste,
+    WebSearchKeysRead, WebSearchKeySaved, WebSearchKeyRemoved>;
+
 // ── Plugin editor (detail / add form) ──────────────────────────
 using PluginEditMsg = std::variant<
     OpenPluginEdit, ClosePluginEdit, PluginEditKey, PluginEditPaste>;
 
 // ── Appearance (theme / density / motion) ──────────────────────
+// ── Appearance (theme / density / motion) ─────────────
 using AppearanceMsg = std::variant<
     OpenAppearance, CloseAppearance, AppearanceKey, AppearancePickTheme,
     AppearanceThemeMove, AppearanceThemeQuery, AppearanceThemeCommit,
     AppearanceThemeCancel>;
+
+// ── Sandbox (filesystem / network / syscalls / limits) ─────
+using SandboxMsg = std::variant<
+    OpenSandbox, CloseSandbox, SandboxKey, SandboxRefreshPreview,
+    SandboxSave,
+    SandboxEditList, SandboxListKey, SandboxListClose>;
 
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, ToggleChangesStrip,
     RestoreCheckpoint, CheckpointRestored,
     ToggleRetrievedExpanded,
     TerminalFocus,
+    TerminalResized,
     Tick, Quit, NoOp, ClearStatus, RedrawScreen,
-    UpdateCheckDone, UpdateApplied, GitSignalsRefreshed>;
+    UpdateCheckDone, UpdateProgress, UpdateApplied, GitSignalsRefreshed>;
 
 } // namespace msg
 
@@ -1177,7 +1463,7 @@ using MetaMsg = std::variant<
 // implicit:
 //
 //   Msg m = ComposerEnter{};       //  -> Msg{ComposerMsg{ComposerEnter{}}}
-//   Cmd<Msg>::after(d, RetryStream{}); // same path
+//   Cmd::after(d, RetryStream{}); // same path
 //
 // std::visit on a Msg dispatches on domain, not leaf — see update.cpp.
 // ============================================================================
@@ -1202,8 +1488,10 @@ using Msg = std::variant<
     msg::LoginMsg,
     msg::DiffReviewMsg,
     msg::SmartModeMsg,
+    msg::WebSearchMsg,
     msg::PluginEditMsg,
     msg::AppearanceMsg,
+    msg::SandboxMsg,
     msg::MetaMsg
 >;
 
@@ -1249,8 +1537,10 @@ consteval int leaf_domain_count() {
          + int{in_variant_v<L, msg::LoginMsg>}
          + int{in_variant_v<L, msg::DiffReviewMsg>}
          + int{in_variant_v<L, msg::SmartModeMsg>}
+         + int{in_variant_v<L, msg::WebSearchMsg>}
          + int{in_variant_v<L, msg::PluginEditMsg>}
          + int{in_variant_v<L, msg::AppearanceMsg>}
+         + int{in_variant_v<L, msg::SandboxMsg>}
          + int{in_variant_v<L, msg::ToolOutputMsg>}
          + int{in_variant_v<L, msg::MetaMsg>};
 }
@@ -1306,12 +1596,14 @@ static_assert(leaf_domain_count<AcceptAllChanges>()          == 1,
               "AcceptAllChanges must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<Tick>()                      == 1,
               "Tick must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenWebSearch>()             == 1,
+              "OpenWebSearch must belong to exactly one Msg domain");
 
 // Pin the top-level Msg domain count too — if someone adds a new domain
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 23,
+static_assert(std::variant_size_v<Msg> == 25,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

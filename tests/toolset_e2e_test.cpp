@@ -37,6 +37,7 @@
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agtest_cap.hpp"
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -58,7 +59,8 @@ tools::ExecResult run(std::string_view name, json args) {
     const auto* td = tools::find(name);
     if (!td) return std::unexpected(tools::ToolError::unknown(
         "tool not in registry: " + std::string{name}));
-    return td->execute(args);
+    return tool::DynamicDispatch::execute_with(agtest::cap(), td, name, args,
+                                               agentty::tools::CallContext{});
 }
 
 std::string text_of(const tools::ExecResult& r) {
@@ -68,6 +70,15 @@ std::string text_of(const tools::ExecResult& r) {
 bool has(const tools::ExecResult& r, std::string_view needle) {
     return r && r->text.find(needle) != std::string::npos;
 }
+
+// The exec tools run through the platform shell: /bin/sh on POSIX, cmd.exe
+// on Windows. A case that exercises shell SEMANTICS picks the spelling for
+// the shell that will actually run it; the assertions stay identical.
+#if defined(_WIN32)
+constexpr const char* posix_or_cmd(const char*, const char* cmd) { return cmd; }
+#else
+constexpr const char* posix_or_cmd(const char* posix, const char*) { return posix; }
+#endif
 
 void write_file(const fs::path& p, std::string_view body) {
     fs::create_directories(p.parent_path());
@@ -107,8 +118,7 @@ int main() {
     ::unsetenv("AGENTTY_MCP_CONFIG");   // no external MCP servers
     ::unsetenv("AGENTTY_DOCS_DIR");
 
-    tools::util::set_workspace_root(root);
-    tools::wire_mcp_runtime("off");   // no bwrap wrapping — CI portability
+    tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
 
     // ── Registry completeness: every catalog tool must be advertised. ──
     {
@@ -135,9 +145,9 @@ int main() {
     {
         tools::ToolDef throwing;
         throwing.name.value = "throwing_test_tool";
-        throwing.execute = [](const json&) -> tools::ExecResult { throw 7; };
+        throwing.execute = [](const maya::unlocked&, const json&, const tools::CallContext&) -> tools::ExecResult { throw 7; };
         auto guarded = tool::DynamicDispatch::execute_with(
-            &throwing, throwing.name.value, json::object());
+            agtest::cap(), &throwing, throwing.name.value, json::object(), tools::CallContext{});
         check(!guarded && guarded.error().kind == tools::ErrorKind::Unknown,
               "dispatch: contains non-standard tool exceptions");
     }
@@ -181,16 +191,31 @@ int main() {
               "write nudge: full rewrite stays silent");
     }
 
-    // ── read ─────────────────────────────────────────────────────────
+    // ── read ───────────────────────────────────────────────────────────────
     {
         auto r = run("read", {{"path", file.string()}});
         check(has(r, "beta"), "read: returns content");
     }
     {
+        // #92: an unchanged re-read used to answer ONLY "File unchanged
+        // since last read ... refer to that instead" -- a pointer to bytes
+        // the model may no longer have (compaction, wire read-collapse,
+        // subagents). A weak model obeyed by reading AGAIN, got the same
+        // pointer, and looped. Every repeat must now carry the file itself.
+        for (int i = 0; i < 3; ++i) {
+            auto again = run("read", {{"path", file.string()}});
+            check(has(again, "beta") && has(again, "gamma"),
+                  "read #92: repeat " + std::to_string(i + 1) + " carries the bytes");
+            check(!has(again, "refer to that instead"),
+                  "read #92: repeat " + std::to_string(i + 1) + " is not a bare pointer");
+        }
+    }
+    {
         // Reading a 0-byte file gives an explicit heads-up, not a blank result
         // the model could mistake for a failed read.
         auto empty = root / "empty_e2e.txt";
-        run("write", {{"file_path", empty.string()}, {"content", ""}});
+        auto made = run("write", {{"file_path", empty.string()}, {"content", ""}});
+        check(made.has_value(), "read: 0-byte fixture written");
         auto r = run("read", {{"path", empty.string()}});
         check(has(r, "empty"), "read: 0-byte file is flagged as empty");
     }
@@ -292,6 +317,11 @@ int main() {
         write_file(disposable, "temporary\n");
         auto removed = run("remove", {{"path", disposable.string()}});
         check(removed.has_value() && !fs::exists(disposable), "remove: deletes a file");
+        // #91: removing something already gone is the desired state, not a
+        // failure a weak model reads as "blocked" and gives up on.
+        auto again = run("remove", {{"path", disposable.string()}});
+        check(again.has_value() && has(again, "does not exist"),
+              "remove: an already-absent path succeeds and says so");
         auto root_remove = run("remove", {{"path", root.string()}, {"recursive", true}});
         check(!root_remove.has_value(), "remove: refuses workspace root");
     }
@@ -349,6 +379,37 @@ int main() {
                               {"cd", root.string()}});
         check(has(r, "e2e-bash-ok"), "shell: runs and captures stdout");
     }
+    // ── shell guard: destructive commands hidden inside substitutions,
+    //    `bash -c`, and wrappers are refused before anything runs ────────
+    for (const char* evil : {"echo hi && x=$(rm -rf /)", "bash -c 'ls && rm -rf ~'",
+                             "sudo env A=1 rm -rf /", "find ~ -exec rm -rf {} +"}) {
+        auto r = run("shell", {{"command", evil}, {"cd", root.string()}});
+        check(!r.has_value(), std::string{"shell guard refuses: "} + evil);
+    }
+    {
+        // …and ordinary work is untouched.
+        auto r = run("shell", {{"command", posix_or_cmd("python3 -c 'print(40+2)'",
+                                                      "python -c \"print(40+2)\"")},
+                               {"cd", root.string()}});
+        check(has(r, "42"), "shell guard allows `python3 -c`");
+    }
+    // ── shell detour: the command still runs, and a pure file-inspection
+    //    call gets a tip naming the native tool + the exact parameter read
+    //    off the command (never a rewrite, never run in its place) ──────────
+    {
+        auto r = run("shell", {{"command", "sed -n '1,2p' code.cpp"},
+                              {"cd", root.string()}});
+        check(has(r, "`read` with `start_line: 1, end_line: 2`"),
+              "shell tip: `sed -n 1,2p` → read with the exact range");
+        auto g = run("shell", {{"command", "grep -rn answer . | head -5"},
+                              {"cd", root.string()}});
+        check(has(g, "`grep`") && has(g, "`limit:5`"),
+              "shell tip: `grep -rn … | head -5` → grep with limit:5");
+        check(has(g, "answer"), "shell tip: the shell still ran and its output is there");
+        auto b = run("shell", {{"command", "echo build-step"},
+                              {"cd", root.string()}});
+        check(!has(b, "tip:"), "shell tip: no tip for non-inspection work");
+    }
     // ── legacy `bash` name canonicalises to the `shell` tool ────────────────
     // Models call the exec tool `bash` (training prior) before internalising
     // our `shell` schema; tools::find aliases it so the first-turn call works
@@ -367,17 +428,20 @@ int main() {
     }
     // ── bash failure feedback: exit-code decode + error-line digest ──────────
     {
-        // 127 = command not found — the decode hint must appear.
+        // 127 = command not found (cmd.exe: 9009) — the decode hint must appear.
         auto r = run("shell", {{"command", "this_binary_does_not_exist_e2e"},
                               {"cd", root.string()}});
-        check(has(r, "127"), "bash: reports the numeric exit code");
+        // cmd.exe reports 9009 at top level but 1 when /S /C wraps a chain,
+        // so on Windows the decoded hint is the contract, not the number.
+        check(has(r, posix_or_cmd("127", "exit code")), "bash: reports the numeric exit code");
         check(has(r, "not found"), "bash: decodes exit 127 as command-not-found");
     }
     {
         // A failing command whose output contains an error: line should get a
         // leading digest so the model sees the cause before the full dump.
-        auto r = run("shell", {{"command",
-                               "echo 'warming up'; echo 'error: something broke'; exit 2"},
+        auto r = run("shell", {{"command", posix_or_cmd(
+                                   "echo 'warming up'; echo 'error: something broke'; exit 2",
+                                   "echo warming up& echo error: something broke& exit /b 2")},
                               {"cd", root.string()}});
         check(has(r, "exit code 2"), "bash: reports non-zero exit");
         check(has(r, "Key error line"), "bash: surfaces an error digest on failure");
@@ -391,11 +455,15 @@ int main() {
     // and commit to scrollback — the "r r" corruption report), SGR text
     // preserved, and the CR progress line collapsed to its final state.
     {
+        // cmd can't emit raw ESC/CR bytes by itself; PowerShell's `e and `r
+        // produce the identical byte stream.
         auto r = run("shell",
-            {{"command",
+            {{"command", posix_or_cmd(
               "printf 'p 1\\r'; printf 'p 2\\n';"
               " printf '\\033[1;32mgreen-e2e\\033[0m\\n';"
-              " printf '\\033[3;24r'; printf '\\033]0;title\\007after-e2e\\n'"},
+              " printf '\\033[3;24r'; printf '\\033]0;title\\007after-e2e\\n'",
+              "powershell -NoProfile -c \"$e=[char]27; $o=[char]7; $c=[char]13; $n=[char]10; "
+              "[Console]::Out.Write('p 1'+$c+'p 2'+$n+$e+'[1;32mgreen-e2e'+$e+'[0m'+$n+$e+'[3;24r'+$e+']0;title'+$o+'after-e2e'+$n)\"")},
              {"cd", root.string()}});
         const std::string body = text_of(r);
         bool clean = true;
@@ -407,26 +475,35 @@ int main() {
         check(has(r, "green-e2e"), "bash: SGR-wrapped text survives the strip");
         check(has(r, "after-e2e"), "bash: text after DECSTBM/OSC survives");
         check(has(r, "p 2"), "bash: CR progress collapses to final state");
-        check(body.find("[3;24r") == std::string::npos
-                  && body.find(";24r") == std::string::npos,
+        // The header echoes the COMMAND; on Windows that text literally
+        // contains "`e[3;24r". Judge only what the program printed.
+        const auto out_at = body.find("green-e2e");
+        const std::string printed =
+            out_at == std::string::npos ? body : body.substr(body.rfind('\n', out_at) + 1);
+        check(printed.find("[3;24r") == std::string::npos
+                  && printed.find(";24r") == std::string::npos,
               "bash: no stray CSI parameter bytes (the 'r r' glyphs)");
     }
 
     // ── focused tests + persistent process sessions ─────────────────────
     {
-        auto tested = run("test", {{"command", "printf native-test-ok"}});
+        auto tested = run("test", {{"command", posix_or_cmd("printf native-test-ok",
+                                                            "echo native-test-ok")}});
         check(has(tested, "PASS") && has(tested, "native-test-ok"),
               "test: runs an explicit focused command with pass status");
 
         // A failing run surfaces WHICH test failed as a leading digest so the
         // model doesn't have to scan the whole runner log.
-        auto failed = run("test", {{"command",
-            "printf '[  FAILED  ] Suite.CaseX\\n'; exit 1"}});
+        auto failed = run("test", {{"command", posix_or_cmd(
+            "printf '[  FAILED  ] Suite.CaseX\\n'; exit 1",
+            "echo [  FAILED  ] Suite.CaseX& exit /b 1")}});
         check(has(failed, "FAIL"), "test: failing run reports FAIL status");
         check(has(failed, "Failing test") && has(failed, "Suite.CaseX"),
               "test: failing run digests the failing test name");
 
-        auto started = run("process_start", {{"command", "printf 'process-first\\n'; sleep 1; printf 'process-second\\n'; sleep 5"},
+        auto started = run("process_start", {{"command", posix_or_cmd(
+                "printf 'process-first\\n'; sleep 1; printf 'process-second\\n'; sleep 5",
+                "echo process-first& ping -n 2 127.0.0.1 >nul& echo process-second& ping -n 6 127.0.0.1 >nul")},
                                               {"cwd", root.string()}});
         check(started.has_value() && has(started, "proc-"), "process_start: returns session id");
         if (started) {
@@ -475,6 +552,27 @@ int main() {
                                       && !has(stopped, "process-second"),
                   "process_stop: does not replay output delivered by polls");
         }
+
+        // A session that exited and was fully drained is dropped by the next
+        // process_start. Its destructor takes the session's own lock, so it
+        // must die outside the tool-state lock (this aborted with
+        // lock_order_error).
+        auto quick = run("process_start", {{"command", "sleep 0.3; printf quick-done"}});
+        if (quick) {
+            const auto m = quick->text.find("proc-");
+            const std::string qid = quick->text.substr(m, quick->text.find(' ', m) - m);
+            for (int i = 0; i < 20; ++i) {
+                auto r = run("process_poll", {{"id", qid}, {"wait_ms", 300}});
+                if (has(r, "exited")) break;
+            }
+        }
+        auto next = run("process_start", {{"command", "sleep 5"}});
+        check(next.has_value() && has(next, "proc-"),
+              "process_start: reaping a drained session does not abort");
+        if (next) {
+            const auto m = next->text.find("proc-");
+            (void)run("process_stop", {{"id", next->text.substr(m, next->text.find(' ', m) - m)}});
+        }
     }
 
     // ── workspace-root boundary: fs tools refuse escapes ─────────────────
@@ -496,11 +594,11 @@ int main() {
         // Project memory must still anchor to the process cwd.
         const auto prior_cwd = fs::current_path();
         fs::current_path(root);
-        tools::util::set_workspace_root("/");
+        tools::util::set_workspace_root(::agentty::IoAccess::grant(), "/");
         check(tools::memory::path_for(tools::memory::Scope::Project)
                   == root / ".agentty" / "memory.jsonl",
               "remember: project scope uses cwd under --workspace /");
-        tools::util::set_workspace_root(root);
+        tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
         fs::current_path(prior_cwd);
 
         const auto* remember_def = tools::find("remember");
@@ -745,11 +843,11 @@ int main() {
         // check from inside the sandbox root, restored after.
         auto prev_cwd = fs::current_path();
         fs::current_path(root);
-        check(sub::agent_origin("helper") == "project",
+        check(sub::agent_origin(agentty::IoAccess::grant(), "helper") == "project",
               "agent provenance: a project-shipped agent is 'project'");
-        check(sub::agent_origin("explorer") == "builtin",
+        check(sub::agent_origin(agentty::IoAccess::grant(), "explorer") == "builtin",
               "agent provenance: a built-in agent is 'builtin' (no tag)");
-        check(sub::agent_origin("nonexistent") == "builtin",
+        check(sub::agent_origin(agentty::IoAccess::grant(), "nonexistent") == "builtin",
               "agent provenance: an unknown name is 'builtin' (safe default)");
         fs::current_path(prev_cwd);
     }
@@ -804,11 +902,11 @@ int main() {
 
         // A narrowed workspace inside a parent repository must not let Git
         // rediscover that parent and expose/commit sibling files.
-        tools::util::set_workspace_root(root / "src");
+        tools::util::set_workspace_root(::agentty::IoAccess::grant(), root / "src");
         auto escaped = run("git_status", {{"path", (root / "src").string()}});
         check(!escaped && escaped.error().kind == tools::ErrorKind::OutOfWorkspace,
               "git_status: refuses repository rooted above workspace");
-        tools::util::set_workspace_root(root);
+        tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
 
         write_file(root / "src" / "hello.txt", "changed content\n");
 

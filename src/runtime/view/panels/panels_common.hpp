@@ -113,24 +113,16 @@ inline constexpr int kViewportH = 14;
 // wordmark. Clamping the list so the WHOLE picker fits avoids the overflow.
 inline constexpr int kPickerChromeRows = 7;
 
+// The terminal size during a view build: view() installs a RenderContext
+// from the Model's size (TerminalResized) before any panel is built, so
+// these read that, never the tty. Outside a view (a test calling a panel
+// builder directly) there is no context: fall back to COLUMNS/LINES, which
+// is how those tests say what width they render at.
 [[nodiscard]] inline int panel_terminal_rows() {
-    const auto sz = maya::platform::query_terminal_size(
-        maya::platform::stdout_handle());
-    // Prefer the real ioctl height. When it's unavailable (no tty: a pipe, a
-    // test harness) ws_col is 0 and the query returns maya's hardcoded
-    // {80,24} fallback — not the real viewport. In that no-tty case only,
-    // fall back to the LINES env var so the clamp uses the true height. A
-    // valid ioctl always wins over LINES (which may be stale).
-    int term_rows = sz.height.value;
-    const bool have_tty = maya::platform::is_tty(
-        maya::platform::stdout_handle());
-    if (!have_tty) {
-        if (const char* lines_env = std::getenv("LINES")) {
-            if (const int n = std::atoi(lines_env); n > 0) term_rows = n;
-        }
-    }
-    if (term_rows <= 0) term_rows = 40;
-    return term_rows;
+    if (maya::have_render_context()) return maya::available_height();
+    if (const char* lines_env = std::getenv("LINES"))   // launch-env: only outside a view (a test calling a panel builder)
+        if (const int n = std::atoi(lines_env); n > 0) return n;
+    return 40;
 }
 
 [[nodiscard]] inline int panel_viewport_h() {
@@ -146,21 +138,12 @@ inline constexpr int kPickerChromeRows = 7;
     return std::clamp(avail, 4, agentty::ui_prefs::panel_rows());
 }
 
-// Terminal WIDTH, resolved the same way panel_terminal_rows() resolves
-// height: real ioctl first, COLUMNS only when there is no tty.
+// Terminal WIDTH, resolved the same way panel_terminal_rows() resolves height.
 [[nodiscard]] inline int panel_terminal_cols() {
-    const auto sz = maya::platform::query_terminal_size(
-        maya::platform::stdout_handle());
-    int cols = sz.width.value;
-    const bool have_tty = maya::platform::is_tty(
-        maya::platform::stdout_handle());
-    if (!have_tty) {
-        if (const char* c = std::getenv("COLUMNS")) {
-            if (const int n = std::atoi(c); n > 0) cols = n;
-        }
-    }
-    if (cols <= 0) cols = 80;
-    return cols;
+    if (maya::have_render_context()) return maya::available_width();
+    if (const char* c = std::getenv("COLUMNS"))   // launch-env: only outside a view (a test calling a panel builder)
+        if (const int n = std::atoi(c); n > 0) return n;
+    return 80;
 }
 
 // How many columns the provider badge may occupy. The badge is the grouping
@@ -207,15 +190,6 @@ inline constexpr int kPickerChromeRows = 7;
     return muted;
 }
 
-// Resolve the currently-active provider id so a picker can mark the active
-// row. Anthropic (the default) when kind==Anthropic, else the endpoint label
-// / ACP agent id. Shared by the provider picker and the Smart Mode overlay.
-[[nodiscard]] inline std::string active_provider_id() {
-    const auto& sel = provider::active();
-    if (sel.kind == provider::Kind::OpenAI) return sel.openai_endpoint.label;
-    if (sel.kind == provider::Kind::ExternalAcp) return sel.acp_agent_id;
-    return std::string{provider::default_provider_id()};
-}
 
 // A section is one labelled band of a grouped picker list. `hue` tints the
 // label; `count` (when > 0) renders dim + right-pinned so a band can carry a

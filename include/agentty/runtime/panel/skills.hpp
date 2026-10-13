@@ -35,6 +35,7 @@
 // panel's: opening it scans, closing it frees, and a user who never opens
 // it pays nothing.
 
+#include "agentty/runtime/library.hpp"
 #include "agentty/scope/scope.hpp"
 #include "agentty/tool/skills.hpp"
 
@@ -131,6 +132,6 @@ struct Open {
 // Scan every discovered skill into rows: resolve trust, screen the body,
 // sanitise author text. Pure with respect to the Model — it reads the
 // skills store and the approvals file, and returns.
-[[nodiscard]] Open scan();
+[[nodiscard]] Open scan(const Library& lib);
 
 } // namespace agentty::skills_panel

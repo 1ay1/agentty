@@ -52,13 +52,21 @@ Cold start under 1 ms; keystroke-to-pixel about 1 ms. No Node, no Python, no npm
 Claude, GPT, Groq, OpenRouter, Ollama, or any OpenAI-compatible endpoint. Switch live with `^P`.
 
 ### 🛡️ Sandboxed by default
-Every shell call runs inside bwrap (Linux) / sandbox-exec (macOS). File tools refuse paths outside your workspace.
+Every shell call runs inside an OS-enforced sandbox — claybin on both Linux
+(seccomp + landlock + cgroup2, with bubblewrap as the fallback) and macOS
+(seatbelt + rlimits, with sandbox-exec as the fallback).
+Credential files are masked whether or not you configure anything, and file
+tools refuse paths outside your workspace. Deep dive:
+[`docs/SANDBOX.md`](docs/SANDBOX.md).
 
 </td>
 <td width="50%">
 
 ### 🌐 Air-gapped mode
 Run on a box with no internet. Your laptop relays the bytes over SSH with TLS pinned end-to-end.
+
+### 🤖 Scripts and CI
+`agentty run "fix the failing test"` runs one prompt with tools and prints just the answer. `--json`, clear exit codes, `--timeout`, `--events jsonl` (tool calls and reasoning), and `--read-only --no-network` for untrusted code. [Docs ↗](https://agentty.org/docs/cli#agentty-run)
 
 ### 🔧 Full tool suite
 read · write · edit · bash · grep · glob · git · web · search_docs · search_code · task — each with a purpose-built widget.
@@ -246,24 +254,26 @@ Pasting images **over SSH** needs one terminal setting — see [Clipboard & Imag
 **Linux**
 
 ```bash
-# Debian / Ubuntu
-curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty_amd64.deb
-sudo dpkg -i agentty_amd64.deb
+# Debian / Ubuntu  (V = the release you want, e.g. 0.9.5)
+curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty_${V}_amd64.deb
+sudo dpkg -i agentty_${V}_amd64.deb
 
 # Fedora / RHEL / CentOS
-sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.rpm
+sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-${V}-1.x86_64.rpm
 
 # openSUSE
-sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.rpm
+sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-${V}-1.x86_64.rpm
 
 # Arch (AUR)
 yay -S agentty-bin   # prebuilt static release
 yay -S agentty-git   # build HEAD from source, dynamically linked
 
-# Alpine
-curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.apk
-sudo apk add --allow-untrusted agentty-x86_64.apk
+# Alpine — no .apk yet; use the install script above
 ```
+
+Package filenames carry the version, so `latest/download/` needs it spelled
+out — see the [releases page](https://github.com/1ay1/agentty/releases/latest)
+for the exact names, or use the install script, which resolves it for you.
 
 **macOS**
 
@@ -310,7 +320,7 @@ curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
 **From source** (needs a C++26 toolchain — GCC 14+ / recent Clang / MSVC)
 
 ```bash
-git clone --recursive git@github.com:1ay1/agentty.git
+git clone --recursive https://github.com/1ay1/agentty.git
 cd agentty && cmake -B build && cmake --build build -j
 ```
 

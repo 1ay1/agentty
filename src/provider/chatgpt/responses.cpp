@@ -19,6 +19,7 @@
 #include "agentty/provider/chatgpt/responses.hpp"
 #include "agentty/provider/responses/responses.hpp"
 
+#include <maya/runtime.hpp>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -190,8 +191,8 @@ std::string session_id_for(std::string_view session_key) {
 // ── The ChatGPT Site ──────────────────────────────────────────────────────
 
 std::expected<responses::Target, std::string>
-chatgpt_authorize(provider::Request& req) {
-    auto creds = codex_fresh_credentials();   // auto-refreshes if stale
+chatgpt_authorize(const maya::unlocked& cap, provider::Request& req) {
+    auto creds = codex_fresh_credentials(cap);   // auto-refreshes if stale
     if (!creds || creds->access_token.empty())
         return std::unexpected(
             std::string{"not signed in to ChatGPT — run `agentty login` and "
@@ -246,33 +247,32 @@ bool responses_available() {
     // on the file's (mtime, size): a stat is ~1µs and invalidates correctly
     // on sign-in, sign-out, and cross-process refreshes alike.
     namespace fs = std::filesystem;
-    static std::mutex mu;
-    static bool cached = false;
-    static fs::file_time_type cached_mtime{};
-    static std::uintmax_t cached_size = static_cast<std::uintmax_t>(-1);
-    std::scoped_lock lk(mu);
+    struct Cache {
+        bool           ok = false;
+        std::int64_t   mtime = 0;   // file_time_type ticks: a Sendable key
+        std::uintmax_t size = static_cast<std::uintmax_t>(-1);
+    };
+    static maya::snapshot<Cache> cache;
     std::error_code ec;
     const auto p = codex_credentials_path();
-    const auto mtime = fs::last_write_time(p, ec);
+    const std::int64_t mtime = fs::last_write_time(p, ec).time_since_epoch().count();
     const auto size  = ec ? 0 : fs::file_size(p, ec);
     if (ec) {   // missing/unreadable → signed out; remember that cheaply
-        cached = false;
-        cached_mtime = {};
-        cached_size = static_cast<std::uintmax_t>(-1);
+        cache.store(Cache{});
         return false;
     }
-    if (mtime != cached_mtime || size != cached_size) {
-        auto c = load_codex_credentials();
-        cached = c && !c->access_token.empty();
-        cached_mtime = mtime;
-        cached_size  = size;
-    }
-    return cached;
+    if (auto hit = cache.load(); hit->mtime == mtime && hit->size == size)
+        return hit->ok;
+    // Changed: unseal + parse, then publish.
+    auto c = load_codex_credentials();
+    const bool ok = c && !c->access_token.empty();
+    cache.store(Cache{ok, mtime, size});
+    return ok;
 }
 
 // ── Live model catalog ────────────────────────────────────────────────────
-std::vector<CatalogModel> fetch_models() {
-    auto creds = codex_fresh_credentials();
+std::vector<CatalogModel> fetch_models(Io io, const maya::unlocked& cap) {
+    auto creds = codex_fresh_credentials(cap);
     if (!creds || creds->access_token.empty()) return {};
 
     http::Request hr;
@@ -299,7 +299,7 @@ std::vector<CatalogModel> fetch_models() {
     // (parity with Anthropic's list_models).
     hr.max_body_bytes = 1ull * 1024 * 1024;
 
-    auto result = http::default_client().send(hr, tos);
+    auto result = http::default_client(io).send(hr, tos);
     if (!result || result->status < 200 || result->status >= 300) return {};
 
     std::vector<CatalogModel> out;
@@ -328,9 +328,10 @@ std::vector<CatalogModel> fetch_models() {
     return out;
 }
 
-provider::StreamResult stream_responses(provider::Request req,
+provider::StreamResult stream_responses(const maya::unlocked& cap,
+                                        provider::Request req,
                                         provider::EventSink sink) {
-    return responses::stream(kChatGptSite, std::move(req), std::move(sink));
+    return responses::stream(cap, kChatGptSite, std::move(req), std::move(sink));
 }
 
 // ── Test seams ────────────────────────────────────────────────────────────
@@ -339,7 +340,12 @@ provider::StreamResult stream_responses(provider::Request req,
 // the existing expectations about store/include still hold.
 nlohmann::json build_body_for_test(const provider::Request& req) {
     provider::Request r = req;
-    json body = responses::build_body(r);
+    // Build FOR this site, exactly as stream() does. The seam claims to
+    // return the body as sent, so it has to pass the same site id —
+    // otherwise encrypted-reasoning replay is gated off here and on
+    // nowhere else, and the test would be asserting a body no request
+    // ever produces.
+    json body = responses::build_body(r, kChatGptSite.id);
     if (r.model.empty() || r.model == "chatgpt-default")
         body["model"] = "gpt-5-codex";
     chatgpt_decorate_body(body, r);
@@ -354,8 +360,9 @@ std::string format_http_error_for_test(int status, std::string_view body) {
     return format_http_error(status, body);
 }
 
-std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines) {
-    return responses::parse_sse_for_test(sse_data_lines);
+std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines,
+                                    bool show_reasoning) {
+    return responses::parse_sse_for_test(sse_data_lines, show_reasoning);
 }
 
 } // namespace agentty::provider::chatgpt

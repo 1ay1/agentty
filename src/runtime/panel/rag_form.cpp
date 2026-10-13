@@ -45,17 +45,20 @@ using form::text_of;
 // is the same failure as leaving it in an env var. This pane is Retrieval, so
 // it walks the Retrieval rows.
 void add_all_registry_rows(form::Builder& b, const store::Settings& settings,
+                           const agentty::settings::registry::EnvSnapshot& env,
                            bool advanced) {
     namespace reg = agentty::settings::registry;
     auto last_group = reg::Group::Sources;
     bool first = true;
-    reg::add_rows(b, settings.rag, reg::Owner::Rag, advanced, first, last_group);
+    reg::add_rows(b, settings.rag, env, reg::Owner::Rag, advanced, first, last_group);
 }
 
 } // namespace
 
 form::Form build_form(const eb::EmbedConfig& c, store::RagMode mode,
-                      const store::Settings& settings, bool advanced) {
+                      const store::Settings& settings,
+                      const agentty::settings::registry::EnvSnapshot& env,
+                      bool advanced) {
     form::Builder b{" Retrieval "};
     b.subtitle(eb::describe(c));
 
@@ -102,13 +105,13 @@ form::Form build_form(const eb::EmbedConfig& c, store::RagMode mode,
         b.lock("auto-detected");
         b.action(kFieldTest, "Test connection",
                  "check whether Auto can reach a local Ollama right now");
-        add_all_registry_rows(b, settings, advanced);
+        add_all_registry_rows(b, settings, env, advanced);
         return b.build();
     }
     if (c.backend == eb::Backend::Disabled) {
         b.text(kFieldModel, "Retrieval", "keyword only (BM25)");
         b.lock("embeddings off");
-        add_all_registry_rows(b, settings, advanced);
+        add_all_registry_rows(b, settings, env, advanced);
         return b.build();
     }
 
@@ -150,7 +153,7 @@ form::Form build_form(const eb::EmbedConfig& c, store::RagMode mode,
     b.action(kFieldTest, "Test connection",
              "embed a probe string and measure the vector");
 
-    add_all_registry_rows(b, settings, advanced);
+    add_all_registry_rows(b, settings, env, advanced);
     return b.build();
 }
 

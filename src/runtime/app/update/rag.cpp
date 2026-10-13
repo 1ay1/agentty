@@ -13,6 +13,7 @@
 
 #include <maya/core/overload.hpp>
 
+#include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/panel/rag.hpp"
 #include "agentty/rag/embed_secret.hpp"
 #include "agentty/tool/mcp_tools_backends.hpp"
@@ -24,7 +25,6 @@ namespace agentty::app::detail {
 
 namespace rs = agentty::rag_settings;
 namespace eb = agentty::rag::embed;
-using maya::Cmd;
 using maya::overload;
 
 namespace {
@@ -32,17 +32,29 @@ namespace {
 // Persist + live-apply the chosen mode. `proactive` is derived from the mode
 // (Off ⇒ no pre-turn injection; the First-turn gate is enforced in modal.cpp).
 //
-// Both halves are non-blocking BY CONSTRUCTION, not by care taken here:
-// `save_settings` is write-behind at the Deps seam, and `rag_apply_settings`
-// does its probe + rebuild on a worker. A reducer cannot stall a frame on
-// either even if it wanted to.
-void commit_mode(store::RagMode mode) {
-    auto s = deps().load_settings();
-    s.rag.configured = true;
-    s.rag.mode = mode;
-    s.rag.proactive = (mode != store::RagMode::Off);
-    deps().save_settings(s);
-    tools::rag_apply_settings(s.rag);
+// Both halves are EFFECTS, and both are returned, not performed: the save is
+// write-behind at the Deps seam, and the retriever re-sync is
+// cmd::apply_rag_settings, which the kernel runs on a worker. This function
+// only edits the Model and says what should happen next.
+//
+// Persist the retrieval mode.
+//
+// Edits the rag block in `m.d.persisted`, then saves through persist_settings
+// rather than handing the record to the seam directly: only `ui` and `rag`
+// are edited in place on the record, while `effort`, `model_id`, `profile`,
+// `smart` and the active provider are SEPARATE Domain fields. A raw save
+// would write those as they stood at init() and revert everything changed
+// since — switching retrieval mode would undo a model switch.
+// `configured = true` is the first-run latch — once the user has chosen a
+// mode, the onboarding prompt stops asking.
+[[nodiscard]] Cmd commit_mode(Model& m, store::RagMode mode) {
+    auto& rag = m.d.persisted.rag;
+    rag.configured = true;
+    rag.mode       = mode;
+    rag.proactive  = (mode != store::RagMode::Off);
+    const auto applied = rag;   // persist_settings may rewrite the record
+    auto save = persist_settings(m);
+    return Cmd::batch(std::move(save), cmd::apply_rag_settings(applied));
 }
 
 // Project an EmbedConfig onto the persisted settings shape. The API key is
@@ -59,11 +71,12 @@ void write_embed_into(store::RagConfig& r, const eb::EmbedConfig& c) {
     r.embed_dim            = c.dim;
 }
 
-// Load the live embed config for the form's initial state.
-[[nodiscard]] eb::EmbedConfig current_embed_config() {
-    eb::EmbedConfig c;
-    eb::apply_env(c);
-    const auto s = deps().load_settings();
+// The embed config for the form's initial state: the launch env's defaults
+// under the persisted record. The API key is not here; it is read from the
+// secure store by an effect after the pane opens (RagEmbedKeyLoaded).
+[[nodiscard]] eb::EmbedConfig current_embed_config(const Model::Env& env,
+                                                   const store::Settings& s) {
+    eb::EmbedConfig c = env.embed_defaults;
     if (!s.rag.embed_backend.empty()) {
         c.backend = eb::backend_from_id(s.rag.embed_backend);
         if (!s.rag.embed_model.empty()) c.model = s.rag.embed_model;
@@ -75,8 +88,6 @@ void write_embed_into(store::RagConfig& r, const eb::EmbedConfig& c) {
         c.tokenizer_path = s.rag.embed_tokenizer_path;
         c.dim            = s.rag.embed_dim;
     }
-    if (eb::needs_api_key(c.backend))
-        c.api_key = eb::load_key(eb::endpoint_key(c));
     return c;
 }
 
@@ -84,13 +95,14 @@ void write_embed_into(store::RagConfig& r, const eb::EmbedConfig& c) {
 // cursor on the same logical field. `advanced` must be carried through every
 // rebuild: dropping it would silently collapse the pane back to the basic rows
 // the next time any field changed the row set.
-void resync_rows(rs::EmbedForm& f, store::RagMode mode, bool advanced) {
+void resync_rows(rs::EmbedForm& f, const store::Settings& settings,
+                 const Model::Env& env, store::RagMode mode, bool advanced) {
     const auto* focused = f.form.focused();
     const std::string focused_id = focused ? focused->id : std::string{};
     f.cfg = rs::config_from_form(f.cfg, f.form);
 
     const bool was_dirty = f.form.dirty;
-    f.form = rs::build_form(f.cfg, mode, deps().load_settings(), advanced);
+    f.form = rs::build_form(f.cfg, mode, settings, env.settings, advanced);
     f.form.dirty = was_dirty;
     for (std::size_t i = 0; i < f.form.fields.size(); ++i)
         if (f.form.fields[i].id == focused_id) {
@@ -164,17 +176,13 @@ void refresh_status(rs::EmbedForm& f) {
 // Build the pane's form for `mode`, seeded with what the live retriever
 // already knows so opening it immediately shows whether embeddings work
 // rather than an empty "untested" state.
-[[nodiscard]] rs::EmbedForm make_embed_form(store::RagMode mode,
+[[nodiscard]] rs::EmbedForm make_embed_form(const Model::Env& env,
+                                            const store::Settings& settings,
+                                            store::RagMode mode,
                                             bool advanced = false) {
     rs::EmbedForm f;
-    f.cfg  = current_embed_config();
-    f.form = rs::build_form(f.cfg, mode, deps().load_settings(), advanced);
-    const auto st = tools::rag_embed_status();
-    using S = tools::RagEmbedStatus::State;
-    if (st.state == S::Ready)
-        f.probe = rs::EmbedForm::Ok{st.dim, st.latency_ms};
-    else if (st.state == S::Unavailable)
-        f.probe = rs::EmbedForm::Failed{st.reason};
+    f.cfg  = current_embed_config(env, settings);
+    f.form = rs::build_form(f.cfg, mode, settings, env.settings, advanced);
     refresh_status(f);
     return f;
 }
@@ -186,9 +194,9 @@ void refresh_status(rs::EmbedForm& f) {
 
 } // namespace
 
-Step rag_settings_update(Model m, msg::RagMsg rm) {
+Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
     return std::visit(overload{
-        [&](OpenRag) -> Step {
+        [&](OpenRag) -> Cmd {
             // ONE pane. The overlay used to open a three-row mode list, with
             // the embedder settings hidden behind a second keypress that
             // nothing advertised. Mode and embedder are two halves of one
@@ -200,21 +208,32 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             // every key and answers none of them, so the app looked frozen.
             // An overlay must never be representable in a state where it owns
             // the keyboard but cannot act on it.
-            const auto s = deps().load_settings();
-            const auto mode = s.rag.configured ? s.rag.mode : store::RagMode::On;
+            const auto& st = m.d.persisted;
+            const auto mode = st.rag.configured ? st.rag.mode : store::RagMode::On;
             m.ui.panel.descend(
-                pn::Rag{{mode, mode, make_embed_form(mode)}});
-            return {std::move(m), Cmd<Msg>::none()};
+                pn::Rag{{mode, mode, make_embed_form(m.env, m.d.persisted, mode)}});
+            // What the live retriever already knows, read on a worker (it is
+            // shared with tool threads) and folded in by RagEmbedStatusRead.
+            Cmd status = cmd::read_rag_embed_status(m.ui.panel.get<pn::Rag>()->embed.probe_gen);
+            // The key lives in the secure store, which may mean spawning
+            // secret-tool: read it on a worker.
+            const auto& cfg = m.ui.panel.get<pn::Rag>()->embed.cfg;
+            if (!eb::needs_api_key(cfg.backend)) return status;
+            return Cmd::batch(std::move(status), Cmd::task_isolated(
+                [](maya::Sink<Msg> out, std::stop_token, std::string slot) {
+                    std::string key = eb::load_key(slot);
+                    out.send(Msg{RagEmbedKeyLoaded{std::move(slot), std::move(key)}});
+                }, eb::endpoint_key(cfg)));
         },
-        [&](CloseRag) -> Step {
+        [&](CloseRag) -> Cmd {
             // Esc unwinds ONE level: the parent snapshot (palette or settings
             // list, full state intact) or the thread when there is none.
             // (Selecting a mode, below, commits and drops to the thread —
             // that's "done", not "back".)
             ascend(m);
-            return {std::move(m), Cmd<Msg>::none()};
+            return Cmd::none();
         },
-        [&](RagAdvanced) -> Step {
+        [&](RagAdvanced) -> Cmd {
             // Reveal/hide the Tier::Advanced rows. The form is rebuilt because
             // the row SET changes; the cursor is kept where it was so the
             // toggle does not also move the selection out from under the user.
@@ -222,16 +241,16 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
                 o->advanced = !o->advanced;
                 const int cursor = o->embed.form.cursor;
                 o->embed.form = rs::build_form(o->embed.cfg, o->cursor,
-                                               deps().load_settings(),
+                                               m.d.persisted, m.env.settings,
                                                o->advanced);
                 // Clamp: hiding rows can leave the cursor past the end.
                 const int n = static_cast<int>(o->embed.form.fields.size());
                 o->embed.form.cursor = n > 0 ? std::min(cursor, n - 1) : 0;
             }
-            return {std::move(m), Cmd<Msg>::none()};
+            return Cmd::none();
         },
         // ── Embeddings rows ─────────────────────────────────────────
-        [&](RagEmbedClose) -> Step {
+        [&](RagEmbedClose) -> Cmd {
             // Esc unwinds one level at a time (menu → field → pane); the form
             // layer owns that ordering so every pane behaves identically.
             //
@@ -241,17 +260,17 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             // have escaped it.
             if (auto* o = m.ui.panel.get<pn::Rag>())
                 if (!form::escape(o->embed.form))
-                    return {std::move(m), Cmd<Msg>::none()};   // unwound a level
-            return agentty::app::update(std::move(m), Msg{CloseRag{}});
+                    return Cmd::none();   // unwound a level
+            return rag_settings_update(m, msg::RagMsg{CloseRag{}});
         },
 
         // Every navigation/editing key arrives here. The shared reducer does
         // the work; this arm only handles what is genuinely pane-specific:
         // a backend change alters WHICH rows exist, and firing the Action row
         // means "probe".
-        [&](RagEmbedKey& e) -> Step {
+        [&](RagEmbedKey& e) -> Cmd {
             auto* f = form_of(m);
-            if (!f) return {std::move(m), Cmd<Msg>::none()};
+            if (!f) return Cmd::none();
 
             const auto* before = f->form.focused();
             const bool on_backend = before && before->id == rs::kFieldBackend;
@@ -259,6 +278,7 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
 
             const auto applied = form::keys::apply(f->form, e.action);
 
+            Cmd mode_save = Cmd::none();
             if (applied.changed) {
                 // The mode row commits immediately — it is a policy switch with
                 // nothing to validate and no probe to invalidate, so making the
@@ -267,14 +287,14 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
                     if (auto* o = m.ui.panel.get<pn::Rag>()) {
                         o->cursor = rs::mode_from_form(f->form, o->cursor);
                         o->active = o->cursor;
-                        commit_mode(o->cursor);
+                        mode_save = commit_mode(m, o->cursor);
                     }
                 } else {
                     invalidate_probe(*f);
                     if (on_backend) {
                         auto* o = m.ui.panel.get<pn::Rag>();
                         const auto mode = o ? o->cursor : store::RagMode::On;
-                        resync_rows(*f, mode, o && o->advanced);
+                        resync_rows(*f, m.d.persisted, m.env, mode, o && o->advanced);
                     } else {
                         sync_cfg(*f);
                     }
@@ -283,74 +303,77 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             refresh_status(*f);
 
             if (applied.fired)
-                return {std::move(m),
-                        Cmd<Msg>::after(std::chrono::milliseconds{0}, Msg{RagEmbedTest{}})};
+                return Cmd::batch(
+                    std::move(mode_save),
+                    Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedTest{}}));
             // Leaving an edited field IS the save (commit-on-exit — the
             // form-layer contract; there is no ^S). RagEmbedSave validates
             // first, so a bad half-config surfaces as the probe's Failed
             // note rather than a write.
             if (applied.left_field)
-                return {std::move(m),
-                        Cmd<Msg>::after(std::chrono::milliseconds{0}, Msg{RagEmbedSave{}})};
+                return Cmd::batch(
+                    std::move(mode_save),
+                    Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedSave{}}));
             if (applied.close)
-                return {std::move(m),
-                        Cmd<Msg>::after(std::chrono::milliseconds{0}, Msg{RagEmbedClose{}})};
-            return {std::move(m), Cmd<Msg>::none()};
+                return Cmd::batch(
+                    std::move(mode_save),
+                    Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedClose{}}));
+            return mode_save;
         },
 
-        [&](RagEmbedPaste& e) -> Step {
+        [&](RagEmbedPaste& e) -> Cmd {
             auto* f = form_of(m);
-            if (!f) return {std::move(m), Cmd<Msg>::none()};
+            if (!f) return Cmd::none();
             // SSOT guard + dirty live in paste_into; only the pane-specific
             // consequence (a changed field invalidates the probe) stays here.
             if (form::paste_into(f->form, e.text)) {
                 invalidate_probe(*f);
                 refresh_status(*f);
             }
-            return {std::move(m), Cmd<Msg>::none()};
+            return Cmd::none();
         },
 
         // Run the probe on a worker: it dials a network endpoint (or loads a
         // model file) and must never block the UI thread.
-        [&](RagEmbedTest) -> Step {
+        [&](RagEmbedTest) -> Cmd {
             auto* f = form_of(m);
-            if (!f) return {std::move(m), Cmd<Msg>::none()};
+            if (!f) return Cmd::none();
             sync_cfg(*f);
             if (auto v = eb::validate(f->cfg); auto* bad = std::get_if<eb::Invalid>(&v)) {
                 f->probe = rs::EmbedForm::Failed{bad->why};
-                return {std::move(m), Cmd<Msg>::none()};
+                return Cmd::none();
             }
             f->probe = rs::EmbedForm::Testing{};
             const std::uint64_t gen = ++f->probe_gen;
 
-            store::RagConfig probe_cfg = deps().load_settings().rag;
+            store::RagConfig probe_cfg = m.d.persisted.rag;
             write_embed_into(probe_cfg, f->cfg);
             std::string key = f->cfg.api_key;
             // task_isolated: the probe dials a network endpoint or memory-maps
             // a model file, either of which can block for seconds. Keeping it
             // off the shared BG pool means a wedged endpoint cannot starve
             // other background work.
-            return {std::move(m),
-                    Cmd<Msg>::task_isolated(
-                        [probe_cfg = std::move(probe_cfg), key = std::move(key),
-                         gen]
-                        (std::function<void(Msg)> dispatch) {
+            return Cmd::task_isolated(
+                        [](maya::Sink<Msg> out, std::stop_token,
+                           store::RagConfig probe_cfg, std::string key,
+                           std::uint64_t gen) {
                             const auto r = tools::rag_probe_embedder(probe_cfg, key);
-                            dispatch(Msg{RagEmbedTestDone{r.ok, r.dim,
+                            out.send(Msg{RagEmbedTestDone{r.ok, r.dim,
                                                           r.latency_ms, r.error,
                                                           gen}});
-                        })};
+                        },
+                        std::move(probe_cfg), std::move(key), gen);
         },
-        [&](RagEmbedTestDone& e) -> Step {
+        [&](RagEmbedTestDone& e) -> Cmd {
             auto* f = form_of(m);
-            if (!f) return {std::move(m), Cmd<Msg>::none()};
+            if (!f) return Cmd::none();
             // STALENESS GATE (same shape as login's attempt_id): only the
             // completion of the LATEST launch may land. An edit or a re-test
             // bumped probe_gen, making this answer about a config that no
             // longer exists — adopting its dim / Ok would verify bytes the
             // probe never saw.
             if (e.gen != f->probe_gen)
-                return {std::move(m), Cmd<Msg>::none()};
+                return Cmd::none();
             if (e.ok) {
                 // Adopt the MEASURED dimension. This is the only place `dim`
                 // is ever set: a user-supplied value would be silently
@@ -361,39 +384,81 @@ Step rag_settings_update(Model m, msg::RagMsg rm) {
             } else {
                 f->probe = rs::EmbedForm::Failed{e.error.empty() ? "probe failed" : e.error};
             }
-            return {std::move(m), Cmd<Msg>::none()};
+            return Cmd::none();
         },
-        [&](RagEmbedSave) -> Step {
+        [&](RagEmbedSave) -> Cmd {
             auto* f = form_of(m);
-            if (!f) return {std::move(m), Cmd<Msg>::none()};
+            if (!f) return Cmd::none();
             sync_cfg(*f);
             if (auto v = eb::validate(f->cfg); auto* bad = std::get_if<eb::Invalid>(&v)) {
                 f->probe = rs::EmbedForm::Failed{bad->why};
-                return {std::move(m), Cmd<Msg>::none()};
+                return Cmd::none();
             }
 
             // The credential goes to the keystore (or a sealed file), keyed by
-            // endpoint — never into settings.json.
-            std::string note;
+            // endpoint — never into settings.json. Written on a worker; a
+            // failure comes back as RagEmbedKeySaved{false}.
+            Cmd store_key = Cmd::none();
             if (eb::needs_api_key(f->cfg.backend)) {
-                const auto slot = eb::endpoint_key(f->cfg);
-                if (!eb::store_key(slot, f->cfg.api_key) && !f->cfg.api_key.empty())
-                    note = " (key not saved: no secure store)";
+                store_key = Cmd::task_isolated(
+                    [](maya::Sink<Msg> out, std::stop_token, std::string slot, std::string key) {
+                        const bool ok = eb::store_key(slot, key) || key.empty();
+                        out.send(Msg{RagEmbedKeySaved{ok}});
+                    }, eb::endpoint_key(f->cfg), f->cfg.api_key);
             }
 
-            auto s = deps().load_settings();
-            s.rag.configured = true;
-            write_embed_into(s.rag, f->cfg);
+            // Edit the record the Model holds, then save it. The read this
+            // replaced (`auto s = deps().load_settings()`) existed only
+            // because the Model had no Settings to patch.
+            m.d.persisted.rag.configured = true;
+            write_embed_into(m.d.persisted.rag, f->cfg);
             // The pipeline knobs, read back through the same table that
             // generated their rows.
-            rs::apply_form_to_settings(f->form, s);
-            deps().save_settings(s);
-            tools::rag_apply_settings(s.rag);
+            rs::apply_form_to_settings(f->form, m.d.persisted);
+            // Same reason as commit_mode: save through persist_settings so
+            // the scattered Domain fields reach the record first.
+            auto save = persist_settings(m);
 
             const std::string label = eb::describe(f->cfg);
-            return {std::move(m),
-                    set_status_toast(m, "Embeddings: " + label + note,
-                                     std::chrono::seconds{4})};
+            return Cmd::batch(
+                std::move(save),
+                std::move(store_key),
+                cmd::apply_rag_settings(m.d.persisted.rag),
+                set_status_toast(m, "Embeddings: " + label,
+                                 std::chrono::seconds{4}));
+        },
+        [&](RagEmbedKeyLoaded& e) -> Cmd {
+            // Only if the pane is still on the endpoint the key was read for
+            // and the user has not edited it meanwhile. A stored key wins
+            // over the env's, as it always has.
+            auto* f = form_of(m);
+            if (!f || f->form.dirty || e.key.empty() || eb::endpoint_key(f->cfg) != e.endpoint)
+                return Cmd::none();
+            f->cfg.api_key = std::move(e.key);
+            auto* o = m.ui.panel.get<pn::Rag>();
+            const int cursor = f->form.cursor;
+            f->form = rs::build_form(f->cfg, o ? o->cursor : store::RagMode::On,
+                                     m.d.persisted, m.env.settings, o && o->advanced);
+            f->form.cursor = cursor;
+            refresh_status(*f);
+            return Cmd::none();
+        },
+        [&](RagEmbedKeySaved& e) -> Cmd {
+            if (e.ok) return Cmd::none();
+            return set_status_toast(m, "Embeddings: key not saved (no secure store)",
+                                    std::chrono::seconds{4});
+        },
+        [&](RagEmbedStatusRead& e) -> Cmd {
+            // Only into the form it was read for, and only if nothing newer
+            // (an edit, a test) has replaced the untested state since.
+            auto* f = form_of(m);
+            if (!f || f->probe_gen != e.gen
+                || !std::holds_alternative<rs::EmbedForm::Idle>(f->probe))
+                return Cmd::none();
+            if (e.ready)       f->probe = rs::EmbedForm::Ok{e.dim, e.latency_ms};
+            else if (e.failed) f->probe = rs::EmbedForm::Failed{std::move(e.reason)};
+            refresh_status(*f);
+            return Cmd::none();
         },
     }, rm);
 }

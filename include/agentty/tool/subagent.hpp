@@ -8,13 +8,21 @@
 // without a default model), the tool returns a clear "unavailable"
 // error instead of crashing.
 
+#include <chrono>
+#include <cstddef>
 #include <functional>
+#include <memory>
+#include <stop_token>
+#include <optional>
 #include <string>
+
+#include "agentty/util/io.hpp"
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/smart_mode.hpp"
 #include "agentty/provider/provider.hpp"
+#include "agentty/util/sendable.hpp"
 
 namespace agentty::tools::subagent {
 
@@ -40,9 +48,31 @@ struct Config {
     // hardcoding the Anthropic transport — previously `task` failed on
     // every non-Anthropic provider (wrong wire, wrong auth). Null ⇒ the
     // runner falls back to the Anthropic transport (old behaviour, keeps
-    // tests that install only auth+model working).
-    std::function<provider::StreamResult(provider::Request,
+    // tests that install only auth+model working). Runs on the subagent's
+    // worker, which holds no lock: it gets that worker's `unlocked`.
+    std::function<provider::StreamResult(const maya::unlocked&,
+                                         provider::Request,
                                          provider::EventSink)> stream;
+
+    // The same dispatch, but to a NAMED provider instead of the active one.
+    //
+    // `stream` above closes over provider::active() at call time, which is
+    // right for a subagent that runs where the parent runs — and makes a
+    // cross-provider role inexpressible. A Smart Mode slot pinned on another
+    // endpoint had to be dropped for exactly that reason (docs/design/
+    // smart-mode.md §9 called this "per-role auth threading").
+    //
+    // Separate seam rather than a defaulted argument on `stream`, because
+    // the two have different failure modes: dispatching to the active
+    // provider cannot fail to find one, and dispatching to a named provider
+    // can (signed out, removed, misspelled). A caller that does not install
+    // this gets the old behaviour — the role falls back to the active
+    // provider's own cheapest capable model, never a 404. Runs on the
+    // subagent's worker: it gets that worker's `unlocked`.
+    std::function<provider::StreamResult(const maya::unlocked&,
+                                         const std::string& provider_id,
+                                         provider::Request,
+                                         provider::EventSink)> stream_to;
 
     // Smart Mode config, mirrored from the Model so the subagent runner can
     // resolve a worker's model by its ROLE (Layer 3b) when
@@ -65,28 +95,28 @@ void install(Config cfg);
 // logout, account switching, or provider switching changes the runtime auth.
 // Empty is valid for local and native-OAuth providers whose transports resolve
 // credentials themselves.
-void set_auth(auth::AuthHeader auth);
+void set_auth(Io, auth::AuthHeader auth);
 
 // Update just the model the subagent loop uses, without disturbing auth
 // or the installed flag. Called when the user switches models mid-session
 // (model picker) so subagents track the live model instead of the stale
 // startup default. No-op if the config was never installed.
-void set_model(std::string model);
+void set_model(Io, std::string model);
 
 // Update the provider's available-models list the router picks cheap roles
 // from. Called alongside set_model whenever the model list is (re)loaded or
 // the provider changes, so routing always reflects the live provider.
-void set_candidates(std::vector<ModelInfo> candidates);
+void set_candidates(Io, std::vector<ModelInfo> candidates);
 
 // Update the Smart Mode role config the subagent router honours (Layer 3b).
 // Called alongside set_candidates whenever Smart Mode or the model list
 // changes. No-op if the config was never installed.
-void set_smart(smart::RoleConfig smart);
+void set_smart(Io, smart::RoleConfig smart);
 
 // Update the provider the parent turn runs on, so pinned slots stay scoped to
 // the endpoint that can actually serve them. Pushed alongside set_smart /
 // set_candidates whenever the active provider changes.
-void set_provider(std::string provider);
+void set_provider(Io, std::string provider);
 
 // Snapshot the installed config. `installed == false` until install() runs.
 [[nodiscard]] Config current();
@@ -139,13 +169,72 @@ inline constexpr int kMaxTurnsWrite    = 80;
 static_assert(kMaxTurnsReadOnly <= kMaxTurns);
 static_assert(kMaxTurnsWrite    <= kMaxTurns);
 
-// Process-wide current nesting depth, incremented while a subagent runs.
-// Read by the `task` tool to enforce kMaxDepth. Thread-safe via atomic;
-// subagents run on the parent tool's worker thread (run_tool is
-// task_isolated), so each nesting level is on its own thread.
-[[nodiscard]] int current_depth() noexcept;
-void push_depth() noexcept;
-void pop_depth() noexcept;
+// ── Run deadline, inherited across nesting ────────────────────────────
+//
+// The wall-clock ceiling for one subagent run. It exists because kMaxTurns
+// bounds COMPLETIONS, not time: a backend that keeps a stream technically
+// alive without finishing it is healthy to every layer below.
+//
+// A NESTED run takes the min of its own budget and whatever is left of the
+// run above it, so the ceiling holds for the whole tree rather than per
+// level. The depth and the inherited deadline travel with the tool call
+// (tools::CallContext::depth / deadline), not on the thread.
+using RunClock    = std::chrono::steady_clock;
+using RunDeadline = std::optional<RunClock::time_point>;
+
+
+// ── Running-run registry, for a bounded shutdown ──────────────────────
+//
+// A subagent runs on a Cmd::task_isolated thread, and jaal DETACHES those:
+// kernel/pool.hpp says outright that isolated threads are "asked to stop but
+// never waited for". The ask does now arrive (run_tool's cancellation probe
+// reads its stop_token), but nothing waits for the answer — so main() can
+// return while a subagent is still inside its provider stream, and that
+// stream holds the provider objects BY REFERENCE off main's stack.
+//
+// Zed does not have this problem because a subagent there is an owned
+// `Entity<Thread>` in a `running_subagents` list, and cancelling the parent
+// turn awaits each one (`turn.cancel()` returns a `Task<()>`). We cannot
+// adopt the ownership model without rewriting the Cmd layer, but we can
+// adopt the REGISTRY: every live run publishes a cancel flag plus a
+// "finished" latch, teardown trips them all and waits a bounded moment for
+// the threads to leave the provider call.
+//
+// Bounded, not indefinite, on purpose: a wedged syscall must not hold the
+// process open (the reason jaal detaches in the first place). The win is
+// that the common case — a stream that notices the cancel in tens of
+// milliseconds — stops being a race against main's unwind.
+
+// Per-run handle. `run()` below holds one for the whole subagent loop.
+class RunRegistration {
+public:
+    RunRegistration();
+    ~RunRegistration();
+    RunRegistration(const RunRegistration&)            = delete;
+    RunRegistration& operator=(const RunRegistration&) = delete;
+
+    // Has shutdown asked this run to stop? The loop polls it between turns.
+    [[nodiscard]] bool cancelled() const noexcept;
+
+    // The same signal as a real std::stop_token, so the stream's cancel can
+    // ride a stop_callback instead of a polling thread. Already stopped if
+    // the run was refused admission because shutdown had begun.
+    [[nodiscard]] std::stop_token token() const noexcept;
+
+    // Per-run flags. Public because the registry that trips them lives in
+    // the .cpp and must name the type; nothing outside constructs one.
+    struct State;
+
+private:
+    std::shared_ptr<State> state_;
+};
+
+// Ask every live run to stop and wait up to `grace` for them to leave.
+// Returns how many were still running when the grace expired (0 = clean).
+// Idempotent; safe with no runs in flight. Registered with util::teardown by
+// the first run that starts, so main() needs no knowledge of this.
+std::size_t shutdown_running(std::chrono::milliseconds grace
+                                 = std::chrono::milliseconds(1500)) noexcept;
 
 // Provenance of an agent persona by name, for the task card's transparency
 // tag: "builtin" (explorer/reviewer/…), "user" (~/.agentty/agents), or
@@ -153,6 +242,12 @@ void pop_depth() noexcept;
 // Returns "builtin" for an unknown name (the safe default — no tag shown).
 // A PROJECT agent's role prompt is attacker-controllable via a clone, so the
 // UI surfaces it; it is NOT blocked (its tools stay gated like any other).
-[[nodiscard]] std::string_view agent_origin(std::string_view name) noexcept;
+[[nodiscard]] std::string_view agent_origin(Io, std::string_view name) noexcept;
 
 } // namespace agentty::tools::subagent
+
+// The stream seams are std::function, which jaal can't see inside. They
+// are set at install and called, never mutated, after; the callables they
+// wrap capture shared, thread-safe provider handles (main.cpp). Moving a
+// Config to another thread therefore shares nothing unsafe.
+MAYA_SENDABLE(agentty::tools::subagent::Config);

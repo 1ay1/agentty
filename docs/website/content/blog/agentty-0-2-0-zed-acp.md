@@ -35,7 +35,7 @@ Drop this into Zed's `settings.json`:
 ```
 
 Open the agent panel, pick **agentty**, and prompt. Auth is whatever
-`agentty login` already wrote to `~/.config/agentty/credentials.json` — nothing
+`agentty login` already wrote to `~/.agentty/credentials/credentials.json` — nothing
 extra to configure.
 
 ## What you get

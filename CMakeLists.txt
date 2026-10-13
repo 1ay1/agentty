@@ -1,12 +1,27 @@
 cmake_minimum_required(VERSION 3.28...3.31)
 project(agentty
-    VERSION     0.9.2
+    VERSION     0.9.19
     DESCRIPTION "A fast terminal coding agent (TUI) in modern C++"
     LANGUAGES   CXX)
 
 # Project CMake modules (test registry, and — as the redesign lands — the
 # extracted toolchain/standalone/hardening includes) live under cmake/.
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
+# GNU ld on MinGW loads every object's full symbol table into memory; the
+# test binaries link the whole tree, and four at once exhausted a 63 GB box
+# ("could not read symbols: memory exhausted"). Compiles stay fully
+# parallel; links take turns. Override with -DAGENTTY_LINK_JOBS=N.
+if(MINGW AND CMAKE_GENERATOR MATCHES "Ninja")
+    set(AGENTTY_LINK_JOBS 1 CACHE STRING "Concurrent link jobs (Ninja pool)")
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS agentty_link=${AGENTTY_LINK_JOBS})
+    set(CMAKE_JOB_POOL_LINK agentty_link)
+endif()
+
+# No C++ modules anywhere in the tree. With scanning on, every target gets
+# ninja dyndep files, and ninja 1.13 can assert on those mid-build
+# (RefreshDyndepDependents). Off globally so no target is missed.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 # Toolchain: compiler cache, C++ standard + fallback, default build type,
 # MSVC Release flag normalization. See cmake/AgenttyToolchain.cmake.
@@ -231,6 +246,39 @@ if(AGENTTY_FAST_DEBUG AND NOT MSVC AND CMAKE_BUILD_TYPE STREQUAL "Debug")
     string(REGEX REPLACE "(^| )-g( |$)" "\\1-g1\\2"
            CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
 
+    # Split DWARF: debug info goes to per-object .dwo files instead of into
+    # the objects, so the LINKER never reads it.
+    #
+    # This is the biggest single edit-loop win left on this tree, because the
+    # debug loop here is link-bound, not compile-bound. Measured, GCC 16 /
+    # 12 cores / mold, one-file change with reconfigure excluded:
+    #
+    #   -g1                 compile 22ms  link 10.5s   binary 801 MB
+    #   -g1 -gsplit-dwarf   compile 22ms  link  ~4s    binary 428 MB
+    #
+    # The compile is already 22ms thanks to ccache; every remaining second
+    # was mold walking 801 MB of DWARF that the executable does not need at
+    # link time. Halving the image halves the link.
+    #
+    # Costs, both small: ~370 .dwo files alongside the objects (they live in
+    # the build tree and die with it), and gdb needs the .dwo present to show
+    # source lines -- which it is, since nobody ships or moves a debug build.
+    # `-DAGENTTY_FAST_DEBUG=OFF` (the `debug-full` preset) still gives plain
+    # -g with everything inline for anyone who wants a self-contained image.
+    #
+    # Probed rather than assumed: -gsplit-dwarf is GCC/Clang-only, and a
+    # toolchain that takes the flag but cannot emit .dwo would silently
+    # produce a debug build with no debug info.
+    include(CheckCXXCompilerFlag)
+    set(CMAKE_REQUIRED_FLAGS -gsplit-dwarf)
+    check_cxx_compiler_flag("" AGENTTY_HAS_SPLIT_DWARF)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(AGENTTY_HAS_SPLIT_DWARF)
+        string(APPEND CMAKE_CXX_FLAGS_DEBUG " -gsplit-dwarf")
+        string(APPEND CMAKE_C_FLAGS_DEBUG   " -gsplit-dwarf")
+        message(STATUS "agentty: split DWARF on (debug info in .dwo; halves the link).")
+    endif()
+
     # A faster linker, if one is installed. mold beats lld beats ld.bfd, and
     # both are drop-in for ELF. Probed by ACTUALLY LINKING rather than by
     # looking for the binary: a present-but-unusable linker would otherwise
@@ -261,7 +309,7 @@ function(agentty_objlib name)
     # OPTION and refuses to cache the TU. Measured: 100% uncacheable calls with
     # scanning on, so `ccache` was installed and doing nothing.
     #
-    # maya already does this for the same reason (see maya/CMakeLists.txt,
+    # maya already does this for the same reason (see third_party/maya/CMakeLists.txt,
     # which also hit a scan-vs-archive ordering bug). Turning it off here makes
     # the object libraries cacheable and is otherwise a no-op.
     set_target_properties(${name} PROPERTIES CXX_SCAN_FOR_MODULES OFF)
@@ -299,7 +347,7 @@ function(agentty_objlib name)
         # agentty_tool_obj) now mirrors the workspace root into mcp's util
         # layer, so every objlib needs mcp::tools' include dir resolvable.
         if(TARGET mcp::tools)
-            target_link_libraries(${name} PRIVATE mcp::tools)
+            target_link_libraries(${name} PRIVATE mcp::tools mcp::tools_native_files)
         endif()
     else()
         target_compile_definitions(${name} PRIVATE AGENTTY_MCP=0)
@@ -321,9 +369,16 @@ function(agentty_objlib name)
     else()
         target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=0)
     endif()
+    # The claybin sandbox backend. A required submodule, so it links
+    # unconditionally and there is no define to get half-applied -- which is
+    # what the old AGENTTY_HAVE_CLAYBIN guard risked: sandbox.hpp's Backend
+    # enum and sandbox.cpp's dispatch were both gated on it, so a define that
+    # reached some objlibs and not others gave two TUs different ideas about
+    # the enum. An ODR violation, and not a compile error.
+    target_link_libraries(${name} PRIVATE claybin)
     # Header-only access to the linked libs (no actual linking for OBJECT).
     target_link_libraries(${name} PRIVATE
-        maya::maya
+        maya::app
         nlohmann_json::nlohmann_json
         simdjson::simdjson
         nghttp2::nghttp2
@@ -386,6 +441,7 @@ endif()
 
 add_executable(agentty
     src/runtime/main.cpp
+    src/runtime/run_cli.cpp
     ${AGENTTY_SHARED_OBJECTS}
     $<TARGET_OBJECTS:agentty_acp_obj>
 )
@@ -409,7 +465,7 @@ else()
     target_compile_definitions(agentty PRIVATE AGENTTY_MCP=0)
 endif()
 target_link_libraries(agentty PRIVATE
-    maya::maya
+    maya::app
     acp::acp
     nlohmann_json::nlohmann_json
     simdjson::simdjson
@@ -422,8 +478,9 @@ if(AGENTTY_MCP AND TARGET mcp::mcp)
     target_link_libraries(agentty PRIVATE mcp::mcp)
 endif()
 if(AGENTTY_MCP AND TARGET mcp::tools)
-    target_link_libraries(agentty PRIVATE mcp::tools)
+    target_link_libraries(agentty PRIVATE mcp::tools mcp::tools_native_files)
 endif()
+target_link_libraries(agentty PRIVATE claybin)
 if(AGENTTY_HAS_MIMALLOC)
     # The static target contains both C allocation and global C++ new/delete
     # overrides when MI_OVERRIDE is enabled.
@@ -758,4 +815,16 @@ if(AGENTTY_BUILD_TESTS)
     # sanitizer_tests aggregates are DERIVED from the registry (no hand-listed
     # parallel lists). See cmake/AgenttyTestRegistry.cmake + cmake/DESIGN.md.
     include(AgenttyTests)
+
+    # The test suite is written against POSIX setenv/unsetenv (it sandboxes
+    # HOME and the workspace per test). UCRT lacks them, so on Windows every
+    # source under tests/ force-includes one shim. A source property, so it
+    # reaches every test target however it is defined (consolidated, standalone
+    # or raw) and never the product.
+    if(WIN32)
+        file(GLOB_RECURSE _agentty_test_srcs CONFIGURE_DEPENDS
+             ${CMAKE_SOURCE_DIR}/tests/*.cpp)
+        set_source_files_properties(${_agentty_test_srcs} PROPERTIES
+            COMPILE_OPTIONS "-include;${CMAKE_SOURCE_DIR}/tests/win_posix_compat.hpp")
+    endif()
 endif()

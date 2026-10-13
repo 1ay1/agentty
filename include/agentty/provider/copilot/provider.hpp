@@ -19,6 +19,7 @@
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/openai/transport.hpp"  // openai::Endpoint
 #include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider::copilot {
 
@@ -26,7 +27,8 @@ class CopilotProvider {
 public:
     CopilotProvider() = default;
 
-    provider::StreamResult stream(provider::Request req, provider::EventSink sink);
+    provider::StreamResult stream(const maya::unlocked& cap, provider::Request req,
+                                  provider::EventSink sink);
 
     // Builds the Copilot inference Endpoint for the given host (from the token
     // exchange). Shared by stream() and list_models().
@@ -39,10 +41,12 @@ static_assert(provider::Provider<CopilotProvider>);
 // {endpoints.api}/models). The set depends on the account's entitlements
 // (gpt-4o, o-series, Claude, Gemini …), so it MUST be listed, not hardcoded.
 // Falls back to a small bundled list when offline / not signed in.
-[[nodiscard]] std::vector<ModelInfo> list_models();
+// Blocks on the token exchange / Auto session (takes their rank-ordered
+// locks), so the caller must hold no lock.
+[[nodiscard]] std::vector<ModelInfo> list_models(Io, const maya::unlocked& cap);
 
 // The account's default model slug (first catalog entry) or a safe fallback.
-[[nodiscard]] std::string default_model();
+[[nodiscard]] std::string default_model(Io, const maya::unlocked& cap);
 
 // Drop the cached model catalog so the next list_models() re-ranks with any
 // freshly learned per-model support (after a turn's 400/200 outcome).

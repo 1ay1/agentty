@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
-#include <mutex>
 #include <sstream>
 #include <string_view>
 #include <system_error>
@@ -14,6 +13,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <maya/runtime.hpp>
 
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/subprocess.hpp"
@@ -291,10 +292,10 @@ util::AtomicSnapshot<std::vector<std::string>> g_files;
 // Frecency: paths the user has referenced, most-recent-first-weighted.
 // A tiny recency list (not a full frecency decay) — the last-referenced
 // files are exactly what a follow-up `@` wants at the top.
-std::mutex& frecency_mu() { static std::mutex m; return m; }
-std::vector<std::string>& frecency_list() {
-    static std::vector<std::string> v; return v;
-}
+using Frecency = std::vector<std::string>;
+// A snapshot: replaced on each reference, read once per filter pass. No lock,
+// so the picker and the tools that note a reference need no capability.
+maya::snapshot<Frecency>& frecency() { static maya::snapshot<Frecency> v; return v; }
 
 // ── Git signals ──────────────────────────────────────────
 // The single strongest "which file matters" signal is git: the files you
@@ -302,15 +303,13 @@ std::vector<std::string>& frecency_list() {
 // both lead their pickers with these. We compute a status map once at
 // prewarm (git status --porcelain + recent commit touch history) and fold
 // it into ranking + row tags. path (workspace-relative) -> GitTag.
-std::mutex& git_mu() { static std::mutex m; return m; }
-std::unordered_map<std::string, GitTag>& git_status_map() {
-    static std::unordered_map<std::string, GitTag> m; return m;
-}
-std::atomic<bool>& git_ready_flag() { static std::atomic<bool> b{false}; return b; }
+using GitTags = std::unordered_map<std::string, GitTag>;
+// Built once at prewarm, read on every filter: a snapshot, no lock.
+maya::snapshot<GitTags>& git_status_map() { static maya::snapshot<GitTags> m; return m; }
 
 void build_git_signals() {
     const auto root = tools::util::project_root();
-    if (root.empty()) { git_ready_flag() = true; return; }
+    if (root.empty()) return;
     std::unordered_map<std::string, GitTag> tags;
 
     // 1. Working-tree status. NEWLINE-separated (NOT -z: the subprocess
@@ -354,14 +353,10 @@ void build_git_signals() {
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lk(git_mu());
-        git_status_map() = std::move(tags);
-    }
-    git_ready_flag() = true;
+    git_status_map().store(std::move(tags));
 }
 
-std::vector<std::string> build_file_list(std::size_t cap) {
+std::vector<std::string> build_file_list(std::size_t cap, std::stop_token stop = {}) {
     std::vector<std::string> out;
     out.reserve(std::min<std::size_t>(cap, 1024));
     const auto root = tools::util::project_root();
@@ -372,10 +367,9 @@ std::vector<std::string> build_file_list(std::size_t cap) {
              root, fs::directory_options::skip_permission_denied, ec);
          it != fs::recursive_directory_iterator() && out.size() < cap;
          it.increment(ec)) {
-        // Bail promptly on shutdown: this walk is joined at teardown, so an
-        // uncancellable full-tree scan would stall ^C on a large repo. Check
-        // every 64 entries (cheap; the flag is only set on quit).
-        if ((++tick & 63) == 0 && prewarm_cancelled()) return out;
+        // Bail promptly on shutdown: jaal waits for this task to return, so
+        // an uncancellable full-tree scan would stall ^C on a large repo.
+        if ((++tick & 63) == 0 && stop.stop_requested()) return out;
         if (ec) { ec.clear(); continue; }
         const auto& entry = *it;
         auto fn = entry.path().filename().string();
@@ -412,12 +406,11 @@ std::atomic<bool>& files_building() {
 }
 }  // namespace
 
-void prewarm_workspace_files(std::size_t cap) {
+void prewarm_workspace_files(std::stop_token stop, std::size_t cap) {
     // SYNCHRONOUS. The caller decides where this runs — init.cpp hands it to
-    // maya's Cmd::task_isolated, which owns the thread, joins it at teardown,
-    // and swallows exceptions. This module used to hand-roll all three, in
-    // parallel with maya's pool doing the same job two lines away in the same
-    // function.
+    // maya's Cmd::task_isolated, which owns the thread and swallows
+    // exceptions. At shutdown jaal stops `stop` and waits for us to return,
+    // which matters: the walk touches process-wide caches.
     if (g_files.has_value()) return;   // already warm
     bool expected = false;
     if (!files_building().compare_exchange_strong(expected, true)) return;
@@ -429,20 +422,9 @@ void prewarm_workspace_files(std::size_t cap) {
     // already git-aware the instant it publishes — a blank `@` leads with
     // your dirty files from the very first open.
     build_git_signals();
-    g_files.store(build_file_list(cap));
+    auto files = build_file_list(cap, stop);
+    if (!stop.stop_requested()) g_files.store(std::move(files));
     files_building() = false;
-}
-
-// Shared cooperative-cancel flag for BOTH prewarm walks. A single process-wide
-// atomic (defined here, declared in files.hpp) so files.cpp and symbols.cpp
-// observe the same request. Set once at teardown; never reset.
-std::atomic<bool> g_prewarm_cancel{false};
-
-void request_prewarm_cancel() noexcept {
-    g_prewarm_cancel.store(true, std::memory_order_relaxed);
-}
-bool prewarm_cancelled() noexcept {
-    return g_prewarm_cancel.load(std::memory_order_relaxed);
 }
 
 void deprioritize_prewarm_thread() noexcept {
@@ -461,35 +443,25 @@ void deprioritize_prewarm_thread() noexcept {
 #endif
 }
 
-void join_workspace_prewarm() {
-    // Nothing to join anymore: the walk runs on maya's worker pool, which
-    // owns and joins its own threads at teardown. All this still does is trip
-    // the cooperative cancel flag so a big-repo scan stops promptly instead of
-    // making maya's shutdown wait for it.
-    //
-    // Kept as a named no-op-ish entry point rather than deleted because the
-    // CANCEL half is still load-bearing, and because `agentty run` / acp /
-    // mcp-serve (which have no maya runtime) call the prewarm synchronously.
-    request_prewarm_cancel();
-}
-
 bool files_ready() {
     return g_files.has_value();
 }
 
 void note_file_referenced(std::string_view path) {
     if (path.empty()) return;
-    std::lock_guard<std::mutex> lk(frecency_mu());
-    auto& v = frecency_list();
-    std::erase(v, std::string{path});     // dedupe — move to front
-    v.insert(v.begin(), std::string{path});
-    if (v.size() > 64) v.resize(64);      // bounded recency window
+    (void)frecency().update([](const Frecency& old, const std::string& p) {
+        Frecency v = old;
+        std::erase(v, p);                     // dedupe — move to front
+        v.insert(v.begin(), p);
+        if (v.size() > 64) v.resize(64);      // bounded recency window
+        return v;
+    }, std::string{path});
 }
 
 GitTag file_git_tag(std::string_view path) {
-    std::lock_guard<std::mutex> lk(git_mu());
-    auto it = git_status_map().find(std::string{path});
-    return it == git_status_map().end() ? GitTag::None : it->second;
+    const auto m = git_status_map().load();
+    auto it = m->find(std::string{path});
+    return it == m->end() ? GitTag::None : it->second;
 }
 
 std::string_view git_tag_label(GitTag tag) {
@@ -536,17 +508,13 @@ filter_files(const std::vector<std::string>& files, std::string_view query) {
     // read once per filter pass.
     std::unordered_map<std::string, int> frec;
     {
-        std::lock_guard<std::mutex> lk(frecency_mu());
-        const auto& v = frecency_list();
-        for (std::size_t i = 0; i < v.size(); ++i) frec.emplace(v[i], (int)i);
+        const auto v = frecency().load();
+        for (std::size_t i = 0; i < v->size(); ++i) frec.emplace((*v)[i], (int)i);
     }
     // Git-status snapshot: the STRONGEST signal. The file you're editing is
     // almost always dirty/staged — lead with it.
-    std::unordered_map<std::string, GitTag> git;
-    {
-        std::lock_guard<std::mutex> lk(git_mu());
-        git = git_status_map();
-    }
+    const auto git_h = git_status_map().load();
+    const GitTags& git = *git_h;
     auto git_bonus = [&](std::size_t i) -> int {
         auto it = git.find(files[i]);
         if (it == git.end()) return 0;

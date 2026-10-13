@@ -1,0 +1,56 @@
+# Files allowed to mint an agentty::Io (IoAccess::grant). See io_roots.py.
+# Each is a place IO is supposed to start. Reducers and views are never here.
+
+# The type, and the effect wrapper reducers return (cmd::io_task).
+include/agentty/util/io.hpp
+include/agentty/runtime/cmd.hpp
+
+# The effect host (it runs effects) and init(), the one launch read.
+include/agentty/runtime/app/host.hpp
+src/runtime/app/init.cpp
+
+# Process entry points: `agentty run`, the CLI verbs.
+src/runtime/main.cpp
+src/tool/skills_cli.cpp
+
+# The ACP server: its handlers run on the RPC reader, not in a reducer.
+src/acp/server.cpp
+
+# Tool bodies and subagents, on tool workers.
+src/tool/mcp_tools_backends.cpp
+
+# The retriever's index, built on its own workers and tool threads.
+src/rag/adapter.cpp
+
+# fresh_auth_header's one-at-a-time lock: a guarded body can't take the
+# caller's Io (not Sendable), so it re-mints the one the caller already had.
+src/io/auth.cpp
+
+# The persistence store's internals (async writer, settings lock, thread
+# log, blob store) run only under its Io-taking entry points.
+src/io/persistence.cpp
+src/io/thread_log.cpp
+src/io/blob_store.cpp
+# The daily gc job (blob sweep + thread retention) runs on its own pool.
+src/io/blob_gc.cpp
+
+# Network layer entry points. Each runs only off the UI thread: provider
+# streams (dispatch runs them on the turn's worker), OAuth device/browser
+# flows (CLI or a login stream), MCP transports (their own peer threads),
+# tool bodies, and the background update/catalog refreshers.
+src/provider/dispatch.cpp
+src/provider/anthropic/transport.cpp
+src/provider/openai/transport.cpp
+src/provider/ollama/transport.cpp
+src/provider/responses/codec.cpp
+src/provider/kimi/provider.cpp
+src/provider/chatgpt/codex_oauth.cpp
+src/provider/copilot/copilot_oauth.cpp
+src/provider/kimi/kimi_oauth.cpp
+src/mcp/bridge.cpp
+src/mcp/http_server.cpp
+src/mcp/oauth.cpp
+src/tool/mcp_tools_bridge.cpp
+src/rag/rag_host.cpp
+src/util/modelsdev.cpp
+src/util/update.cpp

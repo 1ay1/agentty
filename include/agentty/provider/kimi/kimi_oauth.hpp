@@ -23,6 +23,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <stop_token>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -30,6 +31,8 @@
 #include <vector>
 
 #include "agentty/auth/auth.hpp"   // OAuthError
+#include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 namespace agentty::provider::kimi {
 
@@ -58,7 +61,8 @@ struct DeviceCode {
     int         expires_in = 900;
 };
 using DeviceCodeSink = std::function<void(const DeviceCode&)>;
-using CancelProbe    = std::function<bool()>;
+// Login stops when this is requested (Esc, a newer attempt, shutdown).
+using CancelProbe    = std::stop_token;
 
 // ── Device-flow login ─────────────────────────────────────────────────────
 // Requests a device code (delivered to `on_device_code` so the modal can show
@@ -66,15 +70,16 @@ using CancelProbe    = std::function<bool()>;
 // expires, or `cancelled()` trips. On success the token bundle is persisted
 // and returned. `timeout_s` bounds the whole poll loop.
 [[nodiscard]] std::expected<KimiToken, auth::OAuthError>
-login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled);
+login(const maya::below<maya::leaf>&, int timeout_s, DeviceCodeSink on_device_code,
+      CancelProbe cancelled);
 
 // ── Credential store ───────────────────────────────────────────────────────
 [[nodiscard]] std::filesystem::path credentials_path();
-[[nodiscard]] std::optional<KimiToken> load_token();
-bool save_token(const KimiToken& tok);
-bool clear_credentials();
+[[nodiscard]] std::optional<KimiToken> load_token(const maya::below<maya::leaf>&);
+bool save_token(const maya::below<maya::leaf>&, const KimiToken& tok);
+bool clear_credentials(Io, const maya::below<maya::leaf>&);
 
-// Cheap "is a Kimi credential present?" for the picker view (stat-cached).
+// Cheap "is a Kimi credential present?" for the picker view (stat-cached, lock-free).
 [[nodiscard]] bool signed_in();
 
 // Force the next fresh_token() to refresh even if the cached token looks valid
@@ -85,7 +90,7 @@ void invalidate_cached_token();
 // Returns a valid access token for the API, refreshing via refresh_token when
 // the persisted one is expired (or a forced refresh was requested). nullopt
 // when not signed in or the refresh failed.
-[[nodiscard]] std::optional<KimiToken> fresh_token();
+[[nodiscard]] std::optional<KimiToken> fresh_token(const locks::below_auth_refresh&);
 
 // ── Testing seam ───────────────────────────────────────────────────────────
 // Parse a token-endpoint JSON body into a KimiToken (expiry computed from

@@ -14,24 +14,34 @@
 //     call — but those live on the transport Endpoint, not here.
 
 #include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 #include <chrono>
 #include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <set>
 #include <thread>
+
+#ifndef _WIN32
+#include <unistd.h>   // getpid — unique temp name per process
+#else
+#include <process.h>  // _getpid
+#define getpid _getpid
+#endif
 
 #include <nlohmann/json.hpp>
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/util/base64.hpp"
+#include "agentty/util/user_root.hpp"   // user_cache_dir — the support cache
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/logx.hpp"
+
+#include <maya/runtime.hpp>
 
 #ifndef _WIN32
 #  include <sys/stat.h>   // chmod
@@ -57,9 +67,9 @@ constexpr const char* kTokenPath   = "/login/oauth/access_token";
 constexpr const char* kExchangePath= "/copilot_internal/v2/token";
 constexpr const char* kScope       = "read:user";
 constexpr const char* kGrantType   = "urn:ietf:params:oauth:grant-type:device_code";
-constexpr const char* kEditorVer   = "vscode/1.104.3";
-constexpr const char* kPluginVer   = "copilot-chat/0.26.7";
-constexpr const char* kUserAgent   = "GitHubCopilotChat/0.26.7";
+// Editor/plugin/user-agent identity now lives in copilot_oauth.hpp as runtime-
+// overridable accessors (client_editor_version() etc.) — Copilot gates model
+// rollout on these, so they must be tunable without a rebuild.
 constexpr const char* kIntegration = "vscode-chat";
 // Fallback inference base when the token response omits endpoints.api.
 constexpr const char* kDefaultApi  = "https://api.githubcopilot.com";
@@ -105,9 +115,9 @@ HttpResult request(http::HttpMethod method, std::string_view host,
     req.path   = std::string{path};
     req.headers = {
         {"accept",       "application/json"},
-        {"user-agent",   kUserAgent},
-        {"editor-version", kEditorVer},
-        {"editor-plugin-version", kPluginVer},
+        {"user-agent",   client_user_agent()},
+        {"editor-version", client_editor_version()},
+        {"editor-plugin-version", client_plugin_version()},
     };
     for (auto& h : headers) req.headers.push_back({h.first, h.second});
     if (const auto& ov = http::agentty_oauth_host_override(); ov.active()) {
@@ -121,7 +131,7 @@ HttpResult request(http::HttpMethod method, std::string_view host,
     tos.connect = std::chrono::milliseconds(10'000);
     tos.total   = std::chrono::milliseconds(30'000);
 
-    auto resp = http::default_client().send(req, tos);
+    auto resp = http::default_client(::agentty::IoAccess::grant()).send(req, tos);
     if (!resp) { r.transport_error = resp.error().render(); return r; }
     r.status = resp->status;
     r.body   = std::move(resp->body);
@@ -129,7 +139,21 @@ HttpResult request(http::HttpMethod method, std::string_view host,
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────
-std::mutex& store_mutex() { static std::mutex m; return m; }
+// The creds file. Every read and read-modify-write runs inside store().with,
+// so two threads never interleave on it.
+struct CredsFile {};
+maya::guarded<CredsFile>& store() { static maya::guarded<CredsFile> f; return f; }
+
+// signed_in() cache, keyed on the file's (mtime, size). Lock-free.
+struct SignedInCache {
+    long long      mtime      = 0;
+    std::uintmax_t size       = static_cast<std::uintmax_t>(-1);
+    bool           signed_in  = false;
+};
+maya::snapshot<SignedInCache>& signed_in_cache() {
+    static maya::snapshot<SignedInCache> s{SignedInCache{}};
+    return s;
+}
 
 struct Stored {
     GithubToken github;
@@ -238,13 +262,11 @@ poll_for_token(const std::string& device_code, int interval_s, int timeout_s,
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
     int interval = interval_s > 0 ? interval_s : 5;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (cancelled && cancelled())
+        if (cancelled.stop_requested())
             return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
-        for (int slept = 0; slept < interval; ++slept) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (cancelled && cancelled())
-                return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
-        }
+        // The server's interval, cut short the moment the login is cancelled.
+        if (maya::delay_for(cancelled, std::chrono::seconds(interval)))
+            return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
         auto r = request(http::HttpMethod::Post, kGithubHost, kTokenPath,
             {{"content-type", "application/x-www-form-urlencoded"}},
             form_encode({{"client_id", kClientId},
@@ -344,26 +366,29 @@ parse_token_envelope(std::string_view json_body, std::int64_t now_ms) {
 // ── Public API ──────────────────────────────────────────────────────────────
 fs::path credentials_path() { return creds_path(); }
 
-std::optional<GithubToken> load_github_token() {
-    std::scoped_lock lk(store_mutex());
-    auto s = load_unlocked();
-    if (!s) return std::nullopt;
-    return s->github;
+std::optional<GithubToken> load_github_token(const maya::below<maya::leaf>& cap) {
+    return store().with(cap, [](CredsFile&) -> std::optional<GithubToken> {
+        auto s = load_unlocked();
+        if (!s) return std::nullopt;
+        return s->github;
+    });
 }
 
-bool save_github_token(const GithubToken& gh) {
-    std::scoped_lock lk(store_mutex());
-    Stored s;
-    if (auto cur = load_unlocked()) s = *cur;
-    s.github = gh;
-    s.proxy = {};   // a new sign-in invalidates any cached proxy token
-    return save_unlocked(s);
+bool save_github_token(const maya::below<maya::leaf>& cap, const GithubToken& gh) {
+    return store().with(cap, [](CredsFile&, GithubToken g) {
+        Stored s;
+        if (auto cur = load_unlocked()) s = *cur;
+        s.github = std::move(g);
+        s.proxy = {};   // a new sign-in invalidates any cached proxy token
+        return save_unlocked(s);
+    }, gh);
 }
 
-bool clear_credentials() {
-    std::scoped_lock lk(store_mutex());
-    std::error_code ec;
-    return fs::remove(creds_path(), ec) || !ec;
+bool clear_credentials(Io, const maya::below<maya::leaf>& cap) {
+    return store().with(cap, [](CredsFile&) {
+        std::error_code ec;
+        return fs::remove(creds_path(), ec) || !ec;
+    });
 }
 
 bool signed_in() {
@@ -372,35 +397,47 @@ bool signed_in() {
     // work per frame while the picker is open. Cache the boolean keyed on
     // the file's (mtime, size): a stat is ~1µs and invalidates correctly on
     // sign-in, sign-out, and cross-process credential changes alike.
-    std::scoped_lock lk(store_mutex());
-    static bool cached = false;
-    static std::filesystem::file_time_type cached_mtime{};
-    static std::uintmax_t cached_size = static_cast<std::uintmax_t>(-1);
+    // Lock-free (views can't hold capabilities): the read of the file needs
+    // no lock because writers replace it with an atomic rename.
     std::error_code ec;
     const auto p = creds_path();
-    const auto mtime = fs::last_write_time(p, ec);
-    const auto size  = ec ? 0 : fs::file_size(p, ec);
+    const auto t = fs::last_write_time(p, ec);
+    const auto size = ec ? 0 : fs::file_size(p, ec);
     if (ec) {   // missing/unreadable → signed out; remember that cheaply
-        cached = false;
-        cached_mtime = {};
-        cached_size = static_cast<std::uintmax_t>(-1);
+        signed_in_cache().store(SignedInCache{});
         return false;
     }
-    if (mtime != cached_mtime || size != cached_size) {
-        auto s = load_unlocked();
-        cached = s && !s->github.access_token.empty();
-        cached_mtime = mtime;
-        cached_size  = size;
-    }
-    return cached;
+    const long long mtime = static_cast<long long>(t.time_since_epoch().count());
+    const auto cur = signed_in_cache().get();
+    if (mtime == cur.mtime && size == cur.size) return cur.signed_in;
+    auto s = load_unlocked();
+    const bool in = s && !s->github.access_token.empty();
+    signed_in_cache().store(SignedInCache{mtime, size, in});
+    return in;
 }
 
 void invalidate_cached_token() { g_force_refresh.store(true); }
 
 // ── Per-account model-support learning ─────────────────────────────────
 namespace {
-std::mutex& support_mu() { static std::mutex m; return m; }
-fs::path support_path() { return auth::config_dir() / "copilot_model_support.json"; }
+// The support file; its read-modify-writes run inside support_file().with.
+struct SupportFile {};
+maya::guarded<SupportFile>& support_file() { static maya::guarded<SupportFile> f; return f; }
+// cache/, NOT credentials/.
+//
+// This is refetchable learning state -- which models this account was told it
+// may use -- and it was landing in the secrets directory purely because this
+// file already had auth::config_dir() in scope. Two things wrong with that:
+// it is the one directory where a 0600 audit should find no exceptions (this
+// file sat at 0644 among seven 0600 siblings), and "delete your cache" should
+// never mean "go near your tokens".
+//
+// Nothing migrates the old copy: it is a cache, so a missing file costs one
+// relearn on the next request, and leaving the stale one behind in a 0700
+// directory harms nothing. The blob holds model ids, never a credential.
+fs::path support_path() {
+    return ::agentty::util::user_cache_dir() / "copilot_model_support.json";
+}
 
 struct SupportSets { std::set<std::string> unsupported, supported; };
 
@@ -427,40 +464,59 @@ void save_support(const SupportSets& s) {
     for (auto& id : s.unsupported) j["unsupported"].push_back(id);
     j["supported"] = json::array();
     for (auto& id : s.supported) j["supported"].push_back(id);
+    const std::string payload = j.dump();
+
     std::error_code ec;
-    fs::create_directories(support_path().parent_path(), ec);
-    std::ofstream ofs(support_path(), std::ios::trunc);
-    if (ofs) ofs << j.dump();
+    const auto dest = support_path();
+    fs::create_directories(dest.parent_path(), ec);
+
+    // Temp + rename: a trunc write leaves the file empty then partial, and a
+    // reader that catches it mid-write just relearns the whole set.
+    fs::path tmp = dest;
+    tmp += "." + std::to_string(static_cast<long long>(::getpid())) + ".tmp";
+    {
+        std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
+        if (!ofs) return;
+        ofs.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+        if (!ofs) { fs::remove(tmp, ec); return; }
+    }
+    fs::rename(tmp, dest, ec);
+    if (ec) fs::remove(tmp, ec);
 }
 } // namespace
 
-void note_unsupported_model(const std::string& model_id) {
+void note_unsupported_model(const maya::below<maya::leaf>& cap, const std::string& model_id) {
     if (model_id.empty()) return;
-    std::scoped_lock lk(support_mu());
-    auto s = load_support();
-    s.supported.erase(model_id);
-    if (s.unsupported.insert(model_id).second) save_support(s);
+    support_file().with(cap, [](SupportFile&, std::string id) {
+        auto s = load_support();
+        s.supported.erase(id);
+        if (s.unsupported.insert(id).second) save_support(s);
+    }, model_id);
 }
-bool is_unsupported_model(const std::string& model_id) {
-    std::scoped_lock lk(support_mu());
-    return load_support().unsupported.count(model_id) > 0;
+bool is_unsupported_model(const maya::below<maya::leaf>& cap, const std::string& model_id) {
+    return support_file().with(cap, [](SupportFile&, std::string id) {
+        return load_support().unsupported.count(id) > 0;
+    }, model_id);
 }
-void note_supported_model(const std::string& model_id) {
+void note_supported_model(const maya::below<maya::leaf>& cap, const std::string& model_id) {
     if (model_id.empty()) return;
-    std::scoped_lock lk(support_mu());
-    auto s = load_support();
-    bool changed = s.unsupported.erase(model_id) > 0;
-    changed |= s.supported.insert(model_id).second;
-    if (changed) save_support(s);
+    support_file().with(cap, [](SupportFile&, std::string id) {
+        auto s = load_support();
+        bool changed = s.unsupported.erase(id) > 0;
+        changed |= s.supported.insert(id).second;
+        if (changed) save_support(s);
+    }, model_id);
 }
-bool is_supported_model(const std::string& model_id) {
-    std::scoped_lock lk(support_mu());
-    return load_support().supported.count(model_id) > 0;
+bool is_supported_model(const maya::below<maya::leaf>& cap, const std::string& model_id) {
+    return support_file().with(cap, [](SupportFile&, std::string id) {
+        return load_support().supported.count(id) > 0;
+    }, model_id);
 }
 
 std::expected<GithubToken, OAuthError>
-login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled) {
-    if (cancelled && cancelled())
+login(const maya::below<maya::leaf>& cap, int timeout_s, DeviceCodeSink on_device_code,
+      CancelProbe cancelled) {
+    if (cancelled.stop_requested())
         return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
 
     std::string device_code;
@@ -475,20 +531,28 @@ login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled) {
 
     // Persist the durable GitHub token; the proxy token is exchanged lazily on
     // first use via fresh_token().
-    save_github_token(*tok);
+    save_github_token(cap, *tok);
     return *tok;
 }
 
-std::optional<CopilotToken> fresh_token() {
-    // Serialize refreshes without holding store_mutex during the network call.
-    static std::mutex refresh_mu;
-    std::scoped_lock refresh_lk(refresh_mu);
+namespace {
+std::optional<CopilotToken> fresh_token_locked(const maya::held<locks::auth_refresh>& h);
+}
 
-    std::optional<Stored> loaded;
-    {
-        std::scoped_lock lk(store_mutex());
-        loaded = load_unlocked();
-    }
+std::optional<CopilotToken> fresh_token(const locks::below_auth_refresh& cap) {
+    // One refresh at a time. The store (a leaf) is only held for the file
+    // IO, never across the network call. Lock order, checked by the
+    // compiler: the refresh lane (auth.refresh), then the store (leaf).
+    struct RefreshLane {};
+    static maya::guarded<RefreshLane, locks::auth_refresh> one_at_a_time;
+    return one_at_a_time.with(cap, [](const maya::held<locks::auth_refresh>& h, RefreshLane&) {
+        return fresh_token_locked(h);
+    });
+}
+
+namespace {
+std::optional<CopilotToken> fresh_token_locked(const maya::held<locks::auth_refresh>& h) {
+    auto loaded = store().with(h, [](CredsFile&) { return load_unlocked(); });
     if (!loaded || loaded->github.access_token.empty()) return std::nullopt;
 
     const bool force = g_force_refresh.exchange(false);
@@ -500,9 +564,8 @@ std::optional<CopilotToken> fresh_token() {
     // re-read the peer's freshly-saved token.
     auth::CrossProcessFileLock xlock(creds_path());
     if (xlock.held() && !force) {
-        std::scoped_lock lk(store_mutex());
-        if (auto disk = load_unlocked();
-            disk && disk->proxy.valid()
+        auto disk = store().with(h, [](CredsFile&) { return load_unlocked(); });
+        if (disk && disk->proxy.valid()
             && !disk->proxy.expired(/*skew_ms=*/5 * 60 * 1000)) {
             return disk->proxy;   // a peer refreshed while we waited
         }
@@ -511,26 +574,27 @@ std::optional<CopilotToken> fresh_token() {
     auto exchanged = exchange(loaded->github);
     if (!exchanged) return std::nullopt;
 
-    std::scoped_lock lk(store_mutex());
-    Stored s = *loaded;
-    if (auto cur = load_unlocked()) s.github = cur->github;   // adopt newest ghu_
-    s.proxy = *exchanged;
-    save_unlocked(s);
+    store().with(h, [](CredsFile&, Stored s) {
+        if (auto cur = load_unlocked()) s.github = cur->github;   // adopt newest ghu_
+        (void)save_unlocked(s);
+    }, Stored{loaded->github, *exchanged});
     return *exchanged;
 }
+} // namespace
 
-Entitlement account_entitlement() {
+Entitlement account_entitlement(const maya::below<maya::leaf>& cap) {
     // Short in-process cache: the picker may call this repeatedly while open.
-    static std::mutex mu;
-    static Entitlement cached;
-    static std::int64_t fetched_at = 0;
-    {
-        std::scoped_lock lk(mu);
-        if (cached.known && now_ms_impl() - fetched_at < 5 * 60 * 1000)
-            return cached;
-    }
+    // A leaf, held only to copy in or out: the network fetch runs between
+    // the read and the write, never under the lock.
+    struct Cached { Entitlement e; std::int64_t fetched_at = 0; };
+    static maya::guarded<Cached> cache;
+    if (auto hit = cache.read(cap, [](const Cached& c) -> std::optional<Entitlement> {
+            if (c.e.known && now_ms_impl() - c.fetched_at < 5 * 60 * 1000) return c.e;
+            return std::nullopt;
+        }))
+        return *hit;
     Entitlement e;   // known=false by default → permissive fallback
-    auto gh = load_github_token();
+    auto gh = load_github_token(cap);
     if (!gh) return e;
 
     // GET api.github.com/copilot_internal/user with the ghu_ token — the
@@ -563,9 +627,10 @@ Entitlement account_entitlement() {
         e.known = true;
     } catch (...) { return Entitlement{}; }
 
-    std::scoped_lock lk(mu);
-    cached = e;
-    fetched_at = now_ms_impl();
+    cache.with(cap, [](Cached& c, Entitlement fresh) {
+        c.e = std::move(fresh);
+        c.fetched_at = now_ms_impl();
+    }, e);
     return e;
 }
 
@@ -590,19 +655,40 @@ std::int64_t jwt_exp_ms(const std::string& jwt) {
     return 0;
 }
 
-std::mutex& auto_mu() { static std::mutex m; return m; }
-AutoSession& auto_cache() { static AutoSession s; return s; }
+// The Auto session cache and its failure backoff. auto_session() holds this
+// across its network call on purpose, so concurrent turns share one probe.
+//
+// Lock order: copilot.auto_session (12), then fresh_token's refresh lane
+// (auth.refresh, 15), then the creds store (leaf). The body takes the
+// refresh lane, so this lock MUST rank below it -- it used to be a default
+// leaf, and taking auth.refresh from a leaf body was the startup abort.
+// That shape is now a compile error: auto_session_locked can only call
+// fresh_token with the held<copilot_auto> it is given, which converts to
+// below<auth_refresh> only because 12 < 15.
+struct AutoState {
+    AutoSession  cache;
+    std::int64_t failed_until_ms = 0;   // 0 = no backoff armed
+};
+using AutoLock = maya::guarded<AutoState, locks::copilot_auto>;
+AutoLock& auto_state() { static AutoLock s; return s; }
+
+std::optional<AutoSession> auto_session_locked(const maya::held<locks::copilot_auto>& h,
+                                               AutoState& st);
 } // namespace
 
-// Guarded by auto_mu(), like auto_cache(). 0 = no backoff armed.
-std::int64_t& auto_failed_until_ms() { static std::int64_t v = 0; return v; }
+std::optional<AutoSession> auto_session(const locks::below_copilot_auto& cap) {
+    return auto_state().with(cap, [](const maya::held<locks::copilot_auto>& h, AutoState& st) {
+        return auto_session_locked(h, st);
+    });
+}
 
-std::optional<AutoSession> auto_session() {
-    std::scoped_lock lk(auto_mu());
-    if (auto_cache().valid()) return auto_cache();
+namespace {
+std::optional<AutoSession> auto_session_locked(const maya::held<locks::copilot_auto>& h,
+                                               AutoState& st) {
+    if (st.cache.valid()) return st.cache;
 
     // NEGATIVE CACHE. Everything below is blocking network I/O held under
-    // auto_mu(), and a FAILED attempt used to cache nothing — so an account
+    // the auto lock, and a FAILED attempt used to cache nothing — so an account
     // that can't open an Auto session (no entitlement, org policy, a flaky
     // 5xx) re-dialled /models/session on EVERY turn, and every turn paid a
     // full TLS handshake + round-trip before the first token. That is the
@@ -614,13 +700,13 @@ std::optional<AutoSession> auto_session() {
     // waits out a blip recovers without restarting. invalidate_auto_session()
     // clears it, so an explicit account switch or a 401 retry re-probes at once.
     const auto now = CopilotToken::now_ms();
-    if (now < auto_failed_until_ms()) return std::nullopt;
+    if (now < st.failed_until_ms) return std::nullopt;
     constexpr std::int64_t kBackoffMs = 60'000;
     // Any early return below is a failure; arm the backoff up front so no
     // path can forget it.
-    auto_failed_until_ms() = now + kBackoffMs;
+    st.failed_until_ms = now + kBackoffMs;
 
-    auto tok = fresh_token();
+    auto tok = fresh_token(h);
     if (!tok || !tok->chat_enabled) {
         AGT_LOG(Auth, Warn, "copilot.auto_session.skipped",
                 "reason={} backoff_ms=60000",
@@ -637,7 +723,7 @@ std::optional<AutoSession> auto_session() {
     auto r = request(http::HttpMethod::Post, host, "/models/session",
         {{"authorization", "Bearer " + tok->token},
          {"copilot-integration-id", kIntegration},
-         {"x-github-api-version", kAutoApiVersion},
+         {"x-github-api-version", client_api_version()},
          {"content-type", "application/json"}},
         R"({"auto_mode":{"model_hints":["auto"]}})");
     if (!r.transport_error.empty() || r.status < 200 || r.status >= 300) {
@@ -667,22 +753,20 @@ std::optional<AutoSession> auto_session() {
             return std::nullopt;
         }
         s.expires_at_ms = jwt_exp_ms(s.session_token);
-        auto_cache() = s;
-        auto_failed_until_ms() = 0;   // succeeded — disarm the backoff
+        st.cache = s;
+        st.failed_until_ms = 0;   // succeeded — disarm the backoff
         return s;
     } catch (const std::exception& e) {
         AGT_LOG(Auth, Warn, "copilot.auto_session.parse", "err={}", e.what());
         return std::nullopt;
     } catch (...) { return std::nullopt; }
 }
+} // namespace
 
-void invalidate_auto_session() {
-    std::scoped_lock lk(auto_mu());
-    auto_cache() = AutoSession{};
-    // Also clear the negative cache: an explicit invalidation (account switch,
-    // 401 retry) is a statement that the world changed, so re-probe at once
-    // rather than serving a stale "this account can't" for another minute.
-    auto_failed_until_ms() = 0;
+void invalidate_auto_session(const locks::below_copilot_auto& cap) {
+    // Also clears the negative cache: an explicit invalidation (account
+    // switch, 401 retry) means the world changed, so re-probe at once.
+    auto_state().with(cap, [](AutoState& st) { st = {}; });
 }
 
 } // namespace agentty::provider::copilot

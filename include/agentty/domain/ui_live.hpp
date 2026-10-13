@@ -33,44 +33,32 @@
 // they do not care WHICH frame's prefs they see, only that it is one of
 // them.
 
-#include <mutex>
-#include <shared_mutex>
+#include <maya/runtime.hpp>
 
 #include "agentty/domain/ui_prefs.hpp"
 
 namespace agentty::ui_prefs {
 
 namespace detail {
-// Prefs holds a std::string (the theme name), so it is not trivially
-// copyable and cannot live in a std::atomic. A mutex + a value is the
-// honest implementation: the lock is uncontended in practice (published
-// once per frame on the render thread, read on the same thread) and a
-// shared_mutex's read side is a relaxed atomic increment, which is the
-// same order of cost the atomic would have been.
-inline std::shared_mutex& slot_mutex() noexcept {
-    static std::shared_mutex mu;
-    return mu;
-}
-inline Prefs& slot() noexcept {
-    static Prefs s{};
+// A snapshot, not a lock: published once per frame by view() and read from
+// view code, panels and background prewarms. A lock here would need a rank
+// and a capability on every reader, and view() is deliberately never handed
+// one (it must not be able to take locks). A snapshot read is one atomic
+// load, and no reader can ever be part of a deadlock.
+inline maya::snapshot<Prefs>& slot() noexcept {
+    static maya::snapshot<Prefs> s;
     return s;
 }
 }  // namespace detail
 
 // Make `p` the prefs every consumer sees from now on. Called once per frame
 // by view(), before any Element is built.
-inline void publish(const Prefs& p) {
-    std::unique_lock lk{detail::slot_mutex()};
-    detail::slot() = p;
-}
+inline void publish(const Prefs& p) { detail::slot().store(p); }
 
 // The prefs in force. Defaults until the first publish(), so a consumer
 // that runs before the first frame (a test, a background prewarm) gets the
 // documented defaults rather than garbage.
-[[nodiscard]] inline Prefs current() {
-    std::shared_lock lk{detail::slot_mutex()};
-    return detail::slot();
-}
+[[nodiscard]] inline Prefs current() { return detail::slot().get(); }
 
 // ── Convenience readers ──────────────────────────────────────────────────
 //
@@ -131,5 +119,31 @@ inline void publish(const Prefs& p) {
 [[nodiscard]] inline int panel_rows() {
     return viewport_rows(current().density);
 }
+
+// ── Path roots ──────────────────────────────────────────────────────────
+//
+// Where tool cards show paths relative to: the launch cwd and the home dir,
+// from Model::env. Same seam and same reason as the prefs: the reader
+// (pretty_path, under every tool card's header) is a free function many
+// layers below anything holding a Model, and the reducer's tool viewer calls
+// the same helper. view() publishes them each frame; read_launch_env
+// captured them once, so the view never asks the OS.
+struct PathRoots {
+    std::string cwd;
+    std::string home;
+    // Subagent types defined by the project (Model::ui.library). The task
+    // card tags them; it sits under the same free helper as pretty_path.
+    std::vector<std::string> project_agents;
+};
+
+namespace detail {
+inline maya::snapshot<PathRoots>& roots_slot() noexcept {
+    static maya::snapshot<PathRoots> s;
+    return s;
+}
+}  // namespace detail
+
+inline void publish_path_roots(PathRoots r) { detail::roots_slot().store(std::move(r)); }
+[[nodiscard]] inline PathRoots path_roots() { return detail::roots_slot().get(); }
 
 }  // namespace agentty::ui_prefs

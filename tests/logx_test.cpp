@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -35,13 +36,21 @@ static std::string slurp(const std::string& path) {
     return ss.str();
 }
 
+// A file under the platform temp dir ("/tmp" doesn't exist on Windows).
+static std::string tmp_file(const char* name) {
+    return (std::filesystem::temp_directory_path() / name).string();
+}
+
 int main() {
     // Configure BEFORE the first logx call: default warn, wire wide open,
     // rag silenced. File in a temp path.
-    const std::string log_path = "/tmp/agentty-logx-test.log";
+    const std::string log_path = tmp_file("agentty-logx-test.log");
     std::remove(log_path.c_str());
     setenv("AGENTTY_LOG", "warn,wire=trace,rag=off", 1);
-    setenv("AGENTTY_LOG_FILE", log_path.c_str(), 1);
+    // AGENTTY_LOG_FILE is gone — the destination is set through the same
+    // seam `--log-file` uses. Must happen before the first log call, which
+    // is exactly the contract set_log_path() documents.
+    logx::set_log_path(log_path);
 
     // ── Gate semantics ────────────────────────────────────────────────
     CHECK(logx::enabled(logx::Channel::Wire, logx::Level::Trace),
@@ -84,7 +93,7 @@ int main() {
     AGT_LOG(General, Warn, "ring.a", "first");
     AGT_LOG(General, Warn, "ring.b", "second");
     {
-        const std::string dump_path = "/tmp/agentty-logx-ring.txt";
+        const std::string dump_path = tmp_file("agentty-logx-ring.txt");
         std::remove(dump_path.c_str());
         CHECK(logx::dump_flight_recorder_to(dump_path.c_str()),
               "ring: dump writes bytes");
@@ -109,7 +118,7 @@ int main() {
     {
         for (int i = 0; i < 300; ++i)
             AGT_LOG(General, Warn, "wrap", "event {}", i);
-        const std::string dump_path = "/tmp/agentty-logx-wrap.txt";
+        const std::string dump_path = tmp_file("agentty-logx-wrap.txt");
         std::remove(dump_path.c_str());
         (void)logx::dump_flight_recorder_to(dump_path.c_str());
         const std::string got = slurp(dump_path);
@@ -149,7 +158,7 @@ int main() {
     {
         std::string big(2000, 'x');
         AGT_LOG(General, Warn, "trunc", "{}", big);
-        const std::string dump_path = "/tmp/agentty-logx-trunc.txt";
+        const std::string dump_path = tmp_file("agentty-logx-trunc.txt");
         std::remove(dump_path.c_str());
         (void)logx::dump_flight_recorder_to(dump_path.c_str());
         CHECK(slurp(dump_path).find("trunc: xxx") != std::string::npos,

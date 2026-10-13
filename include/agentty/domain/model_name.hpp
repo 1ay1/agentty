@@ -227,6 +227,25 @@ struct ModelName {
     // otherwise-identical rows distinguishably.
     std::string annotation;
 
+    // The routing namespace a gateway put in front of the id: the "igpu" in
+    // `igpu/laguna-xs-2.1`. Empty when the id carried none.
+    //
+    // Normally decoration — `openrouter/anthropic/claude-3-5-haiku` is the
+    // same product however you reached it, and showing the path would be
+    // noise in every row. But a self-hosted gateway uses the prefix as the
+    // LANE: Bifrost in front of two llama.cpp servers routes
+    // `dgpu/granite-4.0-h-tiny` to an 8GB discrete GPU and
+    // `utils/granite-4.0-h-tiny` to CPU. Same weights, different machine,
+    // wildly different speed — and with the prefix dropped both render as
+    // "Granite 4.0 H Tiny", so the picker shows two identical rows and you
+    // cannot tell which one you are about to run on.
+    //
+    // So it is kept as a FACT, and full() shows it only when it is the only
+    // thing telling two rows apart (see needs_namespace / full()). That way
+    // the common case stays clean and the ambiguous case stays honest — the
+    // same reasoning as `annotation` above.
+    std::string ns;
+
     // Family hue from the table above. A theme SLOT, like everything
     // color_of() returns — a default here that was a literal would quietly
     // pin any un-decoded model to one palette.
@@ -245,6 +264,14 @@ struct ModelName {
 
     // "Opus 4.8 · 1M" — everything we know. Picker rows, command palette.
     [[nodiscard]] std::string full() const;
+
+    // "igpu/Laguna Xs 2.1" — full(), prefixed with the routing namespace.
+    //
+    // For the one surface that must disambiguate: a picker listing several
+    // catalogs where two entries decode to the same label. Callers that know
+    // their rows are unique should use full(); this exists so the ambiguous
+    // case has a spelling, not as the default.
+    [[nodiscard]] std::string qualified() const;
 
     // "Opus 4.8" / "GPT 5.1 Codex Max" — drops only the annotation. Turn
     // headers, composer chip. The version and qualifier both stay: "Opus"

@@ -1,17 +1,17 @@
 # 02 — maya Reference (the parts the agent panel needs)
 
-maya is the in-tree TUI library at `maya/` (a git submodule). It's broad
+maya is the in-tree TUI library at `third_party/maya/` (a git submodule). It's broad
 — 60+ widgets, a flex layout engine, an Elm-style runtime — and most of
 it is irrelevant to the agent panel. This doc inventories what we **will
 use**, with real signatures and one-line idioms.
 
-For the full library tour, read `maya/include/maya/maya.hpp` and walk
+For the full library tour, read `third_party/maya/include/maya/maya.hpp` and walk
 the headers. Everything below is grounded in real code in
-`maya/include/maya/`.
+`third_party/maya/include/maya/`.
 
 ## 1. Element model
 
-`maya/include/maya/element/element.hpp`
+`third_party/maya/include/maya/element/element.hpp`
 
 Everything maya renders is an `Element` — a `std::variant` of:
 
@@ -27,7 +27,7 @@ struct Element {
 ```
 
 You almost never construct these directly — you use the **DSL** in
-`maya/include/maya/dsl.hpp`.
+`third_party/maya/include/maya/dsl.hpp`.
 
 ### TextElement (`element/text.hpp:134`)
 
@@ -91,7 +91,7 @@ width.
 
 ## 2. The DSL
 
-`maya/include/maya/dsl.hpp`. Two flavors: compile-time (`t<"…">`,
+`third_party/maya/include/maya/dsl.hpp`. Two flavors: compile-time (`t<"…">`,
 `v(...)`) and runtime (`text(...)`, `dyn(...)`).
 
 ### Compile-time text
@@ -172,7 +172,7 @@ the next child in an `h()` row.
 
 ## 3. Layout (yoga-flavored flexbox in cells)
 
-`maya/include/maya/layout/yoga.hpp`
+`third_party/maya/include/maya/layout/yoga.hpp`
 
 Everything works in **terminal cells** (integers). All Zed `rems_from_px`
 values must be rounded to cells. See `05_design_tokens.md`.
@@ -226,7 +226,7 @@ struct Dimension {
 
 ## 4. Style + Color
 
-`maya/include/maya/style/style.hpp`, `style/color.hpp`.
+`third_party/maya/include/maya/style/style.hpp`, `style/color.hpp`.
 
 ```cpp
 struct Style {
@@ -258,7 +258,7 @@ The exact RGB values for each Zed token are in `05_design_tokens.md`.
 
 ## 5. Border
 
-`maya/include/maya/style/border.hpp`
+`third_party/maya/include/maya/style/border.hpp`
 
 ```cpp
 enum class BorderStyle : uint8_t {
@@ -308,7 +308,7 @@ v(content)
 
 ## 6. Theme
 
-`maya/include/maya/style/theme.hpp`
+`third_party/maya/include/maya/style/theme.hpp`
 
 ```cpp
 struct Theme {
@@ -336,7 +336,7 @@ Zed token-for-token.
 
 ## 7. The widgets we lean on
 
-All in `maya/include/maya/widget/`. Each is a class with `Config`,
+All in `third_party/maya/include/maya/widget/`. Each is a class with `Config`,
 constructor, getters/setters, and `operator Element() const`.
 
 ### `tool_call.hpp` — the generic card
@@ -510,7 +510,7 @@ Use it in the status bar / footer.
 
 ## 8. Runtime: Program / Cmd / Sub
 
-`maya/include/maya/app/app.hpp`, `maya/core/cmd.hpp`, `maya/app/sub.hpp`.
+`third_party/maya/include/maya/app/app.hpp`, `third_party/maya/include/maya/core/cmd.hpp`, `third_party/maya/include/maya/app/sub.hpp`.
 
 ### Program concept
 
@@ -593,7 +593,7 @@ command but isn't what we want for the panel.
 
 ## 9. Input events
 
-`maya/include/maya/terminal/input.hpp`.
+`third_party/maya/include/maya/terminal/input.hpp`.
 
 ```cpp
 struct CharKey { char32_t codepoint; };
@@ -633,7 +633,7 @@ paste of code.
 
 ## 10. Rendering pipeline
 
-`maya/include/maya/render/renderer.hpp`. Mostly opaque to us; just know:
+`third_party/maya/include/maya/render/renderer.hpp`. Mostly opaque to us; just know:
 
 - Layout pass: yoga walks the tree, computes a `LayoutNode` (Rect) for
   every node

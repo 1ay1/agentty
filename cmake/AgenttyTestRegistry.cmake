@@ -68,13 +68,31 @@ function(_agentty_test_link_full name)
         OpenSSL::SSL
         OpenSSL::Crypto
         Threads::Threads)
+    # The runtime is a jaal program now: include/agentty/runtime/cmd.hpp pulls
+    # <jaal/jaal.hpp>, and the render probes pull <maya/app/inline.hpp>. Both
+    # arrive through maya::app (an INTERFACE target carrying jaal's include
+    # dir), which is what the `agentty` exe links. Tests linked only
+    # maya::maya, so every TU touching the runtime failed to find the headers.
+    if(TARGET maya::app)
+        target_link_libraries(${name} PRIVATE maya::app)
+    endif()
+    # libstdc++ ships std::print's Windows terminal path (__open_terminal /
+    # __write_to_terminal) in the experimental archive, not libstdc++ proper.
+    if(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_libraries(${name} PRIVATE stdc++exp)
+    endif()
     # registry.cpp routes the whole tool set through the mcp-cpp bridge.
     if(TARGET mcp::mcp)
         target_link_libraries(${name} PRIVATE mcp::mcp)
     endif()
     if(TARGET mcp::tools)
-        target_link_libraries(${name} PRIVATE mcp::tools)
+        target_link_libraries(${name} PRIVATE mcp::tools mcp::tools_native_files)
     endif()
+    # The claybin sandbox backend. Needed by every test binary, not just the
+    # sandbox ones: the shared object set includes sandbox_claybin.cpp, so
+    # without the library any test that links the tool layer fails to resolve
+    # clay::* at link time. Unconditional, like the submodule.
+    target_link_libraries(${name} PRIVATE claybin)
     if(AGENTTY_HAS_RAGCPP)
         target_link_libraries(${name} PRIVATE ragcpp::ragcpp)
         target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=1)
@@ -196,7 +214,7 @@ define_property(DIRECTORY PROPERTY AGENTTY_FOLD_NAMES
     BRIEF_DOCS "folded standalone test names" FULL_DOCS "AgenttyTestRegistry")
 
 function(agentty_fold_test name)
-    cmake_parse_arguments(F "ARGS" "TIMEOUT;SKIP_CODE" "LABELS;UNIX_LIBS" ${ARGN})
+    cmake_parse_arguments(F "ARGS" "TIMEOUT;SKIP_CODE;FIXTURE" "LABELS;UNIX_LIBS" ${ARGN})
     set_property(DIRECTORY APPEND PROPERTY AGENTTY_FOLD_NAMES ${name})
     # Rename this TU's main() to <name>_main so the dispatcher can call it.
     set_source_files_properties(${CMAKE_SOURCE_DIR}/tests/${name}.cpp
@@ -208,8 +226,29 @@ function(agentty_fold_test name)
     if(NOT F_TIMEOUT)
         set(F_TIMEOUT 60)
     endif()
-    add_test(NAME ${name} COMMAND agentty_standalone_tests ${name})
+    # FIXTURE supplies the operand a bench needs, resolved against the source
+    # tree so the test does not depend on ctest's working directory.
+    if(F_FIXTURE)
+        add_test(NAME ${name}
+                 COMMAND agentty_standalone_tests ${name}
+                         ${CMAKE_SOURCE_DIR}/${F_FIXTURE})
+        # Run from the source root: a fixture may itself name repo-relative
+        # paths (symbol_read_corpus's TSV does), and ctest's default cwd is
+        # the build tree, where none of them resolve.
+        set_tests_properties(${name} PROPERTIES
+                             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    else()
+        add_test(NAME ${name} COMMAND agentty_standalone_tests ${name})
+    endif()
     set_tests_properties(${name} PROPERTIES TIMEOUT ${F_TIMEOUT})
+    if(F_ARGS AND NOT F_SKIP_CODE AND NOT F_FIXTURE)
+        # ARGS marks a test that takes OPTIONAL operands (a thread file, a
+        # corpus) and is run by hand with them. ctest runs it with none, where
+        # it prints its usage and exits 2. That is "nothing to do here", not a
+        # failure — without this the test is permanently red and everyone
+        # learns to ignore it. Give it a fixture instead when one exists.
+        set_tests_properties(${name} PROPERTIES SKIP_RETURN_CODE 2)
+    endif()
     if(F_SKIP_CODE)
         # A test may bail with this exit code when its environment can't
         # produce the geometry it needs (e.g. a PTY-driven repro whose
@@ -221,12 +260,19 @@ function(agentty_fold_test name)
         if("perf" IN_LIST F_LABELS)
             set_property(DIRECTORY APPEND PROPERTY AGENTTY_T_PERF ${name})
             # A wall-clock probe measured against a threshold cannot share a
-            # machine with another one. Run in parallel they steal each
-            # other's CPU and fail intermittently on a busy box -- which
-            # reads as a flaky test rather than the resource contention it
-            # is. RESOURCE_LOCK makes ctest serialise them against each
-            # other while everything else still runs -j12.
-            set_tests_properties(${name} PROPERTIES RESOURCE_LOCK wallclock)
+            # machine with anything. RESOURCE_LOCK only serialises the perf
+            # tests against EACH OTHER -- the other ~1100 tests still run
+            # alongside at -j12, which is what made md_cache_probe flaky: its
+            # quote_fence_300 shape sits at ~2.9x against a 3.0x growth
+            # threshold, so any stolen CPU or memory bandwidth tipped it over
+            # and it read as a broken cache rather than a busy box.
+            #
+            # RUN_SERIAL is the property that actually means "give this test
+            # the machine": ctest runs it with no other test in flight. Cost
+            # is small (the perf label is ~19s total) and it buys a probe
+            # whose failure means something.
+            set_tests_properties(${name} PROPERTIES RESOURCE_LOCK wallclock
+                                                    RUN_SERIAL TRUE)
         endif()
     endif()
 endfunction()
@@ -298,5 +344,18 @@ function(agentty_finalize_tests)
     endif()
     add_custom_target(tests_gating DEPENDS agentty_tests ${_gating})
 
-    add_custom_target(sanitizer_tests DEPENDS agentty_tests ${_sanitizer})
+    # sanitizer_tests deliberately does NOT depend on agentty_tests.
+    #
+    # Every `sanitizer`-labelled entry is a narrow-source binary of its own
+    # (concurrency_primitives, cred_crypt, keystore, race_harness,
+    # real_subsystem_race) — they are narrow precisely so they stay
+    # asan-clean without linking maya's un-instrumented renderer. Not one
+    # test in the label comes out of agentty_tests, so depending on it made
+    # the ASan CI lane compile and link the ~1.1 GB doctest binary, with
+    # instrumentation, to then run nothing from it.
+    #
+    # If a doctest case ever needs to run under a sanitizer, give it its own
+    # narrow target and the `sanitizer` label — that is the pattern here,
+    # and it is what keeps this lane from rebuilding the world.
+    add_custom_target(sanitizer_tests DEPENDS ${_sanitizer})
 endfunction()

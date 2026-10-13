@@ -13,6 +13,8 @@
 #include "agentty/domain/conversation.hpp"
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/profile.hpp"
+#include "agentty/domain/sandbox_config.hpp"
+#include "agentty/domain/web_search_config.hpp"
 #include "agentty/domain/ui_prefs.hpp"
 #include "agentty/domain/smart_mode.hpp"
 
@@ -170,6 +172,26 @@ struct Settings {
     // — the person who configured the gateway knows what it serves — and a
     // setting that a heuristic can quietly overrule is not a setting.
     std::map<std::string, int> context_overrides;
+    // Hosts proven to be self-hosted, so later refreshes probe them too.
+    //
+    // A runtime context window can only be learned by ASKING the server
+    // (llama.cpp meta.n_ctx, LM Studio's loaded instance, Ollama /api/ps),
+    // and those routes are withheld from anything that looks like somebody
+    // else's API — otherwise every refresh against api.openai.com pays
+    // guaranteed 404s.
+    //
+    // Private addresses are detected from the address alone. This set is
+    // for the rest: a server on a public hostname, behind a VPN with its
+    // own DNS, or through a tunnel. Entries are LEARNED, not configured —
+    // the add-host probe asks every new host regardless of address, and a
+    // host that answers a runtime route has proven what it is (no hosted
+    // API serves /props). There is deliberately no toggle for this: the
+    // server already told us, so asking the user would be asking them to
+    // repeat an answer we have.
+    //
+    // Exact host match (no port, no scheme). AGENTTY_PROBE_HOSTS adds to
+    // this for one run without persisting.
+    std::set<std::string> probe_hosts;
     // MRU of recently-active (provider,model) pairs, MOST-RECENT-FIRST and
     // bounded. Drives the fused model picker's RECENT section and the ^Tab
     // quick-swap (jump to the previous provider+model). Each entry is
@@ -177,8 +199,13 @@ struct Settings {
     // (which is a per-provider recall MAP); this is an ordered cross-provider
     // history the user actually toggles between.
     std::vector<std::string> recent_models;
-    // Reasoning effort tier (output_config.effort wire value, e.g. "high";
-    // empty = off, the default). Reloaded into Model::effort at startup.
+    // Reasoning effort tier, in PERSISTED form (effort_to_wire_setting):
+    // a wire value like "high", or one of the two sentinels -- "none" for an
+    // explicit off, "auto" for the centred default. Empty means UNSET (never
+    // configured), which reads back as auto, NOT as off: the two were
+    // indistinguishable while both persisted as "", which is what pinned the
+    // dial to the bottom rung of the ladder. Reloaded into Model::effort at
+    // startup via effort_from_wire.
     std::string          effort;
     // Per-model reasoning-effort capability overrides (issue #20). Keyed by
     // model id; true = force the effort knob ON for a compat model the
@@ -194,6 +221,11 @@ struct Settings {
     // arm in stream.cpp); hydrated into the catalog's learned-effort registry
     // at init so every later session's ladder/clamps/wire start correct.
     std::map<std::string, std::uint8_t> learned_effort_sets;
+    // LEARNED: host ("api.groq.com", "llm.corp:8443") → optional request
+    // fields it rejected with a 400 (provider::OptionalField bits). Written
+    // by the reject→learn→retry arm in stream.cpp (#93), hydrated at init
+    // so the transport never sends that host the field again.
+    std::map<std::string, std::uint8_t> rejected_fields;
     // Tool names the user granted "always allow" (PermissionApproveAlways).
     // Persisted so the grant survives restarts — Zed's always_allow rules.
     // Loaded into Model::session_grants at init; note CycleProfile still
@@ -222,6 +254,19 @@ struct Settings {
     // User-configured RAG behaviour (the RAG settings picker). Defaults to
     // configured=false ⇒ the adapter keeps its env-derived config.
     RagConfig rag;
+
+    // web_search policy (Settings → Web Search). Every field is a registry
+    // row, so the shipped defaults ARE "never touched" — no `configured` flag;
+    // save writes only rows that moved off their default.
+    web_search_cfg::Config web_search;
+
+    // Sandbox policy (what a shell command may reach). Composed whole for the
+    // same reason RoleConfig is: a flat set of fields on Settings makes
+    // "network off but the port allowlist populated" representable, and forces
+    // a hand-written mapping at every boundary -- which is a place to forget a
+    // field. `configured` stays false until a deliberate edit, so upgrading
+    // never changes anyone's sandbox.
+    sandbox_cfg::Config sandbox;
 
     // Smart Mode (role-based execution routing, docs/design/smart-mode.md).
     // Off by default.

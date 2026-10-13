@@ -3,9 +3,12 @@
 
 #include "agentty/util/user_root.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/util/sendable.hpp"
 #include "agentty/util/home_dir.hpp"
 
 #include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kSkillsLayout — the one declaration
+#include "agentty/util/capped_read.hpp"   // the one capped-read primitive
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -16,9 +19,18 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
+#include <optional>
 #include <sstream>
 #include <system_error>
+
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#  define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#else
+#  include <sys/stat.h>
+#endif
 
 namespace agentty::tools::skills {
 
@@ -101,19 +113,11 @@ std::atomic<std::size_t>& cap_resolutions() noexcept {
     return s;
 }
 
-// Read a file with a hard byte cap. Empty on missing / unreadable / oversize.
-[[nodiscard]] std::string read_capped(const fs::path& p, std::size_t cap) {
-    std::error_code ec;
-    if (!fs::is_regular_file(p, ec) || ec) return {};
-    auto sz = fs::file_size(p, ec);
-    if (ec || sz == 0 || sz > cap) return {};
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return {};
-    std::string out(static_cast<std::size_t>(sz), '\0');
-    f.read(out.data(), static_cast<std::streamsize>(sz));
-    out.resize(static_cast<std::size_t>(f.gcount()));
-    return out;
-}
+// NOTE: the local read_capped() is gone. The same helper lived here, in
+// commands.cpp and in hooks.cpp, and every copy returned "" for both
+// "missing" and "too big" -- which is how an oversized SKILL.md used to
+// vanish with `0 warning(s)`. util::capped_read returns a VARIANT, so the
+// two cannot be conflated by a caller who forgets to care.
 
 // Parse `key: value` from a YAML frontmatter line. LENIENT by design
 // (spec guidance): only the FIRST colon splits, so a description like
@@ -333,15 +337,10 @@ void enumerate_resources(const fs::path& dir, std::vector<std::string>& out) {
 // keep their flat names so existing libraries load unchanged.
 // Appends each found SKILL.md's mtime into `sig` so an in-place edit
 // (same dir mtime) still invalidates the cache.
-// Shadowed skills from the last discovery pass. Rebuilt whenever all()
-// re-scans, cleared first so a fixed collision stops being reported.
-std::vector<Shadowed>& shadow_log() {
-    static std::vector<Shadowed> v;
-    return v;
-}
-
-void scan_root(const fs::path& root, const std::string& source,
-               std::size_t cap, std::vector<Skill>& out, std::string& sig) {
+// `shadows` collects the skills this pass hides behind an earlier root.
+void scan_root(Io io, const fs::path& root, const std::string& source,
+               std::size_t cap, std::vector<Skill>& out, std::string& sig,
+               std::vector<Shadowed>& shadows) {
     std::error_code ec;
     if (!fs::is_directory(root, ec) || ec) return;
     auto mt = fs::last_write_time(root, ec);
@@ -447,8 +446,32 @@ void scan_root(const fs::path& root, const std::string& source,
             sig += std::to_string(static_cast<long long>(
                        fmt.time_since_epoch().count())) +
                    ";";
-        std::string raw = read_capped(md, kMaxBodyBytes);
-        if (raw.empty()) continue;
+        // Visit, don't peek: the compiler refuses a lambda set that omits
+        // TooBig, which is the whole reason this is a variant.
+        const auto got = ::agentty::util::capped_read(md, kMaxBodyBytes);
+        std::string raw;
+        bool skip = false;
+        std::visit([&](const auto& v) {
+            using V = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<V, ::agentty::util::Content>) {
+                raw = v.text;
+            } else if constexpr (std::is_same_v<V, ::agentty::util::TooBig>) {
+                // Keep a stub so discovery can REPORT it. A file on disk
+                // the catalog ignores is exactly what the shadow log exists
+                // to prevent; the size cap deserves the same treatment.
+                Skill over;
+                over.name   = slug;
+                over.slug   = slug;
+                over.source = source;
+                over.dir    = md.parent_path();
+                over.oversized_bytes = v.size;
+                out.push_back(std::move(over));
+                skip = true;
+            } else {
+                skip = true;   // Absent / Unreadable
+            }
+        }, got);
+        if (skip || raw.empty()) continue;
         Skill s = parse_skill(raw, slug, source);
         if (s.name.empty()) continue;
         // Shadow: earlier roots (project before user, native before
@@ -465,7 +488,7 @@ void scan_root(const fs::path& root, const std::string& source,
             // the UI layer; same-scope is what gets surfaced.
             std::error_code sec;
             auto sdir = fs::weakly_canonical(md.parent_path(), sec);
-            shadow_log().push_back(Shadowed{
+            shadows.push_back(Shadowed{
                 .name        = s.name,
                 .dir         = (sec ? md.parent_path() : sdir).string(),
                 .source      = source,
@@ -482,14 +505,25 @@ void scan_root(const fs::path& root, const std::string& source,
         // can fetch bundled scripts/references that live outside the
         // workspace (~/.agentty/skills/...) without tripping the
         // boundary. Read-only — the write/edit gate never consults it.
-        util::allow_read_root(s.dir);
+        util::allow_read_root(io, s.dir);
         out.push_back(std::move(s));
     }
 }
 
-std::vector<Skill>& cache() {
-    static std::vector<Skill> c;
-    return c;
+// The last discovery: the skills, what they shadowed, and the signature
+// they were scanned at. One immutable value in a published slot so the three
+// can't disagree: every reader sees a whole discovery, and a rescan publishes
+// a whole new one. No lock, so no capability on all() (called from tool
+// bodies, the RAG reindex and the prompt builder alike).
+struct Discovery {
+    std::vector<Skill>    skills;
+    std::vector<Shadowed> shadows;
+    std::string           sig = "\x01uninit";
+    std::uint64_t         generation = 0;   // bumped on every rescan
+};
+maya::published<const Discovery>& discovery() {
+    static maya::published<const Discovery> d;
+    return d;
 }
 
 } // namespace
@@ -503,55 +537,109 @@ std::size_t debug_cap_resolutions() noexcept {
 // directory order, same SKILL.md locations, same nesting) so the two agree
 // on what "changed" means — if they drift, the cache either never hits or
 // never invalidates, and both are worse than the cost this saves.
+// ONE metadata query per path: is it there, what kind, mtime, size. This
+// pass runs on every turn, and fs::is_regular_file + last_write_time +
+// file_size is three separate stats -- on Windows each one opens and closes
+// a file handle, which put 40 skills at ~10 ms/turn. GetFileAttributesExW
+// answers all of it from the directory entry without opening the file.
+struct StatSig { bool dir = false; bool file = false; long long mtime = 0; std::uintmax_t size = 0; };
+[[nodiscard]] std::optional<StatSig> stat_sig(const fs::path& p) noexcept {
+#if defined(_WIN32)
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (!::GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &a)) return std::nullopt;
+    StatSig s;
+    s.dir   = (a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    s.file  = !s.dir && (a.dwFileAttributes & FILE_ATTRIBUTE_DEVICE) == 0;
+    s.mtime = static_cast<long long>((static_cast<unsigned long long>(a.ftLastWriteTime.dwHighDateTime) << 32)
+                                     | a.ftLastWriteTime.dwLowDateTime);
+    s.size  = (static_cast<std::uintmax_t>(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+    return s;
+#else
+    struct ::stat st{};
+    if (::stat(p.c_str(), &st) != 0) return std::nullopt;
+    StatSig s;
+    s.dir   = S_ISDIR(st.st_mode);
+    s.file  = S_ISREG(st.st_mode);
+#  if defined(__APPLE__)
+    s.mtime = static_cast<long long>(st.st_mtimespec.tv_sec) * 1'000'000'000LL + st.st_mtimespec.tv_nsec;
+#  else
+    s.mtime = static_cast<long long>(st.st_mtim.tv_sec) * 1'000'000'000LL + st.st_mtim.tv_nsec;
+#  endif
+    s.size  = static_cast<std::uintmax_t>(st.st_size);
+    return s;
+#endif
+}
+
+void append_md_sig(const fs::path& dir, const StatSig& md, std::string& sig) {
+    sig += dir.filename().string();
+    sig += std::to_string(md.mtime);
+    sig += ':';
+    sig += std::to_string(md.size);
+    sig += ';';
+}
+
 void scan_root_signature(const fs::path& root, std::string& sig) {
     std::error_code ec;
-    if (!fs::is_directory(root, ec)) return;
+    const auto rs = stat_sig(root);
+    if (!rs || !rs->dir) return;
 
     // The root's own mtime catches an added or removed skill directory.
-    if (const auto t = fs::last_write_time(root, ec); !ec)
-        sig += std::to_string(static_cast<long long>(t.time_since_epoch().count()));
+    sig += std::to_string(rs->mtime);
     sig += "|";
 
     std::vector<fs::path> dirs;
+#if defined(_WIN32)
+    // One FindFirstFile pass yields every child's name + attributes without
+    // a handle per entry; std::filesystem's iterator stats each entry again
+    // for is_directory(), which is most of the per-turn cost on Windows.
+    auto list_subdirs = [](const fs::path& d, std::vector<fs::path>& out) {
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = ::FindFirstFileExW((d / L"*").c_str(), FindExInfoBasic, &fd,
+                                      FindExSearchNameMatch, nullptr,
+                                      FIND_FIRST_EX_LARGE_FETCH);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            const std::wstring_view n{fd.cFileName};
+            if (n == L"." || n == L"..") continue;
+            out.push_back(d / fd.cFileName);
+        } while (::FindNextFileW(h, &fd));
+        ::FindClose(h);
+    };
+    list_subdirs(root, dirs);
+#else
     for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
         if (it->is_directory(ec)) dirs.push_back(it->path());
     }
+#endif
     std::ranges::sort(dirs);   // stable order → stable signature
 
     for (const auto& d : dirs) {
         // A skill is <dir>/SKILL.md, or one level of group nesting.
-        const auto md = d / "SKILL.md";
-        if (fs::is_regular_file(md, ec)) {
-            sig += d.filename().string();
-            if (const auto t = fs::last_write_time(md, ec); !ec)
-                sig += std::to_string(static_cast<long long>(t.time_since_epoch().count()));
-            if (const auto z = fs::file_size(md, ec); !ec)
-                sig += ":" + std::to_string(z);
-            sig += ";";
+        if (const auto md = stat_sig(d / "SKILL.md"); md && md->file) {
+            append_md_sig(d, *md, sig);
             continue;
         }
         std::vector<fs::path> subs;
+#if defined(_WIN32)
+        list_subdirs(d, subs);
+#else
         for (fs::directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec)) {
             if (it->is_directory(ec)) subs.push_back(it->path());
         }
+#endif
         std::ranges::sort(subs);
         for (const auto& s : subs) {
-            const auto smd = s / "SKILL.md";
-            if (!fs::is_regular_file(smd, ec)) continue;
-            sig += s.filename().string();
-            if (const auto t = fs::last_write_time(smd, ec); !ec)
-                sig += std::to_string(static_cast<long long>(t.time_since_epoch().count()));
-            if (const auto z = fs::file_size(smd, ec); !ec)
-                sig += ":" + std::to_string(z);
-            sig += ";";
+            if (const auto smd = stat_sig(s / "SKILL.md"); smd && smd->file)
+                append_md_sig(s, *smd, sig);
         }
     }
 }
 
-const std::vector<Skill>& all() {
-    static std::mutex mu;
-    static std::string cached_sig = "\x01uninit";
-    std::lock_guard lk(mu);
+std::vector<Skill> all(Io io) {
+    // Both passes run outside the lock; only the swap of the result is
+    // locked. Two callers racing a change both scan, and the second's
+    // identical result replaces the first's: wasted work, never a wrong one.
 
     // Resolve the cap ONCE for this pass — every root's scan bound and
     // every catalog slice below share this value, so the environment
@@ -571,7 +659,7 @@ const std::vector<Skill>& all() {
     env.user_native_base = ::agentty::util::user_root();
     env.project_root     = fs::path{"."};
     env.project_writable = true;   // discovery reads all dialects; unused here
-    const scope::Layout layout{.leaf = "skills"};
+    const scope::Layout& layout = ::agentty::config::kSkillsLayout;
     const auto sources = scope::plan(layout, env);
 
     // PASS 1 — signature only. stat() per SKILL.md, no file read, no parse.
@@ -593,45 +681,51 @@ const std::vector<Skill>& all() {
     // which flips the env var and re-reads all().
     sig += "#cap=" + std::to_string(cap);
 
-    if (sig == cached_sig) return cache();
+    if (const auto cur = discovery().current(); cur && cur->sig == sig) return cur->skills;
 
     // PASS 2 — something changed on disk; do the expensive read+parse.
-    std::vector<Skill> fresh;
+    Discovery fresh;
     std::string parse_sig;
-    shadow_log().clear();   // rebuilt by this pass
     for (const scope::Source& src : sources) {
-        scan_root(src.base / layout.leaf, std::string{scope::to_string(src.locus)},
-                  cap, fresh, parse_sig);
+        scan_root(io, src.base / layout.leaf, std::string{scope::to_string(src.locus)},
+                  cap, fresh.skills, parse_sig, fresh.shadows);
     }
-
-    cache() = std::move(fresh);
-    cached_sig = sig;
-    return cache();
+    fresh.sig = sig;
+    std::vector<Skill> out = fresh.skills;
+    // Publish with the next generation; retried if a racing scan got in first.
+    for (;;) {
+        auto prev = discovery().current();
+        auto next = std::make_shared<Discovery>(fresh);
+        next->generation = (prev ? prev->generation : 0) + 1;
+        if (discovery().publish_if(prev, std::shared_ptr<const Discovery>(std::move(next)))) break;
+    }
+    return out;
 }
 
-const std::vector<Shadowed>& shadowed() {
-    all();                 // ensure a discovery has run
-    return shadow_log();
+std::vector<Shadowed> shadowed(Io io) {
+    (void)all(io);           // ensure a discovery has run
+    auto d = discovery().current();
+    return d ? d->shadows : std::vector<Shadowed>{};
 }
 
-bool shadowed_within_scope(std::string_view name) {
+bool shadowed_within_scope(Io io, std::string_view name) {
     // Cross-scope shadowing is the documented rule (project beats user),
     // so it is not a warning. Two directories in the SAME scope claiming
     // one name is the case that is either a mistake or a hiding place.
-    const auto* winner = find(name);
+    const auto winner = find(io, name);
     if (!winner) return false;
-    for (const auto& sh : shadowed())
+    for (const auto& sh : shadowed(io))
         if (sh.name == name && sh.source == winner->source) return true;
     return false;
 }
 
-const Skill* find(std::string_view name) {
-    for (const auto& s : all())
-        if (s.name == name) return &s;
-    return nullptr;
+std::optional<Skill> find(Io io, std::string_view name) {
+    for (auto& s : all(io))
+        if (s.name == name) return std::move(s);
+    return std::nullopt;
 }
 
-std::string catalog_block() {
+std::string catalog_block(Io io) {
     // CACHED. This runs on EVERY turn (provider::system_prompt_for →
     // default_system_prompt), and resolving trust made it expensive: a
     // JSON read of the approvals store plus a SHA-256 over every skill
@@ -643,39 +737,31 @@ std::string catalog_block() {
     // all() already rescans on its own mtime signature, so a skill edit
     // lands next turn exactly as before; an approve lands when the file
     // it wrote changes.
-    static std::mutex mu;
-    static std::string cached;
-    static std::uintmax_t cached_key = 0;
-    static const void*    cached_data = nullptr;
+    struct Built {
+        std::string    text;
+        std::uintmax_t key = 0;
+        std::uint64_t  generation = ~std::uint64_t{0};
+    };
+    // Replaced whole, read every turn: an immutable value in a published slot.
+    static maya::published<const Built> built_cache;
 
-    const auto& skills = all();
+    const auto skills = all(io);
+    const auto disc = discovery().current();
+    const std::uint64_t gen = disc ? disc->generation : 0;
 
-    // Approvals file identity — cheap stat, no parse.
+    // Approvals file identity — ONE metadata query, no parse (the same
+    // stat_sig the discovery signature uses; file_size + last_write_time
+    // were two handle opens each on Windows).
     std::uintmax_t akey = 0;
-    {
-        std::error_code ec;
-        const auto p = agentty::util::user_root() / std::string{kApprovalsLeaf};
-        const auto sz = fs::file_size(p, ec);
-        if (!ec) {
-            akey = sz;
-            const auto t = fs::last_write_time(p, ec);
-            if (!ec)
-                akey ^= static_cast<std::uintmax_t>(
-                    t.time_since_epoch().count()) * 1099511628211ull;
-        }
-    }
-    // all() returns a reference to its own cached vector and rebuilds it
-    // in place on rescan; pairing the data pointer with the size catches
-    // both "vector reallocated" and "count changed".
-    const std::uintmax_t key =
-        akey ^ (static_cast<std::uintmax_t>(skills.size()) << 32);
+    if (const auto st = stat_sig(agentty::util::user_root() / std::string{kApprovalsLeaf});
+        st && st->file)
+        akey = st->size ^ static_cast<std::uintmax_t>(st->mtime) * 1099511628211ull;
+    // The discovery generation says the skills changed; the approvals
+    // fingerprint says a trust decision did.
+    const std::uintmax_t key = akey;
 
-    {
-        std::lock_guard lk(mu);
-        if (cached_data == static_cast<const void*>(skills.data())
-            && cached_key == key)
-            return cached;
-    }
+    if (const auto b = built_cache.current(); b && b->key == key && b->generation == gen)
+        return b->text;
 
     // Hidden beats listed-but-blocked: user_only skills never appear, so
     // the model can't waste a turn trying to activate one. An UNAPPROVED
@@ -683,19 +769,21 @@ std::string catalog_block() {
     // the activation path will refuse just burns a turn and reads as a
     // malfunction. `agentty skill list` shows it as PENDING, which is
     // where a human looks; the model is simply not told about it.
-    const auto approvals = load_approvals();
+    const auto approvals = load_approvals(io);
     auto eligible_for_model = [&](const Skill& s) {
         if (s.user_only) return false;
+        // An oversized SKILL.md produced a reporting stub with no body to
+        // load. Offering it to the model would be offering a skill that
+        // cannot be activated -- the same wasted turn user_only avoids.
+        // `agentty skills` is where it shows up, as a warning.
+        if (s.oversized_bytes > 0) return false;
         return std::holds_alternative<scope::Trusted>(trust_of(s, approvals));
     };
 
     std::size_t eligible = 0;
     for (const auto& s : skills) if (eligible_for_model(s)) ++eligible;
     if (eligible == 0) {
-        std::lock_guard lk(mu);
-        cached.clear();
-        cached_key = key;
-        cached_data = static_cast<const void*>(skills.data());
+        built_cache.publish(std::make_shared<const Built>(Built{{}, key, gen}));
         return {};
     }
 
@@ -725,16 +813,15 @@ std::string catalog_block() {
     }
     m << "</skills>";
     auto built = m.str();
-    {
-        std::lock_guard lk(mu);
-        cached = built;
-        cached_key = key;
-        cached_data = static_cast<const void*>(skills.data());
-    }
+    built_cache.publish(std::make_shared<const Built>(Built{built, key, gen}));
     return built;
 }
 
-std::string activation_payload(const Skill& s) {
+std::string activation_payload(Io io, const Skill& s) {
+    return activation_payload(s, load_approvals(io));
+}
+
+std::string activation_payload(const Skill& s, const scope::Approvals& approvals) {
     // The enforcement point. catalog_block() hides an unapproved skill, but
     // the model can name one directly (it may have seen it in a previous
     // session, or the user may have mentioned it), so the refusal has to
@@ -743,7 +830,7 @@ std::string activation_payload(const Skill& s) {
     // Refuse with an instruction the model can act on, not a bare error:
     // it should tell the user what to run, not retry or route around it.
     if (needs_trust_gate(s.effects)
-        && !std::holds_alternative<scope::Trusted>(trust_of(s))) {
+        && !std::holds_alternative<scope::Trusted>(trust_of(s, approvals))) {
         std::ostringstream deny;
         deny << "<skill_blocked name=\"" << s.name << "\">\n"
              << "This skill declares effects (" << effects_to_frontmatter(s.effects)
@@ -787,29 +874,48 @@ std::string activation_payload(const Skill& s) {
 }
 
 namespace {
-struct Activations {
-    std::mutex mu;
-    std::vector<std::string> names;
-};
-[[nodiscard]] Activations& activations() {
-    static Activations a;
-    return a;
+// The tag activation_payload() emits around a body. Matching the exact
+// opening tag (with the name attribute and closing quote) means a skill
+// whose name is a prefix of another's ("review" vs "review-pr") can't be
+// mistaken for it.
+std::string body_tag_for(std::string_view name) {
+    std::string t = "<skill_content name=\"";
+    t.append(name);
+    t += "\">";
+    return t;
 }
+
 } // namespace
 
-bool note_activated(std::string_view name) {
-    auto& a = activations();
-    std::lock_guard lk(a.mu);
-    for (const auto& n : a.names) if (n == name) return false;
-    a.names.emplace_back(name);
-    return true;
+bool is_active_in(std::string_view name,
+                  const std::vector<std::string_view>& visible) {
+    const std::string tag = body_tag_for(name);
+    for (auto text : visible)
+        if (text.find(tag) != std::string_view::npos) return true;
+    return false;
 }
 
-void reset_activations() {
-    auto& a = activations();
-    std::lock_guard lk(a.mu);
-    a.names.clear();
+std::vector<std::string>
+active_in(const std::vector<std::string_view>& visible) {
+    // Scan for the tag prefix and read the name out, rather than testing
+    // every installed skill against every message: the transcript is the
+    // smaller side once a session has many skills.
+    static constexpr std::string_view open = "<skill_content name=\"";
+    std::vector<std::string> out;
+    for (auto text : visible) {
+        for (std::size_t at = text.find(open); at != std::string_view::npos;
+             at = text.find(open, at + open.size())) {
+            const std::size_t b = at + open.size();
+            const std::size_t e = text.find('"', b);
+            if (e == std::string_view::npos) break;
+            std::string n{text.substr(b, e - b)};
+            if (std::find(out.begin(), out.end(), n) == out.end())
+                out.push_back(std::move(n));
+        }
+    }
+    return out;
 }
+
 
 // ── Effects + trust ────────────────────────────────────────────────────────
 
@@ -893,6 +999,18 @@ scope::Trust trust_of(const Skill& s, const scope::Approvals& approvals) noexcep
 
 std::vector<std::string> lint(const Skill& s) {
     std::vector<std::string> out;
+    // Too big to load at all. Report ONLY this: every other rule reads a
+    // field that was never parsed, so running them would bury the one fact
+    // that matters under a pile of "description is missing".
+    if (s.oversized_bytes > 0) {
+        out.push_back("SKILL.md is "
+                      + std::to_string(s.oversized_bytes / 1024)
+                      + " KB — over the "
+                      + std::to_string(kMaxBodyBytes / 1024)
+                      + " KB limit, so this skill is NOT loaded"
+                        " (move detail into references/)");
+        return out;
+    }
     // name: 1-64 chars, lowercase alnum + hyphens, no edge/double hyphens.
     if (s.name.empty()) out.push_back("name is empty");
     if (s.name.size() > 64) out.push_back("name exceeds 64 characters");
@@ -931,8 +1049,8 @@ std::vector<std::string> lint(const Skill& s) {
     return out;
 }
 
-int cmd_skills() {
-    const auto& sk = all();
+int cmd_skills(Io io) {
+    const auto sk = all(io);
     if (sk.empty()) {
         std::printf("no skills installed.\n"
                     "add one: <project>/.agentty/skills/<name>/SKILL.md "

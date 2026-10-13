@@ -11,12 +11,14 @@
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
+#include "agentty/tool/util/sandbox.hpp"      // is_active/config_snapshot — the <environment> sandbox stanza
+#include "agentty/domain/sandbox_config.hpp"  // NetMode
 #include "agentty/util/dbglog.hpp"
 
+#include <maya/runtime.hpp>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -51,46 +53,50 @@ namespace {
 // so worst case ~192 KiB of process memory.
 //
 // Concurrency: the system prompt is built on the stream worker thread
-// (Cmd::stream's task body). Two concurrent stream calls against the
-// same Anthropic endpoint are serialized at the connection-pool layer,
-// so there's effectively one writer in practice — but the mutex
-// removes "in practice" from the contract.
+// (Cmd::stream's task body); the cache is a lock-free snapshot.
 [[nodiscard]] std::string read_memory_cached(const std::filesystem::path& p) {
+    // Keyed on plain values (path string, mtime ticks) so they cross into
+    // guarded<T> as Sendable arguments.
     struct Entry {
-        std::filesystem::file_time_type mtime{};
-        std::string                     content;
+        std::int64_t mtime = 0;
+        std::string  content;
     };
-    static std::unordered_map<std::string, Entry> cache;
-    static std::mutex                              mu;
+    using Cache = std::unordered_map<std::string, Entry>;
+    // Read-mostly, replaced per entry: a lock-free snapshot, so building a
+    // prompt needs no capability.
+    static maya::snapshot<Cache> cache;
 
-    const std::string key = p.string();
-    std::error_code   ec;
-    auto              now_mtime = std::filesystem::last_write_time(p, ec);
+    std::string     key = p.string();
+    std::error_code ec;
+    const auto      mt = std::filesystem::last_write_time(p, ec);
 
     if (ec) {
         // File missing / unreadable — drop any previous cache entry so
-        // a re-creation later is observed (the next call will re-stat
-        // and miss into the read path).
-        std::lock_guard lk(mu);
-        cache.erase(key);
+        // a re-creation later is observed.
+        if (cache.load()->contains(key))
+            (void)cache.update([](const Cache& old, const std::string& k) {
+                Cache c = old;
+                c.erase(k);
+                return c;
+            }, std::move(key));
         return {};
     }
+    const std::int64_t now_mtime = mt.time_since_epoch().count();
 
     {
-        std::lock_guard lk(mu);
-        auto it = cache.find(key);
-        if (it != cache.end() && it->second.mtime == now_mtime) {
-            return it->second.content;
-        }
+        const auto c = cache.load();
+        auto it = c->find(key);
+        if (it != c->end() && it->second.mtime == now_mtime) return it->second.content;
     }
 
-    // Cache miss or stale — read outside the lock so a slow NFS read
+    // Cache miss or stale — read with no lock held so a slow NFS read
     // doesn't block other paths' cache hits.
     std::string body = read_optional_memory(p);
-    {
-        std::lock_guard lk(mu);
-        cache[key] = Entry{now_mtime, body};
-    }
+    (void)cache.update([](const Cache& old, const std::string& k, const Entry& e) {
+        Cache c = old;
+        c[k] = e;
+        return c;
+    }, std::move(key), Entry{now_mtime, body});
     return body;
 }
 
@@ -112,7 +118,7 @@ namespace {
 // cache_control breakpoint catches the result); the disk cost is
 // memoized through read_memory_cached so the per-turn footprint is
 // 3× stat() + memcpy of the cached body, not 3× full read.
-[[nodiscard]] std::string collect_memory_blocks() {
+[[nodiscard]] std::string collect_memory_blocks(Io) {
     std::string user    = read_memory_cached(home_dir() / "CLAUDE.md");
     std::string project = read_memory_cached(std::filesystem::path{"CLAUDE.md"});
     std::string local   = read_memory_cached(std::filesystem::path{"CLAUDE.local.md"});
@@ -185,7 +191,7 @@ namespace {
 // guidance stays visually distinct from the personal CLAUDE.md tiers and the
 // model can apply precedence correctly. Sits behind the same Anthropic
 // cache_control breakpoint as collect_memory_blocks.
-[[nodiscard]] std::string collect_agents_md_block() {
+[[nodiscard]] std::string collect_agents_md_block(Io) {
     // workspace_root() is the fixed access boundary (where the root AGENTS.md
     // lives); project_root() is the agent's cwd clamped inside that boundary
     // — the walk start point for finding the nearest nested AGENTS.md.
@@ -200,9 +206,79 @@ namespace {
         &read_memory_cached);
 }
 
+// What the model needs to know about the sandbox, or "" when there is none.
+//
+// ── Why the model is told at all ───────────────────────────────────
+//
+// Because a model that does not know it is sandboxed MISDIAGNOSES every wall
+// it hits. The failure is well documented across agents: EPERM on a path
+// becomes "your corporate proxy is blocking this", a blocked connect becomes
+// "check your firewall / CrowdStrike", and the agent either sends the user on
+// a wild goose chase or retries the same denied call in a loop. Both waste a
+// turn and neither can succeed, because the boundary is a kernel decision and
+// no amount of retrying moves it.
+//
+// The fix every mature implementation lands on is the same: say the boundary
+// exists, say where it is, and say what to do instead. Then a denial is a
+// FACT the model can route around rather than a mystery to investigate.
+//
+// ── Why it is in <environment> ─────────────────────────────────────
+//
+// It is an environment fact, exactly like the OS and the shell: the same class
+// of thing as "you are on Windows, do not write `ls`". Putting it in its own
+// section would make it read as policy to be reasoned about; putting it here
+// makes it a constraint to be worked within.
+//
+// ── Why it says what is ALLOWED, not just what is blocked ───────────────
+//
+// A denial list invites probing the edges. Stating the workspace is writable
+// and the rest is read-only tells the model where to work on the FIRST try,
+// which is the whole point: fewer walls hit, not better explanations after.
+[[nodiscard]] std::string sandbox_stanza() {
+    namespace sb = tools::util::sandbox;
+    if (!sb::is_active()) return {};
+
+    const auto cfg = sb::config_snapshot();
+    std::string out = "  sandbox: ON \xe2\x80\x94 shell commands run inside an "
+                      "OS-level sandbox\n";
+
+    // The workspace is the one thing that is always writable, and saying so is
+    // what stops "I cannot write anywhere" panic after one EPERM elsewhere.
+    out += "    writable:  the workspace (cwd above) and /tmp\n";
+    out += "    readable:  system dirs and your toolchain; "
+           "credential files are masked\n";
+
+    switch (cfg->net_mode) {
+        case sandbox_cfg::NetMode::Full:
+            out += "    network:   allowed\n";
+            break;
+        case sandbox_cfg::NetMode::None:
+            // Worth being blunt: this one breaks the commands an agent reaches
+            // for most (git push, npm install, curl), and a model that does not
+            // know will burn a turn diagnosing DNS.
+            out += "    network:   BLOCKED \xe2\x80\x94 git push, npm/pip installs "
+                   "and curl will fail. Do not retry them or blame DNS.\n";
+            break;
+        case sandbox_cfg::NetMode::Ports:
+            out += "    network:   restricted to specific ports; an unlisted "
+                   "port fails to connect\n";
+            break;
+    }
+
+    // The instruction, not just the facts. Without this the model knows it is
+    // sandboxed and still retries, because nothing told it that retrying is
+    // the wrong move.
+    out += "    If a command fails with a permission or network error, that is "
+           "the sandbox, not a broken tool or a proxy.\n"
+           "    Do NOT retry it unchanged and do NOT tell the user to check "
+           "their firewall. Work inside the workspace, or say plainly which "
+           "wall you hit and what you would need.\n";
+    return out;
+}
+
 } // namespace
 
-std::string default_system_prompt(bool lean) {
+std::string default_system_prompt(Io io, bool lean) {
 #if defined(_WIN32)
     constexpr const char* os_name  = "Windows";
     constexpr const char* shell    = "cmd.exe (Windows Command Prompt)";
@@ -290,8 +366,8 @@ std::string default_system_prompt(bool lean) {
         // four idioms that produced them.
         << "  - The shell idioms you reach for have native equivalents — "
         << "a pipe is usually a PARAMETER you haven't found yet:\n"
-        << "      `cmd | head -20`   → `limit: 20` (every search/read "
-        << "tool bounds its own output)\n"
+        << "      `cmd | head -20`   → `limit: 20` on `grep`/`read` (list_dir "
+        << "and glob are already bounded)\n"
         // The one idiom with no native TOOL answer: a real build/test
         // command whose output you want to bound. The pipe filters at the
         // wrong layer — it discards the rest before the terminal card sees
@@ -306,6 +382,17 @@ std::string default_system_prompt(bool lean) {
         << "`symbol: \"name\"` for one function's body\n"
         << "      `cmd 2>/dev/null`  → nothing: native tools report "
         << "\"no matches\" instead of shouting\n"
+        // Measured on 11.5k real shell calls: 19% were `cd X && inspect`,
+        // 28% glued steps together with `echo "=== x ==="`, and 24% of
+        // greps used BRE `\|`, which ripgrep reads as a literal pipe.
+        << "      `cd X && grep …`   → `grep` with `path: \"X\"` — native "
+        << "tools take the directory as a parameter\n"
+        << "      `a; echo ===; b`   → two native calls in one turn; they "
+        << "run in parallel and each gets its own card\n"
+        << "      `grep -A 8 --include=*.cpp` → `context: \"8\"`, "
+        << "`glob: \"*.cpp\"`; and the pattern is ripgrep syntax: `a|b`, "
+        << "not `a\\|b`\n"
+        << "      `grep … | grep -v x` → `grep` with `exclude: \"x\"`\n"
         << "</shell>\n\n"
         << "<tool-batching>\n"
         << "  - Every model round-trip costs seconds. When your next "
@@ -347,9 +434,9 @@ std::string default_system_prompt(bool lean) {
         << "  - `read` returns up to 2000 lines. For larger files, "
         << "use `offset` + `limit` to page through — read only the "
         << "slice you need, not the whole file. Re-reading the SAME "
-        << "(path, offset, limit) returns a 'file unchanged' sentinel "
-        << "that you should respect: refer to the earlier tool_result "
-        << "instead of re-fetching.\n"
+        << "(path, offset, limit) of an unchanged file returns the "
+        << "same content from cache, tagged `[cached]`: you already "
+        << "have it, so don't re-read just to look again.\n"
         << "  - Prefer `grep` / `find_definition` over `read` when "
         << "you're looking for a pattern or symbol — they return the "
         << "match + 2 lines of context, not the whole file.\n"
@@ -445,7 +532,8 @@ std::string default_system_prompt(bool lean) {
         << "  os: " << os_name << "\n"
         << "  shell: " << shell << "\n";
     if (!cwd.empty()) oss << "  cwd: " << cwd << "\n";
-    oss << "</environment>\n\n"
+    oss << sandbox_stanza()
+        << "</environment>\n\n"
         << "<shell-notes>\n"
         << shell_hint << "\n"
         << "</shell-notes>\n\n";
@@ -530,15 +618,15 @@ std::string default_system_prompt(bool lean) {
     // tiers. Standardized public project guidance lands first, personal
     // memory layers on top — same end-of-prompt position so the always-on
     // rules above still anchor first.
-    oss << collect_agents_md_block();
+    oss << collect_agents_md_block(io);
     // Append CLAUDE.md tiers (User + Project + Local) when present.
     // Lives at the END of the prompt so the always-on rules above
     // anchor first; user-authored memory then layers on top.
-    oss << collect_memory_blocks();
+    oss << collect_memory_blocks(io);
     // On-demand skills catalog (names + descriptions only). The full
     // bodies load lazily via the `skill` tool — progressive disclosure
     // keeps the per-request cost to one cheap line per skill.
-    oss << tools::skills::catalog_block();
+    oss << tools::skills::catalog_block(io);
     return oss.str();
 }
 
@@ -573,8 +661,8 @@ std::string prompt_overlay(std::string_view provider_id) {
     return {};
 }
 
-std::string system_prompt_with_overlay(std::string_view provider_id, bool lean) {
-    std::string base = default_system_prompt(lean);
+std::string system_prompt_with_overlay(Io io, std::string_view provider_id, bool lean) {
+    std::string base = default_system_prompt(io, lean);
     std::string overlay = prompt_overlay(provider_id);
     if (overlay.empty()) return base;
     // Ensure a clean seam between the base and the appended delta.

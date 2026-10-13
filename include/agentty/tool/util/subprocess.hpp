@@ -13,12 +13,11 @@
 //             + restored (prevents a child resetting ENABLE_LINE_INPUT from
 //             corrupting TUI input). Reader thread drains the pipe so a
 //             grandchild that inherits stdout can't deadlock the wait.
-//   POSIX   → posix_spawn + poll-based deadline. Shell form goes through
-//             /bin/sh -c; argv form execs directly. Timeouts are enforced
-//             in-process via SIGTERM (with a 2 s grace) → SIGKILL — no
-//             dependency on GNU coreutils `timeout`, which isn't on stock
-//             macOS. stdin redirected from /dev/null; stdout+stderr both
-//             dup2'd onto a single pipe so callers see merged output.
+//   POSIX   → run_child (exec.hpp) on jaal's posix_process: the same
+//             supervise loop the tools use. Shell form goes through
+//             sh -c; argv form execs directly. Idle and wall clocks, then
+//             SIGTERM, a grace, SIGKILL to the tree. stdin is /dev/null and
+//             stdout+stderr share one pipe.
 //
 // Both paths stream captured bytes through the thread-local progress sink
 // (see agentty/tool/registry.hpp) at most every ~80 ms, so the UI reveals live
@@ -65,7 +64,26 @@ struct SubprocessOptions {
         return nullptr;
     }
 
+    // `timeout` is an IDLE watchdog: it fires only after this many seconds
+    // of SILENCE, so a chatty build/test that keeps printing progress is
+    // never killed mid-flight. That is the right default for a coding agent
+    // -- a 20-minute test run should finish.
+    //
+    // But silence is not the only way to hang. A runaway that stays chatty
+    // forever (`yes`, `tail -f`, a progress loop) rolls the idle deadline
+    // forward on every byte and is never reaped, and once the output cap is
+    // hit the reader discards everything it reads, so it isn't even bounded
+    // by memory. `hard_timeout` is an absolute ceiling from spawn that never
+    // resets. 0 derives a generous one (20x idle, floored at 10 min) so a
+    // caller that only set `timeout` still gets a backstop without any
+    // realistic build or test suite coming near it.
+    //
+    // This mirrors mcp-cpp's runner field for field. agentty installs ITS
+    // runner as mcp-cpp's host sandbox whenever the sandbox is on, so the
+    // ceiling written over there was being bypassed in the default config --
+    // the two have to agree or the protection only exists on paper.
     std::chrono::seconds timeout{120};
+    std::chrono::seconds hard_timeout{0};
     // Unsigned because a negative cap makes no sense and every compare
     // site was already a `size_t` on the RHS; the old `int` caused
     // mixed-sign promotions and the occasional sign-compare warning.
@@ -82,12 +100,87 @@ struct SubprocessOptions {
     // This keeps callers such as a provider bridge responsive to UI cancel
     // without coupling this low-level utility to a particular token type.
     std::function<bool()> stop_requested;
+
+    // Optional replacement for the fork/exec step ONLY.
+    //
+    // A sandbox that is a LIBRARY rather than a binary cannot be expressed as
+    // an argv prefix: claybin has to fork, apply the namespace/landlock/seccomp
+    // plan in the child, and exec there. But everything after that -- poll the
+    // pipe, throttle progress, enforce the idle deadline, SIGTERM then SIGKILL,
+    // reap -- is identical to the normal path and is the part that is easy to
+    // get wrong. Duplicating it per backend would mean two implementations of
+    // the hard half.
+    //
+    // So a backend supplies just the spawn: it receives the write end of the
+    // pipe the runner already created, wires it to the child's stdout+stderr,
+    // and returns the pid. The runner keeps ownership of the read end, the
+    // deadline, and the reaping.
+    //
+    // Returning a pid of -1 (with `error` set) is a start failure and surfaces
+    // as started==false, exactly like a posix_spawn failure.
+    struct SpawnedChild {
+        int pid{-1};
+        int pidfd{-1};   // taken: the runner reaps by it when set
+        std::string error;
+
+        // A syscall supervisor, when the sandbox brokers calls.
+        //
+        // This exists because seccomp user-notification makes the CHILD's
+        // progress depend on the PARENT answering: the kernel blocks a
+        // brokered syscall until someone responds on the listener, so a
+        // supervisor that is not being polled is a hang, not a weaker wall.
+        // The supervise loop below already owns the child's lifetime and
+        // already polls, so this is where the listener has to live -- a second
+        // loop elsewhere would race this one for the same child.
+        //
+        // Two fields rather than a callback taking the fd, so the runner can
+        // put the descriptor in its own pollfd set and only call `service`
+        // when it is actually readable. A callback that blocked on recv would
+        // stall stdout draining and the idle watchdog.
+        //
+        //   supervisor_fd  readable exactly when a guest thread is blocked on
+        //                  a brokered syscall. -1 when nothing is brokered,
+        //                  which is the common case and costs nothing.
+        //   service        answer ONE pending notification. Returns false when
+        //                  the listener is finished (guest gone, fd closed),
+        //                  after which the runner stops polling it.
+        //
+        // The runner never interprets either one: what a decision means is the
+        // sandbox's business, and keeping that knowledge out of the subprocess
+        // layer is what stops this from becoming a second policy engine.
+        int supervisor_fd{-1};
+        std::function<bool()> service;
+
+        // Stop the whole process tree, if the spawner has a better way than
+        // signalling the process group.
+        //
+        // killpg is what the runner falls back to, and it has a hole: a
+        // descendant that calls setsid() leaves the group and survives. So
+        // does anything the shell re-parented. A sandbox that put the guest
+        // in its own cgroup can close that hole exactly -- cgroup.kill is a
+        // single atomic kernel operation over the whole subtree, with no PID
+        // list to race and nowhere to escape to.
+        //
+        // Returns false if it could not do it, and the runner then uses the
+        // process group as before. Empty means "nothing better available",
+        // which is the normal case for an unsandboxed spawn.
+        std::function<bool()> kill_tree;
+    };
+    // (command, pipe_write_fd) -> child. `command` is the resolved shell string
+    // or argv, already chosen by the variant above.
+    std::function<SpawnedChild(const SubprocessOptions&, int pipe_write_fd)> spawner;
 };
 
 struct SubprocessResult {
     std::string output;                // captured stdout+stderr, UTF-8 valid
     int  exit_code   = 0;
     bool timed_out   = false;
+    // True when it was the WALL-CLOCK ceiling that stopped it, not silence.
+    // The two want opposite advice: an idle timeout means "it hung, look at
+    // why", a hard cap means "it was still working, give it longer or run it
+    // in the background". Saying "timed out" for both sends the model
+    // debugging a command that was fine.
+    bool hard_capped = false;
     bool truncated   = false;
     bool started     = true;           // false iff spawn itself failed
     std::string start_error;           // populated when started==false

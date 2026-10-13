@@ -4,6 +4,7 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/util/logx.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -14,6 +15,7 @@
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/io/persistence.hpp"   // new_id: a pure function, called directly
 #include "agentty/provider/selection.hpp"
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/mem.hpp"
@@ -29,7 +31,6 @@ namespace agentty::app::detail {
 
 namespace pick = agentty::ui::pick;
 using maya::overload;
-using maya::Cmd;
 // ── Fresh-thread reset ────────────────────────────────────────────────────
 // Swap the model over to a brand-new empty thread and return the terminal
 // reset that wipes the departing thread's rendered turns off-screen.
@@ -45,10 +46,7 @@ using maya::Cmd;
 //
 // Returns the reset_inline Cmd so the caller can batch it with its own
 // commands (delete also kicks a thread-list refresh + a toast).
-[[nodiscard]] Cmd<Msg> reset_to_fresh_thread(Model& m) {
-    // Skill activations belong to the departing thread's context; the new
-    // thread must be able to re-load any skill from scratch.
-    tools::skills::reset_activations();
+[[nodiscard]] Cmd reset_to_fresh_thread(Model& m) {
     // Drop the whole render cache: every (tid,msg) entry belongs to the
     // thread we're leaving, whose messages will never freeze again (freeze
     // is the only per-entry drop, and it only runs on the CURRENT thread).
@@ -56,9 +54,9 @@ using maya::Cmd;
     // the old thread's staged/pinned entries so they don't linger.
     m.ui.view_cache.clear();
     m.d.current = Thread{};
-    m.d.current.id = deps().new_thread_id();
+    m.d.current.id = persistence::new_id();
     m.d.current.created_at = m.d.current.updated_at =
-        std::chrono::system_clock::now();
+        m.wall_now();
     clear_frozen(m);
     // Close every modal that framed the OLD thread: the picker we acted
     // from, plus the palette / code-block picker whose contents belonged to
@@ -84,32 +82,30 @@ using maya::Cmd;
     m.s.smart_turn_complexity  = smart::Complexity::Standard;
     m.s.smart_effort_bias      = 0;
     release_to_kernel();
-    // Re-warm the active provider's TLS socket. The launch-time prewarm in
-    // main() has usually aged out of the pool by now — a user reads a reply,
-    // composes, then hits ^N, and the 90 s idle TTL has evicted the warm
-    // connection. Without this the FIRST turn of every new thread re-pays
-    // the full DNS+TCP+TLS handshake (~150-300 ms) before its first SSE byte,
-    // which reads as a per-new-thread lag. Opening the socket now overlaps
-    // that cost with the user typing their first prompt. Non-blocking: spawns
-    // a tracked background dial and returns immediately; a no-op when the pool
-    // is already warm enough to serve the next request.
-    provider::prewarm_active_provider();
-    // Per maya's contract this is the ONE allowed wiring of reset_inline: an
-    // explicit, user-initiated content swap. `\x1b[3J` wipes saved-lines
-    // (including pre-agentty shell history), acceptable precisely because
-    // the user asked to switch threads. Do NOT extend it to per-turn paths.
-    return Cmd<Msg>::reset_inline();
+    // Re-warm the active provider's TLS socket. The launch-time prewarm has
+    // usually aged out of the pool by now — a user reads a reply, composes,
+    // then hits ^N, and the 90 s idle TTL has evicted the warm connection.
+    // Without this the FIRST turn of every new thread re-pays the full
+    // DNS+TCP+TLS handshake (~150-300 ms) before its first SSE byte. Returned
+    // as an effect, so the dial overlaps the user typing their first prompt.
+    //
+    // Per maya's contract reset_inline is the ONE allowed wiring of
+    // `\x1b[3J`: an explicit, user-initiated content swap. It wipes
+    // saved-lines (including pre-agentty shell history), acceptable precisely
+    // because the user asked to switch threads. Do NOT extend it to per-turn
+    // paths.
+    return Cmd::batch(cmd::prewarm_provider(m), cmd::reset_inline());
 }
 
-Step thread_list_update(Model m, msg::ThreadListMsg tm) {
+Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
     return std::visit(overload{
-        [&](OpenThreadList) -> Step {
+        [&](OpenThreadList) -> Cmd {
             // Refresh in the background if no load is in flight — the
             // walk + parse is too slow (seconds, with hundreds of
             // multi-MB thread files) to do synchronously here. The
             // picker opens immediately against the cached list; new
             // entries fade in when ThreadsLoaded lands.
-            Cmd<Msg> cmd = Cmd<Msg>::none();
+            Cmd cmd = Cmd::none();
             if (!m.s.threads_loading) {
                 m.s.threads_loading = true;
                 cmd = cmd::load_threads_async();
@@ -124,25 +120,25 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                     break;
                 }
             m.ui.panel.descend(pn::ThreadList{{at}});
-            return {std::move(m), std::move(cmd)};
+            return cmd;
         },
-        [&](CloseThreadList) -> Step {
+        [&](CloseThreadList) -> Cmd {
             ascend(m);   // Esc: back to whatever opened this, or close
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ThreadListMove& e) -> Step {
-            if (m.d.threads.empty()) return done(std::move(m));
+        [&](ThreadListMove& e) -> Cmd {
+            if (m.d.threads.empty()) return Cmd::none();
             auto* p = m.ui.panel.get<pn::ThreadList>();
-            if (!p) return done(std::move(m));
+            if (!p) return Cmd::none();
             p->confirm_remove.clear();   // moving disarms a pending `d`
             int sz = static_cast<int>(m.d.threads.size());
             p->index = (p->index + e.delta + sz) % sz;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ThreadListJump& e) -> Step {
-            if (m.d.threads.empty()) return done(std::move(m));
+        [&](ThreadListJump& e) -> Cmd {
+            if (m.d.threads.empty()) return Cmd::none();
             auto* p = m.ui.panel.get<pn::ThreadList>();
-            if (!p) return done(std::move(m));
+            if (!p) return Cmd::none();
             p->confirm_remove.clear();   // jumping disarms a pending `d`
             int sz = static_cast<int>(m.d.threads.size());
             using W = ThreadListJump::Where;
@@ -153,7 +149,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 case W::PageUp:   p->index = std::max(0, p->index - kPage); break;
                 case W::PageDown: p->index = std::min(sz - 1, p->index + kPage); break;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
         // ── Model swap: commit overflow before swapping ──────────────
         //
@@ -188,7 +184,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
         //   wire effect.
         //
         // Why NOT force_redraw:
-        //   Cmd::force_redraw demotes Synced → Stale, routing the
+        //   cmd::force_redraw demotes Synced → Stale, routing the
         //   next render through compose case (B). Case (B)'s
         //   scroll-to-fit branch (scroll_n > 0) emits \n at the
         //   viewport bottom when the new frame is taller than the
@@ -197,9 +193,9 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
         //   tail + host shell history above it) up into
         //   terminal-owned scrollback, permanently. History: commit
         //   8becb88 did exactly that and reverted in 0b24148.
-        [&](ThreadListSelect) -> Step {
+        [&](ThreadListSelect) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
-            Cmd<Msg> cmd = Cmd<Msg>::none();
+            Cmd cmd = Cmd::none();
             if (p) p->confirm_remove.clear();   // selecting disarms a pending `d`
             if (p && !m.d.threads.empty() && !m.s.thread_loading) {
                 // Re-clamp: p->index can be stale if an async refresh shrank
@@ -212,27 +208,27 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 // reparse the same bytes and flash.
                 if (meta.id == m.d.current.id) {
                     m.ui.panel.close<pn::ThreadList>();
-                    return done(std::move(m));
+                    return Cmd::none();
                 }
                 m.s.thread_loading = true;
-                // Warm the socket now so the first turn in the thread the user
+                // Warm the socket so the first turn in the thread the user
                 // is switching INTO doesn't re-pay the handshake (the pool's
                 // idle TTL has usually evicted it during composer breathing
-                // room). Non-blocking; no-op if already warm.
-                provider::prewarm_active_provider();
-                cmd = cmd::load_thread_async(meta.id);
+                // room). Returned, not performed.
+                cmd = Cmd::batch(cmd::prewarm_provider(m),
+                                 cmd::load_thread_async(meta.id));
             }
             m.ui.panel.close<pn::ThreadList>();
-            return {std::move(m), std::move(cmd)};
+            return cmd;
         },
-        [&](ThreadListDelete) -> Step {
+        [&](ThreadListDelete) -> Cmd {
             // `d` / `D` in the thread picker — two-press delete with
             // confirm_remove, mirroring SettingsListRemove / AccountRemove.
             // First press on a row marks it pending (⚠ badge in the view);
             // second press on the SAME row commits via deps().delete_thread().
             // Any move/jump/select/new/close disarms the pending state.
             auto* p = m.ui.panel.get<pn::ThreadList>();
-            if (!p || m.d.threads.empty()) return done(std::move(m));
+            if (!p || m.d.threads.empty()) return Cmd::none();
             // Bounds-guard the cursor before indexing. Navigation handlers
             // clamp p->index on every move, but the thread list can be
             // mutated out from under the picker by an async refresh (or a
@@ -248,7 +244,7 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             const std::string key = target.id.value;
             if (p->confirm_remove != key) {
                 p->confirm_remove = key;
-                return done(std::move(m));
+                return Cmd::none();
             }
             // Second press — commit. Snapshot everything we need OUT of the
             // vector element BEFORE erase(): the erase invalidates `target`,
@@ -260,7 +256,9 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 target.title.empty() ? "(untitled)" : target.title;
 
             p->confirm_remove.clear();
-            deps().delete_thread(target_id);
+            // The delete is a VALUE, batched into both of this arm's
+            // returns below — taken here, where target_id is still in hand.
+            Cmd del = Cmd(DeleteThread{target_id});
             m.d.threads.erase(m.d.threads.begin() + idx);
             // Clamp the cursor so it stays valid after removal.
             const int sz = static_cast<int>(m.d.threads.size());
@@ -281,13 +279,12 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // that wipes the deleted thread's rendered turns off-screen.
             if (was_current) {
                 auto reset = reset_to_fresh_thread(m);
-                return {std::move(m),
-                        Cmd<Msg>::batch(cmd::load_threads_async(),
-                                        std::move(reset), std::move(toast))};
+                return Cmd::batch(std::move(del), cmd::load_threads_async(),
+                                  std::move(reset), std::move(toast));
             }
-            return {std::move(m), std::move(toast)};
+            return Cmd::batch(std::move(del), std::move(toast));
         },
-        [&](ThreadCycle& e) -> Step {
+        [&](ThreadCycle& e) -> Cmd {
             // Alt+←/→ — jump to the adjacent thread without the picker.
             // Recency order (same as ^J): index 0 = newest; +1 = older,
             // -1 = newer, wrapping at both ends. Gated on an idle
@@ -296,21 +293,20 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             if (m.s.active()) {
                 auto cmd = set_status_toast(m,
                     "wait for the reply to finish before switching threads");
-                return {std::move(m), std::move(cmd)};
+                return cmd;
             }
-            if (m.s.thread_loading) return done(std::move(m));
+            if (m.s.thread_loading) return Cmd::none();
             const int sz = static_cast<int>(m.d.threads.size());
             if (sz == 0) {
                 // History not loaded yet (or genuinely empty) — kick a
                 // refresh so the NEXT press works, and say so.
-                Cmd<Msg> cmd = Cmd<Msg>::none();
+                Cmd cmd = Cmd::none();
                 if (!m.s.threads_loading) {
                     m.s.threads_loading = true;
                     cmd = cmd::load_threads_async();
                 }
                 auto toast = set_status_toast(m, "no other threads yet");
-                return {std::move(m),
-                        Cmd<Msg>::batch(std::move(cmd), std::move(toast))};
+                return Cmd::batch(std::move(cmd), std::move(toast));
             }
             // Locate the current thread in the recency list. A fresh
             // unsaved thread isn't in it — treat "newest" as the anchor
@@ -327,19 +323,18 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             } else {
                 if (sz == 1) {
                     auto toast = set_status_toast(m, "only one thread");
-                    return {std::move(m), std::move(toast)};
+                    return toast;
                 }
                 target = ((cur + e.delta) % sz + sz) % sz;
             }
             const Thread& meta = m.d.threads[static_cast<std::size_t>(target)];
-            if (meta.id == m.d.current.id) return done(std::move(m));
+            if (meta.id == m.d.current.id) return Cmd::none();
             // Preserve the thread being left — same courtesy NewThread
             // extends. finalize_turn saves per turn, but a title edit or
             // an un-persisted tail shouldn't be lost to a quick cycle.
-            if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
+            Cmd save = m.d.current.messages.empty()
+                         ? Cmd::none() : Cmd(SaveThread{m.d.current});
             m.s.thread_loading = true;
-            // Warm the socket for the switched-into thread's first turn.
-            provider::prewarm_active_provider();
             // "thread k/N · title" — the positional readout that makes
             // repeated Alt+←/→ presses feel like flipping through a
             // deck rather than teleporting blind. Survives the swap
@@ -348,20 +343,24 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 "thread " + std::to_string(target + 1) + "/"
                     + std::to_string(sz) + " \xc2\xb7 "
                     + (meta.title.empty() ? "(untitled)" : meta.title));
-            return {std::move(m),
-                    Cmd<Msg>::batch(cmd::load_thread_async(meta.id),
-                                    std::move(toast))};
+            // The prewarm warms the socket for the switched-into thread's
+            // first turn.
+            return Cmd::batch(std::move(save),
+                              cmd::prewarm_provider(m),
+                              cmd::load_thread_async(meta.id),
+                              std::move(toast));
         },
-        [&](NewThread) -> Step {
+        [&](NewThread) -> Cmd {
             // Persist the outgoing thread before we drop it (delete's
             // active-row path does the opposite — it just removed the
             // thread, so it must NOT save). The shared reset below owns
             // everything after this policy decision.
-            if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
+            Cmd save = m.d.current.messages.empty()
+                         ? Cmd::none() : Cmd(SaveThread{m.d.current});
             auto reset = reset_to_fresh_thread(m);
-            return {std::move(m), std::move(reset)};
+            return Cmd::batch(std::move(save), std::move(reset));
         },
-        [&](ThreadsLoaded& e) -> Step {
+        [&](ThreadsLoaded& e) -> Cmd {
             m.d.threads = std::move(e.threads);
             m.s.threads_loading = false;
             // If the thread picker is open, its cursor may now point past the
@@ -371,17 +370,15 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
                 const int sz = static_cast<int>(m.d.threads.size());
                 p->index = sz > 0 ? std::clamp(p->index, 0, sz - 1) : 0;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ThreadLoaded& e) -> Step {
+        [&](ThreadLoaded& e) -> Cmd {
             // Result of the async single-thread load kicked off by
             // ThreadListSelect. Empty Thread (default ThreadId) means
             // the disk read or parse failed; just clear the spinner
             // and leave the current thread in place.
             m.s.thread_loading = false;
-            if (e.thread.id.value.empty()) return done(std::move(m));
-            // Old thread's skill activations leave context with it.
-            tools::skills::reset_activations();
+            if (e.thread.id.value.empty()) return Cmd::none();
             // Smart-Mode per-thread routing state belongs to the departing
             // thread too — same reset as reset_to_fresh_thread (momentum,
             // cascade bias, outcome-feedback signature). Without it the
@@ -389,24 +386,18 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // momentum and its first follow-up trains the old signature.
             m.s.smart_turn_complexity  = smart::Complexity::Standard;
             m.s.smart_effort_bias      = 0;
-            // Optional timing probe. AGENTTY_LOAD_PROF=1 keeps surfacing
-            // the synchronous portion of the load (rehydrate +
-            // release_to_kernel) that still lives on the UI thread.
-            const bool prof = []{
-                static const bool on = [] {
-                    const char* e = std::getenv("AGENTTY_LOAD_PROF");
-                    return e && *e && *e != '0';
-                }();
-                return on;
-            }();
-            std::FILE* prof_out = nullptr;
-            if (prof) prof_out = std::fopen("/tmp/agentty-load-prof.log", "a");
-            auto stamp = [&](const char* tag, auto t0) {
-                if (!prof_out) return;
+            // Timing probe for the synchronous portion of the load
+            // (rehydrate + release_to_kernel) that still lives on the UI
+            // thread. AGENTTY_LOG=perf=debug surfaces it.
+            //
+            // A STOPWATCH: it reads a real clock twice to time work inside
+            // this fold, which the fold's single instant (m.now) can't do.
+            // Log-only; never reaches the Model, so replay is unaffected.
+            auto stamp = [](const char* tag, auto t0) {
                 auto dt = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
-                std::fprintf(prof_out, "[load-async] %s: %.2f ms\n", tag, dt);
-                std::fflush(prof_out);
+                AGT_LOG(Perf, Debug, "thread.load", "stage={} ms={:.2f}",
+                        tag, dt);
             };
             m.d.current = std::move(e.thread);
             // The loaded thread has no live turn, so any run state still
@@ -462,20 +453,14 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             auto t2 = std::chrono::steady_clock::now();
             release_to_kernel();
             stamp("release_to_kernel", t2);
-            if (prof_out) {
-                const auto _ts = maya::platform::query_terminal_size(
-                    maya::platform::stdout_handle());
-                std::fprintf(prof_out,
-                    "[load-async] msgs=%zu frozen=%zu frozen_rows=%zu "
-                    "frozen_through=%zu term_h=%d\n",
+            AGT_LOG(Perf, Debug, "thread.load_done",
+                    "msgs={} frozen={} frozen_rows={} "
+                    "frozen_through={} term_h={}",
                     m.d.current.messages.size(),
                     m.ui.frozen.size(),
                     m.ui.frozen.row_total(),
                     m.ui.frozen_through,
-                    _ts.height.value);
-                std::fflush(prof_out);
-                std::fclose(prof_out);
-            }
+                    m.ui.term_rows);
             // Wholesale model swap into the loaded thread. Same
             // rationale as NewThread above: the previous thread's
             // overflow rows are committed to native scrollback and only
@@ -483,12 +468,12 @@ Step thread_list_update(Model m, msg::ThreadListMsg tm) {
             // erase them. Without it the previous thread's tail turns
             // are visible above the rehydrated thread's first turn.
             //
-            // Per maya/app/app.hpp reset_inline() docs: this is the
+            // Per maya/device.hpp reset_inline() docs: this is the
             // sanctioned recovery for thread switch / new thread. The
             // `\x1b[3J` cost (wipes the user's pre-agentty shell
             // scrollback) is acceptable because the user explicitly
             // asked for the content swap (picker select).
-            return {std::move(m), Cmd<Msg>::reset_inline()};
+            return cmd::reset_inline();
         },
     }, tm);
 }

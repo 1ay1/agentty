@@ -14,7 +14,7 @@ Yes — OAuth against your existing Pro/Max plan is supported (no extra billing,
 
 ## Will using my Claude subscription with agentty get my account banned?
 
-The honest answer: agentty is a third-party client, so it carries the same footing as any third-party client that speaks to Anthropic's API. What agentty actually does is deliberately unexotic — it completes the **same OAuth flow** and uses the **same `CLAUDE_CODE_OAUTH_TOKEN`** mechanism Claude Code itself uses, sends ordinary Messages-API requests over HTTPS, and adds nothing that spoofs, scrapes, or circumvents rate limits. Credentials live only in `~/.config/agentty/credentials.json` (mode `0600`); nothing is sent anywhere except Anthropic.
+The honest answer: agentty is a third-party client, so it carries the same footing as any third-party client that speaks to Anthropic's API. What agentty actually does is deliberately unexotic — it completes the **same OAuth flow** and uses the **same `CLAUDE_CODE_OAUTH_TOKEN`** mechanism Claude Code itself uses, sends ordinary Messages-API requests over HTTPS, and adds nothing that spoofs, scrapes, or circumvents rate limits. Credentials live only in `~/.agentty/credentials/credentials.json` (mode `0600`); nothing is sent anywhere except Anthropic.
 
 We're not affiliated with Anthropic and can't speak for their enforcement, and their terms can change. If you want **zero ambiguity**, use an `ANTHROPIC_API_KEY` (pay-as-you-go, unquestionably in-bounds) or point agentty at [another provider](/docs/providers) — OpenAI, DeepSeek, Kimi, Gemini, Groq, OpenRouter, or a local Ollama model — with `--provider`. See [Authentication](/docs/authentication).
 
@@ -40,7 +40,7 @@ Linux, macOS, and Windows — all built and tested daily. Prebuilt binaries ship
 
 ## How is it sandboxed?
 
-Every shell/build call runs in `bwrap` (Linux) or `sandbox-exec` (macOS). The workspace is read-write, system libs read-only, and `~/.ssh` / `/etc` / other projects are blocked. Windows and unrooted Android/Termux run unsandboxed (no user-namespace backend available there); agentty detects this and prints `sandbox: unavailable, running unsandboxed`.
+Every shell/build call runs in a sandbox the kernel enforces, so it holds even if the command tries to escape. The workspace is read-write, system libs read-only, and `~/.ssh` / `/etc` / other projects are blocked. Windows and unrooted Android/Termux run unsandboxed (no user-namespace backend available there); agentty detects this and prints `sandbox: unavailable, running unsandboxed`.
 
 ## Can I run it on a machine with no internet?
 
@@ -52,7 +52,7 @@ Yes. `agentty acp` runs agentty as an [Agent Client Protocol](/docs/acp) agent i
 
 ## Where are my conversations stored?
 
-As plain JSON, one file per thread, under `~/.agentty/threads/`. Safe to inspect, back up, or delete.
+As plain files under `~/.agentty/threads/`: one append-only `.jsonl` log per thread plus small index sidecars. Safe to inspect, back up, or delete. Move them with `AGENTTY_THREADS_DIR`, expire old ones with `AGENTTY_THREADS_KEEP_DAYS`. `agentty config` shows every folder agentty uses and its size; [Storage](/docs/storage) has the full map.
 
 ## What happens when a conversation runs out of context?
 

@@ -3,8 +3,20 @@
 Every file in this directory is **one page** on <https://agentty.org/docs>. The
 site (repo `1ay1/agentty.org`) fetches this directory at build time and renders
 each `.md` through a dynamic route — there are no hand-written page components on
-the site anymore. Edit docs *here*, next to the code; a push to `master` that
-touches `docs/website/**` triggers a rebuild + deploy of the site automatically.
+the site anymore. Edit docs *here*, next to the code.
+
+Deploys are driven by a **GitHub webhook** on this repo pointed at
+`https://agentty.org/_deploy-hook`, handled by the `agentty-deploy-hook`
+service on the web host: it pulls this directory, rebuilds, and reloads nginx.
+A systemd timer re-runs the same deploy every 30 minutes as a backstop, so the
+site also picks up anything it fetches live from GitHub (release version,
+binary sizes, star count) without a push.
+
+There is deliberately NO workflow in this repo that deploys the site. There was
+one — it sent a `repository_dispatch` and needed a `SITE_DISPATCH_TOKEN` that
+was never set, so it logged "skipping site dispatch" and exited 0 on every run
+for months. A green check that does nothing is worse than no check, and the
+webhook had been doing the real work the whole time.
 
 ## File → page mapping
 

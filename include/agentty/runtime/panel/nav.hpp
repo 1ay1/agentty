@@ -230,11 +230,18 @@ namespace agentty::ui::panel {
         case Kind::SettingsList:    return Msg{CloseSettingsList{}};
         case Kind::PluginEdit:      return Msg{ClosePluginEdit{}};
         case Kind::Appearance:      return Msg{CloseAppearance{}};
+        case Kind::Sandbox:         return Msg{CloseSandbox{}};
+        // Closing the list editor COMMITS it, which is why this is not a
+        // CloseSandboxList: Esc in a form means "leave this field, keeping
+        // it", and a list that threw your entries away on Esc would be the
+        // one place in the pane where leaving loses work.
+        case Kind::SandboxList:     return Msg{SandboxListClose{}};
         case Kind::Fork:            return Msg{CloseFork{}};
         case Kind::Models:     return Msg{CloseModels{}};
         case Kind::Providers:  return Msg{CloseProviders{}};
         case Kind::ThreadList:      return Msg{CloseThreadList{}};
         case Kind::SmartMode:       return Msg{CloseSmartMode{}};
+        case Kind::WebSearch:       return Msg{CloseWebSearch{}};
         case Kind::DiffReview:      return Msg{CloseDiffReview{}};
         // Ambient: never swallows, so it never needs rescuing.
         case Kind::Todo:            return Msg{NoOp{}};

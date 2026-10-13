@@ -7,21 +7,25 @@
 //   visual row). User sees the painted caret still on the (erased)
 //   second row until the next repaint.
 //
-// Drives the REAL agentty view() + update() + REAL maya Runtime::render
+// Drives the REAL agentty view() + update() + REAL maya Screen::present
 // through a PTY into a compact VT emulator, then inspects the SCREEN
 // rows: after the shrink, the caret block must be back on the line
 // above, and the previously-caret-holding row must be empty.
 //
 // Build: link against the agentty tests lib (see CMake agentty_test()).
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
 #include <clocale>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <fcntl.h>
+#include <poll.h>
 #if defined(__APPLE__)
 #include <util.h>
 #else
@@ -30,7 +34,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-#include <maya/app/app.hpp>
+#include <maya/screen.hpp>
 #include <maya/core/anim_clock.hpp>
 #include <maya/terminal/tmux.hpp>   // reset_cache_for_test — the probe is one-shot
 
@@ -220,13 +224,17 @@ struct VtEmu {
     }
 };
 
+// Drain until the pty goes quiet (macOS delivers pty bytes asynchronously,
+// so the first EAGAIN is not the end of what was written).
 static std::string read_all(int fd) {
     std::string s;
     char buf[8192];
     for (;;) {
         ssize_t k = ::read(fd, buf, sizeof(buf));
         if (k > 0) { s.append(buf, static_cast<std::size_t>(k)); continue; }
-        break;
+        if (k < 0 && errno == EINTR) continue;
+        pollfd pfd{fd, POLLIN, 0};
+        if (::poll(&pfd, 1, 60) <= 0) break;
     }
     return s;
 }
@@ -393,13 +401,27 @@ int main() {
     ::close(slave);
     fcntl(master, F_SETFL, fcntl(master, F_GETFL, 0) | O_NONBLOCK);
 
-    maya::RunConfig cfg;
+    // The host split replaced maya::detail::Runtime + RunConfig with
+    // maya::Screen + maya::Options. Screen owns the device and cleans up in
+    // its destructor; `impl()` is the escape hatch for the finalize-bytes
+    // assertion at the bottom, which needs the explicit cleanup() call.
+    maya::Options cfg;
     cfg.mode = maya::Mode::Inline;
-    auto rt_r = maya::detail::Runtime::create(cfg);
-    if (!rt_r) { std::fprintf(stderr, "Runtime::create failed\n"); return 2; }
-    maya::detail::Runtime& rt = *rt_r;
+    auto scr_r = maya::Screen::open(cfg);
+    if (!scr_r) { std::fprintf(stderr, "Screen::open failed\n"); return 2; }
+    maya::Screen& scr = *scr_r;
+    maya::detail::Device& rt = scr.impl();
 
     Model m;
+    // The host sends the size as a Msg at attach and on every SIGWINCH;
+    // view() reads it from the Model, so the test has to do the same.
+    auto resized = [&](int cols, int rows) {
+        auto [m2, cmd] = agentty::app::update(std::move(m),
+                                              Msg{agentty::TerminalResized{cols, rows}});
+        m = std::move(m2);
+        (void)cmd;
+    };
+    resized(W, H);
     // Welcome screen off → plain composer-only frame.
     m.d.current.messages.push_back({});
     m.d.current.messages.back().role = agentty::Role::User;
@@ -409,9 +431,36 @@ int main() {
     auto frame = [&](const char* tag) {
         tick(20);
         maya::Element root = agentty::ui::view(m);
+        // Drain the master WHILE rendering. A macOS pty buffers only a few
+        // KB; a full-frame write larger than that stalls (or is deferred by
+        // a non-blocking writer) until someone reads, so draining after the
+        // fact sees a torn frame. Linux's 4K+ line discipline buffer hid it.
+        std::string got;
+        std::atomic<bool> done{false};
+        std::thread drain([&] {
+            char buf[8192];
+            for (;;) {
+                ssize_t k = ::read(master, buf, sizeof(buf));
+                if (k > 0) { got.append(buf, static_cast<std::size_t>(k)); continue; }
+                if (done.load()) {
+                    // render() has returned, so every byte of the frame has
+                    // been written; the wait is only for the pty to hand the
+                    // tail across. 60ms of silence, not 25: a shared CI VM
+                    // can stall that long, and a short window would feed the
+                    // emulator a torn frame -- the bug this test exists for.
+                    pollfd pfd{master, POLLIN, 0};
+                    if (::poll(&pfd, 1, 60) <= 0) break;   // quiet: frame complete
+                } else {
+                    pollfd pfd{master, POLLIN, 0};
+                    (void)::poll(&pfd, 1, 5);
+                }
+            }
+        });
         (void)rt.render(root);
         tick(20);
-        emu.feed(read_all(master));
+        done = true;
+        drain.join();
+        emu.feed(got);
         (void)tag;
     };
     auto type = [&](char32_t ch) {
@@ -646,6 +695,7 @@ int main() {
         ws2.ws_col = (unsigned short)W;
         ws2.ws_row = (unsigned short)H2;
         ioctl(master, TIOCSWINSZ, &ws2);
+        resized(W, H2);
         // maya picks the resize up on the next frame via its width-
         // backstop / SIGWINCH path.
         tick(50);
@@ -763,6 +813,7 @@ int main() {
             wsw.ws_col = (unsigned short)W;
             wsw.ws_row = (unsigned short)Hw;
             ioctl(master, TIOCSWINSZ, &wsw);
+            resized(W, Hw);
             tick(50);
             frame("welcome-resize");
         }

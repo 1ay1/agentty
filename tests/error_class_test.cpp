@@ -18,6 +18,8 @@
 
 #include "agentty/provider/error_class.hpp"
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/entitlement.hpp"
+#include "agentty/provider/openai/transport.hpp"   // build_request_body (#93)
 
 using namespace agentty::provider;
 
@@ -71,6 +73,204 @@ TEST_CASE("classify_stream_error is a pure dispatcher") {
     CHECK(classify_stream_error("whatever", 503)
           == classify(agentty::http::HttpError{K::Status, 503, ""}));
     CHECK(classify_stream_error("Overloaded", 0) == classify("Overloaded"));
+}
+
+// ── Typed mid-stream errors ────────────────────────────────────────
+//
+// An `event: error` inside a 200 body carries a machine-readable type and no
+// HTTP status — the status line was 200 and is long gone. So the retry
+// ladder used to classify these by sniffing the human `message`.
+//
+// That is the lossy path this header exists to avoid, and its failures are
+// asymmetric in both directions: a retryable overload whose prose we don't
+// recognise dies as Terminal, and a permanently-invalid request whose prose
+// happens to contain a transient-sounding word gets retried six times.
+
+TEST_CASE("wire error types map to the status that means the same thing") {
+    using agentty::provider::wire_error_type_status;
+
+    // Anthropic's published taxonomy.
+    CHECK(wire_error_type_status("rate_limit_error")     == 429);
+    CHECK(wire_error_type_status("overloaded_error")     == 503);
+    CHECK(wire_error_type_status("api_error")            == 503);
+    CHECK(wire_error_type_status("authentication_error") == 401);
+    CHECK(wire_error_type_status("permission_error")     == 403);
+    CHECK(wire_error_type_status("invalid_request_error")== 400);
+    CHECK(wire_error_type_status("not_found_error")      == 404);
+    CHECK(wire_error_type_status("request_too_large")    == 413);
+
+    // The OpenAI/Responses spellings for the same conditions. Both dialects
+    // surface errors this way; one table is one fewer place to drift.
+    CHECK(wire_error_type_status("rate_limit_exceeded")     == 429);
+    CHECK(wire_error_type_status("insufficient_quota")      == 429);
+    CHECK(wire_error_type_status("server_error")            == 503);
+    CHECK(wire_error_type_status("context_length_exceeded") == 413);
+
+    // Unknown means NO OPINION, not Terminal. 0 tells the caller to keep
+    // its existing string-sniff rather than inventing a classification —
+    // guessing here would be the same mistake as guessing a tool call's
+    // owner: confidently wrong beats visibly unsure only until it matters.
+    CHECK(wire_error_type_status("some_future_error") == 0);
+    CHECK(wire_error_type_status("")                  == 0);
+}
+
+TEST_CASE("a typed wire error classifies like its HTTP equivalent") {
+    using agentty::provider::wire_error_type_status;
+    using K = agentty::http::HttpErrorKind;
+
+    // The point of the mapping: a mid-stream error reaches the SAME
+    // compile-time-proven table as a header error, instead of a parallel
+    // substring list that drifts from it.
+    struct Case { const char* type; int status; };
+    static constexpr Case kCases[] = {
+        {"rate_limit_error",      429},
+        {"overloaded_error",      503},
+        {"authentication_error",  401},
+        {"invalid_request_error", 400},
+    };
+    for (const auto& c : kCases) {
+        INFO("type = " << c.type);
+        CHECK(wire_error_type_status(c.type) == c.status);
+        CHECK(classify_stream_error("any prose at all", c.status)
+              == classify(agentty::http::HttpError{K::Status, c.status, ""}));
+    }
+}
+
+TEST_CASE("typed errors fix what prose sniffing gets wrong") {
+    using agentty::provider::wire_error_type_status;
+
+    // THE MOTIVATING CASE, in both directions.
+
+    // 1. A retryable overload phrased in prose the sniffer has never seen.
+    //    Sniffing calls it Terminal and the turn dies on a failure the
+    //    server told us to retry.
+    const char* unfamiliar =
+        "The model is currently experiencing unusually high demand";
+    const auto sniffed = classify(unfamiliar);
+    const auto typed   = classify_stream_error(
+        unfamiliar, wire_error_type_status("overloaded_error"));
+
+    CHECK(typed == ErrorClass::Transient);
+    CHECK(sniffed != typed);      // the sniff really does get this wrong
+
+    // 2. The reverse: a permanently-invalid request whose message happens
+    //    to read as transient. Retrying it six times cannot help, and the
+    //    user waits through the whole ladder for a guaranteed failure.
+    const char* misleading =
+        "invalid connection parameter: tools[0].name";
+    const auto typed_terminal = classify_stream_error(
+        misleading, wire_error_type_status("invalid_request_error"));
+
+    CHECK(typed_terminal == ErrorClass::Terminal);
+    CHECK(max_retries_for(typed_terminal, /*mid_stream=*/true) == 0);
+}
+
+// ── Vision rejections ──────────────────────────────────────────
+//
+// A 400 on an image-bearing request has four causes and they are NOT
+// interchangeable. The strings below are what Copilot's API actually
+// returns — read out of the GitHub CLI's own binary, not invented.
+
+TEST_CASE("vision rejection: each cause is told apart") {
+    using agentty::provider::classify_vision_rejection;
+    using V = agentty::provider::VisionRejection;
+
+    // The model genuinely cannot see. A property of the MODEL: switching
+    // account changes nothing, and the fix is a different model.
+    CHECK(classify_vision_rejection("not supported for vision", 400)
+          == V::ModelCapability);
+    CHECK(classify_vision_rejection(
+              "This model does not support image input", 400)
+          == V::ModelCapability);
+
+    // The model sees images, just not THIS format. Per-request: a PNG
+    // would work on the very same model, so remembering it as a
+    // capability would be wrong.
+    CHECK(classify_vision_rejection("image media type not supported", 400)
+          == V::MediaType);
+    CHECK(classify_vision_rejection("could not process image", 400)
+          == V::MediaType);
+
+    // Too MANY, not too big. Also per-request.
+    CHECK(classify_vision_rejection(
+              "exceeded maximum number of images", 400)
+          == V::TooManyImages);
+
+    // Policy, not capability — the one that matters most (below).
+    CHECK(classify_vision_rejection(
+              "vision is not enabled for this organization", 400)
+          == V::OrgPolicy);
+
+    // And an ordinary 400 is not swept in. A classifier that fires on
+    // unrelated errors would strip images from turns that never had a
+    // vision problem, and then retry forever.
+    CHECK(classify_vision_rejection("invalid request: messages[0]", 400)
+          == V::None);
+    CHECK(classify_vision_rejection("rate limit exceeded", 429) == V::None);
+}
+
+TEST_CASE("vision rejection: org policy is never read as a model defect") {
+    // THE ordering hazard, and the reason this is an enum rather than a
+    // bool.
+    //
+    // "vision is not enabled for this organization" contains the word
+    // "vision". A classifier that tested the model-capability patterns
+    // first would match it, record the MODEL as blind, and persist that
+    // against the model for every account — including the entitled ones.
+    // The user would switch to a working account and find the model still
+    // refusing to look at images, with nothing anywhere explaining why.
+    //
+    // So the narrow, most-specific test runs FIRST. This pins it against
+    // messages deliberately built to trip a naive ordering.
+    using agentty::provider::classify_vision_rejection;
+    using V = agentty::provider::VisionRejection;
+
+    CHECK(classify_vision_rejection(
+              "vision is not enabled for this organization", 400)
+          == V::OrgPolicy);
+    CHECK(classify_vision_rejection(
+              "vision is not supported for this organization", 400)
+          == V::OrgPolicy);
+    CHECK(classify_vision_rejection(
+              "image input is not supported for this organisation", 400)
+          == V::OrgPolicy);          // en-GB spelling
+    CHECK(classify_vision_rejection(
+              "blocked by organization policy", 403)
+          == V::None);               // 403 is an auth class, not ours
+
+    // Every kind has a distinct, greppable tag — a log line that says
+    // "vision failed" is the 400 we already had.
+    CHECK(agentty::provider::tag(V::OrgPolicy)       == "org_policy");
+    CHECK(agentty::provider::tag(V::ModelCapability) == "model_capability");
+    CHECK(agentty::provider::tag(V::MediaType)       == "media_type");
+    CHECK(agentty::provider::tag(V::TooManyImages)   == "too_many_images");
+}
+
+TEST_CASE("vision rejection: an org block is account-scoped, not model-scoped") {
+    // The storage half of the same distinction.
+    //
+    // An org-policy block must key on the ACCOUNT and not the model, so
+    // that (a) it applies to every model on that login, and (b) it
+    // evaporates the moment the user switches to an entitled account.
+    // Recording it per-model would do the opposite on both counts.
+    namespace ent = agentty::domain::entitlement;
+    ent::Store s;
+
+    ent::record_blocked(s, ent::Fact::VisionOrgPolicy, "copilot", "work");
+
+    // Blocks on this account, for ANY model — no model component in the key.
+    CHECK(ent::blocked(s, ent::Fact::VisionOrgPolicy, "copilot", "work"));
+
+    // And NOT on another account of the same provider. This is the
+    // property the whole registry exists for: the other login's facts were
+    // never in the way, so nothing has to be reset on a switch.
+    CHECK(!ent::blocked(s, ent::Fact::VisionOrgPolicy, "copilot", "personal"));
+
+    // Nor on a different provider.
+    CHECK(!ent::blocked(s, ent::Fact::VisionOrgPolicy, "openai", "work"));
+
+    // And it does not collide with the other fact on the same key axes.
+    CHECK(!ent::blocked(s, ent::Fact::Context1M, "copilot", "work"));
 }
 
 // ── Long-context entitlement rejection: the [1m] self-heal trigger ───────
@@ -198,10 +398,14 @@ TEST_CASE("learned effort set drives ladder, clamp and wire") {
     {
         const auto caps = resolved_caps(id);
         const auto ladder = available_efforts(caps);
-        REQUIRE(ladder.size() == 3);
-        CHECK(ladder[0] == Effort::None);
-        CHECK(ladder[1] == Effort::Low);
-        CHECK(ladder[2] == Effort::High);
+        REQUIRE(ladder.size() == 4);
+        CHECK(ladder[0] == Effort::Auto);
+        CHECK(ladder[1] == Effort::None);
+        CHECK(ladder[2] == Effort::Low);
+        CHECK(ladder[3] == Effort::High);
+        // Auto anchors at the midpoint of the LEARNED ladder {low,high}:
+        // (2-1)/2 = 0 -> low. A learned set narrows the anchor too.
+        CHECK(agentty::auto_base_effort(caps) == Effort::Low);
         // Medium maps DOWN to low (nearest at-or-below), max down to high.
         CHECK(clamp_effort(Effort::Medium, caps) == Effort::Low);
         CHECK(effort_wire_for(Effort::Medium, caps) == "low");
@@ -215,10 +419,79 @@ TEST_CASE("learned effort set drives ladder, clamp and wire") {
         const auto caps = resolved_caps(id);
         CHECK(!agentty::effort_capable(caps));
         CHECK(effort_wire_for(Effort::High, caps) == "");
+        // No ladder: `auto` is not offered, because it would resolve to off
+        // and an "auto" that can only ever mean off is a lie.
         CHECK(available_efforts(caps).size() == 1);   // just off
+        CHECK(available_efforts(caps)[0] == Effort::None);
+        CHECK(agentty::auto_base_effort(caps) == Effort::None);
+        CHECK(effort_wire_for(Effort::Auto, caps) == "");
     }
 
     set_learned_effort_sets({});   // reset global state for other tests
+}
+
+// #93: strict OpenAI-compat hosts 400 an optional field; we must recognise
+// exactly that (and nothing broader) so the turn retries without it.
+TEST_CASE("parse_rejected_field: the issue's bodies and its neighbours") {
+    using agentty::provider::parse_rejected_field;
+    using F = agentty::provider::OptionalField;
+
+    // Groq.
+    CHECK(parse_rejected_field("property 'prompt_cache_key' is unsupported", 400)
+          == F::PromptCacheKey);
+    // Gemini (the extracted sentence).
+    CHECK(parse_rejected_field(
+              "Invalid JSON payload received. Unknown name \"prompt_cache_key\": "
+              "Cannot find field.", 400) == F::PromptCacheKey);
+    // Azure-style / vLLM / pydantic phrasings, and stream_options.
+    CHECK(parse_rejected_field("Unrecognized request argument supplied: stream_options", 400)
+          == F::StreamOptions);
+    CHECK(parse_rejected_field("stream_options: Extra inputs are not permitted", 422)
+          == F::StreamOptions);
+
+    // NOT a rejection of the field: a value error naming it must surface.
+    CHECK(parse_rejected_field("prompt_cache_key must be at most 64 chars", 400)
+          == F::None);
+    // A required field is never "learned" away.
+    CHECK(parse_rejected_field("Unknown name \"messages\": Cannot find field.", 400)
+          == F::None);
+    // Only 400/422 (or status-less mid-stream frames).
+    CHECK(parse_rejected_field("prompt_cache_key is unsupported", 500) == F::None);
+    CHECK(parse_rejected_field("prompt_cache_key is unsupported", 401) == F::None);
+    CHECK(parse_rejected_field("prompt_cache_key is unsupported", 0) == F::PromptCacheKey);
+}
+
+TEST_CASE("learned rejected field is omitted from the next body (#93)") {
+    namespace oa = agentty::provider::openai;
+    using agentty::provider::OptionalField;
+    using agentty::provider::bit;
+
+    // OpenAI opts in to prompt_cache_key, so the first body carries it...
+    oa::Request r;
+    r.endpoint    = oa::Endpoint::from_spec("openai");
+    r.model       = "gpt-4o";
+    r.max_tokens  = 64;
+    r.session_key = "thread-1";
+    CHECK(oa::build_request_body(r).contains("prompt_cache_key"));
+    CHECK(oa::build_request_body(r).contains("stream_options"));
+
+    // ...until that host rejects it once. Learned per HOST: every model
+    // behind it gets the corrected body.
+    const auto host = agentty::host_key(r.endpoint.host, r.endpoint.port);
+    agentty::add_rejected_field(host, bit(OptionalField::PromptCacheKey));
+    CHECK(!oa::build_request_body(r).contains("prompt_cache_key"));
+    CHECK(oa::build_request_body(r).contains("stream_options"));   // untouched
+
+    agentty::add_rejected_field(host, bit(OptionalField::StreamOptions));
+    CHECK(!oa::build_request_body(r).contains("stream_options"));
+    CHECK(agentty::rejected_fields_for(host)
+          == (bit(OptionalField::PromptCacheKey) | bit(OptionalField::StreamOptions)));
+
+    // Another host is unaffected.
+    r.endpoint = oa::Endpoint::from_spec("openrouter");
+    CHECK(oa::build_request_body(r).contains("prompt_cache_key"));
+
+    agentty::set_rejected_fields({});   // reset global state
 }
 
 TEST_CASE("parse_effort_rejection: ollama think-value + minimal harvesting") {
@@ -255,4 +528,43 @@ TEST_CASE("parse_effort_rejection: ollama think-value + minimal harvesting") {
         CHECK((*set & effort_bit(Effort::Minimal)) != 0);
         CHECK((*set & effort_bit(Effort::High))    != 0);
     }
+}
+
+// A 429 covers two unrelated situations and only one is worth retrying.
+//
+// A burst/concurrency limit clears in seconds — retrying is exactly right.
+// A plan QUOTA does not clear until it resets, and every retry is guaranteed
+// to fail with the message the first response already carried. So the user
+// sits through a backoff to learn nothing.
+//
+// The server tells us which one it is, in Retry-After. Yolo-Auto's free tier
+// answers `retry-after: 29410` (8h, to 00:00 UTC) with
+// type=insufficient_quota — captured live 2026-09-23 after exhausting a real
+// key's 15 requests. agentty used to clamp that to 600s and retry 3×, so a
+// "you are out until midnight" became three pointless 10-minute waits.
+TEST_CASE("retry-after: hours means quota, and a quota is terminal") {
+    namespace P = agentty::provider;
+
+    // The threshold is the line between "wait" and "tell the user".
+    CHECK(P::kRetryAfterTerminalSeconds == 15 * 60);
+
+    // Burst limits sit well under it and must still be honoured, not
+    // shortened — re-hitting the same 429 early burns the budget faster
+    // than the server permits.
+    CHECK(30   <= P::kRetryAfterTerminalSeconds);   // typical burst backoff
+    CHECK(60   <= P::kRetryAfterTerminalSeconds);
+    CHECK(300  <= P::kRetryAfterTerminalSeconds);   // a 5-min cooldown
+
+    // A real quota reset is far beyond it.
+    CHECK(29410 > P::kRetryAfterTerminalSeconds);   // Yolo-Auto free, measured
+    CHECK(3600  > P::kRetryAfterTerminalSeconds);   // an hourly cap
+    CHECK(86400 > P::kRetryAfterTerminalSeconds);   // a daily cap
+
+    // And the classification itself is unchanged: this is still a RateLimit,
+    // not an Auth or Terminal error. What changed is whether we WAIT on it —
+    // the class still drives the slow loop-backoff schedule.
+    agentty::http::HttpError e{};
+    e.kind        = agentty::http::HttpErrorKind::Status;
+    e.http_status = 429;
+    CHECK(P::classify(e) == P::ErrorClass::RateLimit);
 }

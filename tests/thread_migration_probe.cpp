@@ -15,6 +15,7 @@
 // history is never touched. No argument = no-op pass.
 
 #include <agentty/domain/conversation.hpp>
+#include "agtest_cap.hpp"
 #include <agentty/io/persistence.hpp>
 #include <agentty/io/thread_log.hpp>
 
@@ -60,7 +61,7 @@ int main(int argc, char** argv) {
     const auto legacy_size = fs::file_size(legacy, ec);
 
     // The thread as it exists today, via the legacy reader.
-    auto before = persistence::load_thread_by_id(id);
+    auto before = persistence::load_thread_by_id(::agentty::IoAccess::grant(), id);
     if (!before) { std::printf("FAIL: could not load the staged thread\n"); return 1; }
 
     std::size_t tools = 0, images = 0;
@@ -78,8 +79,8 @@ int main(int argc, char** argv) {
 
     // THE MIGRATION: the real save path, exactly as a turn would run it.
     const auto t0 = std::chrono::steady_clock::now();
-    persistence::save_thread(*before);
-    persistence::flush_pending_saves();
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), *before);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
     const auto save_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - t0).count();
 
@@ -96,7 +97,7 @@ int main(int argc, char** argv) {
     }
 
     // Everything must survive, byte for byte.
-    auto after = persistence::load_thread_by_id(id);
+    auto after = persistence::load_thread_by_id(::agentty::IoAccess::grant(), id);
     if (!after) { std::printf("FAIL: migrated thread does not load\n"); return 1; }
 
     check(after->id.value    == before->id.value,    "id survives");
@@ -130,15 +131,15 @@ int main(int argc, char** argv) {
     }
 
     // The picker must still find it, exactly once, with its title.
-    const auto all = persistence::load_all_threads();
+    const auto all = persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap());
     std::size_t seen = 0;
     for (const auto& t : all) if (t.id.value == id.value) ++seen;
     check(seen == 1, "listed exactly once after migrating");
 
     // A second save (i.e. the next turn) must be a no-op, not a corruption.
-    persistence::save_thread(*after);
-    persistence::flush_pending_saves();
-    auto again = persistence::load_thread_by_id(id);
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), *after);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+    auto again = persistence::load_thread_by_id(::agentty::IoAccess::grant(), id);
     check(again.has_value() && again->messages.size() == before->messages.size(),
           "a second save leaves the thread intact");
 

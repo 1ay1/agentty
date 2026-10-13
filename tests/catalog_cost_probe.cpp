@@ -37,12 +37,12 @@ int main() {
     ::setenv("AGENTTY_HOME", (home / ".agentty").c_str(), 1);
 
     // Warm the skills cache so we measure the catalog, not discovery.
-    (void)catalog_block();
+    (void)catalog_block(::agentty::IoAccess::grant());
 
     constexpr int kRuns = 200;
     const auto t0 = std::chrono::steady_clock::now();
     std::size_t sink = 0;
-    for (int i = 0; i < kRuns; ++i) sink += catalog_block().size();
+    for (int i = 0; i < kRuns; ++i) sink += catalog_block(::agentty::IoAccess::grant()).size();
     const auto t1 = std::chrono::steady_clock::now();
 
     const auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
@@ -59,7 +59,17 @@ int main() {
     // 1500 is deliberately loose — this is a debug build on shared CI, and
     // a flaky perf test gets deleted rather than fixed. It catches the
     // REGRESSION SHAPE (re-parsing the library per turn), not jitter.
+    //
+    // Windows: the stat-only pass is ~80 path lookups (40 skill dirs + their
+    // SKILL.md), and an NTFS metadata query is ~30-40 us against ~3 us on
+    // Linux, so the same healthy pass measures ~3 ms there. The re-parse
+    // regression this guards against costs several times that again (every
+    // SKILL.md opened, read and hashed), so the shape still shows.
+#if defined(_WIN32)
+    constexpr long long kBudgetUs = 6000;
+#else
     constexpr long long kBudgetUs = 1500;
+#endif
     const bool ok = per < kBudgetUs;
     if (!ok) {
         std::printf("FAIL: %lld us/call exceeds the %lld us budget.\n", per, kBudgetUs);

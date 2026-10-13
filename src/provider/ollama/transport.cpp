@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -32,6 +33,7 @@
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/provider/debug.hpp"
+#include "agentty/provider/openai/transport.hpp"   // local_model_action_rules (#91)
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
@@ -1260,7 +1262,7 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
             if (has_images) {
                 json imgs = json::array();
                 for (const auto* imgp : wire::wire_message_images(m, max_side))
-                    imgs.push_back(agentty::util::base64_encode(imgp->bytes()));
+                    imgs.push_back(imgp->base64());
                 if (!imgs.empty()) msg["images"] = std::move(imgs);
             }
             if (has_tools) {
@@ -1304,7 +1306,7 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
                 // ollama-specific.
                 json tool_imgs = json::array();
                 for (const auto* imgp : wire::wire_tool_result_images(tc, max_side))
-                    tool_imgs.push_back(agentty::util::base64_encode(imgp->bytes()));
+                    tool_imgs.push_back(imgp->base64());
                 if (!tool_imgs.empty()) tool_msg["images"] = std::move(tool_imgs);
                 arr.push_back(std::move(tool_msg));
             }
@@ -1422,6 +1424,31 @@ json json_protocol_schema(const std::vector<provider::ToolSpec>& tools) {
 // is the single highest-leverage robustness lever for local models. Exposed
 // (non-anonymous) so a unit test can assert the chosen values without a
 // network round-trip. Reads AGENTTY_OLLAMA_NUM_CTX / _NUM_PREDICT overrides.
+int effective_num_ctx(int advertised) noexcept {
+    // The ONE place the served window is decided. build_options() below
+    // calls this for the wire, and the runtime calls it for the gauge, so
+    // the two cannot drift — which they did, by a factor of four.
+    constexpr int kAgentCtxFloor   = 8192;    // unknown-window default
+    constexpr int kAgentCtxCeiling = 32768;   // don't OOM a local KV cache
+
+    // The power-user escape hatch outranks everything: someone who set this
+    // knows their machine better than a ceiling we picked. Honoured here
+    // rather than only in build_options, or the gauge would ignore it and
+    // reintroduce the same divergence for exactly the users who cared
+    // enough to configure it.
+    if (const char* v = std::getenv("AGENTTY_OLLAMA_NUM_CTX")) {
+        char* end = nullptr;
+        const long n = std::strtol(v, &end, 10);
+        if (end && *end == '\0' && n > 0 && n <= std::numeric_limits<int>::max())
+            return static_cast<int>(n);
+    }
+
+    if (advertised <= 0) return kAgentCtxFloor;
+    if (advertised < kAgentCtxFloor)   return kAgentCtxFloor;
+    if (advertised > kAgentCtxCeiling) return kAgentCtxCeiling;
+    return advertised;
+}
+
 json build_options(const Request& req) {
     auto env_int = [](const char* name) -> int {
         if (const char* v = std::getenv(name)) {
@@ -1450,18 +1477,12 @@ json build_options(const Request& req) {
     //   3. A safe agent-sized default (8192) when the window is unknown — 4x
     //      Ollama's floor, enough to hold the prompt + a few tool turns,
     //      small enough to load on modest hardware.
-    int num_ctx = env_int("AGENTTY_OLLAMA_NUM_CTX");
-    if (num_ctx <= 0) {
-        constexpr int kAgentCtxFloor   = 8192;    // unknown-window default
-        constexpr int kAgentCtxCeiling = 32768;   // don't OOM a local KV cache
-        if (req.context_window > 0) {
-            num_ctx = req.context_window;
-            if (num_ctx < kAgentCtxFloor)   num_ctx = kAgentCtxFloor;
-            if (num_ctx > kAgentCtxCeiling) num_ctx = kAgentCtxCeiling;
-        } else {
-            num_ctx = kAgentCtxFloor;
-        }
-    }
+    //
+    // All three now live in effective_num_ctx(), because the context GAUGE
+    // needs the same answer: it used to score the unclamped window while
+    // the wire sent the clamped one, so the bar read a quarter of true
+    // usage on a 131k local model.
+    const int num_ctx = effective_num_ctx(req.context_window);
 
     // ── num_predict (max output tokens) ────────────────────────────────
     //
@@ -1559,6 +1580,9 @@ std::string system_prompt() {
            "call `search_docs` FIRST to retrieve the relevant passages, then "
            "answer from what it returns. Do NOT guess from memory when the "
            "answer should come from their documents.\n\n";
+
+    // Shared with the OpenAI-compat local prompt (one source, #91).
+    out += openai::local_model_action_rules();
 
     out += "OUTPUT\n"
            "- Output is rendered as GitHub-flavoured markdown in a terminal. "
@@ -1727,7 +1751,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // finish_stream needs it to distinguish a user cancel from a transport
     // error at the post-loop.
     http::CancelTokenPtr cancel_for_end = cancel;
-    auto result = http::default_client().stream(hreq, std::move(handler),
+    auto result = http::default_client(::agentty::IoAccess::grant()).stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
     // Uniform end-of-turn pair via the scaffold — this transport previously
@@ -1799,9 +1823,11 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
 std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
                                        std::vector<std::string> known_tools,
                                        bool json_protocol,
-                                       bool allow_memory_salvage) {
+                                       bool allow_memory_salvage,
+                                       bool show_reasoning) {
     std::vector<Msg> out;
     StreamCtx ctx;
+    ctx.show_reasoning = show_reasoning;
     ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
     ctx.known_tools = std::move(known_tools);
     ctx.allow_remember_salvage = allow_memory_salvage;

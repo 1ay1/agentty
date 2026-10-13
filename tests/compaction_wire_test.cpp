@@ -162,3 +162,116 @@ TEST_CASE("compaction wire") {
               "fork+compaction: raw tail after the boundary preserved");
     }
 }
+
+TEST_CASE("compaction reclaim is measured") {
+    // A compaction's whole job is to make the next request fit. Nothing
+    // recorded whether it DID.
+    //
+    // The dangerous case is not a compaction that fails loudly — it is one
+    // that reclaims almost nothing. It looks identical in the transcript:
+    // a summary appears, the turn continues. Then the next turn is still
+    // over threshold, compacts again, reclaims nothing again, and the
+    // thread livelocks summarising itself while the user watches it do
+    // nothing. That is only visible as a NUMBER, which is why GitHub's
+    // runtime carries the same pre/post pair.
+    //
+    // Both sides must come from the SAME scorer or the difference is
+    // noise, so this pins that the pair is measured with
+    // cmd::estimate_wire_tokens — the compaction-aware one.
+    Thread t;
+    t.messages.push_back(umsg(std::string(20000, 'q')));   // a big prefix
+    t.messages.push_back(amsg(std::string(20000, 'a')));
+    t.messages.push_back(umsg("and now a short tail"));
+
+    const int before = app::cmd::estimate_wire_tokens(t);
+
+    Thread::CompactionRecord rec;
+    rec.up_to_index   = 2;              // subsume the two big messages
+    rec.summary       = "user asked a long thing; assistant answered";
+    rec.tokens_before = before;
+    t.compactions.push_back(rec);
+    t.compactions.back().tokens_after = app::cmd::estimate_wire_tokens(t);
+
+    const auto& r = t.compactions.back();
+
+    // The measurement is real: a big prefix replaced by one short summary
+    // has to shrink the wire substantially.
+    check(r.tokens_after < r.tokens_before,
+          "compaction reclaim: after is smaller than before");
+    check(r.reclaimed().has_value(),
+          "compaction reclaim: a measured record reports a reclaim");
+    check(*r.reclaimed() > 1000,
+          "compaction reclaim: subsuming ~40KB reclaims real tokens");
+
+    // And it agrees with the estimator the auto-compaction trigger reads,
+    // which is the only reason before/after can be compared at all.
+    check(r.tokens_after == app::cmd::estimate_wire_tokens(t),
+          "compaction reclaim: after matches the live wire estimate");
+}
+
+TEST_CASE("an unmeasured compaction reports unknown, not zero") {
+    // Records written before the measurement existed reload with 0/0.
+    // Zero reclaim and "we never measured" want OPPOSITE reactions — the
+    // first means compaction is broken and the thread is about to
+    // livelock, the second means we simply don't know. Conflating them
+    // would have an old thread reporting a disaster that never happened.
+    Thread t;
+    t.messages.push_back(umsg("q"));
+    t.messages.push_back(amsg("a"));
+
+    Thread::CompactionRecord rec;
+    rec.up_to_index = 1;
+    rec.summary     = "old record, written before tokens were tracked";
+    t.compactions.push_back(rec);
+
+    check(!t.compactions.back().reclaimed().has_value(),
+          "unmeasured compaction reports nullopt rather than 0");
+
+    // A half-measured record is also unknown: one side alone cannot
+    // produce a difference, and guessing the other would be inventing data.
+    t.compactions.back().tokens_before = 5000;
+    check(!t.compactions.back().reclaimed().has_value(),
+          "half-measured compaction is still unknown");
+}
+
+TEST_CASE("soft trim keeps the live request") {
+    // ~1143 tokens per 4000-byte message at 3.5 bytes/token.
+    const std::string big(4000, 'x');
+
+    // Long tool loop: q1, then q2 followed by many assistant sub-turns.
+    // The old front-trim peeled q2 away and kept only the last assistant.
+    {
+        std::vector<Message> v = { umsg("q1"), amsg(big), umsg("q2") };
+        for (int i = 0; i < 10; ++i) v.push_back(amsg(big));
+        app::cmd::soft_trim_to_ceiling(v, 3000);
+        bool has_q2 = false;
+        for (auto& m : v) if (m.text == "q2") has_q2 = true;
+        check(has_q2, "latest user message survives the trim");
+        check(v.front().role == Role::User, "wire still opens with a User");
+        check(v.back().text == big, "newest message survives");
+    }
+
+    // A huge first prompt alone overflows: the head goes, the live turn stays.
+    {
+        std::vector<Message> v = { umsg(std::string(40000, 'h')), amsg("a1"),
+                                   umsg("q2"), amsg("a2") };
+        app::cmd::soft_trim_to_ceiling(v, 1000);
+        check(v.front().text == "q2", "oversized head is dropped last");
+        check(v.size() == 2, "live turn kept whole");
+    }
+
+    // Fits already: nothing changes.
+    {
+        std::vector<Message> v = { umsg("q1"), amsg("a1"), umsg("q2") };
+        app::cmd::soft_trim_to_ceiling(v, 100000);
+        check(v.size() == 3, "under the ceiling is a no-op");
+    }
+
+    // The head IS the live request: never dropped.
+    {
+        std::vector<Message> v = { umsg(std::string(40000, 'h')), amsg(big) };
+        app::cmd::soft_trim_to_ceiling(v, 100);
+        check(!v.empty() && v.front().role == Role::User,
+              "sole user message is never dropped");
+    }
+}

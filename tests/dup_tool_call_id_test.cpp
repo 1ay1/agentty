@@ -65,24 +65,24 @@ static Message asst_placeholder() {
 }
 
 static Step start(Model m, const std::string& id, const std::string& name) {
-    return stream_update(std::move(m),
+    return ::agentty::app::detail::step(::agentty::app::detail::stream_update, std::move(m),
                          msg::StreamMsg{StreamToolUseStart{
                              ToolCallId{id}, ToolName{name}}});
 }
 
 static Step delta(Model m, const std::string& id, std::string js) {
-    return stream_update(std::move(m),
+    return ::agentty::app::detail::step(::agentty::app::detail::stream_update, std::move(m),
                          msg::StreamMsg{StreamToolUseDelta{
                              ToolCallId{id}, std::move(js)}});
 }
 
 static Step end(Model m, const std::string& id) {
-    return stream_update(std::move(m),
+    return ::agentty::app::detail::step(::agentty::app::detail::stream_update, std::move(m),
                          msg::StreamMsg{StreamToolUseEnd{ToolCallId{id}}});
 }
 
 static Step observed(Model m, const std::string& id, std::string out) {
-    return stream_update(std::move(m),
+    return ::agentty::app::detail::step(::agentty::app::detail::stream_update, std::move(m),
                          msg::StreamMsg{StreamObservedToolResult{
                              ToolCallId{id}, /*failed=*/false,
                              std::move(out)}});
@@ -232,4 +232,46 @@ TEST_CASE("unique ids untouched") {
           "T5: call_a got its own args");
     check(calls[1].args_streaming.find("\"y\":2") != std::string::npos,
           "T5: call_b got its own args");
+}
+
+// ── 6. A worker that outlives its call can't hit a reused id ──────────────
+// Turn 1 ran call_0 (seq 7), the user cancelled, turn 2 reuses call_0 and
+// runs it as seq 8. Turn 1's worker finally returns: it must be dropped.
+TEST_CASE("stale tool result is dropped by exec seq") {
+    using agentty::ToolExecOutput;
+    using agentty::ToolExecProgress;
+    using agentty::app::detail::tool_update;
+    auto now = std::chrono::steady_clock::now();
+
+    Model m;
+    m.d.current.messages.push_back(asst_placeholder());
+    m.d.current.messages.back().tool_calls.push_back(make_call("call_0",
+        ToolUse::Failed{now, now, "cancelled"}));
+    m.d.current.messages.push_back(asst_placeholder());
+    m.d.current.messages.back().tool_calls.push_back(make_call("call_0",
+        ToolUse::Running{now, {}, {}, now, /*exec_seq=*/8}));
+
+    ToolExecProgress p{ToolCallId{"call_0"}, "old progress", 7};
+    auto s = ::agentty::app::detail::step(::agentty::app::detail::tool_update, std::move(m), msg::ToolMsg{std::move(p)});
+    m = std::move(s.first);
+    auto* r = std::get_if<ToolUse::Running>(
+        &m.d.current.messages[1].tool_calls[0].status);
+    check(r && r->progress_text.empty(), "T6: stale progress ignored");
+
+    ToolExecOutput o{ToolCallId{"call_0"}, std::string{"old output"}};
+    o.exec_seq = 7;
+    s = ::agentty::app::detail::step(::agentty::app::detail::tool_update, std::move(m), msg::ToolMsg{std::move(o)});
+    m = std::move(s.first);
+    check(std::holds_alternative<ToolUse::Running>(
+              m.d.current.messages[1].tool_calls[0].status),
+          "T6: stale result does not settle the new call");
+    check(m.d.current.messages[0].tool_calls[0].output() == "cancelled",
+          "T6: the cancelled call keeps its reason");
+
+    ToolExecOutput fresh{ToolCallId{"call_0"}, std::string{"new output"}};
+    fresh.exec_seq = 8;
+    s = ::agentty::app::detail::step(::agentty::app::detail::tool_update, std::move(m), msg::ToolMsg{std::move(fresh)});
+    m = std::move(s.first);
+    check(m.d.current.messages[1].tool_calls[0].output() == "new output",
+          "T6: the matching result lands");
 }

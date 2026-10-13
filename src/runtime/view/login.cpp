@@ -334,6 +334,24 @@ Element panel_device_waiting(const login::DeviceWaiting& s) {
         rows.push_back(body_text(
             "After signing in to " + label + ", approve the device. The code "
             "expires in ~15 minutes; no API key is needed.", fg_dim(muted)));
+        if (s.provider == "copilot") {
+            // GitHub shows this consent page as `GitHub Copilot Plugin`,
+            // not `Agentty`. That is deliberate and NOT replaceable: the
+            // token-exchange endpoint only accepts VS Code's GitHub App id
+            // (`Iv1.b507a08c87ecfe98`), AND the Copilot server keys its
+            // model allowlist to that id -- using a different App id would
+            // bounce the token exchange *or* return a stripped model list.
+            // See docs/design/copilot-provider.md section 2. Call it out
+            // explicitly so the user doesn't abort thinking they clicked
+            // the wrong link.
+            rows.push_back(text(""));
+            rows.push_back(body_text(
+                "Note: GitHub will label the app \"GitHub Copilot Plugin\" on "
+                "the consent page. That is expected \xe2\x80\x94 agentty signs "
+                "in as VS Code's Copilot client because the API's model "
+                "allowlist is keyed to that identity.",
+                fg_dim(muted)));
+        }
         rows.push_back(text(""));
         rows.push_back(key_hints({
             {"c",   "copy code"},

@@ -16,7 +16,7 @@ A profile decides which tool effects run automatically and which prompt you firs
 
 ## Write (autonomous, default)
 
-The default tier. Every tool runs without prompting so agentty can move fast — and because each shell call is sandboxed (`bwrap` / `sandbox-exec`) and the file tools refuse paths outside your workspace, even an autonomous run can't escape your project directory or read your secrets.
+The default tier. Every tool runs without prompting so agentty can move fast — and because each shell call is sandboxed by the OS and the file tools refuse paths outside your workspace, even an autonomous run can't escape your project directory or read your secrets.
 
 ## Ask
 

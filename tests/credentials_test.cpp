@@ -9,6 +9,7 @@
 #include "agtest.hpp"
 
 #include "agentty/provider/credentials.hpp"
+#include "agentty/provider/registry.hpp"   // provider_for_api_key, providers()
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
 
@@ -54,9 +55,9 @@ struct TmpHome {
 };
 
 void set_key(const std::string& provider, const std::string& key) {
-    auto s = persistence::load_settings();
+    auto s = persistence::load_settings(::agentty::IoAccess::grant());
     s.provider_keys[provider] = key;
-    persistence::save_settings(s);
+    persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 }
 
 } // namespace
@@ -69,21 +70,21 @@ TEST_CASE("credentials::resolve returns the target provider's key") {
 
     // Resolving mistral must return the mistral key, NOT cerebras' or anything
     // else. (This is exactly the guarantee the 401 bug violated.)
-    CHECK(auth::bearer_token(cred::resolve("mistral"))
+    CHECK(auth::bearer_token(cred::resolve(::agentty::IoAccess::grant(), "mistral"))
           == "MISTRAL-KEY-32chars-xxxxxxxxDdmj");
-    CHECK(auth::bearer_token(cred::resolve("cerebras"))
+    CHECK(auth::bearer_token(cred::resolve(::agentty::IoAccess::grant(), "cerebras"))
           == "CEREBRAS-KEY-yyyyyyyyyyyyyyyyyyyy");
 }
 
 TEST_CASE("credentials: local providers need no login, hosted keys do") {
     TmpHome home;
     // A hosted provider with no saved key + no env var needs login.
-    CHECK(cred::needs_login("mistral"));
+    CHECK(cred::needs_login(::agentty::IoAccess::grant(), "mistral"));
     set_key("mistral", "sk-abc");
-    CHECK(!cred::needs_login("mistral"));
+    CHECK(!cred::needs_login(::agentty::IoAccess::grant(), "mistral"));
 
     // A local server (ollama) is keyless — never needs login.
-    CHECK(!cred::needs_login("ollama"));
+    CHECK(!cred::needs_login(::agentty::IoAccess::grant(), "ollama"));
     CHECK(cred::add_method("ollama") == cred::AddMethod::None);
 
     // Hosted key providers take an API key; Anthropic takes OAuth.
@@ -95,7 +96,59 @@ TEST_CASE("credentials::add_key preserves the prior account (no clobber)") {
     TmpHome home;
     set_key("mistral", "key-AAAA");
     // Adding a different key snapshots the old one as an account first.
-    cred::add_key("mistral", "key-BBBB");
-    CHECK(auth::bearer_token(cred::resolve("mistral")) == "key-BBBB");
-    CHECK(cred::list("mistral").size() >= 1);   // the prior key was preserved
+    cred::add_key(::agentty::IoAccess::grant(), agtest::cap(), "mistral", "key-BBBB");
+    CHECK(auth::bearer_token(cred::resolve(::agentty::IoAccess::grant(), "mistral")) == "key-BBBB");
+    CHECK(cred::list(::agentty::IoAccess::grant(), "mistral").size() >= 1);   // the prior key was preserved
+}
+
+TEST_CASE("a pasted key names its own provider") {
+    // Issue #68: `agentty login` and the first-run modal both offer "an API
+    // key (Anthropic sk-ant-..., or any provider)" and then wrote EVERY key
+    // to the Anthropic store. A Groq key was accepted, saved, reported as
+    // success, and failed on the first turn with an auth error naming
+    // Anthropic -- so the user debugged a credential that was correct.
+    //
+    // The prefix table lives on the registry row beside auth_env, because a
+    // new provider already declares its host and env vars there and a second
+    // table elsewhere is one more place to forget.
+    CHECK(provider::provider_for_api_key("gsk_abc123") == "groq");
+    CHECK(provider::provider_for_api_key("xai-abc123") == "xai");
+    CHECK(provider::provider_for_api_key("AIzaSyAbc123") == "gemini");
+    CHECK(provider::provider_for_api_key("sk-ant-api03-abc") == "anthropic");
+    CHECK(provider::provider_for_api_key("sk-ant-oat01-abc") == "anthropic");
+
+    // Longest match wins, so a more specific prefix is never shadowed by the
+    // looser one on the same row.
+    CHECK(provider::provider_for_api_key("sk-or-v1-abc") == "openrouter");
+    CHECK(provider::provider_for_api_key("sk-or-abc") == "openrouter");
+}
+
+TEST_CASE("an ambiguous key is NOT guessed at") {
+    // THE property that keeps the fix from being a different bug. `sk-` is
+    // shared by OpenAI, DeepSeek and any custom endpoint, so it identifies
+    // nothing -- and a wrong confident answer is worse than none, because the
+    // user then debugs a credential they believe is correct against a vendor
+    // they never chose. Empty means "ask"; the caller keeps its own default.
+    CHECK(provider::provider_for_api_key("sk-proj-abc123").empty());
+    CHECK(provider::provider_for_api_key("sk-abc123").empty());
+    CHECK(provider::provider_for_api_key("ollama-local").empty());
+    CHECK(provider::provider_for_api_key("").empty());
+    // Shorter than any prefix: must not read out of bounds.
+    CHECK(provider::provider_for_api_key("s").empty());
+    CHECK(provider::provider_for_api_key("gsk").empty());
+}
+
+TEST_CASE("every declared key prefix resolves to the row that declared it") {
+    // Walks the registry rather than restating it, so a provider added with a
+    // prefix is covered without touching this test. The compile-time
+    // key_prefixes_unambiguous() already rejects two rows claiming
+    // overlapping prefixes; this checks the lookup agrees with the table.
+    for (const auto& p : provider::providers()) {
+        for (std::string_view pre : p.key_prefixes) {
+            if (pre.empty()) continue;
+            const std::string probe = std::string{pre} + "ZZZ000";
+            INFO("prefix " << pre << " declared by " << p.id);
+            CHECK(provider::provider_for_api_key(probe) == p.id);
+        }
+    }
 }

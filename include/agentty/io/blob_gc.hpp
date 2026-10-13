@@ -36,9 +36,14 @@
 // references, so it refuses to delete anything at all. An unreadable
 // thread file is exactly when a user most needs their payloads intact.
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
+#include <stop_token>
+
+#include <maya/runtime.hpp>
 
 namespace agentty::blobs {
 
@@ -65,9 +70,32 @@ struct GcStats {
 // urgent enough to justify an O(corpus) walk during a thread switch.
 [[nodiscard]] GcStats collect(bool dry_run = false);
 
-// Same, against an explicit threads directory. For tests and for
-// operating on a copy.
+// `min_age`: only reclaim unreferenced blobs whose mtime is at least this
+// old. A save writes its blobs BEFORE the thread file that references
+// them (and another agentty process may be mid-save), so a fresh
+// unreferenced blob may be about to become referenced. 0 = no grace.
+// `stop` is checked between files; a stopped walk deletes nothing.
 [[nodiscard]] GcStats collect_in(const std::filesystem::path& threads_dir,
-                                 bool dry_run = false);
+                                 bool dry_run = false,
+                                 std::chrono::seconds min_age =
+                                     std::chrono::seconds{0},
+                                 std::stop_token stop = {});
+
+// Background-safe housekeeping: runs collect with a 24 h grace window, at
+// most once per day (stamp file in the blob dir). Returns nullopt when
+// skipped because it ran recently, or when cancelled.
+[[nodiscard]] std::optional<GcStats> collect_if_due(const maya::unlocked& cap,
+                                                    std::stop_token stop = {});
+
+// Run collect_if_due() on its own thread after a short delay, so it never
+// competes with startup and never runs at all in a process that exits at
+// once (a pipe-EOF smoke test, `--version`-style fast paths). The thread is
+// joined by join_background_gc(), which main() calls before teardown; a
+// detached walk still touching logx/persistence statics while the CRT frees
+// them is a use-after-free (Windows 0xC0000005 on the CI pipe smoke test).
+void start_background_gc();
+// Cancel (cooperatively, checked between files) and join. Idempotent, and
+// a no-op if start_background_gc() never ran. Joins, so needs `unlocked`.
+void join_background_gc(const maya::unlocked& cap) noexcept;
 
 } // namespace agentty::blobs

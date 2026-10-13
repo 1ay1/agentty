@@ -8,7 +8,7 @@
 
 namespace agentty::provider {
 
-std::string system_prompt_for(const Selection& selection) {
+std::string system_prompt_for(Io io, const Selection& selection) {
     // An ACP backend is a delegated agent, not a model wire transport. Its
     // session owns instructions; provider::Request.system_prompt is ignored.
     if (selection.kind == Kind::ExternalAcp) return {};
@@ -18,26 +18,30 @@ std::string system_prompt_for(const Selection& selection) {
         // long-lived transport does not use the generic endpoint at all. Its
         // registry capability must win before localhost detection.
         if (selection.is_oauth_native())
-            return system_prompt_with_overlay("chatgpt");
+            return system_prompt_with_overlay(io, "chatgpt");
 
         const auto& ep = selection.openai_endpoint;
         if (ep.native_api) return ollama::system_prompt();
 
         // Compact prompting is a model/endpoint capability decision, not a
-        // provider-brand decision. Keep it for local OpenAI-compatible servers
-        // where small models benefit from short imperative instructions.
-        const bool local_endpoint = !ep.use_tls
-            && (ep.host == "localhost" || ep.host == "127.0.0.1");
-        if (local_endpoint) return openai::local_model_system_prompt();
+        // provider-brand decision. Keep it for self-hosted OpenAI-compatible
+        // servers, where small models benefit from short imperative
+        // instructions. "Self-hosted" means a server YOU run -- loopback,
+        // a LAN box (192.168.x.x, gpu-box, *.local), a tailnet -- the same
+        // rule the window probe uses. It used to be loopback-only, so a
+        // llama.cpp/vLLM on another machine fed gpt-oss the long hosted
+        // prompt and none of the local action rules (#91).
+        if (!ep.use_tls && openai::detail::is_local_endpoint(ep))
+            return openai::local_model_system_prompt();
 
         // Hosted OpenAI-compatible model on the shared base + any openai delta.
-        return system_prompt_with_overlay("openai");
+        return system_prompt_with_overlay(io, "openai");
     }
 
     // Anthropic (and any other wire that reaches here) receives the shared
     // agent/tool/RAG policy plus its provider overlay. Provider adapters only
     // decide how this string is encoded on their wire.
-    return system_prompt_with_overlay("anthropic");
+    return system_prompt_with_overlay(io, "anthropic");
 }
 
 } // namespace agentty::provider

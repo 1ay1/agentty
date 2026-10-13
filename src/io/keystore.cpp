@@ -9,18 +9,7 @@
 #include <vector>
 
 #if !defined(_WIN32)
-#  include <fcntl.h>
-#  include <poll.h>
-#  include <signal.h>
-#  include <sys/wait.h>
-#  include <unistd.h>
-#  if __has_include(<spawn.h>)
-#    include <spawn.h>
-#    define AGENTTY_KS_HAVE_SPAWN 1
-#  else
-#    define AGENTTY_KS_HAVE_SPAWN 0
-#  endif
-extern char** environ;
+#  include "agentty/tool/util/exec.hpp"   // run_child
 #else
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -93,66 +82,17 @@ Backend backend() {
 // reads the secret from stdin — so the secret never appears in the process
 // table / argv the way a `-w <secret>` flag would. Best-effort, short-lived.
 int spawn_feed_stdin(const std::vector<std::string>& argv, const std::string& input) {
-#if AGENTTY_KS_HAVE_SPAWN
-    int in_pipe[2];
-    if (::pipe(in_pipe) != 0) return -1;
-    // CLOEXEC both ends. This pipe FEEDS A SECRET to the child's stdin: any
-    // concurrently-spawned unrelated child inheriting the read end could
-    // read the secret; one inheriting the write end pins it open. The
-    // file_actions adddup2 below clears the flag on the child's duplicate.
-    (void)::fcntl(in_pipe[0], F_SETFD, ::fcntl(in_pipe[0], F_GETFD) | FD_CLOEXEC);
-    (void)::fcntl(in_pipe[1], F_SETFD, ::fcntl(in_pipe[1], F_GETFD) | FD_CLOEXEC);
-
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_adddup2(&fa, in_pipe[0], STDIN_FILENO);
-    posix_spawn_file_actions_addclose(&fa, in_pipe[1]);
-    // Silence the child's output.
-    posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
-    posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
-
-    // Detach the child into its own session so it has NO controlling terminal.
-    // macOS `security -w` reads the password via readpassphrase(), which opens
-    // /dev/tty when a controlling tty exists and would otherwise ignore our
-    // stdin pipe (and hang). With no tty, readpassphrase() falls back to stdin,
-    // which is exactly the pipe we feed the secret through. POSIX_SPAWN_SETSID
-    // is macOS 10.15+/glibc 2.26+; harmless for `secret-tool` too.
-    posix_spawnattr_t attr;
-    posix_spawnattr_init(&attr);
-#ifdef POSIX_SPAWN_SETSID
-    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSID);
-#endif
-
-    std::vector<char*> cargv;
-    cargv.reserve(argv.size() + 1);
-    for (const auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
-    cargv.push_back(nullptr);
-
-    pid_t pid = 0;
-    int rc = ::posix_spawnp(&pid, cargv[0], &fa, &attr, cargv.data(), environ);
-    posix_spawnattr_destroy(&attr);
-    posix_spawn_file_actions_destroy(&fa);
-    ::close(in_pipe[0]);
-    if (rc != 0) { ::close(in_pipe[1]); return -1; }
-
-    // Write the secret, ignoring SIGPIPE if the child died early.
-    signal(SIGPIPE, SIG_IGN);
-    const char* p = input.data();
-    size_t remaining = input.size();
-    while (remaining > 0) {
-        ssize_t n = ::write(in_pipe[1], p, remaining);
-        if (n < 0) { if (errno == EINTR) continue; break; }
-        p += n; remaining -= (size_t)n;
-    }
-    ::close(in_pipe[1]);
-
-    int status = 0;
-    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-#else
-    (void)argv; (void)input;
-    return -1;
-#endif
+    // run_child puts the child in its own session, so it has no controlling
+    // terminal: macOS `security -w` reads via readpassphrase(), which opens
+    // /dev/tty when one exists and would ignore our pipe (and hang).
+    tools::util::ChildRun run;
+    run.argv       = argv;
+    run.stdin_data = input;
+    run.idle       = std::chrono::seconds{10};
+    run.wall       = std::chrono::seconds{30};
+    run.max_output_bytes = 4096;   // output is discarded
+    const auto r = tools::util::run_child(run);
+    return r.started && r.exited ? r.exit_code : -1;
 }
 #endif // !_WIN32
 

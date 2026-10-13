@@ -39,16 +39,16 @@ Update: `dpkg -i` the new release's `.deb`.
 
 ```bash
 # Fedora / RHEL / CentOS
-sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.rpm
+sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
 
 # openSUSE
-sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.rpm
+sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
 
 # or upgrade an existing install:
 sudo rpm -Uvh https://github.com/1ay1/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
 ```
 
-`-U` is upgrade; works for the first install too.
+`-U` is upgrade; works for the first install too. Use `agentty-{{version}}-1.aarch64.rpm` on ARM.
 
 ## Arch Linux
 
@@ -61,9 +61,10 @@ Or install the release-page `.pkg.tar.zst` with `sudo pacman -U`.
 
 ## Alpine
 
+No `.apk` is published yet — use the install script or the static binary:
+
 ```bash
-curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty-x86_64.apk
-sudo apk add --allow-untrusted agentty-x86_64.apk
+curl -fsSL https://agentty.org/install.sh | sh
 ```
 
 ## Nix · Snap · Gentoo
@@ -122,7 +123,7 @@ pkg install git cmake clang openssl libnghttp2
 curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --build
 ```
 
-Everything works — file tools, RAG, the agent loop, and shell/build tools — with one caveat: the shell sandbox (Bubblewrap) needs Linux user namespaces that unrooted Android doesn't grant, so `bash`/`diagnostics` run **unsandboxed** (agentty detects this and prints `sandbox: unavailable, running unsandboxed`). Point it at a scoped workspace if that matters to you.
+Everything works — file tools, RAG, the agent loop, and shell/build tools — with one caveat: the shell sandbox needs Linux user namespaces that unrooted Android doesn't grant, so `bash`/`diagnostics` run **unsandboxed** (agentty detects this and prints `sandbox: unavailable, running unsandboxed`). Point it at a scoped workspace if that matters to you.
 
 An on-repo [`packaging/termux/build.sh`](https://github.com/1ay1/agentty/blob/master/packaging/termux/build.sh) recipe targets the official Termux repos for a future `pkg install agentty`.
 

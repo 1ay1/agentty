@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
     const int msgs = argc > 1 ? std::atoi(argv[1]) : 1000;
 
     app::install_deps(app::Deps{
-        .stream = [](provider::Request, provider::EventSink) {},
+        .stream = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread = [](const Thread&) {},
         .load_threads = [] { return std::vector<Thread>{}; },
         .load_thread = [](const ThreadId&) { return std::optional<Thread>{}; },
@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
     // The OLD per-keystroke cost.
     double full = 0;
     for (int i = 0; i < kIters; ++i) {
-        m.d.ui.theme = (i % 2) ? "Dracula" : "Nord";
+        m.d.ui().theme = (i % 2) ? "Dracula" : "Nord";
         const auto t0 = clk::now();
         app::detail::restyle_sealed_turns(m);
         full += ms_since(t0);
@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     // The NEW per-keystroke cost.
     double second = 0;
     for (int i = 0; i < kIters; ++i) {
-        m.d.ui.theme = (i % 2) ? "Dracula" : "Nord";
+        m.d.ui().theme = (i % 2) ? "Dracula" : "Nord";
         const auto t0 = clk::now();
         app::detail::restyle_sealed_turns(m);
         second += ms_since(t0);

@@ -103,9 +103,42 @@ The `#name` is a local tag only — it never reaches the wire — but it shows o
 
 Custom hosts you add are **saved** — they reappear in the `^P` picker every session (`Del` on a row removes one, two-press). A local host committed without a key is saved too, so you never re-type it.
 
+### Adding one from the TUI
+
+You don't need the CLI, and you don't need to hunt for a menu. Open `^P` and **just type the endpoint**:
+
+```
+^P  →  yolo-auto.com
+
+  Use yolo-auto.com  as a custom OpenAI-compatible host      ⏎ connect
+  ──────────────────────────────────────────────────────────────────
+  ⏎ connects to yolo-auto.com · agentty probes it and adopts the dialect it finds
+```
+
+The moment what you type looks like an endpoint — it has a dot, a `host:port`, or an `https://` — the picker offers it as the **first** row. `Enter` carries the text straight into the connect modal (no retyping) and probes the server: it tries the configured models path, then `/v1/models`, then Ollama's `/api/tags`, adopts whichever answers, and reports `✓ 12 models · openai · 45ms` before committing. A dead endpoint never becomes your active provider.
+
+Searching also reaches hosts you've **already saved**, so `gw.internal` jumps straight to that row instead of making you scroll past every built-in.
+
+:::tip You do not need a built-in row
+The provider list is a convenience for endpoints with quirks — their own transport, OAuth, a second dialect, a non-standard port. **Any** plain OpenAI-compatible server works through the custom-host path with no code change, which is why llama.cpp, vLLM and LM Studio don't have rows either.
+:::
+
 :::tip Debugging a custom host
 Set `AGENTTY_LOG=wire=trace`  to see the exact request path, status, and response your server returned — see **[Logging & diagnostics](/docs/logging)**. The most common issues are a missing `/v1` (→ 404) and a model id that doesn't match what `/v1/models` reports.
 :::
+
+### Known working endpoints
+
+Hosted gateways that work through the custom-host path as is. Type the spec into `^P` (or pass it to `--provider`), then paste the key when prompted, pass `-k`, or set `OPENAI_API_KEY`.
+
+| Endpoint | Spec | Key | Example model |
+|---|---|---|---|
+| [Requesty](https://docs.requesty.ai) | `https://router.requesty.ai/v1` (EU: `https://router.eu.requesty.ai/v1`) | [app.requesty.ai/api-keys](https://app.requesty.ai/api-keys) | `openai/gpt-4o-mini` |
+
+```bash
+agentty --provider https://router.requesty.ai/v1 -k <key> -m openai/gpt-4o-mini
+```
+
 ## Sign in with GitHub Copilot
 
 If you have a GitHub Copilot subscription (Individual, Business, or Enterprise), you can use its models — GPT-4o, o-series, Claude, Gemini, and more — through your existing Copilot plan, **no API key required**.
@@ -115,7 +148,7 @@ agentty login          # choose "Sign in with GitHub Copilot"
 agentty --provider copilot
 ```
 
-Sign-in uses GitHub's **device flow**: agentty shows a one-time code and opens `github.com/login/device` (works over SSH too — just enter the code in any browser). The available model list is fetched live from your account's entitlements, so you see exactly the models your plan offers. agentty stores a durable GitHub token (encrypted, at `~/.config/agentty/copilot_credentials.json`) and transparently exchanges it for the short-lived Copilot session token, refreshing mid-session so long agent runs never drop. `agentty status` shows your plan, entitlement, and the active inference host; `agentty logout` → GitHub Copilot signs out.
+Sign-in uses GitHub's **device flow**: agentty shows a one-time code and opens `github.com/login/device` (works over SSH too — just enter the code in any browser). The available model list is fetched live from your account's entitlements, so you see exactly the models your plan offers. agentty stores a durable GitHub token (encrypted, at `~/.agentty/credentials/copilot_credentials.json`) and transparently exchanges it for the short-lived Copilot session token, refreshing mid-session so long agent runs never drop. `agentty status` shows your plan, entitlement, and the active inference host; `agentty logout` → GitHub Copilot signs out.
 
 :::note
 Copilot routes to the right host automatically (Individual / Business / Enterprise each use a different endpoint) — there's nothing to configure. On the free Copilot tier, agentty surfaces a clear "chat quota exhausted" message rather than a raw error.
@@ -132,7 +165,7 @@ agentty --provider kimi
 
 Sign-in uses Kimi's **OAuth device flow** (RFC 8628), the same in-terminal experience as Claude, ChatGPT, and Copilot: agentty shows a one-time code and opens the Kimi authorization page in your browser. It works over SSH — in the modal press [[c]] to copy the **code** and [[u]] to copy the **URL** (both sent via OSC 52, so they land on your local clipboard even through a remote session), then paste in any browser. [[o]] re-opens the browser. agentty polls in the background and switches the moment you approve.
 
-The token is stored encrypted at `~/.config/agentty/kimi_credentials.json` and refreshed automatically mid-session, so long agent runs never drop. The picker row reflects real sign-in state (`⚠ sign in with Kimi` / `✓ signed in`), and pressing [[Enter]] on the active Kimi row opens the **multi-account manager** (switch / add / remove Kimi accounts) — hold several Kimi accounts and switch entirely in-app. `agentty status` shows the active account; `agentty logout` → Kimi signs out.
+The token is stored encrypted at `~/.agentty/credentials/kimi_credentials.json` and refreshed automatically mid-session, so long agent runs never drop. The picker row reflects real sign-in state (`⚠ sign in with Kimi` / `✓ signed in`), and pressing [[Enter]] on the active Kimi row opens the **multi-account manager** (switch / add / remove Kimi accounts) — hold several Kimi accounts and switch entirely in-app. `agentty status` shows the active account; `agentty logout` → Kimi signs out.
 
 :::tip
 Kimi's inference runs on its OpenAI-compatible endpoint, so tool-calling, streaming, and reasoning all work exactly as they do on every other provider — nothing Kimi-specific to configure. Prefer a raw platform API key instead of the subscription? Use any OpenAI-compatible host: `agentty --provider https://api.moonshot.ai -k <key> -m kimi-k2-0905-preview`.

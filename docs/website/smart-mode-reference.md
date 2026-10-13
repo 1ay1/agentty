@@ -27,7 +27,7 @@ They aren't separate toggles because no one reasonably wants them apart: switchi
 
 ## Persisted config
 
-Every overlay choice is saved to your settings so the next session starts where you left off. The state lives under the `smart_mode` key in `settings.json` (`~/.config/agentty/settings.json`, or the platform equivalent).
+Every overlay choice is saved to your settings so the next session starts where you left off. The state lives under the `smart_mode` key in `settings.json` (`~/.agentty/settings.json`, or the platform equivalent).
 
 | Key | Meaning |
 |-----|---------|

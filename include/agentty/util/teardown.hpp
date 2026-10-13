@@ -30,6 +30,23 @@
 // depend on one registered earlier, so it is torn down first.
 //
 // `run()` is idempotent and safe to call when nothing registered.
+//
+// ── The rule, for anything that starts a thread ──────────────────────────
+//
+//     Register the join in the function that CREATES the thread,
+//     not in main().
+//
+// Wrap it in a `std::call_once` so repeated starts register once, and skip
+// `cancel()` only when the target is a process-lifetime static (the common
+// case: a function-local `Bg&`). Anything shorter-lived MUST cancel in its
+// destructor, or run() would call into freed memory.
+//
+// Adoption is partial, and deliberately visible here rather than implied:
+// settings_cache, modelsdev and blob_gc self-register; the remaining joins
+// in main() (workspace prewarm, symbol prewarm, persistence flush, ACP
+// agent release) are still spelled out by hand and should move here as
+// each is touched. tests/teardown_registration_test.cpp pins the ones that
+// have moved, so they cannot silently regress to the old arrangement.
 
 #include <cstddef>
 #include <cstdint>
@@ -37,7 +54,14 @@
 #include <string>
 #include <string_view>
 
+#include <maya/runtime.hpp>
+
 namespace agentty::util::teardown {
+
+// A shutdown action. It runs from run(), which is called at the end of main
+// with no lock held, so every action is handed `unlocked`: it may stop
+// pools and worker groups, flush, and take any lock in rank order.
+using Action = std::function<void(const maya::unlocked&)>;
 
 // Register a shutdown action under `name` (used only for diagnostics).
 // Actions must be noexcept in spirit: any exception is swallowed by run(),
@@ -50,7 +74,7 @@ namespace agentty::util::teardown {
 // the token.
 using Token = std::uint64_t;
 
-Token on_shutdown(std::string name, std::function<void()> action);
+Token on_shutdown(std::string name, Action action);
 
 // Remove a registration. Idempotent, and safe with a token whose action has
 // already run. This is what lets a registrant with a bounded lifetime stay
@@ -59,8 +83,8 @@ void cancel(Token token) noexcept;
 
 // Run every registered action, most-recently-registered first, then clear the
 // registry. Idempotent: a second call is a no-op unless new actions were
-// registered in between. Never throws.
-void run() noexcept;
+// registered in between. Never throws. Needs `unlocked`: it joins.
+void run(const maya::unlocked& cap) noexcept;
 
 // How many actions are pending. For tests and diagnostics.
 [[nodiscard]] std::size_t pending() noexcept;

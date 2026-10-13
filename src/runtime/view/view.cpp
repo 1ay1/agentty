@@ -56,8 +56,11 @@ std::optional<maya::Element> pick_panel(const Model& m) {
         case OK::Providers: return providers_panel(m);
         case OK::ThreadList:     return thread_list_panel(m);
         case OK::SmartMode:      return smart_mode_panel(m);
+        case OK::WebSearch:      return web_search_panel(m);
         case OK::PluginEdit:     return plugin_edit_panel(m);
         case OK::Appearance:     return appearance_panel(m);
+        case OK::Sandbox:        return sandbox_panel(m);
+        case OK::SandboxList:    return sandbox_list_panel(m);
         case OK::DiffReview:     return diff_review(m);
         case OK::Todo:           return todo_panel(m);
         case OK::None:           return std::nullopt;
@@ -101,15 +104,11 @@ maya::Element view(const Model& m) {
     // The reducer is pure — it cannot reach the runtime — so the swap lands
     // here, on the one path that sees both the Model and the frame. It is a
     // no-op whenever the resolved theme has not changed, which is every
-    // frame but the one after a settings row is pressed.
-    //
-    // Resolving per frame rather than at startup is deliberate: `auto` is
-    // answered by the terminal, and the terminal changes under us — a tmux
-    // detach, an ssh hop, a COLORFGBG that only arrives late. Re-asking
-    // costs two getenvs and means the look follows the terminal it is
-    // actually on.
+    // frame but the one after a settings row is pressed. "auto" resolves
+    // against what the terminal reported at launch (m.env.terminal); the
+    // env vars it came from cannot change while we run.
     {
-        const auto r = ui_prefs::resolve(m.d.ui, /*tty=*/true);
+        const auto r = ui_prefs::resolve(m.d.ui(), m.env.terminal);
         // ONE call, two sinks. There used to be a `static const Theme*
         // applied` cache here that skipped the push when the pointer had not
         // moved, which duplicated a guard maya already owns — app_set_theme()
@@ -135,13 +134,16 @@ maya::Element view(const Model& m) {
         // motion by the StreamingMarkdown setup deep in turn.cpp. Publishing
         // here keeps them a pure projection of the Model — refreshed every
         // frame, written nowhere else.
-        ui_prefs::publish(m.d.ui);
+        ui_prefs::publish(m.d.ui());
+        // Paths in tool cards are shown relative to these (Model::env,
+        // captured at launch), so the view never asks the OS for its cwd.
+        ui_prefs::publish_path_roots({m.env.cwd, m.env.home, m.ui.library.project_agents});
         // Motion::Off freezes maya's stepped animations at their source —
         // one gate under every spinner, blink and frame counter, including
         // widgets that do not know this setting exists. It also stops the
         // frame REQUESTS, so "off" means the render loop goes quiet rather
         // than repainting an unchanging glyph 11× a second.
-        maya::anim::set_reduce_motion(m.d.ui.motion == ui_prefs::Motion::Off);
+        maya::anim::set_reduce_motion(m.d.ui().motion == ui_prefs::Motion::Off);
         // Reduced sits between the two: keep the motion, thin the REPAINTS.
         // Measured on a recorded stream, Reduced used to change exactly as
         // many frames as Full (1753 of them) because it only dropped
@@ -154,29 +156,24 @@ maya::Element view(const Model& m) {
         // to be published rather than threaded. It was persisted and hashed
         // into the render key but read by NOTHING until maya grew a switch
         // for it — a toggle that moved, saved, and changed no pixel.
-        maya::set_syntax_highlighting(m.d.ui.syntax);
+        maya::set_syntax_highlighting(m.d.ui().syntax);
     }
 
     // ── Terminal dimensions for the BUILD phase ──
     // maya's run loop calls P::view(model) BEFORE Runtime::render
-    // installs the sized RenderContext (the only guard site), so any
-    // available_height()/available_width() read during Element
-    // construction would see the 24x80 DEFAULT. Parent ctx wins (a
-    // nested render or a test harness driving simulated dims), else
-    // one cheap ioctl, else COLUMNS/LINES (tests, pipes).
+    // installs the sized RenderContext, so the view installs one itself.
+    // The size comes from the Model (TerminalResized, fed by the host), so
+    // a view is a function of the Model and nothing else: every panel and
+    // tool body below reads available_width()/available_height(), never
+    // the tty. A parent context still wins (a nested render, or a test
+    // harness driving simulated dims).
     int cols = 0, rows = 0;
-    if (maya::detail::render_ctx_) {
+    if (maya::have_render_context()) {
         cols = maya::available_width();
         rows = maya::available_height();
     } else {
-        const auto sz = maya::platform::query_terminal_size(
-            maya::platform::stdout_handle());
-        cols = sz.width.value;
-        rows = sz.height.value;
-        if (cols <= 0)
-            if (const char* e = std::getenv("COLUMNS")) cols = std::atoi(e);
-        if (rows <= 0)
-            if (const char* e = std::getenv("LINES"))   rows = std::atoi(e);
+        cols = m.ui.term_cols;
+        rows = m.ui.term_rows;
     }
     if (cols <= 0) cols = 80;
     if (rows <= 0) rows = 24;

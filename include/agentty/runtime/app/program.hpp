@@ -24,27 +24,121 @@ namespace agentty::app {
 
 namespace pn = agentty::ui::panel;   // the exclusive overlay slot's alternatives
 
-[[nodiscard]] std::pair<Model, maya::Cmd<Msg>> init();
+[[nodiscard]] std::pair<Model, Cmd> init();
+
+// Log any loop step (an update arm, view, subscribe) that took longer than a
+// frame. Free when fast: one clock read and a compare. Lands in agentty.log
+// as `ui loop.slow: <what> <ms>`, so a user's "it lags when I open X"
+// becomes a line naming the arm instead of a guess.
+void note_slow(const char* what, std::chrono::steady_clock::time_point t0) noexcept;
 
 struct AgenttyApp {
     using Model = ::agentty::Model;
     using Msg   = ::agentty::Msg;
+    // jaal reads the effect and source ROWS off the program (D2): P::Cmd says
+    // what this program may return, P::Sub what it may listen to, and a host
+    // must serve every entry or the program won't compile against it.
+    using Cmd   = ::agentty::Cmd;
+    using Sub   = ::agentty::Sub;
 
-    static std::pair<Model, maya::Cmd<Msg>> init() { return ::agentty::app::init(); }
+    // The clock update() is handed. Declaring it makes jaal pass the step
+    // time as every update's third argument (jaal core/program.hpp, "time,
+    // as an argument"), so a reducer never reads std::chrono itself and a
+    // recorded run replays to the same model. The seam below copies it into
+    // Model::now, which is how it reaches the helpers.
+    using Clock = maya::platform::steady_clock;
 
-    static auto update(Model m, Msg msg) -> std::pair<Model, maya::Cmd<Msg>> {
-        return ::agentty::app::update(std::move(m), std::move(msg));
+    // jaal's init is `Cmd init(Model&)` — it fills the model IN PLACE and
+    // returns only the first Cmd (core/program.hpp, `has_init`).
+    //
+    // This used to be `static std::pair<Model, Cmd> init()`, the old runtime's
+    // shape. That is not an error anyone reports: `has_init` is a `requires`
+    // test, so a signature jaal can't call simply reads as "this program has
+    // no init", and the kernel value-initialises the Model instead. Everything
+    // init() loads — settings, the thread list, the active provider — was
+    // built and then dropped on the floor, which presents as agentty
+    // remembering nothing across restarts and showing the first-run card on
+    // every launch.
+    //
+    // The free function still returns a pair (init.cpp builds a Model and its
+    // Cmd together, and the tests call it that way), so this adapts.
+    static Cmd init(Model& m) {
+        auto [built, cmd] = ::agentty::app::init();
+        m = std::move(built);
+        return std::move(cmd);
     }
+
+    // jaal calls P::update(Model&, T) for whatever it lands on as it walks the
+    // Msg tree, so the 23 domain reducers are static members here. Each
+    // forwards to the free function of the same name in its own TU, which is
+    // what keeps a one-leaf edit to a ~1.2 s rebuild.
+    //
+    // The domains are declared groups (handled_as_group in runtime/cmd.hpp),
+    // and these are the handlers that declaration CLAIMS exist — jaal only
+    // honours a group when it finds one, so without these it correctly keeps
+    // descending and asks for all 231 leaves instead.
+#define AGENTTY_FWD_UPDATE(DomainMsg)                                    \
+    static Cmd update(Model& m, msg::DomainMsg d, Clock::time_point now) { \
+        m.now = now;   /* the fold's time: see Model::now */             \
+        const auto t0 = std::chrono::steady_clock::now();                \
+        auto c = ::agentty::app::update(m, std::move(d));                \
+        auto out = ::agentty::app::publish_derived(m, std::move(c));      \
+        ::agentty::app::note_slow(#DomainMsg, t0);                       \
+        return out;                                                       \
+    }
+
+    AGENTTY_FWD_UPDATE(ComposerMsg)
+    AGENTTY_FWD_UPDATE(StreamMsg)
+    AGENTTY_FWD_UPDATE(ToolMsg)
+    AGENTTY_FWD_UPDATE(ToolOutputMsg)
+    AGENTTY_FWD_UPDATE(ProvidersMsg)
+    AGENTTY_FWD_UPDATE(ModelsMsg)
+    AGENTTY_FWD_UPDATE(ThreadListMsg)
+    AGENTTY_FWD_UPDATE(PaletteMsg)
+    AGENTTY_FWD_UPDATE(MentionMsg)
+    AGENTTY_FWD_UPDATE(SymbolMsg)
+    AGENTTY_FWD_UPDATE(CodeBlockMsg)
+    AGENTTY_FWD_UPDATE(CheckpointMsg)
+    AGENTTY_FWD_UPDATE(RagMsg)
+    AGENTTY_FWD_UPDATE(StatsMsg)
+    AGENTTY_FWD_UPDATE(SettingsListMsg)
+    AGENTTY_FWD_UPDATE(ForkMsg)
+    AGENTTY_FWD_UPDATE(TodoMsg)
+    AGENTTY_FWD_UPDATE(LoginMsg)
+    AGENTTY_FWD_UPDATE(DiffReviewMsg)
+    AGENTTY_FWD_UPDATE(SmartModeMsg)
+    AGENTTY_FWD_UPDATE(WebSearchMsg)
+    AGENTTY_FWD_UPDATE(PluginEditMsg)
+    AGENTTY_FWD_UPDATE(AppearanceMsg)
+    AGENTTY_FWD_UPDATE(SandboxMsg)
+    AGENTTY_FWD_UPDATE(MetaMsg)
+
+#undef AGENTTY_FWD_UPDATE
 
     static maya::Element view(const Model& m) {
-        return ::agentty::ui::view(m);
+        const auto t0 = std::chrono::steady_clock::now();
+        auto e = ::agentty::ui::view(m);
+        ::agentty::app::note_slow("view", t0);
+        return e;
     }
 
-    static auto subscribe(const Model& m) -> maya::Sub<Msg> {
-        return ::agentty::app::subscribe(m);
+    static auto subscribe(const Model& m) -> Sub {
+        const auto t0 = std::chrono::steady_clock::now();
+        auto s = ::agentty::app::subscribe(m);
+        ::agentty::app::note_slow("subscribe", t0);
+        return s;
     }
 
-    // Optional Program hook (see maya/app/app.hpp — detail::HasVisualHash).
+    // Optional Program hook (jaal core/program.hpp — HasSubsKey). jaal
+    // re-runs subscribe() only when this value changes; without it the
+    // subscription tree is rebuilt and re-diffed after EVERY message.
+    // The value and the rule it has to obey live with subscribe() itself,
+    // in app/subscribe.hpp — they only stay correct if they change together.
+    static auto subs_key(const Model& m) noexcept {
+        return ::agentty::app::subs_key(m);
+    }
+
+    // Optional Program hook (see maya/device.hpp — detail::HasVisualHash).
     // The runtime calls this just before view(); when the hash is
     // unchanged from the previous render, view() + render() are skipped
     // entirely. Captures the axes that affect what the user can see;
@@ -141,18 +235,18 @@ struct AgenttyApp {
         //
         // A scheme name is ~15 bytes and this runs once per frame, so
         // there is nothing to save by sampling it.
-        for (unsigned char c : m.d.ui.theme) mix(c);
-        mix(m.d.ui.theme.size());
-        mix(static_cast<std::uint64_t>(m.d.ui.tier));
-        mix(static_cast<std::uint64_t>(m.d.ui.polarity));
-        mix(static_cast<std::uint64_t>(m.d.ui.density));
-        mix(static_cast<std::uint64_t>(m.d.ui.motion));
-        mix(static_cast<std::uint64_t>(m.d.ui.tool_output));
-        mix(static_cast<std::uint64_t>(m.d.ui.thinking));
-        mix(static_cast<std::uint64_t>(m.d.ui.timestamps));
-        mix(static_cast<std::uint64_t>(m.d.ui.prose_width));
-        mix(m.d.ui.syntax ? 1ULL : 0ULL);
-        mix(m.d.ui.compact_turns ? 1ULL : 0ULL);
+        for (unsigned char c : m.d.ui().theme) mix(c);
+        mix(m.d.ui().theme.size());
+        mix(static_cast<std::uint64_t>(m.d.ui().tier));
+        mix(static_cast<std::uint64_t>(m.d.ui().polarity));
+        mix(static_cast<std::uint64_t>(m.d.ui().density));
+        mix(static_cast<std::uint64_t>(m.d.ui().motion));
+        mix(static_cast<std::uint64_t>(m.d.ui().tool_output));
+        mix(static_cast<std::uint64_t>(m.d.ui().thinking));
+        mix(static_cast<std::uint64_t>(m.d.ui().timestamps));
+        mix(static_cast<std::uint64_t>(m.d.ui().prose_width));
+        mix(m.d.ui().syntax ? 1ULL : 0ULL);
+        mix(m.d.ui().compact_turns ? 1ULL : 0ULL);
 
         // ── Session / phase.
         mix(static_cast<std::uint64_t>(m.s.phase.index()));
@@ -387,7 +481,7 @@ struct AgenttyApp {
         // ≥ 80 ms SSH). Sharing the one function eliminates the old
         // hand-maintained duplicate heuristic here — which silently
         // omitted the SSH floor and could beat against the real tick.
-        const std::int64_t kFineAnimMs = streaming_tick_period().count();
+        const std::int64_t kFineAnimMs = streaming_tick_period(m.env).count();
 
         // Streaming-text render bucket. While an assistant message is
         // actively streaming, the live edge runs maya's reveal_fx
@@ -428,21 +522,39 @@ struct AgenttyApp {
         // flood is exactly the "streaming gets stuck" symptom — the display
         // falls seconds behind the model because the paint/wire pipe can't
         // drain 60 fps of frames. The Tick subscription already wakes at
-        // only 100 ms (streaming_tick_period()) on these terminals, and the
-        // RAF override forces a render on the intervening 16 ms wakes for no
-        // visible gain. Match the reveal bucket to the tick period so the
-        // hash advances ONCE per tick: exactly one render per wake, the
-        // freshly arrived bytes still show on that very next tick (no "burst"
-        // — the tick period is the byte-delivery cadence anyway), and the
+        // only 100 ms on these terminals, and the RAF override forces a
+        // render on the intervening 16 ms wakes for no visible gain.
+        //
+        // So match the reveal bucket to that paint period: the hash advances
+        // ONCE per tick: exactly one render per wake, the
+        // freshly arrived bytes still show on that very next tick, and the
         // redundant torn repaints stop. The reveal SPEED is unchanged (the
         // pacer is bytes/second, not bytes/frame), so prose fills at the same
-        // wall-clock rate, just in fewer frames. Sharing streaming_tick_
-        // period() keeps this phase-locked to the Tick by construction — the
-        // same guarantee kFineAnimMs relies on.
+        // wall-clock rate, just in fewer frames. Sharing the period keeps
+        // this phase-locked to the Tick by construction — the same guarantee
+        // kFineAnimMs relies on.
+        //
+        // It is the TERMINAL's period, not streaming_tick_period(), and the
+        // difference shows up over ssh. That function answers two questions
+        // at once: "can this terminal composite a frame atomically" (33 vs
+        // 100 ms) AND "is there a slow wire to spare" (a >=80 ms floor when
+        // remote). The first is about painting and belongs here; the second
+        // is about BANDWIDTH — and raising the reveal bucket for it makes
+        // the typewriter chunky for a reason that has nothing to do with
+        // what the eye can see. At 100 ms with the 120 cps floor that is 12
+        // characters appearing at once, 10x a second: the reported "slow and
+        // bursty" reasoning. The byte-delivery cadence the old comment
+        // leaned on ("the tick period is the byte-delivery cadence anyway")
+        // is true locally and false over ssh, where bytes keep arriving
+        // continuously while the tick is held back for the link.
+        //
+        // The Tick subscription still throttles for the wire; only the
+        // reveal bucket is decoupled, so a remote session renders the
+        // typewriter smoothly without changing how often it wakes.
         const std::int64_t kRevealBucketMs =
             maya::ansi::env_supports_synchronized_output()
-                ? 16                              // sync: 60 fps, atomic swap
-                : streaming_tick_period().count(); // non-sync: 1 render / tick
+                ? 16    // sync: 60 fps, atomic swap
+                : 100;  // non-sync: progressive paint, 1 render / 100 ms
 
         // POST-STREAM SETTLE bucket. After StreamFinished the phase goes
         // Idle and streaming_text drains into `text`, so BOTH m.s.active()
@@ -454,7 +566,7 @@ struct AgenttyApp {
         // maya's subsequent live-tail→frozen shrink reconciliation — advance
         // ONLY inside frames that actually render, and the run loop's
         // visual_hash gate skips any frame whose hash didn't move
-        // (maya/app/app.hpp). Without a fast time term here the hash falls
+        // (maya/device.hpp). Without a fast time term here the hash falls
         // to the caret-blink PARITY bucket (one flip / 265 ms): the freeze
         // Tick and the post-freeze reconciliation frames get gated away,
         // the collapse never finishes, and a duplicate turn is stranded in
@@ -468,7 +580,7 @@ struct AgenttyApp {
         // where maya reconciles the live-tail→frozen collapse (its
         // detect→commit→demote→repaint shrink chain). request_animation_
         // frame() alone CANNOT drive them: the run loop's visual_hash gate
-        // skips any frame whose hash didn't move (maya/app/app.hpp), so
+        // skips any frame whose hash didn't move (maya/device.hpp), so
         // without advancing the hash here those frames are gated away and
         // the collapse never finishes reconciling — leaving a stranded
         // duplicate turn in scrollback. Advancing the hash while the
@@ -521,7 +633,7 @@ struct AgenttyApp {
         return k;
     }
 
-    // Optional Program hook (see maya/app/app.hpp — detail::HasNeedsWarmup).
+    // Optional Program hook (see maya/device.hpp — detail::HasNeedsWarmup).
     // Returns true when the next view() result contains a freshly
     // rehydrated frozen scrollback whose cells haven't been captured
     // into maya's component cache yet. The runtime fires a one-shot

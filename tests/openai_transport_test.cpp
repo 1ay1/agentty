@@ -404,6 +404,286 @@ TEST_CASE("test_sse_stray_close_tag_in_prose_is_kept") {
     CHECK(joined_text(msgs).find("ends reasoning") != std::string::npos);
 }
 
+TEST_CASE("test_sse_tool_call_nested_object_fragments") {
+    // Issue #48. llama.cpp (and any server that streams token-by-token)
+    // fragments `function.arguments` finely enough that a fragment can equal
+    // a PREFIX of what we have already accumulated — `{"` opening a NESTED
+    // object, when the buffer already starts with the `{"` of the top-level
+    // object.
+    //
+    // Chat Completions does not label its payloads, so a per-chunk test
+    // cannot tell that fragment from a coalescing proxy restating the value.
+    // The old heuristic guessed "retransmission" and dropped it, which ate
+    // the `{` that opens the first element of `edits` and made the whole
+    // args string invalid JSON — surfaced to the user as
+    // "old_string is missing — stream truncated" on a stream that was
+    // neither missing a field nor truncated.
+    auto frag = [](std::string_view a) {
+        std::string esc;
+        for (char c : a) {
+            if (c == '"')       esc += "\\\"";
+            else if (c == '\\') esc += "\\\\";
+            else                 esc += c;
+        }
+        return "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+               "\"function\":{\"arguments\":\"" + esc + "\"}}]}}]}\n\n";
+    };
+
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_7\",\"type\":\"function\","
+            "\"function\":{\"name\":\"edit\",\"arguments\":\"\"}}]}}]}\n\n";
+
+    // The reporter's shape: the damaging fragment is the `{"` at index 8,
+    // which is byte-identical to the buffer's first two bytes.
+    for (std::string_view f : {"{\"", "path", "\":\"", "/tmp/a.md", "\",\"",
+                               "edits", "\":", "[", "{\"", "old_text",
+                               "\":\"", "x", "\",\"", "new_text", "\":\"",
+                               "y", "\"}", "]", "}"})
+        sse += frag(f);
+
+    sse += "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+           "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // Every byte the server sent, in order, with nothing dropped.
+    CHECK(joined_tool_args(msgs) ==
+          std::string{"{\"path\":\"/tmp/a.md\",\"edits\":"
+                      "[{\"old_text\":\"x\",\"new_text\":\"y\"}]}"});
+
+    // And it has to actually parse — the user-visible symptom was a tool
+    // call that failed with a missing required field.
+    auto parsed = nlohmann::json::parse(joined_tool_args(msgs), nullptr, false);
+    CHECK(!parsed.is_discarded());
+    CHECK(parsed.contains("edits"));
+    CHECK(parsed["edits"].is_array());
+    CHECK(parsed["edits"][0].contains("old_text"));
+}
+
+TEST_CASE("test_sse_tool_call_coalescing_proxy_snapshots") {
+    // The OTHER carrier, which the heuristic exists for: a proxy that
+    // restates the COMPLETE arguments in every chunk. Blind concatenation
+    // would yield `{"a":1}{"a":1,"b":2}`; the classifier has to notice that
+    // each payload contains the previous one and emit only the suffix.
+    //
+    // Kept beside the fragment test on purpose: these two are the reason a
+    // per-chunk guess is impossible, and a fix for either that breaks the
+    // other is not a fix.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_9\",\"type\":\"function\","
+            "\"function\":{\"name\":\"grep\",\"arguments\":\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"arguments\":\"{\\\"pattern\\\":\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"arguments\":\"{\\\"pattern\\\":\\\"x\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+    CHECK(joined_tool_args(msgs) == std::string{"{\"pattern\":\"x\"}"});
+
+    auto parsed = nlohmann::json::parse(joined_tool_args(msgs), nullptr, false);
+    CHECK(!parsed.is_discarded());
+}
+
+TEST_CASE("test_sse_tool_call_empty_id_on_continuation") {
+    // A continuation chunk that RESTATES `id` as "" instead of omitting it.
+    // Several OpenAI-compatible proxies do this (llm-gateway #136 is the
+    // public report), and assigning it blindly loses the call's identity:
+    // every later delta carries an empty ToolCallId, and the end-of-turn
+    // sweep skips slots with an empty id, so the call is never closed and
+    // the turn hangs with a tool call that never dispatches.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_keep\",\"type\":\"function\","
+            "\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n"
+        // id restated as empty — must NOT clobber call_keep.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\","
+            "\"function\":{\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"\","
+            "\"function\":{\"arguments\":\"\\\"a.txt\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // The id survives on every carrier.
+    for (const auto& m : msgs) {
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->id.value == "call_keep");
+        if (const auto* d = get_leaf<StreamToolUseDelta>(m))
+            CHECK(d->id.value == "call_keep");
+        if (const auto* e = get_leaf<StreamToolUseEnd>(m))
+            CHECK(e->id.value == "call_keep");
+    }
+
+    // And the call is actually CLOSED — the sweep skips empty ids, so a
+    // clobbered id shows up here as a missing End rather than a wrong one.
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    CHECK(joined_tool_args(msgs) == std::string{"{\"path\":\"a.txt\"}"});
+}
+
+TEST_CASE("test_sse_parallel_tool_calls_without_index") {
+    // Chat Completions interleaves fragments for PARALLEL calls in one
+    // stream, and `index` is the only thing separating them. A provider that
+    // omits the field used to land every call on slot 0, concatenating one
+    // call's arguments onto another's — both calls corrupted.
+    //
+    // The array position is the natural fallback: it is what `index` means
+    // when present, and it is what the payload already tells us.
+    std::string sse =
+        // Two calls opened in ONE delta, no index on either.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"id\":\"call_a\",\"type\":\"function\","
+             "\"function\":{\"name\":\"read\",\"arguments\":\"\"}},"
+            "{\"id\":\"call_b\",\"type\":\"function\","
+             "\"function\":{\"name\":\"grep\",\"arguments\":\"\"}}"
+        "]}}]}\n\n"
+        // Arguments for both, still no index, same array order.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}},"
+            "{\"function\":{\"arguments\":\"{\\\"pattern\\\":\\\"b\\\"}\"}}"
+        "]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // Two distinct calls, not one merged blob.
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 2);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 2);
+
+    // Each call's arguments stay with that call.
+    std::string a_args, b_args;
+    for (const auto& m : msgs)
+        if (const auto* d = get_leaf<StreamToolUseDelta>(m)) {
+            if (d->id.value == "call_a") a_args += d->partial_json;
+            if (d->id.value == "call_b") b_args += d->partial_json;
+        }
+    CHECK(a_args == std::string{"{\"path\":\"a\"}"});
+    CHECK(b_args == std::string{"{\"pattern\":\"b\"}"});
+}
+
+TEST_CASE("test_sse_tool_call_unattributable_fragment_fails_the_turn") {
+    // The one case attribution genuinely cannot resolve: a fragment carrying
+    // NEITHER an id NOR an index, arriving while several calls are open and
+    // the array-position fallback does not apply (a single-element array that
+    // could belong to either open call).
+    //
+    // Guessing corrupts arguments SILENTLY — the loser's JSON still parses,
+    // so a tool runs with another call's bytes appended. Dropping the
+    // fragment avoids corruption but is silent in its own way: the tool runs
+    // with arguments MISSING and the model is told the call succeeded.
+    //
+    // Neither is acceptable, so the turn fails. That is also what zed does
+    // (ToolCallAccumulator::entry returns AmbiguousToolCallChunk, and the
+    // mapper turns it into a completion error rather than a best guess).
+    std::string sse =
+        // Two calls open, each properly identified.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"index\":0,\"id\":\"call_a\",\"type\":\"function\","
+             "\"function\":{\"name\":\"read\",\"arguments\":\"\"}}"
+        "]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"index\":1,\"id\":\"call_b\",\"type\":\"function\","
+             "\"function\":{\"name\":\"grep\",\"arguments\":\"\"}}"
+        "]}}]}\n\n"
+        // A lone fragment with no identity at all. Which call? Unknowable.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}"
+        "]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // The failure is REPORTED, not swallowed.
+    CHECK(count_leaf<StreamError>(msgs) >= 1);
+
+    // And reported ONCE — a long response must not emit one error per
+    // unplaceable chunk.
+    CHECK(count_leaf<StreamError>(msgs) == 1);
+
+    // The poisoned calls are NOT handed to the reducer as if complete: a
+    // StreamToolUseEnd here would let the turn dispatch `read` with no path.
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 0);
+
+    // The error names the situation well enough to act on.
+    bool explains = false;
+    for (const auto& m : msgs)
+        if (const auto* e = get_leaf<StreamError>(m))
+            explains = e->message.find("tool-call fragment") != std::string::npos;
+    CHECK(explains);
+}
+
+TEST_CASE("test_sse_tool_call_index_reused_for_a_new_call") {
+    // A provider may REUSE index 0 for a second parallel call, distinguishing
+    // them only by a new `id`. Keying on index alone merges them: the second
+    // call's arguments get appended to the first, and both are corrupted.
+    //
+    // Learned from Zed's ToolCallAccumulator, which keys on (id, index)
+    // jointly for exactly this reason — "either value alone is unreliable
+    // because some providers omit indices, reuse indices, or repeat IDs
+    // across parallel calls".
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_a\",\"type\":\"function\","
+            "\"function\":{\"name\":\"read\","
+            "\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}]}}]}\n\n"
+        // Same index, DIFFERENT id — a new call, not a continuation.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_b\",\"type\":\"function\","
+            "\"function\":{\"name\":\"grep\","
+            "\"arguments\":\"{\\\"pattern\\\":\"}}]}}]}\n\n"
+        // Anonymous continuation: belongs to the LATEST call at that index.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"arguments\":\"\\\"b\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // TWO calls, each with its own arguments — not one merged blob.
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 2);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 2);
+
+    std::string a, b;
+    for (const auto& m : msgs)
+        if (const auto* d = get_leaf<StreamToolUseDelta>(m)) {
+            if (d->id.value == "call_a") a += d->partial_json;
+            if (d->id.value == "call_b") b += d->partial_json;
+        }
+    CHECK(a == std::string{"{\"path\":\"a\"}"});
+    CHECK(b == std::string{"{\"pattern\":\"b\"}"});
+}
+
+TEST_CASE("test_sse_tool_call_id_only_no_index") {
+    // MiniMax (Zed #42584) identifies calls by ID alone and sends no usable
+    // index. Two calls therefore arrive with no index at all, and the only
+    // thing separating them is the id.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"id\":\"call_a\",\"type\":\"function\","
+             "\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\"}}"
+        "]}}]}\n\n"
+        // Continuation for the SAME id, still no index.
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":["
+            "{\"id\":\"call_a\","
+             "\"function\":{\"arguments\":\"\\\"src\\\"}\"}}"
+        "]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // ONE call, not two: the repeated id is the same call continuing.
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    CHECK(joined_tool_args(msgs) == std::string{"{\"path\":\"src\"}"});
+}
+
 TEST_CASE("test_sse_tool_call_stream") {
     // OpenAI tool-call streaming: opening frame carries id+name, subsequent
     // frames carry arguments fragments; finish_reason "tool_calls".
@@ -708,6 +988,64 @@ TEST_CASE("legacy codex alias resolves to the openai row, not a copy") {
     CHECK(empty.path == openai.path);
 }
 
+TEST_CASE("attribution: openrouter names agentty on the chat dialect") {
+    // Issue #74. OpenRouter credits a request to an app page keyed on the URL
+    // we send, and some models only serve a recognised agent harness, so
+    // these two headers are the difference between "works" and "403" on
+    // part of the catalog.
+    const auto find = [](const auto& hs, std::string_view name)
+            -> std::optional<std::string> {
+        for (const auto& [k, v] : hs)
+            if (k == name) return v;
+        return std::nullopt;
+    };
+
+    // ── the chat dialect ──
+    auto orouter = oai::Endpoint::from_spec("openrouter");
+    auto referer = find(orouter.extra_headers, "http-referer");
+    auto title   = find(orouter.extra_headers, "x-title");
+    REQUIRE(referer.has_value());
+    REQUIRE(title.has_value());
+    // HTTP-Referer is the PRIMARY key for the app page, so it has to be the
+    // real public URL -- a placeholder here silently creates someone else's
+    // app page, or none at all.
+    CHECK(*referer == "https://agentty.org");
+    CHECK(*title == "agentty");
+
+    // ── every other row stays silent ──
+    // Attribution is opt-in per row. Sending agentty's URL to OpenAI, Groq or
+    // a user's own llama.cpp is noise at best and a fingerprint at worst.
+    for (const char* id : {"openai", "groq", "together", "cerebras",
+                           "deepseek", "mistral", "ollama", "llama.cpp"}) {
+        auto ep = oai::Endpoint::from_spec(id);
+        INFO("row: ", id);
+        CHECK(!find(ep.extra_headers, "http-referer").has_value());
+        CHECK(!find(ep.extra_headers, "x-title").has_value());
+    }
+
+    // A custom host spec matches no row, so it gets nothing either.
+    auto custom = oai::Endpoint::from_spec("https://gw.example.com/api");
+    CHECK(!find(custom.extra_headers, "http-referer").has_value());
+
+    // ── and they actually reach the WIRE ──
+    // The struct carrying them is not the point; the request is. This is the
+    // same builder the stream and the model-list call go through, so passing
+    // here means an attributed request really goes out attributed.
+    const auto wire = [](const agentty::http::Headers& hs, std::string_view nm)
+            -> std::optional<std::string> {
+        for (const auto& x : hs)
+            if (x.name == nm) return x.value;
+        return std::nullopt;
+    };
+    auto hs = oai::build_request_headers(
+        oai::AuthHeader{oai::BearerHeader{"sk-or-v1-test"}}, orouter);
+    CHECK(wire(hs, "http-referer") == std::optional<std::string>{"https://agentty.org"});
+    CHECK(wire(hs, "x-title")      == std::optional<std::string>{"agentty"});
+    // The auth header still wins its slot — extras are appended, not merged
+    // over the top of something load-bearing.
+    CHECK(wire(hs, "authorization") == std::optional<std::string>{"Bearer sk-or-v1-test"});
+}
+
 TEST_CASE("test_endpoint_presets") {
     auto groq = oai::Endpoint::from_spec("groq");
     CHECK(groq.host == "api.groq.com");
@@ -975,7 +1313,7 @@ TEST_CASE("bundled model seed when no key / fetch empty") {
 
     for (const char* id : {"xai", "mistral", "gemini", "fireworks",
                            "deepseek", "groq", "cerebras", "together"}) {
-        auto models = P::list_models_for(P::parse_selection(id), none);
+        auto models = P::list_models_for(::agentty::IoAccess::grant(), agtest::cap(), P::parse_selection(id), none);
         CHECK(!models.empty());
         // The seed stamps the provider label so the picker groups it right.
         if (!models.empty())
@@ -984,12 +1322,12 @@ TEST_CASE("bundled model seed when no key / fetch empty") {
 
     // A couple of concrete slugs land where expected (newest first).
     {
-        auto xai = P::list_models_for(P::parse_selection("xai"), none);
+        auto xai = P::list_models_for(::agentty::IoAccess::grant(), agtest::cap(), P::parse_selection("xai"), none);
         CHECK(!xai.empty());
         if (!xai.empty()) CHECK(xai.front().id.value == "grok-4.6");
     }
     {
-        auto gem = P::list_models_for(P::parse_selection("gemini"), none);
+        auto gem = P::list_models_for(::agentty::IoAccess::grant(), agtest::cap(), P::parse_selection("gemini"), none);
         CHECK(!gem.empty());
         if (!gem.empty()) CHECK(gem.front().id.value == "gemini-2.5-pro");
     }
@@ -997,7 +1335,7 @@ TEST_CASE("bundled model seed when no key / fetch empty") {
     // Providers WITHOUT a seed (openrouter, custom hosts, locals) legitimately
     // stay empty with no key rather than showing guessed models.
     {
-        auto orr = P::list_models_for(P::parse_selection("openrouter"), none);
+        auto orr = P::list_models_for(::agentty::IoAccess::grant(), agtest::cap(), P::parse_selection("openrouter"), none);
         CHECK(orr.empty());
     }
 }
@@ -1078,6 +1416,96 @@ TEST_CASE("test_provider_display_name_url_label") {
 // fix the raw spec flows into parse_selection → from_spec. This pins the
 // contract for the specs the TUI must accept: every URL form a CLI user
 // can pass via --provider, plus bare host[:port].
+TEST_CASE("endpoint: the URL a provider actually hands you") {
+    namespace P = agentty::provider;
+
+    // THE ONE PEOPLE HIT. Docs say the path is a PREFIX and we append
+    // /chat/completions. But what a provider's dashboard gives you — and
+    // therefore what you paste — is the full endpoint URL. Appending to that
+    // produced "/v1/chat/completions/chat/completions": a 404 on every
+    // request, from a URL that looks obviously correct in the settings pane.
+    {
+        auto sel = P::parse_selection("https://api.example.com/v1/chat/completions");
+        CHECK(sel.openai_endpoint.host == "api.example.com");
+        CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+        CHECK(sel.openai_endpoint.models_path == "/v1/models");
+    }
+    // Same URL as a prefix. Both spellings name the same endpoint, so both
+    // must land on it — that is the whole point of accepting the full form.
+    {
+        auto sel = P::parse_selection("https://api.example.com/v1");
+        CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+    }
+    // A gateway under a sub-path, pasted whole.
+    {
+        auto sel = P::parse_selection("https://gw.corp/openai/v1/chat/completions");
+        CHECK(sel.openai_endpoint.path == "/openai/v1/chat/completions");
+        CHECK(sel.openai_endpoint.models_path == "/openai/v1/models");
+    }
+}
+
+TEST_CASE("endpoint: query strings and fragments never reach the path") {
+    namespace P = agentty::provider;
+    // Azure-style URLs carry ?api-version=. Left in the prefix it became
+    // "/v1?api-version=x/chat/completions", which every server 404s.
+    {
+        auto sel = P::parse_selection("https://api.example.com/v1?api-version=2024");
+        CHECK(sel.openai_endpoint.host == "api.example.com");
+        CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+    }
+    // The fragment is our own multi-account tag and is never dialled.
+    {
+        auto sel = P::parse_selection("https://api.example.com/v1#work");
+        CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+    }
+}
+
+TEST_CASE("endpoint: userinfo is stripped from the dialled host") {
+    namespace P = agentty::provider;
+    // "user:pass@host" left whole became the SNI name and the Host header,
+    // so TLS failed with a name mismatch — surfaced to the user as a
+    // certificate error rather than "your URL has credentials in it".
+    {
+        auto sel = P::parse_selection("https://user:pw@api.example.com/v1");
+        CHECK(sel.openai_endpoint.host == "api.example.com");
+        CHECK(sel.openai_endpoint.port == 443);
+    }
+    // The bare host[:port] arm reaches the same dialling code, so it needs
+    // the same cleanup — one arm accepting a shape the other rejects is its
+    // own bug report.
+    {
+        auto sel = P::parse_selection("user@my-box.lan:8080");
+        CHECK(sel.openai_endpoint.host == "my-box.lan");
+        CHECK(sel.openai_endpoint.port == 8080);
+    }
+}
+
+TEST_CASE("endpoint: a host is dialled case-insensitively") {
+    namespace P = agentty::provider;
+    // Hostnames are case-insensitive (RFC 4343) but we compare them as
+    // strings for SNI, the Host header, and the credential lookup keyed on
+    // the endpoint. A user who capitalises should not get a second, key-less
+    // identity for the same server.
+    {
+        auto a = P::parse_selection("https://API.Example.COM/v1");
+        auto b = P::parse_selection("https://api.example.com/v1");
+        CHECK(a.openai_endpoint.host == "api.example.com");
+        CHECK(a.openai_endpoint.host == b.openai_endpoint.host);
+    }
+    {
+        auto sel = P::parse_selection("My-Box.LAN:8080");
+        CHECK(sel.openai_endpoint.host == "my-box.lan");
+    }
+}
+
+TEST_CASE("endpoint: duplicate slashes collapse") {
+    namespace P = agentty::provider;
+    // A hand-edited or concatenated URL yields "//v1", and
+    // "//v1/chat/completions" is a different path to most routers.
+    auto sel = P::parse_selection("https://api.example.com//v1");
+    CHECK(sel.openai_endpoint.path == "/v1/chat/completions");
+}
+
 TEST_CASE("test_tui_custom_host_specs") {
     namespace P = agentty::provider;
 
@@ -1171,10 +1599,10 @@ TEST_CASE("test_build_request_headers") {
 
     // parse_selection stamps the session override onto the endpoint (and an
     // empty override leaves it clear).
-    agentty::provider::set_custom_auth_header("Api-Key");
+    agentty::provider::set_custom_auth_header(::agentty::IoAccess::grant(), "Api-Key");
     auto sel = agentty::provider::parse_selection("my.host:9000");
     CHECK(sel.openai_endpoint.auth_header_name == "Api-Key");
-    agentty::provider::set_custom_auth_header("");
+    agentty::provider::set_custom_auth_header(::agentty::IoAccess::grant(), "");
     sel = agentty::provider::parse_selection("my.host:9000");
     CHECK(sel.openai_endpoint.auth_header_name.empty());
 }
@@ -1646,10 +2074,10 @@ TEST_CASE("test_wire_body_golden") {
     const std::string wire = oai::build_messages(t).dump();
 
     CHECK(wire.find("FIRST_") == std::string::npos);      // superseded read collapsed
-    CHECK(wire.find("superseded") != std::string::npos);  // pointer text present
+    CHECK(wire.find("content was dropped to save context") != std::string::npos);  // pointer text present
     CHECK(wire.find("SECOND_") != std::string::npos);     // live read full
 
-    constexpr std::uint64_t kGolden = 0x60773f1adaf86e13ull;
+    constexpr std::uint64_t kGolden = 0x5cbfe9a39e038624ull;
     const std::uint64_t got = fnv1a(wire);
     if (kGolden == 0)
         std::fprintf(stderr, "OPENAI wire golden = 0x%016llxull (len=%zu)\n",
@@ -1711,3 +2139,383 @@ TEST_CASE("test_sse_bare_error_object_llamacpp") {
     CHECK(joined_text(msgs).empty());
 }
 
+
+TEST_CASE("test_sse_tool_name_split_across_deltas") {
+    // opencode #24137: an OpenAI-compatible gateway splits function.name
+    // across deltas the same way it splits arguments — "re" then "ad" for
+    // `read`. The spec's own accumulator (`name ??=`) takes the first
+    // non-null and never appends, so we dispatched a tool called `re`, got
+    // "unknown tool" three times, and the doom-loop breaker killed the turn.
+    //
+    // The name is accumulated until it resolves to a tool we advertised;
+    // that gate is what lets the accumulation terminate without guessing how
+    // many fragments to expect.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"c1\",\"type\":\"function\","
+            "\"function\":{\"name\":\"re\",\"arguments\":\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"name\":\"ad\",\"arguments\":\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse, {"read"});
+
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "read");        // not "re"
+    CHECK(joined_tool_args(msgs) == std::string{"{\"path\":\"a.txt\"}"});
+}
+
+TEST_CASE("test_sse_whole_tool_name_is_not_doubled") {
+    // The other direction, and the one that would break every normal server:
+    // a gateway that RESTATES the full name on continuation chunks must not
+    // accumulate "readread". Appending only happens while the call is
+    // unannounced and only for a fragment that differs from what we hold.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"c1\",\"type\":\"function\","
+            "\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"name\":\"read\","
+            "\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse, {"read"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "read");
+}
+
+TEST_CASE("test_sse_empty_name_on_continuation_keeps_the_name") {
+    // A3S-Lab/Code #139: Azure and several local proxies re-send
+    // `"name": ""` on argument chunks. Assigning it wipes an established
+    // name and the NEXT turn fails on an empty tool name.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"c1\",\"type\":\"function\","
+            "\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"function\":{\"name\":\"\","
+            "\"arguments\":\"{\\\"path\\\":\\\"a.txt\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse, {"read"});
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "read");
+    CHECK(joined_tool_args(msgs) == std::string{"{\"path\":\"a.txt\"}"});
+}
+
+TEST_CASE("test_sse_unresolvable_tool_name_still_reaches_the_model") {
+    // The accumulation gate waits for a name that resolves. A name that
+    // NEVER resolves must not vanish — it has to reach the model as a
+    // failed call so it can correct itself, rather than the turn ending
+    // with a tool call that silently did not happen.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"c1\",\"type\":\"function\","
+            "\"function\":{\"name\":\"nosuchtool\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse, {"read"});
+    CHECK(count_leaf<StreamToolUseStart>(msgs) == 1);
+    CHECK(count_leaf<StreamToolUseEnd>(msgs) == 1);
+    for (const auto& m : msgs)
+        if (const auto* s = get_leaf<StreamToolUseStart>(m))
+            CHECK(s->name.value == "nosuchtool");
+}
+
+TEST_CASE("test_sse_error_object_mid_stream_terminates") {
+    // A provider can answer 200, stream a few deltas, then emit
+    // `{"error": …}` in place of a finish_reason. The transport sees a clean
+    // 200 and a closed stream, so only the decoded event knows the turn
+    // failed.
+    //
+    // The decoder has always handled this shape; what was missing was a
+    // consumer. The subagent loop's StreamError arm was empty, so the error
+    // was decoded and discarded and the turn returned its partial text as a
+    // successful answer — a truncated reply with no indication anything went
+    // wrong, which is the worst possible reading of a failed request.
+    std::string sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"starting\"}}]}\n\n"
+        "data: {\"error\":{\"message\":\"upstream exploded\","
+            "\"type\":\"server_error\"}}\n\n"
+        "data: [DONE]\n\n";
+
+    auto msgs = oai::parse_sse_for_test(sse);
+
+    // The content before the error is kept — it really did arrive.
+    CHECK(joined_text(msgs).find("starting") != std::string::npos);
+
+    // And the error is emitted, carrying the provider's own message rather
+    // than a generic "stream failed".
+    bool saw = false;
+    for (const auto& m : msgs)
+        if (const auto* e = get_leaf<StreamError>(m)) {
+            saw = true;
+            CHECK(e->message.find("upstream exploded") != std::string::npos);
+        }
+    CHECK(saw);
+}
+
+// ── Live probe against a local server (opt-in) ────────────────────────────
+//
+// Issue #49 was not a parser bug alone — the parser change is covered by
+// context_window_test. This covers what only an end-to-end run can: that
+// list_models() actually REACHES the probe for a local endpoint, and that a
+// measured runtime window overrides a declared architectural one.
+//
+// Opt-in because it needs a server on the port. tests/fake_local_server.py
+// serves the exact payloads verified from llama.cpp's
+// server-context.cpp (get_res_model_info) and LM Studio's native API:
+//
+//   python3 tests/fake_local_server.py llama     8080 &
+//   AGENTTY_LIVE_LOCAL_PORT=8080 AGENTTY_LIVE_LOCAL_MODE=llama ./agentty_tests
+//   python3 tests/fake_local_server.py lmstudio  1234 &
+//   AGENTTY_LIVE_LOCAL_PORT=1234 AGENTTY_LIVE_LOCAL_MODE=lmstudio ./agentty_tests
+// The add-host path forces the runtime probe regardless of address. This
+// is the half that makes "no settings toggle" work: a self-hosted server on
+// a public-looking hostname is DETECTED, not configured.
+//
+// Uses a loopback server but asserts on the FLAG rather than the address —
+// list_models with force_probe must hit the runtime routes even for an
+// endpoint is_local_endpoint() would have declined.
+TEST_CASE("live: force_probe asks even when the address says otherwise") {
+    const char* port_s = std::getenv("AGENTTY_LIVE_LOCAL_PORT");
+    if (!port_s) return;
+    namespace oai = agentty::provider::openai;
+
+    oai::Endpoint ep;
+    ep.host        = "127.0.0.1";
+    ep.port        = static_cast<std::uint16_t>(std::atoi(port_s));
+    ep.path        = "/v1/chat/completions";
+    ep.models_path = "/v1/models";
+    ep.use_tls     = false;
+
+    // Make the address look PUBLIC so the heuristic would decline, while
+    // still resolving to the loopback stub. A single-label host is treated
+    // as local, and a dotted one is not — so "x.example.com" mapped onto
+    // 127.0.0.1 by the connect layer is the shape we need. We cannot fake
+    // DNS here, so instead assert the two calls DIFFER in what they ask:
+    // with force, the runtime routes are hit even though the row already
+    // declared a window (any_unknown == false).
+    //
+    // The stub at /tmp/fp_check.py logs each route; this asserts the
+    // OBSERVABLE consequence instead — force must never return a smaller
+    // window, and must still return one when the row declares nothing.
+    auto with    = oai::list_models(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, /*force=*/true);
+    auto without = oai::list_models(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, /*force=*/false);
+    REQUIRE(!with.empty());
+    REQUIRE(with.size() == without.size());
+    for (std::size_t i = 0; i < with.size(); ++i)
+        CHECK(with[i].context_window >= without[i].context_window);
+}
+
+TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
+    const char* port_s = std::getenv("AGENTTY_LIVE_LOCAL_PORT");
+    const char* mode   = std::getenv("AGENTTY_LIVE_LOCAL_MODE");
+    if (!port_s || !mode) return;   // not opted in
+
+    namespace oai = agentty::provider::openai;
+    oai::Endpoint ep;
+    // AGENTTY_LIVE_LOCAL_HOST lets this point at a NON-loopback address, which
+    // is the shape reported on #49: llama-server on the box with the GPU,
+    // reached over the LAN.
+    if (const char* h = std::getenv("AGENTTY_LIVE_LOCAL_HOST")) ep.host = h;
+    else                                                        ep.host = "127.0.0.1";
+    ep.port        = static_cast<std::uint16_t>(std::atoi(port_s));
+    ep.path        = "/v1/chat/completions";
+    ep.models_path = "/v1/models";
+    ep.use_tls     = false;
+    // A non-empty label so the catalog writes land on a SCOPED key
+    // ("provider/model"), which is what the product does and what the
+    // capability reads below resolve. An empty scope silently falls back
+    // to the bare key and would test a path no real endpoint takes.
+    ep.label       = "local-test";
+
+    // force_probe mirrors what the ADD-HOST flow does: ask the runtime
+    // routes regardless of what the address looks like, so a self-hosted
+    // server on a public-looking name is detected rather than configured.
+    const bool force = std::getenv("AGENTTY_LIVE_FORCE_PROBE") != nullptr;
+    auto models = oai::list_models(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, force);
+    REQUIRE(!models.empty());
+
+    const std::string m{mode};
+    if (m == "real") {
+        // Pointed at a REAL daemon, not a stub. Asserts the invariant that
+        // matters rather than a fixed number (the window depends on the
+        // model and on OLLAMA_CONTEXT_LENGTH): whatever we report must be
+        // a real number, and it must be the LOADED window from /api/ps
+        // rather than the much larger architectural one from /api/show.
+        //
+        // On a stock 0.34.2 with qwen3:0.6b those are 4096 and 40960 — a
+        // 10x gap, and picking the wrong one means every prompt over 4k
+        // gets silently truncated by the server.
+        bool any = false;
+        for (const auto& mi : models) {
+            if (mi.context_window <= 0) continue;
+            any = true;
+            INFO("model " << mi.id.value << " window " << mi.context_window);
+            // The architectural window for this family is 40960; the loaded
+            // one is far smaller. Anything >= 40960 means we read the wrong
+            // field.
+            CHECK(mi.context_window < 40960);
+        }
+        CHECK(any);
+    } else if (m == "router") {
+        // llama-server ROUTER mode. A bare /props answers with a dummy
+        // n_ctx 0, so the window only exists at /props?model=<name> — which
+        // is exactly what the issue reported and what a bare probe missed.
+        //
+        // Two models: qwen3-coder is loaded (32768), gemma3:27b is not.
+        // The unloaded one must keep whatever the ladder gave it rather
+        // than inherit the loaded model's window.
+        REQUIRE(models.size() == 2u);
+        const ModelInfo* loaded = nullptr;
+        const ModelInfo* unloaded = nullptr;
+        for (const auto& mi : models) {
+            if (mi.id.value == "qwen3-coder") loaded = &mi;
+            if (mi.id.value == "gemma3:27b")  unloaded = &mi;
+        }
+        REQUIRE(loaded != nullptr);
+        REQUIRE(unloaded != nullptr);
+        CHECK(loaded->context_window == 32768);
+        // Not resident, so no measurement: the size comes from the launch
+        // args the router lists for it.
+        CHECK(unloaded->context_window == 131072);
+
+        // One model resident at a time. The live probe only answers for the
+        // loaded one, and never loads anything itself.
+        CHECK(oai::probe_loaded_window(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, "qwen3-coder") == 32768);
+        CHECK(oai::probe_loaded_window(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, "gemma3:27b") == 0);
+        CHECK(oai::probe_loaded_window(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, "qwen3-coder") == 32768);
+
+        // A request for the other model swaps it in (router autoload).
+        {
+            agentty::http::Request r;
+            r.method    = agentty::http::HttpMethod::Post;
+            r.host      = ep.host;
+            r.port      = ep.port;
+            r.path      = "/v1/chat/completions";
+            r.plaintext = true;
+            r.headers   = {{"content-type", "application/json"}};
+            r.body      = R"({"model":"gemma3:27b","messages":[]})";
+            auto resp = agentty::http::default_client(::agentty::IoAccess::grant()).send(r, {});
+            REQUIRE(resp);
+            REQUIRE(resp->status == 200);
+        }
+        CHECK(oai::probe_loaded_window(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, "gemma3:27b") == 131072);
+        CHECK(oai::probe_loaded_window(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, "qwen3-coder") == 0);
+
+        // ── Capability, not window ──────────────────────────────────
+        // Same asymmetry as the window above, for the same reason. On a
+        // router each model has its OWN chat template, so caps are per
+        // model and the bare /props dummy (role:"router", n_ctx 0, no
+        // chat_template_caps — see server-models.cpp get_router_props)
+        // describes none of them.
+        //
+        // The LOADED model answers, so its template caps are recorded.
+        using agentty::catalog_reasoning_for;
+        CHECK(catalog_reasoning_for("qwen3-coder", ep.label) == 1);
+
+        // The UNLOADED one gets -1, not 0. We ask with autoload=false, so
+        // the router refuses rather than spawning a process — which is the
+        // right trade, but it means we learned nothing. Recording `false`
+        // on "we did not ask hard enough" would disable reasoning on a
+        // model that supports it, and the user would have no way to tell
+        // that from a real answer. Leave the rung empty and let inference
+        // speak until the model loads and a later refresh sees the truth.
+        CHECK(catalog_reasoning_for("gemma3:27b", ep.label) == -1);
+    } else if (m == "litellm") {
+        // THE REGRESSION GUARD. /v1/models advertises 128000; the proxy's
+        // /v1/model/info declares a stale 8192. A DECLARATION must never
+        // shrink a larger advertised window — only a MEASUREMENT may
+        // (WindowProbe::measured). Getting this backwards would compact
+        // conversations that never needed compacting, and nobody would
+        // trace that symptom back to a probe.
+        CHECK(models.front().context_window == 128000);
+    } else if (m == "ollama") {
+        // /api/tags carries no window at all, so this row arrives at 0.
+        // /api/ps reports the LOADED context_length, which is a real
+        // measurement of what the daemon allocated.
+        CHECK(models.front().context_window == 16384);
+    } else if (m == "llama") {
+        // meta.n_ctx = 8192 (served), meta.n_ctx_train = 32768 (ceiling).
+        // Before the fix this row advertised nothing and resolved to the
+        // 200k default.
+        CHECK(models.front().context_window == 8192);
+
+        // The other half of the same request. llama.cpp's /v1/models rows
+        // carry no capability object at all, so before this every model
+        // here fell through resolved_caps() to id inference over a GGUF
+        // filename — which is how "no reasoning on llama.cpp" happened
+        // even on a model whose template supports it.
+        //
+        // /props answers, and its answer is a MEASUREMENT: llama.cpp runs
+        // the model's own jinja template against probe inputs at load and
+        // diffs the output (common/jinja/caps.cpp). Single-model server,
+        // so one server-wide answer covers the one model it serves.
+        using agentty::catalog_reasoning_for;
+        CHECK(catalog_reasoning_for(models.front().id.value, ep.label) == 1);
+
+        // supports_tool_calls is true in the stub, so tools stay allowed.
+        // The tri-state must be unknown-or-true, never a hard false.
+        CHECK(models.front().tools_allowed());
+    } else {
+        // /v1 declares max_context_length 262144; the native API reports the
+        // instance loaded at 16384. The smaller, measured one must win.
+        CHECK(models.front().context_window == 16384);
+
+        // ── Capability, not window ──────────────────────────────────
+        // The /v1 shim carries no capability object, so this all comes off
+        // the native /api/v1/models route — the same request that answered
+        // the window above.
+        using agentty::catalog_reasoning_for;
+
+        // Declared as an OBJECT ({allowed_options, default}), not a bare
+        // bool. That shape is the whole LM Studio bug: the reader tested
+        // is_boolean() and skipped anything else, so every model here fell
+        // through to id inference — a heuristic over hosted naming that
+        // cannot classify a `publisher/model` key. Reasoning was decided
+        // by filename.
+        //
+        // This row is also UNLOADED-adjacent in the way that matters: the
+        // capability write sits ABOVE the loaded_instances early-continue,
+        // because capability belongs to the MODEL and is knowable while it
+        // is unloaded, unlike the window, which belongs to the instance.
+        // So the picker shows the right affordances before the first load.
+        CHECK(catalog_reasoning_for("qwen/qwen3-coder-30b", ep.label) == 1);
+
+        // A model with NO `reasoning` key gets NOTHING recorded — not a
+        // declared no. That is deliberate and it is the opposite of what
+        // it looks like.
+        //
+        // LM Studio's capability object is built per model from what the
+        // app knows, and "the key is missing" covers both "this model
+        // cannot reason" and "this build/model entry does not say". Those
+        // are not the same claim, and treating absence as a hard NO would
+        // POISON the id-inference rung underneath: a DeepSeek-R1 distill
+        // listed without the key would be pinned to no-reasoning even
+        // though its id says otherwise and it plainly reasons. Silence is
+        // not evidence. Leave the rung empty and let inference speak.
+        CHECK(catalog_reasoning_for("mistralai/mistral-7b-instruct-v0.3",
+                                    ep.label) == -1);
+
+        // trained_for_tool_use is false on that second row, and it must
+        // NOT become a hard withhold — see the tri-state in
+        // ModelInfo::supports_tools. It is a claim about TRAINING, not
+        // about whether the server will accept a tools array, and a model
+        // that silently never gets tools is indistinguishable from one
+        // that is merely bad at them.
+        for (const auto& mi : models)
+            CHECK(mi.tools_allowed());
+    }
+}

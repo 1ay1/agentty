@@ -39,10 +39,39 @@ using provider::debug_log;
 struct StreamCtx {
     EventSink sink;
     wire::SseFramer sse;
-    // Tool-use tracking (current block index in-flight)
-    std::string current_tool_id;
-    std::string current_tool_name;
-    bool in_tool_use = false;
+    // ── Tool-use blocks, keyed by the wire's own block index ──────────
+    //
+    // Anthropic puts an `index` on EVERY content_block_* frame, and that
+    // index is the block's identity for its whole life: start, every
+    // delta, stop. This used to be a single `current_tool_id` slot with
+    // the deltas routed to whatever call opened last.
+    //
+    // That is the `latest_tool_item` shape from docs/TOOL_CALL_ATTRIBUTION
+    // — the one that has shipped as a bug in openai-python, opik, strands,
+    // zed and twice in here. It happens to be safe while the server emits
+    // blocks strictly one at a time, which Claude does today. "Happens to
+    // be safe today" is not a property; it is a bet on a server's emission
+    // order, and the losing side of that bet is one call's arguments
+    // appended to another's, still valid JSON, dispatched silently.
+    //
+    // So use the identity the protocol already hands us. Small-N linear
+    // scan: a turn has a handful of parallel blocks, and a scan over 2-4
+    // entries beats a hash.
+    struct ToolBlock {
+        int         index = -1;   // the wire's content_block index
+        std::string id;
+        std::string name;
+    };
+    std::vector<ToolBlock> tool_blocks;
+
+    // Find the open tool block at `index`, or nullptr. Named rather than
+    // inlined so there is exactly ONE place a delta can resolve its owner,
+    // and no spelling of "the most recent one".
+    [[nodiscard]] ToolBlock* tool_at(int index) noexcept {
+        for (auto& b : tool_blocks)
+            if (b.index == index) return &b;
+        return nullptr;
+    }
     // True while a TEXT content block is open on the wire (between its
     // content_block_start and content_block_stop). Lets ContentBlockStop
     // emit StreamTextBlockClosed exactly once per text block, and only for

@@ -30,7 +30,7 @@
 #include "agentty/io/persistence.hpp"
 
 #include <maya/maya.hpp>
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include <cstdio>
 #include <string>
@@ -64,6 +64,12 @@ std::string view_bytes(const Model& m) {
 } // namespace
 
 int main(int argc, char** argv) {
+    // These compare painted bytes across palettes; a NO_COLOR in the
+    // caller's env (CI, agent shells, a console with no VT) would make every
+    // scheme identical. MAYA_COLOR is maya's documented deterministic-test
+    // override (see detect_color_level).
+    ::unsetenv("NO_COLOR");
+    ::setenv("MAYA_COLOR", "truecolor", 1);
     const int msgs = argc > 1 ? std::atoi(argv[1]) : 200;
     // Optional: a REAL thread file. Synthetic messages do not reproduce the
     // frozen ledger's real block shapes (tool cards, code blocks, folds),
@@ -71,7 +77,7 @@ int main(int argc, char** argv) {
     const char* thread_path = argc > 2 ? argv[2] : nullptr;
 
     app::install_deps(app::Deps{
-        .stream = [](provider::Request, provider::EventSink) {},
+        .stream = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread = [](const Thread&) {},
         .load_threads = [] { return std::vector<Thread>{}; },
         .load_thread = [](const ThreadId&) { return std::optional<Thread>{}; },
@@ -88,7 +94,7 @@ int main(int argc, char** argv) {
         // A thread id, not a path: the store speaks the .jsonl log format
         // (load_thread_file is the LEGACY whole-document .json reader, which
         // silently returns nothing for a log file).
-        auto t = persistence::load_thread_by_id(ThreadId{thread_path});
+        auto t = persistence::load_thread_by_id(::agentty::IoAccess::grant(), ThreadId{thread_path});
         if (t) {
             m.d.current = std::move(*t);
             std::printf("loaded thread %s: %zu messages\n\n",
@@ -120,7 +126,7 @@ int main(int argc, char** argv) {
     // EVERY theme to the same palette and "the ledger did not change" is a
     // property of the harness, not of the code under test. Forcing TrueColor
     // is what a real terminal session already has.
-    m.d.ui.tier = ui_prefs::ColorTier::TrueColor;
+    m.d.ui().tier = ui_prefs::ColorTier::TrueColor;
 
     app::detail::rehydrate_frozen(m);
 
@@ -139,11 +145,11 @@ int main(int argc, char** argv) {
         std::printf("a single arrow key changes what is on screen\n");
         std::string f0, v0, f1, v1;
         frame(f0, v0);
-        const std::string t0 = m.d.ui.theme;
+        const std::string t0 = m.d.ui().theme;
 
         m = app::update(std::move(m), Msg{AppearanceThemeMove{1}}).first;
         frame(f1, v1);
-        const std::string t1 = m.d.ui.theme;
+        const std::string t1 = m.d.ui().theme;
 
         std::printf("    theme: '%s' -> '%s'\n", t0.c_str(), t1.c_str());
         // Distinguish "the reducer never picked a real scheme" from "it did
@@ -152,7 +158,7 @@ int main(int argc, char** argv) {
         // headless run can silently resolve everything to the same palette —
         // which would look exactly like the bug without being it.
         {
-            const auto r0 = ui_prefs::resolve(m.d.ui, /*tty=*/true);
+            const auto r0 = ui_prefs::resolve(m.d.ui(), m.env.terminal);
             std::printf("    resolved tier=%d  scheme=%s  ink=%02x%02x%02x\n",
                         static_cast<int>(r0.tier),
                         (r0.theme == &maya::theme::native) ? "native(FALLBACK)"

@@ -15,13 +15,35 @@
 // All functions are safe to call outside a git repo — they return
 // false/nullopt and do nothing.
 
+#include <optional>
+#include <stop_token>
 #include <string>
+
+#include <maya/runtime.hpp>
+#include "agentty/util/io.hpp"
 
 namespace agentty::workspace {
 
 // True iff the workspace root is inside a git repository. Cached after
 // the first call (repo-ness doesn't change mid-session).
-[[nodiscard]] bool in_git_repo();
+[[nodiscard]] bool in_git_repo(Io);
+
+// Non-blocking variant for the UI/reducer thread. Returns the cached answer
+// only if repo discovery has ALREADY been forced (by prewarm_repo_info() or
+// an earlier blocking caller); returns nullopt when the cache is still cold,
+// so the caller can skip git work this turn instead of spawning `git` on the
+// hot path. The very first Enter after launch -- before the startup prewarm
+// lands -- takes this nullopt path, keeping the keystroke instant on Windows.
+[[nodiscard]] std::optional<bool> in_git_repo_if_ready(Io);
+
+// Warm the cached repo discovery; run it on a background task at launch.
+// The first call to in_git_repo()/create_checkpoint() otherwise
+// spawns two blocking `git rev-parse` subprocesses on the submit path --
+// cheap on POSIX, but process creation is heavy on Windows and lands
+// squarely on the first turn's critical path. Priming it while the user
+// is still typing moves that cost off the hot path. Idempotent; does
+// nothing once `stop` is requested.
+void prewarm_repo_info(std::stop_token stop = {});
 
 // A one-glance summary of what the worktree has changed SINCE a
 // checkpoint was taken — the diff between the pinned snapshot tree and
@@ -35,13 +57,14 @@ struct CheckpointDiff {
     int  insertions     = 0;
     int  deletions      = 0;
 };
-[[nodiscard]] CheckpointDiff checkpoint_summary(const std::string& id);
+[[nodiscard]] CheckpointDiff checkpoint_summary(const maya::below<maya::leaf>& cap,
+                                                const std::string& id);
 
 // Snapshot the current worktree and pin it at
 // refs/agentty/checkpoints/<id>. Returns false when not in a repo or
 // any git step fails. Also prunes the oldest checkpoint refs beyond a
 // fixed keep-count so refs don't accumulate forever.
-bool create_checkpoint(const std::string& id);
+bool create_checkpoint(const maya::below<maya::leaf>& cap, const std::string& id);
 
 // True iff refs/agentty/checkpoints/<id> resolves to a commit.
 [[nodiscard]] bool checkpoint_exists(const std::string& id);
@@ -50,6 +73,7 @@ bool create_checkpoint(const std::string& id);
 // recorded in the snapshot and delete non-ignored files that did not
 // exist when it was taken. On failure returns false and, if `error` is
 // non-null, writes a short human-readable reason into it.
-bool restore_checkpoint(const std::string& id, std::string* error = nullptr);
+bool restore_checkpoint(const maya::below<maya::leaf>& cap, const std::string& id,
+                        std::string* error = nullptr);
 
 } // namespace agentty::workspace

@@ -17,11 +17,14 @@
 
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/smart_mode.hpp"
+#include "agentty/provider/selection.hpp"   // Domain::selection
 #include "agentty/domain/conversation.hpp"
 #include "agentty/diff/diff.hpp"
 #include "agentty/domain/id.hpp"
 #include "agentty/domain/profile.hpp"
 #include "agentty/domain/ui_prefs.hpp"
+#include "agentty/domain/ui_theme.hpp"   // ui_prefs::Detected
+#include "agentty/runtime/settings_registry.hpp"   // registry::EnvSnapshot
 #include "agentty/domain/session.hpp"
 #include "agentty/domain/todo.hpp"
 #include "agentty/runtime/panel/slot.hpp"   // ui::panel::State (the exclusive slot)
@@ -30,6 +33,10 @@
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/panel/common.hpp"
 #include "agentty/runtime/view/cache.hpp"
+#include "agentty/store/store.hpp"          // store::Settings (the persisted record)
+#include "agentty/domain/auth_view.hpp"     // auth::AuthView
+#include "agentty/runtime/library.hpp"      // Library: what is installed on disk
+#include "agentty/rag/embed_backend.hpp"    // Env::embed_defaults
 
 namespace agentty {
 
@@ -270,17 +277,61 @@ struct TodoState {
 
 struct Model {
     struct Domain {
+        // THE persisted record, held whole.
+        //
+        // init() used to unpack this field-by-field into the members below,
+        // which meant a reducer that changed one preference could not
+        // produce a Settings to save — it had to read the last one back
+        // through the Deps seam and patch it (the read-modify-write in
+        // update/appearance.cpp). That read is why reducers were impure.
+        //
+        // Holding the record makes saving a pure derivation: edit the field
+        // here, hand `persisted` to the save effect, done. Fields are
+        // migrating into it one at a time (each move is its own commit, so
+        // a regression has one suspect); the members below are what has not
+        // moved yet.
+        //
+        // NOT in here: provider_keys. Those are sealed to a separate
+        // keystore and never reach settings.json; the host's save handler
+        // merges them back. That is a host concern — it owns the keystore.
+        store::Settings     persisted;
+
         Thread              current;
         std::vector<Thread> threads;
         Profile             profile = Profile::Write;
 
-        // How agentty LOOKS. Domain, not ui, because it is persisted state
-        // the user chose — `ui` is this session's transient panels and
-        // cursors, which these outlive.
-        ui_prefs::Prefs     ui;
+        // How agentty LOOKS. The storage is `persisted.ui`; this is the
+        // name 34 call sites already use. Domain, not Model::ui, because it
+        // is persisted state the user chose — `Model::ui` is this session's
+        // transient panels and cursors, which these outlive.
+        //
+        // Deliberately an accessor and not a reference member: a reference
+        // would delete Domain's copy-assignment, and the Model is copied and
+        // moved on every reducer step.
+        [[nodiscard]] ::agentty::ui_prefs::Prefs&       ui()       noexcept { return persisted.ui; }
+        [[nodiscard]] const ::agentty::ui_prefs::Prefs& ui() const noexcept { return persisted.ui; }
 
         std::vector<ModelInfo> available_models;
         ModelId                model_id{std::string{"claude-opus-4-5"}};
+        // The active provider — WHICH backend this session talks to (Anthropic,
+        // an OpenAI-family endpoint, an ACP agent). The source of truth.
+        //
+        // This used to live only in a process global (provider::select /
+        // provider::active()), written from inside the switch reducer. The
+        // global stays, as the published copy that code OFF the loop reads —
+        // the stream worker, the ACP server, main — but it is now derived:
+        // the dispatch seam publishes this field to it after the fold that
+        // changed it (update.cpp, publish_derived). Reducers and the Cmd
+        // builders they call read the Model.
+        //
+        // Initialised by init() from what main() selected at launch.
+        provider::Selection    selection;
+
+        // Credentials outside the settings record: which stores hold a
+        // token, which env vars are set, the accounts registry. Loaded by the
+        // host (LoadAuthView → AuthViewLoaded) at launch and after every
+        // credential effect, so reducers and views never read them from disk.
+        auth::AuthView         auth;
 
         // Fused cross-provider model picker (docs/design/unified-model-picker.md).
         // `provider_catalogs` is the MERGED, multi-provider catalog view built
@@ -315,6 +366,11 @@ struct Model {
         smart::RoleConfig      smart;
 
         std::vector<FileChange>          pending_changes;
+        // Two-press guard state for X/^X "reject all" when the review pane is
+        // CLOSED: the first bare X arms (toast asks for a second), the second
+        // executes, ANY other diff-review message disarms. Inside the pane the
+        // guard lives on the panel cell (confirm_reject_all) instead.
+        bool                             reject_all_armed = false;
         // Whether the persistent "N changes" review strip renders after edits.
         // Loaded from Settings at startup; toggled live via the palette. OFF by
         // default — edits still queue in pending_changes (Ctrl+R opens the
@@ -326,14 +382,29 @@ struct Model {
         // "Reasoning"). Off by default. Provider-agnostic.
         bool                             show_reasoning = false;
         std::optional<PendingPermission> pending_permission;
+        // Shell detours in a row (analyze_detour().substitutable()). Drives
+        // the drift reminder in update/tool.cpp; reset by any other call.
+        int                              shell_detour_streak = 0;
 
         // Session-scoped "always allow" grants, keyed by tool name
         // (e.g. "shell", "write"). Set by PermissionApproveAlways;
-        // consulted in kick_pending_tools BEFORE prompting. NOT
-        // persisted — a grant lives for the lifetime of the process
-        // run, mirroring Zed's per-session allow-list. Cleared on
+        // consulted in kick_pending_tools BEFORE prompting. Cleared on
         // profile change so tightening the profile re-arms prompts.
+        // Seeded at startup from persisted always_allow_tools.
         std::set<std::string>            session_grants;
+
+        // The DEFINITION each grant was given for, by tool name.
+        //
+        // A grant on a bare name is a standing permission for whatever that
+        // name resolves to later, and for an MCP tool the server owns the
+        // name. So the grant carries the fingerprint of what was approved,
+        // and a call riding that grant is dispatched against that hash --
+        // execute_approved refuses if the tool has since been redefined.
+        //
+        // Missing entry (or 0) = unchecked: a grant persisted by an older
+        // build has no hash, and refusing those would break every saved
+        // grant on upgrade.
+        std::map<std::string, std::uint64_t> grant_def_hash;
 
         // Is ANY provider catalog still being fetched?
         //
@@ -374,6 +445,11 @@ struct Model {
         // timeout compares against it to tell a silent terminal from one
         // whose (large, image) reply is still streaming in.
         std::uint64_t       clipboard_rx_mark    = 0;
+        // maya::clipboard_read_refused() sampled when the query was armed.
+        // Movement means the terminal answered with EPERM/ENOSYS rather than
+        // staying silent — a different fault with a different fix, which the
+        // user cannot distinguish from the symptom alone.
+        std::uint64_t       clipboard_refused_mark = 0;
         // True when the in-flight query was raised by an IMAGE-paste intent
         // (Ctrl+V / Alt+V on a clipboard we could not read locally), as
         // opposed to an ordinary text paste. Set alongside the seq bump.
@@ -386,6 +462,11 @@ struct Model {
         // without this flag there is no moment at which anything can explain
         // what happened — the failure is invisible.
         bool                clipboard_wanted_image = false;
+        // Text stashed by the ComposerPaste arm when wanted_image is true and
+        // the paste was text (the tmux race: OSC 52 text reply arrives before
+        // the OSC 5522 image reply). The timeout path uses it as a fallback
+        // instead of diagnosing "no answer" while the text is sitting here.
+        std::string         clipboard_text_fallback;
         // (Smart-Mode slot-assign state used to be parked HERE as three
         // fields — slot, advanced, from — because the hand-off destroyed the
         // SmartMode overlay. It now rides ON the assign-mode Models panel
@@ -422,6 +503,11 @@ struct Model {
         // that launched agentty has focus. Gates the hardware caret:
         // unfocused ⇒ park + hide (no blinking bar in inactive panes).
         bool                terminal_focused = true;
+        // Terminal geometry as the host last reported it (TerminalResized).
+        // 80x40 until the first report, the same fallback the old direct
+        // tty query used for a piped or detached stdout.
+        int                 term_cols = 80;
+        int                 term_rows = 40;
 
         // ── Sealed scrollback prefix (maya ScrollbackLedger) ───
         //
@@ -552,6 +638,22 @@ struct Model {
         // Deliberately NOT part of the visual hash — it changes no pixels.
         bool                git_refresh_inflight = false;
 
+        // A custom --provider spec (and its -m recall) that becomes sticky
+        // the first time its host answers a model fetch. Set once by init
+        // from main's launch args; ModelsLoaded takes it.
+        std::optional<std::pair<std::string, std::string>> unproven_spec;
+
+        // What is installed on disk: skills, their approvals, slash
+        // commands, the hooks file. Loaded by an effect (LibraryLoaded) at
+        // startup and after each turn, since a turn can add or edit any of
+        // them. Reducers and panels read this instead of the disk.
+        Library library;
+
+        // Is the workspace a git repo? nullopt until the startup probe
+        // answers (RepoProbed). Checkpoints read this; asking git directly
+        // would spawn it on the reducer thread.
+        std::optional<bool> git_repo;
+
         // Cross-frame widget state cache. The only consumers now are:
         //   • StreamingMarkdown — keeps a per-Message widget instance
         //     alive across frames so its block boundary cache survives
@@ -624,6 +726,7 @@ struct Model {
         mutable maya::ScrollState smart_mode_scroll       = routed_scroll();
         mutable maya::ScrollState plugin_edit_scroll      = routed_scroll();
         mutable maya::ScrollState appearance_scroll       = routed_scroll();
+        mutable maya::ScrollState sandbox_scroll          = routed_scroll();
         mutable maya::ScrollState fork_scroll              = routed_scroll();
         mutable maya::ScrollState todo_scroll             = routed_scroll();
         mutable maya::ScrollState tool_viewer_scroll      = routed_scroll();
@@ -637,6 +740,177 @@ struct Model {
     Domain      d;
     StreamState s;
     UI          ui;
+
+    // The time of the message being folded. NOT a clock.
+    //
+    // jaal hands update() the step time as an argument (AgenttyApp declares
+    // a Clock — jaal core/program.hpp, "time, as an argument"). That argument
+    // is the contract, and it is what makes a recorded run replay to the same
+    // model. This field is how it reaches the ~300 helper calls below the
+    // dispatch seam without a `now` parameter on each: the seam writes it as
+    // the FIRST thing every fold does, from jaal's argument, so inside a fold
+    // it always holds the current step's time.
+    //
+    // Rules, and how each is enforced rather than hoped for:
+    //   * written ONLY by the dispatch seam (program.hpp AGENTTY_FWD_UPDATE,
+    //     and the test entry update(Model, Msg, now)). Nothing else stamps it.
+    //   * read only by reducers. view() and subscribe() see a const Model
+    //     whose `now` is the LAST fold's time, which is stale by definition;
+    //     the elm_purity lint rejects a read of it outside update/.
+    //   * reducers never read a clock instead — the lint's `clock` category.
+    //
+    // steady_clock, matching jaal's: a wall clock can run backwards.
+    std::chrono::steady_clock::time_point now{};
+
+    // The fold's CALENDAR time, for the few things that must be real dates:
+    // a thread's created_at/updated_at (persisted, and the picker sorts by
+    // them) and an OAuth expiry (compared against the provider's clock).
+    //
+    // A steady clock has no relation to the calendar, so this is a second
+    // input rather than a conversion of `now`. It is derived at the SAME seam
+    // from the same step: the wall clock is read once when the kernel starts
+    // (Model::wall_epoch / steady_epoch, set by init) and every fold places
+    // its steady `now` on that timeline. So one fold sees one instant in both
+    // clocks, and a recorded run replays to the same dates — a direct
+    // system_clock read per call site gave each call its own instant and made
+    // updated_at differ from the message time it was written beside.
+    [[nodiscard]] std::chrono::system_clock::time_point wall_now() const noexcept {
+        return wall_at(now);
+    }
+    // Any steady instant on that same calendar timeline. A view passes the
+    // FRAME's time (maya::anim_now()) to get "now" as a date without reading
+    // the system clock itself; before init() set the epochs it falls back to
+    // the real wall clock.
+    [[nodiscard]] std::chrono::system_clock::time_point wall_at(
+            std::chrono::steady_clock::time_point t) const noexcept {
+        if (steady_epoch == std::chrono::steady_clock::time_point{})
+            return std::chrono::system_clock::now();
+        return wall_epoch + std::chrono::duration_cast<
+                   std::chrono::system_clock::duration>(t - steady_epoch);
+    }
+    // The pair of readings wall_now() is anchored to. Set once, by init().
+    std::chrono::system_clock::time_point wall_epoch{};
+    std::chrono::steady_clock::time_point steady_epoch{};
+
+    // The subagent router's view of this Model, as LAST PUBLISHED to the
+    // runtime's subagent registry (tool/subagent.cpp).
+    //
+    // The subagent loop runs on worker threads and reads its config from a
+    // registry, not the Model, so the registry has to track four Model
+    // fields. Reducers used to push each one with tools::subagent::set_*()
+    // — eleven calls across four files, written from inside update, and
+    // correct only as long as every reducer that changed one of those fields
+    // remembered to make the matching call.
+    //
+    // Now no reducer publishes. The dispatch seam (update.cpp,
+    // publish_subagent_if_changed) derives the view from the Model after
+    // every fold, compares it with this snapshot, and returns
+    // cmd::publish_subagent only when it moved. Forgetting is impossible
+    // because syncing is not a step anyone performs.
+    struct SubagentView {
+        std::string             model;
+        std::string             provider;
+        smart::RoleConfig       smart;
+        std::vector<ModelInfo>  candidates;
+        [[nodiscard]] bool operator==(const SubagentView&) const = default;
+    };
+    SubagentView published_subagent;
+
+    // The active provider as LAST PUBLISHED to the process global
+    // (provider::select). Same rule as published_subagent: the seam compares
+    // the Model's selection with this and returns a publish effect only on
+    // change. Kept on the Model, not read back from the global, so the
+    // comparison is against Model state and replays.
+    provider::Selection published_selection;
+
+    // The web_search policy as LAST PUBLISHED to the tool layer. Same rule as
+    // published_selection. Starts as nullopt so the FIRST fold always
+    // publishes: until then the tool layer runs on its own lazy read of
+    // settings.json, which can disagree with what init() loaded.
+    std::optional<web_search_cfg::Config> published_web_search;
+
+    // The process's launch environment, read ONCE by init() and never again.
+    //
+    // Elm has no getenv: a reducer that reads the environment is a function
+    // of state the Model doesn't hold, so replay and a test that sets one var
+    // and expects one behaviour both lie. These facts can't change while we
+    // run (env vars are fixed at exec), so capturing them is not a snapshot
+    // that goes stale — it is the whole truth, stated where update can see
+    // it. They were six getenv calls and two function-local statics spread
+    // across update/; the predicates below are their single definition.
+    struct Env {
+        // A remote session (SSH / mosh / Eternal Terminal, or forced). Frames
+        // land >=80 ms apart, so streaming and reveal cadence throttle down.
+        bool remote               = false;
+        // A plain SSH session specifically (mosh/ET excluded): the composer's
+        // clipboard paths differ, because OSC 52 rides the SSH pty.
+        bool ssh                  = false;
+        // AGENTTY_NO_REVEAL_GLIDE: force the immediate end-of-turn finish.
+        bool no_reveal_glide      = false;
+        // The terminal supports synchronized output (DECSET 2026).
+        bool synchronized_output  = false;
+        // AGENTTY_FROZEN_COLLAPSE: stub off-screen bodies instead of
+        // re-rendering them.
+        bool frozen_collapse      = false;
+        // AGENTTY_NO_UPDATE_CHECK / AGENTTY_NO_AUTO_UPDATE.
+        bool no_update_check      = false;
+        bool no_auto_update       = false;
+        // AGENTTY_MAX_CONTEXT_TOKENS, parsed (0 = unset): the context
+        // ladder's last rung before the default.
+        int  max_context_tokens   = 0;
+        // AGENTTY_REVEAL / _TYPEWRITER / _DECORATE (unset = on).
+        bool reveal               = true;
+        bool reveal_typewriter    = true;
+        bool reveal_decorate      = true;
+        // AGENTTY_PAINTED_CARET: always paint the composer caret.
+        bool painted_caret        = false;
+        // Running under a cooperating editor host (AGENTTY_HOST=emacs or
+        // INSIDE_EMACS with vterm): emit file-event OSCs.
+        bool host_integration     = false;
+        // Colour tier and background polarity the terminal reports (TERM,
+        // COLORTERM, COLORFGBG, NO_COLOR). "auto" appearance resolves here.
+        ui_prefs::Detected terminal;
+        // Env overrides for settings rows, and the AGENTTY_SMART_MODE pin.
+        settings::registry::EnvSnapshot settings;
+        // Can this binary replace itself? Answered once at launch: resolving
+        // our own path and probing its directory for write access (it creates
+        // and deletes a file there). The reducer used to call that inline
+        // every time an auto-update was considered — a filesystem WRITE from
+        // inside update, invisible to a name-based lint because it sat in a
+        // util/ helper. Neither answer can change while we run.
+        bool        self_update_ok     = false;
+        std::string self_update_reason;   // why not, when !self_update_ok
+        // The embedder config the AGENTTY_EMBED_* / AGENTTY_OLLAMA_HOST vars
+        // describe, layered on the defaults. The RAG pane starts from this.
+        rag::embed::EmbedConfig embed_defaults;
+        // agentty's per-user root (~/.agentty, or $AGENTTY_HOME), resolved
+        // once. Paths the reducers name (the user mcp.json) derive from it.
+        std::string user_root;
+        // AGENTTY_RAG_PROACTIVE, if set: forces proactive injection on/off
+        // for one run, over the saved RAG setting.
+        std::optional<bool> rag_proactive_override;
+
+        // Where paths are shown relative to: the launch cwd ("src/x.cpp")
+        // and the home dir ("~/notes"). Captured once so a tool card names a
+        // path the same way every frame without asking the OS.
+        std::string cwd;
+        std::string home;
+
+        // The end-of-turn reveal glide (the design contract: end-of-turn is
+        // a visible catch-up, never a paste) needs a DENSE frame cadence to
+        // hold the live height steady mid-ramp, so it requires both signals
+        // streaming_tick_period() derives its cadence from:
+        //   - not remote: remote frames land >=80 ms apart, with wire jitter
+        //     on top;
+        //   - synchronized output: without it the tick is 100 ms, so a 200 ms
+        //     ramp is ~2 frames, the same sparse-frame height-drift geometry
+        //     (the stranded-duplicate bug) as SSH.
+        // Everywhere sparse, the immediate finish is used.
+        // AGENTTY_NO_REVEAL_GLIDE=1 forces the immediate finish everywhere.
+        [[nodiscard]] bool reveal_end_glide() const noexcept {
+            return !no_reveal_glide && !remote && synchronized_output;
+        }
+    } env;
 
     // Is a LOADING SPINNER currently on screen?
     //

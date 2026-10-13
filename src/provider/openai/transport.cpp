@@ -21,9 +21,15 @@
 
 #include "agentty/provider/openai/transport.hpp"
 
+#include <maya/runtime.hpp>
+// The observation tables: every way this spec-less wire spells a field lives
+// there, not here. See lens.hpp for why a Lens and not an acp::Codec.
+#include "agentty/provider/openai/dialect.hpp"
+
 #include <map>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <array>
 #include <chrono>
 #include <format>
@@ -42,12 +48,14 @@
 #include "agentty/provider/dialect.hpp"  // chat-vs-Responses routing (SSOT)
 #include "agentty/provider/openai/responses_site.hpp"
 #include "agentty/provider/registry.hpp" // endpoint columns: from_spec's SSOT
+#include "agentty/provider/error_class.hpp" // OptionalField: learned rejections (#93)
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/stream_scaffold.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
 #include "agentty/provider/wire/streamed.hpp"
+#include "agentty/provider/wire/tool_calls.hpp"
 #include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
@@ -112,11 +120,18 @@ struct StreamCtx {
     // iterate() calls so the hot path avoids a malloc per SSE frame.
     simdjson::ondemand::parser simd_parser;
 
-    // Tool-call streaming state, indexed by OpenAI's tool_calls[].index.
-    // Calls may interleave, so each slot owns its own lifecycle; there is no
-    // provider-global "active" call.
-    std::vector<ToolCallSlot> tool_slots;
+    // Tool-call streaming state. Attribution (which chunk belongs to which
+    // call) lives in wire::ToolCallTracker — it keys on (id, index) jointly
+    // because neither alone is reliable across providers, and it is unit
+    // tested without any SSE plumbing. Calls may interleave, so each has its
+    // own lifecycle; there is no provider-global "active" call.
+    wire::ToolCallTracker tools;
     bool any_structured_tool = false; // a real tool_calls[] delta arrived
+    // An unattributable chunk poisoned the tool state: we cannot know which
+    // call the bytes belonged to, so every call in flight may be missing
+    // arguments. Set once, reported once, and it stops us emitting tool
+    // events built from state we no longer trust.
+    bool tool_attribution_failed = false;
 
     // ── Incremental leaked-tool-call salvage (local models) ─────────────
     // Many Ollama/llama.cpp models (qwen2.5-coder, hermes, mistral, etc.)
@@ -209,7 +224,25 @@ using wire::could_be_tool_json;
 // argument deltas by tool_calls[].index and only gives a turn-level finish, so
 // closing a call merely because another index emitted would truncate siblings.
 void close_open_tools(StreamCtx& ctx) {
-    for (auto& slot : ctx.tool_slots) {
+    // Attribution failed earlier in this response: we know some argument
+    // bytes went unplaced, but not which call lost them. Announcing these
+    // calls now would hand the model a set of tool invocations that look
+    // complete and are not. The StreamError already went out; stay quiet.
+    if (ctx.tool_attribution_failed) return;
+    for (auto& slot : ctx.tools.all()) {
+        // A call whose name never resolved to a known tool was never
+        // announced (the start gate waits for a resolvable name so a
+        // fragmented name can finish accumulating). Announce it now under
+        // whatever accumulated, so it reaches the model as "unknown tool:
+        // <full name>" instead of silently vanishing mid-turn.
+        if (!slot.started && !slot.name.empty()) {
+            if (slot.id.empty()) slot.id = "call_late";
+            ctx.sink(StreamToolUseStart{ToolCallId{slot.id},
+                                        ToolName{slot.name}});
+            if (!slot.args.empty())
+                ctx.sink(StreamToolUseDelta{ToolCallId{slot.id}, slot.args});
+            slot.started = true;
+        }
         if (!slot.started || slot.ended || slot.id.empty()) continue;
         ctx.sink(StreamToolUseEnd{ToolCallId{slot.id}});
         slot.ended = true;
@@ -867,28 +900,28 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
 // Handle one choices[0].delta object.
 void handle_delta(StreamCtx& ctx, const json& delta) {
     // Reasoning / chain-of-thought text. Reasoning-capable models on the Chat
-    // wire stream their thinking in a field PARALLEL to `content`: DeepSeek and
-    // most compat proxies use `reasoning_content`; a few (some OpenRouter
-    // passthroughs) use `reasoning`. Emit it as StreamThinkingDelta — the SAME
-    // event the Anthropic transport emits for thinking_delta — so the reducer /
-    // UI render it identically (no signature on this wire). Also a liveness
-    // signal during a long reasoning pause before any visible content.
-    for (const char* key : {"reasoning_content", "reasoning"}) {
-        auto it = delta.find(key);
-        if (it != delta.end() && it->is_string()) {
-            const auto& r = it->get_ref<const std::string&>();
-            // Only stop once a NON-empty value was taken: some proxies
-            // (OpenRouter normalisation) send an empty reasoning_content
-            // alongside a populated reasoning — breaking on the empty first
-            // key would silently drop all reasoning.
-            if (!r.empty()) {
-                if (ctx.show_reasoning)
-                    ctx.sink(StreamThinkingDelta{r, {}});
-                else
-                    ctx.sink(StreamHeartbeat{});  // liveness only, no capture
-                break;   // never double-count if a proxy sends both
-            }
-        }
+    // wire stream their thinking in a field PARALLEL to `content`, and the
+    // ecosystem does not agree on its name — DeepSeek/vLLM say
+    // `reasoning_content`, OpenAI's Responses API and some OpenRouter
+    // passthroughs say `reasoning`.
+    //
+    // WHICH SPELLINGS EXIST IS NOT DECIDED HERE. dialect::reasoning_delta() is
+    // the single source of truth for that, and it also encodes the ordering
+    // rule (prefer the specific key, but fall through when it is EMPTY — some
+    // proxies send an empty reasoning_content beside a populated reasoning,
+    // and stopping at the first key that merely exists drops all reasoning
+    // silently). Adding a provider's spelling is a one-line change there,
+    // covered by openai_dialect_test.cpp against captured fixtures.
+    //
+    // Emit as StreamThinkingDelta — the SAME event the Anthropic transport
+    // emits for thinking_delta — so the reducer / UI render it identically.
+    // Also a liveness signal during a long reasoning pause before any visible
+    // content.
+    if (auto r = dialect::reasoning_delta()(delta)) {
+        if (ctx.show_reasoning)
+            ctx.sink(StreamThinkingDelta{*r, {}});
+        else
+            ctx.sink(StreamHeartbeat{});  // liveness only, no capture
     }
 
     // Structured content-parts array (Mistral reasoning models): `content`
@@ -1012,24 +1045,114 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             ctx.text_hold.clear();
             ctx.salvage_eligible = false;  // real tool call, no need for salvage
         }
+        int array_pos = -1;
+        const std::size_t array_len = delta["tool_calls"].size();
         for (const auto& tc : delta["tool_calls"]) {
-            const int index = tc.value("index", 0);
+            ++array_pos;
+            // `index` is how Chat Completions distinguishes PARALLEL calls:
+            // fragments for different calls interleave in one stream and the
+            // index is the only thing separating them. A provider that omits
+            // it used to collapse every parallel call onto slot 0, so the
+            // second call's arguments were appended to the first and both
+            // were lost. Falling back to the payload's own array position
+            // keeps them apart, which is what the field means when present.
+            const bool has_wire_index =
+                tc.contains("index") && tc["index"].is_number_integer();
+            const int index = has_wire_index ? tc["index"].get<int>() : array_pos;
             if (index < 0) continue;
             // `index` is server-controlled. A hostile or buggy endpoint
-            // (or a compat proxy) can send an absurd index; resize(index+1)
-            // would then allocate index * sizeof(ToolCallSlot) bytes and
-            // OOM-kill the process mid-stream (and index+1 on INT_MAX
-            // overflows to a negative -> huge size_t). Real streams never
-            // carry more than a handful of parallel tool calls, so cap the
-            // slot table far below any legitimate use.
-            constexpr int kMaxToolSlots = 1024;
-            if (index >= kMaxToolSlots) continue;
-            if (static_cast<std::size_t>(index) >= ctx.tool_slots.size())
-                ctx.tool_slots.resize(static_cast<std::size_t>(index) + 1);
-            auto& slot = ctx.tool_slots[index];
+            // can send an absurd one, so cap it before it reaches the
+            // tracker — otherwise we allocate per-call state for it.
+            //
+            // When the field is ABSENT we fall back to the payload's own
+            // array position. Chat Completions interleaves fragments for
+            // parallel calls in one delta, and a provider that omits the
+            // index leaves position as the only thing separating them: the
+            // opening delta lists both calls, and the continuation delta
+            // lists their fragments in the SAME order with no id and no
+            // index. Without the fallback both fragments look like "no
+            // identity at all", which with two calls in flight is correctly
+            // reported as ambiguous — correct, but it drops arguments a
+            // well-ordered server did give us enough to place.
+            //
+            // That reasoning only holds while position is EVIDENCE rather
+            // than a guess: it requires the delta to restate every call in
+            // flight, so slot N really is the Nth call. A delta carrying
+            // FEWER elements than there are open calls has no such
+            // correspondence — element 0 could be any of them — and using
+            // position there silently appends one call's arguments to
+            // another. In that case send no index at all and let the tracker
+            // report it as unattributable.
+            constexpr std::size_t kMaxToolSlots = 1024;
+            const bool position_is_evidence =
+                has_wire_index || ctx.tools.size() <= 1
+                || array_len >= ctx.tools.size();
+            std::optional<std::size_t> slot_index;
+            if (position_is_evidence
+                && static_cast<std::size_t>(index) < kMaxToolSlots)
+                slot_index = static_cast<std::size_t>(index);
 
+            // WHO does this chunk belong to?
+            //
+            // Delegated to wire::ToolCallTracker, which keys on (id, index)
+            // jointly and fails rather than guessing when a chunk carries
+            // neither. That rule is not obvious and we got it wrong twice:
+            // index-only keying merged two parallel calls that reused index
+            // 0, and an empty-id restatement wiped the call's identity so it
+            // was never closed. Both are pinned in
+            // tests/tool_call_identity_test.cpp, against the seam rather
+            // than against an SSE fixture.
+            std::string_view wire_id;
             if (tc.contains("id") && tc["id"].is_string())
-                slot.id = tc["id"].get<std::string>();
+                wire_id = tc["id"].get_ref<const std::string&>();
+
+            const auto who = ctx.tools.attribute(
+                wire::ChunkIdentity{wire_id, slot_index});
+            if (!who) {
+                // Ambiguous: no id, no index, several calls in flight. Any
+                // pick is a coin flip, and the losing side appends these
+                // bytes to another call's arguments — producing JSON that
+                // still parses, so the corruption reaches a tool
+                // invocation silently.
+                //
+                // Dropping the fragment avoids the corruption but keeps the
+                // silence: the remaining arguments still parse, so the turn
+                // runs a tool with SOME of its arguments missing and nothing
+                // says so. A chunk we cannot attribute means every call in
+                // flight is now suspect, so fail the turn — the same choice
+                // zed makes (ToolCallAccumulator::entry returns
+                // AmbiguousToolCallChunk and the mapper surfaces it as a
+                // completion error rather than a best guess). Report once:
+                // later chunks would otherwise each raise their own error.
+                if (!ctx.tool_attribution_failed) {
+                    ctx.tool_attribution_failed = true;
+                    AGT_LOG(Wire, Warn, "openai.tool_args_unattributable",
+                            "calls_in_flight={}", ctx.tools.size());
+                    ctx.sink(StreamError{
+                        "the provider sent a tool-call fragment that names "
+                        "neither an id nor an index while "
+                            + std::to_string(ctx.tools.size())
+                            + " calls were in flight — it cannot be placed "
+                              "without risking corrupted arguments",
+                        std::nullopt});
+                }
+                continue;
+            }
+
+            // An index reused for a DIFFERENT id means the previous call at
+            // that index is over. Close it here: an unclosed call leaves a
+            // tool_use with no tool_result and hangs the turn, so splitting
+            // without closing trades one bug for a worse one.
+            if (who->displaced) {
+                auto& old = ctx.tools.displaced(*who);
+                if (old.started && !old.ended && !old.id.empty()) {
+                    ctx.sink(StreamToolUseEnd{ToolCallId{old.id}});
+                    old.ended = true;
+                }
+            }
+
+            auto& slot = ctx.tools.at(*who);
+
             std::string fn_name;
             std::string fn_args;
             if (tc.contains("function") && tc["function"].is_object()) {
@@ -1039,9 +1162,51 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
                 if (fn.contains("arguments") && fn["arguments"].is_string())
                     fn_args = fn["arguments"].get<std::string>();
             }
-            if (!fn_name.empty()) slot.name = fn_name;
+            // The NAME can arrive in fragments too, not just the arguments.
+            //
+            // The spec's own accumulator (`accumulated.function.name ??=`)
+            // takes the first non-null and never appends, which is right for
+            // servers that send the whole name once. But real gateways split
+            // it: `"re"` then `"ad"` for `read` (opencode #24137). Taking
+            // only the first fragment dispatches a tool called `re`, which
+            // fails "unknown tool" three times and kills the turn.
+            //
+            // So: append until the call is ANNOUNCED. The announce gate
+            // below waits for a name that resolves to a real tool, which is
+            // what makes appending safe — a server that sends the whole name
+            // up front matches on the first fragment and never accumulates a
+            // second, and one that splits it builds up until it does.
+            //
+            // An empty name on a continuation is IGNORED, never assigned:
+            // several gateways (Azure, local proxies) re-send
+            // `"name": ""` on argument chunks, and letting that through
+            // wipes an established name (A3S-Lab/Code #139).
+            if (!fn_name.empty()) {
+                if (slot.started) {
+                    // Already announced under a resolved name — a later
+                    // fragment cannot rename the call.
+                } else if (slot.name.empty()) {
+                    slot.name = fn_name;
+                } else if (slot.name != fn_name) {
+                    slot.name += fn_name;
+                }
+            }
 
-            if (!slot.started && !slot.name.empty()) {
+            // Announce once the name names something we can actually run.
+            //
+            // Waiting for a KNOWN tool is what lets the accumulation above
+            // terminate: a complete name resolves immediately, a partial one
+            // does not and we keep collecting. A name that never resolves is
+            // announced by close_open_tools at end of turn instead, so the
+            // call still reaches the model as "unknown tool: <full name>"
+            // rather than vanishing.
+            const bool name_is_known = [&] {
+                if (ctx.known_tools.empty()) return true;   // nothing declared
+                for (const auto& t : ctx.known_tools)
+                    if (t == slot.name) return true;
+                return false;
+            }();
+            if (!slot.started && !slot.name.empty() && name_is_known) {
                 if (slot.id.empty())
                     slot.id = "call_" + std::to_string(index);
                 ctx.sink(StreamToolUseStart{ToolCallId{slot.id},
@@ -1050,14 +1215,19 @@ void handle_delta(StreamCtx& ctx, const json& delta) {
             }
 
             if (!fn_args.empty() && slot.started) {
-                // A chunk that REPEATS what we already hold is a coalescing
-                // proxy restating the whole value, not new bytes. Treat a
-                // fragment that our accumulated args already start with as a
-                // snapshot; otherwise append. Either way emit only what is
-                // newly known, so both dialects behave identically.
-                const bool repeat = fn_args.size() <= slot.args.size()
-                                 && slot.args.compare(0, fn_args.size(), fn_args) == 0;
-                const auto fresh = wire::unseen(slot.args, fn_args, repeat);
+                // A snapshot is when the server restates the COMPLETE arguments
+                // (longer than what we have, or equal to it on retransmission).
+                // A fragment is never longer than the accumulated buffer yet.
+                // This distinguishes:
+                //  (1) Snapshot longer: fn_args > slot.args and slot.args is a prefix
+                //  (2) Idempotent repeat: fn_args == slot.args exactly
+                //  (3) Fragment: fn_args.size() == 1 (e.g., "{" from token-by-token)
+                //      that happens to match the start of our accumulated buffer —
+                //      this is legitimate new data, not a retransmission.
+                const bool snapshot = (fn_args.size() > slot.args.size()
+                                    && fn_args.compare(0, slot.args.size(), slot.args) == 0)
+                                   || fn_args == slot.args;
+                const auto fresh = wire::unseen(slot.args, fn_args, snapshot);
                 if (!fresh.empty())
                     ctx.sink(StreamToolUseDelta{ToolCallId{slot.id},
                                                 std::string{fresh}});
@@ -1169,11 +1339,9 @@ void dispatch_data(StreamCtx& ctx, std::string_view data) {
 
     // Top-level error object (some servers stream an error frame mid-body).
     if (j.contains("error")) {
-        std::string msg = "unknown error";
-        if (j["error"].is_object())
-            msg = j["error"].value("message", msg);
-        else if (j["error"].is_string())
-            msg = j["error"].get<std::string>();
+        // Same SSOT as the HTTP-status path below: dialect::error_message()
+        // knows every envelope this wire uses, so neither site re-derives it.
+        std::string msg = dialect::error_message()(j).value_or("unknown error");
         ctx.sink(StreamError{msg, std::nullopt});
         ctx.terminated = true;
         return;
@@ -1255,10 +1423,15 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
             try {
                 auto j = json::parse(payload);
                 if (j.is_object()) {
-                    if (j.contains("message") && j["message"].is_string())
-                        msg = j["message"].get<std::string>();
-                    else if (j.contains("error") && j["error"].is_object())
-                        msg = j["error"].value("message", msg);
+                    // Envelope shapes live in dialect::error_message() — the
+                    // SSOT for how this spec-less wire spells an error. Three
+                    // exist ({"error":{"message"}}, {"error":"…"} flattened by
+                    // some gateways, and llama.cpp's bare {"message","code"}),
+                    // and an unrecognised one surfaces to the user as "the
+                    // model stopped for no reason", which is the worst
+                    // possible diagnostic. Parsing them here too would be a
+                    // second partial list that drifts from the first.
+                    if (auto m = dialect::error_message()(j)) msg = std::move(*m);
                     // llama.cpp stamps the would-be HTTP status in `code`
                     // (500 template failure, 400 bad request, 503 busy).
                     // Carrying it into StreamError.http_status routes the
@@ -1339,7 +1512,7 @@ void feed_sse(StreamCtx& ctx, const char* data, size_t len) {
                 json imgs = json::array();
                 for (const auto& img : m.images)
                     if (!img.bytes().empty())
-                        imgs.push_back(agentty::util::base64_encode(img.bytes()));
+                        imgs.push_back(img.base64());
                 if (!imgs.empty()) msg["images"] = std::move(imgs);
             }
             if (has_tools) {
@@ -1464,7 +1637,43 @@ void feed_ndjson(StreamCtx& ctx, const char* data, size_t len) {
 
 } // namespace
 
-// ── Endpoint presets ────────────────────────────────────────────────────────
+// Does this endpoint really speak Ollama's native /api/* protocol? See the
+// header. Unreachable counts as native so a busy daemon is not downgraded.
+bool endpoint_speaks_native(Io io, const Endpoint& ep) {
+    if (!ep.native_api) return false;
+
+    using Cache = std::map<std::string, bool, std::less<>>;
+    static maya::snapshot<Cache> cache;
+    const std::string key = ep.host + ":" + std::to_string(ep.port);
+    if (auto snap = cache.load(); snap->contains(key))
+        return snap->find(key)->second;
+
+    http::Request probe;
+    probe.method    = http::HttpMethod::Get;
+    probe.host      = ep.host;
+    probe.port      = ep.port;
+    probe.path      = "/api/tags";
+    probe.plaintext = !ep.use_tls;
+    http::Timeouts tos;
+    tos.connect = std::chrono::milliseconds(2'000);
+    tos.total   = std::chrono::milliseconds(3'000);
+
+    auto resp = http::default_client(io).send(probe, tos);
+    const bool native = !resp || resp->status == 200;
+    if (!native)
+        AGT_LOG(Wire, Info, "openai",
+                "{}:{} has no /api/tags — treating it as OpenAI-compatible",
+                ep.host, ep.port);
+
+    cache.update([](const Cache& m, const std::string& k, const bool& v) {
+        Cache next = m;
+        next.insert_or_assign(k, v);
+        return next;
+    }, key, native);
+    return native;
+}
+
+// ── Endpoint presets ─────────────────────────────────────────────────────────
 Endpoint Endpoint::from_spec(std::string_view spec) {
     auto eq = [](std::string_view a, const char* b) {
         return a == std::string_view{b};
@@ -1510,6 +1719,12 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
                     std::string{row->models_path}, row->use_tls,
                     std::string{row->id}};
         ep.native_api = row->native_api;
+        ep.prompt_cache_key = row->accepts_prompt_cache_key;
+        // Name ourselves when the row asks for it (OpenRouter today). Same
+        // builder the Responses path uses, so both dialects are credited to
+        // one app page. Rides extra_headers, which build_request_headers
+        // already appends on both the chat and the models calls.
+        ep.extra_headers = provider::attribution_headers(row);
         return ep;
     }
 
@@ -1549,13 +1764,48 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         auto slash = s.find('/');
         std::string_view authority = (slash == std::string_view::npos)
             ? s : s.substr(0, slash);
+        // Strip userinfo: "user:pass@host" dials `host`, not the whole
+        // string. Left in, it became the SNI name and the Host header, so
+        // TLS failed with a name mismatch that read as "certificate
+        // problem" rather than "your URL has credentials in it".
+        if (auto at = authority.rfind('@'); at != std::string_view::npos)
+            authority = authority.substr(at + 1);
+
         std::string prefix;   // base path prefix, may be empty
         if (slash != std::string_view::npos) {
             prefix = std::string{s.substr(slash)};
+            // Drop ?query and #fragment — neither belongs in a base path.
+            // Without this, "/v1?key=x" produced the path
+            // "/v1?key=x/chat/completions", which every server 404s.
+            if (auto q = prefix.find_first_of("?#"); q != std::string::npos)
+                prefix.resize(q);
             // Strip trailing '/' so "/api/" → "/api", and "/" → "".
             while (prefix.size() > 1 && prefix.back() == '/')
                 prefix.pop_back();
             if (prefix == "/") prefix.clear();
+            // Collapse duplicate slashes: a hand-edited or concatenated URL
+            // yields "//v1", and "//v1/chat/completions" is a different
+            // path to most routers.
+            for (std::size_t i = 1; i + 1 <= prefix.size();) {
+                if (prefix[i] == '/' && prefix[i - 1] == '/') prefix.erase(i, 1);
+                else ++i;
+            }
+            // THE ONE USERS ACTUALLY HIT. The docs say the path is a
+            // PREFIX and we append /chat/completions — but what a provider
+            // hands you, and what you therefore paste, is the full
+            // endpoint URL. Appending to that gives
+            // "/v1/chat/completions/chat/completions": a 404 on every
+            // request, from a URL that is visibly correct.
+            //
+            // So accept both spellings. A prefix that already ends in the
+            // completions path IS the endpoint; take the part before it.
+            for (std::string_view tail : {"/chat/completions", "/completions"}) {
+                if (prefix.size() > tail.size()
+                    && std::string_view{prefix}.ends_with(tail)) {
+                    prefix.resize(prefix.size() - tail.size());
+                    break;
+                }
+            }
         }
         // BARE URL → /v1 DEFAULT. This endpoint speaks the OpenAI dialect,
         // and that dialect lives under /v1 everywhere — api.openai.com/v1,
@@ -1606,6 +1856,14 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         // to the default endpoint rather than dialing an empty host.
         if (ep.host.empty()) return Endpoint{};
 
+        // Hostnames are case-insensitive (RFC 4343), but we compare them as
+        // strings in several places — SNI, the Host header, and the
+        // per-provider credential lookup keyed on the endpoint. "API.Foo.com"
+        // and "api.foo.com" are the same server, and a user who capitalises
+        // one should not get a second, key-less identity.
+        for (char& c : ep.host)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
         ep.path       = prefix + "/chat/completions";
         ep.models_path = prefix + "/models";
         return ep;
@@ -1623,6 +1881,12 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
     // the port, not "8080#work".
     if (auto hash = s.rfind('#'); hash != std::string::npos)
         s.resize(hash);
+    // Same normalisation as the URL arm: a bare spec can carry userinfo
+    // ("user@my-box.lan:8080") and can be capitalised. Both reach the same
+    // dialling code, so both need the same cleanup — having one arm accept a
+    // shape the other rejects is its own bug report.
+    if (auto at = s.rfind('@'); at != std::string::npos)
+        s.erase(0, at + 1);
     if (auto colon = s.rfind(':'); colon != std::string::npos) {
         ep.host = s.substr(0, colon);
         try {
@@ -1638,6 +1902,8 @@ Endpoint Endpoint::from_spec(std::string_view spec) {
         ep.port = 443;
         ep.use_tls = true;
     }
+    for (char& c : ep.host)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return ep;
 }
 
@@ -1694,7 +1960,7 @@ json build_messages(const Thread& t) {
                 for (const auto& img : m.images) {
                     if (img.bytes().empty()) continue;
                     std::string url = "data:" + img.media_type + ";base64,"
-                                    + agentty::util::base64_encode(img.bytes());
+                                    + img.base64();
                     content.push_back({{"type", "image_url"},
                                        {"image_url", {{"url", url}}}});
                 }
@@ -1809,6 +2075,48 @@ http::Headers build_request_headers(const AuthHeader& auth,
     return h;
 }
 
+// The human sentence in a provider's error body, or a capped raw excerpt.
+//
+// Shapes seen in the wild across the OpenAI-compat family:
+//   {"error": {"message": "..."}}          OpenAI, Groq, most
+//   {"error": "..."}                         some gateways
+//   {"message": "..."}                       a few
+//   [{"error": {"message": "..."}}]          Google Gemini (array-wrapped!)
+// Gemini's array wrapper used to fall through to the raw dump, so the user
+// got a screen of JSON (`fieldViolations`, `@type`, ...) instead of the one
+// sentence that names the problem (#93). Whatever the shape, the result is
+// a single line: newlines collapsed so the transcript shows a sentence.
+std::string provider_error_message(std::string_view body) {
+    auto one_line = [](std::string s) {
+        for (char& c : s) if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s)
+            if (!(c == ' ' && !out.empty() && out.back() == ' ')) out += c;
+        while (!out.empty() && out.back() == ' ') out.pop_back();
+        return out;
+    };
+    if (body.empty()) return {};
+    try {
+        json j = json::parse(body);
+        if (j.is_array() && !j.empty()) j = j.front();
+        if (j.is_object()) {
+            if (auto e = j.find("error"); e != j.end()) {
+                if (e->is_object()) {
+                    if (auto m = e->find("message"); m != e->end() && m->is_string())
+                        return one_line(m->get<std::string>());
+                } else if (e->is_string()) {
+                    return one_line(e->get<std::string>());
+                }
+            }
+            if (auto m = j.find("message"); m != j.end() && m->is_string())
+                return one_line(m->get<std::string>());
+        }
+    } catch (...) {}
+    constexpr std::size_t kRawCap = 300;
+    return one_line(std::string{body.substr(0, kRawCap)});
+}
+
 // Infer only explicit memory-tool intent from the latest real user message.
 // This is a safety gate for JSON-in-content salvage, not a general NLP policy:
 // false negatives merely leave the call swallowed; false positives could mutate
@@ -1854,8 +2162,15 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     if (dialect_for(req.endpoint.label, req.model) == Dialect::Responses) {
         openai::ResponsesEndpoint rep;
         if (responses_endpoint_for(req.endpoint.label, rep)) {
+            // responses_endpoint_for() already resolved both of these from the
+            // row. Re-assert them from the LIVE endpoint anyway: the native
+            // Copilot path rewrites host and headers at request time from its
+            // token exchange, so the runtime endpoint is a superset of what
+            // the static row knows. For a plain row (OpenRouter) the two are
+            // identical and this is a no-op.
             rep.provider_id   = req.endpoint.label;
-            rep.extra_headers = req.endpoint.extra_headers;
+            if (!req.endpoint.extra_headers.empty())
+                rep.extra_headers = req.endpoint.extra_headers;
             // openai::Request and provider::Request are distinct types (the
             // former carries chat-only fields like weak_model/native_api), so
             // project across explicitly rather than assuming layout overlap.
@@ -1904,71 +2219,12 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     ctx.known_tools.reserve(req.tools.size());
     for (const auto& t : req.tools) ctx.known_tools.push_back(t.name);
 
-    // ── Build the request body ──────────────────────────────────────────────
+    // ── Build the request body ──────────────────────────────────────────
+    // One pure function, asserted directly in openai_request_body_test.cpp.
+    // Keeping it out of this hot path is what lets the conformance tiers be
+    // a contract rather than a comment.
     const bool native = req.endpoint.native_api;
-    json body;
-    body["model"]  = req.model;
-    body["stream"] = true;
-
-    if (native) {
-        // Ollama native /api/chat: system prompt as a role:"system" message,
-        // structured tool_calls, NDJSON response.
-        // num_predict = max output tokens (Ollama default is low ~128).
-        body["options"] = {{"num_predict", req.max_tokens}};
-        json messages = json::array();
-        if (!req.system_prompt.empty())
-            messages.push_back({{"role", "system"},
-                                {"content", scrub_utf8(req.system_prompt)}});
-        for (auto& m : build_native_messages(req.messages))
-            messages.push_back(std::move(m));
-        body["messages"] = std::move(messages);
-        if (!req.tools.empty()) body["tools"] = wire::openai_chat_tools(req.tools);
-    } else {
-        // max_tokens is `max_tokens` on the OpenAI chat endpoint (newer models
-        // also accept max_completion_tokens; max_tokens stays accepted for the
-        // whole compatible family, so use it for portability).
-        body["max_tokens"] = req.max_tokens;
-        // Ask for a usage frame on the final SSE event so the context gauge can
-        // update even on streaming requests.
-        body["stream_options"] = {{"include_usage", true}};
-
-        // messages: system prompt first, then the conversation.
-        json messages = json::array();
-        if (!req.system_prompt.empty()) {
-            messages.push_back({{"role", "system"},
-                                {"content", scrub_utf8(req.system_prompt)}});
-        }
-        {
-            json conv = build_messages(Thread{ThreadId{""}, "", req.messages, {}, {}});
-            for (auto& m : conv) messages.push_back(std::move(m));
-        }
-        body["messages"] = std::move(messages);
-
-        if (!req.tools.empty())
-            body["tools"] = wire::openai_chat_tools(req.tools);
-
-        // Prompt-cache routing. OpenAI auto-caches prefixes >=1024 tokens;
-        // sending a stable prompt_cache_key pins a conversation's identical
-        // prefix (system + tools + history) to the same cache node across
-        // turns, lifting the cache-hit rate on the exact bytes that repeat.
-        // Only for hosted TLS endpoints — local Ollama/llama.cpp ignore or
-        // reject the field, and their KV cache is prefix-automatic anyway.
-        if (req.endpoint.use_tls && !req.session_key.empty())
-            body["prompt_cache_key"] = req.session_key;
-
-        // Reasoning effort. Chat Completions takes a top-level `reasoning_effort`
-        // (o-series, DeepSeek-Reasoner/R1, xAI Grok reasoning, Mistral
-        // Small/Medium, Gemini *-thinking via the compat shim). req.effort is
-        // the model-agnostic tier already gated to "" by effort_wire_for when
-        // the model can't (or must not) take it — e.g. Mistral MAGISTRAL reasons
-        // natively and REJECTS reasoning_effort (422), so the catalog excludes
-        // it and effort arrives empty here. So this needs no capability
-        // re-check. Hosted TLS only; local servers reject the field. NOTE:
-        // reasoning TEXT still streams for excluded models — the response-side
-        // reasoning_content handler is unconditional (see handle_delta).
-        if (req.endpoint.use_tls && !req.effort.empty())
-            body["reasoning_effort"] = req.effort;
-    }
+    json body = build_request_body(req);
 
     std::string body_str;
     try {
@@ -2004,7 +2260,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             req.endpoint.use_tls ? "https" : "http", req.endpoint.host,
             static_cast<unsigned>(req.endpoint.port), req.endpoint.path,
             req.model, native ? 1 : 0, hreq.body.size());
-    AGT_LOG(Wire, Trace, "openai.request.body", "raw={}", hreq.body);
+    AGT_LOG(Wire, Trace, "openai.request.body", "bytes={} raw={}", hreq.body.size(), ::agentty::logx::body(hreq.body));
 
     provider::StreamScaffold sc;
     sc.dialect = native ? "ollama-native" : "openai-chat";
@@ -2030,7 +2286,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
     // finish_stream needs it to distinguish a user cancel from a transport
     // error at the post-loop.
     http::CancelTokenPtr cancel_for_end = cancel;
-    auto result = http::default_client().stream(hreq, std::move(handler),
+    auto result = http::default_client(::agentty::IoAccess::grant()).stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
     // One end-of-turn line + the raw error body on failure — the pair every
@@ -2058,18 +2314,8 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         .stop        = ctx.stop_reason,
         .http_error_message = [&]() -> std::string {
             std::string msg = "HTTP " + std::to_string(sc.http_status);
-            try {
-                auto j = json::parse(sc.error_body);
-                if (j.contains("error") && j["error"].is_object()
-                    && j["error"].contains("message"))
-                    msg += ": " + j["error"]["message"].get<std::string>();
-                else if (j.contains("message"))
-                    msg += ": " + j["message"].get<std::string>();
-                else if (!sc.error_body.empty())
-                    msg += ": " + sc.error_body.substr(0, 300);
-            } catch (...) {
-                if (!sc.error_body.empty()) msg += ": " + sc.error_body.substr(0, 300);
-            }
+            if (auto said = provider_error_message(sc.error_body); !said.empty())
+                msg += ": " + said;
             if (sc.http_status == 401 || sc.http_status == 403)
                 msg += "  (check the provider API key)";
             // A 404 on a local OpenAI-compatible server is one of TWO things:
@@ -2147,6 +2393,29 @@ std::string_view local_model_prompt_addendum() {
         "Never call remember/forget/wipe_memory on your own.";
 }
 
+std::string_view local_model_action_rules() {
+    return
+        "DOING WORK\n"
+        "- When the user asks you to create, implement, build, change, fix, "
+        "rename, or delete something, DO it with tools. Write files with "
+        "`write`, change them with `edit`, run commands with the shell tool.\n"
+        "- NEVER paste the code (or a command) into your reply instead of "
+        "calling the tool. Code in a reply does nothing \u2014 the user wants "
+        "the files on disk.\n"
+        "- Big tasks are normal here. You are NOT limited to one reply: you "
+        "work in many steps, one tool call at a time, and the user sees each "
+        "file land. So never refuse or apologise that a task is too large "
+        "for a single response. Start with the first file, then the next, "
+        "until it is done.\n"
+        "- If you are unsure what exists, `read` or list the directory "
+        "first. A missing directory is not a reason to stop: `write` "
+        "creates parent directories.\n"
+        "- Never say a file was created, changed, or deleted unless a tool "
+        "you called returned that result.\n"
+        "- A `read` result tagged [cached] still contains the file's "
+        "content: use it, do not read the same file again.\n\n";
+}
+
 std::string local_model_system_prompt() {
     std::string cwd;
     try { cwd = std::filesystem::current_path().string(); }
@@ -2193,6 +2462,8 @@ std::string local_model_system_prompt() {
            "- Never call remember/forget/wipe_memory unless the user asks "
            "you to remember or forget something.\n\n";
 
+    out += local_model_action_rules();
+
     out += "OUTPUT\n"
            "- Output is rendered as GitHub-flavoured markdown in a terminal. "
            "Use fenced code blocks for code. Keep tables small. LaTeX math "
@@ -2225,7 +2496,7 @@ struct OllamaProbe {
     int context_window = 0;  // real model window from model_info.*.context_length
 };
 
-OllamaProbe probe_ollama_model(const AuthHeader& auth,
+OllamaProbe probe_ollama_model(Io io, const AuthHeader& auth,
                                const Endpoint& ep,
                                const std::string& model_name) {
     OllamaProbe out;
@@ -2243,7 +2514,7 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
     tos.connect = std::chrono::milliseconds(2'000);
     tos.total   = std::chrono::milliseconds(5'000);
 
-    auto resp = http::default_client().send(hreq, tos);
+    auto resp = http::default_client(io).send(hreq, tos);
     if (!resp || resp->status != 200) return out;
 
     try {
@@ -2266,15 +2537,26 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
         // arch-prefixed keys; the window lives under "<arch>.context_length"
         // (e.g. "qwen2.context_length": 32768, "llama.context_length": 8192).
         // The arch prefix varies per model, so scan for any key ending in
-        // ".context_length" rather than hard-coding the architecture.
+        // ".context_length" rather than hard-coding the architecture. This
+        // mirrors what Ollama's own CLI does in cmd/cmd.go's showInfo.
+        //
+        // Accept a FLOAT as well as an integer. Ollama itself sends a plain
+        // integer — verified against a real 0.34.2 daemon, which answers
+        // "qwen3.context_length":40960 — but ModelInfo is typed
+        // map[string]any, so nothing in the protocol guarantees that, and
+        // LiteLLM already emits this class of field as a float (16385.0).
+        // Being strict here buys nothing and silently drops a window.
         if (j.contains("model_info") && j["model_info"].is_object()) {
             for (auto it = j["model_info"].begin(); it != j["model_info"].end(); ++it) {
                 const std::string& key = it.key();
                 if (key.size() >= 15
                     && key.compare(key.size() - 15, 15, ".context_length") == 0
-                    && it.value().is_number_integer()) {
-                    out.context_window = it.value().get<int>();
-                    break;
+                    && it.value().is_number()) {
+                    const double d = it.value().get<double>();
+                    if (d > 0 && d < 2e9) {
+                        out.context_window = static_cast<int>(d);
+                        break;
+                    }
                 }
             }
         }
@@ -2287,12 +2569,167 @@ OllamaProbe probe_ollama_model(const AuthHeader& auth,
 }
 } // namespace
 
+// The exact JSON agentty puts on the wire. Pure: Request in, json out.
+// See the header for why this is not inline in the stream path, and
+// conformance.hpp for the evidence behind each tier decision below.
+json build_request_body(const Request& req) {
+    const bool native = req.endpoint.native_api;
+    json body;
+    body["model"]  = req.model;
+    body["stream"] = true;
+
+    if (native) {
+        // Ollama native /api/chat: system prompt as a role:"system" message,
+        // structured tool_calls, NDJSON response.
+        // num_predict = max output tokens (Ollama default is low ~128).
+        body["options"] = {{"num_predict", req.max_tokens}};
+        json messages = json::array();
+        if (!req.system_prompt.empty())
+            messages.push_back({{"role", "system"},
+                                {"content", scrub_utf8(req.system_prompt)}});
+        for (auto& m : build_native_messages(req.messages))
+            messages.push_back(std::move(m));
+        body["messages"] = std::move(messages);
+        if (!req.tools.empty()) {
+            body["tools"] = wire::openai_chat_tools(req.tools);
+            body["tool_choice"] = "auto";
+        }
+        return body;
+    }
+
+    // max_tokens is `max_tokens` on the OpenAI chat endpoint (newer models
+    // also accept max_completion_tokens; max_tokens stays accepted for the
+    // whole compatible family, so use it for portability).
+    body["max_tokens"] = req.max_tokens;
+    // Optional fields this host has REJECTED before (its own 400, learned
+    // by the stream reducer and persisted). Checked per field below so a
+    // strict host gets a body it accepts on every turn after the first.
+    const std::uint8_t rejected =
+        rejected_fields_for(host_key(req.endpoint.host, req.endpoint.port));
+    auto allowed = [&](provider::OptionalField f) {
+        return (rejected & provider::bit(f)) == 0;
+    };
+    // Ask for a usage frame on the final SSE event so the context gauge can
+    // update even on streaming requests.
+    if (allowed(provider::OptionalField::StreamOptions))
+        body["stream_options"] = {{"include_usage", true}};
+
+    // messages: system prompt first, then the conversation.
+    json messages = json::array();
+    if (!req.system_prompt.empty()) {
+        messages.push_back({{"role", "system"},
+                            {"content", scrub_utf8(req.system_prompt)}});
+    }
+    {
+        json conv = build_messages(Thread{ThreadId{""}, "", req.messages, {}, {}});
+        for (auto& m : conv) messages.push_back(std::move(m));
+    }
+    body["messages"] = std::move(messages);
+
+    if (!req.tools.empty()) {
+        body["tools"] = wire::openai_chat_tools(req.tools);
+        body["tool_choice"] = "auto";
+    }
+
+    // Prompt-cache routing. OpenAI auto-caches prefixes >=1024 tokens;
+    // sending a stable prompt_cache_key pins a conversation's identical
+    // system+tools+history prefix to one cache node. PROBED TIER, from the
+    // registry row: this used to be gated on TLS ("hosted") alone, and TLS
+    // is not evidence -- Groq and Gemini are hosted, strictly validated,
+    // and 400 the unknown field, so every turn on them died (#93). Local
+    // servers reject it too, and their KV cache is prefix-automatic anyway.
+    if (req.endpoint.prompt_cache_key && !req.session_key.empty()
+        && allowed(provider::OptionalField::PromptCacheKey))
+        body["prompt_cache_key"] = req.session_key;
+
+    // Reasoning effort. PROBED TIER: the catalog already excluded models
+    // that can't (or must not) take it — e.g. Mistral MAGISTRAL reasons
+    // natively and REJECTS reasoning_effort (422), so the catalog excludes
+    // it and effort arrives empty here. So this needs no capability
+    // re-check. NOTE: reasoning TEXT still streams for excluded models —
+    // the response-side reasoning handler is unconditional (see
+    // handle_delta).
+    //
+    // NOT gated on use_tls, i.e. not on "is this a hosted server".
+    //
+    // It used to be, with the reason "local servers reject the field".
+    // That was true of the server it was written for and false in general:
+    //
+    //   • Ollama, the one that does reject it, uses the NATIVE /api/chat
+    //     branch above and returns before this line. It was never reachable
+    //     for the server the guard names.
+    //   • llama.cpp documents --reasoning-effort and accepts the request
+    //     field. So did the guard: it dropped the user's per-turn choice
+    //     silently, leaving the server's command-line default as the only
+    //     channel that worked. That is the "forcing server side sorta
+    //     works" in the bug report.
+    //
+    // What guards this now is the thing that should: `req.effort` is only
+    // non-empty when resolved_caps() says the model takes an effort ladder,
+    // and for a local server that answer now comes from the server's own
+    // declaration (see declared_reasoning in dialect.hpp) rather than a
+    // filename heuristic. Transport encryption was never evidence about a
+    // model's capabilities.
+    if (!req.effort.empty())
+        body["reasoning_effort"] = req.effort;
+
+    return body;
+}
+
 // ── Model listing ────────────────────────────────────────────────────────────
-HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
+// One actionable sentence per failure. The taxonomy and the wording live
+// together so they cannot drift.
+std::string HostProbe::explain() const {
+    switch (failure) {
+        case Failure::None:
+            return {};
+        case Failure::Unreachable:
+            return "nothing listening \xe2\x80\x94 is the server running on "
+                   "that host:port?";
+        case Failure::NeedsKey:
+            // NOT a typo in the address. Say so, or the user starts editing a
+            // URL that was already correct.
+            return "HTTP " + std::to_string(http_status)
+                 + " \xe2\x80\x94 the endpoint is right, it needs an API key";
+        case Failure::NotAnApi:
+            // The single most common custom-host mistake: pasting the
+            // dashboard / docs URL instead of the API base.
+            return "that's a web page, not an API \xe2\x80\x94 use the API "
+                   "base URL (usually ends in /v1)";
+        case Failure::NoModelList:
+            return "reachable, but no model list at any known path "
+                   "\xe2\x80\x94 check the path prefix (often /v1)";
+        case Failure::HttpError:
+            return "HTTP " + std::to_string(http_status)
+                 + " \xe2\x80\x94 no model list at any known path";
+    }
+    return "probe failed";
+}
+
+HostProbe probe_host(Io io, const AuthHeader& auth, const Endpoint& endpoint) {
     HostProbe out;
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(3'000);
     tos.total   = std::chrono::milliseconds(6'000);
+
+    // Worst failure seen so far, so the LAST attempt cannot erase the most
+    // informative diagnosis. Ordering matters: a 401 on the configured path
+    // is far more useful than a 404 on the fallback, because it means the
+    // address was right all along.
+    auto note = [&](HostProbe::Failure f) {
+        const auto rank = [](HostProbe::Failure x) {
+            switch (x) {
+                case HostProbe::Failure::NeedsKey:    return 5;  // most useful
+                case HostProbe::Failure::NotAnApi:    return 4;
+                case HostProbe::Failure::NoModelList: return 3;
+                case HostProbe::Failure::HttpError:   return 2;
+                case HostProbe::Failure::Unreachable: return 1;
+                case HostProbe::Failure::None:        return 0;
+            }
+            return 0;
+        };
+        if (rank(f) > rank(out.failure)) out.failure = f;
+    };
 
     auto attempt = [&](const std::string& path) -> bool {
         http::Request r;
@@ -2308,12 +2745,31 @@ HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
         r.headers        = build_request_headers(auth, endpoint);
         r.max_body_bytes = 2ull * 1024 * 1024;
         const auto t0   = std::chrono::steady_clock::now();
-        auto resp       = http::default_client().send(r, tos);
+        auto resp       = http::default_client(io).send(r, tos);
         const auto ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
-        if (!resp) return false;                 // connect failure — keep 0
+        if (!resp) { note(HostProbe::Failure::Unreachable); return false; }
         out.http_status = resp->status;
-        if (resp->status != 200) return false;
+        if (resp->status == 401 || resp->status == 403) {
+            // The address is CORRECT — it answered, and it wants credentials.
+            // Treat as the most informative outcome short of success.
+            note(HostProbe::Failure::NeedsKey);
+            return false;
+        }
+        if (resp->status != 200) { note(HostProbe::Failure::HttpError); return false; }
+
+        // 200 + HTML is the dashboard-URL mistake. Detect it BEFORE trying to
+        // parse, so the diagnosis is "that's a web page" instead of a JSON
+        // error the user cannot act on. Verified live: https://yolo-auto.com
+        // /models returns 200 text/html with a full SPA.
+        const std::string_view body{resp->body};
+        const auto first = body.find_first_not_of(" \t\r\n");
+        if (first != std::string_view::npos
+            && (body.compare(first, 1, "<") == 0)) {
+            note(HostProbe::Failure::NotAnApi);
+            return false;
+        }
+
         // Count models from either shape. {"data":[…]} = OpenAI dialect;
         // {"models":[…]} = Ollama /api/tags.
         try {
@@ -2325,11 +2781,13 @@ HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
                 out.dialect     = HostProbe::Dialect::OllamaNative;
                 out.model_count = static_cast<int>(j["models"].size());
             } else {
+                note(HostProbe::Failure::NoModelList);
                 return false;                    // 200 but not a model list
             }
-        } catch (...) { return false; }
+        } catch (...) { note(HostProbe::Failure::NoModelList); return false; }
         out.models_path = path;
         out.latency_ms  = static_cast<long>(ms);
+        out.failure     = HostProbe::Failure::None;
         return true;
     };
 
@@ -2339,7 +2797,7 @@ HostProbe probe_host(const AuthHeader& auth, const Endpoint& endpoint) {
     if (endpoint.models_path != "/v1/models" && attempt("/v1/models"))
         return out;
     if (attempt("/api/tags")) return out;
-    return out;   // dialect None; http_status carries the last error seen
+    return out;   // dialect None; failure carries the best diagnosis
 }
 
 namespace detail {
@@ -2373,15 +2831,59 @@ namespace detail {
 // treatment, and conflating them is what pinned every custom-host model to
 // the built-in default.
 [[nodiscard]] inline int advertised_context_window(const nlohmann::json& m) {
+    // A context window is a TOKEN COUNT, and every shape below has to survive
+    // a gateway that lies, overflows, or stringifies it.
+    //
+    // The old extraction narrowed straight to `int`, which is UB on overflow
+    // and produced plausible-looking garbage rather than a visible failure:
+    //
+    //   18446744073709551615  ->        -1   (uint64 max, seen from buggy proxies)
+    //   4000000000            -> -294967296  (a real number, just > INT_MAX)
+    //   1e18                  -> -2147483648 (float narrowing, UB)
+    //   "1e6"                 ->         1   (stoi stops at 'e')
+    //
+    // Any of those reaching the gauge is worse than reporting nothing: a
+    // NEGATIVE window disables compaction entirely (every `used < window`
+    // test is false), and a window of 1 compacts on every single turn. Both
+    // read as "agentty is broken" rather than "this gateway lies".
+    //
+    // So: widen first, validate, THEN narrow. Reject anything outside a
+    // plausible band — below 1024 is not a usable agent window (it is almost
+    // certainly an output cap or a parse artifact), and above 100M is not a
+    // real deployment in 2026 (the largest shipped windows are ~10M).
+    constexpr std::int64_t kMinPlausibleWindow = 1024;
+    constexpr std::int64_t kMaxPlausibleWindow = 100'000'000;
     auto as_int = [](const nlohmann::json& v) -> int {
-        if (v.is_number_integer())  return v.get<int>();
-        if (v.is_number_unsigned()) return static_cast<int>(v.get<std::uint64_t>());
-        if (v.is_number_float())    return static_cast<int>(v.get<double>());
-        // Some proxies stringify numeric metadata.
-        if (v.is_string()) {
-            try { return std::stoi(v.get<std::string>()); } catch (...) {}
+        std::int64_t n = 0;
+        if (v.is_number_integer())  n = v.get<std::int64_t>();
+        else if (v.is_number_unsigned()) {
+            const auto u = v.get<std::uint64_t>();
+            if (u > static_cast<std::uint64_t>(kMaxPlausibleWindow)) return 0;
+            n = static_cast<std::int64_t>(u);
+        } else if (v.is_number_float()) {
+            const double d = v.get<double>();
+            // NaN/inf compare false against both bounds, so this rejects them
+            // without a separate isfinite() — and never narrows a value that
+            // would not fit.
+            if (!(d >= static_cast<double>(kMinPlausibleWindow)
+               && d <= static_cast<double>(kMaxPlausibleWindow))) return 0;
+            n = static_cast<std::int64_t>(d);
+        } else if (v.is_string()) {
+            // Some proxies stringify numeric metadata. Require the WHOLE
+            // string to be the number: "1e6" must not become 1, and
+            // "128000abc" must not become 128000 — a partial parse is a
+            // misread, not a lenient read.
+            const auto& s = v.get_ref<const std::string&>();
+            try {
+                std::size_t consumed = 0;
+                n = std::stoll(s, &consumed);
+                if (consumed != s.size()) return 0;
+            } catch (...) { return 0; }
+        } else {
+            return 0;
         }
-        return 0;
+        if (n < kMinPlausibleWindow || n > kMaxPlausibleWindow) return 0;
+        return static_cast<int>(n);
     };
     auto pick = [&](const nlohmann::json& obj, const char* key) -> int {
         if (!obj.is_object()) return 0;
@@ -2403,8 +2905,92 @@ namespace detail {
         if (const int w = pick(*mi, "context_window");   w > 0) return w;
     }
 
-    // Flat spellings.
+    // llama-server's per-model `meta` block.
+    //
+    // Verified against llama.cpp tools/server/server-context.cpp
+    // (get_res_model_info): each /v1/models row carries
+    //
+    //     "meta": { "n_ctx": slot_n_ctx, "n_ctx_train": …, … }
+    //
+    // n_ctx is the SERVED window — what the server was actually started
+    // with (-c), divided across slots — and n_ctx_train is the model's
+    // train-time maximum. The served one is the number that bounds this
+    // request, so it wins; n_ctx_train is the fallback for a build that
+    // omits it.
+    //
+    // The flat ladder below already lists n_ctx/n_ctx_train, but llama.cpp
+    // never puts them at the top level of a row — only inside `meta` — so
+    // every llama-server model fell through to the 200k default. That is
+    // issue #49: a 8k or 32k local model whose gauge claimed 200k, so
+    // compaction never fired and the server truncated the prompt instead.
+    if (const auto meta = m.find("meta");
+        meta != m.end() && meta->is_object()) {
+        if (const int w = pick(*meta, "n_ctx");       w > 0) return w;
+        if (const int w = pick(*meta, "n_ctx_train"); w > 0) return w;
+    }
+
+    // GGUF arch-prefixed keys: "<arch>.context_length".
+    //
+    // This is how the window is spelled in a model's own metadata —
+    // "qwen2.context_length", "llama.context_length", "gemma3.context_length"
+    // — and it is exactly what Ollama's own CLI reads in cmd/cmd.go's
+    // showInfo(). The prefix varies per architecture, so scan for the
+    // suffix rather than hard-coding a list that would go stale with every
+    // new model family.
+    //
+    // Any nested object is searched, because the key appears at the top
+    // level on some servers and under "model_info" on Ollama.
+    {
+        const auto scan = [](const nlohmann::json& obj) -> int {
+            if (!obj.is_object()) return 0;
+            constexpr std::string_view kSuffix = ".context_length";
+            for (auto it = obj.begin(); it != obj.end(); ++it) {
+                const std::string& key = it.key();
+                if (key.size() <= kSuffix.size()) continue;
+                if (key.compare(key.size() - kSuffix.size(),
+                                kSuffix.size(), kSuffix) != 0) continue;
+                if (!it.value().is_number()) continue;
+                const double d = it.value().get<double>();
+                // Same plausibility band as as_int above: a sub-1k "window"
+                // is an output cap or an artifact, not a usable one.
+                if (d >= static_cast<double>(kMinPlausibleWindow)
+                 && d <= static_cast<double>(kMaxPlausibleWindow))
+                    return static_cast<int>(d);
+            }
+            return 0;
+        };
+        if (const auto mi = m.find("model_info");
+            mi != m.end() && mi->is_object())
+            if (const int w = scan(*mi); w > 0) return w;
+        if (const int w = scan(m); w > 0) return w;
+    }
+
+    // Flat spellings, in the order a row is most likely to carry them.
+    //
+    // Every hosted OpenAI-compatible API picked its own name for the same
+    // number, and a spelling we do not read is not a small miss: the model
+    // silently drops to the 200k default, the gauge misreads, and
+    // auto-compaction fires at the wrong point. So this list is the
+    // ecosystem, not a guess — one entry per vendor we can actually name.
+    //
+    //   context_length     Together, Fireworks, DeepSeek, Perplexity,
+    //                      openrouter's flat rows
+    //   context_window     Groq
+    //   max_context_length Mistral (api.mistral.ai) — its own spelling,
+    //                      matching nothing else in the ecosystem
+    //   max_input_tokens   Qwen/DashScope and several others that report
+    //                      the input half separately; that is the number
+    //                      bounding the prompt, which is what a context
+    //                      gauge measures
+    //   n_ctx / n_ctx_train  llama.cpp (served window, then train-time)
+    //
+    // NOTE what is deliberately absent: `max_tokens`, `max_output_tokens`,
+    // `max_completion_tokens`. Those are OUTPUT caps, an order of
+    // magnitude smaller, and reading one as the window produces a
+    // plausible wrong number rather than a visible failure — the agent
+    // then "forgets" constantly on a model with a huge window.
     for (const char* key : {"context_length", "context_window",
+                            "max_context_length",
                             "max_input_tokens", "n_ctx", "n_ctx_train"})
         if (const int w = pick(m, key); w > 0) return w;
 
@@ -2449,21 +3035,182 @@ struct WindowProbe {
     // A single window that applies to the whole server (llama.cpp serves one
     // model). Used when per_model has no entry for an id.
     int server_wide = 0;
+    // Is per_model a MEASUREMENT of what the server allocated, or another
+    // party's DECLARATION of what a model supports?
+    //
+    // The distinction decides whether this may shrink a window the row
+    // already advertised. A measurement may: llama.cpp's meta.n_ctx and LM
+    // Studio's loaded_instances[].config.context_length are the size the
+    // running process actually allocated, so a request genuinely cannot
+    // exceed them.
+    //
+    // A declaration may NOT. LiteLLM's /v1/model/info is a config file the
+    // proxy was handed; it can be stale, conservative, or a default the
+    // admin never edited, and letting it override a larger advertised
+    // window would silently cost users context they really have. Same for
+    // any future catalog-shaped route.
+    //
+    // Getting this wrong is a quiet, expensive bug: too-small means we
+    // compact a conversation that never needed compacting, and the user
+    // sees history disappear for no reason.
+    bool measured = false;
+
+    // ── Capability, not window ───────────────────────────────────────────
+    // Riding along on the same trip. /props is the ONLY place llama.cpp
+    // says anything about capability — its /v1/models rows are bare id +
+    // object, with no capability object for dialect::declared_reasoning()
+    // to read — and we are already making this request for the window.
+    //
+    // Keyed like per_model so a multi-model router answers per model; a
+    // single-model server writes the one id it serves. Empty = the server
+    // never mentioned chat_template_caps (not llama.cpp, or a build older
+    // than the field), which must stay distinct from "said false".
+    std::map<std::string, bool> reasoning_effort;
+    // Same shape for tool-call support (chat_template_caps.supports_tool_calls).
+    std::map<std::string, bool> tool_calls;
+    // Server-wide fallbacks, for the single-model shape where /props answers
+    // for the one loaded model and we have no id to key on yet.
+    std::optional<bool> reasoning_effort_wide;
+    std::optional<bool> tool_calls_wide;
 };
 
+// Hosts the user has explicitly opted into runtime probing for.
+//
+// Installed by the runtime from Settings::probe_hosts — pushed IN rather
+// than read out, because this layer takes no dependency on the settings
+// store (the whole transport is constructed from an Endpoint and an auth
+// header, which is what makes it testable without a filesystem).
+maya::snapshot<std::set<std::string>>& probe_opt_in() {
+    static maya::snapshot<std::set<std::string>> s;
+    return s;
+}
+
+// Is this endpoint a server we should probe unconditionally?
+//
+// The probe is up to four extra round-trips and every route it tries
+// (/api/v1/models, /props, /api/ps) is local-server-specific, so against a
+// hosted API it buys guaranteed 404s per refresh. On a self-hosted server
+// they are cheap and carry the only accurate answer — the RUNTIME window —
+// which no catalog can know.
+//
+// "Local" therefore means "a server you run", not "a server on this
+// machine". The first version of this checked loopback only, which was
+// wrong the moment anyone put llama-server on the box with the GPU and
+// talked to it over their LAN — reported on #49 within hours. A private
+// address is the honest generalisation: RFC1918 and friends are not
+// routable on the internet, so nothing behind one is a hosted API.
+//
+// Host-based, not TLS-based: `https://llama.lan:8443` is still yours, and a
+// plain-HTTP remote gateway is still somebody else's.
+[[nodiscard]] bool is_local_endpoint(const Endpoint& ep) {
+    const std::string& h = ep.host;
+    if (h.empty()) return false;
+
+    // Explicit opt-in, for anything the heuristics cannot see: a server on a
+    // public address, behind a VPN with its own DNS, or reached through a
+    // tunnel. Set in the app (the add-host toast offers it when it matters)
+    // and persisted in Settings::probe_hosts; AGENTTY_PROBE_HOSTS adds to it
+    // for one run without persisting.
+    //
+    // This exists because the alternative is telling someone their setup is
+    // unsupported — the probe is the only way to learn a runtime window, so
+    // refusing to run it makes the window permanently wrong.
+    if (probe_opt_in().load()->count(h) > 0)
+        return true;
+    if (const char* v = std::getenv("AGENTTY_PROBE_HOSTS")) {
+        std::string_view list{v};
+        while (!list.empty()) {
+            const auto comma = list.find(',');
+            auto item = list.substr(0, comma);
+            // trim spaces
+            while (!item.empty() && item.front() == ' ') item.remove_prefix(1);
+            while (!item.empty() && item.back()  == ' ') item.remove_suffix(1);
+            if (!item.empty() && item == h) return true;
+            if (comma == std::string_view::npos) break;
+            list.remove_prefix(comma + 1);
+        }
+    }
+
+    if (h == "localhost" || h == "::1" || h == "[::1]") return true;
+    // The docker-desktop / podman bridge alias for the host machine.
+    if (h == "host.docker.internal") return true;
+    // A .local name is mDNS — link-local by definition (RFC 6762).
+    if (h.size() > 6 && h.compare(h.size() - 6, 6, ".local") == 0) return true;
+
+    // Private / non-routable IPv4. Parsed rather than prefix-matched, so
+    // "17.2.3.4" (Apple) is not mistaken for 172.16/12, and a hostname that
+    // merely starts with digits is not mistaken for an address at all.
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    char tail = '\0';
+    if (std::sscanf(h.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) == 4
+        && a < 256 && b < 256 && c < 256 && d < 256) {
+        if (a == 127) return true;                     // loopback
+        if (a == 10)  return true;                     // 10/8
+        if (a == 192 && b == 168) return true;         // 192.168/16
+        if (a == 172 && b >= 16 && b <= 31) return true;  // 172.16/12
+        if (a == 169 && b == 254) return true;         // link-local
+        if (a == 100 && b >= 64 && b <= 127) return true;  // CGNAT — tailscale
+        return false;   // a real routable address
+    }
+
+    // IPv6 unique-local (fc00::/7) and link-local (fe80::/10).
+    if (h.size() > 2) {
+        const std::string_view v6{h.front() == '[' ? h.c_str() + 1 : h.c_str()};
+        if (v6.size() >= 2) {
+            const char c0 = static_cast<char>(std::tolower(v6[0]));
+            const char c1 = static_cast<char>(std::tolower(v6[1]));
+            if (c0 == 'f' && (c1 == 'c' || c1 == 'd')) return true;
+            if (c0 == 'f' && c1 == 'e' && v6.size() >= 3) {
+                const char c2 = static_cast<char>(std::tolower(v6[2]));
+                if (c2 >= '8' && c2 <= '9') return true;
+                if (c2 == 'a' || c2 == 'b') return true;
+            }
+        }
+    }
+
+    // A bare single-label hostname ("gpubox", "nas") has no dots and cannot
+    // resolve on the public internet without a search domain — it is a
+    // machine on your network.
+    if (h.find('.') == std::string::npos && h.find(':') == std::string::npos)
+        return true;
+
+    return false;
+}
+
+// Percent-encode one query-string value.
+//
+// Model ids routinely contain '/' and ':' ("qwen/qwen3-coder-30b",
+// "llama3.2:latest"), and llama-server's router matches on the exact name.
+// Sending those raw would either truncate the value at the first reserved
+// character or miss the model entirely.
+[[nodiscard]] inline std::string url_encode(std::string_view in) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(in.size() * 3);
+    for (unsigned char c : in) {
+        const bool safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                       || (c >= '0' && c <= '9')
+                       || c == '-' || c == '_' || c == '.' || c == '~';
+        if (safe) out.push_back(static_cast<char>(c));
+        else { out.push_back('%'); out.push_back(hex[c >> 4]); out.push_back(hex[c & 15]); }
+    }
+    return out;
+}
+
 [[nodiscard]] inline WindowProbe probe_endpoint_windows(const AuthHeader& auth,
-                                                       const Endpoint& ep) {
+                                                       const Endpoint& ep,
+                                                       const std::vector<std::string>& ids = {}) {
     WindowProbe out;
     http::Timeouts tos;
     tos.connect = std::chrono::milliseconds(1'500);
     tos.total   = std::chrono::milliseconds(4'000);
 
-    auto get = [&](const char* path) -> std::optional<std::string> {
+    auto get = [&](std::string_view path) -> std::optional<std::string> {
         http::Request hreq;
         hreq.method    = http::HttpMethod::Get;
         hreq.host      = ep.host;
         hreq.port      = ep.port;
-        hreq.path      = path;
+        hreq.path      = std::string{path};
         hreq.plaintext = !ep.use_tls;
         hreq.headers   = build_request_headers(auth, ep);
         hreq.max_body_bytes = 2ull * 1024 * 1024;
@@ -2471,7 +3218,7 @@ struct WindowProbe {
             hreq.dial_host = ov.host;
             hreq.dial_port = ov.port;
         }
-        auto resp = http::default_client().send(hreq, tos);
+        auto resp = http::default_client(::agentty::IoAccess::grant()).send(hreq, tos);
         if (!resp || resp->status != 200) return std::nullopt;
         return resp->body;
     };
@@ -2488,6 +3235,17 @@ struct WindowProbe {
                 std::string id = row.value("model_name", std::string{});
                 if (id.empty()) id = row.value("id", std::string{});
                 if (id.empty()) continue;
+                // Capability BEFORE the window guard. These are independent
+                // facts on one row, and a LiteLLM admin who declared
+                // `supports_reasoning: true` without touching token limits
+                // is the common case — `continue`ing on a missing window
+                // would throw away the only reasoning declaration the proxy
+                // ever makes. (This route is also the ONLY place a stock
+                // LiteLLM says anything about capability: its /v1/models
+                // rows are frequently bare id + object, exactly like
+                // llama.cpp's, which is why that server needed /props.)
+                if (const auto reasons = dialect::declared_reasoning()(row))
+                    out.reasoning_effort[id] = *reasons;
                 // Reuse the same tolerant ladder as the catalog path: the
                 // window may be flat on the row or nested under model_info,
                 // and LiteLLM emits it as a FLOAT (16385.0).
@@ -2499,15 +3257,146 @@ struct WindowProbe {
             util::dbglog("openai.window_probe.model_info", e.what());
         } catch (...) {}
     }
-    if (!out.per_model.empty()) return out;
+    // NOT measured: /v1/model/info is the proxy's own config, a declaration
+    // like the row's, so it fills holes but never shrinks a larger one.
+    //
+    // Return on a CAPABILITY hit too, not just a window one. A proxy that
+    // declared reasoning but no limits has still answered this probe, and
+    // falling through to the LM Studio / llama.cpp branches below would ask
+    // a LiteLLM endpoint for routes it does not serve.
+    if (!out.per_model.empty() || !out.reasoning_effort.empty()) return out;
 
-    // 2. llama.cpp /props — one model per server, so the answer is
-    //    server-wide. n_ctx here is the RUNTIME window (-c on the command
-    //    line), which is the number that actually applies; n_ctx_train is
-    //    the architectural ceiling and is often much larger.
+    // 2. LM Studio /api/v1/models — the NATIVE API, not the /v1 shim.
+    //
+    // LM Studio serves two APIs on one port. The OpenAI-compatible /v1 one
+    // reports `max_context_length`: what the model ARCHITECTURE supports.
+    // The native one additionally reports, per running instance:
+    //
+    //     "loaded_instances": [ { "config": { "context_length": 16384 } } ]
+    //
+    // which is the window the instance was actually loaded with. Those are
+    // different numbers and only the second one bounds a request — a model
+    // capable of 128k loaded at 16k will still refuse at 16k.
+    //
+    // This is the second half of issue #49: the gauge showed the
+    // architectural maximum, so compaction sat idle while the server
+    // truncated the prompt.
+    //
+    // NOTE the asymmetry, which matters: an UNLOADED model gets no entry
+    // here at all. LM Studio does not expose the saved load config of an
+    // unloaded model, so its real window is unknowable until it loads — and
+    // substituting max_context_length would size prompts against a window
+    // that was never allocated, which is the bug we are fixing. Leaving it
+    // absent lets the existing ladder fall back to max_context_length as a
+    // declared ceiling, which is honest: it is the best bound available
+    // until the model loads.
+    if (auto body = get("/api/v1/models")) {
+        try {
+            auto j = json::parse(*body);
+            for (const auto& row : j.value("models", json::array())) {
+                if (!row.is_object()) continue;
+                const std::string id = row.value("key", std::string{});
+                if (id.empty()) continue;
+
+                // Declared capability, recorded BEFORE the loaded-instance
+                // check below returns early.
+                //
+                // This row is the only place LM Studio states what a model
+                // can do:
+                //
+                //     "capabilities": {"vision": true,
+                //                      "trained_for_tool_use": true,
+                //                      "reasoning": {"default": "on", ...}}
+                //
+                // The /v1 shim's rows carry no such object, so without this
+                // every LM Studio model falls through resolved_caps() to
+                // the id-inference rung — a heuristic tuned for hosted
+                // naming (`:7b` tags, known family prefixes) that cannot
+                // read a `publisher/model` key. Reasoning support ended up
+                // decided by filename.
+                //
+                // Deliberately ABOVE the `loaded_instances` early-continue:
+                // capability is a property of the MODEL and is knowable
+                // while it is unloaded, unlike the runtime window, which is
+                // a property of the instance and is not. Recording it here
+                // means the picker shows the right affordances before the
+                // first load rather than after it.
+                if (const auto ci = row.find("capabilities");
+                    ci != row.end() && ci->is_object()) {
+                    // Endpoint-scoped, like every other catalog write: the
+                    // same key on another host may have a different build.
+                    const std::string scoped = ep.label + "/" + id;
+                    if (const auto reasons = dialect::declared_reasoning()(*ci))
+                        set_catalog_reasoning(scoped, *reasons);
+                    // Deliberately NOT writing an effort set here, unlike
+                    // the Ollama branch below. reasoning_compat already
+                    // derives exactly low|medium|high, which is the ladder
+                    // the OpenAI wire carries — so a set would restate what
+                    // the default already says. Ollama needs its explicit
+                    // write because `think` is its own field with its own
+                    // contract, not the OpenAI enum.
+                    //
+                    // The one thing that WOULD justify a write here is an
+                    // allowed_options list that disagrees (LM Studio has
+                    // shipped `xhigh` on some gpt-oss builds). Reading it
+                    // needs a real payload showing the disagreement; until
+                    // then, restating the default would just be a second
+                    // place to keep in sync.
+                }
+
+                const auto li = row.find("loaded_instances");
+                if (li == row.end() || !li->is_array()) continue;
+                // Several instances of one model can be loaded at different
+                // sizes. The smallest is the only one every request is
+                // guaranteed to fit, so it is the safe bound.
+                int best = 0;
+                for (const auto& inst : *li) {
+                    if (!inst.is_object()) continue;
+                    const auto cfg = inst.find("config");
+                    if (cfg == inst.end() || !cfg->is_object()) continue;
+                    const int w = advertised_context_window(*cfg);
+                    if (w > 0 && (best == 0 || w < best)) best = w;
+                }
+                if (best > 0) out.per_model[id] = best;
+            }
+        } catch (const std::exception& e) {
+            util::dbglog("openai.window_probe.lmstudio", e.what());
+        } catch (...) {}
+    }
+    if (!out.per_model.empty()) {
+        // MEASURED: this is the size the loaded instance allocated.
+        out.measured = true;
+        return out;
+    }
+
+    // 3. llama.cpp /props — the RUNTIME window (-c on the command line),
+    //    which is the number that actually applies; n_ctx_train is the
+    //    architectural ceiling and is often much larger.
+    //
+    //    Two server shapes:
+    //
+    //    SINGLE-MODEL (the classic `llama-server -m model.gguf`): a bare
+    //    /props answers for the one model it serves, so the result is
+    //    server-wide.
+    //
+    //    ROUTER (`llama-server --models-dir ...`, multi-model): a bare
+    //    /props returns a DUMMY with n_ctx: 0 — literally a placeholder so
+    //    the web UI doesn't break (verified in tools/server/server-models.cpp,
+    //    get_router_props). The real answer needs ?model=<name>.
+    //
+    //    So a 0 here is not "no answer", it is "ask again per model".
     if (auto body = get("/props")) {
         try {
             auto j = json::parse(*body);
+            // Capability rides along on the window trip. Record it BEFORE
+            // the window logic and before any early return, because the
+            // two answers are independent: a router's bare /props has a
+            // dummy n_ctx of 0 but still carries the real template caps,
+            // and a server whose window we already knew still needs this.
+            const auto wide_effort = dialect::template_reasoning_effort()(j);
+            const auto wide_tools  = dialect::template_tool_calls()(j);
+            if (wide_effort) out.reasoning_effort_wide = *wide_effort;
+            if (wide_tools)  out.tool_calls_wide       = *wide_tools;
             if (auto dg = j.find("default_generation_settings");
                 dg != j.end() && dg->is_object()) {
                 if (const int w = advertised_context_window(*dg); w > 0)
@@ -2515,8 +3404,85 @@ struct WindowProbe {
             }
             if (out.server_wide <= 0)
                 out.server_wide = advertised_context_window(j);
+            // MEASURED: default_generation_settings.n_ctx is meta.slot_n_ctx,
+            // the window this process actually allocated (verified in
+            // llama.cpp tools/server/server-context.cpp).
+            if (out.server_wide > 0) out.measured = true;
+
+            // Router mode: ask per model for the ones we were given.
+            //
+            // `autoload=false` is NOT optional. The router's models_autoload
+            // defaults to TRUE, so a plain /props?model=X LOADS that model —
+            // walking the list would pull every model on the server into
+            // memory just to read a number. With autoload=false an unloaded
+            // model answers "model is not loaded" and we simply skip it,
+            // which is the correct outcome anyway: a model that is not
+            // resident has no allocated window to report.
+            if (j.value("role", std::string{}) == "router" && !ids.empty()) {
+                for (const auto& id : ids) {
+                    auto pb = get("/props?model=" + url_encode(id)
+                                  + "&autoload=false");
+                    if (!pb) continue;
+                    try {
+                        auto pj = json::parse(*pb);
+                        // Per-model caps: on a router each model has its
+                        // OWN chat template, so the server-wide answer
+                        // above (a dummy) does not describe any of them.
+                        if (auto e = dialect::template_reasoning_effort()(pj))
+                            out.reasoning_effort[id] = *e;
+                        if (auto t = dialect::template_tool_calls()(pj))
+                            out.tool_calls[id] = *t;
+                        int w = 0;
+                        if (auto dg = pj.find("default_generation_settings");
+                            dg != pj.end() && dg->is_object())
+                            w = advertised_context_window(*dg);
+                        if (w <= 0) w = advertised_context_window(pj);
+                        if (w > 0) out.per_model[id] = w;
+                    } catch (...) {}
+                }
+                if (!out.per_model.empty()) out.measured = true;
+            }
         } catch (const std::exception& e) {
             util::dbglog("openai.window_probe.props", e.what());
+        } catch (...) {}
+    }
+    if (out.measured) return out;
+
+    // 4. Ollama /api/ps — what is loaded RIGHT NOW, and at what size.
+    //
+    // /api/tags (the route list_models uses for Ollama) carries no window
+    // at all — verified against ollama api/types.go ListModelResponse,
+    // which is {name, model, modified_at, size, digest, details,
+    // capabilities}. So an Ollama row arrives here at 0 and the runtime
+    // falls back to effective_num_ctx()'s 8k floor / 32k ceiling.
+    //
+    // That fallback is a guess. /api/ps reports, per LOADED model,
+    // ProcessModelResponse.context_length — the actual num_ctx the daemon
+    // allocated, which is the same class of fact as llama.cpp's n_ctx and
+    // strictly better than a heuristic. Someone running `ollama serve` with
+    // OLLAMA_CONTEXT_LENGTH=65536 currently gets clamped to 32k by our
+    // ceiling despite having asked for more.
+    //
+    // Only loaded models appear, which is correct: an unloaded model has no
+    // allocated window to report, and inventing one is the #49 bug.
+    if (auto body = get("/api/ps")) {
+        try {
+            auto j = json::parse(*body);
+            for (const auto& row : j.value("models", json::array())) {
+                if (!row.is_object()) continue;
+                const int w = row.value("context_length", 0);
+                if (w <= 0) continue;
+                // Ollama answers to both "llama3.2" and "llama3.2:latest";
+                // index whichever names the row carries so the lookup in
+                // list_models hits regardless of how the user typed it.
+                for (const char* key : {"model", "name"}) {
+                    const auto id = row.value(key, std::string{});
+                    if (!id.empty()) out.per_model[id] = w;
+                }
+            }
+            if (!out.per_model.empty()) out.measured = true;
+        } catch (const std::exception& e) {
+            util::dbglog("openai.window_probe.ollama_ps", e.what());
         } catch (...) {}
     }
     return out;
@@ -2524,12 +3490,81 @@ struct WindowProbe {
 
 }  // namespace detail
 
+void install_probe_hosts(std::set<std::string> hosts) {
+    detail::probe_opt_in().store(std::move(hosts));
+}
+
 // Public forwarder — see the header for why the 0 is a contract.
 int advertised_context_window(const nlohmann::json& model_row) {
     return detail::advertised_context_window(model_row);
 }
 
-std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpoint) {
+int router_declared_window(const nlohmann::json& row) {
+    // llama-server router rows (tools/server/server-models.cpp,
+    // get_router_models) carry the argv the router will launch the child
+    // with: {"status": {"value": "unloaded", "args": ["llama-server",
+    // "--ctx-size", "32768", ...]}}. Only a LOADED row also gets `meta`,
+    // so for everything else this is the only place the size is written.
+    //
+    // Slot window, mirroring server-context.cpp: with a unified KV cache
+    // every slot can use the whole pool; without it the pool is split
+    // across --parallel slots. --parallel defaults to auto (4 slots,
+    // unified), and --kv-unified-per-slot caps each slot.
+    const auto st = row.find("status");
+    if (st == row.end() || !st->is_object()) return 0;
+    const auto args = st->find("args");
+    if (args == st->end() || !args->is_array()) return 0;
+
+    long long ctx = -1, parallel = -1, per_slot = 0;
+    int unified = -1;   // -1 unset, 0 off, 1 on
+    auto num = [](const std::string& s) -> long long {
+        try {
+            std::size_t used = 0;
+            const long long v = std::stoll(s, &used);
+            return used == s.size() ? v : -1;
+        } catch (...) { return -1; }
+    };
+    const auto& a = *args;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (!a[i].is_string()) continue;
+        const auto& k = a[i].get_ref<const std::string&>();
+        const bool has_v = i + 1 < a.size() && a[i + 1].is_string();
+        const std::string v = has_v ? a[i + 1].get<std::string>() : "";
+        if (k == "--ctx-size" || k == "-c")            { ctx = num(v); ++i; }
+        else if (k == "--parallel" || k == "-np")      { parallel = num(v); ++i; }
+        else if (k == "--kv-unified-per-slot")         { per_slot = num(v); ++i; }
+        else if (k == "--kv-unified" || k == "-kvu")   unified = 1;
+        else if (k == "--no-kv-unified" || k == "-no-kvu") unified = 0;
+    }
+    if (parallel < 0) {            // auto: 4 slots, unified KV
+        parallel = 4;
+        if (unified < 0) unified = 1;
+    }
+    // No -c (or -c 0) means "whatever the model was trained with", except
+    // when --kv-unified-per-slot sizes the pool itself.
+    if (ctx <= 0 && per_slot > 0) ctx = parallel * per_slot;
+    if (ctx <= 0) return 0;
+    long long slot = unified == 1 ? ctx : ctx / std::max(1LL, parallel);
+    if (per_slot > 0 && per_slot < slot) slot = per_slot;
+    return detail::advertised_context_window(nlohmann::json{{"n_ctx", slot}});
+}
+
+int probe_loaded_window(Io /*io*/, const AuthHeader& auth, const Endpoint& endpoint,
+                        const std::string& model_id) {
+    if (model_id.empty() || !detail::is_local_endpoint(endpoint)) return 0;
+    const auto probe = detail::probe_endpoint_windows(auth, endpoint, {model_id});
+    // Declarations (LiteLLM's config) are not what this asks for.
+    if (!probe.measured) return 0;
+    if (const auto it = probe.per_model.find(model_id); it != probe.per_model.end())
+        return it->second;
+    // Per-model routes (router, LM Studio, Ollama) answered but not for this
+    // id: it isn't loaded. server_wide is only meaningful on a single-model
+    // server, where it describes the one model it serves.
+    return probe.per_model.empty() ? probe.server_wide : 0;
+}
+
+std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth, const Endpoint& endpoint,
+                                   bool force_probe) {
     std::vector<ModelInfo> result;
     if (endpoint.use_tls && is_empty(auth)) return result;
 
@@ -2550,7 +3585,7 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
     tos.connect = std::chrono::milliseconds(5'000);
     tos.total   = std::chrono::milliseconds(10'000);
 
-    auto resp = http::default_client().send(hreq, tos);
+    auto resp = http::default_client(io).send(hreq, tos);
     // PATH-PREFIX PROBE (custom hosts): a spec like http://host:8080/ derives
     // models_path "/models", but most local OpenAI-compatible servers
     // (llama.cpp, vLLM, LM Studio) only serve under "/v1". A 404 here — with
@@ -2561,19 +3596,32 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
     // process (Endpoint::from_spec output is rebuilt per selection, so the
     // correction also has to happen at request time — see run_stream_sync's
     // matching fallback note).
+    //
+    // The retry covers Ollama too. 11434 is Ollama's port but llama.cpp can
+    // be told to use it, and then /api/tags 404s while /v1/models answers
+    // fine — an empty model picker against a server the user can curl (#73).
+    // Falling back here means picking "Ollama" for an OpenAI-compatible
+    // server on that port lists models instead of looking broken.
+    bool fell_back_to_v1 = false;
     if (resp && resp->status == 404
-        && !endpoint.models_path.starts_with("/v1/")
-        && !endpoint.native_api) {
+        && !endpoint.models_path.starts_with("/v1/")) {
         http::Request retry = hreq;
         retry.path = "/v1/models";
-        auto second = http::default_client().send(retry, tos);
-        if (second && second->status == 200) resp = std::move(second);
+        auto second = http::default_client(io).send(retry, tos);
+        if (second && second->status == 200) {
+            resp = std::move(second);
+            // The body is now OpenAI-shaped whatever the preset said, so the
+            // parse below must follow the RESPONSE rather than the registry
+            // row. Reading a {"data":[...]} list as Ollama's {"models":[...]}
+            // yields an empty picker that looks exactly like the 404 did.
+            fell_back_to_v1 = true;
+        }
     }
     if (!resp || resp->status != 200) return result;
 
     try {
         auto j = json::parse(resp->body);
-        if (endpoint.native_api) {
+        if (endpoint.native_api && !fell_back_to_v1) {
             // Ollama /api/tags: {"models":[{"name":"qwen2.5-coder:7b",...}]}
             // Collect model names first, then probe /api/show for each to
             // determine tool support (Zed-style capability check).
@@ -2588,7 +3636,7 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
             // supports structured tool calls (Ollama's capabilities[].
             // "tools") vs. just leaking tool JSON into content.
             for (const auto& id : names) {
-                auto probe = probe_ollama_model(auth, endpoint, id);
+                auto probe = probe_ollama_model(io, auth, endpoint, id);
                 ModelInfo info{
                     .id             = ModelId{id},
                     .display_name   = id,
@@ -2625,28 +3673,40 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
                 // none of which an agent can drive. Drop them so they never
                 // pollute the picker OR get chosen by the subagent router.
                 if (!is_dispatchable_model(id)) continue;
-                // Providers that DECLARE per-model reasoning support in the
-                // catalog (Mistral: capabilities.reasoning) get that truth
-                // recorded — resolved_caps() folds it in over id inference,
-                // so the effort ladder tracks the provider's live dispatch
-                // table instead of our static guesses (which drift: dated
-                // mistral-medium revisions reject reasoning_effort while
-                // magistral now accepts it).
-                if (auto ci = m.find("capabilities");
-                    ci != m.end() && ci->is_object()
-                    && ci->contains("reasoning")
-                    && (*ci)["reasoning"].is_boolean()) {
+                // Providers that DECLARE per-model capability in the
+                // catalog get that truth recorded — resolved_caps() folds
+                // it in OVER id inference, so the effort ladder tracks the
+                // server's live dispatch table instead of our static
+                // guesses (which drift: dated mistral-medium revisions
+                // reject reasoning_effort while magistral now accepts it).
+                //
+                // Read through the dialect table, not by hand. Two shapes
+                // exist in the wild — Mistral's plain bool and LM Studio's
+                // object — and this call site used to test is_boolean()
+                // and skip anything else. That silently dropped EVERY LM
+                // Studio model onto the id-inference rung, which is a
+                // heuristic over hosted naming conventions and cannot
+                // classify a `publisher/model` key. Reasoning support was
+                // then decided by filename. dialect::declared_reasoning()
+                // states both spellings in one place; a third server adds
+                // a line there, not a branch here.
+                if (const auto ci = m.find("capabilities");
+                    ci != m.end() && ci->is_object()) {
                     // Provider-scoped key: the same bare id on another host
                     // (gpt-oss on Groq vs Cerebras) may have a different
                     // contract, so never let one host's declaration bleed.
-                    set_catalog_reasoning(endpoint.label + "/" + id,
-                                          (*ci)["reasoning"].get<bool>());
+                    const std::string scoped = endpoint.label + "/" + id;
+                    if (const auto reasons = dialect::declared_reasoning()(*ci))
+                        set_catalog_reasoning(scoped, *reasons);
                 }
                 result.push_back(ModelInfo{
                     .id           = ModelId{id},
                     .display_name = m.value("display_name", id),
                     .provider     = endpoint.label,
-                    .context_window = detail::advertised_context_window(m),
+                    .context_window = [&] {
+                        const int w = detail::advertised_context_window(m);
+                        return w > 0 ? w : router_declared_window(m);
+                    }(),
                 });
             }
             // Any row the catalog said nothing about gets ONE chance to be
@@ -2658,18 +3718,114 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
             // This is the seam that fixes "my 1M-context models show 200k":
             // a private gateway's window is knowable only from the gateway,
             // never from a third-party catalog keyed by URL.
+            // Probe whenever ANY row is unknown, and also — for a LOCAL
+            // server — whenever the rows already declare something, because
+            // what they declare may not be the runtime window.
+            //
+            // Gating the probe on `any_unknown` alone was wrong for the two
+            // biggest local servers, because both declare something:
+            //
+            //   * LM Studio's /v1 rows carry `max_context_length` — what the
+            //     ARCHITECTURE supports. A model capable of 128k but loaded
+            //     at 16k still refuses at 16k. The row looked "known", so
+            //     the probe never ran and the gauge showed 128k forever.
+            //   * llama-server rows carry meta.n_ctx_train alongside the
+            //     served meta.n_ctx.
+            //
+            // A DECLARED ceiling and a MEASURED runtime window are different
+            // facts, and the measured one is the only one a request has to
+            // fit inside — so when every row is "known" we still probe, and
+            // a per-model result OVERRIDES a declared window if it is
+            // smaller. (That is also why #49 reported "values don't update
+            // on refresh": a refresh re-read the declared ceiling and the
+            // probe result had nowhere to land.)
+            //
+            // Smaller-only, deliberately. A probe larger than the declared
+            // ceiling would mean we misread something; raising the window on
+            // that basis risks building a prompt the server rejects, while
+            // lowering it only costs headroom. Fail toward the smaller
+            // number.
+            //
+            // LOCAL-ONLY, also deliberately. The probe is up to three extra
+            // HTTP round-trips, and none of its endpoints exist on a hosted
+            // API — running it against api.openai.com on every refresh would
+            // buy three guaranteed 404s. Hosted rows keep the old rule:
+            // probe only to fill a hole.
             const bool any_unknown =
                 std::any_of(result.begin(), result.end(),
                             [](const ModelInfo& mi) { return mi.context_window <= 0; });
-            if (any_unknown) {
-                const auto probe = detail::probe_endpoint_windows(auth, endpoint);
+            const bool local = detail::is_local_endpoint(endpoint);
+            if (any_unknown || local || force_probe) {
+                // The ids let the probe answer per model where the endpoint
+                // requires it (llama-server router mode's /props?model=).
+                std::vector<std::string> ids;
+                ids.reserve(result.size());
+                for (const auto& mi : result) ids.push_back(mi.id.value);
+                const auto probe =
+                    detail::probe_endpoint_windows(auth, endpoint, ids);
+                // Capability first, and on its OWN condition: the window
+                // block below is gated on the probe having found a window,
+                // but a llama.cpp build can answer chat_template_caps while
+                // reporting n_ctx 0 (router dummy), and a row that already
+                // declared its window still needs its caps recorded.
+                for (auto& mi : result) {
+                    const auto pick = [&](const std::map<std::string, bool>& per,
+                                          const std::optional<bool>& wide)
+                        -> std::optional<bool> {
+                        if (const auto it = per.find(mi.id.value); it != per.end())
+                            return it->second;
+                        // server_wide only speaks for a single-model server.
+                        // On a router it is the dummy, which describes no
+                        // real model — same asymmetry as the window above.
+                        return per.empty() ? wide : std::nullopt;
+                    };
+                    // Endpoint-scoped key, like every other catalog write:
+                    // the same model id on another host may be a different
+                    // quant with a different template.
+                    const std::string scoped = endpoint.label + "/" + mi.id.value;
+                    if (const auto e = pick(probe.reasoning_effort,
+                                            probe.reasoning_effort_wide)) {
+                        // This is the fix for "no reasoning on llama.cpp".
+                        // Without it these rows fall through resolved_caps()
+                        // to id inference, which reads a GGUF path and
+                        // guesses — so the effort ladder appeared or vanished
+                        // based on what the file happened to be named.
+                        set_catalog_reasoning(scoped, *e);
+                    }
+                    if (const auto t = pick(probe.tool_calls, probe.tool_calls_wide)) {
+                        // Only ever WITHHOLD on an explicit false. Unknown
+                        // still sends tools (see ModelInfo::tools_allowed):
+                        // a model that silently never gets tools looks
+                        // identical to a model that is just bad at them.
+                        if (!*t) mi.supports_tools = false;
+                    }
+                }
                 if (!probe.per_model.empty() || probe.server_wide > 0) {
                     for (auto& mi : result) {
-                        if (mi.context_window > 0) continue;
                         const auto it = probe.per_model.find(mi.id.value);
-                        if (it != probe.per_model.end()) mi.context_window = it->second;
-                        else if (probe.server_wide > 0)
+                        if (it != probe.per_model.end()) {
+                            // Fill a hole always; SHRINK only on a real
+                            // measurement (see WindowProbe::measured).
+                            // Letting a declaration shrink a larger
+                            // advertised window would quietly cost users
+                            // context they actually have — and the symptom,
+                            // a conversation compacting early for no visible
+                            // reason, is one nobody would trace back here.
+                            if (mi.context_window <= 0
+                                || (probe.measured && it->second < mi.context_window))
+                                mi.context_window = it->second;
+                        } else if (probe.server_wide > 0
+                                   && (mi.context_window <= 0
+                                       || (probe.measured && local
+                                           && probe.server_wide < mi.context_window))) {
+                            // server_wide is the measured window for a
+                            // single-model local server (llama.cpp /props,
+                            // LM Studio loaded instance). It may shrink a
+                            // stale declaration, but only on local endpoints
+                            // where it is a measurement of the running server,
+                            // not a gateway-wide catalog hint.
                             mi.context_window = probe.server_wide;
+                        }
                     }
                 }
             }
@@ -2687,9 +3843,11 @@ std::vector<ModelInfo> list_models(const AuthHeader& auth, const Endpoint& endpo
 std::vector<Msg> parse_sse_for_test(std::string_view sse_bytes,
                                    std::vector<std::string> known_tools,
                                    bool allow_memory_salvage,
-                                   bool reason_by_default) {
+                                   bool reason_by_default,
+                                   bool show_reasoning) {
     std::vector<Msg> out;
     StreamCtx ctx;
+    ctx.show_reasoning = show_reasoning;
     ctx.known_tools = std::move(known_tools);
     ctx.allow_remember_salvage = allow_memory_salvage;
     ctx.allow_forget_salvage = allow_memory_salvage;

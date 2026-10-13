@@ -314,13 +314,19 @@ int main() {
     // Pin the sync-output classification so the reveal render bucket is the
     // deterministic 16 ms (60 fps) cadence this probe's ±16 ms step
     // assertions are written against. On a NON-sync terminal the bucket is
-    // the tick period (100 ms) — correct behaviour (see program.hpp: 60 fps
-    // only floods a progressively-painting terminal like Termux), but a
-    // 16 ms step wouldn't reliably cross a 100 ms bucket boundary, making
-    // these timing checks flaky. The gate MECHANISM under test (armed reveal
-    // frames advance the hash; settled turns go quiet) is identical in both
-    // modes — only the period differs — so forcing sync keeps the probe
+    // 100 ms — correct behaviour (see program.hpp: 60 fps only floods a
+    // progressively-painting terminal like Termux), but a 16 ms step
+    // wouldn't reliably cross a 100 ms bucket boundary, making these timing
+    // checks flaky. The gate MECHANISM under test (armed reveal frames
+    // advance the hash; settled turns go quiet) is identical in both modes
+    // — only the period differs — so forcing sync keeps the probe
     // deterministic without weakening what it proves.
+    //
+    // The bucket's INPUTS are pinned separately by reveal_bucket_test: it
+    // must depend on sync support alone, never on whether the session is
+    // remote. It used to read streaming_tick_period(), which folds in an
+    // ssh floor, and that made the typewriter chunky over ssh for a
+    // bandwidth reason the eye cannot see.
     setenv("MAYA_FORCE_SYNC", "1", /*overwrite=*/1);
 
     std::printf("reveal_freeze_gate_probe\n");

@@ -1,5 +1,7 @@
 #include "agentty/runtime/view/thread/turn/turn.hpp"
 
+#include "agentty/util/logx.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -40,18 +42,6 @@
 namespace agentty::ui {
 
 namespace {
-
-// Tri-state env flag: unset → `def`; "0"/"false"/"off"/"no" (any case) →
-// false; anything else → true. Lets a switch DEFAULT ON yet be explicitly
-// forced either way. Callers cache the result in a static (read once).
-[[nodiscard]] inline bool env_on(const char* name, bool def) noexcept {
-    const char* v = std::getenv(name);
-    if (!v || !*v) return def;
-    std::string s;
-    for (const char* p = v; *p; ++p)
-        s += static_cast<char>(std::tolower(static_cast<unsigned char>(*p)));
-    return !(s == "0" || s == "false" || s == "off" || s == "no");
-}
 
 // ── Cached markdown render. The ONE Element-returning helper kept in
 //    agentty — strictly because cross-frame cache state lives in the
@@ -219,14 +209,40 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // animation quality (fast scramble/ghost SLIDE, never a paste) comes
         // from the rate_tau low-pass — which is INDEPENDENT of the speed band.
         // So we lift the CEILING well above the answer path (reasoning is
-        // bulk, skimmable content the user reads faster than prose) to drain a
-        // big block quickly, keep the floor brisk so short reasoning types
-        // promptly, and hold a tight-ish lag so the cursor tracks the wire and
-        // never hoards a backlog to dump at the reasoning→answer settle. The
-        // earlier 95 cps ceiling was the bottleneck that made it feel slow.
+        // bulk, skimmable content the user reads faster than prose) and keep
+        // the floor brisk so short reasoning types promptly.
+        //
+        // The LAG matches the answer path (0.40), and that is a fix: it was
+        // 0.28, justified as "hold a tight-ish lag so the cursor tracks the
+        // wire and never hoards a backlog to dump at the reasoning->answer
+        // settle". That is the same argument the answer path above tried at
+        // 0.15 and retired, with a profile: a tight lag leaves no buffer, so
+        // the cursor drains each fat delta and then sits IDLE at the edge
+        // until the next one (57% of frames frozen at 90/0.15, <1% at
+        // 45/0.40). Reasoning arrives in BIGGER, sparser bursts than prose,
+        // so a short buffer bites harder there, not less — which is the
+        // reported "slow and bursty" reasoning: a sprint, then a stall.
+        //
+        // The dump it was guarding against is bounded elsewhere now: the
+        // tool boundary drains through snap_reveal_to_edge(150), and the
+        // reasoning->answer seam through the request_finalize(220) armed
+        // below -- both bounded VISIBLE glides rather than a paste. (That
+        // seam ramp is new: this comment previously claimed the seam already
+        // drained through request_finalize(160), which was the ANSWER path's
+        // mechanism. Nothing bounded the reasoning side at all.)
+        //
+        // 0.55, not 0.40, and the half-step is the point. On the reasoning
+        // fixture (reveal_stream_gate_reasoning), measured over the lag
+        // window: 0.40 leaves the cursor idle AT the edge on 2.9% of live
+        // frames, 0.55 on 1.6%, 0.70 on 0.9% -- and the end-of-reasoning
+        // drain stretches 1.9s / 2.5s / 3.0s in step. Stalls are what the
+        // user sees mid-stream and the drain is what they see at the seam,
+        // so this sits at the knee rather than at either end. Bigger lag
+        // also means a smoother glide (max 11 -> 9 bytes revealed per
+        // frame), because the rate is backlog/lag.
         if (reasoning_view) {
             cache.streaming->set_reveal_pacing(/*floor_cps=*/60.0,
-                                               /*lead_secs=*/0.28);
+                                               /*lead_secs=*/0.55);
             cache.streaming->set_reveal_adaptive(true, /*min*/45.0,
                                                  /*max*/280.0);
         }
@@ -265,8 +281,8 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // isn't one any more. A test that wants the reveal OFF still
         // pre-seeds the flag on its own widget (midrun_wire_test), which
         // this never clobbers.
-        const bool fx_default = true;
-        const bool master     = env_on("AGENTTY_REVEAL", fx_default);
+        // Read once at launch into m.env (env.cpp).
+        const bool master     = m.env.reveal;
         // The MOTION pref gates both layers, under the env flags. Reduced
         // keeps the progressive clip — text walking in is information about
         // progress — and drops the decorative glyph churn, which is not.
@@ -284,20 +300,43 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         // ... EXCEPT when the pref itself changed, which is the one case a
         // live setting must beat that rule: a user who turns motion off
         // mid-stream is telling us to stop NOW, not on the next message.
-        // `last_motion` is function-local and render-thread-only, so the
-        // re-apply costs one comparison per frame and fires on the frame
-        // the pref moves.
-        static agentty::ui_prefs::Motion last_motion =
-            agentty::ui_prefs::current().motion;
-        const auto motion_now = agentty::ui_prefs::current().motion;
-        const bool motion_changed = motion_now != last_motion;
-        last_motion = motion_now;
+        //
+        // Compared against what THIS widget was configured with
+        // (cache.applied_motion), not a latch shared by every caller. This
+        // function runs several times per frame -- the reasoning "#r" lane,
+        // the answer lane, one per sub-turn -- so a compare-and-reset latch
+        // is consumed by whichever widget it reaches first and every later
+        // widget that frame reads "unchanged". Toggling motion mid-stream
+        // then applied to the reasoning block and left the answer animating:
+        // the same "only the first widget gets the policy" failure the
+        // paragraph above exists to prevent.
+        //
+        // Per-widget also needs no frame semantics, which a global
+        // changed-this-frame flag does: that flag is sticky for anything
+        // which does not publish every frame, so it leaks across tests and
+        // across a panel-only frame. "What I have differs from what is in
+        // force" is the real condition and carries no such hazard.
+        const int motion_now = static_cast<int>(agentty::ui_prefs::current().motion);
+        // >= 0 guard: -1 means "this widget's policy was never set by us".
+        // `fresh_widget` already covers the widget WE just created, so the
+        // only other way to reach here unstamped is a widget seeded from
+        // outside (a test building a slot directly to measure a settled
+        // height). Treating unstamped as stale would overwrite a deliberate
+        // setup, so a change means a KNOWN level that differs -- not an
+        // absent one.
+        const bool motion_changed =
+            cache.applied_motion >= 0 && cache.applied_motion != motion_now;
 
         if (fresh_widget || motion_changed) {
             cache.streaming->set_reveal_fx(
-                want_fx && env_on("AGENTTY_REVEAL_TYPEWRITER", fx_default));
+                want_fx && m.env.reveal_typewriter);
             cache.streaming->set_reveal_decorate(
-                want_deco && env_on("AGENTTY_REVEAL_DECORATE", fx_default));
+                want_deco && m.env.reveal_decorate);
+            // Stamp what we just configured, so the next frame re-applies
+            // only on a real move. Unconditional inside the branch: a fresh
+            // widget has applied_motion = -1 and must record its level too,
+            // or it would re-apply on every frame for the life of the turn.
+            cache.applied_motion = motion_now;
         }
     }
 
@@ -476,18 +515,17 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         && cache.last_settled_size == source.size()
         && cache.revealed_size == source.size();
 
-    // Optional per-frame timer for the streaming-markdown widget. Set
-    // AGENTTY_STREAM_PROF=1 to log set_content+finish+build() cost for
-    // each non-fast-path call to /tmp/agentty-stream-prof.log. Isolates
-    // the in-flight widget cost from the (separately-profiled) timeline
-    // render. One line per call; skips the settled fast-path entirely.
-    static const bool stream_prof = []{
-        const char* e = std::getenv("AGENTTY_STREAM_PROF");
-        return e && *e && *e != '0';
-    }();
-    const auto prof_t0 = stream_prof
-        ? std::chrono::steady_clock::now()
-        : std::chrono::steady_clock::time_point{};
+    // Optional per-frame timer for the streaming-markdown widget: logs
+    // set_content+finish+build() cost for each non-fast-path call.
+    // Isolates the in-flight widget cost from the (separately-profiled)
+    // timeline render. One line per call; skips the settled fast-path.
+    // Frame-build cost + reveal pacing. AGENTTY_LOG=perf=trace surfaces it:
+    // trace, not debug, because this fires on every streaming frame.
+    const auto prof_t0 = ::agentty::logx::enabled(
+                             ::agentty::logx::Channel::Perf,
+                             ::agentty::logx::Level::Trace)
+                       ? std::chrono::steady_clock::now()   // stopwatch: perf log only
+                       : std::chrono::steady_clock::time_point{};
 
     if (!already_settled_into_cache) {
         // Skip set_content_async entirely on a sizes-unchanged frame.
@@ -600,6 +638,76 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                 if (!end_glide_running) cache.streaming->finish();
             } else {
                 cache.streaming->set_live(true);
+            }
+        }
+
+        // ── The reasoning → answer seam ─────────────────────────────
+        //
+        // A reasoning slot settles the INSTANT the answer produces its first
+        // byte (see `settled` above: reasoning_active goes false). If the
+        // reasoning cursor still has backlog at that moment, nothing above
+        // bounds it:
+        //
+        //   • the settle branch is gated on !sizes_unchanged, and reasoning's
+        //     source STOPS GROWING exactly when it settles — so from the next
+        //     frame on that gate is false and the branch never runs again.
+        //   • even when it does run, end_glide_running is true while the
+        //     reveal is in progress, so finish() is (correctly) skipped.
+        //
+        // The widget is therefore left live with an unbounded glide: the
+        // reasoning block keeps typing at its own pace while the answer races
+        // underneath it, two typewriters running to different clocks. That is
+        // the jerky hand-off — and the alternative (letting finish() fire)
+        // is a one-frame paste of the remainder, which is worse.
+        //
+        // So arm the same bounded VISIBLE glide the answer path uses at its
+        // seams: a hard deadline that sprints the cursor to the edge over
+        // ~220 ms. Reasoning is skimmable bulk the reader has already moved
+        // past by the time the answer starts, so finishing it promptly is
+        // what the eye wants; the ramp keeps it a slide rather than a pop.
+        //
+        // Armed ONCE per slot (seam_glide_armed), outside the sizes gate,
+        // because the trigger is a state TRANSITION and not a byte arrival.
+        // Re-arming every frame would restamp the deadline and the cursor
+        // would never actually land.
+        if (reasoning_view && settled && !cache.seam_glide_armed) {
+            cache.seam_glide_armed = true;
+            if (cache.streaming->is_live()
+                && cache.streaming->reveal_in_progress()
+                && !cache.streaming->is_finalizing()) {
+                // Ramp scaled to what is actually LEFT, not a constant.
+                //
+                // A fixed 220 ms was itself a burst whenever the remainder
+                // was large, which at this seam is the normal case: the
+                // final reasoning delta often lands only a few hundred ms
+                // before the answer's first token, so several hundred
+                // characters can still be unrevealed. 350 chars in 220 ms is
+                // ~1600 cps -- a paste wearing a ramp's clothes, and exactly
+                // the "no time to glide, it just bursts" report.
+                //
+                // So pick the duration from the backlog at a readable rate
+                // and clamp it. The floor keeps a tiny remainder from
+                // feeling sluggish; the ceiling stops a very long tail from
+                // still typing when the answer is already paragraphs ahead,
+                // at which point nobody is reading it.
+                //
+                // The answer lane's seams can use a constant because its
+                // drain fires when text goes QUIET, so its backlog is
+                // small by construction. Reasoning has no such guarantee --
+                // it is cut off by an event on a different channel.
+                constexpr double kGlideCps = 220.0;   // readable, brisk
+                constexpr int    kMinMs    = 260;
+                constexpr int    kMaxMs    = 1400;
+                const std::size_t clip = cache.streaming->debug_reveal_byte_clip();
+                const std::size_t shown =
+                    (clip == static_cast<std::size_t>(-1)) ? source.size() : clip;
+                const std::size_t backlog =
+                    source.size() > shown ? source.size() - shown : 0;
+                const int ramp = std::clamp(
+                    static_cast<int>(1000.0 * static_cast<double>(backlog)
+                                     / kGlideCps),
+                    kMinMs, kMaxMs);
+                cache.streaming->request_finalize(ramp);
             }
         }
 
@@ -725,6 +833,18 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
     //        widget, fx on), so nothing visible is lost — the animation
     //        simply doesn't outlive the prose it animates.
     {
+        // NOTE on lane scope. This block reasons about tool CARDS
+        // interleaved into the body being revealed, which is an ANSWER-body
+        // concern: the reasoning "#r" slot has no cards inside it (a tool
+        // call belongs to the answer, below the reasoning block). Most of
+        // what follows is therefore inert for reasoning -- but the cursor
+        // SNAPS were not, and they ran for both lanes (#79).
+        //
+        // The guards are on the snap/finish sites below rather than on
+        // has_cards, deliberately: has_cards also appears NEGATED (see
+        // text_gone_quiet), so forcing it false for reasoning would make a
+        // drain path newly REACHABLE on that lane instead of unreachable.
+        // Removing a wrong effect must not add a new one.
         const bool has_cards = !msg.tool_calls.empty();
 
         // ── Pre-emptive end-of-text drain (kills the burst at its ROOT) ──
@@ -773,7 +893,27 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
             && cache.streaming->reveal_in_progress()
             && cache.last_grow_tick_ms != 0
             && since_grow_ms >= kTextQuietMs;
-        if (text_gone_quiet || msg.text_block_closed)
+        // ANSWER LANE ONLY, both terms.
+        //
+        // The drain's job, as the paragraph above says, is the text->tool
+        // seam: get the prose out before the card paints. Both signals are
+        // about the ANSWER body -- text_block_closed is the answer's
+        // end-of-text wire event, and since_grow_ms tracks the answer's
+        // bytes -- so neither says anything about whether the reasoning
+        // channel is done.
+        //
+        // Unguarded, a reasoning->tool-call turn (the common shape: think,
+        // then act) closed the answer's text block while the reasoning
+        // reveal was still mid-glide, and armed a 160 ms HARD ramp on it.
+        // One ~300-character paragraph finishing in 160 ms is ~1900 cps: the
+        // first reasoning box bursting even when it is a single paragraph,
+        // with no tool card and no ticker involved. Sibling of #79 -- same
+        // cause, a different answer-body mechanism reaching the other lane.
+        //
+        // The reasoning lane needs no equivalent: it has no card to get out
+        // of the way of, and its own end-of-channel is already handled where
+        // `settled` is computed.
+        if (!reasoning_view && (text_gone_quiet || msg.text_block_closed))
             cache.streaming->request_finalize(/*ramp_ms=*/160);
 
         // Gate on is_live(): finish() assigns live_=false through the
@@ -1140,7 +1280,20 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
                 // reveal_in_progress() reading with different semantics.
                 const bool was_deferring = cache.defer_tool_panel;
                 const bool has_backlog = backlog_worth_smoothing;
-                if (has_backlog) {
+                if (reasoning_view) {
+                    // The reasoning lane has no card to stay consistent
+                    // with, so there is nothing here to protect and the snap
+                    // is pure damage: it jumped the reasoning cursor to the
+                    // live edge at every tool boundary, bursting the block
+                    // once per tool call and worst on the last paragraph,
+                    // where the final call lands (#79). Leave the reveal
+                    // alone and let it keep gliding.
+                    //
+                    // Scrollback safety, which is why the snap exists, is an
+                    // ANSWER-body concern: it is the growing tool CARD that
+                    // can push a half-revealed row off the top. The reasoning
+                    // block sits above the cards and is not what grows.
+                } else if (has_backlog) {
                     // Bounded glide, then defer the finish to the exit path.
                     cache.streaming->snap_reveal_to_edge(/*glide_ms=*/150);
                     cache.defer_tool_panel    = true;
@@ -1254,43 +1407,44 @@ maya::Element cached_markdown_for(const Message& msg, const Model& m,
         ::maya::anim::keep_animating();
     }
 
-    if (stream_prof) {
+    if (prof_t0.time_since_epoch().count() != 0) {
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - prof_t0).count();
-        static std::FILE* out = []() -> std::FILE* {
-            // Use the platform temp dir so the AGENTTY_STREAM_PROF knob
-            // works on Windows (no /tmp) too; computed once.
-            std::error_code ec;
-            auto p = std::filesystem::temp_directory_path(ec);
-            if (ec) return nullptr;
-            p /= "agentty-stream-prof.log";
-            return std::fopen(p.string().c_str(), "a");
-        }();
-        if (out) {
-            // Real reveal cursor (the byte the typewriter has reached) and
-            // the per-call jump in it — the number that shows a BURST. A
-            // smooth glide moves the clip a few bytes per frame; a paste
-            // (tool-boundary snap, in-progress-line reveal) jumps it by
-            // hundreds in one call. dclip is the honest burst signal.
-            const std::size_t clip = cache.streaming->debug_reveal_byte_clip();
-            static std::size_t prev_clip = 0;
-            const long long dclip =
-                static_cast<long long>(clip == static_cast<std::size_t>(-1)
-                                           ? source.size() : clip)
-              - static_cast<long long>(prev_clip);
-            prev_clip = (clip == static_cast<std::size_t>(-1)) ? source.size() : clip;
-            std::fprintf(out,
-                "[stream] src=%zu clip=%zu dclip=%+lld live=%d finalizing=%d "
-                "settled=%d fastpath=%d build_us=%lld\n",
+            std::chrono::steady_clock::now() - prof_t0).count();   // stopwatch: perf log only
+        // Real reveal cursor (the byte the typewriter has reached) and
+        // the per-call jump in it — the number that shows a BURST. A
+        // smooth glide moves the clip a few bytes per frame; a paste
+        // (tool-boundary snap, in-progress-line reveal) jumps it by
+        // hundreds in one call. dclip is the honest burst signal.
+        const std::size_t clip = cache.streaming->debug_reveal_byte_clip();
+        // Per-SLOT previous clip, not one static shared by every caller.
+        //
+        // cached_markdown_for runs once per streaming widget per frame -- the
+        // reasoning "#r" lane, the answer lane, one per sub-turn -- and a
+        // single `static prev_clip` was differenced across all of them. So
+        // dclip was reasoning-clip minus answer-clip: noise, often negative,
+        // occasionally a huge positive that looked exactly like the paste it
+        // was supposed to detect. The one instrument for diagnosing bursts
+        // was unusable on the lane most complained about, and it reported
+        // nothing to say which lane a line belonged to.
+        static std::unordered_map<std::string, std::size_t> prev_clips;
+        const std::size_t now_clip =
+            (clip == static_cast<std::size_t>(-1)) ? source.size() : clip;
+        auto& prev = prev_clips[slot_id.value];
+        const long long dclip =
+            static_cast<long long>(now_clip) - static_cast<long long>(prev);
+        prev = now_clip;
+        AGT_LOG_HOT(Perf, Trace, "stream.frame",
+                "lane={} slot={} src={} clip={} dclip={:+} live={} "
+                "finalizing={} settled={} fastpath={} build_us={}",
+                reasoning_view ? "reasoning" : "answer",
+                slot_id.value,
                 source.size(),
-                clip == static_cast<std::size_t>(-1) ? source.size() : clip,
+                now_clip,
                 dclip,
                 cache.streaming->is_live() ? 1 : 0,
                 cache.streaming->is_finalizing() ? 1 : 0,
                 settled ? 1 : 0, already_settled_into_cache ? 1 : 0,
                 static_cast<long long>(us));
-            std::fflush(out);
-        }
     }
 
     // Live markdown body returned UNPADDED. Composer anti-bounce — the
@@ -1395,9 +1549,9 @@ SpeakerStyle speaker_style_for(Role role, const Model& m, const Message* msg) {
 // ago, roughly", and a turn that reads "4m 12s ago" invites arithmetic
 // nobody wanted to do. One unit, no decimals.
 [[nodiscard]] inline std::string relative_time(
-        std::chrono::system_clock::time_point ts) {
+        std::chrono::system_clock::time_point ts,
+        std::chrono::system_clock::time_point now) {
     if (ts.time_since_epoch().count() <= 0) return {};
-    const auto now = std::chrono::system_clock::now();
     auto s = std::chrono::duration_cast<std::chrono::seconds>(now - ts).count();
     // A stamp from the future is a clock skew, not a time to report; the
     // honest rendering of "negative ago" is the present.
@@ -1408,8 +1562,11 @@ SpeakerStyle speaker_style_for(Role role, const Model& m, const Message* msg) {
     return std::to_string(s / 86400) + "d ago";
 }
 
+// `now` is the frame's calendar time (Model::wall_at(anim_now())), so the
+// "4m ago" stamps are a function of the Model and the frame clock.
 std::string format_turn_meta(const Message& msg, int turn_num,
                              std::optional<float> elapsed_secs,
+                             std::chrono::system_clock::time_point now,
                              bool checkpoint = false) {
     // Timestamps, per the Appearance pref.
     //
@@ -1424,7 +1581,7 @@ std::string format_turn_meta(const Message& msg, int turn_num,
         case agentty::ui_prefs::Timestamps::Off:
             break;
         case agentty::ui_prefs::Timestamps::Relative:
-            meta = relative_time(msg.timestamp);
+            meta = relative_time(msg.timestamp, now);
             break;
         case agentty::ui_prefs::Timestamps::Absolute:
             meta = timestamp_hh_mm(msg.timestamp);
@@ -1567,43 +1724,43 @@ void append_assistant_tool_panel(maya::Turn::Config& cfg,
 //     (~N tokens)"; the complete reasoning remains below it, dim, above the
 //     answer. Baked at freeze; never changes, never needs a keystroke.
 std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) {
-    // Global display switch (^R in the model picker). Off => no reasoning block
-    // at all, for every provider. This is also what makes the Anthropic
-    // transport request visible thinking, so "off" is a clean, cheap default.
-    if (!m.d.show_reasoning) return std::nullopt;
-    // The Appearance pref is the OTHER half of the same question, and it is
-    // the durable one: ^R is a per-session peek, this is what you chose. Two
-    // switches over one block need a rule, and the rule is that either can
-    // hide it — hiding is the conservative outcome, and a user who set
-    // "never shown" should not have it reappear because a chord toggled.
-    if (agentty::ui_prefs::current().thinking == agentty::ui_prefs::Thinking::Hidden)
-        return std::nullopt;
-    if (msg.reasoning_display_text().empty()) return std::nullopt;
+    // ONE switch decides whether a reasoning block renders: Appearance's
+    // "Thinking" row.
+    //
+    // There used to be two, and the first was dead. `m.d.show_reasoning` was
+    // documented here as "^R in the model picker" -- but ^R is diff review,
+    // and nothing dispatches ModelsToggleShowReasoning (its reducer arm and
+    // Msg variant are still there, unreachable). So the flag sat frozen at
+    // whatever settings.json last held, and that stale value silently
+    // decided whether anyone could see thinking: `true` meant Appearance's
+    // Hidden was the only way to turn it off, `false` meant the Appearance
+    // row did nothing at all. Neither matched what the user had chosen,
+    // because they had never been offered the choice.
+    //
+    // docs/COPILOT_RESPONSES.md already caught the same flag contradicting
+    // the effort strip on the REQUEST side and removed it from there. This is
+    // the display half of that cleanup. The rule itself lives in
+    // ui::reasoning_shown now, because the reveal subscription and the
+    // activity indicator have to answer it the same way.
+    if (!reasoning_shown(msg)) return std::nullopt;
 
-    // "Actively reasoning" = this message is the LIVE tail AND it hasn't
-    // produced any output yet (no answer prose, no tool calls, text block not
-    // closed) AND the stream is running. Intermediate sub-turns that already
-    // reasoned and then ACTED (tool calls) are done thinking — they must read
-    // "Reasoned", not stay stuck on "Thinking". A message that isn't the last
-    // one has, by definition, been followed by more, so it too is settled.
+    // Two questions, not one, and they used to share a boolean.
+    //
+    //   in_flight    — is this turn still working on this message?
+    //   thinking_now — is the model thinking right now, as opposed to
+    //                  running a tool or answering? That is what the HEADER
+    //                  says and what the elapsed meter ticks on.
+    //
+    // m.s.active() rather than is_streaming() because a tool executing is
+    // the same turn in flight, and msg.thinking_open() rather than a peek at
+    // whether the reveal is mid-glide because the wire's own thinking phase
+    // survives a quiet gap — an animation flag does not, and keying the
+    // header off one made it flip to "Reasoned" at every pause.
     const auto& msgs = m.d.current.messages;
     const bool is_live_tail =
         !msgs.empty() && msgs.back().id == msg.id;
-    const bool produced_output =
-        !msg.text.empty() || !msg.streaming_text.empty()
-        || !msg.tool_calls.empty() || msg.text_block_closed;
-    // Interleaved thinking (Anthropic beta) and multi-item Responses streams
-    // legitimately deliver MORE reasoning after the first answer/tool output.
-    // If the header flipped to "Reasoned" purely on produced_output, those
-    // late bytes would snap into a settled block. Stay live while the #r
-    // reveal is still gliding — const peek, no touch/reorder.
-    const auto* rslot = m.ui.view_cache.peek(
-        m.d.current.id, MessageId{msg.id.value + "#r"});
-    const bool reveal_animating =
-        rslot && rslot->streaming && rslot->streaming->is_animating();
-    const bool active =
-        is_live_tail && m.s.is_streaming()
-        && (!produced_output || reveal_animating);
+    const bool in_flight    = is_live_tail && m.s.active();
+    const bool thinking_now = in_flight && msg.thinking_open();
 
     // The reasoning body streams through the CENTRAL streaming-markdown path
     // (own "#r" cache slot, cross-frame-persistent) so it reveals smoothly
@@ -1621,6 +1778,23 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     // the eye. Whole body, smooth reveal, full rail, dim — distinct aside.
     maya::ReasoningStream::Config rcfg;
     rcfg.boxed    = true;    // real ┃ rail (like a Turn), not a per-line prefix
+    rcfg.meter_below = true; // the "· 158 tokens · 6.2s" line reads as a footer
+                             // for what you just watched, and it is the row
+                             // that keeps changing — keep it at the live edge
+                             // rather than scrolling it away mid-tick
+    rcfg.meter_chip  = false; // NOT a chip. The band's own one-column pad
+                              // pushed the ✦ a column right of the body text,
+                              // so the footer never lined up with the prose it
+                              // was summarizing. Flush text + motion says
+                              // "label" without the inset.
+    rcfg.meter_sweep = true;  // a highlight band rides left→right while live
+    rcfg.meter_sweep_fg = ui::fg;  // crest is BRIGHTNESS, not a second hue:
+                                   // a hue sweep over the muted meta fights
+                                   // the magenta rail, and under theme::native
+                                   // the blend snaps, so a hue crest would
+                                   // strobe gray→magenta. Dim→fg just reads as
+                                   // light passing over the row, in any theme.
+    rcfg.meter_rate  = true;  // "· 26 tok/s" — how fast it is actually thinking
     rcfg.dim_body = true;    // recede the body by color so the answer wins
     // Colors MUST come from the named-ANSI palette, not the widget's hardcoded
     // truecolor defaults (0x8a gray body / indigo rail). agentty's rule is
@@ -1655,30 +1829,33 @@ std::optional<maya::Element> reasoning_slot(const Message& msg, const Model& m) 
     rcfg.accent      = ui::role_brand;          // ┃ rail + sigil
     rcfg.header_word = ui::text_secondary;      // visible header/meter
     rcfg.body_fg     = ui::text_secondary;      // always-visible dim
-    // Thinking::Collapsed — "a line you can open". While the model is live
-    // this becomes a thought TICKER: the newest few lines only, so a long
-    // chain-of-thought stays a glance rather than a wall that shoves the
-    // composer down the screen. Settled reasoning still renders in full,
-    // which is the widget's own rule and the right one — the cost of a long
-    // block is that it moves things WHILE it grows, and a settled block
-    // doesn't move.
+    // Thinking::Collapsed — a glance, and that is the whole pref: the last
+    // 8 ROWS of the reasoning, whether it is still arriving or long done.
+    // Thinking::Shown is the one that renders all of it.
+    //
+    // The cap does NOT depend on the turn's state, and that is deliberate.
+    // Deriving it from "is this live" meant the block changed shape on
+    // events that say nothing about how much reasoning the reader wants:
+    // the window released when a tool started (phase left Streaming), when
+    // the typewriter went idle at a pause, and when a later sub-turn made
+    // this message no longer the tail — unfolding a whole chain-of-thought
+    // mid-turn (measured: +32 rows in one frame, in a QUIET frame) and
+    // snapping back when the next burst landed. One cap, one shape.
+    //
+    // ROWS, so the block grows to 8 and then holds — it cannot shrink.
     if (agentty::ui_prefs::current().thinking
             == agentty::ui_prefs::Thinking::Collapsed)
-        rcfg.live_tail_lines = 3;
+        rcfg.live_tail_rows = 8;
     maya::ReasoningStream rs{rcfg};
-    rs.set_live(active);
+    rs.set_live(thinking_now);
     rs.set_char_hint(msg.reasoning_display_text().size());
-    // Reasoning duration for the "· 3.2s" header meter. Once sealed (answer/
-    // tool arrived) show the final reasoning_ms; while still thinking, tick a
-    // live elapsed off the steady-clock start stamp.
-    std::int64_t elapsed = msg.reasoning_ms;
-    if (elapsed == 0 && active && msg.reasoning_started_ms > 0) {
-        const std::int64_t now_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-        elapsed = std::max<std::int64_t>(0, now_ms - msg.reasoning_started_ms);
-    }
-    rs.set_elapsed_ms(elapsed);
+    // Reasoning duration for the "· 3.2s" header meter: closed phases plus
+    // the open one, so a turn that thinks, acts, and thinks again shows the
+    // total rather than restarting or freezing at the first phase.
+    const std::int64_t now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            maya::anim_now().time_since_epoch()).count();
+    rs.set_elapsed_ms(msg.thinking_elapsed_ms(now_ms));
     return rs.build_with_body(std::move(body));
 }
 
@@ -1759,6 +1936,7 @@ maya::Turn::Config turn_config(const Message& msg, std::size_t msg_idx,
                           msg.role == Role::Assistant
                               ? assistant_elapsed(msg, m)
                               : std::nullopt,
+                          m.wall_at(maya::anim_now()),
                           /*checkpoint=*/msg.role == Role::User
                               && msg.checkpoint_id.has_value());
     if (!meta_override.empty()) cfg.meta = std::string{meta_override};
@@ -2334,7 +2512,8 @@ maya::Turn::Config turn_config_for_assistant_run(
     cfg.meta         = format_turn_meta(head, turn_num,
                           head.role == Role::Assistant
                               ? assistant_elapsed(head, m)
-                              : std::nullopt);
+                              : std::nullopt,
+                          m.wall_at(maya::anim_now()));
     if (!style.role_label.empty())
         cfg.meta = style.role_label + "  \xc2\xb7  " + cfg.meta;
 

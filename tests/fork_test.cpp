@@ -19,6 +19,7 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/app/deps.hpp"
+#include "agtest_fx.hpp"
 
 #include <optional>
 #include <print>
@@ -38,7 +39,7 @@ void check(bool cond, const std::string& msg) {
 int g_thread_ids = 0;
 void install_stub_deps() {
     agentty::app::install_deps(agentty::app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const agentty::Thread&) {},
         .delete_thread = [](const agentty::ThreadId&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },
@@ -65,14 +66,40 @@ Model make_parent() {
 }
 
 Model fork_with(Model m, int choice_index) {
-    auto s1 = detail::fork_update(std::move(m), OpenFork{});
+    auto s1 = detail::step(detail::fork_update, std::move(m), OpenFork{});
     Model m1 = std::move(s1.first);
     for (int i = 0; i < choice_index; ++i) {
-        auto s = detail::fork_update(std::move(m1), ForkMove{+1});
+        auto s = detail::step(detail::fork_update, std::move(m1), ForkMove{+1});
         m1 = std::move(s.first);
     }
-    auto s2 = detail::fork_update(std::move(m1), ForkThread{});
-    return std::move(s2.first);
+    const auto choice = m1.ui.panel.get<ui::panel::Fork>()
+                            ? m1.ui.panel.get<ui::panel::Fork>()->choice
+                            : fork_panel::Choice::RagOff;
+    const std::string parent_id = m1.d.current.id.value;
+    auto s2 = detail::step(detail::fork_update, std::move(m1), ForkThread{});
+    // ForkThread only saves the parent and starts the transcript write. Play
+    // the worker's part with the reply it would send, if it was asked to.
+    if (agtest::fx::count<agentty::SaveThread>(s2.second) == 0) return std::move(s2.first);
+    auto s3 = detail::step(detail::fork_update, std::move(s2.first),
+        ForkTranscriptWritten{parent_id, choice, "/tmp/" + parent_id + ".transcript.md"});
+    return std::move(s3.first);
+}
+
+void fork_is_an_effect() {
+    std::println("--- fork_is_an_effect ---");
+    auto s1 = detail::step(detail::fork_update, make_parent(), OpenFork{});
+    auto s2 = detail::step(detail::fork_update, std::move(s1.first), ForkThread{});
+    check(agtest::fx::count<agentty::SaveThread>(s2.second) == 1,
+          "ForkThread saves the parent");
+    check(s2.first.d.current.id.value == "parent",
+          "the fork waits for the transcript; the parent is still current");
+
+    // A reply for a thread the user already left is dropped.
+    auto s3 = detail::step(detail::fork_update, std::move(s2.first),
+        ForkTranscriptWritten{"someone-else", fork_panel::Choice::RagOff, "/x"});
+    check(s3.first.d.current.id.value == "parent",
+          "a stale transcript reply does not fork");
+    std::println("PASS\n");
 }
 
 void fresh_cheap_fork(int choice, const char* name) {
@@ -158,6 +185,7 @@ int main() {
     fresh_cheap_fork(2, "RAG off");
     distinct_rag_modes();
     empty_thread_no_fork();
+    fork_is_an_effect();
     if (g_failed) { std::println("{} check(s) FAILED", g_failed); return 1; }
     std::println("All fork tests passed.");
     return 0;

@@ -155,6 +155,12 @@ Element diff_review(const Model& m) {
             if (hk.status != Hunk::Status::Pending) ++decided;
             if (hk.status == Hunk::Status::Accepted) ++accepted;
         }
+    // NOTE: the pane can never sit at decided == total with work still
+    // pending — the reducer commits and closes itself the moment the last
+    // pending hunk is decided (auto-commit on final y/n), and the *All
+    // handlers clear the queue wholesale. all_done is therefore transient at
+    // worst, and the progress bar / border colour below read it only for the
+    // one frame before the close lands.
     const bool all_done = (decided == total_hunks && total_hunks > 0);
 
     std::vector<Element> rows;
@@ -229,9 +235,7 @@ Element diff_review(const Model& m) {
             text(std::format("{}/{} reviewed", decided, total_hunks), fg_dim(muted)),
             spacer(),
             text("  "),
-            all_done ? text(std::string("\xe2\x9c\x93 all reviewed \xe2\x80\x94 Esc applies"),
-                            fg_bold(success))
-                     : text(std::format("{} to accept", accepted), fg_dim(muted)),
+            text(std::format("{} to accept", accepted), fg_dim(muted)),
             text("  ")
         ).build());
     }
@@ -331,11 +335,13 @@ Element diff_review(const Model& m) {
             hints.push_back({"^D/^U", "scroll", 2});
         // Esc COMMITS: undecided hunks are kept (already live on disk), not
         // discarded. "keep rest" says that; a bare "close" reads like cancel.
+        // There is deliberately no "all reviewed" case: the pane closes ITSELF
+        // when the last pending hunk is decided, so Esc never has to mean two
+        // opposed things (apply-at-end vs keep-the-rest mid-review) — the old
+        // final-Esc affordance trained exactly that contradiction.
         hints.push_back({"Esc",
-                         all_done          ? "apply"
-                         : decided == 0    ? "keep all"
-                                           : "keep rest",
-                         8, all_done ? success : fg});
+                         decided == 0 ? "keep all" : "keep rest",
+                         8, fg});
         rows.push_back(key_hints(std::move(hints)));
     }
 

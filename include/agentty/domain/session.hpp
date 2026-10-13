@@ -455,6 +455,14 @@ struct StreamState {
     // message re-price the whole prefix at fresh input rate after the cache
     // has lapsed. Zero until the first request of the session.
     std::chrono::steady_clock::time_point last_wire_at{};
+    // When the composer last asked for a provider prewarm, and last probed
+    // whether the OAuth token needs a proactive refresh. Throttles, so
+    // key-repeat can't spam dials or the token endpoint. They lived in
+    // function-local statics inside update until the Elm cleanup: state the
+    // reducer reads and writes belongs to the Model, or replay and a second
+    // app instance in one process (tests) silently share it.
+    std::chrono::steady_clock::time_point last_prewarm_at{};
+    std::chrono::steady_clock::time_point last_refresh_probe_at{};
     int tokens_in   = 0;
     int tokens_out  = 0;
     // Reasoning/thinking tokens the model spent on THIS turn's reply, as
@@ -472,7 +480,7 @@ struct StreamState {
     // large context). A LOW ratio on an interior turn of a session is a
     // bug signal: something (tool-catalog reorder, MCP reload, prompt
     // nondeterminism) mutated the cached prefix and torched the cache.
-    // Surfaced via AGENTTY_CACHE_PROF=1 logging; -1 = no data yet.
+    // Surfaced on the `perf` channel (AGENTTY_LOG=perf=debug); -1 = no data yet.
     double cache_hit_ratio = -1.0;
     int    cache_read_tokens     = 0;
     int    cache_creation_tokens = 0;
@@ -687,6 +695,25 @@ struct StreamState {
     std::string update_latest;    // "" = up to date / not checked
     std::string update_url;       // release page for the toast
     bool        update_in_flight = false;
+    // Set once a self-update has been WRITTEN TO DISK. The running process
+    // is still the old image — classic Unix: the new binary is at the same
+    // path, this process keeps the inode it started with — so the user must
+    // restart to get it.
+    //
+    // That used to be said once, in the status line, which a long-running
+    // session scrolls past in seconds. Then the "⬆ vX.Y.Z" chip cleared
+    // too, so the only evidence an update had happened at all was a message
+    // that had already gone. People kept running the old binary for days
+    // and reported bugs that were already fixed.
+    //
+    // Keeping the version here lets the status bar show a persistent
+    // "↺ restart for vX.Y.Z" chip instead: the signal survives until the
+    // thing it is asking for actually happens.
+    std::string update_pending_restart;   // "" = nothing staged
+    // When the last release check ran. Zero = the startup check owns the
+    // first interval. Drives the hourly re-poll in the Tick reducer, so a
+    // long-lived session notices a release without being restarted.
+    std::chrono::steady_clock::time_point last_update_poll{};
 
     std::string status;
     // Optional expiry for `status`. When set, the status bar hides the

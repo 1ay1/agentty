@@ -51,9 +51,14 @@
 // opening a different overlay. (This was equally true with separate
 // fields: assigning pick::Closed{} destroyed the payload too.)
 
+#include <cstdint>
 #include <memory>
+#include <string>
 #include <utility>
 #include <variant>
+#include <vector>
+
+#include <maya/core/scroll_state.hpp>   // WebSearch::scroll
 
 #include "agentty/runtime/panel/common.hpp"
 #include "agentty/domain/smart_mode.hpp"   // smart::OverlayRow
@@ -69,6 +74,7 @@
 #include "agentty/runtime/panel/settings/list.hpp"
 #include "agentty/runtime/panel/fork.hpp"
 #include "agentty/runtime/panel/appearance.hpp"
+#include "agentty/runtime/panel/sandbox.hpp"
 #include "agentty/runtime/panel/form.hpp"
 
 namespace agentty::ui::panel {
@@ -146,6 +152,34 @@ struct SmartMode : WithFrom {
     // rows would vanish the moment the user pinned a model.
     bool advanced = false;
 };
+// Settings → Web Search. Carries its FORM, like Smart Mode: rows, cursor,
+// the env lock and text editing all come from the shared form layer. The
+// rows are the settings registry's web_search.* rows, so this pane holds no
+// config of its own — it is rebuilt from the Model after every commit.
+//
+// The scroll offset lives HERE, not in Model::UI's scroll bag: the slot walk
+// hashes it (so the frame gate sees a scroll), and it dies with the pane (so
+// reopening starts at the top). The shape pn::Stats established.
+struct WebSearch : WithFrom {
+    agentty::form::Form form;
+    mutable maya::ScrollState scroll = [] {
+        maya::ScrollState s;
+        s.auto_dispatch = false;   // the form layer owns movement
+        return s;
+    }();
+    // Where each keyed service's API key comes from, as read off the UI
+    // thread when the pane opened (WebSearchKeysRead): service id ->
+    // "stored", "env: ...", or "" for none. Never the key itself. Until the
+    // read answers, `keys_read` is false and the key rows say so.
+    std::vector<std::pair<std::string, std::string>> key_origins;
+    bool          keys_read = false;
+    // Bumped by every key read, store and removal, so only the newest read's
+    // answer is shown.
+    std::uint64_t keys_gen  = 0;
+    // Key origins arrived while a field was being edited; rebuild the rows as
+    // soon as the edit ends.
+    bool          rows_stale = false;
+};
 struct Palette  : agentty::palette::Open, WithFrom {};
 struct Mention         : agentty::mention::Open, WithFrom {};
 struct Symbol          : agentty::symbol::Open, WithFrom {};
@@ -181,6 +215,22 @@ struct PluginEdit : WithFrom {
 struct Appearance : WithFrom {
     agentty::ui::panel::AppearancePane pane;
 };
+// The Sandbox pane. Also composed rather than doubly-inherited, for the same
+// structured-binding reason. Carries the whole pane (form + live wall
+// preview + blocked log) because the preview is recomputed from the form on
+// every edit, so the two have to travel together.
+struct Sandbox : WithFrom {
+    agentty::ui::panel::SandboxPane pane;
+};
+// The path/port list editor, opened FROM a Sandbox Pick row.
+//
+// Its own slot rather than a mode of Sandbox: it has its own form, its own
+// keys, its own commit and its own completer. Folding it in would give one
+// pane two forms plus a "which am I editing" flag -- the two-bools-for-three-
+// states shape that has already produced two bugs in this pane.
+struct SandboxList : WithFrom {
+    agentty::ui::panel::SandboxListPane pane;
+};
 struct Fork            : agentty::fork_panel::Open, WithFrom {};
 struct DiffReview      : pick::OpenAtCell, WithFrom {};
 struct Stats           : agentty::stats_panel::Open, WithFrom {};
@@ -188,10 +238,10 @@ struct Skills          : agentty::skills_panel::Open, WithFrom {};
 
 using Variant = std::variant<
     None,
-    Models, Providers, ThreadList, SmartMode,
+    Models, Providers, ThreadList, SmartMode, WebSearch,
     Palette, Mention, Symbol,
     CodeBlocks, CodeBlockResult, ToolOutput, Checkpoints,
-    Rag, SettingsList, PluginEdit, Appearance, Fork,
+    Rag, SettingsList, PluginEdit, Appearance, Sandbox, SandboxList, Fork,
     DiffReview, Stats, Skills>;
 
 // The one indirection that lets the type refer to itself: a stashed parent
@@ -407,11 +457,14 @@ enum class Kind {
     SettingsList,
     PluginEdit,
     Appearance,
+    Sandbox,
+    SandboxList,
     Fork,
     Models,
     Providers,
     ThreadList,
     SmartMode,
+    WebSearch,
     DiffReview,
     Todo,
     Stats,
@@ -427,6 +480,7 @@ enum class Kind {
         Kind operator()(const Providers&)  const { return Kind::Providers; }
         Kind operator()(const ThreadList&)      const { return Kind::ThreadList; }
         Kind operator()(const SmartMode&)       const { return Kind::SmartMode; }
+        Kind operator()(const WebSearch&)       const { return Kind::WebSearch; }
         Kind operator()(const Palette&)  const { return Kind::Palette; }
         Kind operator()(const Mention&)         const { return Kind::Mention; }
         Kind operator()(const Symbol&)          const { return Kind::Symbol; }
@@ -438,6 +492,8 @@ enum class Kind {
         Kind operator()(const SettingsList&)    const { return Kind::SettingsList; }
         Kind operator()(const PluginEdit&)      const { return Kind::PluginEdit; }
         Kind operator()(const Appearance&)      const { return Kind::Appearance; }
+        Kind operator()(const Sandbox&)         const { return Kind::Sandbox; }
+        Kind operator()(const SandboxList&)     const { return Kind::SandboxList; }
         Kind operator()(const Fork&)            const { return Kind::Fork; }
         Kind operator()(const DiffReview&)      const { return Kind::DiffReview; }
         Kind operator()(const Stats&)           const { return Kind::Stats; }

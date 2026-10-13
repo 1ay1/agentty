@@ -11,6 +11,7 @@
 // file is pure and always builds.
 
 #include "agentty/rag/embed_backend.hpp"
+#include "agentty/rag/rag_host.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -229,7 +230,7 @@ std::string describe(const EmbedConfig& c) {
 }
 
 // ── Environment ──────────────────────────────────────────────────────────
-void apply_env(EmbedConfig& c) {
+void apply_env(Io, EmbedConfig& c) {
     // Legacy names first so the new ones win when both are present.
     if (const char* m = env_or_null("AGENTTY_EMBED_MODEL")) c.model = m;
     if (const char* h = env_or_null("AGENTTY_OLLAMA_HOST")) {
@@ -281,7 +282,7 @@ ProbeResult probe(const EmbedConfig& c) {
     try {
         const auto t0 = std::chrono::steady_clock::now();
         ::rag::Engine engine;
-        if (!engine.with_embedder_spec(::rag::plugin::Json::parse(*spec)))
+        if (!engine.with_embedder_spec(::rag::plugin::Json::parse(*spec), ::agentty::rag::registries()))
             return ProbeErr{"backend '" + std::string{id_of(concrete(c.backend))}
                             + "' could not be constructed"};
         auto vector = engine.corpus().embed_text("agentty retrieval availability probe");

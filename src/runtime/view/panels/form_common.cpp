@@ -59,7 +59,7 @@ namespace ff = agentty::form::field;
         }
         else if constexpr (std::is_same_v<T, ff::Secret>) {
             // LENGTH ONLY — the plaintext never reaches the widget.
-            return maya::panel::Secret{agentty::form::secret_filled(v), caret};
+            return maya::panel::Secret{agentty::form::secret_filled(v), caret, v.placeholder};
         }
         else if constexpr (std::is_same_v<T, ff::Path>) {
             return maya::panel::Path{v.value, caret, probe_path(v), {}};
@@ -96,6 +96,7 @@ maya::Panel::Config form_config(const agentty::form::Form& f, maya::Color accent
     maya::Panel::Config cfg;
     cfg.title    = f.title;
     cfg.subtitle = f.subtitle;
+    cfg.error    = f.error;
     // ── Footer: ONE grammar for every form pane (SSOT) ───────────
     // The key line is derived from the form's MODE here, not spelled by
     // panes — three panes each wording their own footer is how "no
@@ -119,6 +120,20 @@ maya::Panel::Config form_config(const agentty::form::Form& f, maya::Color accent
             line = f.note.empty() ? grammar : (f.note + "   ·   " + grammar);
         }
         cfg.note = std::move(line);
+
+        // maya REPLACES the note with its own "editing · ↵ done · ↑↓ next
+        // field" whenever a row is live, unless the caller supplies
+        // editing_note. Without this, any pane-specific footer silently
+        // vanished the moment you started typing -- which is exactly when the
+        // sandbox list editor needs to show its completion candidates, and why
+        // the suggestions looked like they were never rendering at all.
+        //
+        // Only when the pane ASKED to own the line (note_replaces_grammar).
+        // Panes that merely prepend an extra still get maya's editing hint,
+        // because that hint is the correct thing to say while editing and
+        // overriding it everywhere would lose "↵ done".
+        if (!f.note.empty() && f.note_replaces_grammar)
+            cfg.editing_note = f.note;
     }
     cfg.selected = f.cursor;
     cfg.accent   = accent;

@@ -7,11 +7,14 @@
 // an at-rest-encrypted per-server token store.
 
 #include "agentty/mcp/oauth.hpp"
+#include "agentty/util/lock_levels.hpp"
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 
+#include <maya/runtime.hpp>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -29,8 +32,10 @@
 #  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <process.h>
 #else
 #  include <arpa/inet.h>
+#  include <fcntl.h>
 #  include <netinet/in.h>
 #  include <sys/socket.h>
 #  include <sys/stat.h>
@@ -103,7 +108,7 @@ HttpOut do_http(http::HttpMethod method, const std::string& url,
     if (!bearer.empty()) req.headers.push_back({"authorization", bearer});
 
     http::Timeouts tos; tos.total = std::chrono::milliseconds(20'000);
-    auto res = http::default_client().send(req, tos);
+    auto res = http::default_client(::agentty::IoAccess::grant()).send(req, tos);
     // agentty's send() delivers ANY HTTP status — including a 401 — as a
     // successful Response with headers + body intact (only transport failures
     // become an unexpected HttpError). So a 401's WWW-Authenticate challenge is
@@ -213,7 +218,7 @@ std::string query_param(std::string_view target, std::string_view key) {
 }
 
 // Accept one request on `srv`, extract code/state/iss, reply with a page.
-CallbackResult wait_for_callback(sock_t srv, int timeout_s, std::atomic<bool>& cancel) {
+CallbackResult wait_for_callback(sock_t srv, int timeout_s) {
     CallbackResult out;
 #if defined(_WIN32)
     const sock_t kInvalid = INVALID_SOCKET;
@@ -224,19 +229,34 @@ CallbackResult wait_for_callback(sock_t srv, int timeout_s, std::atomic<bool>& c
 #endif
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
     for (;;) {
-        if (cancel.load() || std::chrono::steady_clock::now() >= deadline) {
+        const auto left = deadline - std::chrono::steady_clock::now();
+        if (left <= std::chrono::steady_clock::duration::zero()) {
             close_sock(srv);
-            out.error = cancel.load() ? "login cancelled" : "login timed out";
+            out.error = "login timed out";
             return out;
         }
         fd_set rfds; FD_ZERO(&rfds); FD_SET(srv, &rfds);
-        timeval tv{1, 0};
+        const auto us = std::chrono::duration_cast<std::chrono::microseconds>(left).count();
+        timeval tv{static_cast<decltype(tv.tv_sec)>(us / 1000000),
+                   static_cast<decltype(tv.tv_usec)>(us % 1000000)};
         if (::select(static_cast<int>(srv + 1), &rfds, nullptr, nullptr, &tv) <= 0) continue;
         sock_t cli = ::accept(srv, nullptr, nullptr);
         if (cli == kInvalid) continue;
 
+        // Wait for the request with select(), so a peer that connects and
+        // sends nothing (a browser preconnect) can't hang us past the deadline.
+        const auto read_until = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds(10));
         std::string reqbuf; char buf[4096];
-        for (int i = 0; i < 8; ++i) {
+        while (reqbuf.size() <= 16384) {
+            const auto rleft = read_until - std::chrono::steady_clock::now();
+            if (rleft <= std::chrono::steady_clock::duration::zero()) break;
+            fd_set cfds; FD_ZERO(&cfds); FD_SET(cli, &cfds);
+            const auto rus = std::chrono::duration_cast<std::chrono::microseconds>(rleft).count();
+            timeval rtv{static_cast<decltype(rtv.tv_sec)>(rus / 1000000),
+                        static_cast<decltype(rtv.tv_usec)>(rus % 1000000)};
+            const int ready = ::select(static_cast<int>(cli + 1), &cfds, nullptr, nullptr, &rtv);
+            if (ready < 0) break;
+            if (ready == 0) continue;
 #if defined(_WIN32)
             int n = ::recv(cli, buf, sizeof(buf), 0);
 #else
@@ -245,13 +265,14 @@ CallbackResult wait_for_callback(sock_t srv, int timeout_s, std::atomic<bool>& c
             if (n <= 0) break;
             reqbuf.append(buf, static_cast<std::size_t>(n));
             if (reqbuf.find("\r\n\r\n") != std::string::npos) break;
-            if (reqbuf.size() > 16384) break;
         }
         std::string target;
         if (const auto sp = reqbuf.find(' '); sp != std::string::npos) {
             const auto sp2 = reqbuf.find(' ', sp + 1);
             if (sp2 != std::string::npos) target = reqbuf.substr(sp + 1, sp2 - sp - 1);
         }
+        // Not the callback (empty preconnect, favicon): drop it and keep waiting.
+        if (target.find('?') == std::string::npos) { close_sock(cli); continue; }
         out.code  = query_param(target, "code");
         out.state = query_param(target, "state");
         out.iss   = query_param(target, "iss");
@@ -317,13 +338,48 @@ bool save_token(const std::string& server, const StoredToken& t) {
     auto sealed = auth::crypt::seal(to_json(t).dump());
     if (!sealed) return false;
     const fs::path p = token_path(server);
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    if (!f) return false;
-    f << *sealed;
-    f.close();
-#if !defined(_WIN32)
-    ::chmod(p.c_str(), 0600);
+    // Write a sibling temp then rename over the target: a crash mid-write
+    // leaves the old token intact instead of a torn file that forces a
+    // re-login. Unique per process+call so concurrent saves don't share it.
+    static std::atomic<std::uint64_t> seq{0};
+    fs::path tmp = p;
+    tmp += ".tmp-" + std::to_string(
+#if defined(_WIN32)
+        static_cast<unsigned long>(::_getpid())
+#else
+        static_cast<unsigned long>(::getpid())
 #endif
+    ) + "-" + std::to_string(seq.fetch_add(1));
+#if defined(_WIN32)
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f) return false;
+        f << *sealed;
+        f.close();
+        if (!f) { fs::remove(tmp, ec); return false; }
+    }
+#else
+    {
+        // Born 0600: never readable by others, not even for an instant.
+        const int fd = ::open(tmp.c_str(),
+                              O_WRONLY | O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC,
+                              0600);
+        if (fd < 0) return false;
+        const char* d = sealed->data();
+        std::size_t left = sealed->size();
+        bool ok = true;
+        while (left > 0) {
+            const ssize_t w = ::write(fd, d, left);
+            if (w < 0) { if (errno == EINTR) continue; ok = false; break; }
+            d += w; left -= static_cast<std::size_t>(w);
+        }
+        if (ok && ::fsync(fd) != 0) ok = false;
+        ::close(fd);
+        if (!ok) { fs::remove(tmp, ec); return false; }
+    }
+#endif
+    fs::rename(tmp, p, ec);
+    if (ec) { std::error_code rm; fs::remove(tmp, rm); return false; }
     return true;
 }
 
@@ -382,7 +438,7 @@ std::optional<StoredToken> refresh(const StoredToken& tok) {
 
 std::int64_t StoredToken::now_ms() noexcept { return now_ms_impl(); }
 
-LoginResult login(const std::string& server_name, const std::string& endpoint_url,
+LoginResult login(Io io, const std::string& server_name, const std::string& endpoint_url,
                   const std::string& metadata_url_in, const std::string& client_id,
                   int timeout_s) {
     LoginResult r;
@@ -470,8 +526,8 @@ LoginResult login(const std::string& server_name, const std::string& endpoint_ur
     }
 
     // 6. Begin PKCE flow; open the browser; wait for the redirect.
-    const std::string verifier_seed = auth::random_urlsafe(48);   // >= 32 bytes entropy
-    const std::string state = auth::random_urlsafe(24);
+    const std::string verifier_seed = auth::random_urlsafe(io, 48);   // >= 32 bytes entropy
+    const std::string state = auth::random_urlsafe(io, 24);
     ::mcp::auth::AuthSession sess = ::mcp::auth::begin(
         as, client, redirect_uri, resource, verifier_seed, state);
     const std::string url = sess.authorize_url(as.authorization_endpoint);
@@ -480,8 +536,7 @@ LoginResult login(const std::string& server_name, const std::string& endpoint_ur
                          "If it doesn't open, visit:\n\n  %s\n\n", server_name.c_str(), url.c_str());
     auth::open_browser(url);
 
-    std::atomic<bool> cancel{false};
-    CallbackResult cb = wait_for_callback(srv, timeout_s, cancel);
+    CallbackResult cb = wait_for_callback(srv, timeout_s);
     if (!cb.error.empty()) { r.message = cb.error; return r; }
 
     // 7. Validate (state + RFC 9207 iss) and exchange the code for a token.
@@ -515,9 +570,9 @@ LoginResult login(const std::string& server_name, const std::string& endpoint_ur
     return r;
 }
 
-std::optional<std::string> bearer_for(const std::string& server_name) {
-    static std::mutex mu;
-    std::scoped_lock lk(mu);
+namespace {
+// The refresh itself; bearer_for serialises it.
+std::optional<std::string> bearer_for_locked(const std::string& server_name) {
     auto tok = load_token(server_name);
     if (!tok) return std::nullopt;
     if (tok->expired()) {
@@ -528,6 +583,21 @@ std::optional<std::string> bearer_for(const std::string& server_name) {
     if (tok->access_token.empty()) return std::nullopt;
     return tok->authorization_header();
 }
+}  // namespace
+
+std::optional<std::string> bearer_for(const locks::below_auth_refresh& cap,
+                                      const std::string& server_name) {
+    // One refresh at a time: two callers seeing the same expired token would
+    // both refresh, and a server that rotates refresh tokens rejects the
+    // second. A guarded<bool> is just the lock; the work runs inside it.
+    static maya::guarded<bool, locks::auth_refresh> lane;
+    return lane.with(cap,
+        [](bool&, std::string name) -> std::optional<std::string> {
+            return bearer_for_locked(name);
+        },
+        server_name);
+}
+
 
 bool logout(const std::string& server_name) {
     std::error_code ec;
@@ -592,7 +662,7 @@ std::string client_id_of(const json& servers, const std::string& name) {
 }
 } // namespace
 
-int cmd_mcp_login(const std::string& server_name, const std::string& metadata_url,
+int cmd_mcp_login(Io io, const std::string& server_name, const std::string& metadata_url,
                   const std::string& client_id) {
     if (server_name.empty()) {
         std::fprintf(stderr, "usage: agentty mcp-login <server> [--metadata <url>] [--client-id <id|https-url>]\n");
@@ -610,7 +680,7 @@ int cmd_mcp_login(const std::string& server_name, const std::string& metadata_ur
                  server_name.c_str(), endpoint.c_str());
     // --client-id wins; else the server's mcp.json "client_id"; else the env var.
     std::string cid = client_id.empty() ? client_id_of(servers, server_name) : client_id;
-    LoginResult res = login(server_name, endpoint, metadata_url, cid);
+    LoginResult res = login(io, server_name, endpoint, metadata_url, cid);
     if (res.ok) {
         std::fprintf(stderr, "\n\xE2\x9C\x93 %s\n", res.message.c_str());
         return 0;

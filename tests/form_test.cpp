@@ -13,7 +13,7 @@
 
 #include <doctest/doctest.h>
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 
 #include "agentty/runtime/panel/form.hpp"
 #include "agentty/runtime/panel/form_keys.hpp"
@@ -188,6 +188,103 @@ TEST_CASE("form: dropdown commit resolves through the same list the view shows")
     REQUIRE(visible_options(c).labels.size() == 12);
     press(f, key(maya::SpecialKey::Enter));
     CHECK(std::get<field::Choice>(f.find("m")->value).label() == "model-3");
+}
+
+TEST_CASE("form: a letter on a number row is a true no-op") {
+    // Reported as "typing an alpha char misbehaves everywhere".
+    //
+    // A Number row takes digits only, but type-to-edit entered the session
+    // ANYWAY: focus flipped to Editing, edit_dirty went true, and
+    // number_insert then dropped the character. The row was left live and
+    // "changed" with nothing on screen to show it -- so arrows started moving
+    // a caret instead of the row cursor, Esc committed an edit that never
+    // happened, and the pane read as having swallowed the key.
+    //
+    // A rejected character must leave EVERY axis untouched, which is what
+    // makes it a no-op rather than a half-entered session.
+    auto f = demo();
+    f.cursor = 2;                               // port, a Number row
+    const auto before = std::get<field::Number>(f.find("port")->value).value;
+
+    press(f, chr(U'x'));
+    CHECK_FALSE(f.editing());                   // no session started
+    CHECK_FALSE(f.dirty);                       // nothing marked changed
+    CHECK(std::get<field::Number>(f.find("port")->value).value == before);
+
+    // And a digit still works right after, so the guard did not wedge the row.
+    press(f, chr(U'7'));
+    CHECK(f.editing());
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 7);
+
+    // Mid-session too: a letter among digits is ignored rather than ending or
+    // corrupting the edit.
+    press(f, chr(U'z'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 7);
+    press(f, chr(U'9'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 79);
+}
+
+TEST_CASE("form: the first digit typed REPLACES, it does not append") {
+    // Reported as "input doesn't work on all fields sometimes", and this is
+    // the mechanism.
+    //
+    // Appending made a Number row behave like no other settings field: the
+    // value on screen when you start typing is the SAVED one, so extending it
+    // is never what the keystroke meant. Typing 8 into a row showing 4096 gave
+    // 40968.
+    //
+    // On a SMALL range it was worse than surprising, it was dead input: a row
+    // with max 8 showing 3, type 5 -> 3*10+5 = 35 -> clamps to 8. The row is
+    // now at max, so every later digit also clamps to 8 and NOTHING the user
+    // types moves it. No caret, no error, no way to tell why.
+    auto f = demo();
+    f.cursor = 2;                               // port, 11434, range 1-65535
+
+    // Type-to-edit: the first printable starts the session.
+    press(f, chr(U'8'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 8);
+
+    // And the SECOND digit still appends -- 4-0-9-6 must type 4096, so this is
+    // a fresh-vs-continuing distinction rather than "replace always".
+    press(f, chr(U'0'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 80);
+    press(f, chr(U'8'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 808);
+}
+
+TEST_CASE("form: Enter-then-type replaces too") {
+    // The other way into an edit session must behave identically, or the
+    // field's response depends on how you opened it -- which is its own kind
+    // of "sometimes input doesn't work".
+    auto f = demo();
+    f.cursor = 2;
+    press(f, key(maya::SpecialKey::Enter));
+    press(f, chr(U'7'));
+    CHECK(std::get<field::Number>(f.find("port")->value).value == 7);
+}
+
+TEST_CASE("form: a small-range number row never goes deaf to typing") {
+    // The exact shape of the reported bug, on the row that showed it: the
+    // sandbox pane's "Secret scan depth" is 0-8 and ships at 3.
+    //
+    // Every value in range must be reachable by typing it. Under the old
+    // append rule the row latched at max after one keystroke and stayed there.
+    auto f = Builder{"Depth"}.number("depth", "Secret scan depth", 3, 0, 8).build();
+    f.cursor = 0;
+
+    press(f, chr(U'5'));
+    CHECK(std::get<field::Number>(f.find("depth")->value).value == 5);
+
+    // Leave and come back, then type a different digit. The row must answer
+    // again rather than being stuck at whatever it latched to.
+    press(f, key(maya::SpecialKey::Escape));
+    press(f, chr(U'2'));
+    CHECK(std::get<field::Number>(f.find("depth")->value).value == 2);
+
+    // Including 0, which append could never produce from a non-zero start.
+    press(f, key(maya::SpecialKey::Escape));
+    press(f, chr(U'0'));
+    CHECK(std::get<field::Number>(f.find("depth")->value).value == 0);
 }
 
 TEST_CASE("form: number and slider clamp on every mutation") {
@@ -512,6 +609,95 @@ TEST_CASE("form view: a Secret is never painted in the clear") {
     CHECK(out.find("sk-super-secret") == std::string::npos);
     CHECK(out.find("sk-")             == std::string::npos);
     CHECK(out.find("*")               != std::string::npos);   // masked instead
+}
+
+TEST_CASE("form: a Secret's placeholder is shown only while it is empty") {
+    // The placeholder is not secret: it is the one string a Secret may hand
+    // the widget, and it reports a key held elsewhere ("key saved").
+    auto f = Builder{"Keys"}
+        .secret("key", "API key", "").placeholder("held elsewhere")
+        .text("host", "Host", "x").placeholder("ignored")    // not a Secret: no-op
+        .build();
+    CHECK(std::get<field::Secret>(f.find("key")->value).placeholder == "held elsewhere");
+    f.cursor = 1;   // off the Secret: it is drawn unfocused
+    auto out = maya::render_to_string(
+        maya::Panel{agentty::ui::form_config(f, maya::Color::blue())}.build(), 80);
+    CHECK(out.find("held elsewhere") != std::string::npos);
+    CHECK(out.find("not set")        == std::string::npos);
+
+    // A typed value wins: the row shows the mask, never the placeholder.
+    std::get<field::Secret>(f.find("key")->value).value = "sk-typed-value";
+    out = maya::render_to_string(
+        maya::Panel{agentty::ui::form_config(f, maya::Color::blue())}.build(), 80);
+    CHECK(out.find("held elsewhere") == std::string::npos);
+    CHECK(out.find("sk-typed")       == std::string::npos);
+}
+
+TEST_CASE("form: paste_into_focused pastes the way typing types") {
+    // Browsing a text-like row: the paste opens the edit and lands.
+    {
+        auto f = demo();
+        f.cursor = 4;   // the Secret
+        REQUIRE(!f.editing());
+        CHECK(paste_into_focused(f, "sk-NEW"));
+        CHECK(f.editing());
+        CHECK(f.edit_dirty);   // leaving the field commits it
+        CHECK(std::get<field::Secret>(f.find("key")->value).value
+              == "sk-super-secretsk-NEW");   // at the caret, as typing would
+    }
+    // Already editing: exactly paste_into.
+    {
+        auto f = demo();
+        f.cursor = 1;   // Host
+        press(f, key(maya::SpecialKey::Enter));
+        REQUIRE(f.editing());
+        CHECK(paste_into_focused(f, ".lan"));
+        CHECK(std::get<field::Text>(f.find("host")->value).value == "127.0.0.1.lan");
+    }
+    // Nothing lands, and NO edit session is opened, on: a locked row...
+    {
+        auto f = demo();
+        f.cursor = 1;
+        f.fields[1].locked = true;
+        CHECK_FALSE(paste_into_focused(f, "x"));
+        CHECK_FALSE(f.editing());
+        CHECK(std::get<field::Text>(f.find("host")->value).value == "127.0.0.1");
+    }
+    // ...a row that is not text (a Choice, an Action)...
+    for (int row : {0, 5}) {
+        auto f = demo();
+        f.cursor = row;
+        CHECK_FALSE(paste_into_focused(f, "x"));
+        CHECK_FALSE(f.editing());
+    }
+    // ...an open dropdown (the menu owns the keys)...
+    {
+        auto f = demo();
+        f.cursor = 0;
+        press(f, key(maya::SpecialKey::Enter));
+        REQUIRE(f.choosing());
+        CHECK_FALSE(paste_into_focused(f, "x"));
+        CHECK(f.choosing());
+    }
+    // ...and a paste the row takes none of: letters on a Number, a bare
+    // newline anywhere. The half-state type-to-edit refuses for a letter.
+    {
+        auto f = demo();
+        f.cursor = 2;   // Port
+        CHECK_FALSE(paste_into_focused(f, "abc"));
+        CHECK_FALSE(f.editing());
+        CHECK(std::get<field::Number>(f.find("port")->value).value == 11434);
+        f.cursor = 1;   // Host
+        CHECK_FALSE(paste_into_focused(f, "\n"));
+        CHECK_FALSE(f.editing());
+    }
+    // A Number takes a pasted number whole, as typed digits would.
+    {
+        auto f = demo();
+        f.cursor = 2;
+        CHECK(paste_into_focused(f, "8080"));
+        CHECK(std::get<field::Number>(f.find("port")->value).value == 8080);
+    }
 }
 
 TEST_CASE("form: an open pane ALWAYS answers Esc") {

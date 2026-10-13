@@ -1,10 +1,9 @@
 // external_acp_backend_test — the ExternalAcpBackend core, driven against an
 // in-memory FAKE ACP agent.
 //
-// Harness (mirrors acp-cpp/tests/loopback.cpp): a fake agent (acp::Client
-// Connection) is wired to an acp::AgentConnection through a pair of mailbox
-// queues + pump threads. ExternalAcpBackend takes that AgentConnection and its
-// handlers, so we drive prompt() end to end WITHOUT any subprocess or sandbox.
+// Harness: the fake agent is its own rpc::Peer, wired to the backend's peer
+// through rpc::channel_pair(). We drive prompt() end to end with no
+// subprocess or sandbox.
 //
 // Coverage:
 //   1. A clean turn: agent streams message + thought + tool_call + usage
@@ -21,14 +20,15 @@
 #include "agentty/provider/external_acp_backend.hpp"
 
 #include <acp/acp.hpp>
+#include <acp/protocol.hpp>
 
+#include "agentty/rpc/peer.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"   // set_workspace_root
+#include "agtest_cap.hpp"
 
 #include <atomic>
-#include <cassert>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -43,235 +43,175 @@
 #endif
 
 using namespace acp;
-namespace P = agentty::provider;
+namespace P   = agentty::provider;
+namespace rpc = agentty::rpc;
 
 namespace {
-
-class Mailbox {
-public:
-    void push(std::string s) {
-        { std::lock_guard lk(mu_); q_.push_back(std::move(s)); }
-        cv_.notify_one();
-    }
-    bool pop(std::string& out, bool& closed) {
-        std::unique_lock lk(mu_);
-        cv_.wait(lk, [&]{ return !q_.empty() || closed_; });
-        if (q_.empty()) { closed = closed_; return false; }
-        out = std::move(q_.front()); q_.pop_front(); return true;
-    }
-    void close() { { std::lock_guard lk(mu_); closed_ = true; } cv_.notify_all(); }
-private:
-    std::mutex mu_; std::condition_variable cv_;
-    std::deque<std::string> q_; bool closed_ = false;
-};
 
 // How the fake agent should end a prompt, and whether it streams updates first.
 struct AgentScript {
     StopReason stop = StopReason::EndTurn;
     bool       stream_updates = false;   // emit message+thought+tool_call+usage
-    // Set true to make the prompt handler BLOCK until `release` fires — used to
-    // exercise the user-cancel path (backend sends session/cancel, we then
-    // return Cancelled).
+    // Block the prompt until session/cancel arrives, then answer Cancelled.
     bool       block_until_released = false;
-    // Set true to simulate a BUGGY agent that receives session/cancel but NEVER
-    // settles the in-flight prompt future (and whose on_session_cancel is a
-    // no-op). Exercises the backend's engine-level escape hatch: prompt() must
-    // still return (bounded) via on_transport_closed, not wedge forever.
+    // A BUGGY agent: accepts the prompt, never answers it, ignores
+    // session/cancel. prompt() must still return, bounded.
     bool       ignore_cancel = false;
-    // Set true to make the agent call back into the client during the prompt:
-    // fs/write_text_file, fs/read_text_file, and terminal/create+output. Used
-    // to exercise the delegate wiring. Requires the ASYNC handler (the callbacks
-    // are outbound requests whose replies arrive on the same reader thread).
+    // Call back into the client during the prompt: fs/write, fs/read,
+    // terminal/create+output+release.
     bool       exercise_callbacks = false;
-    // Captured callback results (filled by the async prompt worker).
+    // Callback results, filled by the prompt worker.
     std::string read_back;
     std::string term_output;
     int         term_exit = -1;
 };
 
-// A running fake-agent + client pair with pump threads. Destroy to tear down.
-struct Harness {
-    Mailbox client_to_agent, agent_to_client;
-    std::unique_ptr<ClientConnection> agent_side;      // the fake agent
-    std::unique_ptr<AgentConnection>  client;          // agentty's handle
-    std::unique_ptr<P::ExternalAcpBackend> backend;
-    std::atomic<bool> alive{true};
-    std::vector<std::thread> pumps;
-
-    std::atomic<bool> release_prompt{false};
-    std::condition_variable release_cv;
-    std::mutex release_mu;
+// The fake agent: its own peer, answering on the far end of a channel pair.
+struct FakeAgent {
+    AgentScript script;
+    std::unique_ptr<rpc::Peer> peer;
     acp::List<acp::ContentBlock> last_prompt;
-    std::shared_ptr<AgentScript> script_out;   // async worker writes callback results here
 
+    std::mutex              mu;
+    std::condition_variable cv;
+    bool                    released = false;
+    std::vector<std::thread> workers;
+
+    void release() {
+        { std::lock_guard lk(mu); released = true; }
+        cv.notify_all();
+    }
+
+    ~FakeAgent() {
+        release();
+        if (peer) peer->stop(agtest::cap());
+        for (auto& t : workers) if (t.joinable()) t.join();
+    }
+
+    template <jsonrpc::IsMethod M>
+    typename M::result call(const typename M::params& p) {
+        auto r = peer->call<M>(agtest::cap(), p);
+        if (!r) throw r.error();
+        return std::move(*r);
+    }
+
+    void send_update(const SessionId& sid, SessionUpdate u) {
+        SessionUpdateMsg m; m.sessionId = sid; m.update = std::move(u);
+        peer->notify<to_client::SessionUpdate>(agtest::cap(), m);
+    }
+
+    // Runs on a worker so the agent's reader stays free for replies.
+    void run_prompt(Id id, PromptParams p) {
+        using Prompt = to_agent::SessionPrompt;
+        if (script.ignore_cancel) return;   // never answer
+        if (script.block_until_released) {
+            std::unique_lock lk(mu);
+            cv.wait(lk, [&] { return released; });
+            lk.unlock();
+            peer->reply<Prompt>(agtest::cap(), id, PromptResult{StopReason::Cancelled});
+            return;
+        }
+        if (script.exercise_callbacks) {
+            const auto& sid = p.sessionId;
+            WriteTextFileParams wp;
+            wp.sessionId = sid; wp.path = "acp_probe.txt"; wp.content = "delegate-wrote-this\n";
+            (void)call<to_client::FsWriteTextFile>(wp);
+            ReadTextFileParams rp;
+            rp.sessionId = sid; rp.path = "acp_probe.txt";
+            script.read_back = call<to_client::FsReadTextFile>(rp).content;
+            CreateTerminalParams cp;
+            cp.sessionId = sid; cp.command = "printf"; cp.args = {"acp-term-ok"};
+            auto term = call<to_client::TerminalCreate>(cp);
+            TerminalRef ref; ref.sessionId = sid; ref.terminalId = term.terminalId;
+            auto out = call<to_client::TerminalOutput>(ref);
+            script.term_output = out.output;
+            if (out.exitStatus && out.exitStatus->exitCode)
+                script.term_exit = static_cast<int>(*out.exitStatus->exitCode);
+            (void)call<to_client::TerminalRelease>(ref);
+            peer->reply<Prompt>(agtest::cap(), id, PromptResult{StopReason::EndTurn});
+            return;
+        }
+        if (script.stream_updates) {
+            send_update(p.sessionId, SU_AgentMessageChunk{TextContent{"hello", Nothing, Json::object()}, Nothing});
+            send_update(p.sessionId, SU_AgentThoughtChunk{TextContent{"thinking", Nothing, Json::object()}, Nothing});
+            ToolCall tc;
+            tc.toolCallId = ToolCallId{std::string("tc_1")};
+            tc.title      = "shell";
+            send_update(p.sessionId, SU_ToolCall{tc});
+            send_update(p.sessionId, SU_Usage{/*used*/123, /*size*/200000, Nothing});
+        }
+        peer->reply<Prompt>(agtest::cap(), id, PromptResult{script.stop});
+    }
+
+    rpc::Dispatch dispatch() {
+        rpc::Dispatch d;
+        d.on_call = [this](const maya::unlocked&, const Call& c) -> std::optional<std::string> {
+            if (c.method == to_agent::Initialize::name) {
+                InitializeResult r;
+                r.agentCapabilities.promptCapabilities.embeddedContext = true;
+                return reply<to_agent::Initialize>(c.id, r);
+            }
+            if (c.method == to_agent::SessionNew::name) {
+                return reply<to_agent::SessionNew>(c.id,
+                    NewSessionResult{SessionId{std::string("sess_fake")}, Nothing, Nothing, Json::object()});
+            }
+            if (c.method == to_agent::SessionPrompt::name) {
+                auto p = jsonrpc::from_json<PromptParams>(c.params);
+                last_prompt = p.prompt;
+                workers.emplace_back([this, id = c.id, p = std::move(p)]() mutable {
+                    run_prompt(std::move(id), std::move(p));
+                });
+                return std::nullopt;
+            }
+            return reply(c.id, std::unexpected(RpcError(errc::MethodNotFound, c.method)));
+        };
+        d.on_notification = [this](const maya::unlocked&, const Notification& n) {
+            if (n.method == to_agent::SessionCancel::name && !script.ignore_cancel) release();
+        };
+        return d;
+    }
+};
+
+// A running fake-agent + backend pair. Destroy to tear down.
+struct Harness {
+    std::unique_ptr<P::ExternalAcpBackend> backend;
+    std::unique_ptr<rpc::Peer>             client;   // agentty's side
+    std::unique_ptr<FakeAgent>             agent;
+
+    const acp::List<acp::ContentBlock>& last_prompt() const { return agent->last_prompt; }
+    AgentScript& script() { return agent->script; }
     ~Harness() {
-        alive.store(false);
-        { std::lock_guard lk(release_mu); release_prompt.store(true); }
-        release_cv.notify_all();
-        client_to_agent.close();
-        agent_to_client.close();
-        for (auto& t : pumps) if (t.joinable()) t.join();
+        // The client peer first: its dispatch points at the backend.
+        if (client) client->stop(agtest::cap());
+        agent.reset();
+        client.reset();
+        backend.reset();
     }
 };
 
 std::unique_ptr<Harness> make_harness(AgentScript script,
                                      P::AcpClientDelegate delegate = {}) {
     auto h = std::make_unique<Harness>();
-    Harness* hp = h.get();
-    // Stash script results somewhere the async worker can write; the caller
-    // reads them back through the returned Harness via `h->script_out`.
-    auto script_out = std::make_shared<AgentScript>(script);
-    h->script_out = script_out;
+    auto [ours, theirs] = rpc::channel_pair();
 
-    // ── Fake AGENT side ────────────────────────────────────────────────────
-    AgentHandlers a;
-    a.on_initialize = [](const InitializeParams&) {
-        InitializeResult r;
-        r.agentCapabilities.promptCapabilities.embeddedContext = true;
-        return r;
-    };
-    a.on_session_new = [](const NewSessionParams& p) {
-        assert(!p.cwd.empty());
-        return NewSessionResult{SessionId{std::string("sess_fake")}, Nothing, Nothing, Json::object()};
-    };
-    a.on_session_prompt = [hp, script](const PromptParams& p) -> PromptResult {
-        assert(p.sessionId == SessionId{std::string("sess_fake")});
-        assert(!p.prompt.empty());
-        hp->last_prompt = p.prompt;
+    h->agent = std::make_unique<FakeAgent>();
+    h->agent->script = std::move(script);
+    h->agent->peer = std::make_unique<rpc::Peer>(std::move(theirs), h->agent->dispatch(), "fake-agent");
+    h->agent->peer->start();
 
-        if (script.stream_updates) {
-            auto send = [&](SessionUpdate u) {
-                SessionUpdateMsg m; m.sessionId = p.sessionId; m.update = std::move(u);
-                hp->agent_side->session_update(m);
-            };
-            send(SU_AgentMessageChunk{TextContent{"hello", Nothing, Json::object()}, Nothing});
-            send(SU_AgentThoughtChunk{TextContent{"thinking", Nothing, Json::object()}, Nothing});
-            ToolCall tc;
-            tc.toolCallId = ToolCallId{std::string("tc_1")};
-            tc.title      = "shell";
-            send(SU_ToolCall{tc});
-            send(SU_Usage{/*used*/123, /*size*/200000, Nothing});
-        }
-        return PromptResult{script.stop};
-    };
-    // The BLOCKING (user-cancel) case uses the ASYNC handler: it hands the
-    // Responder to a detached worker and returns immediately, so the single
-    // agent reader thread stays free to process the incoming session/cancel
-    // notification (which flips `release_prompt`). This mirrors how a real
-    // agent — with its own turn worker thread — behaves.
-    if (script.block_until_released) {
-        a.on_session_prompt = nullptr;
-        a.on_session_prompt_async =
-            [hp](const PromptParams&, RpcEngine::Responder<PromptResult> resp) {
-            std::thread([hp, resp = std::move(resp)]() mutable {
-                std::unique_lock lk(hp->release_mu);
-                hp->release_cv.wait(lk, [hp]{ return hp->release_prompt.load(); });
-                lk.unlock();
-                resp.ok(PromptResult{StopReason::Cancelled});
-            }).detach();
-        };
-    }
-
-    // The IGNORE-CANCEL case: a buggy agent that accepts the prompt but never
-    // settles the future — the responder is captured and simply LEAKED (held
-    // forever), and on_session_cancel is a no-op. The backend must still bound
-    // prompt() via its engine escape hatch.
-    if (script.ignore_cancel) {
-        a.on_session_prompt = nullptr;
-        a.on_session_prompt_async =
-            [](const PromptParams&, RpcEngine::Responder<PromptResult> resp) {
-            // Deliberately never settle: stash the responder so it outlives the
-            // call and the future stays pending forever.
-            static std::vector<RpcEngine::Responder<PromptResult>> leaked;
-            leaked.push_back(std::move(resp));
-        };
-    }
-
-    // The CALLBACK-exercising case uses the async handler so the reader thread
-    // stays free to deliver the fs/terminal replies while the worker awaits
-    // them. The worker writes a file, reads it back, runs a terminal, records
-    // the results into script_out, then settles the turn.
-    if (script.exercise_callbacks) {
-        a.on_session_prompt = nullptr;
-        a.on_session_prompt_async =
-            [hp, script_out](const PromptParams& p, RpcEngine::Responder<PromptResult> resp) {
-            std::thread([hp, script_out, sid = p.sessionId, resp = std::move(resp)]() mutable {
-                auto& cx = *hp->agent_side;
-                // 1. write a file via the client's fs gate.
-                WriteTextFileParams wp;
-                wp.sessionId = sid; wp.path = "acp_probe.txt"; wp.content = "delegate-wrote-this\n";
-                (void)cx.fs_write_text_file(wp).get();
-                // 2. read it back.
-                ReadTextFileParams rp;
-                rp.sessionId = sid; rp.path = "acp_probe.txt";
-                script_out->read_back = cx.fs_read_text_file(rp).get().content;
-                // 3. run a terminal command.
-                CreateTerminalParams cp;
-                cp.sessionId = sid; cp.command = "printf"; cp.args = {"acp-term-ok"};
-                auto term = cx.terminal_create(cp).get();
-                TerminalRef ref; ref.sessionId = sid; ref.terminalId = term.terminalId;
-                auto out = cx.terminal_output(ref).get();
-                script_out->term_output = out.output;
-                if (out.exitStatus && out.exitStatus->exitCode)
-                    script_out->term_exit = static_cast<int>(*out.exitStatus->exitCode);
-                (void)cx.terminal_release(ref).get();
-                resp.ok(PromptResult{StopReason::EndTurn});
-            }).detach();
-        };
-    }
-
-    a.on_session_cancel = [hp, ignore = script.ignore_cancel](const CancelParams&) {
-        if (ignore) return;   // buggy agent: never acts on cancel
-        { std::lock_guard lk(hp->release_mu); hp->release_prompt.store(true); }
-        hp->release_cv.notify_all();
-    };
-
-    h->agent_side = std::make_unique<ClientConnection>(
-        [hp](std::string_view line){ hp->agent_to_client.push(std::string(line)); },
-        std::move(a));
-
-    // ── agentty CLIENT side + backend ──────────────────────────────────────
     P::ExternalAcpOptions opts;
     opts.cwd = "/tmp/proj";
     opts.reuse_session = true;
     opts.delegate = std::move(delegate);
-
-    // acp::AgentConnection installs handlers at CONSTRUCTION. The backend's
-    // handlers don't need the connection (make_handlers() only closes over the
-    // backend's sink slot + delegate), so build the backend FIRST, take its full
-    // handler set (session/update + fs/* + terminal/*), and construct the
-    // connection with them. session/update is the one handler whose target (the
-    // round's live sink) is set later, but the backend already routes that
-    // through its own internal slot, so no shim is needed — we pass make_handlers()
-    // verbatim.
     h->backend = std::make_unique<P::ExternalAcpBackend>(std::move(opts));
-    auto handlers = h->backend->make_handlers();
 
-    h->client = std::make_unique<AgentConnection>(
-        [hp](std::string_view line){ hp->client_to_agent.push(std::string(line)); },
-        std::move(handlers));
-
-    // Bind the connection now that both exist.
+    h->client = std::make_unique<rpc::Peer>(std::move(ours), h->backend->make_dispatch(), "client");
+    h->client->start();
     h->backend->connect(*h->client);
 
-    // ── Pumps ──────────────────────────────────────────────────────────────
-    auto pump = [hp](Mailbox& mb, RpcEngine& dst) {
-        hp->pumps.emplace_back([hp, &mb, &dst]{
-            while (hp->alive.load()) {
-                std::string line; bool closed = false;
-                if (!mb.pop(line, closed)) { if (closed) return; continue; }
-                dst.feed_line(line);
-            }
-        });
-    };
-    pump(h->client_to_agent, h->agent_side->engine());
-    pump(h->agent_to_client, h->client->engine());
-
-    // Initialize the connection (negotiate) so session_new/prompt are allowed.
     InitializeParams ip;
     ip.clientCapabilities.fs.readTextFile = true;
-    (void)h->client->initialize(ip).get();
-
+    (void)h->client->call<to_agent::Initialize>(agtest::cap(), ip);
     return h;
 }
 
@@ -301,7 +241,7 @@ void test_clean_turn_streams_and_settles() {
         else kinds.push_back("other");
     };
 
-    auto res = h->backend->prompt(make_req("Hi!"), sink, /*cancel*/nullptr);
+    auto res = h->backend->prompt(agtest::cap(), make_req("Hi!"), sink, /*cancel*/nullptr);
 
     CHECK(res.ok());
     CHECK(res.stop == agentty::StopReason::EndTurn);
@@ -323,13 +263,13 @@ void test_prompt_forwards_text_and_image_content() {
         agentty::ImageContent{"image/jpeg", std::string{"\x01\x02\x03", 3}});
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
 
-    auto res = h->backend->prompt(req, sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), req, sink, nullptr);
 
     CHECK(res.ok());
-    CHECK(h->last_prompt.size() == 2);
-    if (h->last_prompt.size() == 2) {
-        const auto* text = std::get_if<acp::TextContent>(&h->last_prompt[0]);
-        const auto* image = std::get_if<acp::ImageContent>(&h->last_prompt[1]);
+    CHECK(h->last_prompt().size() == 2);
+    if (h->last_prompt().size() == 2) {
+        const auto* text = std::get_if<acp::TextContent>(&h->last_prompt()[0]);
+        const auto* image = std::get_if<acp::ImageContent>(&h->last_prompt()[1]);
         CHECK(text && text->text == "look at this");
         CHECK(image && image->mimeType == "image/jpeg");
         CHECK(image && image->data == "AQID");
@@ -343,12 +283,12 @@ void test_prompt_forwards_image_only_turn() {
         agentty::ImageContent{"image/png", std::string{"PNG", 3}});
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
 
-    auto res = h->backend->prompt(req, sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), req, sink, nullptr);
 
     CHECK(res.ok());
-    CHECK(h->last_prompt.size() == 1);
-    if (h->last_prompt.size() == 1) {
-        const auto* image = std::get_if<acp::ImageContent>(&h->last_prompt[0]);
+    CHECK(h->last_prompt().size() == 1);
+    if (h->last_prompt().size() == 1) {
+        const auto* image = std::get_if<acp::ImageContent>(&h->last_prompt()[0]);
         CHECK(image && image->mimeType == "image/png");
         CHECK(image && image->data == "UE5H");
     }
@@ -357,7 +297,7 @@ void test_prompt_forwards_image_only_turn() {
 void test_max_turn_requests_maps_to_endturn() {
     auto h = make_harness(AgentScript{StopReason::MaxTurnRequests, false, false});
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
-    auto res = h->backend->prompt(make_req("go"), sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), make_req("go"), sink, nullptr);
     CHECK(res.ok());
     CHECK(res.stop == agentty::StopReason::EndTurn);
 }
@@ -365,7 +305,7 @@ void test_max_turn_requests_maps_to_endturn() {
 void test_refusal_is_error() {
     auto h = make_harness(AgentScript{StopReason::Refusal, false, false});
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
-    auto res = h->backend->prompt(make_req("do bad thing"), sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), make_req("do bad thing"), sink, nullptr);
     CHECK(!res.ok());
     CHECK(res.error.has_value());
     CHECK(!res.error->user_cancel);
@@ -374,7 +314,7 @@ void test_refusal_is_error() {
 void test_agent_cancelled_stop_reason() {
     auto h = make_harness(AgentScript{StopReason::Cancelled, false, false});
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
-    auto res = h->backend->prompt(make_req("x"), sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), make_req("x"), sink, nullptr);
     CHECK(!res.ok());
     CHECK(res.error.has_value() && res.error->user_cancel);
 }
@@ -390,7 +330,7 @@ void test_user_cancel_via_token() {
         cancel->cancel();
     });
 
-    auto res = h->backend->prompt(make_req("long task"), sink, cancel);
+    auto res = h->backend->prompt(agtest::cap(), make_req("long task"), sink, cancel);
     tripper.join();
 
     CHECK(!res.ok());
@@ -413,7 +353,7 @@ void test_cancel_against_non_settling_agent_is_bounded() {
     });
 
     auto t0 = std::chrono::steady_clock::now();
-    auto res = h->backend->prompt(make_req("never answered"), sink, cancel);
+    auto res = h->backend->prompt(agtest::cap(), make_req("never answered"), sink, cancel);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - t0).count();
     tripper.join();
@@ -460,12 +400,12 @@ void test_delegate_callbacks_wired() {
     auto h = make_harness(script, std::move(del));
 
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
-    auto res = h->backend->prompt(make_req("use tools"), sink, nullptr);
+    auto res = h->backend->prompt(agtest::cap(), make_req("use tools"), sink, nullptr);
 
     CHECK(res.ok());
     CHECK((*files)["acp_probe.txt"] == "delegate-wrote-this\n");
-    CHECK(h->script_out->read_back == "delegate-wrote-this\n");
-    CHECK(h->script_out->term_output == "printf acp-term-ok");
+    CHECK(h->script().read_back == "delegate-wrote-this\n");
+    CHECK(h->script().term_output == "printf acp-term-ok");
 }
 
 // The REAL default_sandbox_delegate() against a temp workspace: a write lands
@@ -478,7 +418,7 @@ void test_default_sandbox_delegate_roundtrip() {
                 ("acp_ws_" + std::to_string(::getpid()) + "_" +
                  std::to_string(counter.fetch_add(1)));
     fs::create_directories(root);
-    agentty::tools::util::set_workspace_root(root);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
 
     auto del = P::default_sandbox_delegate();
     CHECK(static_cast<bool>(del.read_text_file));
@@ -502,83 +442,66 @@ void test_default_sandbox_delegate_roundtrip() {
 
 // ── Self-spawn AGENT MODE ────────────────────────────────────────────────────
 // When invoked as `<this-binary> --acp-agent`, run a REAL ACP agent over
-// stdin/stdout (FdTransport::process). This is the subprocess spawn_acp_agent
+// stdin/stdout (rpc::fd_channel). This is the subprocess spawn_acp_agent
 // launches in the e2e test below — a genuine cross-process round-trip with no
 // external dependency on claude-agent-acp / codex-acp being installed.
+//
+// It answers initialize and session/new, streams one "pong" chunk per prompt,
+// and ends the turn. `session` names the session it hands out.
+std::unique_ptr<rpc::Peer> start_stdio_agent(std::string session, std::atomic<bool>& answered) {
+    // The dispatch notifies through the peer it belongs to, set right after.
+    auto self = std::make_shared<rpc::Peer*>(nullptr);
+    rpc::Dispatch d;
+    d.on_call = [self, session, &answered](const maya::unlocked&, const Call& c) -> std::optional<std::string> {
+        if (c.method == to_agent::Initialize::name) {
+            InitializeResult r;
+            r.agentCapabilities.promptCapabilities.embeddedContext = true;
+            return reply<to_agent::Initialize>(c.id, r);
+        }
+        if (c.method == to_agent::SessionNew::name)
+            return reply<to_agent::SessionNew>(c.id,
+                NewSessionResult{SessionId{session}, Nothing, Nothing, Json::object()});
+        if (c.method == to_agent::SessionPrompt::name) {
+            auto pp = jsonrpc::from_json<PromptParams>(c.params);
+            SessionUpdateMsg m; m.sessionId = pp.sessionId;
+            m.update = SU_AgentMessageChunk{TextContent{"pong", Nothing, Json::object()}, Nothing};
+            (*self)->notify<to_client::SessionUpdate>(agtest::cap(), m);
+            answered.store(true);
+            return reply<to_agent::SessionPrompt>(c.id, PromptResult{StopReason::EndTurn});
+        }
+        return reply(c.id, std::unexpected(RpcError(errc::MethodNotFound, c.method)));
+    };
+    auto peer = std::make_unique<rpc::Peer>(rpc::fd_channel(0, 1), std::move(d), "stdio-agent");
+    *self = peer.get();
+    return peer;
+}
+
 int run_agent_mode() {
-    FdTransport transport = FdTransport::process();   // fds 0/1
-
-    std::atomic<bool> done{false};
-    AgentHandlers a;
-    a.on_initialize = [](const InitializeParams&) {
-        InitializeResult r;
-        r.agentCapabilities.promptCapabilities.embeddedContext = true;
-        return r;
-    };
-    a.on_session_new = [](const NewSessionParams&) {
-        return NewSessionResult{SessionId{std::string("e2e")}, Nothing, Nothing, Json::object()};
-    };
-    // Streams one message chunk, then ends the turn. After the prompt settles we
-    // flip `done` so the process can exit cleanly once the reply is flushed.
-    ClientConnection* self = nullptr;
-    auto handler = [&self, &done](const PromptParams& p) -> PromptResult {
-        SessionUpdateMsg m; m.sessionId = p.sessionId;
-        m.update = SU_AgentMessageChunk{TextContent{"pong", Nothing, Json::object()}, Nothing};
-        self->session_update(m);
-        done.store(true);
-        return PromptResult{StopReason::EndTurn};
-    };
-    a.on_session_prompt = handler;
-
-    ClientConnection agent(transport.sink(), std::move(a));
-    self = &agent;
-    transport.start(agent.engine());
-
-    // Run until the prompt has been answered, then give the transport a beat to
-    // flush the final reply frame before we exit and close the pipe.
-    while (!done.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::atomic<bool> answered{false};
+    auto peer = start_stdio_agent("e2e", answered);
+    peer->start();
+    peer->wait_closed(agtest::cap());   // the parent closes our stdin
+    peer->stop(agtest::cap());
     return 0;
 }
 
 // ── Self-spawn WEDGED AGENT MODE ─────────────────────────────────────────────
 // When invoked as `<this-binary> --acp-agent-wedged`, this deliberately
 // MISBEHAVES: it answers the first prompt, then IGNORES stdin EOF entirely and
-// spins forever without exiting. This is the teardown-deadlock scenario — a
-// well-behaved parent that only close_stdin()'d + joined the reader would hang
-// forever waiting on the child's stdout to EOF. The AgentProcessHolder dtor's
-// bounded-grace + force-kill watchdog is what must reap it. If the watchdog
-// regresses, the e2e test below HANGS (caught by ctest's timeout).
+// spins forever without exiting. A parent that only closed our stdin and
+// waited for our stdout to end would hang; the spawned agent's teardown must
+// kill us instead. If that regresses, the e2e test below HANGS.
 int run_wedged_agent_mode() {
-    FdTransport transport = FdTransport::process();   // fds 0/1
     std::atomic<bool> answered{false};
-    AgentHandlers a;
-    a.on_initialize = [](const InitializeParams&) {
-        InitializeResult r;
-        r.agentCapabilities.promptCapabilities.embeddedContext = true;
-        return r;
-    };
-    a.on_session_new = [](const NewSessionParams&) {
-        return NewSessionResult{SessionId{std::string("wedged")}, Nothing, Nothing, Json::object()};
-    };
-    ClientConnection* self = nullptr;
-    a.on_session_prompt = [&self, &answered](const PromptParams& p) -> PromptResult {
-        SessionUpdateMsg m; m.sessionId = p.sessionId;
-        m.update = SU_AgentMessageChunk{TextContent{"pong", Nothing, Json::object()}, Nothing};
-        self->session_update(m);
-        answered.store(true);
-        return PromptResult{StopReason::EndTurn};
-    };
-    ClientConnection agent(transport.sink(), std::move(a));
-    self = &agent;
-    transport.start(agent.engine());
+    auto peer = start_stdio_agent("wedged", answered);
+    peer->start();
     // Never exit on stdin EOF: spin forever. Only an external kill stops us.
     for (;;) std::this_thread::sleep_for(std::chrono::milliseconds(20));
 }
 
 // ── End-to-end: spawn_acp_agent drives a REAL subprocess ────────────────────
 void test_spawn_real_subprocess(const std::string& self_path) {
-    // Build the backend first, get its handlers, spawn the agent with them,
+    // Build the backend first, get its dispatch, spawn the agent with it,
     // then bind — the documented production flow.
     P::ExternalAcpOptions opts;
     opts.cwd = "/tmp";
@@ -593,12 +516,12 @@ void test_spawn_real_subprocess(const std::string& self_path) {
 
     InitializeParams init;
     std::string err;
-    auto agent = P::spawn_acp_agent(
+    auto agent = P::spawn_acp_agent(agtest::cap(),
         // Bundled into agentty_standalone_tests (argv-dispatched), so the child
         // must carry the dispatch name before its own child-mode flag:
         //   <exe> external_acp_backend_test --acp-agent
         {self_path, "external_acp_backend_test", "--acp-agent"}, init,
-                                    backend->make_handlers(), err);
+                                    backend->make_dispatch(), err);
     if (!agent.ok()) {
         std::cerr << "spawn_acp_agent failed: " << err << "\n";
         ++failures;
@@ -606,13 +529,13 @@ void test_spawn_real_subprocess(const std::string& self_path) {
     }
     backend->connect(*agent.connection);
 
-    auto res = backend->prompt(make_req("ping"), sink, nullptr);
+    auto res = backend->prompt(agtest::cap(), make_req("ping"), sink, nullptr);
     CHECK(res.ok());
     CHECK(res.stop == agentty::StopReason::EndTurn);
     CHECK(backend->session_id() == "e2e");
     CHECK(captured.size() == 1);
     if (captured.size() == 1) CHECK(captured[0] == "pong");
-    // Dropping `agent` here tears down the child + transport.
+    // Dropping `agent` here tears down the peer and the child.
 }
 
 // The child ignores stdin EOF and spins forever. Tearing down the spawned agent
@@ -626,9 +549,9 @@ void test_wedged_child_teardown_is_bounded(const std::string& self_path) {
     P::TurnSink sink; sink.update = [](acp::SessionUpdate){};
     InitializeParams init;
     std::string err;
-    auto agent = P::spawn_acp_agent(
+    auto agent = P::spawn_acp_agent(agtest::cap(),
         {self_path, "external_acp_backend_test", "--acp-agent-wedged"}, init,
-                                    backend->make_handlers(), err);
+                                    backend->make_dispatch(), err);
     if (!agent.ok()) {
         std::cerr << "spawn wedged agent failed: " << err << "\n";
         ++failures;
@@ -637,16 +560,15 @@ void test_wedged_child_teardown_is_bounded(const std::string& self_path) {
     backend->connect(*agent.connection);
 
     // One clean round so the child is fully live and its reader is parked.
-    auto res = backend->prompt(make_req("ping"), sink, nullptr);
+    auto res = backend->prompt(agtest::cap(), make_req("ping"), sink, nullptr);
     CHECK(res.ok());
 
     // Now tear down. The child will IGNORE the stdin-EOF we send; only the
-    // force-kill watchdog reaps it. Time the teardown: it must be bounded.
+    // kill reaps it. Time the teardown: it must be bounded.
     auto t0 = std::chrono::steady_clock::now();
-    backend.reset();   // backend holds nothing that blocks
-    // SpawnedAcpAgent::reset stops/joins the transport reader while its engine
-    // is alive, then destroys the connection.
+    // The peer first: its dispatch points at the backend.
     agent.reset();
+    backend.reset();
     auto elapsed = std::chrono::steady_clock::now() - t0;
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
     // Grace is ~1s; give generous headroom for CI. A regression to the old

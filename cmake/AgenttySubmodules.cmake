@@ -4,14 +4,21 @@
 # the nghttp2 imported-target discovery. Included as one contiguous block so
 # ordering (toggles BEFORE add_subdirectory; deps BEFORE the targets that link
 # them) is preserved exactly. include() keeps CMAKE_CURRENT_SOURCE_DIR at the
-# top level, so add_subdirectory(maya) etc. resolve as before.
+# top level, so add_subdirectory(third_party/maya) etc. resolve as before.
+#
+# Every in-tree submodule lives under third_party/ (maya, mcp-cpp, acp-cpp,
+# rag-cpp — and maya carries jaal at third_party/maya/third_party/jaal). The
+# helper below takes the BARE name (it keys target names and the per-submodule
+# overrides off it) and resolves the checkout under AGENTTY_THIRD_PARTY_DIR.
+set(AGENTTY_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
 # ── Submodule auto-pull ────────────────────────────────────────────────────
-# When AGENTTY_AUTO_PULL_SUBMODULES is ON (default), every in-tree submodule
-# is synced to the tip of its tracking branch on each build before its library
-# target compiles. SAFE: the pull is skipped for any submodule that has
-# uncommitted changes, so local edits are never clobbered. Skipped entirely
-# if the parent isn't a git checkout (release tarballs / FetchContent paths).
+# When AGENTTY_AUTO_PULL_SUBMODULES is ON, every in-tree submodule is synced
+# to the tip of its tracking branch on each build before its library target
+# compiles. It is OFF by default — a normal build must never fetch or reset a
+# submodule. SAFE regardless: the pull is skipped for any submodule carrying
+# local work, so edits are never clobbered. Skipped entirely if the parent
+# isn't a git checkout (release tarballs / FetchContent paths).
 #
 # Call AFTER add_subdirectory(<sub>) so the library target exists to depend on.
 #   agentty_pull_submodule_latest(<dir> <branch> <library-target>)
@@ -28,7 +35,7 @@ function(agentty_pull_submodule_latest sub branch lib)
     if(NOT GIT_FOUND)
         return()
     endif()
-    set(_sd "${CMAKE_CURRENT_SOURCE_DIR}/${sub}")
+    set(_sd "${AGENTTY_THIRD_PARTY_DIR}/${sub}")
     # The guard is deliberately paranoid so a developer's LOCAL work in the
     # submodule is never clobbered by the reset --hard. We refuse to pull if
     # ANY of these hold:
@@ -82,8 +89,8 @@ function(agentty_pull_submodule_latest sub branch lib)
 endfunction()
 
 # Prefer the in-tree submodule when present; only fall back to fetch.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/maya/CMakeLists.txt")
-    add_subdirectory(maya)
+if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/maya/CMakeLists.txt")
+    add_subdirectory(third_party/maya)
     # Called unconditionally so maya joins the on-demand `submodules_sync`
     # target; per-build auto-pull stays gated inside the function.
     agentty_pull_submodule_latest(maya master maya)
@@ -118,19 +125,40 @@ FetchContent_Declare(
 # for config + cold events; simdjson's ondemand API is 3–5× faster for the
 # "open doc, read two fields, throw away" pattern that dominates here.
 set(SIMDJSON_DEVELOPER_MODE   OFF CACHE INTERNAL "")
-FetchContent_Declare(
-    simdjson
-    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
-    GIT_TAG        v3.10.1
-    GIT_SHALLOW    TRUE
+# A STANDALONE build must not adopt a system copy.
+#
+# FIND_PACKAGE_ARGS is what lets a distro package satisfy this without a
+# clone — right for a distro build, wrong for the release binary, whose whole
+# contract (AgenttyStandalone.cmake: "no third-party shared-library
+# dependencies") is that it runs on a machine that has none of this
+# installed. The macOS runners ship a Homebrew simdjson, so the release job
+# quietly linked /usr/local/opt/simdjson/lib/libsimdjson.33.dylib and failed
+# its own portability check — three releases in a row, on both arches, while
+# Linux and Windows cloned and built it static and passed.
+#
+# Everything else in that job is already forced static by hand (openssl,
+# nghttp2 from source, libstdc++/libgcc/libquadmath via linker flags). This
+# closes the one dependency that could still arrive dynamically, for every
+# platform rather than just macOS: the same trap exists anywhere a standalone
+# build runs on a box with the dev package installed.
+#
 # The version is deliberately UNPINNED for the find_package path. Asking for
 # "3.10" makes CMake reject a system simdjson 4.x as incompatible (same-major
 # rule) and clone anyway — which defeats the point on any distro shipping 4.x,
 # including Termux. agentty uses only the stable dom/ondemand surface
 # (parser, document, element, object, array, padded_string), unchanged across
-# 3 and 4, so whatever the distro ships is fine. The GIT_TAG below still pins
-# the version for anyone WITHOUT a system copy.
-    FIND_PACKAGE_ARGS NAMES simdjson
+# 3 and 4, so whatever the distro ships is fine. GIT_TAG still pins the
+# version for anyone WITHOUT a system copy.
+set(_agentty_simdjson_find_args FIND_PACKAGE_ARGS NAMES simdjson)
+if(AGENTTY_STANDALONE)
+    set(_agentty_simdjson_find_args "")
+endif()
+FetchContent_Declare(
+    simdjson
+    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+    GIT_TAG        v3.10.1
+    GIT_SHALLOW    TRUE
+    ${_agentty_simdjson_find_args}
 )
 
 FetchContent_MakeAvailable(nlohmann_json simdjson)
@@ -177,13 +205,20 @@ if(TARGET simdjson)
     endif()
 endif()
 
+# jsonrpc-cpp — JSON-RPC 2.0 as a passive, header-only library (submodule):
+# the one engine and codec algebra mcp-cpp and acp-cpp share. Added first so
+# both find jsonrpc::jsonrpc already defined. No runtime of any kind; see
+# docs/PROTOCOL_LIBRARIES.md.
+set(JSONRPC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/jsonrpc-cpp)
+
 # acp-cpp — header-only Agent Client Protocol library (submodule). Provides
 # the wire algebra + JSON-RPC engine + stdio transport for `agentty acp`.
 # Tests/examples off; it reuses the nlohmann_json target already populated
 # above (its own FetchContent_MakeAvailable is a no-op when already present).
 set(ACP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(ACP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(acp-cpp)
+add_subdirectory(third_party/acp-cpp)
 agentty_pull_submodule_latest(acp-cpp main acp)
 if(TARGET acp)
     set_target_properties(acp PROPERTIES SYSTEM TRUE)
@@ -203,7 +238,7 @@ if(NOT AGENTTY_MCP)
         "served exclusively by the mcp-cpp toolset. Configure with "
         "-DAGENTTY_MCP=ON (the default).")
 endif()
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/CMakeLists.txt")
+if(NOT EXISTS "${AGENTTY_THIRD_PARTY_DIR}/mcp-cpp/CMakeLists.txt")
     message(FATAL_ERROR
         "agentty: the mcp-cpp submodule is missing but it now provides the "
         "entire tool set. Run `git submodule update --init --recursive`.")
@@ -214,7 +249,8 @@ endif()
 # only needs the mcp LIBRARY here, not mcp_tests in agentty's ctest run.
 set(MCP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(MCP_BUILD_EXAMPLES ON  CACHE BOOL "" FORCE)
-add_subdirectory(mcp-cpp)
+set(MCP_BUILD_CLIENT_EXAMPLE OFF CACHE BOOL "" FORCE)   # only the servers are used
+add_subdirectory(third_party/mcp-cpp)
 agentty_pull_submodule_latest(mcp-cpp master mcp)
 if(TARGET mcp)
     set_target_properties(mcp PROPERTIES SYSTEM TRUE)
@@ -222,6 +258,49 @@ endif()
 
 if(NOT TARGET maya::maya)
     add_library(maya::maya ALIAS maya)
+endif()
+
+# ── claybin — the in-process sandbox backend ───────────────────
+#
+# A REQUIRED submodule, on the same footing as maya, acp-cpp, mcp-cpp and
+# rag-cpp: always present, always compiled, no feature toggle.
+#
+# It used to be an option (AGENTTY_CLAYBIN, and for a while defaulted OFF),
+# and that was a mistake worth naming. An optional backend is a backend that
+# does not exist: with the flag off, the whole claybin dispatch path was dead
+# code in the binary people actually run, the Sandbox pane rendered "build
+# with -DAGENTTY_CLAYBIN=ON", the policy it saved had no engine to enforce it,
+# and --sandbox-backend=claybin was refused. Two compile-time answers to the
+# same question also meant two configurations to test and an ODR hazard if
+# the define ever reached some objlibs and not others.
+#
+# So it is not a build-time choice any more. WHICH backend confines a command
+# is a RUNTIME choice -- the Sandbox pane, or --sandbox-backend -- and both
+# backends are always there to choose between. bwrap remains the default
+# because it is what users already have and has a decade of hardening behind
+# it; claybin is one setting away.
+#
+# It compiles everywhere (its plan compiler is portable and covered by tests
+# on any host). The APPLY step used to be Linux-only; it is now Linux AND
+# macOS -- namespaces/landlock/seccomp/cgroup2 there, seatbelt + rlimits here
+# -- which claybin's own CMakeLists handles by adding src/linux/* and
+# src/macos/spawn.cpp conditionally. Windows still compiles the policy and
+# refuses to apply it. So there is no platform guard here either; guarding it
+# would just reintroduce the two-configurations problem on a different axis.
+if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/claybin/CMakeLists.txt")
+    # claybin's own suite is thorough and runs in its own CI; agentty needs
+    # the library, not another 20 test binaries in its ctest run.
+    set(CLAYBIN_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/claybin)
+    agentty_pull_submodule_latest(claybin master claybin)
+    if(TARGET claybin)
+        set_target_properties(claybin PROPERTIES SYSTEM TRUE)
+    endif()
+else()
+    message(FATAL_ERROR
+        "agentty: third_party/claybin/ submodule is empty. Run "
+        "`git submodule update --init --recursive` to vendor the sandbox "
+        "backend, then reconfigure.")
 endif()
 
 # Treat maya's headers as system so its warnings don't surface in agentty builds.
@@ -329,14 +408,14 @@ endif()
 
 # ── rag-cpp: the retrieval (RAG) engine ────────────────────────────────────
 # agentty's retrieval is powered by the external rag-cpp library (submodule
-# rag-cpp/, target ragcpp::ragcpp) — a production-grade hybrid engine
+# third_party/rag-cpp/, target ragcpp::ragcpp) — a production-grade hybrid engine
 # (contextual chunking, BM25 + dense/HNSW, RRF fusion, CRAG, HyDE, MMR /
 # dartboard rerank, GraphRAG, .ragdb persistence). The thin adapter in
 # src/rag/adapter.cpp maps agentty's retrieval boundary onto rag::Engine, so
 # the rest of the app never sees a rag:: type. Built from source in-tree so
 # agentty carries its RAG engine with it and compiles ANYWHERE.
 set(AGENTTY_HAS_RAGCPP FALSE)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
+if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/rag-cpp/CMakeLists.txt")
     # rag-cpp is portable across GCC, Clang, MinGW, and MSVC. Its durability
     # layer uses posix_compat.hpp on Windows, while SIMD/prefetch kernels use
     # compiler-specific wrappers and retain scalar/runtime-dispatched fallbacks.
@@ -354,22 +433,22 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rag-cpp/CMakeLists.txt")
     #     clang into the build via a try_compile probe. That probe inherits our
     #     CMAKE_EXE_LINKER_FLAGS (the GCC-static release passes -static-libgcc /
     #     -static-libstdc++), and Apple clang rejects -static-libgcc — so the
-    #     whole macOS standalone configure died at rag-cpp/CMakeLists.txt.
+    #     whole macOS standalone configure died at third_party/rag-cpp/CMakeLists.txt.
     #   * OPENCL auto-detects any system libOpenCL and would silently add a
     #     dynamic dependency to a binary that's meant to be standalone.
     set(RAGCPP_WITH_METAL     OFF CACHE BOOL "" FORCE)
     set(RAGCPP_WITH_OPENCL    OFF CACHE BOOL "" FORCE)
-    add_subdirectory(rag-cpp EXCLUDE_FROM_ALL)
+    add_subdirectory(third_party/rag-cpp EXCLUDE_FROM_ALL)
     set(AGENTTY_HAS_RAGCPP TRUE)
     # Opt-in upstream tracking, off by default so local rag-cpp edits compile
     # without CMake changing the submodule checkout. Called UNCONDITIONALLY so
     # rag-cpp is always part of the on-demand `submodules_sync` target; the
     # per-build auto-pull stays gated inside the function by
     # AGENTTY_AUTO_PULL_SUBMODULES (and the rag-specific override below).
-    option(AGENTTY_AUTO_PULL_RAGCPP "Fast-forward rag-cpp/ to origin/master on every build" OFF)
-    agentty_pull_submodule_latest(rag-cpp master ragcpp)
+    option(AGENTTY_AUTO_PULL_RAGCPP "Fast-forward third_party/rag-cpp/ to origin/master on every build" OFF)
+    agentty_pull_submodule_latest(rag-cpp main ragcpp)
 else()
-    message(FATAL_ERROR "agentty: rag-cpp/ submodule is empty. Run "
+    message(FATAL_ERROR "agentty: third_party/rag-cpp/ submodule is empty. Run "
                         "`git submodule update --init --recursive` to vendor "
                         "the RAG engine, then reconfigure.")
 endif()

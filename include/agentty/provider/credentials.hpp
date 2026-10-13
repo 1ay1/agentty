@@ -31,6 +31,8 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/accounts.hpp"
+#include "agentty/util/io.hpp"
+#include <maya/runtime.hpp>
 
 namespace agentty::provider::credentials {
 
@@ -46,39 +48,40 @@ enum class AddMethod : std::uint8_t {
 //   stored active account (file OR provider_keys) → env-var chain → empty.
 // Empty (for a provider that needs auth) means "not signed in" — callers route
 // to the account manager. `AuthStyle::None` providers always resolve empty.
-[[nodiscard]] auth::AuthHeader resolve(std::string_view provider_id);
+[[nodiscard]] auth::AuthHeader resolve(Io, std::string_view provider_id);
 
 // True when `provider_id` needs a credential the user hasn't provided yet
 // (resolve() is empty AND the provider isn't a keyless local server). Drives
 // "route to login on switch".
-[[nodiscard]] bool needs_login(std::string_view provider_id);
+[[nodiscard]] bool needs_login(Io, std::string_view provider_id);
 
-// The add-account method this provider offers.
+// The add-account method this provider offers. Pure: a registry lookup, no
+// credential read, so reducers may call it.
 [[nodiscard]] AddMethod add_method(std::string_view provider_id);
 
 // ── Account management — uniform for every provider ──────────────────────────
 // Saved accounts for a provider (may be empty). Mirrors auth::accounts but
 // keyed by the canonical provider id and consistent for file/key/local backends.
-[[nodiscard]] std::vector<auth::accounts::Account> list(std::string_view provider_id);
+[[nodiscard]] std::vector<auth::accounts::Account> list(Io, std::string_view provider_id);
 
 // The active account's label ("OAuth · me@x", "key …Ddmj", "local", …).
-[[nodiscard]] std::string active_label(std::string_view provider_id);
+[[nodiscard]] std::string active_label(Io, std::string_view provider_id);
 
 // Switch the active account for a provider to `label` (writes its secret into
 // the provider's live store + updates the registry). Returns false if unknown.
-bool activate(std::string_view provider_id, std::string_view label);
+bool activate(Io, const maya::unlocked&, std::string_view provider_id, std::string_view label);
 
 // Remove one saved account. When it was the active one, promotes the next (or
 // clears the live credential if none remain).
-bool remove(std::string_view provider_id, std::string_view label);
+bool remove(Io, std::string_view provider_id, std::string_view label);
 
 // Wipe the provider's LIVE active credential entirely (its file, or its
 // provider_keys[spec] entry) — a full sign-out. Used when the last account is
 // removed so build_account_list can't rediscover and resurrect it.
-void clear_active(std::string_view provider_id);
+void clear_active(Io, const maya::unlocked&, std::string_view provider_id);
 
 // Persist a freshly-obtained API key as this provider's active account
 // (snapshots any prior active account first, so it ADDS, not replaces).
-bool add_key(std::string_view provider_id, std::string_view key);
+bool add_key(Io, const maya::unlocked&, std::string_view provider_id, std::string_view key);
 
 } // namespace agentty::provider::credentials

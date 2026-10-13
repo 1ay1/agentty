@@ -129,5 +129,5 @@ fires again on the turn after it.
   terminal error.
 - `src/runtime/app/update/meta.cpp` — Tick resume for a sleeping loop.
 - `src/runtime/app/subscribe.cpp` — `^B` binding; `animation_demand` term.
-- `src/runtime/view/composer.cpp` + `maya/include/maya/widget/composer.hpp` —
+- `src/runtime/view/composer.cpp` + `third_party/maya/include/maya/widget/composer.hpp` —
   the chip, the border tint, `read_only`.

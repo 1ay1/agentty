@@ -25,6 +25,8 @@
 
 #include <string>
 
+#include <maya/runtime.hpp>
+
 namespace agentty::modelsdev {
 
 // Load the cached snapshot from disk (if any) into the catalog registries.
@@ -35,5 +37,15 @@ void load_cached();
 // Blocking — run on a background worker (Cmd::task). Returns the number of
 // models registered (0 on any failure).
 int refresh();
+
+// Run load_cached() + refresh() on an owned thread after a short delay, so a
+// process that exits at once (pipe-EOF smoke test, --version) never starts the
+// network call. The thread is joined by join_background_refresh(), which
+// main() calls before teardown; a detached thread still inside refresh()'s
+// HTTP call while the CRT frees statics is a use-after-free (Windows
+// 0xC0000005 on the CI pipe smoke test — same class as the blob-gc fix).
+void start_background_refresh(bool no_net = false);
+// Cancel and join. Idempotent, no-op if start never ran. Joins: `unlocked`.
+void join_background_refresh(const maya::unlocked& cap) noexcept;
 
 } // namespace agentty::modelsdev

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <stop_token>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -11,8 +12,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agentty/util/sendable.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/tool/effects.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::tools {
 
@@ -47,6 +50,12 @@ enum class ErrorKind : std::uint8_t {
     Subprocess,     // subprocess returned non-zero
     Io,             // generic I/O (write_file failed, etc.)
     OutOfWorkspace, // path is outside the configured workspace root
+    // Refused by policy, not by the filesystem. Distinct from OutOfWorkspace
+    // (a path error the model fixes by picking another path) because the
+    // remedy is different: the call was well-formed and the answer is still
+    // no. Retrying it verbatim is always wrong, and a kind that reads as an
+    // I/O hiccup invites exactly that retry.
+    Denied,
     Unknown,        // uncaught exception / unknown tool
 };
 
@@ -72,6 +81,7 @@ struct ToolError {
     [[nodiscard]] static ToolError subprocess(std::string d)      noexcept { return {ErrorKind::Subprocess,    std::move(d)}; }
     [[nodiscard]] static ToolError io(std::string d)              noexcept { return {ErrorKind::Io,            std::move(d)}; }
     [[nodiscard]] static ToolError out_of_workspace(std::string d) noexcept { return {ErrorKind::OutOfWorkspace, std::move(d)}; }
+    [[nodiscard]] static ToolError denied(std::string d)          noexcept { return {ErrorKind::Denied,         std::move(d)}; }
     [[nodiscard]] static ToolError unknown(std::string d)         noexcept { return {ErrorKind::Unknown,       std::move(d)}; }
 
     // "[not found] path/to/file" — the UI's default stringification when it
@@ -86,6 +96,95 @@ using ExecResult = std::expected<ToolOutput, ToolError>;
 
 enum class ToolOrigin : std::uint8_t { Native, Mcp, Passthrough };
 enum class OutputTruncation : std::uint8_t { Head, Tail, HeadTail };
+
+// ── The tool call's context ────────────────────────────────────────────────────
+//
+// Everything a tool call carries besides its arguments, passed explicitly to
+// ToolDef::execute. The dispatcher builds it; the tool reads it; nothing is
+// parked on the thread. These used to be thread_locals installed by RAII
+// scopes, which went silently missing whenever work moved to another thread
+// (shell output stopped streaming and Esc stopped working for a release).
+// A capability pointer that is NOT carried by copies: copying a context
+// makes a new context for a new call, and the capability belongs to the
+// dispatch that set it on the original. Moves keep it (same call).
+class CallCapability {
+public:
+    CallCapability() = default;
+    CallCapability(const CallCapability&) noexcept {}
+    CallCapability& operator=(const CallCapability&) noexcept { p_ = nullptr; return *this; }
+    CallCapability(CallCapability&& o) noexcept : p_(std::exchange(o.p_, nullptr)) {}
+    CallCapability& operator=(CallCapability&& o) noexcept {
+        p_ = std::exchange(o.p_, nullptr);
+        return *this;
+    }
+    void set(const maya::unlocked* c) noexcept { p_ = c; }
+    [[nodiscard]] const maya::unlocked* get() const noexcept { return p_; }
+private:
+    const maya::unlocked* p_ = nullptr;
+};
+
+struct CallContext {
+    using Sink = std::function<void(std::string_view snapshot)>;
+
+    // The tool worker's `unlocked`, for the duration of ONE execute() call.
+    //
+    // mcp-cpp runs agentty's native tools and calls back into agentty
+    // (memory store, subagent runner, exec) through interfaces whose
+    // signatures it fixes; the only thing that crosses that boundary is this
+    // context (Call::host). DynamicDispatch::execute_with sets it from the
+    // capability it was handed and clears it before returning, so it never
+    // outlives the call that proved it and never reaches another thread (a
+    // copied context drops it: CallCapability).
+    CallCapability cap;
+    [[nodiscard]] const maya::unlocked& capability() const {
+        if (!cap.get()) throw std::logic_error("tool callback outside a dispatched call");
+        return *cap.get();
+    }
+
+    // Live output for the UI, whole buffer each time. Empty: nobody watches.
+    Sink progress;
+    // Whose context the call serves: empty for the main conversation, a
+    // subagent's run id inside one, so a subagent never reads its parent's
+    // "you already read this file".
+    std::string reader;
+    // The call is cancelled when any of these stops (Esc, a newer turn,
+    // shutdown, the enclosing subagent run).
+    std::vector<std::stop_token> cancel;
+    // Skills whose bodies are already in the conversation the call serves.
+    std::vector<std::string> active_skills;
+    // Nesting: how many subagents enclose this call, and the earliest
+    // deadline any of them set (a nested run can only shorten it).
+    int depth = 0;
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    // Workspace scope for a call that serves a particular folder (an ACP
+    // session). Empty: the process-wide workspace and cwd.
+    std::string              workspace;     // access boundary
+    std::vector<std::string> extra_roots;   // more roots the call may touch
+    std::string              project;       // where relative paths and shells start
+    // Ask the user for structured input (an MCP server's elicitation/create),
+    // through whatever UI the host has. Params and result are MCP-shaped
+    // JSON. Empty: no UI to ask, the request is declined.
+    std::function<nlohmann::json(const nlohmann::json&)> elicit;
+    // A subagent run finished; here is its transcript (an editor can keep it
+    // as a session of its own). Empty: dropped.
+    std::function<void(const ::agentty::Thread&)> on_subagent_done;
+
+    void emit(std::string_view snapshot) const { if (progress) progress(snapshot); }
+    [[nodiscard]] bool cancelled() const noexcept {
+        for (const auto& t : cancel) if (t.stop_requested()) return true;
+        return false;
+    }
+    // Wait up to `d`, waking the instant the call is cancelled (or `also`
+    // stops). True when cancelled.
+    [[nodiscard]] bool wait(std::chrono::milliseconds d, std::stop_token also = {}) const;
+    // One token that stops when any of `cancel` does. The returned source
+    // owns the callbacks, so keep it alive while the token is in use.
+    [[nodiscard]] std::shared_ptr<std::stop_source> merged_stop() const;
+    [[nodiscard]] bool skill_active(std::string_view name) const noexcept {
+        for (const auto& n : active_skills) if (n == name) return true;
+        return false;
+    }
+};
 
 struct ToolDef {
     ToolName    name;
@@ -130,10 +229,59 @@ struct ToolDef {
     // world. The permission policy reads these and these alone — there
     // is no per-tool override. Set this when constructing the ToolDef
     // (e.g. `t.effects = {Effect::ReadFs};`); leaving it default
-    // (empty) means "this tool is pure and never needs permission".
+    // empty) means "this tool is pure and never needs permission".
     EffectSet effects;
 
-    std::function<ExecResult(const nlohmann::json& args)> execute;
+    // Runs on a tool worker thread, which holds no lock between tool calls:
+    // the body gets that thread's `unlocked`. A tool may block (a subprocess,
+    // an MCP round-trip, a scope of helpers) and take any lock in rank
+    // order; the type is what proves the dispatcher never calls it from
+    // inside a lock body.
+    using ExecuteFn = std::function<ExecResult(const maya::unlocked& cap,
+                                               const nlohmann::json& args,
+                                               const CallContext& ctx)>;
+    ExecuteFn execute;
+
+    // A stable fingerprint of everything a consent decision depends on:
+    // which tool this is, what it claims to do, what it accepts, and what it
+    // may reach. Deliberately NOT the execute closure (not hashable) and not
+    // the tuning knobs (budgets and timeouts don't change what you agreed
+    // to).
+    //
+    // Why it exists: a permission grant is recorded against a tool NAME, and
+    // for an MCP tool the server owns that name. A server may send
+    // tools/list_changed at any time and redefine `mcp__x__search` as
+    // something else entirely -- the "rug pull" the MCP spec and the OWASP
+    // MCP cheat sheet both call out, whose stated mitigation is to pin
+    // reviewed definitions by hash and re-prompt when they change. The same
+    // value closes the narrower gate/execute race, where the catalog is
+    // rebuilt between "user approved X" and "run X".
+    //
+    // agentty already gates a project-scoped stdio SERVER on its spec hash.
+    // This is that idea one level down, on the tool.
+    [[nodiscard]] std::uint64_t definition_hash() const {
+        // FNV-1a over a canonical rendering. nlohmann's dump() sorts object
+        // keys for the default (map-backed) json type, so the same schema
+        // always renders the same bytes.
+        std::uint64_t h = 1469598103934665603ull;
+        const auto feed = [&h](std::string_view s) {
+            for (unsigned char c : s) {
+                h ^= c;
+                h *= 1099511628211ull;
+            }
+            h ^= '\x1f';           // field separator: "ab"+"c" != "a"+"bc"
+            h *= 1099511628211ull;
+        };
+        feed(name.value);
+        feed(description);
+        feed(input_schema.is_null() ? std::string{} : input_schema.dump());
+        feed(origin_id);
+        const char origin_byte = static_cast<char>(origin);
+        feed(std::string_view{&origin_byte, 1});
+        const auto fx = static_cast<std::uint64_t>(effects.bits());
+        feed(std::to_string(fx));
+        return h;
+    }
 };
 
 [[nodiscard]] const std::vector<ToolDef>& native_registry();
@@ -169,6 +317,27 @@ struct ToolDef {
 // MCP tools most relevant to the current user request.
 [[nodiscard]] std::vector<const ToolDef*> select_wire_tools(
     std::string_view query, std::size_t max_external = 16);
+// Same selection over an explicit catalog (pure; for tests). Natives and
+// pinned tools always; the top `max_external` other tools by query score,
+// emitted in CATALOG order so the wire tools block (the head of the prompt
+// cache prefix) stays byte-stable while the chosen set is unchanged.
+//
+// `web_search_enabled` = false drops the native web_search (Settings → Web
+// Search). select_wire_tools() passes the live policy; tests pass it
+// directly.
+[[nodiscard]] std::vector<const ToolDef*> select_wire_tools_from(
+    const std::vector<ToolDef>& catalog, std::string_view query,
+    std::size_t max_external = 16, bool web_search_enabled = true);
+
+// agentty's settings decide which of its native tools exist for ANY consumer:
+// the model on the wire (select_wire_tools) and other MCP clients through
+// `agentty mcp-serve`. One predicate, so the two can never disagree. Today the
+// only rule is Settings → Web Search: web_search off withholds the NATIVE
+// web_search (an external MCP tool that happens to share the name is not
+// agentty's to govern). The pure overload takes the switch; the other reads
+// the live policy.
+[[nodiscard]] bool withheld_by_policy(const ToolDef& tool, bool web_search_enabled);
+[[nodiscard]] bool withheld_by_policy(const ToolDef& tool);
 
 // The MCP tool-list generation counter, surfaced through the tools namespace
 // so callers (ACP server, wire walks) don't need to link the mcp TU or know
@@ -188,52 +357,18 @@ struct ToolDef {
 // connected; only the projection filter (config tools.exclude, read live)
 // changes, so a re-spawn would be wasteful and — under rapid toggles —
 // race-prone. Cheap and synchronous; safe to call from the UI thread.
-void invalidate_mcp_catalog();
+void invalidate_mcp_catalog(Io);
 
-// ── Live progress sink (thread-local) ────────────────────────────────────
-//
-// Set by the cmd runner (cmd_factory::run_tool) before dispatching a tool
-// and cleared after — bracketed in RAII so exceptions can't leak state
-// across tools. Subprocess runners (run_command_s / run_win32_cmdline_s)
-// forward each read of the child's stdout+stderr to this sink, which
-// ultimately materialises as a ToolExecProgress Msg on the UI thread.
-//
-// Why thread-local: keeps ToolDef::execute's signature (json -> ExecResult)
-// stable; progress is an orthogonal concern of the *outer* cmd runner, not
-// of individual tool implementations. A tool that never touches a
-// subprocess (e.g. read_file) simply never emits anything.
-namespace progress {
-    using Sink = std::function<void(std::string_view snapshot)>;
-    void set(Sink s);
-    void clear();
-    // No-op if no sink is installed — cheap enough to call per pipe read.
-    void emit(std::string_view snapshot);
-    // Copy the sink installed on this worker so an async protocol reader can
-    // forward progress back to the originating tool card.
-    [[nodiscard]] Sink current();
-
-    // RAII guard. `set` on construction, `clear` on destruction.
-    struct Scope {
-        explicit Scope(Sink s) { set(std::move(s)); }
-        ~Scope()                { clear(); }
-        Scope(const Scope&)            = delete;
-        Scope& operator=(const Scope&) = delete;
-    };
-}
-
-namespace cancellation {
-    using Probe = std::function<bool()>;
-    void set(Probe probe);
-    void clear();
-    [[nodiscard]] Probe current();
-    [[nodiscard]] bool requested();
-
-    struct Scope {
-        explicit Scope(Probe probe) { set(std::move(probe)); }
-        ~Scope() { clear(); }
-        Scope(const Scope&) = delete;
-        Scope& operator=(const Scope&) = delete;
-    };
-}
 
 } // namespace agentty::tools
+
+// ToolDef is plain data plus `execute`, a std::function jaal can't see
+// inside. The closures it holds capture shared handles (a provider, the MCP
+// pool) that synchronise themselves, or nothing at all; none borrows from
+// the place it was built. So a ToolDef can be copied to another thread.
+MAYA_SENDABLE(agentty::tools::ToolDef);
+
+// Owned values, stop_tokens (thread-safe handles), and `progress`, a closure
+// the dispatcher builds to post into a Sink or a guarded buffer. A tool call
+// runs on a worker, so the context goes with it.
+MAYA_SENDABLE(agentty::tools::CallContext);

@@ -14,9 +14,11 @@
 #include "agtest.hpp"
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/provider/openai/transport.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/store/store.hpp"
 
+#include <cstdlib>   // setenv/unsetenv
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -28,6 +30,7 @@ namespace ui = agentty::ui;
 // list_models and the test is the only other caller.
 namespace agentty::provider::openai::detail {
 [[nodiscard]] int advertised_context_window(const nlohmann::json& m);
+[[nodiscard]] bool is_local_endpoint(const agentty::provider::openai::Endpoint& ep);
 }
 namespace det = agentty::provider::openai::detail;
 
@@ -91,6 +94,231 @@ TEST_CASE("context: garbage never throws or yields a bogus window") {
         const auto row = json::parse(src);
         CHECK(det::advertised_context_window(row) == 0, src);
     }
+}
+
+TEST_CASE("context: llama-server reports the window inside meta, not at the top") {
+    // Verbatim shape from llama.cpp tools/server/server-context.cpp
+    // (get_res_model_info). n_ctx is the SERVED window (slot_n_ctx, i.e.
+    // what -c allocated); n_ctx_train is the architectural ceiling.
+    //
+    // Issue #49: the flat ladder already listed n_ctx/n_ctx_train, but
+    // llama.cpp never puts them at the top level of a row — only inside
+    // `meta` — so every llama-server model fell through to the 200k
+    // default. An 8k model claiming 200k means compaction never fires and
+    // the server truncates the prompt instead.
+    const auto row = json::parse(R"({
+        "id": "qwen2.5-coder-7b",
+        "object": "model",
+        "owned_by": "llamacpp",
+        "meta": {
+            "vocab_type": 2, "n_vocab": 152064,
+            "n_ctx": 8192, "n_ctx_train": 32768,
+            "n_embd": 3584, "n_params": 7615616512,
+            "size": 4431389696, "ftype": 15
+        }
+    })");
+    // The SERVED window wins over the train-time ceiling: 8192 is what a
+    // request actually has to fit inside.
+    CHECK(det::advertised_context_window(row) == 8192);
+}
+
+TEST_CASE("context: llama-server falls back to n_ctx_train when n_ctx is absent") {
+    const auto row = json::parse(R"({
+        "id": "m", "meta": { "n_ctx_train": 32768 }
+    })");
+    CHECK(det::advertised_context_window(row) == 32768);
+}
+
+TEST_CASE("context: a meta block that says nothing is not a window") {
+    // `meta` exists on every llama.cpp row, so its mere presence must not
+    // be read as an answer — 0 has to stay "nobody said".
+    const auto row = json::parse(R"({
+        "id": "m", "meta": { "n_vocab": 152064, "ftype": 15 }
+    })");
+    CHECK(det::advertised_context_window(row) == 0);
+}
+
+TEST_CASE("context: LM Studio's loaded instance config is a window") {
+    // The per-instance config block from LM Studio's native
+    // /api/v1/models. The probe reads each loaded_instances[].config
+    // through this same parser, so `context_length` must resolve there.
+    const auto cfg = json::parse(R"({
+        "context_length": 16384,
+        "eval_batch_size": 512,
+        "flash_attention": true
+    })");
+    CHECK(det::advertised_context_window(cfg) == 16384);
+}
+
+TEST_CASE("context: an architectural maximum is not the loaded window") {
+    // LM Studio's /v1 shim reports max_context_length — what the model
+    // ARCHITECTURE supports. A model capable of 128k loaded at 16k still
+    // refuses at 16k.
+    //
+    // Both parse to a number, and that was the trap: the row looked
+    // "known", so the endpoint probe (which alone can see the loaded
+    // instance) never ran. The parser is right to return the declared
+    // value here — it is the only bound available until the model loads —
+    // but list_models must treat a smaller probed value as authoritative.
+    const auto row = json::parse(R"({
+        "id": "qwen/qwen3-coder-30b", "max_context_length": 262144
+    })");
+    CHECK(det::advertised_context_window(row) == 262144);
+
+    const auto loaded = json::parse(R"({ "context_length": 16384 })");
+    CHECK(det::advertised_context_window(loaded) == 16384);
+    // The whole point of the probe override: the runtime number is smaller,
+    // and smaller is the one a prompt has to respect.
+    CHECK(det::advertised_context_window(loaded)
+            < det::advertised_context_window(row));
+}
+
+// ── Which endpoints get the runtime-window probe ────────────────────────
+//
+// This decides NETWORK BEHAVIOUR. True costs a few extra round-trips per
+// refresh and is the only way a runtime window is ever learned; false means
+// the endpoint keeps whatever its /v1/models row declared. Both mistakes are
+// silent, which is why the classification is pinned here.
+namespace {
+agentty::provider::openai::Endpoint host_ep(const char* h) {
+    agentty::provider::openai::Endpoint ep;
+    ep.host = h;
+    return ep;
+}
+}
+
+TEST_CASE("probe: a server on your own network counts as local") {
+    // The first version of this checked loopback only. Reported on #49
+    // within hours: "I do host llama-server on a different host than the
+    // loopback". Putting the model server on the box with the GPU is the
+    // NORMAL way to run local models, and that setup was left with a
+    // permanently wrong context window.
+    CHECK(det::is_local_endpoint(host_ep("localhost")));
+    CHECK(det::is_local_endpoint(host_ep("127.0.0.1")));
+    CHECK(det::is_local_endpoint(host_ep("127.0.0.2")));      // 127/8
+    CHECK(det::is_local_endpoint(host_ep("::1")));
+    CHECK(det::is_local_endpoint(host_ep("host.docker.internal")));
+
+    // RFC1918 — the LAN cases from the report.
+    CHECK(det::is_local_endpoint(host_ep("192.168.1.50")));
+    CHECK(det::is_local_endpoint(host_ep("10.0.0.7")));
+    CHECK(det::is_local_endpoint(host_ep("172.16.0.1")));
+    CHECK(det::is_local_endpoint(host_ep("172.31.255.254")));
+
+    // Link-local, CGNAT (tailscale hands out 100.64/10), mDNS, and a bare
+    // single-label hostname that cannot resolve on the public internet.
+    CHECK(det::is_local_endpoint(host_ep("169.254.1.1")));
+    CHECK(det::is_local_endpoint(host_ep("100.84.22.21")));
+    CHECK(det::is_local_endpoint(host_ep("gpubox.local")));
+    CHECK(det::is_local_endpoint(host_ep("gpubox")));
+
+    // IPv6 unique-local and link-local.
+    CHECK(det::is_local_endpoint(host_ep("fd00::1")));
+    CHECK(det::is_local_endpoint(host_ep("fe80::1")));
+}
+
+TEST_CASE("probe: a hosted API is never probed") {
+    // The other half. Probing these buys a guaranteed 404 per route per
+    // refresh, forever, for every user.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("api.openai.com")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("api.anthropic.com")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("openrouter.ai")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("api.mistral.ai")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("")));
+
+    // 172.x OUTSIDE 16-31 is public (172.15 and 172.32 are routable), and
+    // 17.x is Apple. A prefix match on "172." or "17." would swallow both.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("172.15.0.1")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("172.32.0.1")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("17.253.144.10")));
+    // 100.x outside the CGNAT range is public too.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("100.1.2.3")));
+}
+
+TEST_CASE("probe: a learned host is treated as self-hosted from then on") {
+    // The add-host flow probes EVERY new host regardless of address. A host
+    // that answers a runtime route (/props, /api/ps, loaded_instances) has
+    // proven what it is — no hosted API serves those — so it is remembered
+    // and every later refresh probes it too.
+    //
+    // This is what replaces a settings toggle: the server already told us
+    // what it is, so asking the user to confirm would be asking them to
+    // repeat an answer we have.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("llm.example.com")));
+
+    agentty::provider::openai::install_probe_hosts({"llm.example.com"});
+    CHECK(det::is_local_endpoint(host_ep("llm.example.com")));
+    // Exact host only — learning one host must not opt in its neighbours.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("other.example.com")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("evil-llm.example.com")));
+
+    // Install replaces wholesale, so a host dropped from settings stops
+    // being probed rather than lingering in a stale set.
+    agentty::provider::openai::install_probe_hosts({});
+    CHECK_FALSE(det::is_local_endpoint(host_ep("llm.example.com")));
+}
+
+TEST_CASE("probe: AGENTTY_PROBE_HOSTS opts a public host in") {
+    // The escape hatch for a server reached over a VPN with its own DNS, or
+    // through a tunnel, where no heuristic can tell. Without this the answer
+    // to "my server is at llm.example.com" is "unsupported", and the window
+    // stays wrong forever — the probe is the ONLY way to learn it.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("llm.example.com")));
+
+    ::setenv("AGENTTY_PROBE_HOSTS", "llm.example.com", 1);
+    CHECK(det::is_local_endpoint(host_ep("llm.example.com")));
+    // Exact match only — a suffix must not opt in the whole domain.
+    CHECK_FALSE(det::is_local_endpoint(host_ep("evil-llm.example.com")));
+
+    // Comma-separated, spaces tolerated.
+    ::setenv("AGENTTY_PROBE_HOSTS", "a.example.com, b.example.com", 1);
+    CHECK(det::is_local_endpoint(host_ep("a.example.com")));
+    CHECK(det::is_local_endpoint(host_ep("b.example.com")));
+    CHECK_FALSE(det::is_local_endpoint(host_ep("c.example.com")));
+
+    ::unsetenv("AGENTTY_PROBE_HOSTS");
+    CHECK_FALSE(det::is_local_endpoint(host_ep("a.example.com")));
+}
+
+TEST_CASE("context: a GGUF arch-prefixed context_length is a window") {
+    // How the window is spelled in a model's own metadata, and exactly what
+    // Ollama's CLI reads (cmd/cmd.go showInfo). The arch prefix varies per
+    // family, so it is matched by suffix.
+    const auto row = json::parse(R"({
+        "model_info": {
+            "general.architecture": "qwen2",
+            "qwen2.context_length": 32768,
+            "qwen2.embedding_length": 3584
+        }
+    })");
+    CHECK(det::advertised_context_window(row) == 32768);
+}
+
+TEST_CASE("context: a FLOAT context_length still counts") {
+    // Ollama itself sends a plain integer — verified against a real 0.34.2
+    // daemon, which answers "qwen3.context_length":40960. But ModelInfo is
+    // typed map[string]any, so nothing in the protocol guarantees that, and
+    // LiteLLM already emits this class of field as a float (16385.0).
+    //
+    // Being strict costs a whole window when it is wrong and buys nothing
+    // when it is right.
+    const auto row = json::parse(R"({
+        "model_info": { "qwen2.context_length": 32768.0 }
+    })");
+    CHECK(det::advertised_context_window(row) == 32768);
+
+    // The flat spellings take floats too — LiteLLM emits 16385.0.
+    const auto flat = json::parse(R"({ "context_length": 16385.0 })");
+    CHECK(det::advertised_context_window(flat) == 16385);
+}
+
+TEST_CASE("context: embedding_length is not a context window") {
+    // Both keys live side by side in model_info and both end in "_length".
+    // Matching too loosely would report a 3584-token window for a 32k model.
+    const auto row = json::parse(R"({
+        "model_info": { "qwen2.embedding_length": 3584 }
+    })");
+    CHECK(det::advertised_context_window(row) == 0);
 }
 
 TEST_CASE("context: resolution order is override > advertised > id") {

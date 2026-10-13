@@ -24,6 +24,8 @@
 #include <fstream>
 #include <string>
 
+#include <unistd.h>   // geteuid — root reads anything, so skip there
+
 namespace fs = std::filesystem;
 using namespace agentty;
 
@@ -186,6 +188,53 @@ TEST_CASE("blob gc: a torn log line aborts the sweep") {
     CHECK(blob_exists(dir, orphan));
 }
 
+TEST_CASE("blob gc: an unlistable threads dir deletes nothing") {
+    // The nastiest version of "unknown references cannot be assumed
+    // absent", because it does not look like a failure at all.
+    //
+    // `directory_iterator(dir, ec)` yields NOTHING when it cannot open the
+    // directory, and a range-for cannot tell that from an empty directory.
+    // So an unreadable threads dir scanned 0 threads, found 0 references,
+    // left `unreadable` at 0 -- and the sweep, seeing no references at all,
+    // deleted EVERY blob. The safety rule below already said what to do
+    // with an unreadable input; nothing had told it this was one.
+    //
+    // Root can read anything, so this would pass vacuously there. Windows
+    // can't express "unlistable" through fs::permissions at all (it only
+    // toggles the read-only attribute), so the precondition can't be built.
+#if defined(_WIN32)
+    return;
+#else
+    if (::geteuid() == 0) return;
+#endif
+
+    const auto dir = make_dir("unlistable");
+    const auto blob = put_in(dir, std::string(256, 'u'));
+    write_file(dir / "t.json", nlohmann::json{
+        {"id", "t"},
+        {"messages", nlohmann::json::array({
+            nlohmann::json{{"images", nlohmann::json::array({
+                nlohmann::json{{"blob", blob}}})}}})}
+    }.dump());
+
+    // The blobs/ subdir stays readable -- only the thread listing fails, so
+    // the GC can still SEE the payloads it would wrongly delete.
+    std::error_code ec;
+    const auto before = fs::status(dir, ec).permissions();
+    fs::permissions(dir, fs::perms::owner_exec, ec);   // traverse, not list
+
+    const auto st = blobs::collect_in(dir);
+
+    fs::permissions(dir, before, ec);                  // restore for cleanup
+
+    CHECK_MESSAGE(!st.ran, "a sweep that could not read its input did not run");
+    CHECK_MESSAGE(st.unreadable > 0u,
+                  "an unlistable dir counts as unreadable, not as empty");
+    CHECK_MESSAGE(st.deleted == 0u, "nothing is deleted on unknown references");
+    CHECK_MESSAGE(blob_exists(dir, blob),
+                  "the referenced payload survives");
+}
+
 TEST_CASE("blob gc: dry_run reports without deleting") {
     const auto dir = make_dir("dry");
     const auto orphan = put_in(dir, std::string(1024, 'z'));
@@ -247,4 +296,40 @@ TEST_CASE("blob gc: an empty store is a no-op") {
     CHECK(st.total_blobs == 0u);
     CHECK(st.deleted == 0u);
     CHECK(st.scanned_threads == 0u);
+}
+
+TEST_CASE("blob gc: grace window spares young orphans") {
+    const auto dir = make_dir("grace");
+    const auto young = put_in(dir, std::string(100, 'y'));
+    const auto old   = put_in(dir, std::string(200, 'o'));
+    std::error_code ec;
+    fs::last_write_time(dir / "blobs" / old,
+                        fs::file_time_type::clock::now() - std::chrono::hours{48}, ec);
+    REQUIRE(!ec);
+    write_file(dir / "t.json", nlohmann::json{{"id", "t"},
+        {"messages", nlohmann::json::array()}}.dump());
+
+    const auto st = blobs::collect_in(dir, false, std::chrono::hours{24});
+    CHECK(st.ran);
+    CHECK_MESSAGE(blob_exists(dir, young),
+                  "a fresh orphan may be mid-save; it must survive");
+    CHECK_FALSE(blob_exists(dir, old));
+    CHECK(st.deleted == 1u);
+}
+
+// The background GC must never outlive main(). The Windows CI pipe smoke
+// test (stdin at EOF → exit at once) crashed 0xC0000005 when the walk ran
+// on a detached thread into static destruction. start + join right away
+// must return at once and run nothing; join must be idempotent.
+TEST_CASE("blob gc: background thread joins at once and runs nothing") {
+    const auto t0 = std::chrono::steady_clock::now();
+    blobs::start_background_gc();
+    blobs::start_background_gc();                 // second start is a no-op
+    blobs::join_background_gc(agtest::cap());
+    blobs::join_background_gc(agtest::cap());                  // idempotent
+    blobs::start_background_gc();                 // after join: stays stopped
+    blobs::join_background_gc(agtest::cap());
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    CHECK_MESSAGE(ms < 1000, "join must not wait out the start delay");
 }

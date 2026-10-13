@@ -21,6 +21,8 @@
 #include <string>
 #include <string_view>
 
+#include <maya/runtime.hpp>
+
 // Declarations — arity per the original main().
 #define FOLD_NOARGS(name) extern int name##_main();
 #define FOLD_ARGS(name)   extern int name##_main(int, char**);
@@ -34,11 +36,19 @@ int main(int argc, char** argv) {
     // threads and settings; without this they mutate the developer's
     // real ~/.agentty. Mirrors tests/test_main.cpp; see the rationale
     // there and the tripwire in util/user_root.cpp.
+    //
+    // It also mirrors that file's CLEANUP, which it did not before and which
+    // cost 12 GB of /tmp and a failed build. test_main.cpp creates one sandbox
+    // per BINARY; this binary is re-exec'd per folded test, so ctest spawns it
+    // ~150 times a run and every one leaked a ~250 MB directory. The symptom
+    // arrives much later and looks unrelated: "No space left on device" while
+    // compiling something else entirely.
+    namespace fs = std::filesystem;
+    fs::path sandbox;
     {
-        namespace fs = std::filesystem;
         const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        const auto sandbox = fs::temp_directory_path() /
+        sandbox = fs::temp_directory_path() /
             ("agentty_stests_home_" + std::to_string(stamp));
         std::error_code ec;
         fs::create_directories(sandbox, ec);
@@ -50,6 +60,48 @@ int main(int argc, char** argv) {
         ::setenv("AGENTTY_UNDER_TEST", "1", 1);
 #endif
     }
+    // Sweep sandboxes an EARLIER run abandoned (a crash or SIGKILL skips the
+    // cleanup at exit, and those runs are exactly the ones worth
+    // investigating) -- so only directories older than a day go, never a
+    // sibling ctest worker's live one. Same rule and same reasoning as
+    // test_main.cpp, including the breadth: the whole `agentty_*` namespace
+    // rather than this binary's own prefix, because individual tests mint
+    // their own temp dirs and most never clean up. One rule beats 47.
+    {
+        std::error_code ec;
+        const auto now = fs::file_time_type::clock::now();
+        for (fs::directory_iterator it(fs::temp_directory_path(), ec), end;
+             !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().string();
+            if (!name.starts_with("agentty_") &&
+                !name.starts_with("agentty-")) continue;
+            std::error_code dec;
+            if (!fs::is_directory(it->path(), dec) || dec) continue;
+            std::error_code sec;
+            const auto mt = fs::last_write_time(it->path(), sec);
+            if (sec || now - mt < std::chrono::hours(24)) continue;
+            std::error_code rec;
+            fs::remove_all(it->path(), rec);
+        }
+    }
+    // Remove it on the way out, on EVERY path.
+    //
+    // RAII rather than code at the end of main, because the dispatch below is
+    // a wall of `return name##_main(...)` macros -- there is no single exit to
+    // put cleanup after, and a `return` added by the next person would skip it
+    // silently. A destructor cannot be forgotten.
+    //
+    // Best-effort: a leaked sandbox is a slow leak, and a failed remove is not
+    // worth failing a green test over.
+    struct SandboxCleanup {
+        fs::path dir;
+        ~SandboxCleanup() {
+            if (dir.empty()) return;
+            std::error_code ec;
+            fs::remove_all(dir, ec);
+        }
+    } cleanup{sandbox};
+
     // These tests drive the real app reducers, some of which fire a network
     // prewarm (a detached background TLS handshake). A standalone test never
     // calls join_prewarm(), so that thread would outlive main() and race
@@ -59,6 +111,13 @@ int main(int argc, char** argv) {
     _putenv_s("AGENTTY_NO_PREWARM", "1");
 #else
     ::setenv("AGENTTY_NO_PREWARM", "1", 1);
+    // Tests' own temp dirs go inside the sandbox, so cleanup takes them too.
+    {
+        const fs::path tmp = sandbox / "tmp";
+        std::error_code ec;
+        fs::create_directories(tmp, ec);
+        if (!ec) ::setenv("TMPDIR", tmp.c_str(), 1);
+    }
 #endif
     if (argc < 2) {
         std::fprintf(stderr,
@@ -71,6 +130,16 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string_view which{argv[1]};
+
+    // Stand in for the kernel's loop thread. Same reasoning as
+    // tests/test_main.cpp: these tests drive reducers and view() directly on
+    // the main thread rather than running a kernel, and view() touches
+    // loop-bound render state. Off the loop that is an abort by design, so
+    // the harness has to say "this thread is the loop" — which is true here.
+    //
+    // A worker spawned inside a test still has no token, so the guarantee is
+    // intact where it matters.
+    const maya::loop_identity loop_id;
     // Build the sub-argv: keep argv[0] as the REAL executable path (a test may
     // re-exec itself — external_acp_backend_test spawns argv[0] as a fake ACP
     // agent), drop the dispatch name at argv[1], keep the rest as the test's

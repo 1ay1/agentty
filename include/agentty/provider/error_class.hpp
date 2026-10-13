@@ -199,6 +199,193 @@ enum class ErrorClass {
         || lower_contains("context-1m");   // future error-shape drift
 }
 
+// Did the request not fit in the model's context window? Anthropic says
+// "prompt is too long", OpenAI "context_length_exceeded" / "maximum context
+// length", llama.cpp "exceeds the available context size".
+[[nodiscard]] inline bool is_context_overflow(std::string_view message) noexcept {
+    auto lower_contains = [&](std::string_view needle) noexcept -> bool {
+        if (needle.size() > message.size()) return false;
+        for (std::size_t i = 0; i + needle.size() <= message.size(); ++i) {
+            bool ok = true;
+            for (std::size_t j = 0; j < needle.size(); ++j) {
+                char a = message[i + j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                if (a != needle[j]) { ok = false; break; }
+            }
+            if (ok) return true;
+        }
+        return false;
+    };
+    return lower_contains("prompt is too long")
+        || lower_contains("context_length_exceeded")
+        || lower_contains("maximum context length")
+        || lower_contains("exceeds the available context size")
+        || lower_contains("exceed_context_size");
+}
+
+// ── Vision rejection → learned capability / entitlement ────────────────
+//
+// A request carrying images can be refused for FOUR different reasons, and
+// they want three different reactions. Copilot's API returns each as its
+// own sentence — these strings are lifted from the GitHub CLI's own binary
+// (`runtime.node`), so they are what the server actually says rather than
+// what we imagine it says:
+//
+//   "not supported for vision"                       model cannot see
+//   "image media type not supported"                 this FORMAT is out
+//   "exceeded maximum number of images"              too MANY, not too big
+//   "vision is not enabled for this organization"    policy, not capability
+//
+// The last one is the interesting one, and it is why this returns a KIND
+// rather than a bool. "The model cannot see" and "your org forbids it" are
+// both 400s mentioning vision, but:
+//
+//   • a model capability is a property of the MODEL — switching accounts
+//     changes nothing, and the fix is to pick a different model
+//   • an org policy is a property of the ACCOUNT — the same model works
+//     fine on another login, and recording it as a model capability would
+//     poison the model for every account (exactly the bug
+//     domain::entitlement's keyed storage was built to prevent, see its
+//     header note on the account-blind `context_1m_blocked` bool)
+//
+// Collapsing them loses the distinction that decides what to tell the user
+// and what to remember.
+enum class VisionRejection : std::uint8_t {
+    None,           // not a vision rejection at all
+    ModelCapability,// this model cannot accept images (any account)
+    MediaType,      // the model sees images, just not THIS format
+    TooManyImages,  // over the per-request image count limit
+    OrgPolicy,      // the account's organisation disabled vision
+};
+
+[[nodiscard]] constexpr std::string_view tag(VisionRejection v) noexcept {
+    switch (v) {
+        case VisionRejection::None:            return "none";
+        case VisionRejection::ModelCapability: return "model_capability";
+        case VisionRejection::MediaType:       return "media_type";
+        case VisionRejection::TooManyImages:   return "too_many_images";
+        case VisionRejection::OrgPolicy:       return "org_policy";
+    }
+    return "?";
+}
+
+[[nodiscard]] inline VisionRejection classify_vision_rejection(
+        std::string_view message, int http_status) noexcept {
+    // Same status gate as the long-context detector: 0 means the status is
+    // unavailable (an SSE error body inside a 200), which is exactly when a
+    // message sniff is the only evidence there is.
+    if (http_status != 0 && http_status != 400 && http_status != 422)
+        return VisionRejection::None;
+
+    auto lower_contains = [&](std::string_view needle) noexcept -> bool {
+        if (needle.size() > message.size()) return false;
+        for (std::size_t i = 0; i + needle.size() <= message.size(); ++i) {
+            bool ok = true;
+            for (std::size_t j = 0; j < needle.size(); ++j) {
+                char a = message[i + j], b = needle[j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                if (a != b) { ok = false; break; }
+            }
+            if (ok) return true;
+        }
+        return false;
+    };
+
+    // ORDER MATTERS. "vision is not enabled for this organization" also
+    // contains "vision", so the narrow, most-specific test has to run
+    // first or an org-policy block would be recorded as a permanent model
+    // capability — and the model would stay image-less on every account,
+    // including ones that are entitled.
+    if (lower_contains("for this organization")
+     || lower_contains("for this organisation")   // en-GB drift
+     || lower_contains("organization policy"))
+        return VisionRejection::OrgPolicy;
+
+    if (lower_contains("maximum number of images")
+     || lower_contains("too many images"))
+        return VisionRejection::TooManyImages;
+
+    if (lower_contains("media type not supported")
+     || lower_contains("could not process image")
+     || lower_contains("unsupported image"))
+        return VisionRejection::MediaType;
+
+    if (lower_contains("not supported for vision")
+     || lower_contains("does not support image")
+     || lower_contains("image input is not supported")
+     || lower_contains("vision is not supported"))
+        return VisionRejection::ModelCapability;
+
+    return VisionRejection::None;
+}
+
+// ── Optional-field rejection → learned capability ────────────────────────
+// The OpenAI-compat family is not one API: each host validates the body
+// against its OWN schema, and a strict one 400s any field it doesn't know
+// — killing a turn over an OPTIMISATION (#93):
+//   Groq:   "property 'prompt_cache_key' is unsupported"
+//   Gemini: "Invalid JSON payload received. Unknown name \"prompt_cache_key\":
+//            Cannot find field."
+//   others: "Unrecognized request argument supplied: stream_options",
+//           "Extra inputs are not permitted" (pydantic: loc names it), …
+// The registry opts hosts in to the fields it knows they take, so a
+// built-in row never hits this. It is the safety net for everything else:
+// custom hosts, a gateway in front of a strict backend, a provider that
+// tightens its schema next month. Returns which OPTIONAL field the server
+// named — only fields agentty can drop and still send a correct request;
+// a rejection of `messages`/`model`/`tools` is a real error, never
+// "learned" away. The reducer records it for this host and retries the
+// SAME turn without the field.
+enum class OptionalField : std::uint8_t {
+    None = 0,
+    PromptCacheKey = 1u << 0,
+    StreamOptions  = 1u << 1,
+};
+[[nodiscard]] constexpr std::uint8_t bit(OptionalField f) noexcept {
+    return static_cast<std::uint8_t>(f);
+}
+[[nodiscard]] constexpr std::string_view wire_name(OptionalField f) noexcept {
+    switch (f) {
+        case OptionalField::PromptCacheKey: return "prompt_cache_key";
+        case OptionalField::StreamOptions:  return "stream_options";
+        case OptionalField::None:           break;
+    }
+    return {};
+}
+[[nodiscard]] inline OptionalField parse_rejected_field(
+        std::string_view message, int http_status) noexcept {
+    if (http_status != 0 && http_status != 400 && http_status != 422)
+        return OptionalField::None;
+    auto lower = [](char c) noexcept {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+    };
+    auto icontains = [&](std::string_view needle) noexcept {
+        if (needle.size() > message.size()) return false;
+        for (std::size_t i = 0; i + needle.size() <= message.size(); ++i) {
+            std::size_t k = 0;
+            while (k < needle.size() && lower(message[i + k]) == needle[k]) ++k;
+            if (k == needle.size()) return true;
+        }
+        return false;
+    };
+    // The message must SAY the field is unknown/unsupported — naming a
+    // field in some unrelated error ("prompt_cache_key must be a string")
+    // is a value error we must not paper over by dropping it.
+    constexpr std::string_view kRejectionWords[] = {
+        "unsupported", "not supported", "unknown name", "unknown field",
+        "unknown parameter", "unrecognized", "unrecognised",
+        "cannot find field", "not permitted", "not allowed",
+        "extra inputs", "additional properties", "invalid field",
+    };
+    bool says_unknown = false;
+    for (auto w : kRejectionWords) if (icontains(w)) { says_unknown = true; break; }
+    if (!says_unknown) return OptionalField::None;
+    for (auto f : {OptionalField::PromptCacheKey, OptionalField::StreamOptions})
+        if (icontains(wire_name(f))) return f;
+    return OptionalField::None;
+}
+
 // ── reasoning_effort rejection → learned capability ──────────────────────
 // Parse a 4xx body that REJECTS the reasoning_effort parameter and extract
 // what the provider says it accepts — this is capability DISCOVERY, not a
@@ -301,6 +488,57 @@ enum class ErrorClass {
     // nearest_effort clamp keeps requests inside the set either way).
     if (!any_named) return std::uint8_t{0};   // param rejected outright
     return set;
+}
+
+// ── Wire error TYPE → HTTP status ────────────────────────────────────────
+//
+// A mid-stream `event: error` body carries a machine-readable `error.type`
+// and no HTTP status: by the time the SSE body is flowing, the status line
+// is long past (it was 200). So the classifier fell back to sniffing the
+// human `message`, which is the lossy path this header exists to avoid.
+//
+// That fallback is only mostly right, and the failures are asymmetric:
+//
+//   • a provider that phrases `overloaded_error` as "The model is currently
+//     experiencing high demand" has no substring the sniffer knows, so a
+//     retryable overload classifies Terminal and the turn dies
+//   • a genuine `invalid_request_error` whose message happens to contain
+//     the word "connection" classifies Transient and gets retried six
+//     times against a request that can never succeed
+//
+// Both vanish if we use the field the server already typed for us. This
+// maps the error taxonomy onto the equivalent HTTP status, so the SSE path
+// reaches the SAME compile-time-proven classify(HttpError) table as the
+// header path instead of a parallel, drifting substring list.
+//
+// Returns 0 for an unrecognised type, which means "no opinion" — the caller
+// keeps its existing string-sniff behaviour rather than guessing Terminal.
+//
+// Covers Anthropic's published taxonomy plus the OpenAI/Responses spellings
+// that mean the same thing; both dialects surface errors this way and a
+// shared table is one fewer place to drift.
+[[nodiscard]] inline int wire_error_type_status(std::string_view type) noexcept {
+    // Rate limiting — the server is shedding load on purpose.
+    if (type == "rate_limit_error" || type == "rate_limit_exceeded"
+     || type == "insufficient_quota")
+        return 429;
+    // Overload / transient server-side — same request will likely work.
+    if (type == "overloaded_error" || type == "api_error"
+     || type == "server_error" || type == "service_unavailable")
+        return 503;
+    // Auth — credentials, not the request.
+    if (type == "authentication_error" || type == "invalid_api_key")
+        return 401;
+    if (type == "permission_error" || type == "permission_denied")
+        return 403;
+    // Terminal request problems — re-sending changes nothing.
+    if (type == "invalid_request_error" || type == "invalid_request")
+        return 400;
+    if (type == "not_found_error" || type == "model_not_found")
+        return 404;
+    if (type == "request_too_large" || type == "context_length_exceeded")
+        return 413;
+    return 0;   // unknown — no opinion, let the caller sniff
 }
 
 // Backoff duration for the Nth retry attempt (0-indexed). Caps at 6
@@ -421,6 +659,22 @@ inline constexpr std::chrono::seconds kRetryDecayWindow{90};
 // model) could loop failure→backoff→reset→failure forever. After this many
 // no-progress attempts the failure latches Terminal regardless of class.
 inline constexpr int kMaxNoProgressFailures = 6;
+
+// A `Retry-After` longer than this is a QUOTA, not a burst limit — treat it
+// as terminal instead of waiting.
+//
+// 429 covers two unrelated situations and only one of them is worth retrying.
+// A burst/concurrency limit clears in seconds. A plan quota does not clear
+// until it resets: Yolo-Auto's free tier answers `retry-after: 29410` (8 h,
+// to 00:00 UTC) with type=insufficient_quota, and hosted providers answer
+// similarly on a billing cap.
+//
+// Retrying the second kind is always wrong — every attempt is guaranteed to
+// fail with the message the FIRST response already carried, so the user waits
+// through a backoff to learn nothing. 15 minutes is the line: beyond it,
+// nobody is sitting at a terminal waiting for the window to open, and saying
+// so immediately is strictly more useful than saying it later.
+inline constexpr long kRetryAfterTerminalSeconds = 15 * 60;
 
 [[nodiscard]] constexpr std::string_view to_string(ErrorClass k) noexcept {
     switch (k) {

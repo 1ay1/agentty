@@ -7,7 +7,7 @@
 // A theme is judged by LOOKING at it. If choosing and seeing are separated
 // by a save keystroke (never mind a restart) the only way to evaluate a
 // scheme is to commit to it first, which is exactly backwards. So each row
-// writes through on the keystroke that changes it: mutate `m.d.ui`, persist
+// writes through on the keystroke that changes it: mutate `m.d.ui()`, persist
 // to the user store, rebuild the form, and the next frame is painted with
 // it. `Form::dirty` is never set here, because it can never be true.
 //
@@ -23,6 +23,7 @@
 // .agentty/settings.json.
 
 #include "agentty/domain/ui_theme.hpp"
+#include "agentty/i18n/startup.hpp"   // resolve_language on Auto
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -45,17 +46,24 @@ namespace up = agentty::ui_prefs;
 
 namespace {
 
-// Persist the prefs to the USER store. Write-behind at the Deps seam, so a
-// reducer never stalls a frame on the disk — which is what makes saving on
-// every keystroke affordable in the first place.
-void persist(const Model& m) {
-    auto s = deps().load_settings();
-    s.ui = m.d.ui;
-    deps().save_settings(s);
+// Persist the prefs to the USER store.
+//
+// Goes through persist_settings rather than saving `m.d.persisted` straight:
+// only `ui` is aliased into the record (Domain::ui() returns persisted.ui).
+// `effort`, `model_id`, `profile`, `smart` and the active provider live as
+// SEPARATE Domain fields, so a raw save of the record wrote whatever those
+// held at init() time and silently reverted every change made since — a
+// theme tweak would undo a model switch. persist_settings syncs the scattered
+// fields into the record first, then saves, then writes it back.
+//
+// Still write-behind at the Deps seam, so a reducer never stalls a frame on
+// the disk; that is what makes saving on every keystroke affordable.
+[[nodiscard]] Cmd persist(Model& m) {
+    return persist_settings(m);
 }
 
 // Rebuild the pane's rows from the prefs. The form is a PROJECTION of
-// `m.d.ui`, never a second copy of it: the reducer edits the prefs and
+// `m.d.ui()`, never a second copy of it: the reducer edits the prefs and
 // re-derives, so there is no path on which the rows and the truth disagree.
 // Cursor and focus are carried across because the user's place in the list
 // is not part of what changed.
@@ -64,7 +72,7 @@ void reproject(Model& m) {
     if (!o) return;
     const int cursor = o->pane.form.cursor;
     auto focus = o->pane.form.focus;
-    o->pane.form = pn::build_appearance_form(m.d.ui, /*tty=*/true);
+    o->pane.form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
     o->pane.form.cursor = std::clamp(cursor, 0,
                                 std::max(0, static_cast<int>(o->pane.form.fields.size()) - 1));
     o->pane.form.focus = focus;
@@ -79,98 +87,122 @@ void reproject(Model& m) {
 // conversation on screen and the chrome restyles while the transcript above
 // it does not. The taller the thread, the more of the screen stays wrong.
 //
-// rehydrate_frozen is the documented escape hatch for exactly this (see
-// frozen.cpp's lifecycle invariants: "if such a mutation becomes necessary
-// … call rehydrate_frozen() to rebuild from scratch"). It re-seals every
-// turn under the theme now in force.
-//
-// Safe because a theme change is HEIGHT-PRESERVING: only the colours of
-// each cell differ, so every rebuilt block lands at the height the ledger
-// already recorded. A STRUCTURAL pref (compact turns, density) must not do
-// this — it would re-seal at a new height and tear the ledger, which is why
-// those settings are documented as forward-only.
+// THAT IS HISTORY. Colours are late-bound now (docs/LATE_BINDING.md): a
+// sealed Element carries symbolic slots and resolves at PAINT, so it follows
+// the live theme without being rebuilt. The paragraph above is kept because
+// it names the failure precisely, and because the reasoning below — about
+// what a re-seal costs — is exactly why we stopped doing one.
 }  // namespace
 
-// Re-style everything already built under a NEW theme.
+// Publish a NEW theme to everything already on screen.
 //
-// Declared in internal.hpp: external linkage so its cost is measurable
+// Declared in internal.hpp: external linkage so its cost stays measurable
 // (theme_preview_cost_probe), because this runs on EVERY arrow key in the
 // theme browser — "moving applies it, you are looking at the preview" is that
 // panel's whole design.
 //
-// ── Why there is only one of these ───────────────────────────────────────
+// ── Why this is now a publish and not a rebuild ───────────────────────
 //
-// A cheaper "preview" variant that skipped rehydrate_frozen() is tempting and
-// WRONG: the frozen ledger is PAINTED every frame (conversation.cpp hands it
-// to maya as cfg.ledger), so its Elements are on screen. Skipping it previews
-// the new scheme on the newest turns and leaves everything above in the old
-// one — worse than not previewing at all.
+// It used to re-seal the frozen prefix through rehydrate_frozen() and drop
+// every settled turn's built Element, because both had the outgoing palette
+// RESOLVED into them and nothing else would ever invalidate them (a theme
+// switch changes no bytes, so no content-keyed cache notices).
 //
-// It is also unnecessary. The ledger is bounded to ~3 viewports by
-// frozen_row_budget(), so this is O(visible rows), NOT O(transcript):
-// measured at 0.64 ms on a 3000-message thread, 2% of the 33 ms budget at 30
-// keys/sec, and FLAT as the thread grows.
+// Two things were wrong with paying that cost, and the second one is the
+// reason the whole approach was abandoned:
 //
-// What actually made the browser lag was never this function's cost — it was
-// calling persist() alongside it on every keystroke (a settings write per
-// arrow) and re-sealing turns whose HEIGHT could change. Height stability is
-// the load-bearing part: a re-seal at a new height shifts maya's committed
-// scrollback prefix, check_scrollback fails, the frame demotes to Stale, and
-// recovery is a full-viewport repaint (~33 KB instead of 13 bytes). At 30
-// keys/sec that is ~1 MB/s the terminal cannot composite — the highlight
-// appears frozen until you stop, which only happens on a thread long enough
-// to have a frozen prefix at all.
+//   1. It is unnecessary under late binding. The Elements are not stale.
+//
+//   2. It scales with the transcript, and a preview keystroke does not have
+//      that much time. Re-rendering committed content per switch measured
+//      2.42 -> 4.65 ms per keypress on a 100-message thread and grew with
+//      length; past one key-repeat slot (33 ms at 30/s) keys outrun frames,
+//      frames coalesce, and the browser visibly updates on every SECOND
+//      theme you arrow past. "Slow" and "skips every other entry" are one
+//      symptom, and this was its cause.
+//
+// Height stability is why a re-seal is dangerous rather than merely slow: a
+// rebuild at a different height shifts maya's committed scrollback prefix,
+// check_scrollback fails, the frame demotes to Stale, and recovery is a
+// full-viewport repaint (~33 KB instead of 13 bytes). At 30 keys/sec that is
+// ~1 MB/s the terminal cannot composite. Not rebuilding at all is both
+// cheaper and safer than rebuilding carefully.
+//
+// A STRUCTURAL pref (density, compact turns) is different in kind: it
+// changes row HEIGHTS, which invalidates the ledger's recorded measurements
+// rather than their colours. Those stay forward-only — they apply to turns
+// rendered from then on, and are deliberately not retro-applied, because
+// re-sealing at a new height tears the ledger. See pull_field below.
 void restyle_sealed_turns(Model& m) {
-    // Publish FIRST. The reducer runs before view(), which is where the
-    // theme is normally resolved and published — so rebuilding here without
-    // this would re-seal every turn under the theme we are leaving, which
-    // is the exact bug being fixed, one frame later. The turn builders read
-    // `ui::` tokens, and those resolve through the live theme at BUILD time.
+    // Publish the theme. That is now ALMOST the whole job.
     //
-    // publish_theme drives BOTH sinks (see ui_theme.hpp). That matters here
-    // more than anywhere: rehydrate_frozen() below rebuilds sealed turns
-    // immediately, and markdown prose renders from a PROJECTED palette
-    // (~74 `colors::` reads in render_block.cpp alone) that is re-derived
-    // by maya's on_theme_changed hook. Publishing only agentty's half left
-    // that projection stale, so the rebuild baked the OUTGOING palette into
-    // the new Elements — on a dark→light swap, dark ink on a light canvas
-    // for the whole transcript, with only the newest unsealed message
-    // looking right.
+    // Colours are LATE-BOUND (docs/LATE_BINDING.md): a built Element carries
+    // symbolic `Color::slot(...)` values, and maya resolves them in
+    // Style::to_sgr() against whatever theme is live at PAINT time. So a
+    // sealed turn built ten themes ago paints correctly under the current
+    // one without being touched, and StylePool::retheme() re-derives the
+    // cached SGR bytes on the swap — ids stay valid, no canvas cell needs
+    // rewriting.
+    //
+    // This function used to rebuild the entire sealed transcript on every
+    // arrow key, because a committed Element really did have the outgoing
+    // palette baked into it. That rebuild was O(transcript) per keystroke,
+    // and on a long thread it cost more than a key-repeat slot — keys
+    // outran frames, frames coalesced, and the browser visibly updated on
+    // every SECOND theme you passed. "Slow" and "skips entries" were one
+    // symptom. Late binding deletes the work instead of optimising it.
+    //
+    // publish_theme drives BOTH sinks (see ui_theme.hpp): agentty's own
+    // token atom and maya::app_set_theme, which bumps the theme epoch and
+    // re-derives every projected palette. Publishing only one half is its
+    // own bug — markdown prose renders from a projection, so a half-publish
+    // left prose on the old scheme while the chrome moved.
     //
     // Cheap and idempotent: view() publishes the same value again next
     // frame, and publish is a pointer store plus a value compare.
-    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui, /*tty=*/true).theme);
+    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui(), m.env.terminal).theme);
 
-    // The LIVE tail is cached too, and for the same reason it is stale.
+    // NOTHING ELSE TO DO.
     //
-    // ViewCache::finalized holds a built maya::Element per settled-but-not-
-    // yet-frozen message — colours already resolved, exactly like a frozen
-    // turn. It is keyed on message identity and nothing else, so a theme
-    // change does not perturb the key and every subsequent frame serves the
-    // old palette from cache. That is the last few turns of the
-    // conversation: the part the user is actually looking at while they
-    // cycle schemes.
+    // This is the part worth reading, because it used to be forty lines of
+    // cache surgery and the surgery is what made theme switching slow.
     //
-    // Cleared unconditionally, and BEFORE the early return below, because
-    // this is the case that early return got wrong: a thread with nothing
-    // frozen yet (a short conversation, or a fresh one) has no sealed rows
-    // to rebuild but does have a live tail to re-colour, and it used to
-    // return having done neither. Re-caching is one rebuild of the visible
-    // tail, which is what picking a theme asked for.
+    // It used to drop ViewCache::finalized (the built Element per settled
+    // message) and then call rehydrate_frozen() to rebuild the sealed
+    // prefix, because both held Elements with the outgoing palette RESOLVED
+    // into them. Neither is stale any more: those Elements carry symbolic
+    // slots, so they paint under the theme live at paint time. Dropping and
+    // rebuilding them would re-derive, at O(transcript) per keystroke,
+    // something that is already correct.
     //
-    // Settled entries only: a PINNED entry holds the live reveal widget for
-    // the turn being streamed right now, and dropping that would restart
-    // its animation mid-word. It rebuilds from its widget every frame, so
-    // it picks up the new theme without being destroyed.
-    //
-    // COLOURS only, not the whole entry. A settled entry's built Element is
-    // stale under a new theme; the StreamingMarkdown widget that produced it
-    // is not, because markdown structure does not depend on what colour a
-    // heading is. Dropping both forced a full re-parse of every kept message
-    // — the dominant cost of a theme swap, and all of it spent re-deriving
-    // something that had not changed.
-    m.ui.view_cache.invalidate_colours();
+    // The one thing this path deliberately does NOT handle is a change to
+    // row HEIGHTS (density, compact turns). Those are forward-only by
+    // design: re-sealing a frozen turn at a new height tears the scrollback
+    // ledger, so they take effect on turns rendered from then on rather
+    // than retroactively. See pull_field's note below.
+}
 
+// Re-render what is already on screen, for a pref that changes the CONTENT
+// of a built Element rather than only which colour its slots resolve to.
+//
+// A theme swap needs none of this (see restyle_sealed_turns): slots resolve
+// at paint, so a stored Element follows the new palette untouched. These
+// rows are different in kind:
+//
+//   • tier      — decides whether a scheme renders as truecolor, 256, 16 or
+//                 not at all. That is a QUANTISATION of the resolved value,
+//                 applied when the Element is built, so an already-built one
+//                 keeps the old approximation.
+//   • polarity  — picks which side of the canvas the inks sit on, which
+//                 changes which theme resolve() hands back entirely.
+//   • syntax    — re-tokenises every code block into a different span tree.
+//                 Not a colour change at all; a structural one.
+//
+// All three reach the same already-built Elements, and all three used to
+// change nothing until the next turn redrew.
+void rebuild_rendered_content(Model& m) {
+    ui_prefs::publish_theme(*ui_prefs::resolve(m.d.ui(), m.env.terminal).theme);
+    m.ui.view_cache.clear_settled();
     if (m.ui.frozen_through == 0) return;
     rehydrate_frozen(m);
 }
@@ -205,8 +237,58 @@ namespace {
         return t && t->on;
     };
 
-    up::Prefs& p = m.d.ui;
+    up::Prefs& p = m.d.ui();
     if (f.id == pn::kApTier)            { p.tier     = static_cast<up::ColorTier>(idx()); return true; }
+    else if (f.id == pn::kApLang) {
+        // The LANGUAGE row, and it is the one place here that reads an id
+        // rather than an index. The choice carries BCP-47 tags ("", "de",
+        // "pt-BR") so that inserting a language into the table later cannot
+        // silently change what an existing settings.json means -- an index
+        // would.
+        if (const auto* c = std::get_if<form::field::Choice>(&f.value)) {
+            const int i = c->normalized(c->index);
+            p.lang = (i >= 0 && i < static_cast<int>(c->ids.size()))
+                         ? c->ids[static_cast<std::size_t>(i)]
+                         : std::string{};
+        }
+        // Apply NOW, not on restart. t() is a pointer read, so switching is
+        // one atomic store and the next frame is translated -- the sandbox
+        // seal has no analogue here, because a language is not a boundary
+        // (docs/design/i18n.md).
+        //
+        // Empty means auto: re-resolve from the environment rather than
+        // leaving whatever was active, or picking Auto after German would
+        // stay German until restart and read as "the setting did nothing".
+        i18n::Lang want{};
+        if (p.lang.empty()) want = i18n::resolve_language({}, {});
+        else if (!i18n::parse_tag(p.lang, want)) want = i18n::Lang::en;
+        (void)i18n::set_active(want);   // refuses if no catalog; keeps current
+
+        // FALSE, and this is the performance-critical half of the row.
+        //
+        // Returning true runs rebuild_rendered_content(), which drops every
+        // settled Element and rehydrates the frozen prefix. That is right
+        // for tier/polarity/syntax, whose change is baked INTO a built
+        // Element. It is catastrophic here because the language row is a
+        // CHOICE: holding -> cycles it, so the rebuild runs per keystroke
+        // against the whole transcript.
+        //
+        // Measured on an 800-message thread: 43 ms per key against a 33 ms
+        // key-repeat slot. Past that budget keys outrun frames, frames
+        // coalesce, and the row visibly updates on every SECOND language you
+        // pass -- the exact failure the theme browser already fixed once
+        // (see restyle_sealed_turns, and the note above it).
+        //
+        // The pane itself still re-translates: reproject() rebuilds the form
+        // from the new catalog on the very next line, and that is bounded by
+        // the pane rather than the transcript. What stays in the old
+        // language is TRANSCRIPT text already settled -- which is the same
+        // forward-only rule density and compact-turns follow, for the same
+        // reason (docs/design/i18n.md): a translated row is a different
+        // width and often a different height, so re-sealing it at a new
+        // height tears the scrollback ledger.
+        return false;
+    }
     else if (f.id == pn::kApPolarity)   { p.polarity = static_cast<up::Polarity>(idx());  return true; }
     else if (f.id == pn::kApSyntax)     { p.syntax   = on();                              return true; }
     else if (f.id == pn::kApDensity)    p.density     = static_cast<up::Density>(idx());
@@ -262,9 +344,9 @@ void move_highlight(Model& m, int delta) {
     std::string next = highlighted_theme(*o);
     // Landing on the scheme already in force is a no-op, not a rebuild. With
     // 615 rows a wrap or a repeated key hits this often enough to matter.
-    if (next == m.d.ui.theme) { reproject(m); return; }
+    if (next == m.d.ui().theme) { reproject(m); return; }
 
-    m.d.ui.theme = std::move(next);
+    m.d.ui().theme = std::move(next);
     // Re-style everything on screen, including the frozen prefix — it is
     // painted every frame, so a preview that skipped it would show the new
     // scheme on the newest turns and the old one above. Bounded to ~3
@@ -276,12 +358,12 @@ void move_highlight(Model& m, int delta) {
 
 }  // namespace
 
-Step appearance_update(Model m, msg::AppearanceMsg am) {
+Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
     return std::visit(overload{
 
-        [&](OpenAppearance&) -> Step {
+        [&](OpenAppearance&) -> Cmd {
             pn::Appearance o;
-            o.pane.form = pn::build_appearance_form(m.d.ui, /*tty=*/true);
+            o.pane.form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
             // Land on the first real setting, not the "Theme" section
             // header — a cursor parked on a row that does nothing reads as
             // a broken pane for the one keystroke it takes to notice.
@@ -292,58 +374,61 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
                 }
             m.ui.panel.descend(std::move(o));
             m.ui.appearance_scroll.y = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](CloseAppearance&) -> Step {
+        [&](CloseAppearance&) -> Cmd {
             // Esc unwinds one level — to the palette snapshot stashed at
             // open, or to the thread. Nothing to save on the way out: it
             // was all saved as it was typed.
             ascend(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](AppearanceKey& e) -> Step {
+        [&](AppearanceKey& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
 
             // The browser owns the keyboard while it is up.
-            if (o->pane.picking) return done(std::move(m));
+            if (o->pane.picking) return Cmd::none();
 
             const auto applied = form::keys::apply(o->pane.form, e.action);
 
             if (applied.close)
-                return agentty::app::update(std::move(m), Msg{CloseAppearance{}});
+                return appearance_update(m, msg::AppearanceMsg{CloseAppearance{}});
 
             // A Pick row asked for its picker. Only one row is a Pick, so
             // the hand-off needs no dispatch.
             if (applied.hand_off)
-                return agentty::app::update(std::move(m), Msg{AppearancePickTheme{}});
+                return appearance_update(m, msg::AppearanceMsg{AppearancePickTheme{}});
 
             // Everything else: read the focused row back onto the prefs and
             // write through. `changed` covers ←/→ in place and a dropdown
             // commit; `left_field` covers finishing a number edit.
+            // Only a real change saves; the arm still has to return a Cmd
+            // either way, so the save starts empty.
+            Cmd save = Cmd::none();
             if (applied.changed || applied.left_field) {
-                bool recolour = false;
+                bool rebuild = false;
                 if (const auto* row = o->pane.form.focused())
-                    recolour = pull_field(m, *row);
-                // A colour-bearing knob has to reach the transcript that is
-                // already on screen, exactly as a theme change does —
-                // otherwise dropping to 16 colours or flipping polarity
-                // leaves every settled turn in the palette it was built
-                // under, and only new turns look right.
-                if (recolour) restyle_sealed_turns(m);
-                persist(m);
+                    rebuild = pull_field(m, *row);
+                // tier / polarity / syntax change the CONTENT of an
+                // already-built Element, not just which colour its slots
+                // resolve to — a quantisation, a different resolved theme,
+                // or a different span tree. A theme swap needs no rebuild
+                // (slots resolve at paint); these do.
+                if (rebuild) rebuild_rendered_content(m);
+                save = persist(m);
                 reproject(m);
             }
-            return done(std::move(m));
+            return save;
         },
 
         // ── The theme browser ────────────────────────────────────────
 
-        [&](AppearancePickTheme&) -> Step {
+        [&](AppearancePickTheme&) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             o->pane.picking      = true;
             o->pane.picker.picker.clear_query();
             // Open ON the theme in use, so the first thing the list shows is
@@ -356,7 +441,7 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
                 const auto& src = pk.entries();
                 const auto& idx = pk.filtered();
                 for (std::size_t i = 0; i < idx.size(); ++i) {
-                    if (src[idx[i]] == m.d.ui.theme) {
+                    if (src[idx[i]] == m.d.ui().theme) {
                         pk.jump_to(static_cast<int>(i));
                         break;
                     }
@@ -365,18 +450,18 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             // What to restore if the user changes their mind. Stashed on the
             // pane rather than in a message so an Esc always has something
             // to go back to, however the browser was left.
-            o->pane.picker.restore = m.d.ui.theme;
-            return done(std::move(m));
+            o->pane.picker.restore = m.d.ui().theme;
+            return Cmd::none();
         },
 
-        [&](AppearanceThemeMove& e) -> Step {
+        [&](AppearanceThemeMove& e) -> Cmd {
             move_highlight(m, e.delta);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](AppearanceThemeQuery& e) -> Step {
+        [&](AppearanceThemeQuery& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             if (e.text.empty()) o->pane.picker.picker.backspace();
             else                o->pane.picker.picker.type(e.text);
             // The picker resets its own cursor on every query edit — one
@@ -385,44 +470,44 @@ Step appearance_update(Model m, msg::AppearanceMsg am) {
             //
             // Live-apply the new top match. Typing narrows AND previews, so
             // "dra" shows you Dracula without a second keystroke.
-            m.d.ui.theme = highlighted_theme(*o);
+            m.d.ui().theme = highlighted_theme(*o);
             restyle_sealed_turns(m);
             reproject(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
 
-        [&](AppearanceThemeCommit&) -> Step {
+        [&](AppearanceThemeCommit&) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // The theme is already applied (the highlight applied it); Enter
             // only ends the browse and makes it durable.
-            m.d.ui.theme = highlighted_theme(*o);
+            m.d.ui().theme = highlighted_theme(*o);
             o->pane.picking = false;
             // The full restyle, once, on the way out. Browsing already
             // re-styled on each move (the list is its own preview), so this
             // is the settle: it puts the sealed transcript under whichever
             // scheme you actually stopped on.
             restyle_sealed_turns(m);
-            persist(m);
+            auto save = persist(m);
             reproject(m);
-            return done(std::move(m));
+            return save;
         },
 
-        [&](AppearanceThemeCancel&) -> Step {
+        [&](AppearanceThemeCancel&) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // A true cancel: put back the theme we opened on, including on
             // disk — the live previews may have persisted nothing, but the
             // model must not keep the last one we merely looked at.
-            m.d.ui.theme = o->pane.picker.restore;
+            m.d.ui().theme = o->pane.picker.restore;
             o->pane.picking = false;
             // Full restyle on the way out, as with Commit: the frozen prefix
             // may be carrying a previewed scheme's colours and has to be put
             // back under the restored one.
             restyle_sealed_turns(m);
-            persist(m);
+            auto save = persist(m);
             reproject(m);
-            return done(std::move(m));
+            return save;
         },
 
     }, am);

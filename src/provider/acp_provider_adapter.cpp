@@ -4,11 +4,12 @@
 #include "agentty/provider/acp_provider_adapter.hpp"
 
 #include <memory>
-#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include <maya/runtime.hpp>
 
 #include <acp/acp.hpp>          // acp::InitializeParams, SessionUpdate arms, match
 #include <nlohmann/json.hpp>
@@ -33,11 +34,22 @@ using json = nlohmann::json;
 // subprocess is long-lived, its ACP session reused across requests.
 struct LiveAgent {
     std::unique_ptr<ExternalAcpBackend> backend;
-    SpawnedAcpAgent                     agent;   // owns the subprocess + transport
+    SpawnedAcpAgent                     agent;   // owns the subprocess and peer; dies first
 };
 
-std::mutex                                             g_cache_mu;
-std::unordered_map<std::string, std::shared_ptr<LiveAgent>> g_cache;
+// Copy-on-write: readers look up without a lock, a spawn publishes a new map.
+using AgentMap = std::unordered_map<std::string, std::shared_ptr<LiveAgent>>;
+maya::published<const AgentMap>& g_cache() {
+    static maya::published<const AgentMap> c;
+    return c;
+}
+
+std::shared_ptr<LiveAgent> cached(const std::string& agent_id) {
+    auto map = g_cache().current();
+    if (!map) return nullptr;
+    auto it = map->find(agent_id);
+    return it == map->end() ? nullptr : it->second;
+}
 
 // Extract the plain text of a ContentBlock (text + text-resource arms only;
 // other arms contribute nothing to a streamed delta).
@@ -68,12 +80,8 @@ a::InitializeParams make_init() {
 
 // Get (or lazily spawn) the live agent for `agent_id`. Returns nullptr and
 // fills `err` on any launch failure.
-std::shared_ptr<LiveAgent> acquire(const std::string& agent_id, std::string& err) {
-    {
-        std::lock_guard<std::mutex> lk(g_cache_mu);
-        if (auto it = g_cache.find(agent_id); it != g_cache.end())
-            return it->second;
-    }
+std::shared_ptr<LiveAgent> acquire(const maya::unlocked& cap, const std::string& agent_id, std::string& err) {
+    if (auto hit = cached(agent_id)) return hit;
 
     auto spec = resolve_acp_agent(agent_id);
     if (!spec) {
@@ -115,29 +123,33 @@ std::shared_ptr<LiveAgent> acquire(const std::string& agent_id, std::string& err
     live->backend = std::make_unique<ExternalAcpBackend>(std::move(opts));
 
     std::string spawn_err;
-    live->agent = spawn_acp_agent(spec->argv(), make_init(),
-                                  live->backend->make_handlers(), spawn_err);
+    live->agent = spawn_acp_agent(cap, spec->argv(), make_init(),
+                                  live->backend->make_dispatch(), spawn_err);
     if (!live->agent.ok()) {
         err = "failed to launch ACP agent '" + agent_id + "': " + spawn_err;
         return nullptr;
     }
     live->backend->connect(*live->agent.connection);
 
-    std::lock_guard<std::mutex> lk(g_cache_mu);
     // Another thread may have raced us; keep the first winner.
-    if (auto it = g_cache.find(agent_id); it != g_cache.end())
-        return it->second;
-    g_cache.emplace(agent_id, live);
-    return live;
+    for (;;) {
+        auto cur = g_cache().current();
+        if (cur) {
+            if (auto it = cur->find(agent_id); it != cur->end()) return it->second;
+        }
+        auto next = cur ? std::make_shared<AgentMap>(*cur) : std::make_shared<AgentMap>();
+        next->emplace(agent_id, live);
+        if (g_cache().publish_if(cur, std::move(next))) return live;
+    }
 }
 
 } // namespace
 
-StreamResult stream_external_acp(const std::string& agent_id, Request req, EventSink sink) {
+StreamResult stream_external_acp(const maya::unlocked& cap, const std::string& agent_id, Request req, EventSink sink) {
     sink(StreamStarted{});
 
     std::string err;
-    auto live = acquire(agent_id, err);
+    auto live = acquire(cap, agent_id, err);
     if (!live) {
         StreamError e; e.message = err;
         sink(std::move(e));
@@ -244,7 +256,7 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
     // ACP's per-round TurnResult (acp_backend.hpp) is the ADJACENT layer's
     // outcome; fold it onto the shared provider StreamResult so the ACP arm
     // reports through the same value type as the native transports.
-    TurnResult res = live->backend->prompt(req, tsink, cancel);
+    TurnResult res = live->backend->prompt(cap, req, tsink, cancel);
 
     // Some adapters omit a final status update on cancellation/early turn
     // settlement. Close each remaining card exactly once using its latest
@@ -280,20 +292,15 @@ StreamResult stream_external_acp(const std::string& agent_id, Request req, Event
     return sr;
 }
 
-void release_acp_agents() noexcept {
-    std::unordered_map<std::string, std::shared_ptr<LiveAgent>> drained;
-    {
-        std::lock_guard<std::mutex> lk(g_cache_mu);
-        drained.swap(g_cache);
-    }
-    // Destroy outside the lock: each LiveAgent dtor runs ExternalAcpBackend's
-    // hardened teardown watchdog (bounded even for a wedged agent).
-    for (auto& [id, live] : drained) {
+void release_acp_agents(const maya::unlocked&) noexcept {
+    auto drained = g_cache().take();
+    if (!drained) return;
+    // Each agent's teardown is bounded even for a wedged agent.
+    for (const auto& [id, live] : *drained) {
         if (!live) continue;
-        // Order: backend (holds non-owning conn_) → connection → process.
+        // The peer first: its dispatch points at the backend.
+        live->agent.reset();
         live->backend.reset();
-        live->agent.connection.reset();
-        live->agent.process.reset();
     }
 }
 

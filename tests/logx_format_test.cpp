@@ -80,15 +80,105 @@ TEST_CASE("logx: every channel and level renders") {
     }
 }
 
+TEST_CASE("logx: a site name quoted inside a payload is not a site field") {
+    require_logging();
+    // `agentty diagnostics` reconstructs the session by scanning the log for
+    // the `startup` and `provider.select` events. It used to do that with a
+    // bare find() over the whole line — which matched a REQUEST BODY that
+    // happened to quote the string, and printed a chunk of the user's
+    // conversation as the active provider. Observed in a real log.
+    //
+    // The distinguishing fact is POSITION: a site field lives in the line
+    // header, a payload hit lives deep in a JSON blob. Pin that the header
+    // stays short enough for the scanner's column bound to separate them.
+    logx::emit(logx::Channel::Wire, logx::Level::Trace, "anthropic.request.body",
+               "raw={{\"text\":\"provider.select: provider=bogus\"}}");
+    const auto line = last_line();
+
+    const auto at = line.find("provider.select");
+    REQUIRE(at != std::string::npos);      // the payload really is in there
+    CHECK(at > 64);                        // but far past the header
+
+    // A genuine event puts its site inside the header window.
+    logx::emit(logx::Channel::Wire, logx::Level::Warn, "provider.select",
+               "provider=anthropic kind=anthropic");
+    const auto real = last_line();
+    const auto site = real.find("provider.select");
+    REQUIRE(site != std::string::npos);
+    CHECK(site <= 64);
+    CHECK(real.compare(site + std::string_view{"provider.select"}.size(), 1, ":") == 0);
+}
+
+TEST_CASE("logx: the session banner cannot forge a record") {
+    require_logging();
+    // The banner carries the process CWD, and a directory name may legally
+    // contain a newline (`mkdir $'x\nfoo'` works on every POSIX system).
+    // Written verbatim, that ends the banner early and drops the rest of
+    // the path into column 0 — where nothing distinguishes it from a real
+    // record. A path chosen to look like a timestamped error then greps as
+    // a genuine one.
+    //
+    // Verified exploitable against the built binary before the guard
+    // existed: `cd $'…/x\n2026-01-01T00:00:00.000 +0000000ms dead E
+    // general auth' && agentty --version` put a forged auth error in the
+    // log. Same rule as an event body — one record is one line.
+    logx::session_banner(
+        "1.0 pid=1 cwd=/tmp/x\n"
+        "2026-01-01T00:00:00.000 +0000000ms dead E general auth");
+
+    std::ifstream in{std::string{logx::log_file()}, std::ios::binary};
+    std::string all{std::istreambuf_iterator<char>(in),
+                    std::istreambuf_iterator<char>()};
+
+    // EVERY occurrence, not just the first. The log file is appended across
+    // runs, so find() alone would happily inspect a line written by an
+    // earlier, already-fixed run and report success while the current build
+    // forges records. (Caught exactly that way: the first version of this
+    // test passed against a deliberately reverted guard.)
+    const std::string needle = "2026-01-01T00:00:00.000";
+    std::size_t at = all.find(needle);
+    REQUIRE(at != std::string::npos);   // the text really is in there
+    int checked = 0;
+    while (at != std::string::npos) {
+        INFO("occurrence at byte " << at);
+        CHECK(at > 0);
+        CHECK(all[at - 1] != '\n');     // never starts a line
+        ++checked;
+        at = all.find(needle, at + 1);
+    }
+    CHECK(checked > 0);
+}
+
 TEST_CASE("logx: a message with newlines stays one grep-able record") {
     require_logging();
-    // Raw wire bodies contain newlines (SSE frames are \n\n separated). The
-    // line must still START with a timestamp so `grep ' E '` and the
-    // diagnostics tail-reader keep working.
+    // Raw wire bodies contain newlines (SSE frames are \n\n separated).
+    // They must not split the record: the file is line-oriented, and every
+    // consumer — `grep ' E '`, the diagnostics session scanner, the user
+    // pasting a line into an issue — assumes one event is one line.
+    //
+    // This used to assert only that the tail fragment was "recoverable",
+    // which a split record technically satisfies. It isn't enough: a body
+    // that wraps hides the error's level from grep, and a payload that
+    // quotes a site name at the start of its own line is indistinguishable
+    // from a real event (that is how diagnostics came to report a chunk of
+    // conversation as the active provider).
     logx::emit(logx::Channel::Wire, logx::Level::Error, "fmt.multiline",
-               "data: {\"a\":1}\n\ndata: {\"b\":2}");
+               "data: {{\"a\":1}}\n\ndata: {{\"b\":2}}");
     const auto line = last_line();
-    // The tail after the final newline is the body's last fragment; what
-    // matters is that the record was written whole and is recoverable.
-    CHECK(line.find("data:") != std::string::npos);
+
+    // BOTH frames are on the ONE line the reader gets back.
+    CHECK(line.find("\"a\":1") != std::string::npos);
+    CHECK(line.find("\"b\":2") != std::string::npos);
+    // And it still carries its header, so the level is greppable.
+    CHECK(line.find(" E ") != std::string::npos);
+    CHECK(line.find("fmt.multiline:") != std::string::npos);
+
+    // A carriage return must not survive either — a stray \r makes the
+    // line look truncated in a pager.
+    logx::emit(logx::Channel::Wire, logx::Level::Error, "fmt.crlf",
+               "one\r\ntwo");
+    const auto crlf = last_line();
+    CHECK(crlf.find('\r') == std::string::npos);
+    CHECK(crlf.find("one") != std::string::npos);
+    CHECK(crlf.find("two") != std::string::npos);
 }

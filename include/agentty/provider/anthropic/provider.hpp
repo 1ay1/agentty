@@ -13,7 +13,10 @@ namespace agentty::provider::anthropic {
 
 class AnthropicProvider {
 public:
-    provider::StreamResult stream(provider::Request req, provider::EventSink sink) {
+    // run_stream_sync takes no capability today; the cap is the
+    // Provider-concept contract (thread it through if the transport locks).
+    provider::StreamResult stream(const maya::unlocked&, provider::Request req,
+                                  provider::EventSink sink) {
         Request areq;
         provider::lower_shared(areq, req);   // model/system/messages/tools/max_tokens/auth/retry/effort
         return run_stream_sync(std::move(areq), std::move(sink), std::move(req.cancel));

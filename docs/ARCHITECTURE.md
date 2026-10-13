@@ -25,6 +25,13 @@ Rendering is a second pure function, `view : Model -> Element`, delegated to
 constructs chrome glyphs or makes layout decisions; it builds widget *Config*
 values from `Model` state and maya owns every pixel, border, and animation.
 
+The loop itself, the effects, tasks, subscriptions and every thread and lock
+in the process are **jaal**, which agentty reaches only through maya:
+agentty → maya → jaal, strictly. agentty orchestrates; no other submodule
+runs anything of its own. See [LAYERING.md](LAYERING.md), and for the
+protocol libraries (mcp-cpp, acp-cpp, rag-cpp) the binding rules in
+[PROTOCOL_LIBRARIES.md](PROTOCOL_LIBRARIES.md).
+
 The four maya `Program` hooks are bound in
 `include/agentty/runtime/app/program.hpp`:
 
@@ -396,10 +403,13 @@ sees no behavior change.
   the symbol index, and project-scoped `remember` — routes through
   `project_root()`; everything that means "the security gate" (containment
   checks, sandbox bind-mounts, refuse-delete-root) uses `workspace_root()`.
-- **Sandbox.** `bash` and `diagnostics` run inside `bwrap` (Linux) or
-  `sandbox-exec` (macOS) by default. Workspace + system libs + network are
-  reachable; `~/.ssh`, `/etc`, and other projects are read-only. An approved
-  `bash` call still can't `cat ~/.ssh/id_rsa`. `--sandbox auto|on|off`.
+- **Sandbox.** `bash` and `diagnostics` run inside `claybin` by default on both
+  Linux (namespaces + landlock + seccomp + cgroup2) and macOS (seatbelt +
+  rlimits), with `bwrap` and `sandbox-exec` as the respective fallbacks.
+  Workspace + system libs + network are reachable; `~/.ssh`, `/etc`, and other
+  projects are read-only. An approved `bash` call still can't
+  `cat ~/.ssh/id_rsa`. `--sandbox auto|on|off`,
+  `--sandbox-backend claybin|bwrap`.
 - **TLS pinning.** Certificates are pinned on the real upstreams, end-to-end,
   including through the airgap SOCKS tunnel.
 - **Atomic writes.** Every persisted file is `write` + `fsync` + `rename` (or
@@ -440,18 +450,20 @@ input, or timer tick. Two host-side optimizations keep it cheap under load:
   library with its C and C++ allocation overrides enabled.
   `release_to_kernel()` calls `mi_collect(true)` at coarse memory-release
   boundaries.
-- **Gotcha:** `AGENTTY_AUTO_PULL_MAYA=ON` is the default and runs
-  `git reset --hard origin/master` on the `maya/` submodule during build. Its
-  only guard checks for *uncommitted* changes, so committed local maya work
-  still gets wiped. Build with `-DAGENTTY_AUTO_PULL_MAYA=OFF` when iterating on
-  maya.
+- **Submodules don't move on their own.** Auto-pull is OFF by default
+  (`AGENTTY_AUTO_PULL_SUBMODULES`), because fetching during a normal build
+  perturbs header mtimes and needlessly rebuilds the ~64 TUs that include
+  them. Sync on demand with `cmake --build build --target submodules_sync`
+  (or `./resync.sh`). The pull refuses to touch a submodule that has unstaged
+  changes, staged-uncommitted work, or local commits not on origin, and uses
+  `merge --ff-only`, so it never discards local work.
 
 ---
 
 ## 12. One-paragraph mental model
 
 `main.cpp` resolves credentials and installs a Provider + Store behind the
-`Deps` seam, then hands control to maya. maya calls `view(model)` to paint and
+`Deps` seam, then hands control to maya, which runs the program on jaal. maya calls `view(model)` to paint and
 `update(model, msg)` for every event. User input and SSE chunks become `Msg`s;
 the reducer dispatches each to a per-domain handler that returns the next
 `Model` plus a `Cmd` describing any side effects. Tools run behind a JSON

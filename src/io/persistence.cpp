@@ -4,20 +4,25 @@
 #include "agentty/runtime/settings_registry.hpp"
 
 #include "agentty/util/logx.hpp"
+#include "agentty/util/background.hpp"   // util::WorkerGroup
+#include "agentty/util/lock_levels.hpp"
 
+#include "agentty/util/sendable.hpp"   // maya::guarded + the json opt-in
 #include <atomic>
-#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
 #include <mutex>
 #include <random>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
+#include <variant>
 
 #ifdef _WIN32
 #  include <io.h>
@@ -30,6 +35,7 @@
 
 #include "agentty/tool/util/utf8.hpp"
 #include "agentty/auth/keys.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/home_dir.hpp"
@@ -46,7 +52,12 @@ using json = nlohmann::json;
 // Binary mode avoids CRLF translation so the on-disk bytes match dump(2).
 // Public (declared in persistence.hpp) so other JSON sidecars (ACP session
 // index, etc.) share the same crash-safety guarantee.
-bool write_json_atomic(const fs::path& target, const std::string& content) {
+// persistence's own internals (the async writer, the settings lock) only run
+// under one of the Io-taking entry points below, so they re-mint it here
+// rather than threading it through every helper.
+static Io internal_io() { return IoAccess::grant(); }
+
+bool write_json_atomic(Io, const fs::path& target, const std::string& content) {
     fs::path tmp = target;
     tmp += ".tmp";
 #ifdef _WIN32
@@ -90,6 +101,55 @@ bool write_json_atomic(const fs::path& target, const std::string& content) {
     return true;
 }
 
+// ── Cross-process exclusive lock over the settings file ──────────────────
+//
+// write_json_atomic gives CRASH safety (tmp -> fsync -> rename), which is a
+// different property from CONCURRENCY safety, and the two got conflated.
+// Atomicity means no reader ever sees a torn file; it says nothing about
+// LOST UPDATES. save_settings serialises the caller's whole in-memory record
+// and replaces the document, so with two agentty instances open:
+//
+//   A starts (theme=Harper)   B starts (theme=Harper)
+//   B: pick Sumi Phosphor, Enter -> file says Sumi Phosphor
+//   A: change ANY unrelated row -> A writes its STALE record
+//   -> theme is Harper again, and nothing failed
+//
+// Both writes were complete, valid and durable. One simply landed second and
+// won the entire file. Observed in the wild with five instances running: the
+// theme kept reverting and it looked nondeterministic because the winner is
+// whichever process saved last.
+//
+// A mutex cannot fix this -- the writers are separate PROCESSES. The lock has
+// to live in the filesystem, and that primitive is jaal's
+// (maya::platform::native_file_lock) rather than a third hand-rolled copy of
+// it here. persistence::with_shared_file pairs it with a process-wide lane,
+// because the two races are different and each lock closes only one of them:
+// see include/agentty/io/shared_file.hpp.
+//
+// Note the correction this replaces: the old comment here claimed F_SETLKW
+// was chosen partly because "it is per-process so a future threaded writer
+// still serialises". That is backwards. Per-process means two THREADS of one
+// process both acquire and neither waits -- jaal's conformance suite pins it
+// as check 13 -- so the mutex is not redundant with the file lock, it is the
+// other half of the fix.
+//
+// The lock sits on a SIDECAR (settings.json.lock) rather than on settings.json
+// itself, because the atomic write renames a new inode over the target: a lock
+// held on the old inode would protect a file that is no longer there.
+//
+// Advisory, and deliberately best-effort: if the lock cannot be taken we log
+// and proceed with the plain write. Losing an update is bad, but refusing to
+// save the user's settings because a lock file was unavailable is worse.
+persistence::Lane& settings_mu() {
+    static persistence::Lane m;
+    return m;
+}
+
+fs::path data_dir();
+// One name for the file, so the lock sidecar and the writes can never drift
+// onto different paths.
+fs::path settings_path() { return data_dir() / "settings.json"; }
+
 fs::path data_dir() {
     // The single per-user root (~/.agentty or $AGENTTY_HOME) — see
     // util/user_root.hpp for the layout and the reason it is NOT under
@@ -116,10 +176,13 @@ fs::path data_dir() {
 }
 
 fs::path threads_dir() {
-    auto p = data_dir() / "threads";
-    std::error_code ec;
-    fs::create_directories(p, ec);
-    return p;
+    // Via user_threads_dir() rather than `data_dir() / "threads"` so the
+    // $AGENTTY_THREADS_DIR override applies here too. Conversation history
+    // is the second-largest thing agentty writes, and it was the one that
+    // would have silently stayed on the config disk if this had kept
+    // joining the leaf itself — which is exactly the drift the one-root
+    // header warns about.
+    return util::user_threads_dir();
 }
 
 // ---- Image blob store ------------------------------------------------
@@ -235,7 +298,7 @@ std::string render_message_md(const Message& m) {
 
 } // namespace
 
-fs::path write_thread_transcript_md(const Thread& t) {
+fs::path write_thread_transcript_md(Io io, const Thread& t) {
     // Clean, BOUNDED transcript: "## user" / "## assistant" headers + the
     // (clipped) text, tool calls collapsed to a single `› tool(name)` line.
     // None of the <id>.json noise. Small and greppable so a fork can `read`
@@ -290,7 +353,7 @@ fs::path write_thread_transcript_md(const Thread& t) {
 
     // Write next to the thread files under a stable, discoverable name.
     const fs::path out = threads_dir() / (t.id.value + ".transcript.md");
-    if (!write_json_atomic(out, md)) return {};
+    if (!write_json_atomic(io, out, md)) return {};
     return out;
 }
 
@@ -352,6 +415,23 @@ json message_to_json(const Message& m) {
             t["output"] = std::move(out);
         }
         t["status"] = std::string{tc.status_name()};
+        // The EXECUTION window, persisted as a duration in ms rather than a
+        // time_point: steady_clock offsets are meaningless across a restart,
+        // so serializing points would fold "time since boot" into every
+        // reloaded thread's stats (the 2h20m class of lie). Terminal only;
+        // the fold already refuses pending/running spans. exec_window_at()
+        // reads executing_since WITHOUT the card-birth fallback — a tool
+        // that never dispatched must serialize NO window, because on reload
+        // the fallback (started_at) cannot even be reconstructed, and
+        // deserialization would otherwise fill it with a fake epoch.
+        if (tc.is_terminal()) {
+            const auto began = tc.exec_window_at();
+            const auto done  = tc.finished_at();
+            if (began && done.time_since_epoch().count() != 0
+                && done > *began)
+                t["exec_ms"] = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(done - *began).count();
+        }
         tcs.push_back(std::move(t));
     }
     j["tool_calls"] = std::move(tcs);
@@ -511,6 +591,11 @@ json message_to_json(const Message& m) {
     // base64-ish ciphertext (ASCII), so no UTF-8 scrub needed.
     if (!m.reasoning_encrypted.empty())
         j["reasoning_encrypted"] = m.reasoning_encrypted;
+    // The site that minted those blobs. Persisted WITH them: a thread
+    // reloaded tomorrow must still know which backend can decrypt its
+    // ciphertext, or the first turn after a restart replays it blind.
+    if (!m.reasoning_site.empty())
+        j["reasoning_site"] = m.reasoning_site;
     // Non-image attachments (Paste / FileRef / Symbol). Persisted so a
     // reloaded thread can rebuild its wire payload — the user's `text`
     // carries chip placeholders, and the model only sees real content
@@ -610,14 +695,38 @@ std::string DeserializeError::render() const {
 }
 
 static std::expected<ToolUse::Status, DeserializeError>
-parse_tool_status(std::string_view status_tag, std::string&& output) {
+parse_tool_status(std::string_view status_tag, std::string&& output,
+                  std::uint64_t exec_ms) {
     // Reconstruct the variant. Persisted threads only ever land in
     // terminal states (in-flight tools are never serialized), so the
     // intermediate states reset to a no-arg-time-stamp default.
-    if (status_tag == "done")
-        return ToolUse::Status{ToolUse::Done{{}, {}, std::move(output)}};
-    if (status_tag == "failed" || status_tag == "error")
-        return ToolUse::Status{ToolUse::Failed{{}, {}, std::move(output)}};
+    // exec_ms is the EXECUTION window (dispatch → terminal) saved next to
+    // the status tag; rehydrate it as a SYNTHETIC clock window — base=epoch
+    // +1ms, finish=base+exec_ms — so the stats fold keeps measuring the
+    // tool, not the restart. Zero/absent = older thread file: leave the
+    // window empty, and the fold's guard skips the sample rather than
+    // counting a fake span.
+    if (status_tag == "done" || status_tag == "failed"
+        || status_tag == "error") {
+        if (exec_ms == 0) {
+            if (status_tag == "done")
+                return ToolUse::Status{ToolUse::Done{{}, {}, std::move(output)}};
+            return ToolUse::Status{ToolUse::Failed{{}, {}, std::move(output)}};
+        }
+        const auto base = std::chrono::steady_clock::time_point{
+            std::chrono::milliseconds{1}};   // non-zero: the fold's guard
+                                             // reads 0 as "no window"
+        const auto finish = base + std::chrono::milliseconds{
+            static_cast<std::int64_t>(exec_ms)};   // diff == exec_ms exactly
+        if (status_tag == "done") {
+            ToolUse::Done d{base, finish, std::move(output)};
+            d.executing_since = base;
+            return ToolUse::Status{std::move(d)};
+        }
+        ToolUse::Failed fp{base, finish, std::move(output)};
+        fp.executing_since = base;
+        return ToolUse::Status{std::move(fp)};
+    }
     if (status_tag == "rejected") return ToolUse::Status{ToolUse::Rejected{{}}};
     // A persisted thread SHOULD only carry terminal tool states, but a
     // session killed mid-tool (crash, SIGKILL, power loss) leaves a
@@ -629,6 +738,20 @@ parse_tool_status(std::string_view status_tag, std::string&& output) {
     if (status_tag == "running" || status_tag == "approved"
         || status_tag == "pending") {
         std::string note = output.empty() ? "interrupted" : std::move(output);
+        if (exec_ms) {
+            // Defensive: the serializer only writes exec_ms under
+            // is_terminal(), so a non-terminal tag should never carry one —
+            // but if a future writer does, honour it rather than silently
+            // reporting the run as instantaneous.
+            const auto base = std::chrono::steady_clock::time_point{
+                std::chrono::milliseconds{1}};
+            auto st = ToolUse::Failed{base,
+                base + std::chrono::milliseconds{
+                    static_cast<std::int64_t>(exec_ms)},
+                std::move(note)};
+            st.executing_since = base;
+            return ToolUse::Status{std::move(st)};
+        }
         return ToolUse::Status{ToolUse::Failed{{}, {}, std::move(note)}};
     }
     return std::unexpected(DeserializeError{
@@ -705,6 +828,11 @@ std::expected<Message, DeserializeError> message_from_json(const json& j) {
                     tb.value("redacted_data", "")});
     m.reasoning_summary = j.value("reasoning_summary", "");
     m.reasoning_encrypted = j.value("reasoning_encrypted", "");
+    // Absent on threads written before the tag existed. Empty means "we
+    // don't know which site minted this", and build_input replays nothing
+    // without a match — so an old thread quietly loses reasoning
+    // continuity rather than risking a 400 on a blob we cannot place.
+    m.reasoning_site = j.value("reasoning_site", "");
     if (auto it = j.find("error"); it != j.end() && it->is_string()
         && !it->get<std::string>().empty())
         m.error = it->get<std::string>();
@@ -747,7 +875,9 @@ std::expected<Message, DeserializeError> message_from_json(const json& j) {
                         ? std::string{legacy[idx]} : std::string{"pending"};
                 }
             }
-            auto status = parse_tool_status(status_tag, std::move(output));
+            auto status = parse_tool_status(status_tag, std::move(output),
+                                            t.value("exec_ms",
+                                                    static_cast<std::uint64_t>(0)));
             if (!status) return std::unexpected(std::move(status).error());
             tc.status = std::move(*status);
             m.tool_calls.push_back(std::move(tc));
@@ -923,6 +1053,13 @@ std::expected<Thread, DeserializeError> thread_meta_from_json(const json& j) {
                 rec.created_at = std::chrono::system_clock::time_point{
                     std::chrono::seconds{cj["created_at"].get<int64_t>()}};
             }
+            // Absent on records written before the measurement existed.
+            // Leaving them 0 makes reclaimed() return nullopt — "unknown",
+            // which is the truth — rather than a fabricated zero.
+            if (cj.contains("tokens_before") && cj["tokens_before"].is_number_integer())
+                rec.tokens_before = cj["tokens_before"].get<int>();
+            if (cj.contains("tokens_after") && cj["tokens_after"].is_number_integer())
+                rec.tokens_after = cj["tokens_after"].get<int>();
             t.compactions.push_back(std::move(rec));
         }
     }
@@ -1048,7 +1185,7 @@ load_thread_meta_file(const fs::path& p) {
 }
 
 std::expected<Thread, DeserializeError>
-load_thread_file(const std::filesystem::path& p) {
+load_thread_file(Io, const std::filesystem::path& p) {
     std::ifstream ifs(p, std::ios::binary);
     if (!ifs) return std::unexpected(DeserializeError{
         DeserializeErrorKind::Io, "", "open failed: " + p.string()});
@@ -1104,19 +1241,45 @@ namespace {
 
 fs::path thread_index_path() { return threads_dir() / "index.json"; }
 
-// index.json is read-modify-written from TWO threads: the AsyncWriter
-// worker (reindex_thread, after each save) and the UI/reducer thread
-// (delete_thread, load_all_threads). Without a lock the two interleave
-// as a classic lost update — both read the same map, both write their
-// own stale copy, and whichever lands second silently drops the other's
-// entry. write_json_atomic's rename means the file never CORRUPTS, so
-// the damage shows up as a ghost row in the picker (a deleted thread
-// that reappears) or a stale title, and it persists until the next cold
-// rebuild. One process-wide mutex held across the whole read-modify-
-// write closes it. Contention is nil: these are startup + per-save.
-std::mutex& thread_index_mu() {
-    static std::mutex m;
+// index.json is read-modify-written from two THREADS of this process (the
+// AsyncWriter worker via reindex_thread, and the UI/reducer thread via
+// delete_thread / load_all_threads) and from every other RUNNING AGENTTY.
+// Both are the same lost update: everyone reads the same map, everyone
+// writes their own stale copy, and whichever lands last drops the others'
+// entries.
+//
+// WHAT THAT ACTUALLY COSTS, measured rather than assumed: this file is a
+// CACHE, not the record. load_all_threads() enumerates the threads
+// directory and only trusts an index entry whose recorded mtime still
+// matches the file's; a lost entry is a cache miss, so the thread is
+// re-parsed and the index self-heals. So the damage is a slower load and a
+// briefly stale title in the picker — NOT a thread that disappears. The
+// fix is still worth having (it is cheap, and the guarantee this comment
+// used to assert was not actually in force) but it is a performance and
+// freshness fix, and claiming otherwise would send the next reader hunting
+// a data-loss bug that is not here.
+//
+// A mutex alone closes only the in-process half — it is invisible to the
+// other process, and two agentty windows is the normal way to use this
+// program. A file lock alone closes only the cross-process half: POSIX
+// record locks belong to the process, so our own two threads both walk
+// through it (jaal's file_lock conformance check 13). with_shared_file
+// takes both; see include/agentty/io/shared_file.hpp for why neither is
+// sufficient. Contention is nil: these are startup + per-save.
+persistence::Lane& thread_index_mu() {
+    static persistence::Lane m;
     return m;
+}
+
+// The critical section for index.json. Every read_thread_index_locked /
+// write_thread_index_locked pair runs inside ONE of these:
+// body(const held<file_lane>&, Held, args...). The bodies only touch the
+// file, so they ignore the capability; it is there so a future body that
+// needs a ranked lock gets one, checked.
+template <class F, class... Args>
+auto with_thread_index(const lock_levels::below_file_lane& cap, F body, Args... args) {
+    return persistence::with_shared_file(cap, thread_index_mu(), thread_index_path(),
+                                          body, std::move(args)...);
 }
 
 struct IndexEntry {
@@ -1127,15 +1290,45 @@ struct IndexEntry {
     long long   size       = -1;  // file size in bytes; -1 == unknown (pre-v2)
 };
 
-long long file_mtime_ns(const fs::path& p) {
+// The file's last-write time, in SECONDS since the UNIX epoch.
+//
+// Two separate things were wrong here, and fixing one without the other
+// still leaves the cache dead:
+//
+//   1. NANOSECONDS OVERFLOWED. fs::file_time_type's epoch is
+//      implementation-defined, and on libstdc++ it sits far enough before
+//      1970 that a present-day timestamp cast to nanoseconds wraps int64
+//      and comes out negative. Hence seconds.
+//
+//   2. THE EPOCH IS STILL NOT 1970. Counting seconds straight off
+//      time_since_epoch() does not overflow, but it is measured from
+//      whatever epoch file_clock uses — here about -4.65e9, i.e. 1822.
+//      That is a stable number, so the cache would have worked by
+//      accident; but it is meaningless in a file other tools read, and it
+//      changes if the standard library does.
+//
+// clock_cast is the portable conversion, and is what C++20 added it for.
+// The fallback is for the one libstdc++ release that shipped file_clock
+// without the cast: there file_clock and system_clock share an epoch, so
+// the difference is zero and the subtraction is exact rather than a guess.
+//
+// 0 still means "unknown", which load_all_threads treats as a cache miss.
+// The resolution loss from nanoseconds does not matter because the check
+// is paired with file size — see the companion below.
+long long file_mtime_secs(const fs::path& p) {
     std::error_code ec;
     auto t = fs::last_write_time(p, ec);
     if (ec) return 0;
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(
-               t.time_since_epoch()).count();
+#if defined(__cpp_lib_chrono) && __cpp_lib_chrono >= 201907L
+    const auto sys = std::chrono::clock_cast<std::chrono::system_clock>(t);
+#else
+    const auto sys = std::chrono::system_clock::now() +
+                     (t - fs::file_time_type::clock::now());
+#endif
+    return std::chrono::duration_cast<std::chrono::seconds>(sys.time_since_epoch()).count();
 }
 
-// Companion to file_mtime_ns for the freshness check. mtime alone is not
+// Companion to file_mtime_secs for the freshness check. mtime alone is not
 // sufficient: mtime granularity is filesystem-dependent (FAT 2 s, HFS+
 // 1 s), so a thread rewritten within the same tick as its recorded stamp
 // compares equal and the cache serves the OLD title/updated_at forever —
@@ -1151,7 +1344,7 @@ long long file_size_bytes(const fs::path& p) {
     return static_cast<long long>(s);
 }
 
-// Raw index read. PRECONDITION: caller holds thread_index_mu(). The
+// Raw index read. PRECONDITION: called inside with_thread_index(). The
 // read and the matching write must sit inside ONE critical section or
 // the lost-update race described above reopens.
 std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
@@ -1161,6 +1354,20 @@ std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
     try {
         json j; ifs >> j;
         if (!j.is_object()) return out;
+        // Two mtime bugs, two version bumps, and an index written under
+        // either is useless:
+        //
+        //   v2  nanoseconds since file_clock's epoch — overflowed int64 and
+        //       wrapped negative, so no entry ever matched.
+        //   v3  seconds, but still since FILE_CLOCK's epoch (~1822 on
+        //       libstdc++), not the Unix epoch. Self-consistent, so the
+        //       cache worked; but the number meant nothing to anything else
+        //       reading the file, and it moves if the standard library does.
+        //   v4  seconds since the Unix epoch, via clock_cast.
+        //
+        // Reading a stale index costs a full reparse anyway, so an older one
+        // is dropped whole and this run rebuilds it correctly.
+        if (j.value("version", 0) < 4) return out;
         auto& threads = j.contains("threads") ? j["threads"] : j;
         if (!threads.is_object()) return out;
         for (auto& [id, e] : threads.items()) {
@@ -1183,7 +1390,7 @@ std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
     return out;
 }
 
-// Raw index write. PRECONDITION: caller holds thread_index_mu().
+// Raw index write. PRECONDITION: called inside with_thread_index().
 void write_thread_index_locked(const std::unordered_map<std::string, IndexEntry>& idx) {
     json threads = json::object();
     for (const auto& [id, e] : idx) {
@@ -1196,9 +1403,9 @@ void write_thread_index_locked(const std::unordered_map<std::string, IndexEntry>
         threads[id] = std::move(ej);
     }
     json j;
-    j["version"] = 2;
+    j["version"] = 4;
     j["threads"] = std::move(threads);
-    try { (void)write_json_atomic(thread_index_path(), j.dump()); }
+    try { (void)write_json_atomic(internal_io(), thread_index_path(), j.dump()); }
     catch (const std::exception&) { /* best-effort cache */ }
 }
 
@@ -1217,7 +1424,7 @@ Thread thread_from_index(const std::string& id, const IndexEntry& e) {
 // stamping the NEW on-disk mtime so the next startup takes the fast
 // path for this thread instead of re-parsing it. Best-effort: a failed
 // index update just means one slow parse next launch, then self-heals.
-void reindex_thread(const Thread& t) {
+void reindex_thread(const lock_levels::below_file_lane& cap, const Thread& t) {
     // Stat whichever file this thread actually lives in. A migrated thread
     // has no <id>.json, so statting that unconditionally would cache
     // mtime=0/size=0 — and load_all_threads treats mt==0 as "cache miss",
@@ -1230,10 +1437,8 @@ void reindex_thread(const Thread& t) {
     const auto file = fs::exists(meta_file, ec) ? meta_file : legacy_file;
     // Stat OUTSIDE the lock, then read-modify-write inside it, so the
     // whole update is atomic with respect to delete_thread().
-    const long long mt = file_mtime_ns(file);
+    const long long mt = file_mtime_secs(file);
     const long long sz = file_size_bytes(file);
-    std::lock_guard<std::mutex> lk(thread_index_mu());
-    auto idx = read_thread_index_locked();
     IndexEntry ie;
     ie.title      = t.title;
     ie.created_at = std::chrono::duration_cast<std::chrono::seconds>(
@@ -1242,13 +1447,17 @@ void reindex_thread(const Thread& t) {
                         t.updated_at.time_since_epoch()).count();
     ie.mtime      = mt;
     ie.size       = sz;
-    idx[t.id.value] = std::move(ie);
-    write_thread_index_locked(idx);
+    with_thread_index(cap, [](const maya::held<lock_levels::file_lane>&, persistence::Held,
+                              std::string id, IndexEntry e) {
+        auto idx = read_thread_index_locked();
+        idx[id] = std::move(e);
+        write_thread_index_locked(idx);
+    }, t.id.value, std::move(ie));
 }
 
 } // namespace
 
-std::vector<Thread> load_all_threads() {
+std::vector<Thread> load_all_threads(Io, const lock_levels::below_file_lane& cap) {
     // Metadata-only directory walk, index-accelerated (see the index
     // sidecar note above). A cached entry whose mtime still matches the
     // file's on-disk mtime is used verbatim — no open/parse. Only new or
@@ -1260,8 +1469,11 @@ std::vector<Thread> load_all_threads() {
 
     // Held across the whole walk: the read at the top and the refresh at
     // the bottom are one read-modify-write, and a save landing in the
-    // middle must not have its entry clobbered by our `fresh` snapshot.
-    std::lock_guard<std::mutex> lk(thread_index_mu());
+    // middle — from this process OR another instance — must not have its
+    // entry clobbered by our `fresh` snapshot.
+    out = with_thread_index(cap, [](const maya::held<lock_levels::file_lane>&, persistence::Held) {
+    std::vector<Thread> out;
+    std::error_code ec;
     auto index = read_thread_index_locked();
     std::unordered_map<std::string, IndexEntry> fresh;
     fresh.reserve(index.size() + 8);
@@ -1301,7 +1513,7 @@ std::vector<Thread> load_all_threads() {
         if (!is_meta && fs::exists(threads_dir() / (id + ".meta.json"), ec))
             continue;
 
-        const long long   mt = file_mtime_ns(e.path());
+        const long long   mt = file_mtime_secs(e.path());
         const long long   sz = file_size_bytes(e.path());
 
         // Fast path: index entry whose mtime AND size both still match —
@@ -1345,6 +1557,8 @@ std::vector<Thread> load_all_threads() {
     // the refreshed index for the next warm startup.
     if (fresh.size() != index.size()) index_dirty = true;
     if (index_dirty) write_thread_index_locked(fresh);
+    return out;
+    });
 
     std::sort(out.begin(), out.end(), [](const Thread& a, const Thread& b){
         return a.updated_at > b.updated_at;
@@ -1386,6 +1600,14 @@ json thread_meta_to_json(const Thread& t) {
             cj["summary"]     = tools::util::to_valid_utf8(c.summary);
             cj["created_at"]  = std::chrono::duration_cast<std::chrono::seconds>(
                                     c.created_at.time_since_epoch()).count();
+            // Only when measured. Writing 0/0 for an unmeasured record
+            // would make "we didn't record this" indistinguishable from
+            // "this compaction reclaimed nothing" — and those want
+            // opposite reactions.
+            if (c.tokens_before > 0 && c.tokens_after > 0) {
+                cj["tokens_before"] = c.tokens_before;
+                cj["tokens_after"]  = c.tokens_after;
+            }
             comps.push_back(std::move(cj));
         }
         j["compactions"] = std::move(comps);
@@ -1411,7 +1633,7 @@ static bool save_thread_legacy(const Thread& t) {
     // exception as a belt-and-suspenders guard against future regressions —
     // a silently-skipped save beats a process-terminating uncaught throw.
     try {
-        return write_json_atomic(threads_dir() / (t.id.value + ".json"),
+        return write_json_atomic(internal_io(), threads_dir() / (t.id.value + ".json"),
                                  j.dump(2));
     } catch (const nlohmann::json::exception& e) {
         AGT_LOG(Persist, Error, "thread.save", "result=json_error id={} err={}",
@@ -1441,27 +1663,136 @@ static std::vector<Message> persistable(const std::vector<Message>& in) {
 // diff: re-serialising is not guaranteed stable (blob promotion can move
 // a payload out of line on the way in), and a byte comparison would fail
 // on differences that are not data loss.
-static bool log_matches(const ThreadLog& log, const std::vector<Message>& want) {
-    const auto got = log.all();
-    if (got.size() != want.size()) return false;
-    for (std::size_t i = 0; i < got.size(); ++i) {
-        const auto& a = want[i];
-        const auto& b = got[i];
-        if (a.id.value != b.id.value)   return false;
-        if (a.role     != b.role)       return false;
-        if (a.text     != b.text)       return false;
-        if (a.thinking != b.thinking)   return false;
-        if (a.tool_calls.size() != b.tool_calls.size()) return false;
-        for (std::size_t k = 0; k < a.tool_calls.size(); ++k)
-            if (a.tool_calls[k].output() != b.tool_calls[k].output())
-                return false;
-        if (a.images.size() != b.images.size()) return false;
+// A bare bool here was a dead end in practice: the save path logged
+// "log verification FAILED" with no reason, on real threads, in bursts
+// that later healed on their own. Which is the worst shape a diagnostic
+// can have — it names a symptom and withholds every fact needed to tell
+// a writer bug (data loss, must keep the legacy file) apart from a
+// benign race (the thread grew while we were verifying it). So the
+// comparison reports WHERE it diverged, in the same vocabulary the wire
+// audit uses: a kind, an index, and the two values.
+struct LogMismatch {
+    enum class Kind {
+        None,
+        Count,       // different number of messages
+        Id,
+        Role,
+        Text,
+        Thinking,
+        TollCallCount,
+        ToolOutput,
+        ImageCount,
+    };
+    Kind        kind  = Kind::None;
+    std::size_t index = 0;   // message index, or message count for Count
+    std::string want;        // what we meant to write
+    std::string got;         // what read back
+
+    [[nodiscard]] bool ok() const noexcept { return kind == Kind::None; }
+
+    [[nodiscard]] std::string_view kind_name() const noexcept {
+        switch (kind) {
+            case Kind::None:          return "none";
+            case Kind::Count:         return "message_count";
+            case Kind::Id:            return "id";
+            case Kind::Role:          return "role";
+            case Kind::Text:          return "text";
+            case Kind::Thinking:      return "thinking";
+            case Kind::TollCallCount: return "tool_call_count";
+            case Kind::ToolOutput:    return "tool_output";
+            case Kind::ImageCount:    return "image_count";
+        }
+        return "unknown";
     }
-    return true;
+};
+
+// Long fields go in the log; a 200 KB tool output must not.
+static std::string brief(std::string_view s) {
+    constexpr std::size_t kMax = 80;
+    if (s.size() <= kMax) return std::string{s};
+    return std::string{s.substr(0, kMax)} + "…(" + std::to_string(s.size()) + "B)";
 }
 
-static void save_thread_sync(const Thread& t) {
-    if (t.id.empty() || t.messages.empty()) return;
+// What the on-disk format promises to give back, for one field.
+//
+// Two transforms are INTENTIONAL and must not read as data loss:
+//
+//  1. UTF-8 scrubbing. message_to_json runs every string through
+//     to_valid_utf8, so a lone surrogate or truncated sequence in memory
+//     comes back repaired. Comparing raw memory against the file flags
+//     that as corruption when it is the writer doing its job.
+//
+//  2. In-flight tool state. A save fires on every turn, including while a
+//     tool is still running, and the reader deliberately coerces a
+//     `pending`/`running` call to Failed{"interrupted"} — a process that
+//     died mid-tool must not reload with a call that waits forever. So
+//     output() is "" in memory and "interrupted" on disk, by design.
+//
+// This is the actual cause of the "log verification FAILED" bursts seen on
+// live threads: they landed on turns with a tool in flight and healed once
+// it completed. The gate was refusing to retire the legacy document over a
+// difference the format guarantees.
+static bool round_trips(std::string_view want, std::string_view got) {
+    return got == want || got == tools::util::to_valid_utf8(std::string{want});
+}
+
+// Did this call finish before the snapshot was taken? Only a terminal call
+// has an output the file is expected to reproduce verbatim.
+static bool settled(const ToolUse& t) noexcept {
+    return std::holds_alternative<ToolUse::Done>(t.status)
+           || std::holds_alternative<ToolUse::Failed>(t.status)
+           || std::holds_alternative<ToolUse::Rejected>(t.status);
+}
+
+// Compare what was read back (`got`) against what was meant to be written
+// (`want`), both starting at message `base` of the thread. Shared by the
+// full save (base 0, whole log) and the tail save (only the new lines).
+static LogMismatch log_diff_range(const std::vector<Message>& got,
+                                  const std::vector<Message>& want,
+                                  std::size_t base) {
+    using K = LogMismatch::Kind;
+    if (got.size() != want.size())
+        return {K::Count, base + want.size(), std::to_string(base + want.size()),
+                std::to_string(base + got.size())};
+    for (std::size_t j = 0; j < got.size(); ++j) {
+        const std::size_t i = base + j;
+        const auto& a = want[j];
+        const auto& b = got[j];
+        if (a.id.value != b.id.value)
+            return {K::Id, i, a.id.value, b.id.value};
+        if (a.role != b.role)
+            return {K::Role, i, role_to_string(a.role), role_to_string(b.role)};
+        if (!round_trips(a.text, b.text))
+            return {K::Text, i, brief(a.text), brief(b.text)};
+        if (!round_trips(a.thinking, b.thinking))
+            return {K::Thinking, i, brief(a.thinking), brief(b.thinking)};
+        if (a.tool_calls.size() != b.tool_calls.size())
+            return {K::TollCallCount, i, std::to_string(a.tool_calls.size()),
+                    std::to_string(b.tool_calls.size())};
+        for (std::size_t k = 0; k < a.tool_calls.size(); ++k) {
+            // An unsettled call is allowed to come back as the reader's
+            // interrupted form. Checking it would pin a transient.
+            if (!settled(a.tool_calls[k])) continue;
+            if (!round_trips(a.tool_calls[k].output(), b.tool_calls[k].output()))
+                return {K::ToolOutput, i, brief(a.tool_calls[k].output()),
+                        brief(b.tool_calls[k].output())};
+        }
+        if (a.images.size() != b.images.size())
+            return {K::ImageCount, i, std::to_string(a.images.size()),
+                    std::to_string(b.images.size())};
+    }
+    return {};
+}
+
+static LogMismatch log_diff(const ThreadLog& log, const std::vector<Message>& want) {
+    return log_diff_range(log.all(), want, 0);
+}
+
+// Returns true iff the thread is now on disk in the LOG format and that
+// log was verified. The incremental writer only trusts its per-thread
+// bookkeeping after a true here; false means the next save must be full.
+static bool save_thread_sync(const lock_levels::below_file_lane& cap, const Thread& t) {
+    if (t.id.empty() || t.messages.empty()) return false;
 
     // ── Write the log, and only then retire the legacy document ──────
     //
@@ -1484,7 +1815,10 @@ static void save_thread_sync(const Thread& t) {
         // Re-open from scratch so the verification reads the FILES, not
         // the in-memory state that just wrote them.
         auto check = ThreadLog::open(t.id);
-        if (check && log_matches(*check, persistable(t.messages))) {
+        const LogMismatch diff =
+            check ? log_diff(*check, persistable(t.messages))
+                  : LogMismatch{LogMismatch::Kind::Count, 0, "log", "unopenable"};
+        if (diff.ok()) {
             if (fs::exists(legacy_path, ec)) {
                 fs::remove(legacy_path, ec);
                 AGT_LOG(Persist, Info, "thread.save",
@@ -1495,16 +1829,18 @@ static void save_thread_sync(const Thread& t) {
                         "result=ok format=log id={} messages={}",
                         t.id.value, t.messages.size());
             }
-            reindex_thread(t);
-            return;
+            reindex_thread(cap, t);
+            return true;
         }
         // Wrote, but it did not read back correctly. Keep the legacy file
         // (written below) and say so loudly — this is a bug in the log
         // writer, and the user's history is the thing that must not pay
         // for it.
         AGT_LOG(Persist, Error, "thread.save",
-                "log verification FAILED id={} messages={} — keeping the "
-                "legacy document", t.id.value, t.messages.size());
+                "log verification FAILED id={} messages={} kind={} index={} "
+                "want={} got={} — keeping the legacy document",
+                t.id.value, t.messages.size(), diff.kind_name(), diff.index,
+                diff.want, diff.got);
     } else if (!log) {
         AGT_LOG(Persist, Warn, "thread.save",
                 "could not open a log for id={} — falling back to legacy",
@@ -1530,7 +1866,230 @@ static void save_thread_sync(const Thread& t) {
                 t.id.value, t.messages.size());
     // Keep the metadata index in lock-step with the file we just
     // wrote so the next startup's fast path picks it up.
-    reindex_thread(t);
+    reindex_thread(cap, t);
+    return false;
+}
+
+// ── Incremental saves ────────────────────────────────────────────────
+//
+// A save fires at the end of every model round, and it used to write the
+// WHOLE thread: re-encode every message, fsync the full log, then parse it
+// all back (reading every blob off disk) to verify. On a 30 MB thread that
+// is tens of MB of work per round, so a long agent loop got slower the
+// longer it ran. Almost none of it is needed: history before the open turn
+// does not change between two rounds.
+//
+// So the writer keeps, per thread, a cheap fingerprint of every message it
+// last put in the log. A save finds the first message whose fingerprint
+// changed (normally the open turn or a tool that just settled), cuts the
+// log there (O(1), offsets are known) and appends from that point on.
+// Only the appended lines are read back and verified.
+//
+// Anything that rewrites history (compaction, fork, edit, rewind, the
+// image clear on a vision error) changes an early fingerprint or the
+// count, so it falls back to the same full write as before. The full path
+// is also taken for the first save of a thread in this process (nothing
+// is known about the files yet) and after any failure. The bookkeeping is
+// only trusted after a verified log write, so the worst case is one extra
+// full save, never a wrong file.
+
+// Fingerprint of everything message_to_json persists. Hashes the content
+// (not just sizes) so an in-place edit of the same length still shows up,
+// but touches no blobs, does no I/O and allocates nothing.
+//
+// This runs on the REDUCER over every message of the thread on every save,
+// so its throughput is the floor on what a save costs. A single
+// accumulator makes each 8-byte step wait for the previous multiply (a
+// serial dependency chain, ~5 GB/s); the bulk loop below runs FOUR
+// independent lanes over 32 bytes per iteration instead, which the CPU can
+// overlap, and folds them together at the end (~22 GB/s measured, 4.1x).
+// Not cryptographic: it only has to notice that a message changed, and
+// nothing adversarial feeds it.
+struct Fnv {
+    std::uint64_t h = 0x9E3779B97F4A7C15ull;
+    // Independent lanes for the bulk path, folded into `h` by finish().
+    std::uint64_t l1 = 0xBF58476D1CE4E5B9ull;
+    std::uint64_t l2 = 0x94D049BB133111EBull;
+    std::uint64_t l3 = 0x2545F4914F6CDD1Dull;
+    static constexpr std::uint64_t kMul = 0xFF51AFD7ED558CCDull;
+    void word(std::uint64_t w) noexcept {
+        h ^= w;
+        h *= kMul;
+        h ^= h >> 32;
+    }
+    void bytes(const void* p, std::size_t n) noexcept {
+        const auto* c = static_cast<const unsigned char*>(p);
+        std::size_t i = 0;
+        // Four lanes, 32 bytes per iteration. Each lane's multiply depends
+        // only on its own previous value, so they pipeline.
+        for (; i + 32 <= n; i += 32) {
+            std::uint64_t w0, w1, w2, w3;
+            std::memcpy(&w0, c + i,      8);
+            std::memcpy(&w1, c + i +  8, 8);
+            std::memcpy(&w2, c + i + 16, 8);
+            std::memcpy(&w3, c + i + 24, 8);
+            h  = (h  ^ w0) * kMul;
+            l1 = (l1 ^ w1) * kMul;
+            l2 = (l2 ^ w2) * kMul;
+            l3 = (l3 ^ w3) * kMul;
+        }
+        for (; i + 8 <= n; i += 8) {
+            std::uint64_t w;
+            std::memcpy(&w, c + i, 8);
+            word(w);
+        }
+        std::uint64_t last = 0;
+        if (i < n) std::memcpy(&last, c + i, n - i);
+        word(last ^ (static_cast<std::uint64_t>(n - i) << 56));
+    }
+    void str(std::string_view s) noexcept { word(s.size()); bytes(s.data(), s.size()); }
+    template <class N> void num(N v) noexcept {
+        std::uint64_t w = 0;
+        std::memcpy(&w, &v, sizeof v < 8 ? sizeof v : 8);
+        word(w);
+    }
+    // Collapse the lanes. Every lane must reach the result, or content that
+    // only differs in one of them would fingerprint the same.
+    [[nodiscard]] std::uint64_t finish() const noexcept {
+        std::uint64_t x = h ^ (l1 + 0x9E3779B97F4A7C15ull)
+                            ^ (l2 << 1) ^ (l3 >> 1);
+        x ^= x >> 33; x *= kMul;
+        x ^= x >> 29;
+        return x;
+    }
+};
+
+// A lazy payload (image, attachment body). A payload that came from disk
+// is identified by its source (blob name / legacy base64) and is persisted
+// by that same reference, so hashing the source is exact and never loads
+// the bytes. Deliberately ignores materialised(): the view can resolve an
+// image on another thread at any moment, and that must not make an old
+// message look edited. Only raw payloads (a fresh paste) hash their bytes.
+template <class Payload>
+static void fp_payload(Fnv& f, const Payload& p) {
+    const auto& src = p.source();
+    if (!src.blob.empty() || !src.b64.empty()) {
+        f.num(1); f.str(src.blob); f.str(src.b64);
+    } else {
+        f.num(2); f.str(p.bytes());
+    }
+}
+
+static std::uint64_t message_fingerprint(const Message& m) {
+    Fnv f;
+    f.str(m.id.value);
+    f.num(static_cast<int>(m.role));
+    f.str(m.text);
+    f.num(m.timestamp.time_since_epoch().count());
+    f.str(m.served_model.value);
+    f.num(m.served_role.has_value());
+    if (m.served_role) f.num(static_cast<int>(*m.served_role));
+    f.str(m.thinking);
+    f.str(m.thinking_signature);
+    f.num(m.reasoning_ms);
+    f.str(m.reasoning_encrypted);
+    f.str(m.reasoning_site);
+    f.str(m.reasoning_summary);
+    f.num(m.thinking_blocks.size());
+    for (const auto& b : m.thinking_blocks) {
+        f.str(b.text); f.str(b.signature); f.str(b.redacted_data);
+    }
+    f.num(m.tool_calls.size());
+    for (const auto& tc : m.tool_calls) {
+        f.str(tc.id.value);
+        f.str(tc.name.value);
+        f.str(tc.args_dump());
+        f.str(tc.status_name());
+        f.str(tc.output());
+        f.num(tc.done_images().size());
+        for (const auto& img : tc.done_images()) {
+            f.str(img.media_type);
+            fp_payload(f, img);
+        }
+    }
+    f.num(m.images.size());
+    for (const auto& img : m.images) {
+        f.str(img.media_type);
+        fp_payload(f, img);
+    }
+    f.num(m.attachments.size());
+    for (const auto& a : m.attachments) {
+        f.num(static_cast<int>(a.kind));
+        fp_payload(f, a.body);
+        f.str(a.path); f.str(a.media_type); f.str(a.name);
+        f.num(a.line_number); f.num(a.line_count); f.num(a.byte_count);
+    }
+    f.num(m.checkpoint_id.has_value());
+    if (m.checkpoint_id) f.str(m.checkpoint_id->value);
+    f.num(m.error.has_value());
+    if (m.error) f.str(*m.error);
+    f.num(m.is_compact_summary);
+    f.num(m.proactive.has_value());
+    if (m.proactive) {
+        f.num(m.proactive->confidence.has_value());
+        if (m.proactive->confidence) f.num(*m.proactive->confidence);
+    }
+    f.num(m.telemetry.has_value());
+    if (m.telemetry) {
+        const auto& t = *m.telemetry;
+        f.num(t.ttft_ms); f.num(t.stream_ms); f.num(t.input_tokens);
+        f.num(t.output_tokens); f.num(t.reasoning_tokens); f.num(t.cache_read);
+        f.num(t.cache_creation); f.num(t.transient_retries);
+        f.num(t.mid_stream_failures); f.num(t.no_progress_failures);
+        f.num(t.wire_bytes);
+    }
+    f.num(m.fork_note);
+    f.str(m.fork_transcript);
+    return f.finish();
+}
+
+// What the writer knows is in the log for one thread: one fingerprint per
+// persisted message, in log order. Only ever set after a verified write.
+struct LogState {
+    std::vector<std::uint64_t> fps;
+};
+
+// A queued save. `from` is the index (into the persistable messages) of
+// the first one that may differ from the log; `tail` is those messages.
+// `full` carries the whole thread when the tail path can't be used.
+struct SaveJob {
+    Thread                     meta;         // header only, messages empty
+    std::size_t                from = 0;
+    std::vector<Message>       tail;
+    std::vector<std::uint64_t> fps;          // fingerprints for ALL messages
+    std::optional<Thread>      full;
+};
+
+// Encode + append [from, end) after cutting the log at `from`, then verify
+// only the new lines. Returns false on any failure; the caller then does a
+// full save, which also repairs whatever this left behind.
+static bool save_tail_sync(const SaveJob& job) {
+    auto log = ThreadLog::open(job.meta.id);
+    if (!log || !log->exists() || log->size() < job.from) return false;
+    if (!log->truncate_to(job.from)) return false;
+    for (const auto& m : job.tail)
+        if (!log->append(m)) return false;
+    if (!log->set_meta(job.meta)) return false;
+    if (log->size() != job.fps.size()) return false;
+
+    // Same gate as the full path, scoped to what this save wrote. Reads
+    // back the appended lines from the FILES, via a fresh open.
+    auto check = ThreadLog::open(job.meta.id);
+    if (!check) return false;
+    const auto got = check->range(job.from, check->size());
+    const LogMismatch diff = log_diff_range(got, job.tail, job.from);
+    if (!diff.ok()) {
+        AGT_LOG(Persist, Error, "thread.save",
+                "tail verification FAILED id={} from={} kind={} index={} "
+                "want={} got={} — falling back to a full save",
+                job.meta.id.value, job.from, diff.kind_name(), diff.index,
+                diff.want, diff.got);
+        return false;
+    }
+    AGT_LOG(Persist, Debug, "thread.save",
+            "result=ok format=log mode=tail id={} from={} wrote={} messages={}",
+            job.meta.id.value, job.from, job.tail.size(), job.fps.size());
+    return true;
 }
 
 // ── Async writer ─────────────────────────────────────────────────────
@@ -1548,75 +2107,200 @@ static void save_thread_sync(const Thread& t) {
 // because the reducer's Quit handler issues a final save_thread()
 // before maya returns; we wait for the queue to drain inside
 // flush_and_stop() which `main` calls right after maya::run returns.
+// Everything the reducer and the drain worker share. Plain data, so it lives
+// in a guarded; the worker sleeps on it with wait_with.
+//
+// Lock order: the state is a LEAF. Every body below is a few lines over
+// these maps and calls nothing that locks (the slow work -- encoding,
+// fsync, reindexing -- runs between bodies), so enqueue() can be called
+// from any lock-free caller and the drain worker never holds it across IO.
+// The worker group that runs the drain is NOT in a lock: it joins on
+// destruction, so jaal refuses it inside a guarded. It lives in a published
+// slot and is stopped with `unlocked`.
+struct WriterState {
+    std::unordered_map<std::string, SaveJob> pending;
+    // Per-thread knowledge of the log. The reducer reads it to build a
+    // tail-only job; the worker writes it after a verified save. Dropped on
+    // delete, and on any failure.
+    std::unordered_map<std::string, LogState> known;
+    // Last (title, updated_at) written to index.json per thread.
+    std::unordered_map<std::string, std::string> indexed;
+    std::string in_flight;
+    bool        stopping = false;
+    bool        started  = false;
+};
+
+using WriterStateLock = maya::guarded<WriterState>;
+WriterStateLock& async_writer_state() {
+    static WriterStateLock s;
+    return s;
+}
+
 struct AsyncWriter {
-    std::mutex                              mu;
-    std::condition_variable                 cv;
-    std::unordered_map<std::string, Thread> pending;
-    bool                                    stopping = false;
-    std::thread                             worker;
+    // Reached in the constructor, so the state static is built first and
+    // destroyed after this one.
+    WriterStateLock& st = async_writer_state();
 
-    void enqueue(Thread t) {
-        {
-            std::lock_guard<std::mutex> lk(mu);
-            // Newer snapshot supersedes any older one still queued
-            // for the same thread id. Move-assign so we don't copy
-            // the messages vector twice.
-            pending.insert_or_assign(t.id.value, std::move(t));
-            if (!worker.joinable()) start_locked();
+    // The drain worker: a jaal-backed group, joined with no deadline on stop
+    // so every queued save lands. Recreated if saves arrive again. A
+    // published slot, not a lock: whoever wins `started` (under `st`)
+    // creates and publishes it, and flush_and_stop takes it out to stop it.
+    maya::published<util::WorkerGroup> worker;
+
+    // Build the job on the CALLER's thread, copying only what changed.
+    // Fingerprinting is one pass of hashing with no allocation or I/O —
+    // far cheaper than the full Thread copy this replaces, and the writer
+    // no longer re-encodes or re-reads anything before `from`.
+    void enqueue(const maya::below<maya::leaf>& cap, const Thread& t) {
+        std::vector<std::uint64_t> fps;
+        fps.reserve(t.messages.size());
+        for (const auto& m : t.messages)
+            if (!m.smart_routing) fps.push_back(message_fingerprint(m));
+
+        // Diff against what is CONFIRMED on disk. If a save for this thread
+        // is queued or mid-write, its outcome isn't known yet: a tail built
+        // on top of it would be wrong if it fails. That case is rare (saves
+        // are one per round, a tail write takes milliseconds), so just send
+        // the whole thread then — exactly the old behaviour.
+        //
+        // The base is copied out and the job built unlocked; the decision
+        // is re-checked when the job lands, below.
+        const std::string key = t.id.value;
+        auto base = st.read(cap, [](const WriterState& s, std::string k)
+                                -> std::optional<std::vector<std::uint64_t>> {
+            if (s.pending.contains(k) || s.in_flight == k) return std::nullopt;
+            auto it = s.known.find(k);
+            if (it == s.known.end()) return std::nullopt;
+            return it->second.fps;
+        }, key);
+
+        SaveJob job;
+        // HEADER ONLY. `job.meta = t; job.meta.messages.clear();` deep-copied
+        // every message just to throw them away — a full transcript copy on
+        // the reducer on every save, which is the cost this whole path
+        // exists to avoid.
+        job.meta.id                = t.id;
+        job.meta.title             = t.title;
+        job.meta.forked_from       = t.forked_from;
+        job.meta.rag_mode_override = t.rag_mode_override;
+        job.meta.created_at        = t.created_at;
+        job.meta.updated_at        = t.updated_at;
+        job.meta.compactions       = t.compactions;
+        job.fps = fps;
+
+        if (!base) {
+            job.full = t;
+        } else {
+            const std::size_t n = std::min(base->size(), fps.size());
+            std::size_t from = 0;
+            while (from < n && (*base)[from] == fps[from]) ++from;
+            job.from = from;
+            std::size_t i = 0;
+            for (const auto& m : t.messages) {
+                if (m.smart_routing) continue;
+                if (i++ >= from) job.tail.push_back(m);
+            }
         }
-        cv.notify_one();
+
+        // A tail job is only valid against the base it was diffed on. If
+        // that moved while we built it (a save landed, or one got queued),
+        // send the whole thread instead. Rare: saves are once per round.
+        const auto start = st.with(cap, [](WriterState& s, std::string k, SaveJob j,
+                                      std::optional<std::vector<std::uint64_t>> b) {
+            if (!j.full) {
+                auto it = s.known.find(k);
+                const bool still = !s.pending.contains(k) && s.in_flight != k
+                                && it != s.known.end() && b && it->second.fps == *b;
+                if (!still) return std::optional<bool>{};   // rebuild as full
+            }
+            s.pending.insert_or_assign(k, std::move(j));
+            if (s.started) return std::optional<bool>{false};
+            s.started = true;
+            return std::optional<bool>{true};
+        }, key, std::move(job), std::move(base));
+        if (!start) {
+            // Raced a landing save: redo as a full job.
+            SaveJob full;
+            full.meta.id                = t.id;
+            full.meta.title             = t.title;
+            full.meta.forked_from       = t.forked_from;
+            full.meta.rag_mode_override = t.rag_mode_override;
+            full.meta.created_at        = t.created_at;
+            full.meta.updated_at        = t.updated_at;
+            full.meta.compactions       = t.compactions;
+            full.fps  = std::move(fps);
+            full.full = t;
+            const bool s2 = st.with(cap, [](WriterState& s, std::string k, SaveJob j) {
+                s.pending.insert_or_assign(k, std::move(j));
+                if (s.started) return false;
+                s.started = true;
+                return true;
+            }, key, std::move(full));
+            if (s2) start_worker();
+            return;
+        }
+        if (*start) start_worker();
     }
 
-    void flush_and_stop() {
-        std::thread to_join;
-        {
-            std::lock_guard<std::mutex> lk(mu);
-            stopping = true;
-            // Hand the worker handle out under the lock so a concurrent
-            // enqueue() can't observe a half-stopped state, and join
-            // outside the lock. run() drains every queued save before it
-            // sees `stopping` and exits, so nothing enqueued before this
-            // call is dropped.
-            if (worker.joinable()) to_join = std::move(worker);
-        }
-        cv.notify_one();
-        if (to_join.joinable()) to_join.join();
+    void forget(const maya::below<maya::leaf>& cap, const std::string& key) {
+        st.with(cap, [](WriterState& s, std::string k) { s.known.erase(k); }, key);
     }
 
-    ~AsyncWriter() { flush_and_stop(); }
+    // Saved or queued by this process: a thread someone has open.
+    [[nodiscard]] bool live(const maya::below<maya::leaf>& cap, const std::string& key) {
+        return st.read(cap, [](const WriterState& s, std::string k) {
+            return s.known.contains(k) || s.pending.contains(k);
+        }, key);
+    }
+
+    void flush_and_stop(const maya::unlocked& cap, bool restartable = true) {
+        // Mark stopping (which wakes run()), take the worker out of its slot,
+        // and join with no lock held. run() drains every queued save before
+        // it sees `stopping` and exits, so nothing enqueued before this call
+        // is dropped. `started` stays true until the join is done, so a save
+        // racing this queues onto the draining worker instead of starting a
+        // second one; then it's cleared, and a later save starts a fresh one.
+        st.with(cap, [](WriterState& s) { s.stopping = true; });
+        if (auto g = worker.take()) g->stop(cap);
+        if (!restartable) return;   // process exit: nothing runs after this
+        const bool leftover = st.with(cap, [](WriterState& s) {
+            s.stopping = false;
+            s.started  = !s.pending.empty();
+            return s.started;
+        });
+        // A save that queued after run() drained and exited: give it a worker.
+        if (leftover) start_worker();
+    }
+
+    // No flush here: a destructor can't be handed `unlocked`, and a static's
+    // destructor runs after main. main() calls flush_pending_saves(unlocked)
+    // after the loop returns; by the time this runs the worker is already
+    // taken and stopped. ~published releases nothing that joins.
+    ~AsyncWriter() = default;
 
 private:
-    void start_locked() {
-        worker = std::thread([this] { run(); });
+    void start_worker() {
+        // Only the caller that flipped `started` gets here, so there is at
+        // most one worker live at a time.
+        auto g = std::make_shared<util::WorkerGroup>("persistence.async_writer");
+        g->post([](const maya::unlocked& job_cap, std::stop_token) { run(job_cap); });
+        worker.publish(std::move(g));
     }
 
-    void run() {
-        for (;;) {
-            Thread next;
-            {
-                std::unique_lock<std::mutex> lk(mu);
-                cv.wait(lk, [this] { return !pending.empty() || stopping; });
-                // Drain-then-stop: even when `stopping` is set we keep
-                // popping until `pending` is empty, so the final
-                // snapshot the Quit reducer enqueued always lands.
-                if (pending.empty()) {
-                    if (stopping) return;
-                    continue;
-                }
-                auto it = pending.begin();
-                next = std::move(it->second);
-                pending.erase(it);
-            }
-            // Run outside the lock so concurrent enqueue() calls don't
-            // block on the (potentially slow) fsync.
-            try { save_thread_sync(next); }
-            catch (const std::exception& e) {
-                // best-effort, same policy as the sync path
-                util::dbglog("persistence.async_save", e.what());
-            }
-            catch (...) { util::dbglog("persistence.async_save", "non-std exception"); }
-        }
+    struct Next { std::string key; SaveJob job; };
+
+    static void run(const maya::unlocked& cap);
+
+    // Title + updated_at, the fields the picker index holds. updated_at is
+    // second-resolution on disk, so compare at that grain.
+    static std::string index_key(const std::string& title,
+                                 std::chrono::system_clock::time_point up) {
+        return title + '\x1f' + std::to_string(
+            std::chrono::duration_cast<std::chrono::seconds>(
+                up.time_since_epoch()).count());
     }
+
+    static void maybe_reindex(const maya::unlocked& cap, const Thread& meta);
 };
 
 static AsyncWriter& async_writer() {
@@ -1624,16 +2308,152 @@ static AsyncWriter& async_writer() {
     return w;
 }
 
-void save_thread(const Thread& t) {
+void AsyncWriter::maybe_reindex(const maya::unlocked& cap, const Thread& meta) {
+    const bool changed = async_writer().st.with(cap,
+        [](WriterState& s, std::string id, std::string k) {
+            auto it = s.indexed.find(id);
+            if (it != s.indexed.end() && it->second == k) return false;
+            s.indexed[id] = k;
+            return true;
+        }, meta.id.value, index_key(meta.title, meta.updated_at));
+    if (changed) reindex_thread(cap, meta);
+}
+
+void AsyncWriter::run(const maya::unlocked& cap) {
+    auto& st = async_writer().st;
+    for (;;) {
+        // Drain-then-stop: even when `stopping` is set we keep popping until
+        // `pending` is empty, so the final snapshot the Quit reducer enqueued
+        // always lands. Marking the key in flight in the same step keeps
+        // enqueue() from building a tail on an outcome it can't see yet.
+        auto taken = st.wait_with(cap,
+            [](const WriterState& s) { return !s.pending.empty() || s.stopping; },
+            [](WriterState& s) -> std::optional<Next> {
+                if (s.pending.empty()) return std::nullopt;
+                auto it = s.pending.begin();
+                Next n{it->first, std::move(it->second)};
+                s.pending.erase(it);
+                s.in_flight = n.key;
+                return n;
+            });
+        if (!taken) return;
+        auto& key  = taken->key;
+        auto& next = taken->job;
+
+        // Run outside the lock so concurrent enqueue() calls don't block on
+        // the (potentially slow) fsync.
+        bool ok = false;
+        try {
+            if (!next.full) {
+                ok = save_tail_sync(next);
+                if (!ok) {
+                    // The tail write failed partway. The head before `from`
+                    // is the confirmed, verified state (no other job for this
+                    // key can have run in between), so rebuild the whole
+                    // thread from it and do a full write, which also repairs
+                    // whatever the tail left.
+                    if (auto log = ThreadLog::open(next.meta.id);
+                        log && log->size() >= next.from) {
+                        Thread t = next.meta;
+                        t.messages = log->range(0, next.from);
+                        if (t.messages.size() == next.from) {
+                            for (auto& m : next.tail) t.messages.push_back(std::move(m));
+                            ok = save_thread_sync(cap, t);
+                        }
+                    }
+                    // The head is gone too (log emptied or replaced behind
+                    // our back). This job only carries the tail, so it can't
+                    // be written whole. Dropping `known` below makes the NEXT
+                    // save full, which heals it; the reducer saves every
+                    // round and on quit, so the gap is one round at most.
+                    if (!ok)
+                        AGT_LOG(Persist, Error, "thread.save",
+                                "tail save failed and log head unreadable "
+                                "id={} from={} — next save will be full",
+                                next.meta.id.value, next.from);
+                }
+            } else {
+                ok = save_thread_sync(cap, *next.full);
+            }
+            // The picker index only needs refreshing when what it shows
+            // changes (title, timestamps) or at the first save. It is a
+            // read-modify-write of one JSON file covering every thread, so
+            // doing it every round was pure waste.
+            if (ok && !next.full) maybe_reindex(cap, next.meta);
+        }
+        catch (const std::exception& e) {
+            // best-effort, same policy as the sync path
+            util::dbglog("persistence.async_save", e.what());
+        }
+        catch (...) { util::dbglog("persistence.async_save", "non-std exception"); }
+
+        std::optional<std::string> idx;
+        if (ok && next.full) idx = index_key(next.full->title, next.full->updated_at);
+        st.with(cap, [](WriterState& s, std::string k, bool good,
+                   std::vector<std::uint64_t> fps, std::optional<std::string> ik) {
+            s.in_flight.clear();
+            if (!good) s.known.erase(k);
+            else       s.known[k].fps = std::move(fps);
+            if (ik) s.indexed[k] = std::move(*ik);
+        }, key, ok, std::move(next.fps), std::move(idx));
+    }
+}
+
+void save_thread(Io, const maya::below<maya::leaf>& cap, const Thread& t) {
     if (t.id.empty() || t.messages.empty()) return;
-    async_writer().enqueue(t);
+    async_writer().enqueue(cap, t);
 }
 
-void flush_pending_saves() {
-    async_writer().flush_and_stop();
+namespace {
+// Test/diagnostic hook, internal linkage: drop what the writer knows so
+// the next save of `id` is full. Used by delete_thread.
+void forget_log_state(const maya::below<maya::leaf>& cap, const ThreadId& id) {
+    async_writer().forget(cap, id.value);
+}
+} // namespace
+
+void flush_pending_saves(Io, const maya::unlocked& cap) {
+    async_writer().flush_and_stop(cap);
 }
 
-std::optional<Thread> load_thread_by_id(const ThreadId& id) {
+namespace {
+fs::path subagent_path(const ThreadId& id) {
+    return threads_dir() / "subagents" / (id.value + ".json");
+}
+}  // namespace
+
+bool save_subagent_thread(Io io, const Thread& t) {
+    if (t.id.value.empty()) return false;
+    std::error_code ec;
+    fs::create_directories(threads_dir() / "subagents", ec);
+    json j = thread_meta_to_json(t);
+    json msgs = json::array();
+    for (const auto& m : t.messages)
+        if (!m.smart_routing) msgs.push_back(message_to_json(m));
+    j["messages"] = std::move(msgs);
+    try {
+        return write_json_atomic(io, subagent_path(t.id), j.dump(2));
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
+}
+
+std::optional<Thread> load_subagent_thread(Io io, const ThreadId& id) {
+    // Ids are 16 hex digits; anything else never names a file here.
+    if (id.value.empty() || id.value.find_first_not_of("0123456789abcdef") != std::string::npos)
+        return std::nullopt;
+    std::error_code ec;
+    if (!fs::exists(subagent_path(id), ec)) return std::nullopt;
+    auto t = load_thread_file(io, subagent_path(id));
+    if (!t) return std::nullopt;
+    return std::move(*t);
+}
+
+std::uint64_t debug_message_fingerprint(const Message& m) {
+    return message_fingerprint(m);
+}
+
+std::optional<Thread> load_thread_by_id(Io io, const ThreadId& id) {
     if (id.value.empty()) return std::nullopt;
 
     // Prefer the log. A thread has one only after it has been saved since
@@ -1663,43 +2483,140 @@ std::optional<Thread> load_thread_by_id(const ThreadId& id) {
     }
 
     auto p = threads_dir() / (id.value + ".json");
-    auto loaded = load_thread_file(p);
+    auto loaded = load_thread_file(io, p);
     if (!loaded) return std::nullopt;
     AGT_LOG(Persist, Debug, "thread.load", "format=legacy id={} messages={}",
             id.value, loaded->messages.size());
     return std::move(*loaded);
 }
 
-void delete_thread(const ThreadId& id) {
+void delete_thread(Io, const lock_levels::below_file_lane& cap, const ThreadId& id) {
+    forget_log_state(cap, id);
     std::error_code ec;
     fs::remove(threads_dir() / (id.value + ".json"), ec);
-    // The log format is three files (.jsonl, .ofs, .meta.json). A thread
-    // that has been saved since the migration lives in those and NOT in
-    // the .json above, so missing this would leave a deleted thread fully
-    // intact on disk — and it would come back on the next directory walk.
+    fs::remove(threads_dir() / (id.value + ".transcript.md"), ec);
+    // The log format: .jsonl, .ofs, .meta.json.
     if (auto log = ThreadLog::open(id)) log->remove();
-    // Blobs are deliberately NOT removed here. They are content-addressed
-    // and therefore SHARED: the same screenshot pasted in two threads, or
-    // an identical tool output, is one file referenced from both. Deleting
-    // this thread's blobs would silently blank images in threads that are
-    // still open. Reclaiming them needs a mark-and-sweep across every
-    // thread file, which belongs in a maintenance pass, not in the delete
-    // path — an orphaned blob costs disk, a wrongly-deleted one costs data.
-    // Drop the metadata index entry too so the picker list doesn't show
-    // a ghost row until the next full walk prunes it. Under the index
-    // lock: a concurrent reindex_thread() on the AsyncWriter worker
-    // would otherwise resurrect this id from its stale in-memory copy.
-    std::lock_guard<std::mutex> lk(thread_index_mu());
-    auto idx = read_thread_index_locked();
-    if (idx.erase(id.value) > 0) write_thread_index_locked(idx);
+    // Blobs are shared between threads (content-addressed), so they are
+    // left for blob gc's mark-and-sweep. The index entry goes now, under
+    // its lock, so the picker shows no ghost row.
+    with_thread_index(cap, [](const maya::held<lock_levels::file_lane>&, persistence::Held,
+                              std::string key) {
+        auto idx = read_thread_index_locked();
+        if (idx.erase(key) > 0) write_thread_index_locked(idx);
+    }, id.value);
 }
 
-store::Settings load_settings() {
+ExpireStats expire_threads(Io io, const lock_levels::below_file_lane& cap, int keep_days,
+                           const ThreadId& keep, bool dry_run) {
+    ExpireStats st;
+    if (keep_days <= 0) return st;
+    const fs::path dir = threads_dir();
+    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::days{keep_days};
+
+    // A thread's files share its id as the stem; the newest of them is its
+    // last activity. Ids are hex, so anything else (index.json, blobs/) is skipped.
+    // file_time_type{} is the clock's epoch (year 2174 on libstdc++), not "oldest".
+    struct Seen { fs::file_time_type newest = fs::file_time_type::min(); std::uintmax_t bytes = 0; };
+    std::unordered_map<std::string, Seen> by_id;
+    std::error_code ec;
+    for (fs::directory_iterator it{dir, ec}, end; !ec && it != end; it.increment(ec)) {
+        std::error_code fec;
+        if (!it->is_regular_file(fec)) continue;
+        const std::string name = it->path().filename().string();
+        const auto dot = name.find('.');
+        if (dot == 0 || dot == std::string::npos) continue;
+        const std::string id = name.substr(0, dot);
+        if (!std::ranges::all_of(id, [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); }))
+            continue;
+        auto& s = by_id[id];
+        const auto mt = it->last_write_time(fec);
+        if (!fec && mt > s.newest) s.newest = mt;
+        const auto sz = it->file_size(fec);
+        if (!fec) s.bytes += sz;
+    }
+    for (const auto& [id, s] : by_id) {
+        if (id == keep.value || s.newest >= cutoff || async_writer().live(cap, id)) continue;
+        ++st.threads;
+        st.bytes += s.bytes;
+        if (!dry_run) delete_thread(io, cap, ThreadId{id});
+    }
+    // Subagent runs kept for editors age out the same way.
+    std::error_code sec;
+    for (fs::directory_iterator it{dir / "subagents", sec}, end; !sec && it != end; it.increment(sec)) {
+        std::error_code fec;
+        if (!it->is_regular_file(fec)) continue;
+        const auto mt = it->last_write_time(fec);
+        if (fec || mt >= cutoff) continue;
+        st.bytes += it->file_size(fec);
+        if (!dry_run) fs::remove(it->path(), fec);
+    }
+    if (st.threads > 0)
+        AGT_LOG(Persist, Info, "threads.expire", "{} {} thread(s) older than {}d, {} KB",
+                dry_run ? "would delete" : "deleted", st.threads, keep_days, st.bytes / 1024);
+    return st;
+}
+
+int thread_keep_days(Io) {
+    const char* v = std::getenv("AGENTTY_THREADS_KEEP_DAYS");
+    if (!v || !*v) return 0;
+    char* end = nullptr;
+    const long n = std::strtol(v, &end, 10);
+    if (end == v || *end != '\0' || n <= 0) return 0;
+    return static_cast<int>(std::min<long>(n, 365L * 100));
+}
+
+// The raw JSON this process last LOADED from disk.
+//
+// The baseline for the merge in save_settings: a key whose value still equals
+// this one was not touched by us, so a concurrent writer's version of it must
+// win rather than being overwritten with what we read at startup. Without a
+// baseline the only options are "clobber everything" (the bug) or "merge
+// nothing", and neither preserves a second instance's edits.
+//
+// A snapshot: load_settings runs on the engine thread at startup and
+// save_settings can run from a worker, so the two can overlap. Every use
+// reads or replaces the WHOLE document, which is a snapshot's shape exactly
+// -- no lock, so the settings lane's body can read and replace it without
+// any rank above the lane.
+//
+// Held SERIALISED: a snapshot's value must be provably immutable (Shareable),
+// and nlohmann::json can't be proven so. A string can. The baseline is read
+// twice per settings save, so the parse is noise next to the file IO.
+struct Baseline {
+    maya::snapshot<std::string> doc{std::string{"{}"}};
+    void store(const json& j) { doc.store(j.dump()); }
+    [[nodiscard]] json load() const {
+        try { return json::parse(*doc.load()); } catch (...) { return json::object(); }
+    }
+};
+Baseline& loaded_baseline() {
+    static Baseline b;
+    return b;
+}
+
+namespace {
+store::Settings load_settings_from_disk();
+} // namespace
+
+store::Settings load_settings(Io io) {
+    store::Settings s = load_settings_from_disk();
+    // The search policy's env overrides must hold on every path (no
+    // settings.json, a malformed one), not only after a clean parse, or the
+    // pane would show a locked row while the tool ran on the default.
+    // Applied last, so an export beats a stored value.
+    settings::registry::apply_env(io, s.web_search);
+    return s;
+}
+
+namespace {
+store::Settings load_settings_from_disk() {
     store::Settings s;
-    std::ifstream ifs(data_dir() / "settings.json");
+    std::ifstream ifs(settings_path());
     if (!ifs) return s;
     try {
         json j; ifs >> j;
+        loaded_baseline().store(j);
         s.model_id = ModelId{j.value("model_id", "")};
         s.profile = static_cast<Profile>(j.value("profile", 0));
         // Appearance. Read field by field with the struct's own defaults as
@@ -1713,6 +2630,9 @@ store::Settings load_settings() {
                 return static_cast<E>(u.value(k, static_cast<int>(def)));
             };
             s.ui.theme         = u.value("theme", std::string{});
+            // Empty = auto (follow the environment). Same shape as theme:
+            // an absent key and an explicit "" both mean "nobody chose".
+            s.ui.lang          = u.value("lang", std::string{});
             s.ui.tier          = en("tier",       ui_prefs::ColorTier::Auto);
             s.ui.polarity      = en("polarity",   ui_prefs::Polarity::Auto);
             s.ui.density       = en("density",    ui_prefs::Density::Normal);
@@ -1764,6 +2684,11 @@ store::Settings load_settings() {
                 if (v.is_number_integer() && v.get<int>() > 0)
                     s.context_overrides[k] = v.get<int>();
         }
+        if (j.contains("probe_hosts") && j["probe_hosts"].is_array()) {
+            for (auto& v : j["probe_hosts"])
+                if (v.is_string() && !v.get<std::string>().empty())
+                    s.probe_hosts.insert(v.get<std::string>());
+        }
         if (j.contains("recent_models") && j["recent_models"].is_array()) {
             for (auto& v : j["recent_models"])
                 if (v.is_string()) s.recent_models.push_back(v.get<std::string>());
@@ -1781,6 +2706,12 @@ store::Settings load_settings() {
                     s.learned_effort_sets[k] =
                         static_cast<std::uint8_t>(v.get<unsigned>() & 0xFFu);
         }
+        if (j.contains("rejected_fields") && j["rejected_fields"].is_object()) {
+            for (auto& [k, v] : j["rejected_fields"].items())
+                if (v.is_number_unsigned())
+                    s.rejected_fields[k] =
+                        static_cast<std::uint8_t>(v.get<unsigned>() & 0xFFu);
+        }
         auto grants = j.value("always_allow_tools", std::vector<std::string>{});
         s.always_allow_tools = std::move(grants);
         s.context_1m_blocked = j.value("context_1m_blocked", false);
@@ -1794,6 +2725,73 @@ store::Settings load_settings() {
         }
         s.show_changes_strip = j.value("show_changes_strip", false);
         s.show_reasoning     = j.value("show_reasoning", false);
+
+        // Sandbox policy. Every field falls back to the CURRENT value rather
+        // than a literal, so the defaults live in one place (the struct) and a
+        // key added later reads as "keep whatever the struct says" on an older
+        // settings.json instead of silently becoming zero.
+        if (j.contains("sandbox") && j["sandbox"].is_object()) {
+            const auto& b = j["sandbox"];
+            auto& c = s.sandbox;
+            c.configured   = b.value("configured", true);  // present ⇒ user-set
+            // The engine. Clamped rather than cast blind: a hand-edited
+            // settings.json is a supported input, and an out-of-range value
+            // here would pick a backend that does not exist.
+            {
+                // One backend now. A file written when bwrap existed carries
+                // its old ordinal; read it as claybin rather than refusing to
+                // load, and the next save writes the current value. Read-old,
+                // write-new, never write-old -- the same shape as the
+                // entitlements migration above.
+                (void)b.value("backend", 0);
+                c.backend = sandbox_cfg::LinuxBackend::Claybin;
+            }
+            c.fs_scope     = static_cast<sandbox_cfg::FsScope>(
+                                 b.value("fs_scope", static_cast<int>(c.fs_scope)));
+            c.net_mode     = static_cast<sandbox_cfg::NetMode>(
+                                 b.value("net_mode", static_cast<int>(c.net_mode)));
+            c.syscall_mode = static_cast<sandbox_cfg::SyscallMode>(
+                                 b.value("syscall_mode", static_cast<int>(c.syscall_mode)));
+            c.handoff      = static_cast<sandbox_cfg::HandoffPolicy>(
+                                 b.value("handoff", static_cast<int>(c.handoff)));
+            c.wx_protect   = b.value("wx_protect", c.wx_protect);
+            c.max_open_files  = b.value("max_open_files", c.max_open_files);
+            c.wall_clock_secs = b.value("wall_clock_secs", c.wall_clock_secs);
+            c.cpu_secs        = b.value("cpu_secs", c.cpu_secs);
+            c.fake_hostname   = b.value("fake_hostname", c.fake_hostname);
+            // Clamped, not trusted: this bounds a directory walk that runs on
+            // every spawn, so a hand-edited 10000 would put a full-tree scan
+            // in the latency path of every shell command.
+            c.mask_scan_depth = std::min<std::uint32_t>(
+                b.value("mask_scan_depth", c.mask_scan_depth), 8u);
+            c.scope_ipc    = b.value("scope_ipc", c.scope_ipc);
+            c.close_inherited_fds = b.value("close_fds", c.close_inherited_fds);
+            c.memory_mb    = b.value("memory_mb", c.memory_mb);
+            c.max_procs    = b.value("max_procs", c.max_procs);
+            c.cpu_percent  = b.value("cpu_percent", c.cpu_percent);
+            c.tmp_mb       = b.value("tmp_mb", c.tmp_mb);
+            // Lists are absent when empty, so read them only when present --
+            // and type-check, because a hand-edited settings.json is a
+            // supported input and a string where an array belongs should not
+            // throw.
+            auto strs = [&](const char* k, std::vector<std::string>& out) {
+                if (b.contains(k) && b[k].is_array())
+                    for (const auto& v : b[k])
+                        if (v.is_string()) out.push_back(v.get<std::string>());
+            };
+            strs("read_paths", c.read_paths);
+            strs("write_paths", c.write_paths);
+            strs("deny_paths", c.deny_paths);
+            if (b.contains("allow_ports") && b["allow_ports"].is_array()) {
+                c.allow_ports.clear();
+                for (const auto& v : b["allow_ports"])
+                    if (v.is_number_unsigned()) {
+                        const auto p = v.get<std::uint64_t>();
+                        if (p > 0 && p <= 65535)
+                            c.allow_ports.push_back(static_cast<std::uint16_t>(p));
+                    }
+            }
+        }
         if (j.contains("rag") && j["rag"].is_object()) {
             const auto& r = j["rag"];
             auto& c = s.rag;
@@ -1908,6 +2906,44 @@ store::Settings load_settings() {
                 (void)settings::registry::set(s.smart, d, as_text);
             }
         }
+        // web_search policy (Settings → Web Search). Read by WALKING the
+        // registry, so each value is clamped to its row's range on the way in
+        // and a hand-edited settings.json cannot hold what the pane could not
+        // produce. Keys are the row ids without the "web_search." prefix, the
+        // same shape the `smart` block uses. An absent key keeps the default.
+        if (j.contains("web_search") && j["web_search"].is_object()) {
+            const auto& se = j["web_search"];
+            for (const auto& d : settings::registry::kSettings) {
+                if (d.owner() != settings::registry::Owner::WebSearch) continue;
+                const auto dot = d.id.find('.');
+                const std::string key{d.id.substr(dot + 1)};
+                if (!se.contains(key)) continue;
+                const auto& v = se[key];
+                std::string as_text;
+                if      (v.is_boolean())        as_text = v.get<bool>() ? "true" : "false";
+                else if (v.is_number_integer()) as_text = std::to_string(v.get<long long>());
+                else if (v.is_number())         as_text = std::to_string(v.get<double>());
+                else if (v.is_string())         as_text = v.get<std::string>();
+                else continue;
+                (void)settings::registry::set(s.web_search, d, as_text);
+            }
+            // Per-service dials: { "<service>.<dial>": "<value>" }. Not registry
+            // rows (the set depends on which services exist), so read here.
+            // Shape-checked only: whether a value is one the service lists is
+            // mcp-cpp's call, made again on every request, so a stale or
+            // hand-edited entry cannot put arbitrary text on the wire.
+            if (se.contains("dials") && se["dials"].is_object()) {
+                for (const auto& [k, v] : se["dials"].items()) {
+                    if (!web_search_cfg::dial_entry_ok(k, v.is_string() ? v.get<std::string>()
+                                                                         : std::string{}))
+                        continue;
+                    if (s.web_search.dials.size() >= web_search_cfg::kMaxDials) break;
+                    s.web_search.dials[k] = v.get<std::string>();
+                }
+            }
+        }
+        // (web_search's env overrides: applied by load_settings() on every path.)
+
         // Environment overrides, applied by WALKING the registry. This is what
         // makes a row's env alias real for every Settings-owned knob at once,
         // and it clamps to each row's range on the way in.
@@ -1917,7 +2953,7 @@ store::Settings load_settings() {
         // config until the user changes something. Applied after the JSON so
         // an export beats a stored value — the layering the locked row in the
         // settings UI advertises.
-        settings::registry::apply_env(s.smart);
+        settings::registry::apply_env(internal_io(), s.smart);
     } catch (const std::exception& e) {
         util::dbglog("persistence.load_settings", e.what());
     } catch (...) {
@@ -1925,8 +2961,56 @@ store::Settings load_settings() {
     }
     return s;
 }
+} // namespace
 
-void save_settings(const store::Settings& s) {
+namespace {
+void save_settings_locked(persistence::Held held, const store::Settings& s);
+// The observer waits (a cache drains its queue on it), so it is handed the
+// caller's `unlocked`. Published, not locked: set once by the cache.
+maya::published<const std::function<void(const maya::unlocked&)>>& settings_observer() {
+    static maya::published<const std::function<void(const maya::unlocked&)>> o;
+    return o;
+}
+void notify_written(const maya::unlocked& cap);
+}
+
+void save_settings(Io, const maya::unlocked& cap, const store::Settings& s) {
+    // Held for the WHOLE read-modify-write, not just the write. Two instances
+    // each serialise their own full in-memory record, so without this the
+    // second writer silently reverts every field the first one changed --
+    // see settings_mu() for the five-instance theme-revert this fixes.
+    //
+    // Taken BEFORE the json is built so the document we emit cannot be
+    // composed from state that another process invalidates while we work.
+    persistence::with_shared_file(cap, settings_mu(), settings_path(),
+        [](const maya::held<lock_levels::file_lane>&, persistence::Held h, store::Settings v) {
+            save_settings_locked(h, v);
+        }, s);
+    notify_written(cap);
+}
+
+void save_settings_quiet(Io, const lock_levels::below_file_lane& cap,
+                         const store::Settings& s) {
+    persistence::with_shared_file(cap, settings_mu(), settings_path(),
+        [](const maya::held<lock_levels::file_lane>&, persistence::Held h, store::Settings v) {
+            save_settings_locked(h, v);
+        }, s);
+}
+
+namespace {
+void notify_written(const maya::unlocked& cap) {
+    // Tell anyone caching settings that the file moved under them, after the
+    // lane is released. See on_settings_written() in persistence.hpp.
+    if (auto obs = settings_observer().current(); obs && *obs) (*obs)(cap);
+}
+}  // namespace
+
+namespace {
+void save_settings_locked(persistence::Held held, const store::Settings& s) {
+    if (!held.cross_process)
+        AGT_LOG(Persist, Warn, "settings.save",
+                "result=unlocked reason=lock_unavailable (concurrent writes may be lost)");
+
     json j;
     j["model_id"] = s.model_id;
     j["profile"] = static_cast<int>(s.profile);
@@ -1935,6 +3019,10 @@ void save_settings(const store::Settings& s) {
     if (s.ui != ui_prefs::Prefs{}) {
         json u;
         if (!s.ui.theme.empty())  u["theme"] = s.ui.theme;
+        // Only when CHOSEN. Writing "en" for a user who never opened the
+        // picker would freeze them to English the moment they move to a
+        // German machine -- the absence is what makes `auto` work.
+        if (!s.ui.lang.empty())   u["lang"]  = s.ui.lang;
         u["tier"]          = static_cast<int>(s.ui.tier);
         u["polarity"]      = static_cast<int>(s.ui.polarity);
         u["density"]       = static_cast<int>(s.ui.density);
@@ -1969,6 +3057,11 @@ void save_settings(const store::Settings& s) {
             if (v > 0) co[k] = v;
         if (!co.empty()) j["context_overrides"] = std::move(co);
     }
+    if (!s.probe_hosts.empty()) {
+        json ph = json::array();
+        for (const auto& h : s.probe_hosts) ph.push_back(h);
+        j["probe_hosts"] = std::move(ph);
+    }
     if (!s.recent_models.empty()) {
         json rm = json::array();
         for (const auto& e : s.recent_models) rm.push_back(e);
@@ -1986,6 +3079,12 @@ void save_settings(const store::Settings& s) {
             le[k] = static_cast<unsigned>(v);
         j["learned_effort_sets"] = std::move(le);
     }
+    if (!s.rejected_fields.empty()) {
+        json rf = json::object();
+        for (const auto& [k, v] : s.rejected_fields)
+            rf[k] = static_cast<unsigned>(v);
+        j["rejected_fields"] = std::move(rf);
+    }
     if (!s.always_allow_tools.empty())
         j["always_allow_tools"] = s.always_allow_tools;
     // Legacy account-blind flag is READ (for migration, above) but never
@@ -2002,6 +3101,43 @@ void save_settings(const store::Settings& s) {
     // Only persisted when turned ON (default is off), keeping fresh configs clean.
     if (s.show_changes_strip) j["show_changes_strip"] = true;
     if (s.show_reasoning)     j["show_reasoning"] = true;
+
+    // Sandbox policy, written only once the user has edited it. Until then
+    // the runtime keeps its shipped posture, so upgrading never silently
+    // changes anyone's boundary -- the same contract rag.configured has, and
+    // the reason a security default can be strict without breaking people on
+    // the version where it lands.
+    if (s.sandbox.configured) {
+        const auto& c = s.sandbox;
+        json sb = {
+            {"configured",   true},
+            {"backend",      static_cast<int>(c.backend)},
+            {"fs_scope",     static_cast<int>(c.fs_scope)},
+            {"net_mode",     static_cast<int>(c.net_mode)},
+            {"syscall_mode", static_cast<int>(c.syscall_mode)},
+            {"handoff",      static_cast<int>(c.handoff)},
+            {"wx_protect",   c.wx_protect},
+            {"max_open_files",  c.max_open_files},
+            {"wall_clock_secs", c.wall_clock_secs},
+            {"cpu_secs",        c.cpu_secs},
+            {"fake_hostname",   c.fake_hostname},
+            {"mask_scan_depth", c.mask_scan_depth},
+            {"scope_ipc",    c.scope_ipc},
+            {"close_fds",    c.close_inherited_fds},
+            {"memory_mb",    c.memory_mb},
+            {"max_procs",    c.max_procs},
+            {"cpu_percent",  c.cpu_percent},
+            {"tmp_mb",       c.tmp_mb},
+        };
+        // Lists only when non-empty: a fresh config should not carry four
+        // empty arrays, and an absent key reads as "nothing added" on load
+        // without needing a special case.
+        if (!c.read_paths.empty())  sb["read_paths"]  = c.read_paths;
+        if (!c.write_paths.empty()) sb["write_paths"] = c.write_paths;
+        if (!c.deny_paths.empty())  sb["deny_paths"]  = c.deny_paths;
+        if (!c.allow_ports.empty()) sb["allow_ports"] = c.allow_ports;
+        j["sandbox"] = std::move(sb);
+    }
     if (s.rag.configured) {
         const auto& c = s.rag;
         // The picker only sets `mode`; the rest are internal defaults, still
@@ -2049,7 +3185,8 @@ void save_settings(const store::Settings& s) {
                     case settings::registry::Type::Real:
                         try { r[key] = std::stod(val); } catch (...) {}
                         break;
-                    case settings::registry::Type::Enum: r[key] = val; break;
+                    case settings::registry::Type::Enum:
+                    case settings::registry::Type::Text: r[key] = val; break;
                 }
             }
         }
@@ -2123,26 +3260,179 @@ void save_settings(const store::Settings& s) {
                 case settings::registry::Type::Real:
                     sm[key] = std::atof(val.c_str()); break;
                 case settings::registry::Type::Enum: sm[key] = val; break;
+                case settings::registry::Type::Text: sm[key] = val; break;
             }
         }
         j["smart"] = std::move(sm);
     }
+
+    // web_search: written only when a row moved off its shipped default, so a
+    // config that never opened the pane carries no `web_search` key at all — and
+    // a future change to a default reaches everyone who never overrode it.
+    //
+    // A row whose env var is set is NOT written from `s.web_search`: that value
+    // is the export, applied by load_settings(), and saving it would turn a
+    // one-session override into a permanent setting the user never chose.
+    // Such a row keeps whatever settings.json held for it (the baseline), or
+    // stays absent. The pane locks these rows, so nothing else can move them.
+    {
+        json base_web_search = [](const json& b) {
+            return b.contains("web_search") && b["web_search"].is_object()
+                       ? b["web_search"] : json{};
+        }(loaded_baseline().load());
+        const auto env = settings::registry::read_env(internal_io());
+        nlohmann::json se = nlohmann::json::object();
+        for (const auto& d : settings::registry::kSettings) {
+            if (d.owner() != settings::registry::Owner::WebSearch) continue;
+            const auto dot = d.id.find('.');
+            const std::string key{d.id.substr(dot + 1)};
+            if (!settings::registry::env_override(d, env).empty()) {
+                if (base_web_search.is_object() && base_web_search.contains(key))
+                    se[key] = base_web_search[key];
+                continue;
+            }
+            if (settings::registry::is_default(s.web_search, d)) continue;
+            const std::string val = settings::registry::get(s.web_search, d);
+            switch (d.type) {
+                case settings::registry::Type::Bool: se[key] = (val == "true"); break;
+                case settings::registry::Type::Int:
+                    try { se[key] = std::stoll(val); } catch (...) {}
+                    break;
+                case settings::registry::Type::Real:
+                    try { se[key] = std::stod(val); } catch (...) {}
+                    break;
+                case settings::registry::Type::Enum:
+                case settings::registry::Type::Text: se[key] = val; break;
+            }
+        }
+        // Dials: only the ones moved off "the service's own default". Keys of
+        // an unknown service are kept (a newer build may know it), under the
+        // same rules and cap the loader applies.
+        if (!s.web_search.dials.empty()) {
+            nlohmann::json dj = nlohmann::json::object();
+            for (const auto& [k, v] : s.web_search.dials) {
+                if (!web_search_cfg::dial_entry_ok(k, v)) continue;
+                if (dj.size() >= web_search_cfg::kMaxDials) break;
+                dj[k] = v;
+            }
+            if (!dj.empty()) se["dials"] = std::move(dj);
+        }
+        if (!se.empty()) {
+            j["web_search"] = std::move(se);
+        } else if (base_web_search.is_object()) {
+            // We loaded a `web_search` block and now hold all defaults: the user
+            // reset it. Write the empty object so the merge sees OUR change
+            // and does not re-adopt the old block from disk.
+            j["web_search"] = json::object();
+        }
+        // Else: never had one, still all default. Absent — and the merge
+        // adopts a sibling instance's newer `web_search` block from disk rather
+        // than deleting it (see adopt_disk_new below).
+    }
+
+    // ── Merge, rather than replace ──────────────────────────────────
+    //
+    // The lock above makes writes SEQUENTIAL; it cannot make this process's
+    // record FRESH. Our in-memory copy is from startup, so every key we did
+    // not change still holds a startup-era value -- and writing those back is
+    // precisely the lost update (the theme revert).
+    //
+    // So compare each top-level key against the baseline we loaded. If our
+    // value is unchanged from what WE read, we have no opinion on it: adopt
+    // whatever is on disk now, which may be another instance's newer edit.
+    // If it differs, this process changed it and our value wins.
+    //
+    // Top-level granularity is deliberate. A deep per-leaf merge would need
+    // to know which absences are meaningful, and absence IS meaningful here
+    // (save_settings omits defaults on purpose, and load reads `effort: ""`
+    // as auto). Key-level is coarse but has no such failure mode: `ui` moves
+    // as a unit, which is how the user edits it anyway.
+    {
+        std::error_code ec;
+        const fs::path path = data_dir() / "settings.json";
+        json disk = json::object();
+        if (fs::exists(path, ec)) {
+            std::ifstream ifs(path);
+            if (ifs) { try { ifs >> disk; } catch (...) { disk = json::object(); } }
+        }
+        if (disk.is_object()) {
+            const json base = loaded_baseline().load();
+            for (auto it = disk.begin(); it != disk.end(); ++it) {
+                const auto& key = it.key();
+                // Absent from what we LOADED and from what we are WRITING:
+                // we never had an opinion on this key, so a sibling instance
+                // added it after our load. Keep theirs. (Previously this fell
+                // into "appeared/vanished for us" and the key was dropped —
+                // a block such as `search`, absent by design until changed,
+                // was deleted by any other instance's next save.)
+                if (!base.contains(key) && !j.contains(key)) {
+                    AGT_LOG(Persist, Info, "settings.save",
+                            "merge=adopt_disk_new key={}", key);
+                    j[key] = it.value();
+                    continue;
+                }
+                const bool we_changed =
+                    !base.contains(key) || !j.contains(key)
+                        ? true                       // appeared/vanished for us
+                        : j[key] != base[key];
+                if (we_changed) continue;            // our edit wins
+                if (j.contains(key) && j[key] == it.value()) continue;  // agree
+                // Untouched by us and newer on disk: take theirs.
+                AGT_LOG(Persist, Info, "settings.save",
+                        "merge=adopt_disk key={}", key);
+                j[key] = it.value();
+            }
+        }
+    }
+
     // A failed settings write silently discards the user's provider keys,
     // model choice and preferences — they simply "don't stick" across
     // restarts, with nothing to explain why. The result was discarded here.
-    if (!write_json_atomic(data_dir() / "settings.json", j.dump(2)))
+    if (!write_json_atomic(internal_io(), data_dir() / "settings.json", j.dump(2)))
         AGT_LOG(Persist, Error, "settings.save", "result=write_failed path={}",
                 (data_dir() / "settings.json").string());
+    else {
+        // The document we just wrote IS the new baseline. Without this a
+        // second save in the same session would diff against the startup
+        // snapshot, see its own earlier edit as "changed", and keep
+        // re-asserting it over newer values from other instances.
+        loaded_baseline().store(j);
+    }
+}
+} // namespace
+
+void on_settings_written(std::function<void(const maya::unlocked&)> observer) {
+    settings_observer().publish(
+        std::make_shared<const std::function<void(const maya::unlocked&)>>(std::move(observer)));
+}
+
+// 64 random bits as 16 hex digits. Zero-padded so every id is fixed width:
+// variable width was unambiguous given the ":" separator in cache keys but
+// brittle (a 0x1 roll produced "1", a substring of most other ids). Shared
+// by thread and message ids.
+//
+// Lock-free: new_id() is called from reducers, tool bodies and lock bodies
+// alike, so a lock here would put a capability on half the program. One
+// atomic counter seeded from the OS, mixed through splitmix64 (a bijection,
+// so distinct counter values give distinct ids, and the output passes
+// BigCrush). Ids need uniqueness and unpredictability across launches, not
+// cryptographic strength.
+std::string random_hex_id() {
+    static std::atomic<std::uint64_t> counter{[] {
+        std::random_device rd;
+        return (std::uint64_t{rd()} << 32) ^ rd();
+    }()};
+    std::uint64_t z = counter.fetch_add(0x9E3779B97F4A7C15ull, std::memory_order_relaxed);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    const std::uint64_t v = z ^ (z >> 31);
+    std::ostringstream oss;
+    oss << std::hex << std::setw(16) << std::setfill('0') << v;
+    return oss.str();
 }
 
 ThreadId new_id() {
-    static std::mt19937_64 rng{std::random_device{}()};
-    static std::mutex      mu;
-    std::lock_guard<std::mutex> lk(mu);
-    std::uniform_int_distribution<uint64_t> dist;
-    std::ostringstream oss;
-    oss << std::hex << std::setw(16) << std::setfill('0') << dist(rng);
-    return ThreadId{oss.str()};
+    return ThreadId{random_hex_id()};
 }
 
 std::string title_from_first_message(std::string_view text) {
@@ -2177,17 +3467,7 @@ namespace agentty {
 // IDs colliding within a session is ~2⁻³² even at a million messages,
 // well below any realistic load.
 MessageId new_message_id() {
-    static std::mt19937_64 rng{std::random_device{}()};
-    static std::mutex      mu;
-    std::lock_guard<std::mutex> lk(mu);
-    std::uniform_int_distribution<uint64_t> dist;
-    // Zero-pad to 16 hex digits so every id is fixed width. Variable
-    // width was technically unambiguous given the ":" separator in cache
-    // keys but brittle: a 0x1 roll produced "1", which is a substring of
-    // most other ids. Fixed width also makes persisted ids look uniform.
-    std::ostringstream oss;
-    oss << std::hex << std::setw(16) << std::setfill('0') << dist(rng);
-    return MessageId{oss.str()};
+    return MessageId{persistence::random_hex_id()};
 }
 
 } // namespace agentty

@@ -12,10 +12,11 @@
 
 #include "agtest.hpp"
 
-#include <maya/app/inline.hpp>
+#include <maya/print.hpp>
 #include <maya/widget/panel.hpp>
 
 #include <atomic>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,8 +39,24 @@ Panel::Item header_row(const char* label) {
     return r;
 }
 
+// Render a panel at `width`.
+//
+// COLUMNS is set to the same width, because the panel derives its content
+// budgets from the terminal and those budgets have to be about the width it
+// is actually painted at. Rendering at 70 while the ambient terminal says
+// 200 is a state that cannot happen in the app — the overlay stretches to
+// the terminal — and it makes a windowed value look unwindowed.
 std::string render(Panel::Config c, int width = 60) {
-    return maya::render_to_string(Panel{std::move(c)}.build(), width);
+    std::string saved;
+    const bool had = std::getenv("COLUMNS") != nullptr;
+    if (had) saved = std::getenv("COLUMNS");
+    setenv("COLUMNS", std::to_string(width).c_str(), /*overwrite=*/1);
+
+    auto out = maya::render_to_string(Panel{std::move(c)}.build(), width);
+
+    if (had) setenv("COLUMNS", saved.c_str(), /*overwrite=*/1);
+    else     unsetenv("COLUMNS");
+    return out;
 }
 
 // Does the frame have a top and bottom border? A panel that fails to draw one
@@ -553,6 +570,9 @@ TEST_CASE("panel: independent panels do not interfere across threads") {
     constexpr int kThreads = 8;
     std::atomic<int> failures{0};
     std::vector<std::thread> threads;
+    // render() sets COLUMNS around each call, and setenv from eight threads
+    // races. Every thread uses width 72, so set it once here instead.
+    setenv("COLUMNS", "72", 1);
 
     for (int t = 0; t < kThreads; ++t) {
         threads.emplace_back([&, t] {
@@ -569,7 +589,7 @@ TEST_CASE("panel: independent panels do not interfere across threads") {
                     r.leading = "row" + std::to_string(i);
                     c.items.push_back(std::move(r));
                 }
-                if (render(std::move(c), 72).empty()) ++failures;
+                if (maya::render_to_string(Panel{std::move(c)}.build(), 72).empty()) ++failures;
             }
             // Each thread's state must describe ITS OWN content. A shared
             // registry or dirty flag would show up as a neighbour's extent
@@ -578,6 +598,7 @@ TEST_CASE("panel: independent panels do not interfere across threads") {
         });
     }
     for (auto& th : threads) th.join();
+    unsetenv("COLUMNS");
 
     CHECK(failures.load() == 0);
 }

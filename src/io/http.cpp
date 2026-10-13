@@ -25,10 +25,10 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
 #include <random>
 #include <cstdio>
@@ -36,10 +36,12 @@
 #include <cstring>
 #include <deque>
 #include <limits>
-#include <mutex>
 #include <optional>
 #include <string>
+#include <stop_token>
 #include <thread>
+
+#include <maya/runtime.hpp>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -2633,63 +2635,174 @@ constexpr std::size_t kMaxPoolEntriesPerEndpoint = 16;
     return true;
 }
 
+} // namespace
+} // namespace agentty::http
+
+// A Connection solely owns its socket, SSL and nghttp2 session (the dtor
+// frees all three); pend_buf_ points into that same session. Only a
+// connection whose run() succeeded is pooled, and run() clears the session's
+// user_data on success, so a pooled one points at nothing outside itself.
+MAYA_SENDABLE(agentty::http::Connection);
+
+namespace agentty::http {
+namespace {
+
+// Lock-free by design, not a guarded map: acquire()/release() run inside
+// network code that is itself reached from ranked lock bodies (the
+// auth_refresh lane refreshes a token over HTTPS while holding rank 15), and
+// freeing a stale connection runs SSL_shutdown -> new_session_cb (the tls
+// ticket snapshot). A lock here would need a capability threaded through
+// every http call in the program. Instead the pool is a fixed array of slots,
+// each owned by whoever wins a CAS on its state word:
+//
+//   Empty --CAS--> Busy (filler writes payload) --store--> Full
+//   Full  --CAS--> Busy (claimer inspects/takes) --store--> Empty | Full
+//
+// Nobody ever WAITS on a Busy slot -- a claim that loses just skips it -- so
+// nothing here can block or deadlock. The cost is that a connection being
+// inspected by another thread is invisible for those microseconds, and the
+// caller dials fresh instead: harmless for a cache.
 class Pool {
+    enum : int { kEmpty = 0, kBusy = 1, kFull = 2 };
+    // Per-endpoint cap is kMaxPoolEntriesPerEndpoint; agentty talks to a
+    // handful of endpoints, so 64 slots never constrain real use. If they
+    // fill, release() evicts the oldest entry overall.
+    static constexpr std::size_t kSlots = 64;
+
+    struct Slot {
+        std::atomic<int> state{kEmpty};
+        PooledConn       entry;   // owned by the thread that set kBusy
+    };
+
+    bool claim(Slot& s) noexcept {
+        int expected = kFull;
+        return s.state.compare_exchange_strong(expected, kBusy,
+                                               std::memory_order_acquire);
+    }
+
 public:
     std::unique_ptr<Connection> acquire(const Endpoint& ep) {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = map_.find(ep);
-        if (it == map_.end()) return nullptr;
-        auto& stack = it->second;
+        // Stale entries are freed as they're found; no lock is held anywhere
+        // in this class, so SSL_shutdown -> new_session_cb is fine.
         const auto now = clock_t_::now();
-        while (!stack.empty()) {
-            auto p = std::move(stack.back());
-            stack.pop_back();
-            // Three-stage liveness check: idle TTL → nghttp2 protocol state →
-            // socket-level FIN/RST. Each stage is cheap and catches a class
-            // of stale connections the previous one misses.
-            // Four-stage liveness check: total lifetime → idle TTL →
-            // nghttp2 protocol state → socket-level FIN/RST. Each stage
+        // Newest first, like the old LIFO stack: the most recently released
+        // socket is the likeliest to still be warm.
+        for (;;) {
+            Slot* best = nullptr;
+            for (auto& s : slots_) {
+                if (!claim(s)) continue;
+                if (!(s.entry.conn->endpoint() == ep)) {
+                    s.state.store(kFull, std::memory_order_release);
+                    continue;
+                }
+                if (!best || s.entry.released_at > best->entry.released_at) {
+                    if (best) best->state.store(kFull, std::memory_order_release);
+                    best = &s;
+                } else {
+                    s.state.store(kFull, std::memory_order_release);
+                }
+            }
+            if (!best) return nullptr;
+            PooledConn p = std::move(best->entry);
+            best->entry = {};
+            best->state.store(kEmpty, std::memory_order_release);
+            // Four-stage liveness check: total lifetime -> idle TTL ->
+            // nghttp2 protocol state -> socket-level FIN/RST. Each stage
             // is cheap and catches a class of stale connections the
             // previous one misses; lifetime in particular catches the
             // proxy-drain case that no client-side check can detect.
-            if (now - p.created_at  > kMaxLifetime) continue;
-            if (now - p.released_at > idle_ttl())   continue;
-            if (!p.conn->is_alive())                continue;
-            if (!socket_is_alive(p.conn->fd()))     continue;
-            p.conn->set_pooled(true);   // reused socket — see was_pooled()
+            if (now - p.created_at  > kMaxLifetime
+                || now - p.released_at > idle_ttl()
+                || !p.conn->is_alive()
+                || !socket_is_alive(p.conn->fd())) {
+                continue;   // `p` freed here; look for the next-newest
+            }
+            p.conn->set_pooled(true);   // reused socket -- see was_pooled()
             p.conn->set_idle_ms(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     now - p.released_at).count());
             return std::move(p.conn);
         }
-        return nullptr;
     }
 
     void release(std::unique_ptr<Connection> c) {
         if (!c || !c->is_alive()) return;
-        c->set_pooled(false);   // back in the pool — next acquirer re-marks
-        std::lock_guard<std::mutex> lk(mu_);
-        auto& stack = map_[c->endpoint()];
-        if (stack.size() >= kMaxPoolEntriesPerEndpoint) {
-            // Drop the oldest (front) — its idle clock is most advanced and
-            // it's the most likely candidate for the peer to have closed by
-            // the time we'd next reach for it. Keeping the freshest 16 also
-            // matches stdio LRU intuition for a small fixed-size pool.
-            stack.erase(stack.begin());
+        c->set_pooled(false);   // back in the pool -- next acquirer re-marks
+        const Endpoint ep = c->endpoint();
+
+        // Full for this endpoint: drop the oldest, the likeliest to have
+        // been closed by the peer by the time we'd reach for it. Counting is
+        // best-effort under concurrency (a slot mid-claim is not seen),
+        // which can overshoot the cap by the number of racing releasers.
+        std::size_t same = 0;
+        Slot* oldest = nullptr;
+        for (auto& s : slots_) {
+            if (!claim(s)) continue;
+            if (s.entry.conn->endpoint() == ep) {
+                ++same;
+                if (!oldest || s.entry.released_at < oldest->entry.released_at) {
+                    if (oldest) oldest->state.store(kFull, std::memory_order_release);
+                    oldest = &s;
+                    continue;
+                }
+            }
+            s.state.store(kFull, std::memory_order_release);
         }
-        // We don't track the original dial time on Connection; release
-        // time stands in for "how old is this entry in the pool." Good
-        // enough — the lifetime cap is about pool tenure, not socket age.
+        std::unique_ptr<Connection> evicted;
+        if (oldest) {
+            if (same >= kMaxPoolEntriesPerEndpoint) {
+                evicted = std::move(oldest->entry.conn);
+                oldest->entry = {};
+                oldest->state.store(kEmpty, std::memory_order_release);
+            } else {
+                oldest->state.store(kFull, std::memory_order_release);
+            }
+        }
+        evicted.reset();
+
+        // Release time stands in for dial time; the lifetime cap is about
+        // pool tenure, not socket age.
         const auto now = clock_t_::now();
-        stack.push_back({std::move(c), now, now});
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            for (auto& s : slots_) {
+                int expected = kEmpty;
+                if (!s.state.compare_exchange_strong(expected, kBusy,
+                                                     std::memory_order_acquire))
+                    continue;
+                s.entry = PooledConn{std::move(c), now, now};
+                s.state.store(kFull, std::memory_order_release);
+                return;
+            }
+            // Every slot taken: evict the oldest entry overall, then retry.
+            Slot* victim = nullptr;
+            for (auto& s : slots_) {
+                if (!claim(s)) continue;
+                if (!victim || s.entry.released_at < victim->entry.released_at) {
+                    if (victim) victim->state.store(kFull, std::memory_order_release);
+                    victim = &s;
+                } else {
+                    s.state.store(kFull, std::memory_order_release);
+                }
+            }
+            if (!victim) break;
+            PooledConn gone = std::move(victim->entry);
+            victim->entry = {};
+            victim->state.store(kEmpty, std::memory_order_release);
+        }
+        // Lost every race: just drop `c` (closes the socket). Pool is a cache.
     }
 
 private:
-    std::mutex mu_;
-    std::unordered_map<Endpoint, std::vector<PooledConn>, EndpointHash> map_;
+    std::array<Slot, kSlots> slots_{};
 };
 
 } // namespace
+} // namespace agentty::http
+
+// Every member is reached only through a CAS-claimed slot (see above).
+MAYA_SYNC(agentty::http::Pool);
+
+namespace agentty::http {
 
 namespace test {
 std::expected<std::string, std::string>
@@ -2716,21 +2829,28 @@ std::expected<bool, std::string> is_chunked(const Headers& headers) {
 // ---------------------------------------------------------------------------
 // Client::Impl
 // ---------------------------------------------------------------------------
-struct Client::Impl {
-    Config cfg;
-    Pool   pool;
+// Pool is a lock-free slot array, so dials on other threads can share it.
+using PoolRef = maya::co_owned<Pool>;
 
-    // Outstanding prewarm() dials. Tracked (not detached) so join_prewarm()
-    // can cancel + join them before CRT/OpenSSL teardown, closing the
-    // exit-race UAF that manifests as heap corruption on a fast exit. Each
-    // thread carries a `done` flag it sets right before returning, so
-    // join_prewarm() can wait with a deadline (std::thread has no timed join)
-    // and detach a dial genuinely wedged in a blocking getaddrinfo() instead
-    // of hanging teardown.
-    std::mutex                              prewarm_mu;
-    std::vector<std::thread>                prewarm_threads;
-    std::vector<CancelTokenPtr>             prewarm_cancels;
-    std::vector<std::shared_ptr<std::atomic<bool>>> prewarm_done;
+struct Client::Impl {
+    Config  cfg;
+    PoolRef pool_ref = PoolRef::make();
+    Pool&   pool     = *pool_ref;
+
+    // Outstanding prewarm() dials. OWNED (not detached) so join_prewarm()
+    // can cancel and wait for them before CRT/OpenSSL teardown, closing the
+    // exit-race UAF that manifests as heap corruption on a fast exit. The
+    // waiting is maya::pool's: it is bounded, so a dial genuinely
+    // wedged in a blocking getaddrinfo() is abandoned at the deadline rather
+    // than hanging teardown.
+    // Prewarm dials run here. Replaces a vector<thread> + a per-dial `done`
+    // atomic + a 10 ms poll loop in join_prewarm(): the pool already does
+    // "ask to stop, wait for a bounded grace on a condition variable, then
+    // abandon", without the polling, and its abandonment is safe because a
+    // worker co-owns the pool's state. One worker is not a cap on dials —
+    // each is posted isolated, since a dial can wedge in a blocking
+    // getaddrinfo() and must not occupy a shared worker.
+    maya::pool                      prewarm_pool{/*max_workers=*/1};
 };
 
 Client::Client() : Client(Config{}) {}
@@ -2744,12 +2864,19 @@ Client::Client(Config cfg) : impl_(std::make_unique<Impl>()) {
     (void)tls::shared_context(impl_->cfg.insecure);
 }
 
-Client::~Client() { join_prewarm(); }
+// No explicit join: a destructor can't be handed `unlocked`. The prewarm
+// pool's own destructor does the same bounded stop-and-wait. The default
+// client is leaked and never destroyed; main() joins it with a capability.
+Client::~Client() = default;
 
 // Helper: grab a connection from the pool or dial fresh.
 static std::expected<std::unique_ptr<Connection>, HttpError>
 acquire_or_dial(Pool& pool, const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
-    if (auto c = pool.acquire(ep)) return c;
+    if (auto c = pool.acquire(ep)) {
+        AGT_LOG(Perf, Debug, "http.acquire", "pool=hit host={}", ep.host);
+        return c;
+    }
+    AGT_LOG(Perf, Debug, "http.acquire", "pool=miss host={} dial=fresh", ep.host);
     return dial_new(ep, tos, std::move(cancel));
 }
 
@@ -2805,13 +2932,9 @@ static bool backoff_sleep(int attempt, const CancelTokenPtr& cancel) {
                  std::chrono::steady_clock::now().time_since_epoch().count());
     }()};
     std::uniform_int_distribution<long> dist(0, ceiling);
-    auto budget = std::chrono::milliseconds(dist(rng));
-    auto end = clock_t_::now() + budget;
-    while (clock_t_::now() < end) {
-        if (is_cancelled(cancel)) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return true;
+    const auto budget = std::chrono::milliseconds(dist(rng));
+    // Wakes the instant the request is cancelled; no token means a plain wait.
+    return !maya::delay_for(cancel ? cancel->token() : std::stop_token{}, budget);
 }
 
 HttpResult
@@ -3062,23 +3185,20 @@ void Client::prewarm(std::string host, uint16_t port,
         e && *e == '1')
         return;
     // A prewarm dial races process exit: on a fast teardown (immediate
-    // pipe-stdin EOF) main() can return while this thread is mid-SSL_connect,
+    // pipe-stdin EOF) main() can return while this dial is mid-SSL_connect,
     // and the CRT/OpenSSL static state gets freed under it — heap corruption.
-    // So the thread is TRACKED, not detached, with a cancel token; a shutdown
-    // join_prewarm() trips the token (which shuts the dialing socket to wake
-    // poll()) and joins before teardown. Swallows errors — opportunistic.
+    // So the work is OWNED by a pool, not detached, and carries a cancel
+    // token; a shutdown join_prewarm() trips the token (which shuts the
+    // dialing socket to wake poll()) and the pool waits before teardown.
+    // Swallows errors — opportunistic.
+    //
+    // No `done` flag any more: it existed so join_prewarm()'s poll loop could
+    // tell a settled dial from a wedged one, and the pool answers that from
+    // its own accounting without polling.
     auto cancel = std::make_shared<CancelToken>();
-    auto done   = std::make_shared<std::atomic<bool>>(false);
-    std::thread th([this, cancel, done,
-                    host = std::move(host), port,
-                    dial_host = std::move(dial_host), dial_port]() mutable {
-        // Set the done flag no matter how this thread exits (normal return,
-        // cancelled, or dial error) so join_prewarm()'s bounded wait can tell
-        // a settled dial from one still wedged in a blocking syscall.
-        struct DoneGuard {
-            std::shared_ptr<std::atomic<bool>> f;
-            ~DoneGuard() { f->store(true, std::memory_order_release); }
-        } done_guard{done};
+    impl_->prewarm_pool.post_isolated(
+        [](std::stop_token st, PoolRef pool, CancelTokenPtr cancel,
+           std::string host, uint16_t port, std::string dial_host, uint16_t dial_port) {
 #if !defined(_WIN32)
         // Block every signal so SIGWINCH / SIGINT / SIGTERM route to the
         // main thread's handlers instead of being delivered here mid
@@ -3089,77 +3209,52 @@ void Client::prewarm(std::string host, uint16_t port,
         sigfillset(&all);
         pthread_sigmask(SIG_BLOCK, &all, nullptr);
 #endif
-        if (cancel->is_cancelled()) return;
+        // Bridge the pool's stop to the app's cancel token, so a shutdown
+        // reaches the dial's poll loops even if join_prewarm() was never
+        // called — which is exactly the standalone-binary case documented at
+        // the top of this file.
+        const std::stop_callback cancel_on_stop(st, [cancel] {
+            cancel->cancel();
+        });
+        if (cancel->is_cancelled() || st.stop_requested()) return;
         Endpoint ep{ std::move(host), port,
                      std::move(dial_host), dial_port };
         // Short, bounded connect budget. A prewarm is pure latency-hiding —
         // it must never wedge the process at exit. With the default 10 s
         // connect timeout a dial stuck in TCP/TLS would keep join_prewarm()
         // blocked for up to 10 s on a fast pipe-EOF exit; cap it hard so the
-        // shutdown join returns promptly (and the dial's poll loops re-check
+        // shutdown wait returns promptly (and the dial's poll loops re-check
         // the cancel token every 200 ms within that window).
         Timeouts warm_tos{};
         warm_tos.connect = std::chrono::milliseconds{4'000};
         auto r = dial_new(ep, warm_tos, cancel);
-        if (r && !cancel->is_cancelled()) impl_->pool.release(std::move(*r));
-    });
-    std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
-    impl_->prewarm_cancels.push_back(std::move(cancel));
-    impl_->prewarm_done.push_back(std::move(done));
-    impl_->prewarm_threads.push_back(std::move(th));
+        if (r && !cancel->is_cancelled()) pool->release(std::move(*r));
+    }, impl_->pool_ref, std::move(cancel), std::move(host), port,
+       std::move(dial_host), dial_port);
 }
 
-void Client::join_prewarm() noexcept {
-    std::vector<std::thread>                        threads;
-    std::vector<CancelTokenPtr>                     cancels;
-    std::vector<std::shared_ptr<std::atomic<bool>>> dones;
-    {
-        std::lock_guard<std::mutex> lk(impl_->prewarm_mu);
-        threads.swap(impl_->prewarm_threads);
-        cancels.swap(impl_->prewarm_cancels);
-        dones.swap(impl_->prewarm_done);
-    }
-    // Trip every token first so the dials abort at their next poll slice.
-    for (auto& c : cancels)
-        if (c) c->cancel();
-
-    // Bounded wait, then join. A cancelled dial's poll loops re-check the
-    // token every 200 ms and the connect budget is capped at 4 s, so it
-    // normally sets its `done` flag within a fraction of a second. We wait up
-    // to a bounded budget for that flag, then join (fast, the thread has
-    // finished). The one dial that can miss the window is one wedged inside a
-    // blocking getaddrinfo() (a hostile/offline resolver can stall for
-    // seconds) — for that we DETACH rather than let it block process
-    // teardown. Detach is safe here *because default_client() is a
-    // deliberately-leaked singleton*: its pool / OpenSSL statics are never
-    // destroyed, so a still-running dial can't race a destructor, and the OS
-    // reclaims the thread at process exit.
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds{2'000};
-    for (std::size_t i = 0; i < threads.size(); ++i) {
-        auto& t = threads[i];
-        if (!t.joinable()) continue;
-        const bool have_flag = i < dones.size() && dones[i];
-        bool settled = false;
-        while (std::chrono::steady_clock::now() < deadline) {
-            if (have_flag && dones[i]->load(std::memory_order_acquire)) {
-                settled = true;
-                break;
-            }
-            if (!have_flag) break;   // no flag to observe — fall through to join
-            std::this_thread::sleep_for(std::chrono::milliseconds{10});
-        }
-        if (settled || !have_flag) {
-            try { t.join(); } catch (...) {}
-        } else {
-            // Genuinely wedged (blocking resolve). Leak the thread rather than
-            // hang or race teardown; see the safety note above.
-            try { t.detach(); } catch (...) {}
-        }
-    }
+void Client::join_prewarm(const maya::unlocked& cap) noexcept {
+    // shutdown() requests stop on every dial before it waits, and each dial
+    // turns that into its cancel token (the stop_callback above), so the
+    // dials abort at their next poll slice.
+    // One call replaces a hand-rolled bounded wait: the pool requests stop on
+    // every dial, waits out its grace on a condition variable, and abandons
+    // whatever is still stuck. That last case is the dial wedged inside a
+    // blocking getaddrinfo() — a hostile/offline resolver can stall for
+    // seconds — and abandoning it is safe for the same reason the old detach
+    // was: default_client() is a deliberately-leaked singleton, so its pool /
+    // OpenSSL statics are never destroyed and a still-running dial cannot
+    // race a destructor. The OS reclaims the thread at process exit.
+    //
+    // What the old version did instead: a per-dial `done` atomic, and a loop
+    // that slept 10 ms at a time until a 2 s deadline before deciding whether
+    // to join or detach. That is a condition variable spelled as a poll — up
+    // to 200 wakeups per dial on a slow exit, and a shutdown that could not
+    // notice a dial finishing sooner than its next 10 ms tick.
+    (void)impl_->prewarm_pool.shutdown(cap);
 }
 
-Client& default_client() {
+Client& default_client(Io) {
     // Deliberately leaked: process lifetime.  Avoids destruction-order
     // races with maya's worker threads that may be mid-request at exit.
     static Client* c = new Client{};

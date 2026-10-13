@@ -15,6 +15,8 @@
 #include <string_view>
 
 #include "agentty/store/store.hpp"   // store::Settings
+#include "agentty/domain/auth_view.hpp" // auth::AuthView
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider {
 
@@ -25,13 +27,13 @@ struct ProviderDescriptor;   // registry.hpp
 // provider_keys, or a local (no-auth) backend. `settings` supplies the saved
 // custom-host / API-key map (provider_keys). Network-free and cheap (the
 // OAuth predicates are stat-cached).
-[[nodiscard]] bool provider_is_authed(const ProviderDescriptor& p,
+[[nodiscard]] bool provider_is_authed(Io, const ProviderDescriptor& p,
                                       const store::Settings& settings);
 
 // Convenience overload keyed by provider id (looks the descriptor up in the
 // registry). Unknown id ⇒ treated as a saved custom host: authed iff it has a
 // provider_keys entry (a keyless local host counts as authed).
-[[nodiscard]] bool provider_is_authed(std::string_view id,
+[[nodiscard]] bool provider_is_authed(Io, std::string_view id,
                                       const store::Settings& settings);
 
 // WHERE a provider's credential comes from — lets the picker tell the user
@@ -43,7 +45,25 @@ enum class AuthSource {
     Env,         // resolved ONLY from an environment variable
     Local,       // no-auth backend (Ollama, custom http host)
 };
-[[nodiscard]] AuthSource auth_source(const ProviderDescriptor& p,
+[[nodiscard]] AuthSource auth_source(Io, const ProviderDescriptor& p,
                                      const store::Settings& settings);
+
+// The same answers from the Model alone: `view` carries what lives outside
+// the settings record (credential stores, env, accounts), so these read no
+// files and no env. Reducers and views use these.
+[[nodiscard]] AuthSource auth_source(const ProviderDescriptor& p,
+                                     const store::Settings& settings,
+                                     const auth::AuthView& view);
+[[nodiscard]] bool provider_is_authed(std::string_view id,
+                                      const store::Settings& settings,
+                                      const auth::AuthView& view);
+// Is the active credential for `id` present (the vault's "signed in")? For a
+// key provider that means a non-empty saved key; for OAuth, a stored token.
+[[nodiscard]] bool signed_in(std::string_view id,
+                             const store::Settings& settings,
+                             const auth::AuthView& view);
+
+// Build the view from disk and env. Host side only.
+[[nodiscard]] auth::AuthView load_auth_view(Io, const store::Settings& settings);
 
 } // namespace agentty::provider

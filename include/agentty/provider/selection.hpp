@@ -20,8 +20,11 @@
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"   // ModelInfo
-#include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/openai/endpoint.hpp"
 #include "agentty/provider/registry.hpp"
+
+#include <maya/runtime.hpp>
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider {
 
@@ -73,6 +76,20 @@ struct Selection {
     [[nodiscard]] bool is_copilot() const noexcept { return provider_id() == "copilot"; }
     [[nodiscard]] bool is_kimi()    const noexcept { return provider_id() == "kimi"; }
     [[nodiscard]] bool is_chatgpt() const noexcept { return provider_id() == "chatgpt"; }
+
+    // Structural equality. `row` compares by POINTER, which is exact: it
+    // always points into the static kProviders table, so two selections of
+    // the same registry row hold the same address. The dispatch seam uses
+    // this to publish the Model's selection to the process-global copy only
+    // when it actually changed.
+    [[nodiscard]] bool operator==(const Selection&) const = default;
+
+    // The catalog id this selection is filed under — the key every recents,
+    // fused-catalog and capability row uses: the OpenAI-family endpoint label,
+    // the ACP agent id, else the default (Anthropic) id. ONE definition: the
+    // reducers and the provider picker both ask it, so they cannot disagree
+    // about which row is "active".
+    [[nodiscard]] std::string catalog_id() const;
 };
 
 // Parse a provider spec into a Selection. Accepts:
@@ -103,6 +120,22 @@ struct Selection {
     std::string s{spec.substr(b, e - b)};
     while (s.size() > 1 && s.back() == '/' && s[s.size() - 2] != '/')
         s.pop_back();
+
+    // CASE-FOLD THE HOST (and the scheme), never the path or the #name.
+    // DNS is case-insensitive, so "YOLO-AUTO.COM" and "yolo-auto.com" are the
+    // same server and MUST collapse to one identity here — otherwise they
+    // become two saved hosts, two provider_keys entries, and two picker rows
+    // for one endpoint, and the user pastes a key into one spelling then
+    // wonders why the other says "no key". Paths stay untouched because a
+    // path CAN be case-sensitive (`/V1` is not guaranteed to equal `/v1` on
+    // an arbitrary gateway), and the "#name" account tag is user-chosen text.
+    const auto scheme_end = s.find("//");
+    std::size_t host_begin = (scheme_end == std::string::npos) ? 0 : scheme_end + 2;
+    std::size_t host_end   = s.find('/', host_begin);
+    if (host_end == std::string::npos) host_end = s.find('#', host_begin);
+    if (host_end == std::string::npos) host_end = s.size();
+    for (std::size_t i = 0; i < host_end; ++i)
+        if (s[i] >= 'A' && s[i] <= 'Z') s[i] = static_cast<char>(s[i] - 'A' + 'a');
     return s;
 }
 
@@ -110,29 +143,25 @@ struct Selection {
 // A custom --provider spec is raw INTENT until the host answers something;
 // persisting it at parse time let a typo poison settings.json for every
 // future bare launch. main.cpp registers the spec (and the -m recall to
-// file with it) here instead of writing settings; the ModelsLoaded reducer
-// calls take_unproven_spec() when a NON-EMPTY catalog lands for the active
-// provider and persists then — proof-gated stickiness. Known presets never
-// register (they persist at parse, as always). Thread-safe: set once on
-// the main thread before the UI starts; consumed on the UI thread.
-void set_unproven_spec(std::string spec, std::string model_recall);
-// Returns the registered (spec, model_recall) if `spec_now` matches the
-// pending one, clearing it; nullopt otherwise (nothing pending / different
-// provider active by the time models landed).
-[[nodiscard]] std::optional<std::pair<std::string, std::string>>
-take_unproven_spec(std::string_view spec_now);
+// file with it) here instead of writing settings. init() takes it into the
+// Model once; the ModelsLoaded reducer persists it when a NON-EMPTY catalog
+// lands for that provider — proof-gated stickiness. Known presets never
+// register (they persist at parse, as always).
+void set_unproven_spec(Io, std::string spec, std::string model_recall);
+// The registered (spec, model_recall), clearing it. Called once, by init().
+[[nodiscard]] std::optional<std::pair<std::string, std::string>> take_unproven_spec_at_launch(Io);
 
 // Session-wide custom auth header NAME (--auth-header) for OpenAI-family
 // backends whose gateway doesn't accept `Authorization: Bearer` (e.g.
 // `X-API-Key`). Stored process-globally so every parse_selection — startup
 // AND live provider switches from the picker — stamps it onto the resulting
 // Endpoint. Empty (the default) keeps the standard bearer header.
-void set_custom_auth_header(std::string name);
+void set_custom_auth_header(Io, std::string name);
 [[nodiscard]] std::string custom_auth_header();
 
 // Install the active selection (process-global). Called at startup and by
 // the provider-picker reducer for live switches (UI thread).
-void select(Selection s);
+void select(Io, Selection s);
 
 // Read the active selection. Defaults to Anthropic before select() runs.
 // Returns a BY-VALUE snapshot taken under the selection mutex: the stream
@@ -178,7 +207,7 @@ struct PrewarmTarget {
 // start. Locals (Ollama / llama.cpp) and ACP subprocesses are no-ops.
 // Idempotent per (host,port); safe to call fire-and-forget from any thread.
 // A thin wrapper over prewarm_target(active()) — the routing lives there.
-void prewarm_active_provider();
+void prewarm_active_provider(Io);
 
 // Resolve the AuthHeader for a provider spec, registry-driven.
 //   • Anthropic   → derived from `anthropic_creds` (OAuth / x-api-key from
@@ -202,8 +231,9 @@ void prewarm_active_provider();
 // disagree about which backend a selection names. ExternalAcp returns empty
 // (an ACP agent picks its own model and exposes no catalog). `auth` is the
 // active credential (used by the Anthropic / OpenAI-compat catalog endpoints;
-// ChatGPT reads its own in-process OAuth creds and ignores it).
-[[nodiscard]] std::vector<ModelInfo> list_models_for(
+// ChatGPT reads its own in-process OAuth creds and ignores it). It fetches
+// over the network (and refreshes OAuth tokens): `unlocked`.
+[[nodiscard]] std::vector<ModelInfo> list_models_for(Io io, const maya::unlocked& cap,
     const Selection& sel, const auth::AuthHeader& auth);
 
 // ── Provider-picker search filter (shared by the reducer + the view) ────────
@@ -250,3 +280,7 @@ void prewarm_active_provider();
 }
 
 } // namespace agentty::provider
+
+// Selection is plain data plus `row`, which only ever points into the
+// constexpr kProviders table (static, immutable). Safe to copy across threads.
+MAYA_SENDABLE(agentty::provider::Selection);

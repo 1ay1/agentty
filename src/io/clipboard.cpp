@@ -1,10 +1,12 @@
 #include "agentty/io/clipboard.hpp"
 #include "agentty/util/env.hpp"
+#include "agentty/util/logx.hpp"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -30,9 +32,8 @@
   #include <shlwapi.h>    // SHCreateMemStream
   #include <gdiplus.h>
 #else
-  #define AGENTTY_POPEN  ::popen
-  #define AGENTTY_PCLOSE ::pclose
-  #define AGENTTY_POPEN_MODE "r"
+  #include <chrono>
+  #include "agentty/tool/util/exec.hpp"   // run_child
 #endif
 
 namespace agentty {
@@ -79,6 +80,21 @@ const char* sniff_image_type(std::string_view bytes) {
 // file, so the AGENTTY_CLIPBOARD_CMD override works there too.
 CaptureResult popen_capture(const char* cmd, std::size_t cap) {
     CaptureResult r;
+#if !defined(_WIN32)
+    // Through jaal like every other child: own session, no inherited fds,
+    // bounded in time so a clipboard tool that hangs cannot hang us.
+    tools::util::ChildRun run;
+    run.argv = {"/bin/sh", "-c", cmd};
+    run.idle = std::chrono::seconds{10};
+    run.wall = std::chrono::seconds{30};
+    run.max_output_bytes = cap;
+    auto c = tools::util::run_child(run);
+    if (!c.started) return r;   // status stays -1
+    r.bytes  = std::move(c.output);
+    // Shaped like a wait status, for the WIFEXITED/WEXITSTATUS readers.
+    r.status = c.exited ? (c.exit_code & 0xff) << 8 : (c.signal & 0x7f);
+    return r;
+#else
     FILE* fp = AGENTTY_POPEN(cmd, AGENTTY_POPEN_MODE);
     if (!fp) return r;
     r.bytes.reserve(std::min<std::size_t>(cap, 256 * 1024));
@@ -92,6 +108,7 @@ CaptureResult popen_capture(const char* cmd, std::size_t cap) {
     }
     r.status = AGENTTY_PCLOSE(fp);
     return r;
+#endif
 }
 
 // Image capture via a user-supplied command (AGENTTY_CLIPBOARD_CMD).
@@ -162,6 +179,227 @@ const char* pick_clipboard_image_type(std::string_view types) {
         return false;
     return pick_clipboard_image_type(types) == nullptr;
 }
+
+#if defined(__linux__) || defined(__APPLE__)
+
+// True when this process is on the far side of an ssh/mosh hop, so the
+// clipboard the LOCAL tools can reach is not the one the user copied into.
+//
+// This matters on macOS specifically. On Linux a remote host usually has no
+// display at all, so wl-paste/xclip fail and the code falls through to the
+// terminal query by accident. A Mac always has a working pasteboard, so
+// pbpaste SUCCEEDS over ssh — it just answers about the wrong machine. The
+// read then returns that host's stale text and never asks the terminal,
+// which is the one path that can actually reach the laptop's clipboard.
+//
+// Env sniff, not a syscall: the question is "did someone ssh in", and
+// sshd/mosh-server answer it by exporting these. AGENTTY_LOCAL_CLIPBOARD=1
+// forces the local tools back on, for the case this sniff gets wrong (a
+// remote session that really does own the display the user copied from — a
+// VNC/XRDP desktop, say).
+//
+// Lives outside the Linux block below: the macOS arms are its main caller.
+[[maybe_unused]] bool session_is_remote() {
+    if (const char* f = std::getenv("AGENTTY_LOCAL_CLIPBOARD"); f && *f == '1')
+        return false;
+    for (const char* k : {"SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"})
+        if (const char* v = std::getenv(k); v && *v) return true;
+    return false;
+}
+
+#endif
+
+#if defined(__linux__)
+
+// ---------------------------------------------------------------------------
+// Display-server discovery that does NOT trust the environment
+// ---------------------------------------------------------------------------
+//
+// WAYLAND_DISPLAY / XDG_SESSION_TYPE are the obvious way to find the
+// compositor, and they are wrong often enough to be the single biggest
+// source of "image paste stopped working" reports. The reason is process
+// ancestry: agentty inherits the environment of whatever started it, and
+// long-lived process servers hand out a SNAPSHOT of the env they were
+// themselves started with.
+//
+// The canonical case is tmux. The tmux server is started once — often by
+// systemd, or from a TTY login, or by an older graphical session that has
+// since ended — and every pane created later inherits THAT env. So a pane
+// running under a perfectly healthy Wayland kitty can still see:
+//
+//     XDG_SESSION_TYPE=tty          (no WAYLAND_DISPLAY at all)
+//
+// while the same binary run outside tmux sees XDG_SESSION_TYPE=wayland and
+// WAYLAND_DISPLAY=wayland-1. tmux's `update-environment` refreshes the
+// SESSION environment on attach, but panes that already exist — and panes
+// whose server predates the current graphical session — keep the stale
+// copy. Nothing the user can configure in tmux fixes an already-running
+// pane, which is why this has to be solved here.
+//
+// Trusting that stale env made read_clipboard_image() skip the wl-paste
+// branch entirely and fall through to "clipboard has no image", even
+// though `wl-paste --list-types` would have answered `image/png`. The
+// failure then got misattributed to the terminal ("the outer terminal
+// didn't answer") because the local probe had silently opted out.
+//
+// So: ask the filesystem, not the environment. A Wayland compositor is
+// reachable iff its socket exists in XDG_RUNTIME_DIR, and that fact is
+// true regardless of which env snapshot we inherited. When we find a
+// socket the env var disagrees with, we pass the corrected value to the
+// wl-paste/wl-copy child as an `env VAR=…` prefix on its command — they
+// read WAYLAND_DISPLAY themselves and would otherwise fail the same way.
+// See DisplayEnv for why this is a per-command prefix and not setenv.
+
+// Directory holding the user's runtime sockets. Falls back to the
+// well-known /run/user/<uid> when XDG_RUNTIME_DIR is missing (same stale
+// -env scenario; the path is predictable from the uid).
+std::string runtime_dir() {
+    if (const char* d = std::getenv("XDG_RUNTIME_DIR"); d && *d) return d;
+    return "/run/user/" + std::to_string(static_cast<unsigned>(::getuid()));
+}
+
+// Single-quote a value for safe inclusion in a shell command. Every
+// embedded quote is closed, escaped, and reopened ('\''). Paths from the
+// filesystem can contain anything; this keeps a hostile runtime dir name
+// from breaking out of the command we build.
+std::string shell_quote(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out += '\'';
+    for (const char c : s) {
+        if (c == '\'') out += "'\\''";
+        else           out += c;
+    }
+    out += '\'';
+    return out;
+}
+
+// True if `name` resolves to an existing Wayland socket. An absolute
+// WAYLAND_DISPLAY is used verbatim (the protocol allows it); otherwise it
+// is relative to the runtime dir.
+bool wayland_socket_exists(const std::string& dir, std::string_view name) {
+    if (name.empty()) return false;
+    std::error_code ec;
+    std::filesystem::path p =
+        name.front() == '/' ? std::filesystem::path{name}
+                            : std::filesystem::path{dir} / name;
+    // exists() is enough: we only need to know the compositor is there.
+    // Checking for S_IFSOCK would be stricter but breaks compositors that
+    // expose the display through a bind-mounted path.
+    return std::filesystem::exists(p, ec) && !ec;
+}
+
+// What we discovered about the display servers on this machine, plus the
+// `env VAR=…` prefix that hands the correction to a child process.
+//
+// The correction is passed PER COMMAND rather than through setenv():
+// setenv mutates process-global state, which (a) is not thread-safe
+// against a concurrent getenv anywhere else in the program — and POSIX
+// gives no way to make it so — and (b) silently changes the environment
+// of every unrelated subprocess agentty spawns later, including tools and
+// the user's shell. A prefix on the one command that needs it has neither
+// problem and is trivially auditable.
+struct DisplayEnv {
+    bool        wayland = false;   // a compositor socket is reachable
+    bool        x11     = false;   // an X server socket is reachable
+    std::string prefix;            // "env WAYLAND_DISPLAY=… … " or empty
+
+    // Prepend the correction to a command for popen.
+    [[nodiscard]] std::string cmd(std::string_view base) const {
+        std::string out{prefix};
+        out += base;
+        return out;
+    }
+};
+
+// Resolve the display servers by looking for their SOCKETS rather than
+// trusting the inherited environment. See the block comment above.
+//
+// Not cached: the whole point is that the inherited snapshot can be wrong,
+// and a user can start a compositor (or agentty can outlive one) mid
+// -session. The cost is a couple of stat() calls per explicit paste, which
+// is noise next to the popen we're about to do.
+DisplayEnv discover_display() {
+    DisplayEnv out;
+    const std::string dir = runtime_dir();
+
+    // XDG_RUNTIME_DIR has to reach the child too: wl-paste resolves a
+    // relative WAYLAND_DISPLAY against it, so a display name without the
+    // directory it lives in just moves the failure one process down.
+    const char* env_rt = std::getenv("XDG_RUNTIME_DIR");
+    const bool  rt_missing = !env_rt || !*env_rt;
+
+    // ---- Wayland ------------------------------------------------------
+    std::string display;
+
+    // Believe the env only if the socket it names actually exists. A
+    // WAYLAND_DISPLAY left over from a dead session is worse than none:
+    // it makes wl-paste fail with a connect error rather than fall back.
+    if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w) {
+        if (wayland_socket_exists(dir, w)) {
+            out.wayland = true;
+            display     = w;        // already correct; kept for the prefix
+        }
+    }
+
+    if (!out.wayland) {
+        // Scan for a live compositor socket: wayland-0, wayland-1, …
+        // Lowest number wins so a single-compositor box is deterministic.
+        std::error_code ec;
+        std::vector<std::string> found;
+        for (const auto& e : std::filesystem::directory_iterator{dir, ec}) {
+            if (ec) break;
+            const std::string n = e.path().filename().string();
+            if (!n.starts_with("wayland-")) continue;
+            if (n.ends_with(".lock")) continue;   // the lock, not the socket
+            found.push_back(n);
+        }
+        if (!found.empty()) {
+            std::ranges::sort(found);
+            out.wayland = true;
+            display     = found.front();
+            AGT_LOG(Ui, Info, "clipboard.wayland.repaired",
+                    "display={} runtime_dir={} candidates={}",
+                    display, dir, found.size());
+        }
+    }
+
+    // ---- X11 ----------------------------------------------------------
+    std::string xdisplay;
+    if (const char* d = std::getenv("DISPLAY"); d && *d) {
+        out.x11 = true;
+    } else {
+        std::error_code ec;
+        std::vector<std::string> found;
+        for (const auto& e :
+             std::filesystem::directory_iterator{"/tmp/.X11-unix", ec}) {
+            if (ec) break;
+            const std::string n = e.path().filename().string();
+            if (n.size() > 1 && n.front() == 'X') found.push_back(n.substr(1));
+        }
+        if (!found.empty()) {
+            std::ranges::sort(found);
+            out.x11  = true;
+            xdisplay = ":" + found.front();
+            AGT_LOG(Ui, Info, "clipboard.x11.repaired", "display={}", xdisplay);
+        }
+    }
+
+    // ---- Build the child-env prefix -----------------------------------
+    // Only set what we actually corrected, so a healthy environment runs
+    // the bare command and this stays a no-op in the common case.
+    std::string vars;
+    if (rt_missing) vars += " XDG_RUNTIME_DIR=" + shell_quote(dir);
+    if (out.wayland && !display.empty())
+        vars += " WAYLAND_DISPLAY=" + shell_quote(display);
+    if (!xdisplay.empty())
+        vars += " DISPLAY=" + shell_quote(xdisplay);
+    if (!vars.empty()) out.prefix = "env" + vars + " ";
+
+    return out;
+}
+
+#endif // __linux__
 
 #endif // !_WIN32
 
@@ -256,24 +494,38 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
     }
 
 #if defined(__linux__)
-    // Session-type detection. KDE / GNOME / sway / etc. on Wayland
-    // all set XDG_SESSION_TYPE; the WAYLAND_DISPLAY fallback catches
-    // edge cases where the env var got unset by a shell rc.
-    bool wayland = false;
-    if (const char* st = std::getenv("XDG_SESSION_TYPE"))
-        wayland = std::string_view{st} == "wayland";
-    if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w) wayland = true;
+    // Session-type detection. Resolve the display server from its SOCKET
+    // rather than from XDG_SESSION_TYPE/WAYLAND_DISPLAY: inside a tmux
+    // pane those env vars are a snapshot of whatever started the tmux
+    // SERVER, so a healthy Wayland kitty frequently presents as
+    // XDG_SESSION_TYPE=tty with no WAYLAND_DISPLAY and we would skip the
+    // wl-paste branch that was about to succeed. See discover_display.
+    //
+    // The result also carries an `env VAR=…` prefix, so the wl-paste
+    // child we spawn below connects to the compositor we just found
+    // even when our own environment never mentioned it.
+    const DisplayEnv disp = discover_display();
+    const bool wayland = disp.wayland;
+    const bool x11     = disp.x11;
 
     bool has_wl_paste = tool_in_path("wl-paste");
     bool has_xclip    = tool_in_path("xclip");
+
+    AGT_LOG(Ui, Debug, "clipboard.image.probe",
+            "wayland={} x11={} wl_paste={} xclip={} repaired_env={}",
+            wayland, x11, has_wl_paste, has_xclip, !disp.prefix.empty());
 
     if (!has_wl_paste && !has_xclip) {
         // No display server reachable usually means a headless / SSH /
         // airgap host. The image is on the user's laptop, not here —
         // nothing on this machine can read it. Point at the override.
-        const char* disp = std::getenv("DISPLAY");
-        const char* wl   = std::getenv("WAYLAND_DISPLAY");
-        const bool headless = (!disp || !*disp) && (!wl || !*wl);
+        //
+        // Judged by socket probes, not env vars: a stale-env tmux pane on
+        // a graphical box is NOT headless, and telling the user to set
+        // AGENTTY_CLIPBOARD_CMD there sends them down the wrong path.
+        const bool headless = !wayland && !x11;
+        AGT_LOG(Ui, Info, "clipboard.image.no_tool",
+                "headless={}", headless);
         if (headless) {
             return fail(
                 "couldn't read the clipboard over this connection. agentty "
@@ -290,59 +542,110 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
               "(`pacman -S xclip` / `apt install xclip`)");
     }
 
-    // ---- Wayland path: prefer wl-paste --------------------------------
-    if (wayland && has_wl_paste) {
+    // ---- Backend attempts ---------------------------------------------
+    //
+    // TRY every installed tool rather than predicting which one "should"
+    // work. The socket probe above is a good predictor, but a predictor
+    // that is wrong once leaves the user with a dead feature and no way
+    // to tell why — exactly the class of bug that made image paste fail
+    // inside tmux. Cases a socket probe still can't see: a compositor
+    // whose socket lives outside XDG_RUNTIME_DIR, a sandboxed runtime
+    // dir we can't enumerate (flatpak/snap/container), an XWayland-only
+    // bridge, or a WAYLAND_DISPLAY naming scheme we don't recognise.
+    //
+    // Trying is cheap and safe: wl-paste/xclip exit non-zero in a few ms
+    // when they can't reach a display server, and the whole path only
+    // runs on an explicit user paste. So `wayland`/`x11` now only decide
+    // the ORDER we try in (ask the native backend first) and the wording
+    // of the final error — never whether a backend is attempted at all.
+    //
+    // Each lambda returns:
+    //   - an image           -> done, return it
+    //   - nullopt + no error -> backend had nothing, keep going
+    //   - nullopt + error    -> backend found an image it couldn't deliver,
+    //                           which is worth reporting verbatim
+    std::string hard_error;
+
+    auto try_wl_paste = [&]() -> std::optional<ClipboardImage> {
+        if (!has_wl_paste) return std::nullopt;
         // Discover what the clipboard is actually offering. wl-paste
         // exits non-zero on an empty clipboard; capture even on
         // failure so we can give a precise diagnostic.
-        auto types_r = popen_capture("wl-paste --list-types 2>/dev/null", 64 * 1024);
-        if (types_r.bytes.empty()) {
-            // wl-paste returned nothing — empty clipboard, OR
-            // wl-paste needs a connection it can't get.
-            // Try xclip fallback if installed.
-            if (!has_xclip)
-                return fail("clipboard is empty");
-            // fall through to xclip path below
-        } else if (auto* mime = pick_clipboard_image_type(types_r.bytes)) {
+        auto types_r = popen_capture(
+            disp.cmd("wl-paste --list-types 2>/dev/null").c_str(), 64 * 1024);
+        AGT_LOG(Ui, Debug, "clipboard.image.wl_paste.types",
+                "status={} bytes={}", types_r.status, types_r.bytes.size());
+        if (types_r.bytes.empty()) return std::nullopt;  // empty, or no compositor
+
+        if (auto* mime = pick_clipboard_image_type(types_r.bytes)) {
             std::string cmd = "wl-paste --type ";
             cmd += mime;
             cmd += " 2>/dev/null";
-            if (auto img = wrap(popen_capture(cmd.c_str(), kCap)))
+            if (auto img = wrap(popen_capture(disp.cmd(cmd).c_str(), kCap))) {
+                AGT_LOG(Ui, Info, "clipboard.image.ok",
+                        "backend=wl-paste mime={} bytes={}",
+                        mime, img->bytes.size());
                 return img;
-            // Listed but failed to capture — usually means the
-            // source app died between list and read (KDE's Klipper
-            // can race here on Wayland).
-            return fail_owned(std::string{
-                "clipboard advertised "} + mime
-                + " but the bytes were unavailable (source app may have closed)");
+            }
+            // Listed but failed to capture — usually means the source
+            // app died between list and read (KDE's Klipper can race
+            // here on Wayland). Real failure: report it if nothing else
+            // succeeds, but still let xclip try the X11 bridge.
+            hard_error = std::string{"clipboard advertised "} + mime
+                       + " but the bytes were unavailable (source app may "
+                         "have closed)";
+            AGT_LOG(Ui, Warn, "clipboard.image.wl_paste.empty_read",
+                    "mime={}", mime);
         } else if (clipboard_has_qt_image_only(types_r.bytes)) {
-            return fail("clipboard image is in Qt-internal format only "
-                        "(application/x-qt-image) — copy from a non-Qt app, "
-                        "or take the screenshot via Spectacle's \"Save to "
-                        "clipboard\" with the PNG default");
+            hard_error = "clipboard image is in Qt-internal format only "
+                         "(application/x-qt-image) — copy from a non-Qt app, "
+                         "or take the screenshot via Spectacle's \"Save to "
+                         "clipboard\" with the PNG default";
         }
-        // No image-class MIME on the wayland clipboard. Fall through
-        // to xclip in case Klipper's X11 bridge has it.
-    }
+        return std::nullopt;
+    };
 
-    // ---- X11 path (also runs as fallback on Wayland) ------------------
-    if (has_xclip) {
+    auto try_xclip = [&]() -> std::optional<ClipboardImage> {
+        if (!has_xclip) return std::nullopt;
         auto targets = popen_capture(
-            "xclip -selection clipboard -t TARGETS -o 2>/dev/null",
+            disp.cmd("xclip -selection clipboard -t TARGETS -o 2>/dev/null").c_str(),
             64 * 1024);
+        AGT_LOG(Ui, Debug, "clipboard.image.xclip.targets",
+                "status={} bytes={}", targets.status, targets.bytes.size());
         if (auto* mime = pick_clipboard_image_type(targets.bytes)) {
             std::string cmd = "xclip -selection clipboard -t ";
             cmd += mime;
             cmd += " -o 2>/dev/null";
-            if (auto img = wrap(popen_capture(cmd.c_str(), kCap)))
+            if (auto img = wrap(popen_capture(disp.cmd(cmd).c_str(), kCap))) {
+                AGT_LOG(Ui, Info, "clipboard.image.ok",
+                        "backend=xclip mime={} bytes={}",
+                        mime, img->bytes.size());
                 return img;
+            }
         }
-        if (clipboard_has_qt_image_only(targets.bytes)) {
-            return fail("clipboard image is in Qt-internal format only "
-                        "(application/x-qt-image) — install wl-clipboard for "
-                        "Wayland-native access");
+        if (hard_error.empty() && clipboard_has_qt_image_only(targets.bytes)) {
+            hard_error = "clipboard image is in Qt-internal format only "
+                         "(application/x-qt-image) — install wl-clipboard for "
+                         "Wayland-native access";
         }
+        return std::nullopt;
+    };
+
+    // Native backend first, the other as fallback. On Wayland that order
+    // matters for correctness, not just speed: Klipper's X11 bridge often
+    // has the text but not the image.
+    if (x11 && !wayland) {
+        if (auto img = try_xclip())    return img;
+        if (auto img = try_wl_paste()) return img;
+    } else {
+        if (auto img = try_wl_paste()) return img;
+        if (auto img = try_xclip())    return img;
     }
+
+    if (!hard_error.empty()) return fail_owned(std::move(hard_error));
+
+    AGT_LOG(Ui, Info, "clipboard.image.none",
+            "wayland={} wl_paste={} xclip={}", wayland, has_wl_paste, has_xclip);
 
     // Both tools tried; nothing image-y came back.
     if (wayland && !has_wl_paste) {
@@ -354,6 +657,18 @@ std::optional<ClipboardImage> read_clipboard_image(std::string* error_out) {
     return fail("clipboard has no image");
 
 #elif defined(__APPLE__)
+    // SKIPPED over ssh — and this is the whole macOS image-paste bug.
+    //
+    // On Linux a remote host usually has no display, so wl-paste/xclip fail
+    // and the read falls through to the terminal query BY ACCIDENT. A Mac
+    // always has a working pasteboard, so pngpaste/osascript SUCCEED over
+    // ssh; they just answer about the wrong machine. "clipboard has no
+    // image" from the far end then hid the fact that the user's laptop had
+    // a screenshot on it, and the terminal — the only path that can reach
+    // that clipboard — was never asked.
+    if (session_is_remote())
+        return fail("ssh session \xe2\x80\x94 the pasteboard on this host is "
+                    "not the one you copied into");
     if (tool_in_path("pngpaste")) {
         if (auto img = wrap(popen_capture("pngpaste - 2>/dev/null", kCap)))
             return img;
@@ -605,23 +920,59 @@ std::optional<std::string> read_clipboard_text(std::string* error_out) {
     };
 
 #if defined(__linux__)
-    bool wayland = false;
-    if (const char* st = std::getenv("XDG_SESSION_TYPE"))
-        wayland = std::string_view{st} == "wayland";
-    if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w) wayland = true;
+    // Socket-probed, not env-sniffed — same stale-tmux-env reason as
+    // read_clipboard_image(). See discover_display().
+    const DisplayEnv disp = discover_display();
+    const bool wayland = disp.wayland;
+    const bool x11     = disp.x11;
 
-    if (wayland && tool_in_path("wl-paste")) {
-        auto r = popen_capture("wl-paste --no-newline 2>/dev/null", kCap);
-        if (r.status == 0 && !r.bytes.empty()) return std::move(r.bytes);
-    }
-    if (tool_in_path("xclip")) {
+    // TRY both backends; detection only picks the order. Same rationale
+    // as read_clipboard_image() — a wrong prediction must not be able to
+    // disable a backend that would have worked.
+    auto wl = [&]() -> std::optional<std::string> {
+        if (!tool_in_path("wl-paste")) return std::nullopt;
         auto r = popen_capture(
-            "xclip -selection clipboard -o 2>/dev/null", kCap);
+            disp.cmd("wl-paste --no-newline 2>/dev/null").c_str(), kCap);
+        AGT_LOG(Ui, Debug, "clipboard.text.wl_paste",
+                "status={} bytes={}", r.status, r.bytes.size());
         if (r.status == 0 && !r.bytes.empty()) return std::move(r.bytes);
+        return std::nullopt;
+    };
+    auto xc = [&]() -> std::optional<std::string> {
+        if (!tool_in_path("xclip")) return std::nullopt;
+        auto r = popen_capture(
+            disp.cmd("xclip -selection clipboard -o 2>/dev/null").c_str(), kCap);
+        AGT_LOG(Ui, Debug, "clipboard.text.xclip",
+                "status={} bytes={}", r.status, r.bytes.size());
+        if (r.status == 0 && !r.bytes.empty()) return std::move(r.bytes);
+        return std::nullopt;
+    };
+
+    if (x11 && !wayland) {
+        if (auto t = xc()) return t;
+        if (auto t = wl()) return t;
+    } else {
+        if (auto t = wl()) return t;
+        if (auto t = xc()) return t;
     }
+
+    AGT_LOG(Ui, Debug, "clipboard.text.none", "wayland={} x11={}", wayland, x11);
     return fail("clipboard has no text");
 
 #elif defined(__APPLE__)
+    // SKIPPED over ssh, and this is the half that actually broke image paste.
+    //
+    // smart_paste_from_clipboard tries image, then TEXT, then the terminal.
+    // pbpaste succeeds over ssh against the wrong machine, so any stale text
+    // on the remote host satisfied the text step and the function returned
+    // before ever asking the terminal — the user pressed Ctrl+V on a fresh
+    // screenshot and got whatever they last copied on the server.
+    //
+    // Refusing here is what lets the fallback chain reach OSC 5522, which
+    // carries the real image back from kitty over the pty.
+    if (session_is_remote())
+        return fail("ssh session \xe2\x80\x94 the pasteboard on this host is "
+                    "not the one you copied into");
     auto r = popen_capture("pbpaste 2>/dev/null", kCap);
     if (r.status == 0 && !r.bytes.empty()) return std::move(r.bytes);
     return fail("clipboard has no text");
@@ -682,11 +1033,17 @@ namespace {
 // iff the child exited 0. status==-1 (popen failed) or a non-zero exit
 // both report false. Windows maps popen()→_popen via the macros above.
 bool popen_write(const char* cmd, std::string_view data) {
-#if defined(_WIN32)
-    FILE* fp = ::_popen(cmd, "wb");
+#if !defined(_WIN32)
+    tools::util::ChildRun run;
+    run.argv       = {"/bin/sh", "-c", cmd};
+    run.stdin_data = std::string{data};
+    run.idle       = std::chrono::seconds{10};
+    run.wall       = std::chrono::seconds{30};
+    run.max_output_bytes = 4096;
+    auto c = tools::util::run_child(run);
+    return c.started && c.exited && c.exit_code == 0;
 #else
-    FILE* fp = ::popen(cmd, "w");
-#endif
+    FILE* fp = ::_popen(cmd, "wb");
     if (!fp) return false;
     bool wrote_ok = true;
     if (!data.empty()) {
@@ -694,13 +1051,10 @@ bool popen_write(const char* cmd, std::string_view data) {
             std::fwrite(data.data(), 1, data.size(), fp);
         wrote_ok = (n == data.size());
     }
-#if defined(_WIN32)
     const int status = ::_pclose(fp);
-#else
-    const int status = ::pclose(fp);
-#endif
     // pclose returns the child wait-status; 0 means clean exit 0.
     return wrote_ok && status == 0;
+#endif
 }
 
 } // namespace
@@ -716,22 +1070,41 @@ bool write_clipboard_text(std::string_view text, std::string* error_out) {
     return fail("pbcopy failed (is it on PATH?)");
 
 #elif defined(__linux__)
-    bool wayland = false;
-    if (const char* st = std::getenv("XDG_SESSION_TYPE"))
-        wayland = std::string_view{st} == "wayland";
-    if (const char* w = std::getenv("WAYLAND_DISPLAY"); w && *w) wayland = true;
+    // Socket-probed, not env-sniffed — same stale-tmux-env reason as
+    // read_clipboard_image(). Without this a copy from a tmux pane
+    // silently failed to reach the system clipboard. See
+    // discover_display().
+    const DisplayEnv disp = discover_display();
+    const bool wayland = disp.wayland;
+    const bool x11     = disp.x11;
 
-    if (wayland && tool_in_path("wl-copy")) {
-        if (popen_write("wl-copy 2>/dev/null", text)) return true;
+    // Try every installed tool; detection only orders them. wl-copy is
+    // asked first on Wayland because xclip/xsel reach a Wayland
+    // clipboard only through XWayland, which some compositors don't
+    // bridge for writes.
+    auto attempt = [&](const char* tool, const char* base) {
+        if (!tool_in_path(tool)) return false;
+        const bool ok = popen_write(disp.cmd(base).c_str(), text);
+        AGT_LOGL(Ui, ok ? ::agentty::logx::Level::Info
+                        : ::agentty::logx::Level::Debug,
+                 "clipboard.write", "tool={} ok={}", tool, ok);
+        return ok;
+    };
+
+    if (wayland) {
+        if (attempt("wl-copy", "wl-copy 2>/dev/null")) return true;
     }
-    if (tool_in_path("xclip")) {
-        if (popen_write("xclip -selection clipboard 2>/dev/null", text))
-            return true;
+    if (attempt("xclip", "xclip -selection clipboard 2>/dev/null")) return true;
+    if (attempt("xsel", "xsel --clipboard --input 2>/dev/null")) return true;
+    // Last resort on a box where the socket probe said "no compositor"
+    // but wl-copy is installed — cheap, and covers a compositor whose
+    // socket we couldn't see (sandboxed runtime dir, odd socket path).
+    if (!wayland) {
+        if (attempt("wl-copy", "wl-copy 2>/dev/null")) return true;
     }
-    if (tool_in_path("xsel")) {
-        if (popen_write("xsel --clipboard --input 2>/dev/null", text))
-            return true;
-    }
+
+    AGT_LOG(Ui, Warn, "clipboard.write.failed",
+            "wayland={} x11={}", wayland, x11);
     return fail("no clipboard tool — install wl-clipboard or xclip");
 
 #elif defined(_WIN32)

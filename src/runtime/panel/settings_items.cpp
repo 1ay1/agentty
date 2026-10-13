@@ -6,11 +6,14 @@
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/domain/profile.hpp"
+#include "agentty/domain/web_search_config.hpp"   // Web Search row summary
+#include <mcp/tools/web_search.hpp>                // service labels for that summary
 #include "agentty/domain/ui_theme.hpp"
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/commands.hpp"
 #include "agentty/tool/hooks.hpp"
+#include "agentty/tool/util/sandbox.hpp"   // is_active/describe_state/config_enforceable
 
 #include <algorithm>
 #include <filesystem>
@@ -88,11 +91,70 @@ std::vector<Item> general(const Model& m) {
     {
         Item i;
         i.primary   = "Appearance";
-        i.secondary = m.d.ui.theme.empty()
+        i.secondary = m.d.ui().theme.empty()
             ? "native \xc2\xb7 theme, density, motion"
-            : (m.d.ui.theme + " \xc2\xb7 theme, density, motion");
+            : (m.d.ui().theme + " \xc2\xb7 theme, density, motion");
         i.hint      = "Enter: configure";
         i.action    = Action::OpenAppearance;
+        out.push_back(std::move(i));
+    }
+
+    // Sandbox. Also a pane: it carries a live wall report and a dozen
+    // grouped rows. The secondary line is the one thing worth saying from out
+    // here -- which backend is actually enforcing, because that decides
+    // whether the rows inside do anything at all. Only claybin can apply this
+    // policy, so a bwrap session gets told before it opens the pane and
+    // configures something inert.
+    {
+        Item i;
+        i.primary = "Sandbox";
+        namespace sb = tools::util::sandbox;
+        // describe_state() already renders "sandbox: active (claybin)" and the
+        // no-backend cases; strip its prefix rather than re-deriving the text
+        // from the enum, so this row cannot disagree with the startup banner.
+        std::string st = sb::describe_state();
+        if (const auto c = st.find(": "); c != std::string::npos) st = st.substr(c + 2);
+        if (!sb::is_active()) {
+            i.secondary = st + " \xc2\xb7 commands run unconfined";
+        } else if (sb::config_enforceable()) {
+            i.secondary = st + " \xc2\xb7 files, network, syscalls, limits";
+        } else {
+            i.secondary = st + " \xc2\xb7 saved policy not enforced (needs claybin)";
+        }
+        i.hint      = "Enter: configure";
+        i.action    = Action::OpenSandbox;
+        out.push_back(std::move(i));
+    }
+    // Web Search. web_search's policy and the services it asks. The
+    // secondary line says what the policy currently DOES, so "why didn't it
+    // search?" and "who answers?" are answered from the list without opening
+    // the pane. Read from the persisted record — the same value the pane
+    // edits and the tool layer is handed.
+    {
+        const auto& s = m.d.persisted.web_search;
+        Item i;
+        i.primary = "Web Search";
+        const auto mode = web_search_cfg::mode(s);
+        if (mode == web_search_cfg::Mode::Off) {
+            i.secondary = "off";
+        } else {
+            // Auto names itself rather than a count: the count rows are not
+            // applied there, so showing one would describe a setting that
+            // does nothing.
+            i.secondary = mode == web_search_cfg::Mode::Auto
+                ? std::string{"auto"}
+                : "on \xc2\xb7 " + std::to_string(s.count) + " results";
+            // The service asked first, by its menu name. An id this build
+            // does not know is not named (the plan skips it too).
+            if (const auto* svc = ::mcp::tools::find_web_search_service(s.primary))
+                i.secondary += " \xc2\xb7 " + svc->label;
+            const auto n = web_search_cfg::exclude_list(s.exclude_sites).size();
+            if (n == 1)      i.secondary += " \xc2\xb7 1 site excluded";
+            else if (n > 1)  i.secondary += " \xc2\xb7 " + std::to_string(n)
+                                          + " sites excluded";
+        }
+        i.hint   = "Enter: configure";
+        i.action = Action::OpenWebSearch;
         out.push_back(std::move(i));
     }
     return out;
@@ -224,9 +286,9 @@ std::vector<Item> plugins(const agentty::mcp::PluginModel& model, bool loading) 
     return out;
 }
 
-std::vector<Item> commands() {
+std::vector<Item> commands(const Library& lib) {
     std::vector<Item> out;
-    for (const auto& c : tools::commands::all()) {
+    for (const auto& c : lib.commands) {
         Item i;
         i.primary   = "/" + c.name;
         i.secondary = c.description;
@@ -263,9 +325,9 @@ std::vector<Item> agents() {
     return out;
 }
 
-std::vector<Item> hooks() {
+std::vector<Item> hooks(const Library& lib) {
     std::vector<Item> out;
-    const std::string file = tools::hooks::active_file();
+    const std::string& file = lib.hooks_file;
     if (file.empty()) {
         Item i;
         i.primary   = "(no hooks file)";
@@ -277,7 +339,7 @@ std::vector<Item> hooks() {
     }
     Item i;
     i.primary = file;
-    if (tools::hooks::pending_approval()) {
+    if (lib.hooks_pending) {
         i.secondary = "NOT APPROVED — hooks will not run";
         i.hint      = "Enter: review & approve";
         i.action    = Action::ApproveHooks;
@@ -302,10 +364,13 @@ std::vector<Item> items_for(const Model& m, Category cat) {
         // list — the General category carries the single door row that opens
         // it. Return empty rather than leaving the enum unhandled.
         case Category::Appearance: return {};
+        // Sandbox is a form pane too (panel/sandbox.hpp), for the same reason:
+        // the General category carries the door row that opens it.
+        case Category::Sandbox: return {};
         case Category::Plugins:  return plugins(m.ui.plugins, m.ui.plugins_loading);
-        case Category::Commands: return commands();
+        case Category::Commands: return commands(m.ui.library);
         case Category::Agents:   return agents();
-        case Category::Hooks:    return hooks();
+        case Category::Hooks:    return hooks(m.ui.library);
     }
     return {};
 }
@@ -372,7 +437,7 @@ std::vector<std::string> starter_segments(const std::string& name) {
 
 } // namespace
 
-AddResult add_plugin_from_line(const std::string& line) {
+AddResult add_plugin_from_line(Io io, const maya::below<maya::leaf>& cap, const std::string& line) {
     auto tok = split_ws(line);
     // Pull an optional --project flag from anywhere in the line; the rest is
     // the <name> <recipe> [args…] spec.
@@ -454,8 +519,8 @@ AddResult add_plugin_from_line(const std::string& line) {
         spec.args = std::move(rest);
     }
 
-    const auto path = tools::plugin::config_path(project);
-    switch (tools::plugin::add_server(path, spec, /*force=*/false)) {
+    const auto path = tools::plugin::config_path(io, project);
+    switch (tools::plugin::add_server(io, cap, path, spec, /*force=*/false)) {
         case tools::plugin::EditResult::Ok:
             return {true, "added " + std::string{project ? "project " : ""}
                           + "plugin '" + name + "'"};
@@ -468,7 +533,7 @@ AddResult add_plugin_from_line(const std::string& line) {
     }
 }
 
-AddResult create_starter(Category cat, const std::string& name) {
+AddResult create_starter(Io, Category cat, const std::string& name) {
     // Validate AND split on ':' into safe path segments. The command/agent
     // loaders map a `:`-namespaced name to a SUBDIRECTORY (git:fixup ->
     // git/fixup.md), so writing the colon verbatim into one filename both

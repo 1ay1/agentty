@@ -163,25 +163,44 @@ struct DynamicDispatch {
     }
 
     // Execute against a pre-resolved ToolDef (see resolve()). Same body as
-    // execute(name, args) but skips the second name lookup.
-    [[nodiscard]] static ExecResult execute_with(const tools::ToolDef* td,
+    // execute(name, args) but skips the second name lookup. Tools run on a
+    // worker holding no lock, and may block: `unlocked`.
+    [[nodiscard]] static ExecResult execute_with(const maya::unlocked& cap,
+                                                 const tools::ToolDef* td,
                                                  std::string_view name,
-                                                 const nlohmann::json& args) noexcept {
+                                                 const nlohmann::json& args,
+                                                 const tools::CallContext& ctx) noexcept {
         if (!td) return std::unexpected(ToolError::not_found(tools::unknown_tool_error(name)));
         static const nlohmann::json kEmpty = nlohmann::json::object();
         const nlohmann::json& safe_args = args.is_object() ? args : kEmpty;
         ExecResult result;
         try {
-            result = td->execute(safe_args);
+            // The capability rides the context across mcp-cpp's callbacks for
+            // exactly this call: a per-call copy holds it, and the copy dies
+            // when the call returns (CallContext::cap).
+            tools::CallContext call_ctx = ctx;
+            call_ctx.cap.set(std::addressof(cap));
+            result = td->execute(cap, safe_args, call_ctx);
         } catch (const std::exception& e) {
             return std::unexpected(ToolError::unknown(std::string{"tool crashed: "} + e.what()));
         } catch (...) {
             return std::unexpected(ToolError::unknown("tool crashed with a non-standard exception"));
         }
+        // Per-tool output budget: the dispatcher-level safety net for a tool
+        // whose own limiting failed on pathological input. 0 bypasses it.
         if (result && td->max_output_chars > 0) {
             result->text = detail::apply_output_budget(
                 std::move(result->text), td->max_output_chars,
                 td->output_truncation);
+        } else if (!result && td->max_output_chars > 0) {
+            // Errors too: an MCP server's error payload and a subprocess's
+            // stderr cross this boundary verbatim. Generous and HeadTail so a
+            // truncated error stays diagnosable.
+            constexpr int kMinErrorBudget = 4'000;
+            const int budget = std::max(td->max_output_chars, kMinErrorBudget);
+            result.error().detail = detail::apply_output_budget(
+                std::move(result.error().detail), budget,
+                tools::OutputTruncation::HeadTail);
         }
         return result;
     }
@@ -194,39 +213,41 @@ struct DynamicDispatch {
                == tools::policy::Decision::Prompt;
     }
 
-    [[nodiscard]] static ExecResult execute(std::string_view name,
-                                            const nlohmann::json& args) noexcept {
+    // Execute a call that consent was given for, verifying the tool is still
+    // the one consented to.
+    //
+    // Consent is recorded against a NAME, and for an MCP tool the server owns
+    // that name. Between the decision and this call the catalog can be
+    // rebuilt -- a tools/list_changed notification, an mcp reload, a toggle --
+    // and the name can come back pointing at a different tool. The gate and
+    // the execute were two independent lookups of the same string, so nothing
+    // noticed. Re-checking the fingerprint here makes the approval refer to a
+    // definition rather than to a string.
+    //
+    // `approved_hash == 0` means nothing was recorded (a path with no gate, or
+    // a thread from before this existed), and the check is skipped rather
+    // than failing closed -- refusing those would break resumed threads for a
+    // risk that only exists where a grant was actually given.
+    [[nodiscard]] static ExecResult execute_approved(
+        const maya::unlocked& cap, std::string_view name, const nlohmann::json& args,
+        std::uint64_t approved_hash, const tools::CallContext& ctx) noexcept {
         const auto* td = tools::find(name);
         if (!td) return std::unexpected(ToolError::not_found(tools::unknown_tool_error(name)));
-        // Avoid copying `args` on the hot path: tools receive an empty object
-        // only when the model emitted a non-object (rare). Use a process-
-        // lifetime empty json so the reference stays valid either way.
-        static const nlohmann::json kEmpty = nlohmann::json::object();
-        const nlohmann::json& safe_args = args.is_object() ? args : kEmpty;
-        ExecResult result;
-        try {
-            result = td->execute(safe_args);
-        } catch (const std::exception& e) {
-            return std::unexpected(ToolError::unknown(std::string{"tool crashed: "} + e.what()));
-        } catch (...) {
-            return std::unexpected(ToolError::unknown("tool crashed with a non-standard exception"));
+        if (approved_hash != 0 && td->definition_hash() != approved_hash) {
+            return std::unexpected(ToolError::denied(
+                "tool '" + std::string{name} + "' was redefined after it was "
+                "approved, so the approval no longer applies. This is what a "
+                "compromised or updated MCP server looks like. Re-request the "
+                "call to be shown the new definition."));
         }
-        // Per-tool output budget. The catalog declares both a char cap
-        // and a truncation strategy; this is the dispatcher-level
-        // safety net that catches any tool whose internal limiting
-        // failed on pathological input (a Read of a 2000-line file with
-        // 5KB lines, a Bash dump of a multi-MB log, a Grep on a runaway
-        // pattern). Tools whose `max_output_chars == 0` (todo,
-        // git_commit) bypass — their output shape is bounded by
-        // construction. Errors aren't truncated: typed ToolError detail
-        // strings are short by design and the model needs the full text
-        // to recover.
-        if (result && td->max_output_chars > 0) {
-            result->text = detail::apply_output_budget(
-                std::move(result->text), td->max_output_chars,
-                td->output_truncation);
-        }
-        return result;
+        return execute_with(cap, td, name, args, ctx);
+    }
+
+    [[nodiscard]] static ExecResult execute(const maya::unlocked& cap,
+                                            std::string_view name,
+                                            const nlohmann::json& args,
+                                            const tools::CallContext& ctx = {}) noexcept {
+        return execute_with(cap, tools::find(name), name, args, ctx);
     }
 
     // Single source of truth for whether a tool gates on the user.

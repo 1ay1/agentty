@@ -29,7 +29,6 @@
 #include <maya/platform/io.hpp>
 
 #include "agentty/runtime/view/helpers.hpp"
-#include "agentty/auth/vault.hpp"   // vault::signed_in — uniform OAuth status
 #include "agentty/runtime/view/hints.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/panel/code_blocks.hpp"  // extract_code_blocks (palette gating)
@@ -45,7 +44,6 @@
 #include "agentty/provider/auth_state.hpp"
 #include "agentty/provider/credentials.hpp"
 #include "agentty/provider/selection.hpp"
-#include "agentty/runtime/app/deps.hpp"   // deps().auth for the live auth badge
 #include "agentty/auth/auth.hpp"          // auth::is_empty
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
@@ -72,7 +70,6 @@ using panel_detail::panel_viewport_h;
 using panel_detail::panel_terminal_cols;
 using panel_detail::panel_badge_max_cols;
 using panel_detail::tier_hue;
-using panel_detail::active_provider_id;
 using panel_detail::reasoning_effort_footer;
 using panel_detail::section_header;
 using panel_detail::SectionHeader;

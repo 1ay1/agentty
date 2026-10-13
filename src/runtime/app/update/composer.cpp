@@ -10,12 +10,6 @@
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
-#if !defined(_WIN32)
-#  include <unistd.h>   // getppid (mosh ancestry walk in the clipboard diagnosis)
-#endif
 #include <string>
 #include <string_view>
 
@@ -29,7 +23,6 @@
 #include "agentty/io/clipboard.hpp"
 #include "agentty/util/logx.hpp"          // AGT_LOG — paste-path tracing
 #include "agentty/provider/selection.hpp"   // prewarm_active_provider
-#include "agentty/util/home_dir.hpp"
 #include "agentty/util/env.hpp"
 #include "agentty/util/image_dims.hpp"
 #include "agentty/runtime/panel/palette.hpp"
@@ -44,9 +37,36 @@ namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
 
-namespace {
+// Image-paste detection. Terminal bracketed-paste delivers UTF-8 text
+// only — to attach an image the user drops the file's *path* (drag-
+// onto-terminal, "copy as path", whatever). We accept it iff the
+// payload is a single trimmed line, names a regular file under the
+// workspace's filesystem, and starts with one of the recognised
+// image magic-byte prefixes.
+const char* detect_image_media_type(std::string_view bytes) noexcept {
+    auto u = [&](std::size_t i){ return static_cast<unsigned char>(bytes[i]); };
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (bytes.size() >= 8 && u(0) == 0x89 && u(1) == 0x50 && u(2) == 0x4E
+        && u(3) == 0x47 && u(4) == 0x0D && u(5) == 0x0A && u(6) == 0x1A
+        && u(7) == 0x0A) return "image/png";
+    // JPEG: FF D8 FF
+    if (bytes.size() >= 3 && u(0) == 0xFF && u(1) == 0xD8 && u(2) == 0xFF)
+        return "image/jpeg";
+    // GIF87a / GIF89a
+    if (bytes.size() >= 6
+        && bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F'
+        && bytes[3] == '8' && (bytes[4] == '7' || bytes[4] == '9')
+        && bytes[5] == 'a') return "image/gif";
+    // WEBP: "RIFF" .... "WEBP"
+    if (bytes.size() >= 12
+        && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
+        && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P')
+        return "image/webp";
+    return nullptr;
+}
 
-namespace fs = std::filesystem;
+
+namespace {
 
 constexpr std::size_t kUndoDepth = 64;
 
@@ -177,146 +197,18 @@ int word_right(std::string_view s, int pos) noexcept {
     return p;
 }
 
-// Image-paste detection. Terminal bracketed-paste delivers UTF-8 text
-// only — to attach an image the user drops the file's *path* (drag-
-// onto-terminal, "copy as path", whatever). We accept it iff the
-// payload is a single trimmed line, names a regular file under the
-// workspace's filesystem, and starts with one of the recognised
-// image magic-byte prefixes.
-const char* detect_image_media_type(std::string_view bytes) noexcept {
-    auto u = [&](std::size_t i){ return static_cast<unsigned char>(bytes[i]); };
-    // PNG: 89 50 4E 47 0D 0A 1A 0A
-    if (bytes.size() >= 8 && u(0) == 0x89 && u(1) == 0x50 && u(2) == 0x4E
-        && u(3) == 0x47 && u(4) == 0x0D && u(5) == 0x0A && u(6) == 0x1A
-        && u(7) == 0x0A) return "image/png";
-    // JPEG: FF D8 FF
-    if (bytes.size() >= 3 && u(0) == 0xFF && u(1) == 0xD8 && u(2) == 0xFF)
-        return "image/jpeg";
-    // GIF87a / GIF89a
-    if (bytes.size() >= 6
-        && bytes[0] == 'G' && bytes[1] == 'I' && bytes[2] == 'F'
-        && bytes[3] == '8' && (bytes[4] == '7' || bytes[4] == '9')
-        && bytes[5] == 'a') return "image/gif";
-    // WEBP: "RIFF" .... "WEBP"
-    if (bytes.size() >= 12
-        && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
-        && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P')
-        return "image/webp";
-    return nullptr;
-}
-
-// Returns (path, media_type) if the paste looks like a single-line
-// path to a recognised image file. Empty path on no match.
-struct ImagePasteResult {
-    std::string  path;
-    const char*  media_type = nullptr;
-    std::string  body;       // raw image bytes
-};
-
-// Normalise a pasted path candidate:
-//   – expand a leading `~/` to $HOME (file managers / shells emit this)
-//   – unescape `\ ` / `\(` / `\)` / `\'` etc. (drag-drop on macOS and
-//     several Linux file managers backslash-escape every shell-special
-//     character so the path can be re-pasted into a shell verbatim)
-//   – drop CR if a CRLF terminal slipped one through
-std::string normalize_path_candidate(std::string_view in) {
-    // Trim trailing CR.
-    while (!in.empty() && (in.back() == '\r' || in.back() == ' ')) in.remove_suffix(1);
-    std::string s;
-    s.reserve(in.size());
-    if (in.size() >= 2 && in[0] == '~' && in[1] == '/') {
-        // Unified home root ($HOME on POSIX/MSYS2, $USERPROFILE on native
-        // Windows) so a dropped `~/…` path expands on every platform.
-        const fs::path home = agentty::util::home_dir();
-        if (!home.empty()) {
-            s.append(home.string());
-            in.remove_prefix(1);  // keep the '/'
-        }
-    }
-#ifdef _WIN32
-    // On Windows the backslash is the PATH SEPARATOR, not a shell escape:
-    // a dropped native path `C:\Users\foo\bar` must survive verbatim.
-    // Stripping `\` here would mangle it to `C:Usersfoobar`. Take the
-    // whole remainder as-is (drag/drop sources on Windows don't
-    // shell-escape).
-    s.append(in);
-#else
-    for (std::size_t i = 0; i < in.size(); ++i) {
-        if (in[i] == '\\' && i + 1 < in.size()) {
-            // Shell-style escape (macOS / Linux file managers backslash
-            // every shell-special char). Drop the backslash, keep the char.
-            s.push_back(in[i + 1]);
-            ++i;
-            continue;
-        }
-        s.push_back(in[i]);
-    }
-#endif
-    return s;
-}
-
-ImagePasteResult sniff_image_paste(std::string_view text) {
-    ImagePasteResult r;
-    // Trim leading / trailing whitespace (incl. CR).
+// Could this paste be a dropped image path? A cheap lexical check only (one
+// trimmed line, not too long); the worker does the file reads. Keeps every
+// ordinary text paste synchronous.
+bool may_be_image_path(std::string_view text) noexcept {
     std::size_t a = 0, b = text.size();
     while (a < b && std::isspace(static_cast<unsigned char>(text[a]))) ++a;
     while (b > a && std::isspace(static_cast<unsigned char>(text[b - 1]))) --b;
-    auto trimmed = text.substr(a, b - a);
-    if (trimmed.empty()) return r;
-    // Must be a single line — embedded newlines hint at pasted prose
-    // rather than a path.
-    if (trimmed.find('\n') != std::string_view::npos) return r;
-    if (trimmed.size() > 4096) return r;  // sane upper bound
-
-    // Strip surrounding quotes (drag-and-drop on macOS / GNOME quotes
-    // paths automatically).
-    if (trimmed.size() >= 2
-        && (trimmed.front() == '\'' || trimmed.front() == '"')
-        && trimmed.back() == trimmed.front()) {
-        trimmed = trimmed.substr(1, trimmed.size() - 2);
-    }
-    // file:// URIs land here on some desktops. Accept either two or
-    // three leading slashes (file:// vs file:///).
-    constexpr std::string_view kFileUri = "file://";
-    if (trimmed.size() > kFileUri.size()
-        && trimmed.substr(0, kFileUri.size()) == kFileUri) {
-        trimmed.remove_prefix(kFileUri.size());
-        // Some emitters use file:/// for absolute paths. Collapse the
-        // extra slash so the result starts with exactly one '/'.
-        if (!trimmed.empty() && trimmed.front() == '/') {
-            // already absolute, fine
-        }
-    }
-
-    auto candidate = normalize_path_candidate(trimmed);
-    if (candidate.empty()) return r;
-
-    fs::path p{candidate};
-    std::error_code ec;
-    if (!fs::is_regular_file(p, ec) || ec) return r;
-    // Sniff first 16 bytes for a magic prefix.
-    std::ifstream in(p, std::ios::binary);
-    if (!in) return r;
-    char buf[16]{};
-    in.read(buf, sizeof(buf));
-    auto got = static_cast<std::size_t>(in.gcount());
-    auto* mt = detect_image_media_type(std::string_view{buf, got});
-    if (!mt) return r;
-    // Slurp full bytes. 8 MiB cap — Anthropic's per-image limit is
-    // 5 MB and base64 expansion adds ~33 %, so anything bigger than
-    // ~6 MB on disk would fail server-side anyway.
-    auto sz = fs::file_size(p, ec);
-    if (ec || sz > 8 * 1024 * 1024) return r;
-    in.clear();
-    in.seekg(0);
-    std::string body(static_cast<std::size_t>(sz), '\0');
-    in.read(body.data(), static_cast<std::streamsize>(sz));
-    if (in.gcount() != static_cast<std::streamsize>(sz)) return r;
-
-    r.path       = p.string();
-    r.media_type = mt;
-    r.body       = std::move(body);
-    return r;
+    const auto t = text.substr(a, b - a);
+    if (t.empty() || t.size() > 4096) return false;
+    if (t.find('\n') != std::string_view::npos) return false;
+    // A path has a separator or an extension; a pasted word has neither.
+    return t.find_first_of("/\\.") != std::string_view::npos;
 }
 
 // Build the reverse-chronological list of user-message text refs in
@@ -370,7 +262,7 @@ void apply_history_entry(ComposerState& cs, const HistoryEntryRef& entry) {
 //
 // All three routes through this one helper so the behaviour is
 // identical no matter which trigger fired.
-Step smart_paste_from_clipboard(Model m) {
+Cmd smart_paste_from_clipboard(Model& m) {
     std::string img_err;
     if (auto img = read_clipboard_image(&img_err)) {
         begin_edit(m.ui.composer);
@@ -394,14 +286,14 @@ Step smart_paste_from_clipboard(Model m) {
         m.ui.composer.cursor += static_cast<int>(placeholder.size());
         m.ui.composer.expanded = true;
         if (oversized) {
-            return {std::move(m), set_status_toast(
+            return set_status_toast(
                 m, "Image is " + std::to_string(dims.w) + "\xc3\x97"
                 + std::to_string(dims.h) + " px — over the "
                 + std::to_string(util::kMaxWireImageSide)
                 + " px limit, it won't be sent. Resize it first.",
-                std::chrono::seconds{8})};
+                std::chrono::seconds{8});
         }
-        return done(std::move(m));
+        return Cmd::none();
     }
 
     // No image — try text. Re-enter the ComposerPaste arm with the
@@ -409,7 +301,7 @@ Step smart_paste_from_clipboard(Model m) {
     // treatment for free (same path bracketed paste takes).
     std::string txt_err;
     if (auto txt = read_clipboard_text(&txt_err); txt && !txt->empty()) {
-        return composer_update(std::move(m), ComposerPaste{std::move(*txt)});
+        return composer_update(m, ComposerPaste{std::move(*txt)});
     }
 
     // Every local path failed to produce an image or text. Last resort,
@@ -460,6 +352,12 @@ Step smart_paste_from_clipboard(Model m) {
         // TEXT-only reply can explain itself instead of silently inserting
         // prose where the user expected a screenshot.
         m.ui.clipboard_wanted_image = true;
+        // Sample the terminal's REFUSAL counter too. If it moves while we
+        // wait, kitty answered with EPERM — the protocol is there, the read
+        // permission is not — and the advice is one specific config line,
+        // not "your terminal doesn't support images".
+        m.ui.clipboard_refused_mark =
+            maya::clipboard_read_refused().load(std::memory_order_relaxed);
         // How long to wait before declaring "the terminal never answered".
         //
         // 1.2 s is right for a LOCAL terminal answering a text read: the
@@ -470,19 +368,17 @@ Step smart_paste_from_clipboard(Model m) {
         // the timer fires — so the paste that matters most is exactly the
         // one that always failed. Give a remote session room, and let the
         // progress check below extend it further while bytes keep landing.
-        const bool remote = std::getenv("SSH_CONNECTION") != nullptr
-                         || std::getenv("SSH_TTY") != nullptr;
+        const bool remote = m.env.ssh;
         const auto deadline = std::chrono::milliseconds{remote ? 6000 : 1200};
         // Snapshot the byte counter so the timeout arm can tell whether the
         // terminal answered at all.
         m.ui.clipboard_rx_mark =
             maya::clipboard_rx_bytes().load(std::memory_order_relaxed);
-        return {std::move(m),
-                maya::Cmd<Msg>::batch(
-                    maya::Cmd<Msg>::query_clipboard(),
+        return Cmd::batch(
+                    cmd::query_clipboard(),
                     std::move(toast),
-                    maya::Cmd<Msg>::after(deadline,
-                                          Msg{ClipboardQueryTimeout{seq}}))};
+                    Cmd::after(deadline,
+                                          Msg{ClipboardQueryTimeout{seq}}));
     }
 }
 
@@ -490,7 +386,7 @@ Step smart_paste_from_clipboard(Model m) {
 
 using maya::overload;
 
-Step composer_update(Model m, msg::ComposerMsg cm) {
+Cmd composer_update(Model& m, msg::ComposerMsg cm) {
     // Stamp the last-interaction clock on ANY composer message (keystroke,
     // edit, cursor move, paste, history walk). The idle blink-stop in the
     // maya composer widget keys off this: 15 s after the last interaction
@@ -514,28 +410,32 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     // reducer and are unaffected.
     if (m.ui.composer.looping()
         && !std::holds_alternative<ComposerToggleLoop>(cm)) {
-        return done(std::move(m));
+        return Cmd::none();
     }
     // ── Idle-lapse connection re-warm ──────────────────────────
     // The pool's warm socket dies after ~90 s idle (http idle_ttl), so a
     // submit after any longer pause pays a cold TCP+TLS+H2 dial (~150-400
     // ms) on top of TTFT. Typing is the earliest reliable "a request is
     // coming" signal — fire an opportunistic prewarm on the FIRST composer
-    // event after the warm window lapsed. Throttled to one dial per idle
-    // TTL so key-repeat can't spawn dial threads; prewarm itself is
-    // tracked + cancel-safe and swallows errors.
+    // event after the warm window lapsed.
+    //
+    // The throttle lives in the MODEL (m.s.last_prewarm_at), not in a
+    // function-local static: a static is state update can see that the Model
+    // doesn't own, so replay and two app instances in one process would both
+    // get it wrong. Clock still read here — see the elm_purity lint for the
+    // plan to stamp `now` onto the Model per message.
+    Cmd prewarm = Cmd::none();
     {
-        static std::chrono::steady_clock::time_point last_warm{};
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = m.now;
         const bool wire_stale =
             m.s.last_wire_at.time_since_epoch().count() == 0
             || now - m.s.last_wire_at > std::chrono::seconds(85);
         const bool warm_throttled =
-            last_warm.time_since_epoch().count() != 0
-            && now - last_warm < std::chrono::seconds(85);
+            m.s.last_prewarm_at.time_since_epoch().count() != 0
+            && now - m.s.last_prewarm_at < std::chrono::seconds(85);
         if (wire_stale && !warm_throttled && !m.s.active()) {
-            last_warm = now;
-            provider::prewarm_active_provider();
+            m.s.last_prewarm_at = now;
+            prewarm = cmd::prewarm_provider(m);
         }
     }
     // ── Proactive OAuth refresh ────────────────────────────────
@@ -548,23 +448,21 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
     // handler use, so a fresh bearer is in place before Enter. Gated on
     // oauth_refresh_in_flight (no double-fire; TokenRefreshed clears it) and
     // throttled so key-repeat can't spam the token endpoint.
-    maya::Cmd<Msg> proactive_refresh = maya::Cmd<Msg>::none();
+    Cmd proactive_refresh = Cmd::none();
     {
-        static std::chrono::steady_clock::time_point last_refresh_probe{};
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = m.now;
         const bool probe_throttled =
-            last_refresh_probe.time_since_epoch().count() != 0
-            && now - last_refresh_probe < std::chrono::seconds(30);
+            m.s.last_refresh_probe_at.time_since_epoch().count() != 0
+            && now - m.s.last_refresh_probe_at < std::chrono::seconds(30);
         if (!probe_throttled && !m.s.active() && !m.s.oauth_refresh_in_flight) {
-            last_refresh_probe = now;
-            if (auto tok = auth::oauth_proactive_refresh_token()) {
-                m.s.oauth_refresh_in_flight = true;
-                proactive_refresh = cmd::refresh_oauth(std::move(*tok));
-            }
+            m.s.last_refresh_probe_at = now;
+            // The worker reads the token and refreshes only if it is due.
+            m.s.oauth_refresh_in_flight = true;
+            proactive_refresh = cmd::refresh_oauth_if_due();
         }
     }
-    Step step = std::visit(overload{
-        [&](ComposerCharInput e) -> Step {
+    Cmd step = std::visit(overload{
+        [&](ComposerCharInput e) -> Cmd {
             // '/' opens the command palette when it's LINE-LEADING —
             // the cursor sits at the start of the buffer or right
             // after a newline, with no attachment placeholder
@@ -587,7 +485,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             };
             if (e.ch == U'/' && at_line_start()) {
                 m.ui.panel.descend(pn::Palette{});
-                return done(std::move(m));
+                return Cmd::none();
             }
             // '@' opens the file mention picker. Unlike '/' this is
             // permitted mid-prose ("ping @alice tomorrow" is a fine
@@ -622,16 +520,16 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 // the reducer can see whether a refresh is already in flight,
                 // so it simply does not emit a second Cmd. One flag, one
                 // place, visible to tests.
-                maya::Cmd<Msg> git_cmd;
+                Cmd git_cmd;
                 if (!m.ui.git_refresh_inflight) {
                     m.ui.git_refresh_inflight = true;
-                    git_cmd = maya::Cmd<Msg>::task_isolated(
-                        [](std::function<void(Msg)> dispatch) {
+                    git_cmd = Cmd::task_isolated(
+                        [](maya::Sink<Msg> out, std::stop_token) {
                             refresh_git_signals();
-                            dispatch(Msg{GitSignalsRefreshed{}});
+                            out.send(Msg{GitSignalsRefreshed{}});
                         });
                 }
-                return {std::move(m), std::move(git_cmd)};
+                return git_cmd;
             }
             // '#' opens the symbol picker — mirrors '@'. Non-blocking:
             // snapshot only if the (parallel) symbol scan has landed;
@@ -639,7 +537,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // fill on the first keystroke. Never blocks the UI on the scan.
             if (e.ch == U'#' && at_word_boundary()) {
                 m.ui.panel.descend(pn::Symbol{symbol::Open{}});
-                return done(std::move(m));
+                return Cmd::none();
             }
             // Coalesce consecutive typing into one undo unit, but
             // break the run on whitespace so Ctrl+Z rewinds word by
@@ -651,9 +549,9 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             auto utf8 = ui::utf8_encode(e.ch);
             m.ui.composer.text.insert(m.ui.composer.cursor, utf8);
             m.ui.composer.cursor += static_cast<int>(utf8.size());
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerBackspace) -> Step {
+        [&](ComposerBackspace) -> Cmd {
             if (m.ui.composer.cursor > 0 && !m.ui.composer.text.empty()) {
                 begin_edit(m.ui.composer);
                 // chip_prev jumps over a whole placeholder if the
@@ -669,22 +567,22 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 m.ui.composer.text.erase(p, m.ui.composer.cursor - p);
                 m.ui.composer.cursor = p;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerEnter)  { return submit_message(std::move(m)); },
-        [&](ComposerSubmit) { return submit_message(std::move(m)); },
-        [&](ComposerNewline) -> Step {
+        [&](ComposerEnter)  { return submit_message(m); },
+        [&](ComposerSubmit) { return submit_message(m); },
+        [&](ComposerNewline) -> Cmd {
             begin_edit(m.ui.composer);
             m.ui.composer.text.insert(m.ui.composer.cursor, "\n");
             m.ui.composer.cursor += 1;
             m.ui.composer.expanded = true;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerToggleExpand) -> Step {
+        [&](ComposerToggleExpand) -> Cmd {
             m.ui.composer.expanded = !m.ui.composer.expanded;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerToggleLoop) -> Step {
+        [&](ComposerToggleLoop) -> Cmd {
             auto& c = m.ui.composer;
             // Already looping → disarm. Deliberately does NOT cancel the
             // in-flight turn: you're saying "stop after this one", which is
@@ -698,7 +596,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 auto toast = set_status_toast(
                     m, n > 0 ? "loop off \xc2\xb7 " + std::to_string(n) + " sent"
                              : std::string{"loop off"});
-                return {std::move(m), std::move(toast)};
+                return toast;
             }
             // Arming needs something to repeat. An empty composer would arm a
             // loop with no payload — make that unrepresentable rather than
@@ -706,7 +604,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             if (c.text.empty()) {
                 auto toast = set_status_toast(
                     m, "loop: type a message first");
-                return {std::move(m), std::move(toast)};
+                return toast;
             }
             // Snapshot the payload, then submit it. The snapshot (not the
             // live composer) is what repeats, so the user can keep typing.
@@ -714,53 +612,53 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             c.loop_text        = c.text;
             c.loop_attachments = c.attachments;
             c.loop_iterations  = 0;
-            auto step = submit_message(std::move(m));
+            auto sub_cmd = submit_message(m);
             // submit drains the composer; put the armed payload BACK so the
             // box keeps showing what is on repeat. While looping the composer
             // is read-only (see the editing guard), so this is a display of
             // the armed prompt rather than an editable draft — without it the
             // user watches an empty box auto-send something they can't see.
-            auto& sc = step.first.ui.composer;
+            auto& sc = m.ui.composer;
             sc.text        = sc.loop_text;
             sc.attachments = sc.loop_attachments;
             sc.cursor      = static_cast<int>(sc.text.size());
-            return step;
+            return sub_cmd;
         },
-        [&](ComposerCursorLeft) -> Step {
+        [&](ComposerCursorLeft) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = ui::chip_prev(m.ui.composer.text, m.ui.composer.cursor);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerCursorRight) -> Step {
+        [&](ComposerCursorRight) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = ui::chip_next(m.ui.composer.text, m.ui.composer.cursor);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerCursorHome) -> Step {
+        [&](ComposerCursorHome) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerCursorEnd) -> Step {
+        [&](ComposerCursorEnd) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerCursorWordLeft) -> Step {
+        [&](ComposerCursorWordLeft) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = word_left(m.ui.composer.text, m.ui.composer.cursor);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerCursorWordRight) -> Step {
+        [&](ComposerCursorWordRight) -> Cmd {
             m.ui.composer.undo_coalescing = false;
             m.ui.composer.cursor = word_right(m.ui.composer.text, m.ui.composer.cursor);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerKillToEndOfLine) -> Step {
+        [&](ComposerKillToEndOfLine) -> Cmd {
             const auto& s = m.ui.composer.text;
             int n = static_cast<int>(s.size());
             int p = m.ui.composer.cursor;
-            if (p >= n) return done(std::move(m));
+            if (p >= n) return Cmd::none();
             int q = p;
             while (q < n && s[q] != '\n') ++q;
             // Standard readline: Ctrl+K on a line of text deletes to
@@ -769,52 +667,52 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             if (q == p && q < n && s[q] == '\n') ++q;
             begin_edit(m.ui.composer);
             m.ui.composer.text.erase(p, q - p);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerKillToBeginningOfLine) -> Step {
+        [&](ComposerKillToBeginningOfLine) -> Cmd {
             const auto& s = m.ui.composer.text;
             int p = m.ui.composer.cursor;
-            if (p <= 0) return done(std::move(m));
+            if (p <= 0) return Cmd::none();
             int q = p;
             while (q > 0 && s[q - 1] != '\n') --q;
-            if (q == p) return done(std::move(m));
+            if (q == p) return Cmd::none();
             begin_edit(m.ui.composer);
             m.ui.composer.text.erase(q, p - q);
             m.ui.composer.cursor = q;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerDeleteWordBack) -> Step {
+        [&](ComposerDeleteWordBack) -> Cmd {
             // Ctrl+W — readline unix-word-rubout. Delete from the
             // previous word boundary up to the cursor. Reuses the
             // chip-aware word_left boundary so a Ctrl+W at the right
             // edge of an attachment chip removes the whole token in
             // one stroke (same mental model as chip-aware Backspace).
             int p = m.ui.composer.cursor;
-            if (p <= 0) return done(std::move(m));
+            if (p <= 0) return Cmd::none();
             int q = word_left(m.ui.composer.text, p);
-            if (q >= p) return done(std::move(m));
+            if (q >= p) return Cmd::none();
             begin_edit(m.ui.composer);
             m.ui.composer.text.erase(static_cast<std::size_t>(q),
                                      static_cast<std::size_t>(p - q));
             m.ui.composer.cursor = q;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerDeleteWordForward) -> Step {
+        [&](ComposerDeleteWordForward) -> Cmd {
             // Alt+D — readline kill-word. Delete from the cursor up to
             // the next word boundary; cursor stays put. Symmetric to
             // Ctrl+W and chip-aware via word_right.
             const auto& s = m.ui.composer.text;
             int p = m.ui.composer.cursor;
-            if (p >= static_cast<int>(s.size())) return done(std::move(m));
+            if (p >= static_cast<int>(s.size())) return Cmd::none();
             int q = word_right(s, p);
-            if (q <= p) return done(std::move(m));
+            if (q <= p) return Cmd::none();
             begin_edit(m.ui.composer);
             m.ui.composer.text.erase(static_cast<std::size_t>(p),
                                      static_cast<std::size_t>(q - p));
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerUndo) -> Step {
-            if (m.ui.composer.undo_stack.empty()) return done(std::move(m));
+        [&](ComposerUndo) -> Cmd {
+            if (m.ui.composer.undo_stack.empty()) return Cmd::none();
             ComposerState::Snapshot cur;
             cur.text   = std::move(m.ui.composer.text);
             cur.cursor = m.ui.composer.cursor;
@@ -830,10 +728,10 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.undo_coalescing = false;
             reset_browsing(m.ui.composer);
             reset_browsing(m.ui.composer);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerRedo) -> Step {
-            if (m.ui.composer.redo_stack.empty()) return done(std::move(m));
+        [&](ComposerRedo) -> Cmd {
+            if (m.ui.composer.redo_stack.empty()) return Cmd::none();
             ComposerState::Snapshot cur;
             cur.text   = std::move(m.ui.composer.text);
             cur.cursor = m.ui.composer.cursor;
@@ -849,11 +747,11 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             m.ui.composer.undo_coalescing = false;
             reset_browsing(m.ui.composer);
             reset_browsing(m.ui.composer);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerHistoryPrev) -> Step {
+        [&](ComposerHistoryPrev) -> Cmd {
             auto texts = previous_user_texts(m);
-            if (texts.empty()) return done(std::move(m));
+            if (texts.empty()) return Cmd::none();
             auto& cs = m.ui.composer;
             // Where we are now: browsing history, or anywhere else (Live,
             // or peeking the queue — ↑ leaves that and enters history).
@@ -871,12 +769,12 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // non-destructive (they leave draft_save intact). Once
             // the user edits, begin_edit fires reset_browsing and
             // the walked text becomes the new live draft.
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerHistoryNext) -> Step {
+        [&](ComposerHistoryNext) -> Cmd {
             auto& cs = m.ui.composer;
             const auto cur = cs.history_index();
-            if (!cur) return done(std::move(m));   // not walking history
+            if (!cur) return Cmd::none();   // not walking history
             cs.undo_coalescing = false;
             auto texts = previous_user_texts(m);
             const int next_idx = *cur - 1;
@@ -886,14 +784,14 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 cs.text = cs.draft_save.value_or(std::string{});
                 cs.cursor = static_cast<int>(cs.text.size());
                 cs.draft_save.reset();
-                return done(std::move(m));
+                return Cmd::none();
             }
             cs.browsing = ComposerState::History{next_idx};
             if (next_idx < static_cast<int>(texts.size()))
                 apply_history_entry(cs, texts[static_cast<std::size_t>(next_idx)]);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerImagePasteFromClipboard) -> Step {
+        [&](ComposerImagePasteFromClipboard) -> Cmd {
             // Bracketed paste delivers UTF-8 text only; for an image-
             // on-clipboard we ask the OS clipboard directly (see
             // io/clipboard.cpp for the per-OS implementation). Sync —
@@ -901,15 +799,34 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // Same code path as the Alt+V trigger and the empty-
             // bracketed-paste detection (Windows Terminal swallows
             // Ctrl+V, our two fallbacks land here).
-            return smart_paste_from_clipboard(std::move(m));
+            return smart_paste_from_clipboard(m);
         },
-        [&](ComposerPaste& e) -> Step {
+        [&](ComposerPaste& e) -> Cmd {
             // ANY paste (bracketed, OSC 52 reply, OSC 5522 image reply)
             // satisfies an in-flight escape-based clipboard query — cancel
             // the pending no-reply diagnosis.
-            m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
+            //
+            // EXCEPT: when we asked for an IMAGE and got TEXT. In tmux the
+            // OSC 52 (text) and OSC 5522 (image) requests go out together,
+            // and tmux answers the OSC 52 from its own paste buffer while
+            // the 5522 is still in flight to kitty. The text reply is
+            // instant; the image reply crosses two pty hops. If the text
+            // closes the window, the image arrives with nothing listening
+            // for it. So when wanted_image is true and this is NOT image
+            // bytes, keep the window open — the image may still be coming.
             const bool wanted_image = m.ui.clipboard_wanted_image;
-            m.ui.clipboard_wanted_image = false;
+            const bool is_image = !e.text.empty()
+                               && detect_image_media_type(e.text) != nullptr;
+            if (is_image || !wanted_image) {
+                m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
+                m.ui.clipboard_wanted_image = false;
+            }
+            // Stash the text so the image-timeout path can fall back to it
+            // if no image ever arrives.
+            if (wanted_image && !is_image && !e.text.empty()) {
+                m.ui.clipboard_text_fallback = std::move(e.text);
+                return Cmd::none();
+            }
             // Empty bracketed paste → Windows Terminal signature for
             // "user hit Ctrl+V but the clipboard has no text content".
             // The terminal swallows Ctrl+V to run its own paste action;
@@ -919,7 +836,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // same path Alt+V uses so the user gets the image without
             // having to learn an alternate shortcut.
             if (e.text.empty())
-                return smart_paste_from_clipboard(std::move(m));
+                return smart_paste_from_clipboard(m);
 
             // Instrument the paste path. Six turns of this session were
             // spent guessing WHY a 100 KB image showed up as 4 KB, because
@@ -958,34 +875,20 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
                 m.ui.composer.cursor += static_cast<int>(placeholder.size());
                 m.ui.composer.expanded = true;
-                return done(std::move(m));
+                return Cmd::none();
             }
 
             // Image-path paste: a single-line path naming a real image
-            // file becomes an Image attachment. Try this first so a
-            // path under 800 bytes doesn't get inlined as plain text.
-            // Sniff the first 16 bytes for a known magic prefix; only
-            // ingest if it actually looks like an image.
-            if (auto img = sniff_image_paste(e.text); !img.path.empty()) {
-                begin_edit(m.ui.composer);
-                Attachment att;
-                att.kind       = Attachment::Kind::Image;
-                att.path       = std::move(img.path);
-                att.media_type = img.media_type;
-                att.byte_count = img.body.size();
-                att.body.set_bytes(std::move(img.body));
-                std::size_t idx = m.ui.composer.attachments.size();
-                m.ui.composer.attachments.push_back(std::move(att));
-                auto placeholder = attachment::make_placeholder(idx);
-                m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
-                m.ui.composer.cursor += static_cast<int>(placeholder.size());
-                m.ui.composer.expanded = true;
-                return done(std::move(m));
-            }
+            // file becomes an Image attachment. Checking that reads the
+            // file, so a paste that could be a path goes to a worker and
+            // comes back as ImagePathSniffed; if it was not an image, the
+            // reply re-sends the text here with path_checked set.
+            if (!e.path_checked && may_be_image_path(e.text))
+                return cmd::sniff_image_path(std::move(e.text));
 
             // Empty paste (clipboard manager hiccup, terminal dropped
             // a binary clipboard) — nothing to do.
-            if (e.text.empty()) return done(std::move(m));
+            if (e.text.empty()) return Cmd::none();
 
             // Normalize line endings: some terminals (and ssh tty cooked
             // mode) translate \n → \r in bracketed paste so the bytes
@@ -1074,17 +977,17 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                     "over SSH (needs kitty's OSC 5522); attach by path, "
                     "or set AGENTTY_CLIPBOARD_CMD",
                     std::chrono::seconds{9});
-                return {std::move(m), std::move(toast)};
+                return toast;
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ClipboardQueryTimeout& e) -> Step {
+        [&](ClipboardQueryTimeout& e) -> Cmd {
             // The escape-based clipboard read went unanswered. Stale guard:
             // only diagnose if THIS query is still the latest and no paste
             // arrived meanwhile.
             if (e.seq != m.ui.clipboard_query_seq
                 || m.ui.clipboard_query_done >= e.seq)
-                return done(std::move(m));
+                return Cmd::none();
             // The terminal may be ANSWERING, just not finished: an image
             // reply is megabytes of base64 and streams in over seconds on a
             // remote link. Diagnosing "no answer" while bytes are actively
@@ -1099,154 +1002,94 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 if (now != m.ui.clipboard_rx_mark) {
                     m.ui.clipboard_rx_mark = now;
                     const auto again = std::chrono::milliseconds{1500};
-                    return {std::move(m),
-                            maya::Cmd<Msg>::after(again,
-                                Msg{ClipboardQueryTimeout{e.seq}})};
+                    return Cmd::after(again,
+                                Msg{ClipboardQueryTimeout{e.seq}});
                 }
             }
             // This query is dead. Clear the image-intent latch so it cannot
             // leak into an unrelated later paste and mislabel it.
             m.ui.clipboard_wanted_image = false;
-            // Name the user's EXACT situation and the shortest path out —
-            // an unanswered query must never dead-end in silence.
-            const bool in_mosh = [] {
-                // mosh-server exports no reliable env marker into its child
-                // shell — detect it by walking the process ancestry instead
-                // (Linux/procfs; other platforms fall through to false and
-                // get the generic SSH wording, which still applies).
-#if defined(__linux__)
-                int pid = static_cast<int>(::getppid());
-                for (int hop = 0; hop < 12 && pid > 1; ++hop) {
-                    std::string base = "/proc/" + std::to_string(pid);
-                    if (std::ifstream comm(base + "/comm"); comm) {
-                        std::string name;
-                        std::getline(comm, name);
-                        if (name.find("mosh-server") != std::string::npos)
-                            return true;
-                    }
-                    std::ifstream stat(base + "/stat");
-                    if (!stat) break;
-                    // stat: pid (comm) state ppid … — comm may contain
-                    // spaces, so parse from after the LAST ')'.
-                    std::string line;
-                    std::getline(stat, line);
-                    auto rp = line.rfind(')');
-                    if (rp == std::string::npos) break;
-                    int state_and_ppid_at = static_cast<int>(rp) + 2;
-                    std::istringstream tail(line.substr(
-                        static_cast<std::size_t>(state_and_ppid_at)));
-                    char state_ch; int ppid = 0;
-                    tail >> state_ch >> ppid;
-                    if (ppid <= 1) break;
-                    pid = ppid;
-                }
-#endif
-                // Ancestry misses the common persistent-tmux topology:
-                // when the tmux SERVER is started by systemd (or an older
-                // login) the mosh client attaches to it later, so
-                // mosh-server is a sibling of the server, never an ancestor
-                // of us. Ask tmux who is attached and walk THAT process
-                // instead — otherwise a genuine mosh session is diagnosed
-                // with the tmux wording and the user chases a tmux config
-                // that was never the problem.
-#if defined(__linux__)
-                if (maya::tmux::active()) {
-                    if (const int cpid = maya::tmux::client_pid(); cpid > 1) {
-                        int p = cpid;
-                        for (int hop = 0; hop < 12 && p > 1; ++hop) {
-                            std::string base = "/proc/" + std::to_string(p);
-                            if (std::ifstream comm(base + "/comm"); comm) {
-                                std::string name;
-                                std::getline(comm, name);
-                                if (name.find("mosh-server") != std::string::npos)
-                                    return true;
-                            }
-                            std::ifstream stat(base + "/stat");
-                            if (!stat) break;
-                            std::string line;
-                            std::getline(stat, line);
-                            auto rp = line.rfind(')');
-                            if (rp == std::string::npos) break;
-                            std::istringstream tail(line.substr(rp + 2));
-                            char st; int pp = 0;
-                            tail >> st >> pp;
-                            if (pp <= 1) break;
-                            p = pp;
-                        }
-                    }
-                }
-#endif
-                return false;
-            }();
-            // Single source of truth for tmux presence: maya::tmux owns
-            // both topologies ($TMUX here, or a tmux-*/screen-* TERM that
-            // survived ssh) plus the passthrough/feature probes below.
-            const bool in_tmux = maya::tmux::active();
-            // The capability answers below come from a probe maya memoises
-            // for the whole process. tmux capabilities are per-CLIENT, so
-            // detaching a desktop kitty and reattaching from a phone (or
-            // simply fixing tmux.conf and reattaching) leaves the cached
-            // verdict describing a terminal that is no longer there — the
-            // failure then repeats forever and no amount of correct config
-            // clears it. A clipboard read has just FAILED, which is exactly
-            // the moment a stale verdict is worth one ~8 ms round-trip to
-            // re-check. Only re-probes when the attached client changed.
-            if (in_tmux) (void)maya::tmux::refresh_if_client_changed();
-            const bool in_ssh  = std::getenv("SSH_CONNECTION") != nullptr
-                              || std::getenv("SSH_TTY") != nullptr;
-            std::string msg;
-            if (in_mosh) {
-                msg = "clipboard: mosh doesn't relay terminal clipboard "
-                      "replies \xe2\x80\x94 use plain ssh (or tmux over ssh), or set "
-                      "AGENTTY_CLIPBOARD_CMD";
-            } else if (in_tmux) {
-                // Name the ACTUAL blocker instead of guessing. Order
-                // matters: these are checked in the order tmux applies
-                // them, so the first failure reported is the first one
-                // the user has to fix.
-                if (!maya::tmux::clipboard_reads_relayed()) {
-                    // THE common case, and silent until now: tmux's
-                    // `get-clipboard` defaults to `buffer`, so tmux
-                    // answers a clipboard read from its OWN paste buffer
-                    // and never asks the terminal. A paste buffer holds
-                    // TEXT — an image can never come back through it, no
-                    // matter what the outer terminal supports.
-                    msg = "clipboard: tmux answers reads from its own paste "
-                          "buffer (text only) \xe2\x80\x94 run `tmux set -g "
-                          "get-clipboard both` so it asks your terminal, "
-                          "then retry";
-                } else if (!maya::tmux::passthrough_allowed()) {
-                    msg = "clipboard: tmux is dropping the request \xe2\x80\x94 run "
-                          "`tmux set -g allow-passthrough on` (it is OFF by "
-                          "default), then retry";
-                } else if (!maya::tmux::has_feature(
-                               maya::tmux::Feature::Clipboard)) {
-                    msg = "clipboard: tmux reports your outer terminal has no "
-                          "clipboard support \xe2\x80\x94 add `set -ga terminal-features "
-                          "\",*:clipboard\"` if it does, or set AGENTTY_CLIPBOARD_CMD";
-                } else {
-                    msg = "clipboard: no reply through tmux \xe2\x80\x94 passthrough and "
-                          "clipboard are on, so the outer terminal didn't answer "
-                          "(images need a kitty outer terminal)";
-                }
-            } else if (in_ssh) {
-                msg = "clipboard: your terminal didn't answer \xe2\x80\x94 images "
-                      "over SSH need kitty (OSC 5522); else set "
-                      "AGENTTY_CLIPBOARD_CMD='ssh <laptop> wl-paste -t image/png'";
-            } else {
-                msg = "clipboard: terminal didn't answer the read query "
-                      "\xe2\x80\x94 install wl-clipboard/xclip (Linux) or use a "
-                      "terminal with OSC 52 read support";
+
+            // The terminal REFUSED the read — it answered, with EPERM.
+            //
+            // Checked first, and ahead of the text fallback, because it is
+            // the one case where we know exactly what is wrong and exactly
+            // which line fixes it. Every message below this is a guess from
+            // circumstantial evidence; this one is the terminal telling us.
+            const bool refused =
+                maya::clipboard_read_refused().load(std::memory_order_relaxed)
+                    != m.ui.clipboard_refused_mark;
+            if (refused) {
+                std::string txt = std::move(m.ui.clipboard_text_fallback);
+                m.ui.clipboard_text_fallback.clear();
+                m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
+                auto toast = set_status_toast(
+                    m,
+                    "clipboard: your terminal refused the image read \xe2\x80\x94 "
+                    "in kitty.conf add `clipboard_control write-clipboard "
+                    "write-primary read-clipboard read-primary` and restart "
+                    "kitty (it is write-only by default)",
+                    std::chrono::seconds{12});
+                if (txt.empty()) return toast;
+                return Cmd::batch(
+                    composer_update(m, ComposerPaste{std::move(txt)}),
+                    std::move(toast));
             }
-            auto toast = set_status_toast(m, msg, std::chrono::seconds{8});
-            return {std::move(m), std::move(toast)};
+
+            // If a TEXT reply arrived while we waited for an image (the tmux
+            // race: tmux answered OSC 52 from its buffer while OSC 5522 was
+            // still in flight to kitty), use it now rather than diagnosing
+            // "no answer" — the terminal DID answer, just not with the kind
+            // we wanted, and showing the user an error while their text is
+            // stashed is worse than showing the text.
+            if (!m.ui.clipboard_text_fallback.empty()) {
+                std::string txt = std::move(m.ui.clipboard_text_fallback);
+                m.ui.clipboard_text_fallback.clear();
+                m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
+                auto toast = set_status_toast(
+                    m,
+                    "pasted text \xe2\x80\x94 for images over SSH, kitty needs "
+                    "clipboard_control read-clipboard in kitty.conf (restart "
+                    "kitty after adding it)",
+                    std::chrono::seconds{8});
+                return Cmd::batch(
+                    composer_update(m, ComposerPaste{std::move(txt)}),
+                    std::move(toast));
+            }
+            // Name the user's EXACT situation and the shortest path out —
+            // an unanswered query must never dead-end in silence. Working
+            // that out walks /proc and asks tmux, so it runs on a worker.
+            return cmd::diagnose_clipboard(m.env.ssh);
         },
-        [&](ComposerRecallQueued) -> Step {
+        [&](ImagePathSniffed& e) -> Cmd {
+            if (e.path.empty())
+                return composer_update(
+                    m, ComposerPaste{std::move(e.text), /*path_checked=*/true});
+            begin_edit(m.ui.composer);
+            Attachment att;
+            att.kind       = Attachment::Kind::Image;
+            att.path       = std::move(e.path);
+            att.media_type = std::move(e.media_type);
+            att.byte_count = e.body.size();
+            att.body.set_bytes(std::move(e.body));
+            std::size_t idx = m.ui.composer.attachments.size();
+            m.ui.composer.attachments.push_back(std::move(att));
+            auto placeholder = attachment::make_placeholder(idx);
+            m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
+            m.ui.composer.cursor += static_cast<int>(placeholder.size());
+            m.ui.composer.expanded = true;
+            return Cmd::none();
+        },
+        [&](ClipboardDiagnosed& e) -> Cmd {
+            return set_status_toast(m, std::move(e.message),
+                                    std::chrono::seconds{8});
+        },
+        [&](ComposerRecallQueued) -> Cmd {
             // No-op when there's nothing to recall — the caller (the
             // Up-arrow keymap) only emits this when the queue is
             // non-empty, but the predicate is racy across frames so
             // be defensive.
-            if (m.ui.composer.queued.empty()) return done(std::move(m));
+            if (m.ui.composer.queued.empty()) return Cmd::none();
 
             // Drain the queue into the composer, joined by '\n', and
             // append any pre-existing composer text after another
@@ -1321,16 +1164,16 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // trade-off as Claude Code — keeps the data model simple
             // (no "soft-deleted, recallable" intermediate state).
             m.ui.composer.queued.clear();
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerQueuePeekPrev) -> Step {
+        [&](ComposerQueuePeekPrev) -> Cmd {
             // Alt+↑ — step further INTO the queue. Order: queue[last]
             // (most-recently queued, closest to "the one I just
             // typed") → queue[last-1] → … → queue[0]. So the first
             // press loads the tail item, which is what the user
             // usually wants when correcting a typo in their last
             // queued message.
-            if (m.ui.composer.queued.empty()) return done(std::move(m));
+            if (m.ui.composer.queued.empty()) return Cmd::none();
             auto& cs = m.ui.composer;
             cs.undo_coalescing = false;
             const int n = static_cast<int>(cs.queued.size());
@@ -1374,14 +1217,14 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // Multi-line peeked content → honour expanded cap.
             if (cs.text.find('\n') != std::string::npos)
                 cs.expanded = true;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerQueuePeekNext) -> Step {
+        [&](ComposerQueuePeekNext) -> Cmd {
             // Alt+↓ — walk back OUT of the queue toward the live draft.
             // No-op when not peeking.
             auto& cs = m.ui.composer;
             const auto peek = cs.queue_peek_index();
-            if (!peek) return done(std::move(m));
+            if (!peek) return Cmd::none();
             cs.undo_coalescing = false;
             const int n = static_cast<int>(cs.queued.size());
             // Commit the current edit back into its slot first.
@@ -1400,7 +1243,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 cs.draft_save_attachments.clear();
                 cs.cursor = static_cast<int>(cs.text.size());
                 cs.draft_save.reset();
-                return done(std::move(m));
+                return Cmd::none();
             }
             cs.browsing    = ComposerState::QueuePeek{next_idx};
             cs.text        = cs.queued[static_cast<std::size_t>(next_idx)].text;
@@ -1408,9 +1251,9 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             cs.cursor      = static_cast<int>(cs.text.size());
             if (cs.text.find('\n') != std::string::npos)
                 cs.expanded = true;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](ComposerQueuePopLast) -> Step {
+        [&](ComposerQueuePopLast) -> Cmd {
             // Alt+Backspace on an empty composer with no peek active
             // — "undo queue": remove the most recently queued item.
             // Useful when you've fired off a message you immediately
@@ -1418,7 +1261,7 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
             // are dropped (not restored to the composer) so this is a
             // pure delete, mirroring how a real Backspace deletes
             // characters. If you want to edit it instead, Alt+↑.
-            if (m.ui.composer.queued.empty()) return done(std::move(m));
+            if (m.ui.composer.queued.empty()) return Cmd::none();
             m.ui.composer.queued.pop_back();
             // If the peek index pointed at or past the dropped tail,
             // invalidate it. (Subscribe gates this Msg on the composer
@@ -1429,18 +1272,17 @@ Step composer_update(Model m, msg::ComposerMsg cm) {
                 m.ui.composer.draft_save.reset();
                 m.ui.composer.draft_save_attachments.clear();
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
     }, cm);
 
-    // Fold in the proactive OAuth refresh (if armed above) without
-    // disturbing whatever Cmd the matched arm produced. none() short-
-    // circuits the common case to zero overhead.
-    if (!proactive_refresh.is_none()) {
-        step.second = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
-            std::move(step.second), std::move(proactive_refresh)});
-    }
-    return step;
+    // Fold in the opportunistic effects armed above (prewarm, proactive OAuth
+    // refresh) without disturbing whatever Cmd the matched arm produced.
+    // none() short-circuits the common case — almost every keystroke — to
+    // zero overhead.
+    if (prewarm.is_none() && proactive_refresh.is_none()) return step;
+    return Cmd::batch(std::move(step), std::move(prewarm),
+                      std::move(proactive_refresh));
 }
 
 } // namespace agentty::app::detail

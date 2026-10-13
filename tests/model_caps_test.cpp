@@ -196,11 +196,12 @@ TEST_CASE("gpt5 codex caps") {
         const auto c = ModelCapabilities::from_id("gpt-5.6-sol");
         CHECK(effort_wire_for(Effort::Minimal, c) == "minimal");
         const auto ladder = agentty::available_efforts(c);
-        // off + minimal + low + medium + high + xhigh + max
-        REQUIRE(ladder.size() >= 3);
-        CHECK(ladder[0] == Effort::None);
-        CHECK(ladder[1] == Effort::Minimal);
-        CHECK(ladder[2] == Effort::Low);
+        // auto + off + minimal + low + medium + high + xhigh + max
+        REQUIRE(ladder.size() >= 4);
+        CHECK(ladder[0] == Effort::Auto);
+        CHECK(ladder[1] == Effort::None);
+        CHECK(ladder[2] == Effort::Minimal);
+        CHECK(ladder[3] == Effort::Low);
         // A Minimal request stays minimal (nearest at-or-below is itself).
         CHECK(agentty::clamp_effort(Effort::Minimal, c) == Effort::Minimal);
     }
@@ -318,10 +319,16 @@ TEST_CASE("compat reasoning effort (chat wire)") {
         CHECK(effort_wire_for(Effort::None, c)   == "");
         CHECK(agentty::clamp_effort(Effort::Medium, c) == Effort::High);
         CHECK(agentty::clamp_effort(Effort::None, c)   == Effort::None);
+        // The ladder leads with `auto` (the default anchor) then off, then the
+        // one ON rung this model accepts.
         const auto ladder = agentty::available_efforts(c);
-        REQUIRE(ladder.size() == 2);
-        CHECK(ladder[0] == Effort::None);
-        CHECK(ladder[1] == Effort::High);
+        REQUIRE(ladder.size() == 3);
+        CHECK(ladder[0] == Effort::Auto);
+        CHECK(ladder[1] == Effort::None);
+        CHECK(ladder[2] == Effort::High);
+        // On a one-rung ladder the midpoint IS that rung, so auto means high.
+        CHECK(agentty::auto_base_effort(c) == Effort::High);
+        CHECK(effort_wire_for(Effort::Auto, c) == "high");
     }
 
     // Non-reasoning / native-reasoning lines that share a prefix must NOT light
@@ -870,20 +877,20 @@ TEST_CASE("caps scope: provider::select publishes the SAME id lookups use") {
         provider::Selection s;
         s.kind = provider::Kind::ExternalAcp;
         s.acp_agent_id = "my-acp-agent";
-        provider::select(s);
+        provider::select(::agentty::IoAccess::grant(), s);
         CHECK(caps_provider_scope() == "my-acp-agent");
     }
     {
         provider::Selection s;
         s.kind = provider::Kind::OpenAI;
         s.openai_endpoint.label = "groq";
-        provider::select(s);
+        provider::select(::agentty::IoAccess::grant(), s);
         CHECK(caps_provider_scope() == "groq");
     }
     {
         provider::Selection s;
         s.kind = provider::Kind::Anthropic;
-        provider::select(s);
+        provider::select(::agentty::IoAccess::grant(), s);
         CHECK(caps_provider_scope() == std::string{provider::default_provider_id()});
     }
 }
@@ -935,4 +942,177 @@ TEST_CASE("wire dialect reasoning-text transmissibility") {
     CHECK(wire_streams_reasoning_text("openrouter"));
     // Unknown / custom host: assume yes rather than hiding a real feature.
     CHECK(wire_streams_reasoning_text("localhost:8080"));
+}
+
+// ── the runaway step cap applies to models we cannot vouch for ───────────
+//
+// The cap (25 tool turns with no text answer) is the last backstop against
+// a doom loop. The two caps above it key on IDENTICAL arguments — same
+// failing call 3×, same succeeding call 6× — so a model that cycles
+// through DIFFERENT calls escapes both and only this one is left.
+//
+// It used to be enforced only when `is_weak_model(id)` said yes, which
+// inverted the polarity: the LESS agentty knew about a model, the LESS
+// protection it got. The heuristic is tuned for hosted and Ollama naming
+// (`:7b` tags, known family prefixes), so every llama.cpp GGUF filename
+// and every LM Studio `publisher/model` key reads as "not weak" and ran
+// uncapped. That is the "loops forever in tool calls" report.
+//
+// These lock the CLASSIFICATION the gate is built from. The gate itself
+// lives in cmd_factory (it reads provider::active()); what is pinned here
+// is the fact that made the old gate wrong.
+
+TEST_CASE("local model ids are NOT recognised as weak") {
+    // Exactly the shapes a local server reports. Every one of these is a
+    // capable model running locally, and every one reads not-weak — so a
+    // cap gated on is_weak_model() never fires for any of them.
+    //
+    // This is not a bug in is_weak_model: it answers "is this a SMALL
+    // model I recognise", and none of these are that. It is a bug in using
+    // that answer as "is this model safe to run uncapped".
+    CHECK(!weak("qwen3-30b-a3b"));                  // llama.cpp --alias
+    CHECK(!weak("Qwen3-30B-A3B-Q4_K_M.gguf"));      // llama.cpp default id (-m path)
+    CHECK(!weak("gpt-oss-20b"));
+    CHECK(!weak("GLM-4.6-Q4_K_M.gguf"));
+    CHECK(!weak("Devstral-Small-2507-Q8_0.gguf"));
+    CHECK(!weak("qwen/qwen3.5-9b"));                // LM Studio key shape
+    CHECK(!weak("igpu/laguna-xs-2.1"));             // private gateway, from the 80-turn report
+}
+
+TEST_CASE("the ollama-shaped ids the heuristic DOES catch") {
+    // Not deleted: on the Ollama native path these tags are real and the
+    // heuristic is right. The point is that this shape is the only one it
+    // covers, which is why it cannot be the sole gate.
+    CHECK(weak("qwen2.5-coder:7b"));
+    CHECK(weak("codellama:7b"));
+    CHECK(weak("phi3:3.8b"));
+}
+
+TEST_CASE("provider rows know which backends are local") {
+    // The fact the corrected gate keys on. A row that runs on this machine
+    // cannot vouch for its model's loop behaviour the way a hosted backend
+    // can, so it gets the backstop regardless of what the id looks like.
+    const auto* ollama = provider::preset_for("ollama");
+    REQUIRE(ollama != nullptr);
+    CHECK(ollama->is_local);
+
+    const auto* anthropic = provider::preset_for("anthropic");
+    REQUIRE(anthropic != nullptr);
+    CHECK(!anthropic->is_local);
+
+    const auto* openai = provider::preset_for("openai");
+    REQUIRE(openai != nullptr);
+    CHECK(!openai->is_local);
+}
+
+// ── Dotted version ids (GitHub Copilot's /models spelling) ──────────────
+//
+// Copilot returns `claude-opus-4.7`, not `claude-opus-4-7`. The family
+// token matched, so `is_opus()` was true and NOTHING looked broken — but
+// the version parse required a token of <= 2 chars ('4','.','7' is three),
+// so generation and revision both stayed 0. Every gate that reads the
+// NUMBER then silently answered "old model": effort max/xhigh withheld on
+// the whole Copilot Claude lane, and the display label collapsed to a bare
+// "Opus" so 4.7 and 4.8 rendered as two identical picker rows.
+//
+// Both spellings must decode identically.
+TEST_CASE("dotted and dashed version ids decode identically") {
+    using agentty::ModelCapabilities;
+    struct Pair { const char* dotted; const char* dashed; };
+    for (auto p : {Pair{"claude-opus-4.7",   "claude-opus-4-7"},
+                   Pair{"claude-opus-4.5",   "claude-opus-4-5"},
+                   Pair{"claude-sonnet-4.6", "claude-sonnet-4-6"},
+                   Pair{"claude-haiku-4.5",  "claude-haiku-4-5"},
+                   Pair{"claude-fable-5.1",  "claude-fable-5-1"}}) {
+        const auto a = ModelCapabilities::from_id(p.dotted);
+        const auto b = ModelCapabilities::from_id(p.dashed);
+        CHECK(a.family     == b.family);
+        CHECK(a.generation == b.generation);
+        CHECK(a.revision   == b.revision);
+        CHECK(a.generation_4_or_later == b.generation_4_or_later);
+        CHECK(a.supports_effort()       == b.supports_effort());
+        CHECK(a.supports_effort_max()   == b.supports_effort_max());
+        CHECK(a.supports_effort_xhigh() == b.supports_effort_xhigh());
+        CHECK(ModelCapabilities::tier_for(p.dotted)
+              == ModelCapabilities::tier_for(p.dashed));
+    }
+}
+
+TEST_CASE("copilot dotted claude ids reach the full effort ladder") {
+    using agentty::ModelCapabilities;
+    // The user-visible symptom: xhigh shipped with Opus 4.7, and a Copilot
+    // session could never select it because the id decoded as generation 0.
+    const auto o47 = ModelCapabilities::from_id("claude-opus-4.7");
+    CHECK(o47.is_opus());
+    CHECK(o47.generation == 4);
+    CHECK(o47.revision   == 7);
+    CHECK(o47.generation_4_or_later);
+    CHECK(o47.supports_effort());
+    CHECK(o47.supports_effort_max());
+    CHECK(o47.supports_effort_xhigh());
+
+    // A dotted revision must not be mistaken for the NEXT token's revision:
+    // `claude-haiku-4.5-latest` is 4.5, and `latest` is a variant word.
+    const auto h = ModelCapabilities::from_id("claude-haiku-4.5-latest");
+    CHECK(h.is_haiku());
+    CHECK(h.generation == 4);
+    CHECK(h.revision   == 5);
+
+    // Two-digit revisions stay in range.
+    const auto s = ModelCapabilities::from_id("claude-sonnet-5.10");
+    CHECK(s.generation == 5);
+    CHECK(s.revision   == 10);
+}
+
+TEST_CASE("version parse rejects dates and malformed versions") {
+    using agentty::ModelCapabilities;
+    // The guard the old <= 2 length check existed for. An 8-digit date must
+    // never read as a generation — 20241022 would pass every `>= 4` gate.
+    for (const char* id : {"claude-3-5-sonnet-20241022",
+                           "claude-3-opus-20240229"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.generation == 0);
+        CHECK(!c.generation_4_or_later);
+    }
+    // Malformed dotted forms are not versions: trailing dot, leading dot,
+    // and a second dot all leave the version unset rather than guessing.
+    for (const char* id : {"claude-opus-4.", "claude-opus-.7",
+                           "claude-opus-4.7.1"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.is_opus());          // family still decodes
+        CHECK(c.generation == 0);    // but no version is invented
+    }
+    // The gpt branch is bounded the same way, so a date-shaped token there
+    // cannot become a generation either.
+    CHECK(ModelCapabilities::from_id("gpt-20250514").generation == 0);
+    // And the pre-5 ids stay Unknown (generic OpenAI compat), as before.
+    CHECK(!ModelCapabilities::from_id("gpt-4o").is_gpt());
+    CHECK(!ModelCapabilities::from_id("gpt-4.1").is_gpt());
+}
+
+TEST_CASE("the [1m] suffix survives a dotted version") {
+    using agentty::ModelCapabilities;
+    const auto c = ModelCapabilities::from_id("claude-opus-4.5[1m]");
+    CHECK(c.is_opus());
+    CHECK(c.generation == 4);
+    CHECK(c.revision   == 5);
+    CHECK(c.extended_context_1m);
+    CHECK(c.context_window() == 1000000);
+}
+
+TEST_CASE("every live copilot claude id decodes a version") {
+    using agentty::ModelCapabilities;
+    // The real /models payload. Each of these is a Claude-family id whose
+    // version is dotted; a generation of 0 on any of them means the picker
+    // folds siblings into one row and the effort ladder is withheld.
+    for (const char* id : {"claude-opus-4.7", "claude-opus-4.8",
+                           "claude-opus-5",   "claude-opus-5.5",
+                           "claude-sonnet-4.6", "claude-sonnet-5",
+                           "claude-sonnet-5.5", "claude-haiku-4.5",
+                           "claude-fable-5",  "claude-fable-5.1"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.is_known_family());
+        CHECK(c.generation >= 4);
+        CHECK(c.generation_4_or_later);
+    }
 }

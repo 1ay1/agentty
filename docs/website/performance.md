@@ -47,10 +47,40 @@ Neither changes the result. Tool-heavy turns simply finish sooner.
 
 ## Measuring it yourself
 
-Set `AGENTTY_CACHE_PROF=1` and agentty appends one line per turn to `/tmp/agentty-cache-prof.log` with three numbers worth watching:
+Run with `AGENTTY_LOG=perf=debug` and the numbers land in the normal
+diagnostic log (`~/.agentty/logs/agentty.log`, or `--log-file <path>`):
 
-- **cache hit ratio** — the fraction of your prompt prefix the model served from cache. A high ratio means fast, cheap turns; a sudden drop on an interior turn means something invalidated the cached prefix.
-- **TTFT** (time to first token) per model — the wall-clock gap from launching a request to the first content byte.
-- **batch width** — how many tool calls the model emitted in a single round-trip. Wider batches mean fewer round-trips per task.
+| Event | What it tells you |
+|-------|-------------------|
+| `turn.cache` | **cache hit ratio** — the fraction of your prompt prefix the model served from cache. A high ratio means fast, cheap turns; a sudden drop on an interior turn means something invalidated the cached prefix. |
+| `turn.ttft` | **time to first token**, per model — the wall-clock gap from launching a request to the first content byte. |
+| `turn.tool_batch` | **batch width** — how many tool calls the model emitted in one round-trip. Wider batches mean fewer round-trips per task. |
+| `thread.load` | thread rehydrate + release timings, for "why was opening that thread slow". |
+
+So, to watch cache behaviour across a session:
+
+```bash
+AGENTTY_LOG=perf=debug agentty
+grep 'turn.cache\|turn.ttft' ~/.agentty/logs/agentty.log
+```
+
+Add `perf=trace` instead for the per-frame lines (`stream.frame`,
+`view.shape`). Those fire on every streaming frame, which is why they sit
+at `trace` rather than `debug` — an emitted event costs ~1.3 µs against
+~0.5 ns for one that's filtered out, so you want them on only while
+you're looking.
+
+:::note This works on a release build
+Nothing is compiled out. Every log site is in the shipped binary; the
+build type only changes the *default* level (`warn` in release, `trace`
+otherwise). `AGENTTY_LOG=perf=debug` on the release binary gives you the
+same data as a debug build.
+:::
+
+These used to be four separate environment variables
+(`AGENTTY_CACHE_PROF` and friends) that each wrote their own file under
+`/tmp`. That put the timings outside the level filter, the crash-time
+ring buffer and the redaction pass — and meant four more names to know.
+They're all one channel now.
 
 The maya render engine also honors `MAYA_FRAME_PROF=/path/to/log`, which records per-frame build / layout / paint timings — useful when profiling the view pipeline directly.

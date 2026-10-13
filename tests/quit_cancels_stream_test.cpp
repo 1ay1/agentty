@@ -25,7 +25,7 @@ namespace D = agentty::app::detail;
 namespace {
 void install_stub_deps() {
     A::app::install_deps(A::app::Deps{
-        .stream        = [](A::provider::Request, A::provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, A::provider::Request, A::provider::EventSink) {},
         .save_thread   = [](const A::Thread&) {},
         .delete_thread = [](const A::ThreadId&) {},
         .load_threads  = [] { return std::vector<A::Thread>{}; },
@@ -57,7 +57,7 @@ TEST_CASE("Quit cancels the in-flight stream token") {
     check(!token->is_cancelled(), "precondition: token starts un-cancelled");
 
     // Dispatch Quit through the meta reducer.
-    auto [next, cmd] = D::meta_update(std::move(m), A::Quit{});
+    auto [next, cmd] = D::step(::agentty::app::detail::meta_update, std::move(m), A::Quit{});
     (void)next; (void)cmd;
 
     check(token->is_cancelled(),
@@ -68,7 +68,7 @@ TEST_CASE("Quit with no active stream is safe") {
     install_stub_deps();
     // Idle model: no active_ctx. Quit must not crash on the null cancel path.
     A::Model m;
-    auto [next, cmd] = D::meta_update(std::move(m), A::Quit{});
+    auto [next, cmd] = D::step(::agentty::app::detail::meta_update, std::move(m), A::Quit{});
     (void)next; (void)cmd;
     check(true, "Quit is a no-op on the cancel token when nothing is in flight");
 }

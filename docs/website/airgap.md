@@ -17,6 +17,8 @@ agentty airgap --setup user@airgapped-host    # first time: also copies your cre
 agentty airgap user@airgapped-host            # every time after
 ```
 
+`--setup` copies your local `credentials.json` (from `AGENTTY_CREDENTIALS_DIR`, default `~/.agentty/credentials/`) to `~/.agentty/credentials/` on the remote, at 0600.
+
 ## How it works
 
 `ssh -R 1080` exposes a SOCKS5 proxy on the remote at `localhost:1080`; connections to it tunnel back over SSH and are dialed by your laptop. The remote agentty gets `AGENTTY_SOCKS_PROXY=localhost:1080` and routes every TCP destination through it — chat, OAuth refresh, `web_fetch`, `web_search`. One env var, no per-host enumeration.

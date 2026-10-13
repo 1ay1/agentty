@@ -1,14 +1,24 @@
 [submodule "maya"]
-	path = maya
+	path = third_party/maya
 	url = https://github.com/1ay1/maya.git
 	branch = master
+[submodule "jsonrpc-cpp"]
+	path = third_party/jsonrpc-cpp
+	url = https://github.com/1ay1/jsonrpc-cpp.git
+	branch = master
 [submodule "acp-cpp"]
-	path = acp-cpp
+	path = third_party/acp-cpp
 	url = https://github.com/1ay1/acp-cpp.git
+	branch = main
 [submodule "mcp-cpp"]
-	path = mcp-cpp
+	path = third_party/mcp-cpp
 	url = https://github.com/1ay1/mcp-cpp.git
+	branch = master
 [submodule "rag-cpp"]
-	path = rag-cpp
+	path = third_party/rag-cpp
 	url = https://github.com/1ay1/rag-cpp.git
 	branch = main
+[submodule "claybin"]
+	path = third_party/claybin
+	url = https://github.com/1ay1/claybin.git
+	branch = master

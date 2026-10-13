@@ -25,6 +25,22 @@ namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
 
+namespace {
+// Re-enter the whole-Msg reducer, in place.
+//
+// These rows dispatch across FIVE different domains (profile, rag, smart,
+// appearance, meta), which is exactly why they go through the top-level
+// reducer instead of naming a domain reducer each: the row's action IS the
+// dispatch table. update() still returns a pair, so unpack it here — one
+// place rather than at every row.
+[[nodiscard]] Cmd reenter(Model& m, Msg msg) {
+    auto [next, cmd] = agentty::app::update(std::move(m), std::move(msg));
+    m = std::move(next);
+    return std::move(cmd);
+}
+} // namespace
+
+
 using maya::overload;
 namespace se = agentty::settings;
 namespace cmdf = agentty::app::cmd;   // cmd_factory (local vars named `cmd` shadow the ns)
@@ -35,10 +51,10 @@ namespace {
 // remove/toggle lands in the RIGHT file — a project server edits the project
 // config, a user server the user config. Empty config_dir (add-mode, or a
 // pre-provenance row) falls back to the user config, the historical default.
-[[nodiscard]] std::filesystem::path edit_target(const se::Item& row) {
+[[nodiscard]] std::filesystem::path edit_target(const se::Item& row, const Model& m) {
     if (!row.config_dir.empty())
         return std::filesystem::path{row.config_dir} / "mcp.json";
-    return tools::plugin::config_path(/*project=*/false);
+    return tools::plugin::config_path(/*project=*/false, m.env.user_root);
 }
 
 // True when row `i` is one the user can act on (Enter/toggle/etc).
@@ -68,9 +84,9 @@ namespace {
 }
 }  // namespace
 
-Step settings_list_update(Model m, msg::SettingsListMsg sm) {
+Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
     return std::visit(overload{
-        [&](OpenSettingsList& e) -> Step {
+        [&](OpenSettingsList& e) -> Cmd {
             // Land the cursor on the first ACTIONABLE row, not a leading
             // header (the Plugins pane opens with a "N tools on the wire"
             // info row). first_actionable clamps to a valid index for a
@@ -106,12 +122,12 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 // opening the panel is what (re)connects.
                 if (!m.ui.plugins_loading) {
                     m.ui.plugins_loading = true;
-                    return {std::move(m), cmdf::load_plugins_async(/*reconnect=*/true)};
+                    return cmdf::load_plugins_async(/*reconnect=*/true);
                 }
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](PluginsUpdated& e) -> Step {
+        [&](PluginsUpdated& e) -> Cmd {
             // The connect/reload finished on a worker. Store the snapshot
             // (this IS the model delta that repaints the panel — visual_hash
             // covers m.ui.plugins, so no nonce hack) and clear the spinner.
@@ -155,24 +171,24 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     : first_actionable(after,
                           std::clamp(o->index, 0, std::max(0, cnt - 1)), +1);
             }
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](CloseSettingsList) -> Step {
+        [&](CloseSettingsList) -> Cmd {
             // Esc unwinds one level: the palette snapshot stashed at open
             // (query and cursor intact), or the thread when ^S-style direct
             // entry left no parent. The old hand-reconstruction mapped the
             // category back to a palette command; the snapshot just IS the
             // palette the user left.
             ascend(m);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SettingsListMove& e) -> Step {
+        [&](SettingsListMove& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             o->confirm_remove.clear();   // moving off a row disarms a pending ^D
             auto rows = se::items_for(m, o->concern);
             const int n = static_cast<int>(rows.size());
-            if (n <= 0) { o->index = 0; return done(std::move(m)); }
+            if (n <= 0) { o->index = 0; return Cmd::none(); }
 
             // Seamless nav: hop OVER purely informational rows (Action::None
             // — the plugins "N tools on the wire" header, the agents built-in
@@ -205,39 +221,41 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 }
             }
             o->index = idx;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SettingsListActivate) -> Step {
+        [&](SettingsListActivate) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             o->confirm_remove.clear();   // any Enter action disarms a pending ^D
             auto rows = se::items_for(m, o->concern);
             if (o->index < 0 || o->index >= static_cast<int>(rows.size()))
-                return done(std::move(m));
+                return Cmd::none();
             const se::Item& row = rows[static_cast<std::size_t>(o->index)];
 
             switch (row.action) {
                 case se::Action::CycleProfile:
-                    return agentty::app::update(std::move(m), Msg{CycleProfile{}});
+                    return reenter(m, Msg{CycleProfile{}});
                 case se::Action::OpenRag: {
                     // Descending, not jumping: OpenRag runs with the
                     // list still open, so descend() stashes it — category,
                     // cursor and its own parent chain — as the pane's Esc
                     // target. No hand-stamped origin, nothing to forget.
-                    return agentty::app::update(std::move(m),
-                                                Msg{OpenRag{}});
+                    return reenter(m, Msg{OpenRag{}});
                 }
                 case se::Action::OpenSmart: {
-                    return agentty::app::update(std::move(m),
-                                                Msg{OpenSmartMode{}});
+                    return reenter(m, Msg{OpenSmartMode{}});
                 }
                 case se::Action::OpenAppearance: {
-                    return agentty::app::update(std::move(m),
-                                                Msg{OpenAppearance{}});
+                    return reenter(m, Msg{OpenAppearance{}});
+                }
+                case se::Action::OpenSandbox: {
+                    return reenter(m, Msg{OpenSandbox{}});
+                }
+                case se::Action::OpenWebSearch: {
+                    return reenter(m, Msg{OpenWebSearch{}});
                 }
                 case se::Action::ToggleChangesStrip: {
-                    return agentty::app::update(std::move(m),
-                                                Msg{ToggleChangesStrip{}});
+                    return reenter(m, Msg{ToggleChangesStrip{}});
                 }
                 // (There is deliberately NO Activate-arm for plugin removal.
                 // Removal is `d` → SettingsListRemove, which is TWO-step —
@@ -251,76 +269,56 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     // flight — the snapshot (and this row's on/off) is mid-
                     // change, so acting on it could write a stale intent.
                     if (m.ui.plugins_loading)
-                        return done(std::move(m));
+                        return Cmd::none();
                     // Enter on a plugin row flips the WHOLE server on/off — a
                     // reversible `disabled` flag in mcp.json, NOT a delete.
                     // Enabling spawns + handshakes; disabling drops the
                     // connection. Either way it changes the live process set,
                     // so reconnect=true, off the UI thread.
-                    auto path = edit_target(row);
-                    const bool want_disabled = row.on;   // on → turn off
-                    auto r = tools::plugin::set_server_disabled(
-                        path, row.arg, want_disabled);
-                    maya::Cmd<Msg> cmd;
-                    if (r == tools::plugin::EditResult::Ok) {
-                        m.ui.plugins_loading = true;
-                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
-                            cmdf::load_plugins_async(/*reconnect=*/true),
-                            set_status_toast(m,
-                                (want_disabled ? "disabled plugin '"
-                                               : "enabled plugin '")
-                                + row.arg + "'")});
-                    } else {
-                        cmd = set_status_toast(m,
-                                  "could not toggle '" + row.arg + "'");
-                    }
-                    return {std::move(m), std::move(cmd)};
+                    //
+                    // The write is an effect (cmd::edit_plugin); its outcome
+                    // arrives as PluginEdited, handled below. plugins_loading
+                    // goes up NOW, at the request, so the guard above ignores
+                    // a second Enter while the write is in flight instead of
+                    // racing it with a stale intent.
+                    m.ui.plugins_loading = true;
+                    return cmdf::edit_plugin(edit_target(row, m), PluginEdited{
+                        .kind   = PluginEdited::Kind::SetServerDisabled,
+                        .from   = PluginEdited::From::SettingsList,
+                        .server = row.arg,
+                        .flag   = row.on,   // on → turn off
+                    });
                 }
                 case se::Action::ToggleTool: {
                     if (m.ui.plugins_loading)
-                        return done(std::move(m));
+                        return Cmd::none();
                     // Toggling one tool of a DISABLED/disconnected plugin is
                     // meaningless — the whole plugin runs nothing. Guide the
                     // user to enable the plugin (Enter on the parent) instead
                     // of silently editing an exclude that has no effect.
                     if (row.inactive)
-                        return {std::move(m), set_status_toast(m,
+                        return set_status_toast(m,
                             "'" + row.arg + "' is disabled — enable the plugin "
-                            "first (Enter on it), then toggle its tools")};
+                            "first (Enter on it), then toggle its tools");
                     // Enable/disable one tool of a plugin: persist to
                     // mcp.json's tools.exclude, then invalidate the wire
                     // catalog so it re-projects with the new filter. NO
-                    // server re-spawn, NO background thread — the server
-                    // stays connected and project_tools re-reads the live
-                    // exclude. This is synchronous + race-free (the earlier
+                    // server re-spawn — the server stays connected and
+                    // project_tools re-reads the live exclude (the earlier
                     // reload-on-toggle re-spawned the server and hung on
                     // rapid disable→re-enable).
-                    auto path = edit_target(row);
-                    const bool want_enabled = !row.on;   // toggle
-                    auto r = tools::plugin::set_tool_enabled(
-                        path, row.arg, row.arg2, want_enabled);
-                    maya::Cmd<Msg> cmd;
-                    if (r == tools::plugin::EditResult::Ok) {
-                        tools::invalidate_mcp_catalog();
-                        // No respawn (only the exclude filter changed), but
-                        // the Model snapshot must reflect the new enabled set
-                        // — re-snapshot the live pool (reconnect=false).
-                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
-                            cmdf::load_plugins_async(/*reconnect=*/false),
-                            set_status_toast(m,
-                                (want_enabled ? "enabled tool '" : "disabled tool '")
-                                + row.arg2 + "' on " + row.arg)});
-                    } else {
-                        cmd = set_status_toast(m,
-                            "could not toggle '" + row.arg2 + "'");
-                    }
-                    // Keep the cursor on the same row after the list rebuilds.
-                    if (auto* oo = m.ui.panel.get<pn::SettingsList>()) {
-                        const int n = static_cast<int>(
-                            se::items_for(m, oo->concern).size());
-                        oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
-                    }
-                    return {std::move(m), std::move(cmd)};
+                    //
+                    // The write and the catalog invalidation it requires both
+                    // happen on the worker (cmd::edit_plugin); PluginEdited
+                    // brings the result back.
+                    m.ui.plugins_loading = true;
+                    return cmdf::edit_plugin(edit_target(row, m), PluginEdited{
+                        .kind   = PluginEdited::Kind::SetToolEnabled,
+                        .from   = PluginEdited::From::SettingsList,
+                        .server = row.arg,
+                        .tool   = row.arg2,
+                        .flag   = !row.on,   // toggle
+                    });
                 }
                 case se::Action::ApprovePlugin: {
                     // Enter on an untrusted project server = a deliberate
@@ -330,46 +328,38 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     // server's spec (not the whole file), then reconnect so it
                     // spawns; a later-added server stays pending.
                     if (m.ui.plugins_loading)
-                        return done(std::move(m));
-                    const bool ok = tools::plugin::approve_server(
-                        edit_target(row), row.arg);
-                    maya::Cmd<Msg> cmd;
-                    if (ok) {
-                        m.ui.plugins_loading = true;
-                        cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
-                            cmdf::load_plugins_async(/*reconnect=*/true),
-                            set_status_toast(m,
-                                "trusted project config — connecting…")});
-                    } else {
-                        cmd = set_status_toast(m,
-                            "could not record approval (no project mcp.json?)");
-                    }
-                    return {std::move(m), std::move(cmd)};
+                        return Cmd::none();
+                    m.ui.plugins_loading = true;
+                    return cmdf::edit_plugin(edit_target(row, m), PluginEdited{
+                        .kind   = PluginEdited::Kind::Approve,
+                        .from   = PluginEdited::From::SettingsList,
+                        .server = row.arg,
+                    });
                 }
                 case se::Action::ApproveHooks:
                     // Consent MUST be a deliberate terminal action — the
                     // picker can't safely own the y/N prompt while it holds
                     // the screen. Point at the CLI.
-                    return {std::move(m), set_status_toast(m,
+                    return set_status_toast(m,
                         "run `agentty hooks approve` in a shell to review "
-                        "+ approve (consent is deliberate by design)")};
+                        "+ approve (consent is deliberate by design)");
                 case se::Action::None:
                 default:
-                    return done(std::move(m));
+                    return Cmd::none();
             }
         },
-        [&](SettingsListRemove) -> Step {
+        [&](SettingsListRemove) -> Cmd {
             // `d` deletes the highlighted plugin — the deliberate, destructive
             // counterpart to Enter's reversible on/off toggle. Only applies
             // to a server row (Plugins concern, TogglePlugin action); ignored
             // on tool sub-rows and every other category.
-            if (m.ui.plugins_loading) return done(std::move(m));
+            if (m.ui.plugins_loading) return Cmd::none();
             auto* o = m.ui.panel.get<pn::SettingsList>();
             if (!o || o->concern != se::Category::Plugins)
-                return done(std::move(m));
+                return Cmd::none();
             auto rows = se::items_for(m, o->concern);
             if (o->index < 0 || o->index >= static_cast<int>(rows.size()))
-                return done(std::move(m));
+                return Cmd::none();
             const se::Item& row = rows[static_cast<std::size_t>(o->index)];
             // A server row is either TogglePlugin (normal) or ApprovePlugin
             // (untrusted project) — both are removable with `d`. Tool sub-rows
@@ -377,7 +367,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             if ((row.action != se::Action::TogglePlugin
                  && row.action != se::Action::ApprovePlugin)
                 || row.arg.empty())
-                return done(std::move(m));   // not a server row
+                return Cmd::none();   // not a server row
 
             // Two-step: the first `d` on a row ARMS (stores the name); the
             // view then paints "press d again to remove". Only a second `d` on
@@ -385,77 +375,122 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
             // hand-tuned mcp.json entry with no undo.
             if (o->confirm_remove != row.arg) {
                 o->confirm_remove = row.arg;
-                return done(std::move(m));
+                return Cmd::none();
             }
             o->confirm_remove.clear();
 
-            auto path = edit_target(row);
-            auto r = tools::plugin::remove_server(path, row.arg);
-            maya::Cmd<Msg> cmd;
-            if (r == tools::plugin::EditResult::Ok) {
-                m.ui.plugins_loading = true;
-                cmd = maya::Cmd<Msg>::batch(std::vector<maya::Cmd<Msg>>{
-                    cmdf::load_plugins_async(/*reconnect=*/true),
-                    set_status_toast(m, "removed plugin '" + row.arg + "'")});
-            } else {
-                cmd = set_status_toast(m, "could not remove '" + row.arg + "'");
+            m.ui.plugins_loading = true;
+            return cmdf::edit_plugin(edit_target(row, m), PluginEdited{
+                .kind   = PluginEdited::Kind::Remove,
+                .from   = PluginEdited::From::SettingsList,
+                .server = row.arg,
+            });
+        },
+        // The outcome of a write requested from this list (cmd::edit_plugin).
+        // Everything that used to follow the write inline lives here now:
+        // reload the plugin model, toast, keep the cursor in range. An edit
+        // requested from the EDIT PANE is that reducer's to handle.
+        [&](PluginEdited& e) -> Cmd {
+            // A leaf belongs to exactly one domain, so this list owns every
+            // PluginEdited — including the ones the edit pane asked for. Those
+            // are routed to the edit pane's handler explicitly, rather than
+            // giving the reply two owners.
+            if (e.from == PluginEdited::From::EditPane)
+                return plugin_edit_result(m, std::move(e));
+            using K = PluginEdited::Kind;
+            if (!e.ok) {
+                m.ui.plugins_loading = false;   // nothing is reconnecting
+                switch (e.kind) {
+                case K::Approve:
+                    return set_status_toast(m,
+                        "could not record approval (no project mcp.json?)");
+                case K::Remove:
+                    return set_status_toast(m, "could not remove '" + e.server + "'");
+                case K::SetToolEnabled:
+                    return set_status_toast(m, "could not toggle '" + e.tool + "'");
+                default:
+                    return set_status_toast(m, "could not toggle '" + e.server + "'");
+                }
             }
+            // A tool toggle only changed the exclude filter: no respawn, but
+            // the snapshot must reflect the new enabled set, so re-snapshot
+            // the live pool (reconnect=false). Every server-level change does
+            // reconnect, since it changes which processes run.
+            const bool reconnect = (e.kind != K::SetToolEnabled);
+            std::string toast;
+            switch (e.kind) {
+            case K::SetServerDisabled:
+                toast = (e.flag ? "disabled plugin '" : "enabled plugin '")
+                      + e.server + "'";
+                break;
+            case K::SetToolEnabled:
+                toast = (e.flag ? "enabled tool '" : "disabled tool '")
+                      + e.tool + "' on " + e.server;
+                break;
+            case K::Approve:
+                toast = "trusted project config — connecting…";
+                break;
+            case K::Remove:
+                toast = "removed plugin '" + e.server + "'";
+                break;
+            default: break;
+            }
+            // Keep the cursor on a real row after the list rebuilds (a
+            // removal shortens it).
             if (auto* oo = m.ui.panel.get<pn::SettingsList>()) {
                 const int n = static_cast<int>(se::items_for(m, oo->concern).size());
                 oo->index = std::clamp(oo->index, 0, std::max(0, n - 1));
             }
-            return {std::move(m), std::move(cmd)};
+            return Cmd::batch(cmdf::load_plugins_async(reconnect),
+                              set_status_toast(m, std::move(toast)));
         },
-        [&](SettingsListEditOpen& e) -> Step {
+        [&](SettingsListEditOpen& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();
-            if (!o || o->input_active) return done(std::move(m));
+            if (!o || o->input_active) return Cmd::none();
             if (o->concern != se::Category::Plugins) {
                 // Other concerns have no editor form; `a` degrades to the
                 // one-line starter prompt they already use, `e` is a no-op.
                 if (e.add)
-                    return agentty::app::update(std::move(m),
-                                                Msg{SettingsListAddStart{}});
-                return done(std::move(m));
+                    return reenter(m, Msg{SettingsListAddStart{}});
+                return Cmd::none();
             }
             if (e.add) {
                 // Add form: descend keeps this list as the Esc target.
-                return agentty::app::update(std::move(m),
-                                            Msg{OpenPluginEdit{{}, false}});
+                return reenter(m, Msg{OpenPluginEdit{{}, false}});
             }
             // Detail form for the highlighted server. Tool rows carry the
             // server in `arg` too, so `e` works from anywhere in a subtree.
             const auto rows = se::items_for(m, o->concern);
             if (o->index < 0 || o->index >= static_cast<int>(rows.size()))
-                return done(std::move(m));
+                return Cmd::none();
             const auto& row = rows[static_cast<std::size_t>(o->index)];
-            if (row.arg.empty()) return done(std::move(m));   // header rows
-            return agentty::app::update(std::move(m),
-                                        Msg{OpenPluginEdit{row.arg, false}});
+            if (row.arg.empty()) return Cmd::none();   // header rows
+            return reenter(m, Msg{OpenPluginEdit{row.arg, false}});
         },
-        [&](SettingsListAddStart) -> Step {
+        [&](SettingsListAddStart) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // Add is only meaningful for the file/config-backed concerns.
             if (o->concern != se::Category::Plugins
                 && o->concern != se::Category::Commands
                 && o->concern != se::Category::Agents)
-                return done(std::move(m));
+                return Cmd::none();
             o->input_active = true;
             o->input.clear();
             o->cursor = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SettingsListChar& e) -> Step {
+        [&](SettingsListChar& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();
-            if (!o || !o->input_active) return done(std::move(m));
+            if (!o || !o->input_active) return Cmd::none();
             const std::string utf8 = ui::utf8_encode(e.ch);
             o->input.insert(static_cast<std::size_t>(o->cursor), utf8);
             o->cursor += static_cast<int>(utf8.size());
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SettingsListPaste& e) -> Step {
+        [&](SettingsListPaste& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();
-            if (!o || !o->input_active) return done(std::move(m));
+            if (!o || !o->input_active) return Cmd::none();
             // The add-prompt is a single line (a plugin's "name command
             // args…" spec, or a new file's name). Flatten any newlines/tabs
             // in the paste to spaces so a multi-line clipboard can't smuggle
@@ -466,52 +501,54 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                 clean += (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
             o->input.insert(static_cast<std::size_t>(o->cursor), clean);
             o->cursor += static_cast<int>(clean.size());
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SettingsListBackspace) -> Step {
+        [&](SettingsListBackspace) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();
             if (!o || !o->input_active || o->cursor <= 0)
-                return done(std::move(m));
+                return Cmd::none();
             int p = ui::utf8_prev(o->input, o->cursor);
             o->input.erase(static_cast<std::size_t>(p),
                            static_cast<std::size_t>(o->cursor - p));
             o->cursor = p;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SettingsListCancelInput) -> Step {
+        [&](SettingsListCancelInput) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             o->input_active = false;
             o->input.clear();
             o->cursor = 0;
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SettingsListSubmitInput) -> Step {
+        [&](SettingsListSubmitInput) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();
-            if (!o || !o->input_active) return done(std::move(m));
+            if (!o || !o->input_active) return Cmd::none();
             const std::string line = o->input;
             const se::Category concern = o->concern;
             o->input_active = false;
             o->input.clear();
             o->cursor = 0;
-            if (line.empty()) return done(std::move(m));   // empty = cancel
-
-            se::AddResult r = (concern == se::Category::Plugins)
-                ? se::add_plugin_from_line(line)
-                : se::create_starter(concern, line);
-
-            // Make it USABLE NOW, not after a restart. For Plugins the
-            // add already wrote mcp.json; reload the live pool OFF the UI
-            // thread (the connect handshake must never freeze the TUI —
-            // the bridge bounds it with a deadline). Commands are loaded
-            // fresh per use (create_starter invalidated the cache) and
-            // agents are scanned per task-tool call, so both are already
-            // live — no reload needed.
-            maya::Cmd<Msg> reload = maya::Cmd<Msg>::none();
-            if (r.ok && concern == se::Category::Plugins) {
+            if (line.empty()) return Cmd::none();   // empty = cancel
+            // The create writes disk (mcp.json, or a starter file), so it is
+            // an effect; SettingsAddDone below picks up its answer.
+            return cmdf::settings_add(concern, line);
+        },
+        [&](SettingsAddDone& d) -> Cmd {
+            std::string message = std::move(d.message);
+            // Make it USABLE NOW, not after a restart. For Plugins the add
+            // already wrote mcp.json; reload the live pool OFF the UI thread
+            // (the connect handshake must never freeze the TUI — the bridge
+            // bounds it with a deadline). A new command file reaches the
+            // Model through a library reload. Agents are scanned per
+            // task-tool call, so they are already live.
+            Cmd reload = Cmd::none();
+            if (d.ok && d.concern == se::Category::Plugins) {
                 m.ui.plugins_loading = true;
                 reload = cmdf::load_plugins_async(/*reconnect=*/true);
-                r.message += " — connecting…";
+                message += " — connecting…";
+            } else if (d.ok && d.concern == se::Category::Commands) {
+                reload = cmdf::load_library();
             }
             // Re-clamp the (possibly grown) list to the top of the new row.
             if (auto* oo = m.ui.panel.get<pn::SettingsList>()) {
@@ -519,9 +556,7 @@ Step settings_list_update(Model m, msg::SettingsListMsg sm) {
                     static_cast<int>(se::items_for(m, oo->concern).size());
                 oo->index = std::clamp(oo->index, 0, std::max(0, cnt - 1));
             }
-            return {std::move(m), maya::Cmd<Msg>::batch(
-                std::vector<maya::Cmd<Msg>>{
-                    std::move(reload), set_status_toast(m, r.message)})};
+            return Cmd::batch(std::move(reload), set_status_toast(m, message));
         },
     }, sm);
 }

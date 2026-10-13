@@ -13,8 +13,10 @@
 #include "agtest.hpp"
 
 #include "agentty/tool/util/sandbox.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"   // workspace_root
 
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -68,41 +70,9 @@ TEST_CASE("sandbox escape") {
           "embedded NUL → empty");
 
 #if defined(__linux__)
-    // ── bwrap hardening (issue #21) ─────────────────────────────────────
-    // The wrapped argv must carry the kernel-boundary flags AND the read-only
-    // user-toolchain binds, on ANY host (this asserts the ARGV we'd pass to
-    // bwrap, so it needs neither bwrap nor user namespaces to run).
-    const auto argv = sb::bwrap_argv_for_test("echo hi");
-    auto has = [&](std::string_view s) {
-        for (const auto& a : argv) if (a == s) return true;
-        return false;
-    };
-    check(has("--unshare-user"),    "bwrap: own user namespace");
-    check(has("--unshare-pid"),     "bwrap: own pid namespace");
-    check(has("--unshare-ipc"),     "bwrap: own ipc namespace");
-    check(has("--unshare-uts"),     "bwrap: own uts namespace");
-    check(has("--new-session"),     "bwrap: detached session (no TIOCSTI)");
-    check(has("--die-with-parent"), "bwrap: no detached zombies");
-    check(has("--share-net"),       "bwrap: network kept (git/npm work)");
-    check(has("/usr"),              "bwrap: /usr bound read-only");
-    // Issue #21: user-local toolchain roots bound read-only so approved
-    // commands can find go/gofmt/cargo/etc. installed outside /usr — and
-    // secret dirs are NEVER bound.
-    if (const char* home = std::getenv("HOME"); home && *home) {
-        const std::string h = home;
-        check(has(h + "/.local/bin"), "bwrap: ~/.local/bin bound (webinstall)");
-        check(has(h + "/.cargo/bin"), "bwrap: ~/.cargo/bin bound (rust)");
-        check(has(h + "/go/bin"),     "bwrap: ~/go/bin bound (go)");
-        for (const auto& a : argv) {
-            check(a != h + "/.ssh",    "bwrap: ~/.ssh NEVER bound");
-            check(a != h + "/.aws",    "bwrap: ~/.aws NEVER bound");
-            check(a != h + "/.config", "bwrap: ~/.config NEVER bound");
-            check(a != h + "/.local/share", "bwrap: ~/.local/share NEVER bound");
-        }
-    }
-    // The command is the tail of the argv (after the closing "--").
-    check(!argv.empty() && argv.back() == "echo hi",
-          "bwrap: shell cmd is the argv tail");
+    // The claybin posture carries the equivalent walls, and sandbox_pane_test
+    // asserts them against claybin_posture_for_test(). The bwrap argv checks
+    // that used to live here went with bwrap itself.
 #endif
 
 }

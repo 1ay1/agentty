@@ -113,6 +113,53 @@ feature users *feel*:
    > lands outside `effort_set_of`, and that a model with no ladder at all
    > (Claude 4) always resolves to off.
 
+   > **The base effort is a MIDPOINT, which is why the default is `auto`.**
+   > Every scaling rule above reads the user's effort as the centre of a
+   > ladder: Standard keeps it, Complex steps `+1`, Simple steps `-1`. That is
+   > symmetric, and it needs headroom in both directions.
+   >
+   > `Effort::None` has none — it is rung 0, the floor. And it used to be the
+   > default, because the setting was a `std::string` where empty meant off,
+   > so "never configured" and "explicitly chose off" were the same value. The
+   > consequence was that at the default, **the classifier's verdict barely
+   > moved the dial**: a turn scored Complex could only reach `minimal`, one
+   > rung, where the same turn from a `medium` base reaches `high`.
+   >
+   > That is the same bug this document already records on the *role* axis —
+   > the main turn's role was hardcoded Strategic, so "the classifier's verdict
+   > only ever moved the EFFORT dial" (§3a). The mirror image survived on the
+   > effort axis: the verdict barely moved the effort dial either.
+   >
+   > `Effort::Auto` is now its own state, distinct from an explicit off, and it
+   > anchors at the **midpoint of whatever ladder the active model exposes**
+   > (`auto_base_effort`). A POSITION, not a level — the same rule as
+   > `effort_step`, for the same reason a fixed global ladder was wrong:
+   >
+   > | model ladder | auto anchors at | trivial | simple | standard | complex |
+   > |---|---|---|---|---|---|
+   > | gpt-5 `{minimal,low,medium,high}` | `low` | off | minimal | low | **medium** |
+   > | claude `{low,medium,high,max}` | `medium` | off | low | medium | **high** |
+   > | binary `{high}` | `high` | off | off | high | **high** |
+   > | non-reasoning `{}` | — | off | off | off | off |
+   >
+   > Three properties make this safe to ship as a default:
+   >
+   > - **Trivial is still hard-off at every base**, so the raised anchor costs
+   >   nothing on cheap turns. You pay on the turns that earned it.
+   > - **Explicit `off` still sends `""` on every tier.** It persists as
+   >   `"none"` (non-empty, because persistence drops empty values) so it
+   >   round-trips instead of decaying back to `auto` on the next launch.
+   > - **`auto` survives a clamp.** `switch_to_model_ref` clamps on every model
+   >   hop, so an Auto that collapsed to a rung there would be correct exactly
+   >   once — on first run — and silently degrade the first time the user
+   >   pressed `^P`. `nearest_effort` passes it through untouched.
+   >
+   > Auto is a UI/persistence concept only: `effort_wire_for` resolves it at
+   > the wire edge, so no stepper, clamp, or transport below ever sees it.
+   > Locked by `effort_auto_test` — including a case that measures the dial's
+   > RANGE across the four tiers (2 distinct values from `None`, 4 from
+   > `Auto`), which is the regression that matters.
+
 2. **Zero-config by default.** Turning Smart Mode *on* with no slots set
    auto-fills from the signed-in catalog: Strategic = the flagship you're
    already on, Implementation = the strongest mid-tier, Utility = the cheapest

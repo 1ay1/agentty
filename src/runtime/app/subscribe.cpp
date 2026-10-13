@@ -8,16 +8,18 @@
 #include <maya/terminal/ansi.hpp>
 
 #include "agentty/runtime/login.hpp"
+#include "agentty/domain/ui_live.hpp"   // thinking pref: gates the reasoning reveal
+#include "agentty/runtime/view/helpers.hpp"  // ui::reasoning_shown
 #include "agentty/runtime/panel/common.hpp"
 #include "agentty/runtime/panel/top.hpp"
 #include "agentty/runtime/panel/nav.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"   // device_login_sub / codex_login_sub
 
 namespace pn = agentty::ui::panel;
 
 namespace agentty::app {
 
-using maya::Sub;
 using maya::KeyEvent;
 using maya::CharKey;
 using maya::SpecialKey;
@@ -40,20 +42,16 @@ namespace {
 } // namespace
 
 // The single definition of the streaming Tick cadence. See the
-// declaration in subscribe.hpp for the full rationale. Computed once
-// per session — the inputs are immutable — and shared verbatim by both
-// subscribe() (the timer interval) and Program::visual_hash() (the
-// phase-locked animation bucket).
-std::chrono::milliseconds streaming_tick_period() noexcept {
-    static const std::chrono::milliseconds period = [] {
-        auto base = maya::ansi::env_supports_synchronized_output()
-            ? std::chrono::milliseconds(33)
-            : std::chrono::milliseconds(100);
-        if (detail::running_over_ssh())
-            return std::max(base, std::chrono::milliseconds(80));
-        return base;
-    }();
-    return period;
+// declaration in subscribe.hpp for the full rationale. A function of the
+// launch environment, which init() captured into Model::env — so it reads the
+// Model, not the process, and subscribe() and visual_hash() agree because
+// they read the same field.
+std::chrono::milliseconds streaming_tick_period(const Model::Env& env) noexcept {
+    const auto base = env.synchronized_output
+        ? std::chrono::milliseconds(33)
+        : std::chrono::milliseconds(100);
+    if (env.remote) return std::max(base, std::chrono::milliseconds(80));
+    return base;
 }
 
 // True when the last message still carries in-flight wire bytes
@@ -88,8 +86,12 @@ bool reveal_needs_frames(const Model& m) noexcept {
         // this term is the "Thinking gets stuck" bug: the fast bucket
         // never engages, armed RAF frames get gated away, and the
         // reasoning typewriter freezes until a keypress.
-        || (m.d.show_reasoning
-            && !back.reasoning_display_text().empty());
+        //
+        // ui::reasoning_shown is the SAME predicate the view renders on and
+        // the activity indicator defers to. Whatever decides to SHOW
+        // reasoning has to be what decides to animate it, or one of the two
+        // is always wrong.
+        || ::agentty::ui::reasoning_shown(back);
 }
 
 bool reveal_draining(const Model& m) noexcept {
@@ -101,6 +103,31 @@ bool reveal_draining(const Model& m) noexcept {
         // goes quiet, and stopping the clock here freezes it mid-glide at
         // 1% CPU until the next keystroke.
         || !detail::live_tail_reveal_settled(m);
+}
+
+// Whether the changes-strip bulk chords (^A accept all / ^X reject all) are
+// LIVE on the main screen. ONE definition, read by both subscribe() (which
+// captures it into the key router) and subs_key() (which keys the memo on
+// it) — the same shape as animation_demand() just below, and for the same
+// reason: a predicate spelled out twice is a predicate that drifts, and a
+// router capture going stale is invisible until a key routes against last
+// frame's state.
+//
+// The three terms:
+//   * show_changes_strip — the chords are ADVERTISED by the strip's header
+//     hints and nowhere else. With the strip hidden (the default) there is
+//     no on-screen affordance, so a live ^X would be an unannounced way to
+//     revert every pending edit. Advertised and reachable stay the same bit.
+//   * pending_changes non-empty — nothing to accept or reject otherwise.
+//   * !m.s.active() — mid-turn the changeset is still growing, so a bulk
+//     decision would be taken against a set the agent hasn't finished
+//     writing.
+// The composer is deliberately NOT a term: the chords are Ctrl-held, so
+// they can't collide with typing (see the chord policy in on_diff_review).
+bool strip_chords_armed(const Model& m) noexcept {
+    return m.d.show_changes_strip
+        && !m.d.pending_changes.empty()
+        && !m.s.active();
 }
 
 bool animation_demand(const Model& m) noexcept {
@@ -572,6 +599,12 @@ std::optional<Msg> on_smart_mode(const FormFocus& f, const KeyEvent& ev) {
     return on_form(f, ev, [](form::keys::Action a) { return Msg{SmartModeKey{a}}; });
 }
 
+// Web Search. Pure form pane — no pane-specific chords. Esc at the outer
+// level closes back to the settings list it was opened from.
+std::optional<Msg> on_web_search(const FormFocus& f, const KeyEvent& ev) {
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{WebSearchKey{a}}; });
+}
+
 // Plugin editor. Pure form pane — no pane-specific chords; Esc routes
 // through the nav close so the settings list underneath is restored.
 std::optional<Msg> on_plugin_edit(const FormFocus& f, const KeyEvent& ev) {
@@ -607,6 +640,22 @@ std::optional<Msg> on_appearance(const FormFocus& f, bool picking,
         return Msg{NoOp{}};
     }
     return on_form(f, ev, [](form::keys::Action a) { return Msg{AppearanceKey{a}}; });
+}
+
+// Sandbox. A plain form pane -- no chord of its own.
+//
+// It used to have ^S, on the reasoning that a half-typed port list is a policy
+// nobody asked for. That conflated two things: PERSISTING the policy (a file
+// write) and APPLYING it (installing the live boundary). Only the second is
+// dangerous mid-session, and it still never happens -- the policy is sealed at
+// startup and no pane path calls set_config(). The first is just a save, and
+// requiring a chord for it only ever lost people's edits.
+//
+// So edits persist as you type, exactly like every other pane, and the footer
+// still says the policy applies on restart -- which was always the honest
+// statement and is now true without a keystroke.
+std::optional<Msg> on_sandbox(const FormFocus& f, const KeyEvent& ev) {
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{SandboxKey{a}}; });
 }
 
 std::optional<Msg> on_diff_review(const KeyEvent& ev) {
@@ -1090,7 +1139,7 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
 
 } // namespace
 
-Sub<Msg> subscribe(const Model& m) {
+Sub subscribe(const Model& m) {
     // THE routing decision: which overlay owns the keyboard. Computed once
     // per subscription rebuild by panel::top() — the SAME function the
     // view uses to decide what renders, so keys and pixels can never go to
@@ -1132,20 +1181,32 @@ Sub<Msg> subscribe(const Model& m) {
         m.ui.composer.queue_peek_index().has_value(),
     };
 
+    // Changes-strip bulk chords. ONE predicate, shared with subs_key() so the
+    // captured copy below and the memo key can never disagree.
+    const bool chords_armed = strip_chords_armed(m);
+
     // Which mode each form-backed pane is in. Three bools per pane — NOT the
     // pane's rows, which would be a per-frame deep copy on the input path.
     FormFocus rag_form, smart_form_snap, plugin_form_snap, appearance_form_snap;
+    FormFocus sandbox_form_snap, web_search_form_snap;
     bool appearance_picking = false;
     if (const auto* o = m.ui.panel.get<ui::panel::Rag>())
         rag_form = focus_of(o->embed.form);
     if (const auto* o = m.ui.panel.get<ui::panel::SmartMode>())
         smart_form_snap = focus_of(o->form);
+    if (const auto* o = m.ui.panel.get<ui::panel::WebSearch>())
+        web_search_form_snap = focus_of(o->form);
     if (const auto* o = m.ui.panel.get<ui::panel::PluginEdit>())
         plugin_form_snap = focus_of(o->form);
     if (const auto* o = m.ui.panel.get<ui::panel::Appearance>()) {
         appearance_form_snap = focus_of(o->pane.form);
         appearance_picking   = o->pane.picking;
     }
+    if (const auto* o = m.ui.panel.get<ui::panel::Sandbox>())
+        sandbox_form_snap = focus_of(o->pane.form);
+    FormFocus sandbox_list_snap;
+    if (const auto* o = m.ui.panel.get<ui::panel::SandboxList>())
+        sandbox_list_snap = focus_of(o->pane.form);
 
     // Snapshot the login state ONLY when login actually owns the keyboard.
     //
@@ -1163,7 +1224,7 @@ Sub<Msg> subscribe(const Model& m) {
     std::optional<ui::login::State> login_state;
     if (in_login) login_state = m.ui.login;
 
-    auto key_sub = Sub<Msg>::on_key(
+    auto key_sub = Sub::on(maya::on_key{}, 
         [=, login_state = std::move(login_state)](const KeyEvent& ev) -> std::optional<Msg> {
             // ^C quits from ANYWHERE, before overlay routing. Every modal
             // picker's handler returns UNCONDITIONALLY (the dispatch below
@@ -1229,10 +1290,20 @@ Sub<Msg> subscribe(const Model& m) {
                     case OK::Providers: return on_provider_picker(ev);
                     case OK::ThreadList:     return on_thread_list(ev);
                     case OK::SmartMode:      return on_smart_mode(smart_form_snap, ev);
+                    case OK::WebSearch:      return on_web_search(web_search_form_snap, ev);
                     case OK::PluginEdit:     return on_plugin_edit(plugin_form_snap, ev);
                     case OK::Appearance:
                         return on_appearance(appearance_form_snap,
                                              appearance_picking, ev);
+                    case OK::Sandbox:        return on_sandbox(sandbox_form_snap, ev);
+                    // The path list editor. A plain form pane -- no chord of
+                    // its own, because Esc already commits (the form layer's
+                    // rule) and a list with a save key would be the only one.
+                    case OK::SandboxList:
+                        return on_form(sandbox_list_snap, ev,
+                                       [](form::keys::Action a) {
+                                           return Msg{SandboxListKey{a}};
+                                       });
                     case OK::DiffReview:     return on_diff_review(ev);
                     case OK::Todo:           return on_todo_modal(ev);
                     case OK::None:           break;
@@ -1292,19 +1363,53 @@ Sub<Msg> subscribe(const Model& m) {
                 }
             }
             if (auto msg = on_global(ev)) return msg;
+
+            // Changes-strip bulk chords: ^A (accept all, non-destructive —
+            // the tools already wrote these bytes) and ^X (reject all, which
+            // reverts files on disk, so the reducer holds a two-press guard).
+            //
+            // CTRL-HELD, matching the in-pane policy in on_diff_review: bulk
+            // decisions are destructive enough that they must not sit on a
+            // bare letter, and the same action keeping the same chord inside
+            // and outside the pane is the whole point. A bare `x` here would
+            // also be a footgun the moment focus assumptions shift.
+            //
+            // Gated on the bare main screen (no overlay, not even an ambient
+            // Todo) so a modal always keeps its own key surface; the rest of
+            // the arming condition lives in strip_chords_armed().
+            if (chords_armed && active_panel == OK::None) {
+                if (auto* ck = std::get_if<CharKey>(&ev.key); ck && !ev.mods.alt) {
+                    char32_t c = ck->codepoint;
+                    // Legacy terminals deliver Ctrl+letter as the raw control
+                    // byte with no modifier reported — same normalisation the
+                    // global and in-pane routers do, so the chords work
+                    // without keyboard-protocol support.
+                    const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+                    if (raw_ctrl) c = U'a' + (c - 1);
+                    if (ev.mods.ctrl || raw_ctrl) {
+                        if (c == U'a' || c == U'A')
+                            return Msg{AcceptAllChanges{}};
+                        if (c == U'x' || c == U'X')
+                            return Msg{RejectAllChanges{}};
+                    }
+                }
+            }
+
             return on_composer(composer_state, ev);
         });
 
-    auto paste_sub = Sub<Msg>::on_paste(
+    auto paste_sub = Sub::on(maya::on_paste{}, 
         [in_login, settings_list_adding,
          rag_editing   = rag_form.editing,
          smart_editing = smart_form_snap.editing,
+         web_search_open = web_search_form_snap.open,
          plugin_editing = plugin_form_snap.editing,
          filter_open   = active_panel == ui::panel::Kind::Palette
                       || active_panel == ui::panel::Kind::Models
                       || active_panel == ui::panel::Kind::Providers
                       || active_panel == ui::panel::Kind::Mention
-                      || active_panel == ui::panel::Kind::Symbol](std::string s) -> Msg {
+                      || active_panel == ui::panel::Kind::Symbol](const maya::PasteEvent& pe) -> Msg {
+        const std::string& s = pe.content;
         // Route a bracketed paste to whatever modal currently owns text
         // input, so it lands in that field's buffer — NOT the composer.
         //   • login modal open      → its code/key fields (OAuth codes, keys)
@@ -1316,11 +1421,17 @@ Sub<Msg> subscribe(const Model& m) {
         //     field — API keys and hosts are the fields pasting exists for;
         //     these panes' reducers re-verify the mode, so a stale snapshot
         //     degrades to a dropped paste, never a mis-target.
+        //   • the Web Search pane OPEN, editing or not → the pane. Its
+        //     reducer (form::paste_into_focused) lands it on the focused
+        //     text row as type-to-edit does and drops it anywhere else, so
+        //     a key pastes straight onto an empty key row; before, a paste
+        //     there fell through to the composer hidden behind the pane.
         //   • otherwise               → the composer.
         if (in_login) return LoginPaste{std::move(s)};
         if (settings_list_adding) return SettingsListPaste{std::move(s)};
         if (rag_editing)   return RagEmbedPaste{std::move(s)};
         if (smart_editing) return SmartModePaste{std::move(s)};
+        if (web_search_open) return WebSearchPaste{std::move(s)};
         if (plugin_editing) return PluginEditPaste{std::move(s)};
         //   • a FILTER panel open (palette/models/providers/mention/symbol)
         //     → its query. Without this the paste dropped into the composer
@@ -1389,8 +1500,38 @@ Sub<Msg> subscribe(const Model& m) {
     // Terminal window focus (?1004, maya enables it in inline mode).
     // Gates the hardware caret: unfocused ⇒ the composer stops emitting
     // its caret anchor and the real cursor parks + hides.
-    auto focus_sub = Sub<Msg>::on_focus(
-        [](bool focused) -> Msg { return TerminalFocus{focused}; });
+    auto focus_sub = Sub::on(maya::on_focus{}, 
+        [](const maya::FocusEvent& fe) -> Msg { return TerminalFocus{fe.focused}; });
+    // Terminal size: the host reports it at attach and on every SIGWINCH, so
+    // the reducers' row math reads the Model, never the tty.
+    auto resize_sub = Sub::on(maya::on_resize{},
+        [](const maya::ResizeEvent& re) -> Msg {
+            return TerminalResized{re.width.value, re.height.value};
+        });
+
+    // ── The login workers ────────────────────────────────────────────
+    //
+    // A device/ChatGPT login block-polls its provider for up to 900 s. As a
+    // Cmd that was fire-and-forget: Esc closed the modal and the worker
+    // carried on to the end of its budget, one leaked thread per attempt.
+    //
+    // As a keyed source it stops itself. While the model holds the waiting
+    // state we ask for the stream; when the state goes (Esc, success, a
+    // newer attempt) the key goes with it and jaal fires the body's
+    // stop_token. "Close the modal" and "cancel the worker" become one act,
+    // which is the only way they can't drift apart. jaal also discards
+    // messages from a stopped generation, so a late result can't land in a
+    // model that moved on.
+    //
+    // Computed BEFORE the Tick gate below, and included in both returns: a
+    // login can be open while a turn animates, and dropping it from the
+    // animating branch would silently stop the worker mid-sign-in.
+    Sub login_sub = Sub::none();
+    if (const auto* dw = std::get_if<ui::login::DeviceWaiting>(&m.ui.login))
+        login_sub = cmd::device_login_sub(dw->provider, dw->provider_label,
+                                          dw->attempt_id);
+    else if (const auto* cw = std::get_if<ui::login::ChatGptWaiting>(&m.ui.login))
+        login_sub = cmd::codex_login_sub(cw->attempt_id);
 
     // Tick drives every time-based animation. THREE gates must agree on
     // WHAT is animating, and animation_demand (subscribe.hpp) is now the
@@ -1399,12 +1540,124 @@ Sub<Msg> subscribe(const Model& m) {
     // the visual hash (app/program.hpp) lets the wake reach view(). The
     // per-term rationale lives on animation_demand's definition above.
     if (animation_demand(m)) {
-        auto tick = Sub<Msg>::every(streaming_tick_period(), Tick{});
-        return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub),
-                               std::move(focus_sub), std::move(tick));
+        auto tick = Sub::every(streaming_tick_period(m.env), Tick{});
+        return Sub::batch(std::move(key_sub), std::move(paste_sub),
+                               std::move(focus_sub), std::move(resize_sub),
+                               std::move(tick), std::move(login_sub));
     }
-    return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub),
-                           std::move(focus_sub));
+    return Sub::batch(std::move(key_sub), std::move(paste_sub),
+                           std::move(focus_sub), std::move(resize_sub),
+                           std::move(login_sub));
+}
+
+// Keep this in step with subscribe() above: every field it reads, and every
+// local the key router captures by `[=]`, has to be represented here. The
+// contract and the reasoning are on SubsKey in app/subscribe.hpp.
+//
+// Read it top-down against subscribe(): the order below is deliberately the
+// order the values are computed there, so the two can be diffed by eye.
+SubsKey subs_key(const Model& m) noexcept {
+    SubsKey k;
+
+    // Which overlay owns the keyboard (panel::top()), plus the two pane
+    // sub-modes that change routing without changing the Kind.
+    const auto top = ui::panel::top(m);
+    k.active_panel = static_cast<int>(top);
+
+    if (const auto* o = m.ui.panel.get<ui::panel::SettingsList>())
+        k.settings_adding = o->input_active;
+
+    // focus_of() for each form-backed pane. Packed rather than four structs:
+    // the router only branches on these bits, and packing keeps the key
+    // trivially comparable. 3 bits per pane, in a fixed order.
+    const auto pack = [](FormFocus f) -> unsigned {
+        return (f.open ? 1u : 0u) | (f.editing ? 2u : 0u) | (f.choosing ? 4u : 0u);
+    };
+    unsigned modes = 0;
+    if (const auto* o = m.ui.panel.get<ui::panel::Rag>())
+        modes |= pack(focus_of(o->embed.form));
+    if (const auto* o = m.ui.panel.get<ui::panel::SmartMode>())
+        modes |= pack(focus_of(o->form)) << 3;
+    if (const auto* o = m.ui.panel.get<ui::panel::PluginEdit>())
+        modes |= pack(focus_of(o->form)) << 6;
+    if (const auto* o = m.ui.panel.get<ui::panel::Appearance>()) {
+        modes |= pack(focus_of(o->pane.form)) << 9;
+        k.appearance_picking = o->pane.picking;
+    }
+    if (const auto* o = m.ui.panel.get<ui::panel::Sandbox>())
+        modes |= pack(focus_of(o->pane.form)) << 12;
+    // The path list editor. Missing this is why typing in it did nothing: the
+    // key router closes over ONE focus snapshot per subscription rebuild, so a
+    // pane whose focus is not part of the key keeps the snapshot from whenever
+    // the subs last changed -- it reads as Browsing forever, and every
+    // printable dies on apply()'s editing guard. Exactly the hazard
+    // SubsKey's own header warns about, and the rule in
+    // docs/design/sandbox-boundary.md: a new form pane goes in BOTH
+    // subscribe() and subs_key().
+    if (const auto* o = m.ui.panel.get<ui::panel::SandboxList>())
+        modes |= pack(focus_of(o->pane.form)) << 15;
+    // Web Search: its own three bits, so entering/leaving a text row changes
+    // the key and the router never translates against a stale focus.
+    if (const auto* o = m.ui.panel.get<ui::panel::WebSearch>())
+        modes |= pack(focus_of(o->form)) << 18;
+    k.form_modes = modes;
+
+    // Turn gates. animation_demand is what arms the Tick subscription, so a
+    // change in it must rebuild — this is the term that starts and stops a
+    // real timer. `streaming` carves out awaiting-permission (so Esc keeps
+    // meaning "cancel"); `turn_active` does not. Both matter to routing, so
+    // both are here — mirroring subscribe() exactly.
+    k.streaming        = m.s.active() && !m.s.is_awaiting_permission();
+    k.turn_active      = m.s.active();
+    k.animation_demand = animation_demand(m);
+
+    // The changes-strip chord gate the key router captures. Same function
+    // subscribe() calls — not a re-spelling of its terms, so the two cannot
+    // drift apart the way the form-pane focus snapshots once did.
+    k.strip_chords     = strip_chords_armed(m);
+
+    // The composer predicates the router closes over (ComposerKeyState),
+    // plus the has_history scan subscribe() performs — including the
+    // !text.empty() term, which decides whether ↑ recalls anything.
+    k.text_empty    = m.ui.composer.text.empty();
+    k.has_queued    = !m.ui.composer.queued.empty();
+    k.in_history    = m.ui.composer.history_index().has_value();
+    k.peeking_queue = m.ui.composer.queue_peek_index().has_value();
+    for (const auto& msg : m.d.current.messages)
+        if (msg.role == Role::User && !msg.text.empty()) { k.has_history = true; break; }
+
+    // Ctrl+U's target: the newest LIVE (not-yet-frozen) retrieved card.
+    // Same walk as subscribe(), bounded by frozen_through — which means a
+    // card settling into the frozen prefix changes the key, as it must.
+    for (std::size_t i = m.d.current.messages.size(); i-- > m.ui.frozen_through; ) {
+        if (m.d.current.messages[i].is_proactive_context()) {
+            k.live_retrieved_id = m.d.current.messages[i].id;
+            break;
+        }
+    }
+
+    // The login payload's identity. Only meaningful while login owns the
+    // keyboard — that is exactly when subscribe() snapshots it.
+    if (top == ui::panel::Kind::Login) {
+        k.login_alt = static_cast<int>(m.ui.login.index());
+        if (const auto* oc = std::get_if<ui::login::OAuthCode>(&m.ui.login))
+            k.login_code_empty = oc->code_input.empty();
+    }
+
+    // The login worker's SOURCE KEY — not just a capture.
+    //
+    // subscribe() returns a keyed stream while a login is waiting, so this
+    // decides whether the worker runs at all. It is deliberately read off
+    // m.ui.login directly rather than under the Kind::Login guard above: a
+    // waiting login keeps polling while another overlay is on top, and
+    // gating it on "login owns the keyboard" would stop the worker the
+    // moment the user opened anything over it.
+    if (const auto* dw = std::get_if<ui::login::DeviceWaiting>(&m.ui.login))
+        k.login_worker = {dw->attempt_id, dw->provider};
+    else if (const auto* cw = std::get_if<ui::login::ChatGptWaiting>(&m.ui.login))
+        k.login_worker = {cw->attempt_id, std::string{"codex"}};
+
+    return k;
 }
 
 } // namespace agentty::app

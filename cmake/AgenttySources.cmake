@@ -32,6 +32,7 @@ set(AGENTTY_IO_SOURCES
     src/io/cred_crypt.cpp
     src/io/keystore.cpp
     src/io/persistence.cpp
+    src/io/shared_file.cpp
     src/io/blob_store.cpp
     src/io/thread_log.cpp
     src/io/blob_gc.cpp
@@ -42,9 +43,15 @@ set(AGENTTY_IO_SOURCES
     src/util/teardown.cpp
     src/util/home_dir.cpp
     src/util/user_root.cpp
+    src/util/storage_lock.cpp
+    src/util/self_exe.cpp
     src/util/update.cpp
     src/util/modelsdev.cpp
     src/domain/complexity.cpp
+    src/domain/sandbox_provenance.cpp
+    src/domain/web_search_config.cpp
+    src/i18n/i18n.cpp
+    src/i18n/startup.cpp
     src/domain/model_name.cpp
     src/domain/stats/fold.cpp
     src/domain/stats/extract.cpp
@@ -112,7 +119,14 @@ set(AGENTTY_ACP_SOURCES
 # exposes their tools as agentty ToolDefs. The heavy mcp-cpp templates are
 # confined to these TUs (linked as mcp::mcp). Only compiled when AGENTTY_MCP.
 set(AGENTTY_MCP_SOURCES
+    # The JSON-RPC peer both MCP and ACP run on. Here, in the objects every
+    # binary links, because MCP connections use it.
+    src/rpc/peer.cpp
     src/mcp/bridge.cpp
+    # Adopting another tool's servers, rather than growing a sixth read root
+    # for each one. See include/agentty/mcp/import.hpp for the argument.
+    src/mcp/import.cpp
+    src/mcp/connection.cpp
     src/mcp/http_server.cpp
     src/mcp/serve.cpp
     src/mcp/oauth.cpp
@@ -131,17 +145,35 @@ set(AGENTTY_RAG_SOURCES
     src/rag/adapter.cpp
     src/rag/embed_backend.cpp
     src/rag/embed_secret.cpp
+    src/rag/rag_host.cpp
 )
 
 set(AGENTTY_TOOL_SOURCES
     src/tool/registry.cpp
+    src/tool/web_search_policy.cpp
+    src/tool/web_search_plan.cpp
+    src/tool/web_search_secret.cpp
     src/scope/scope.cpp
     src/scope/trust.cpp
+    # The app-level inventory: the ONE declaration of every Layout/Spec, read
+    # by the features and printed by `agentty config`. Sits above both
+    # primitives and depends on both; neither knows it exists.
+    src/config/inventory.cpp
+    # The write-side peer of scope. Lives in this group for the same reason
+    # scope does: it needs util::project_root() from tool/util/fs_helpers.
+    src/dirs/dirs.cpp
     src/tool/progress.cpp
     src/tool/util/utf8.cpp
     src/tool/util/fs_helpers.cpp
+    # The ONE place agentty runs another program: mcp-cpp's Exec capability,
+    # implemented over jaal's process + reactor. Replaces the two poll loops
+    # (this tree's subprocess.cpp and mcp-cpp's) that drifted apart.
+    src/tool/util/exec.cpp
     src/tool/util/subprocess.cpp
     src/tool/util/sandbox.cpp
+    src/tool/util/sandbox_claybin.cpp
+    src/tool/util/sandbox_broker.cpp
+    src/tool/util/handoff_gate.cpp
     src/tool/util/arg_reader.cpp
     src/tool/util/partial_json.cpp
     src/tool/subagent.cpp
@@ -158,16 +190,25 @@ set(AGENTTY_TOOL_SOURCES
 # without fighting main().
 set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/composer_attachment.cpp
+    src/runtime/library.cpp
     src/runtime/app/deps.cpp
     src/runtime/app/settings_cache.cpp
     src/runtime/app/init.cpp
+    src/runtime/app/loop_timing.cpp
+    src/runtime/app/env.cpp
     src/runtime/app/cmd_factory.cpp
+    src/runtime/app/cmd_code_block_run.cpp
+    src/runtime/app/cmd_clipboard_diag.cpp
+    src/runtime/app/cmd_image_paste.cpp
+    src/runtime/app/wire_audit.cpp
     src/runtime/app/update.cpp
     src/runtime/app/update/composer.cpp
     src/runtime/app/update/stream.cpp
     src/runtime/app/update/stream_preview.cpp
     src/runtime/app/update/smart_mode.cpp
+    src/runtime/app/update/web_search.cpp
     src/runtime/app/update/appearance.cpp
+    src/runtime/app/update/sandbox.cpp
     src/runtime/app/update/plugin_edit.cpp
     src/runtime/app/update/submit.cpp
     src/runtime/app/update/frozen.cpp
@@ -191,9 +232,11 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/panel/form_keys.cpp
     src/runtime/view/panels/form_common.cpp
     src/runtime/panel/appearance_form.cpp
+    src/runtime/panel/sandbox.cpp
     src/runtime/panel/rag_form.cpp
     src/runtime/settings_registry.cpp
     src/runtime/panel/smart_form.cpp
+    src/runtime/panel/web_search_form.cpp
     src/runtime/panel/plugin_form.cpp
     src/runtime/app/update/fork.cpp
     src/runtime/app/update/diff_review.cpp
@@ -242,7 +285,9 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/panels/mention.cpp
     src/runtime/view/panels/symbol.cpp
     src/runtime/view/panels/smart_mode.cpp
+    src/runtime/view/panels/web_search.cpp
     src/runtime/view/panels/appearance.cpp
+    src/runtime/view/panels/sandbox.cpp
     src/runtime/view/panels/plugin_edit.cpp
     src/runtime/view/panels/code_blocks.cpp
     src/runtime/view/panels/tool_output.cpp

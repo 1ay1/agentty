@@ -65,6 +65,9 @@ A persona defined in a **project** `.agentty/agents/` can ride in on a cloned re
 - **Isolated & autonomous.** It never sees the parent conversation and can't ask it questions — it works from the task prompt alone, makes a reasonable assumption on ambiguity (and notes it), then stops and writes a tight, evidence-cited report. The report is the *only* thing the parent receives.
 - **Bounded, per role.** Each subagent runs a capped burst — 8 K output tokens, tool results clipped, and a turn budget sized to the work: **32 turns** for read-only roles (explorer, reviewer), **80** for write roles (coder, tester, general). A read sweep converges quickly; an implementation loop is read → edit → build → read the errors → fix → re-run, which is several turns per cycle and several cycles per task. These are ceilings, not quotas — an agent that finishes in five turns costs five. Everything stays comfortably inside the base 200 K window, so a fan-out stays cheap. It never uses the 1M-context beta.
 - **Prompt-cached.** The heavy shared prefix (system prompt + tool schemas + accumulated results) is cached across the subagent's turns, keyed per role + task, so a long investigation doesn't re-pay for its prefix every turn.
+- **Gated twice.** A role only sees the tools it's allowed, and a call to any other tool is refused when it arrives, so a read-only role can't write even if the model names a tool it wasn't offered.
+
+`agentty run` is this same loop with your prompt as the task, so everything here applies to it too. See [agentty run](/docs/cli#agentty-run).
 
 ## Model routing
 

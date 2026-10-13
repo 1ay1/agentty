@@ -25,6 +25,10 @@
 #include <variant>
 
 #include "agentty/domain/id.hpp"
+#include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
+
+#include <maya/runtime.hpp>
 
 namespace agentty::auth {
 
@@ -133,18 +137,18 @@ using AuthHeader = std::variant<ApiKeyHeader, BearerHeader>;
 void prewarm_anthropic();
 
 // ── Disk I/O ─────────────────────────────────────────────────────────────
-[[nodiscard]] std::optional<Credentials> load_credentials();
-bool save_credentials(const Credentials& c);     // writes with 0600 perms where supported
-bool clear_credentials();
+[[nodiscard]] std::optional<Credentials> load_credentials(Io);
+bool save_credentials(Io, const Credentials& c);     // writes with 0600 perms where supported
+bool clear_credentials(Io);
 
 // Cheap, cached predicate: is there an Anthropic credential on disk? Safe to
 // call once per rendered frame (e.g. the provider picker) — it caches on the
 // credentials file's (mtime, size) and only re-reads/decrypts when that
 // changes. Prefer this over load_credentials() in hot render paths.
-[[nodiscard]] bool anthropic_signed_in();
+[[nodiscard]] bool anthropic_signed_in(Io);
 
 // ── PKCE helpers (exposed for tests) ─────────────────────────────────────
-[[nodiscard]] std::string random_urlsafe(std::size_t n);
+[[nodiscard]] std::string random_urlsafe(Io, std::size_t n);
 [[nodiscard]] std::string base64url_no_pad(const unsigned char* data, std::size_t len);
 [[nodiscard]] std::string sha256_hex(const std::string& s);
 [[nodiscard]] std::string code_challenge_s256(const std::string& verifier);
@@ -178,7 +182,7 @@ using TokenResult = std::expected<OAuthToken, OAuthError>;
 [[nodiscard]] TokenResult exchange_code(const OAuthCode& code,
                                         const PkceVerifier& verifier,
                                         const OAuthState& state);
-[[nodiscard]] TokenResult refresh_access_token(const RefreshToken& refresh_token);
+[[nodiscard]] TokenResult refresh_access_token(Io, const RefreshToken& refresh_token);
 
 // Cross-process-serialized refresh (thundering-herd safe). Wraps
 // refresh_access_token with an advisory lock on credentials.json + a
@@ -191,7 +195,7 @@ using TokenResult = std::expected<OAuthToken, OAuthError>;
 // 401 recovery); the reducer's TokenRefreshed handler still installs the
 // result into Deps. The freshest on-disk refresh token wins after the lock is
 // taken, so a rotated token from a peer is never re-used stale.
-[[nodiscard]] TokenResult refresh_access_token_locked(const RefreshToken& refresh_token);
+[[nodiscard]] TokenResult refresh_access_token_locked(Io, const RefreshToken& refresh_token);
 
 // Build the claude.ai authorize URL the user must visit to grant agentty
 // access. Pure: same inputs, same URL — no side effects, safe to call
@@ -218,7 +222,7 @@ void open_browser(const std::string& url);
 // `set_pending_refresh()` so the in-app reducer can kick off a
 // background refresh once the maya runtime is up — the TUI starts
 // immediately instead of waiting on a synchronous network round trip.
-[[nodiscard]] Credentials resolve(const std::string& cli_api_key);
+[[nodiscard]] Credentials resolve(Io, const std::string& cli_api_key);
 
 // ── Synchronous fresh credential (for off-reducer worker threads) ────────
 // Returns a ready-to-use wire header, refreshing an expired OAuth token
@@ -232,13 +236,15 @@ void open_browser(const std::string& url);
 // `fallback` is returned unchanged when no saved/env credential is usable
 // (e.g. a CLI -k key was the only auth) so callers that already hold a
 // known-good header don't regress. Thread-safe to call from any worker.
-[[nodiscard]] AuthHeader fresh_auth_header(const AuthHeader& fallback);
+// Refreshes run one at a time on the auth_refresh lane.
+[[nodiscard]] AuthHeader fresh_auth_header(Io, const locks::below_auth_refresh&,
+                                           const AuthHeader& fallback);
 
 // ── Pending OAuth refresh handoff ────────────────────────────────────────
 // One-shot channel from `auth::resolve()` (called pre-TUI from main()) to
 // `AgenttyApp::init()` (called from inside maya::run()). resolve() writes the
 // refresh token here if a background refresh is needed; init() takes it
-// to construct a `Cmd<Msg>::task(...)` that performs the refresh
+// to construct a `Cmd::task(...)` that performs the refresh
 // asynchronously and dispatches a `TokenRefreshed` Msg on completion.
 //
 // Both functions run on the main thread (sequentially: main → maya::run
@@ -258,10 +264,24 @@ void set_pending_refresh(std::string refresh_token);
 // poll it and must gate their own in-flight/throttle state (the reducer keys
 // on m.s.oauth_refresh_in_flight).
 [[nodiscard]] std::optional<std::string>
-oauth_proactive_refresh_token(std::int64_t window_ms = 5 * 60 * 1000);
+oauth_proactive_refresh_token(Io, std::int64_t window_ms = 5 * 60 * 1000);
 
-// ── Cross-process advisory file lock (thundering-herd guard) ─────────────
+// ── Cross-process advisory file lock (thundering-herd guard) ─────────
 // RAII exclusive lock on `<path>.lock` (POSIX flock / Windows LockFileEx).
+//
+// WHY THIS IS NOT persistence::SharedFile / maya::platform::native_file_lock.
+// Deliberate, not drift. jaal's POSIX backend uses fcntl record locks, which
+// are owned by the PROCESS: two threads of one agentty both acquire and
+// neither waits. This lock uses flock, which is owned by the OPEN FILE
+// DESCRIPTION — each CrossProcessFileLock opens its own descriptor, so two
+// threads of one process DO contend here. The refresh path depends on that:
+// refresh_access_token_locked() is reached from several callers and only some
+// of them hold the process-local refresh mutex, so losing the in-process
+// exclusion would re-open the rotating-refresh-token loop this lock exists to
+// close. Moving it to jaal means also moving the mutex pairing to every
+// caller; until then, flock's stronger guarantee is the safe choice and this
+// comment is the reason.
+//
 // Blocking on construction; released on destruction. Best-effort: if the
 // lock file can't be created/locked, held() is false and the caller should
 // proceed unlocked (no worse than no lock). Used to serialize OAuth token
@@ -287,8 +307,8 @@ private:
 };
 
 // ── Interactive CLI flows (blocking, stdout/stdin — NOT in TUI) ──────────
-int cmd_login();
-int cmd_logout();
-int cmd_status();
+int cmd_login(Io, const maya::unlocked&);
+int cmd_logout(Io, const maya::unlocked&);
+int cmd_status(Io, const maya::unlocked&);
 
 } // namespace agentty::auth

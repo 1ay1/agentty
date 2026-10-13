@@ -50,6 +50,27 @@ Reasoning effort has to be decided *before* the request is sent, so Smart Mode c
 | **Standard** | the everyday working turn | your baseline (unchanged) |
 | **Complex** | "why does this deadlock?", "refactor the auth module", a long or multi-part ask | one step **up** (or **two** when the turn is *deeply* complex) |
 
+### Your baseline, and why it defaults to `auto`
+
+Everything in that table is **relative to a baseline** — the effort setting on your model, which you cycle with [[←]] / [[→]] in the model picker. The tiers move *from* it, so the baseline wants room in both directions.
+
+That's what **`auto`** (the default) gives you. It isn't a fixed level — it's a *position*: the middle rung of whatever reasoning ladder your current model actually exposes. So it's sensible on a model with six levels and on one with a single on/off switch, without you configuring anything:
+
+| Your model's ladder | `auto` means | trivial | simple | standard | complex |
+|---|---|---|---|---|---|
+| `minimal · low · medium · high` | `low` | off | minimal | low | **medium** |
+| `low · medium · high · max` | `medium` | off | low | medium | **high** |
+| on/off only | `high` | off | off | high | **high** |
+| no reasoning control | — | off | off | off | off |
+
+**Trivial turns are always free**, at every baseline — "commit it" never buys a reasoning budget. That's what makes a centred baseline safe: you pay on the turns that earned it, not as a floor tax.
+
+If you'd rather fix the level yourself, cycle to any rung and it stays there. **`off` is a real choice**, distinct from "haven't decided": pick it and agentty sends no reasoning parameter at all, on every turn, including complex ones.
+
+:::note
+Before this was a distinct setting, "never configured" and "off" were the same value — so on default settings the classifier could score a turn Complex and the effort dial had nowhere to climb from. If you had deliberately set effort **off**, set it again once; an untouched setting is now read as `auto`.
+:::
+
 ### How the classifier works
 
 It's not a keyword lookup — it's a small **additive feature score**. Three orthogonal signal families each contribute weight, and the sum is thresholded into a tier:

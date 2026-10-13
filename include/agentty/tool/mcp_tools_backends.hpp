@@ -12,6 +12,9 @@
 
 #include <mcp/tools/host.hpp>
 
+#include "agentty/tool/one_shot.hpp"
+#include "agentty/util/io.hpp"
+
 #include <optional>
 #include <string>
 
@@ -24,19 +27,30 @@ namespace agentty::tools {
 // state) and svc.http untouched (the bridge installs the HttpClient).
 void install_host_backends(::mcp::tools::HostServices& svc);
 
-// Headless one-shot: run `prompt` through the SAME agent loop the `task`
-// tool uses (full toolset, doom-loop breaker, retry/backoff, kMaxTurns
-// bound) and return the final report text. `agent_type` picks the system
-// prompt / model-routing role ("general" default). Requires the subagent
-// seam to be installed (main wires it before subcommand dispatch). On
-// failure returns the actionable error text and sets is_error.
-[[nodiscard]] std::string run_one_shot(const std::string& prompt,
-                                       const std::string& agent_type,
-                                       bool& is_error);
+// Headless one-shot (`agentty run`): see agentty/tool/one_shot.hpp.
 
-// Live-apply user RAG configuration (the RAG settings picker's commit path)
-// to the process-wide retriever. Rebuilds indexes lazily. Never throws.
-void rag_apply_settings(const store::RagConfig& cfg);
+// True iff `name` resolves to a real agent role — a built-in (explorer,
+// reviewer, tester, coder, general) or a user-defined one from
+// .agentty/agents/*.md. Exists so `agentty run --agent X` can REJECT a
+// typo instead of silently running as `general`: resolve_agent_type()
+// falls back on purpose (a model naming a role that doesn't exist should
+// still get work done), but for a human at a CLI that fallback turns a
+// typo into the wrong agent with no warning.
+[[nodiscard]] bool is_known_agent_type(std::string_view name);
+
+// Comma-separated list of the valid names, for that error message.
+[[nodiscard]] std::string known_agent_types();
+
+// Names of the subagent types defined in a project .agentty/agents/. Reads
+// the disk, so it runs on a worker (read_library).
+[[nodiscard]] std::vector<std::string> project_agent_names();
+
+// Apply user RAG configuration to the process-wide retriever, ON THE CALLING
+// THREAD. It probes the embedder (a network dial) and may block, so the TUI
+// never calls this directly: the reducer returns cmd::apply_rag_settings,
+// which runs this on a jaal worker. Scheduling is the caller's decision, not
+// this function's — that is what keeps update() free of effects. Never throws.
+void rag_apply_settings_now(const store::RagConfig& cfg);
 
 // Live dense-embedder status for the RAG picker's status row and
 // `agentty diagnostics`. When the embedder is unavailable, `reason` says why
@@ -50,7 +64,7 @@ struct RagEmbedStatus {
     std::string   reason;
     std::string   describe;
 };
-[[nodiscard]] RagEmbedStatus rag_embed_status();
+[[nodiscard]] RagEmbedStatus rag_embed_status(Io);
 
 // Probe an ARBITRARY embed configuration without disturbing the live
 // retriever — what the picker's "Test connection" row runs on a worker
@@ -70,14 +84,6 @@ struct RagProbeOutcome {
 // main() returns, and blocks the exit on a multi-second embed pass. Idempotent.
 void rag_shutdown();
 
-// Whether the proactive pre-turn injection is enabled, per the live config
-// (persisted RAG picker), with AGENTTY_RAG_PROACTIVE as a shell override.
-[[nodiscard]] bool proactive_enabled();
-
-// Whether the GLOBAL RAG mode is "first turn only" (proactive injection only
-// on a thread's first turn). Consulted by the per-turn gate when a thread has
-// no per-thread override.
-[[nodiscard]] bool proactive_first_turn_only();
 
 // Smart Mode Innovation 3 (SPECULATIVE): kick a detached, best-effort code/
 // docs retrieval warm-up for `query` so the workspace index is hot and the

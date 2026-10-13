@@ -83,8 +83,10 @@ namespace agentty::form::field {
 // an information channel, and this projection is the type-level guarantee
 // the walk preserves. (Same-length overwrite is invisible to the gate;
 // unreachable from single edits, which also move the cursor below.)
+// The placeholder is NOT secret (it is drawn as-is, "✓ key saved") and is
+// walked whole: a row flipping from "not set" to "key saved" must repaint.
 inline auto visual_parts(const Secret& s) {
-    return std::make_tuple(s.value.size(), s.cursor);
+    return std::make_tuple(s.value.size(), s.cursor, visual::ref(s.placeholder));
 }
 static_assert(visual::parts_cover_all<Secret>);
 
@@ -194,6 +196,7 @@ namespace agentty::form {
 // Form: every member is visible.
 inline auto visual_parts(const Form& f) {
     return std::make_tuple(visual::ref(f.title), visual::ref(f.subtitle),
+                           visual::ref(f.error),
                            visual::ref(f.fields), f.cursor,
                            visual::ref(f.focus), f.dirty,
                            visual::ref(f.note), f.note_replaces_grammar,
@@ -239,6 +242,16 @@ inline auto visual_parts(const SmartMode& p) {
 }
 static_assert(visual::parts_cover_all<SmartMode>);
 
+inline auto visual_parts(const WebSearch& p) {
+    return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
+                           visual::ref(p.form), visual::ref(p.scroll),
+                           visual::exempt,   // key_origins: projected into form rows
+                           visual::exempt,   // keys_read:   same
+                           visual::exempt,   // keys_gen:    bookkeeping, never drawn
+                           visual::exempt);  // rows_stale:  bookkeeping, never drawn
+}
+static_assert(visual::parts_cover_all<WebSearch>);
+
 inline auto visual_parts(const PluginEdit& p) {
     return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
                            visual::ref(p.form), visual::ref(p.server),
@@ -261,6 +274,46 @@ inline auto visual_parts(const AppearancePane& p) {
                            visual::ref(p.picker));
 }
 static_assert(visual::parts_cover_all<AppearancePane>);
+
+// Same two facets as Appearance: the parent snapshot and the pane.
+inline auto visual_parts(const Sandbox& p) {
+    return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
+                           visual::ref(p.pane));
+}
+static_assert(visual::parts_cover_all<Sandbox>);
+
+// The list editor slot: the parent snapshot and the pane, same two facets.
+inline auto visual_parts(const SandboxList& p) {
+    return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
+                           visual::ref(p.pane));
+}
+static_assert(visual::parts_cover_all<SandboxList>);
+
+// `form` is the only member carrying an axis the user can move. The rest is
+// derived from it or fixed for the session, so none of it can drift against
+// the rows:
+//   preview   recomputed from the form after every edit (see the reducer)
+//   backend / claybin_available   host facts, settled at open
+//   saved_pending_restart        a latch; it only ever goes false->true, and
+//                                the footer it drives is inside the form's
+//                                own frame
+inline auto visual_parts(const SandboxPane& p) {
+    // `facts` is NOT exempt, and that is load-bearing. The subtitle and the
+    // restart verdict are both derived from it (§17, §19), so a change to it
+    // changes what is on screen -- exempting it would let the pane keep
+    // rendering a stale "what is running" line, which is the precise bug class
+    // this pane exists to prevent.
+    return std::make_tuple(visual::ref(p.form), visual::exempt,
+                           visual::ref(p.restart_note),
+                           // `working` holds the path/port lists, which the
+                           // Pick rows render as a count -- so it is visible
+                           // state even though no row holds it.
+                           visual::exempt,
+                           visual::exempt,
+                           visual::ref(p.facts),
+                           visual::exempt, visual::exempt);
+}
+static_assert(visual::parts_cover_all<SandboxPane>);
 
 // AppearancePane::ThemePicker declares its own visual_parts next to the type
 // (panel/appearance.hpp) — it holds a FilteredPicker, which has a
@@ -421,7 +474,6 @@ static_assert(visual::parts_cover_all<ApiKeyInput>);
 
 inline auto visual_parts(const ChatGptWaiting& s) {
     return std::make_tuple(s.attempt_id,
-                           visual::exempt,          // cancel: worker plumbing
                            s.device_auth,
                            visual::ref(s.authorize_url),
                            visual::ref(s.user_code));
@@ -432,7 +484,6 @@ inline auto visual_parts(const DeviceWaiting& s) {
     return std::make_tuple(visual::ref(s.provider),
                            visual::ref(s.provider_label),
                            s.attempt_id,
-                           visual::exempt,          // cancel: worker plumbing
                            visual::ref(s.authorize_url),
                            visual::ref(s.browser_url),
                            visual::ref(s.user_code));

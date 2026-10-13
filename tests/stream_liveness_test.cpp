@@ -37,7 +37,7 @@
 
 #include "agtest.hpp"
 
-#include <maya/app/app.hpp>            // maya::detail::animation_requested_
+#include <maya/device/frame_request.hpp>  // maya::detail::animation_requested_
 #include <maya/core/anim_clock.hpp>     // maya::testing::advance_anim_clock_ms
 #include <maya/render/canvas.hpp>
 #include <maya/render/renderer.hpp>

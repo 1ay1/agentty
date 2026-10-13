@@ -495,9 +495,9 @@ per-project — that one really is a property of the code you are in.)
 | Per-frame publish | `src/runtime/view/view.cpp` |
 | Persistence (JSON) | `src/io/persistence.cpp` |
 | Hydration at startup | `src/runtime/app/init.cpp` |
-| Motion gate | `maya/include/maya/core/motion.hpp` |
-| Built-in schemes (generated) | `maya/include/maya/style/schemes.hpp` |
-| Scheme generator | `maya/scripts/gen_themes.py` |
+| Motion gate | `third_party/maya/include/maya/core/motion.hpp` |
+| Built-in schemes (generated) | `third_party/maya/include/maya/style/schemes.hpp` |
+| Scheme generator | `third_party/maya/scripts/gen_themes.py` |
 
 Themes are generated from the iTerm2 colour-scheme corpus. Red → error,
 green → success, yellow → warning, cyan → info; diffs and chrome are
@@ -546,11 +546,11 @@ the second is "can you read it", and neither implies the other. Fixing
 the first by moving widgets onto theme slots is what *caused* the
 second.
 
-`maya/tests/test_blend_safety.cpp` pins the same rule one layer down,
+`third_party/maya/tests/test_blend_safety.cpp` pins the same rule one layer down,
 and both repos' `theme_discipline` tests grep the source for colour
 literals and unguarded channel reads.
 
 > **Run maya's own suite too.** agentty does not compile maya's tests or
 > examples, so a change to a maya header can be green here and red in
 > maya's CI. `cmake -B build -DMAYA_BUILD_TESTS=ON -DMAYA_BUILD_EXAMPLES=ON`
-> in `maya/` is what CI builds.
+> in `third_party/maya/` is what CI builds.

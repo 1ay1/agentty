@@ -2,13 +2,14 @@
 
 #include "agentty/provider/dialect.hpp"
 
+#include <maya/runtime.hpp>
 #include <algorithm>
 #include <cctype>
-#include <mutex>
 #include <set>
 #include <string>
 #include <utility>
 
+#include "agentty/domain/catalog.hpp"   // ModelCapabilities: does the MODEL reason
 #include "agentty/provider/registry.hpp"
 #include "agentty/util/logx.hpp"
 
@@ -56,12 +57,25 @@ namespace {
 // ── Learned rejections ───────────────────────────────────────────────────
 using Key = std::pair<std::string, std::string>;   // (provider, model)
 
-std::mutex& obs_mu() { static std::mutex m; return m; }
-std::set<Key>& rejected_responses() { static std::set<Key> s; return s; }
-std::set<Key>& rejected_chat()      { static std::set<Key> s; return s; }
+// What each (provider, model) has rejected, learned at runtime.
+struct Observations {
+    std::set<Key> rejected_responses;
+    std::set<Key> rejected_chat;
+};
+// Read on every routing decision, written only when a host rejects a
+// dialect: a lock-free snapshot, so routing needs no capability.
+maya::snapshot<Observations>& observations() {
+    static maya::snapshot<Observations> o;
+    return o;
+}
 
-[[nodiscard]] bool contains(std::set<Key>& s, std::string_view p, std::string_view m) {
-    return s.count(Key{std::string{p}, std::string{m}}) > 0;
+// Which of the two the host has rejected for this pair, as plain bools.
+struct Rejected { bool responses = false; bool chat = false; };
+[[nodiscard]] Rejected rejected_for(std::string_view p, std::string_view m) {
+    const auto o = observations().load();
+    const Key k{std::string{p}, std::string{m}};
+    return Rejected{o->rejected_responses.count(k) > 0,
+                    o->rejected_chat.count(k) > 0};
 }
 
 } // namespace
@@ -144,15 +158,14 @@ Dialect dialect_for(std::string_view provider_id, std::string_view model) noexce
 
     // Runtime evidence outranks the prior in BOTH directions.
     {
-        std::scoped_lock lk(obs_mu());
-        if (contains(rejected_responses(), provider_id, model)) {
+        const Rejected r = rejected_for(provider_id, model);
+        if (r.responses) {
             // The host told us no. Honour it even for a "required" model:
             // a failing turn on chat is strictly better than a certain 404,
             // and the user gets an error from the model rather than from us.
             return Dialect::Chat;
         }
-        if (contains(rejected_chat(), provider_id, model))
-            return Dialect::Responses;
+        if (r.chat) return Dialect::Responses;
     }
 
     if (required) return Dialect::Responses;
@@ -195,11 +208,41 @@ bool streams_reasoning_text(std::string_view provider_id,
             break;
     }
 
-    // On chat, first-party OpenAI drops reasoning entirely — api.openai.com
-    // does not transmit it on /chat/completions at any effort.
+    // ── Chat: who drops reasoning, and why it is not a provider fact ──
+    //
+    // Two hosts return no reasoning on /chat/completions. Both refusals were
+    // MEASURED, and both were measured on the host's OWN models:
+    //
+    //   openai   api.openai.com transmits none at any effort, for anything
+    //            it serves (its reasoning models are Responses-only anyway).
+    //   copilot  claude-* and gpt-4.x return none there.
+    //
+    // The openai one really is host-wide: every model on that row is a
+    // first-party OpenAI model, so "the host drops it" and "these models
+    // drop it" are the same statement.
+    //
+    // Copilot's is not. That row is a GATEWAY -- it serves Anthropic,
+    // Google, xAI, DeepSeek and Qwen models alongside OpenAI's, and a
+    // measurement taken on claude-* says nothing about deepseek-r1, which
+    // populates reasoning_content exactly like it does on DeepSeek's own
+    // endpoint. Refusing per PROVIDER told the UI "no thinking here" for
+    // every model on a mixed host, so a reasoning model's visible thinking
+    // was dropped on the floor while the transport was parsing it fine.
+    //
+    // So: ask the MODEL whether it reasons, and keep the refusal only for
+    // the families it was actually taken on. supports_effort() is the same
+    // capability the picker's ✦ mark and the effort ladder already read, so
+    // there is no new list to drift -- a model that cannot reason cannot
+    // stream reasoning either, whoever is serving it.
     if (provider_id == "openai") return false;
-    // Copilot on chat likewise: claude-* and gpt-4.x return none there.
-    if (provider_id == "copilot") return false;
+    if (provider_id == "copilot") {
+        if (model.empty()) return true;   // provider-level "anything?" → yes
+        const auto caps = ModelCapabilities::from_id(model);
+        if (!caps.supports_effort()) return false;   // not a reasoning model
+        // Measured silent on this path despite being reasoning-capable.
+        if (caps.is_opus() || caps.is_sonnet() || caps.is_haiku()) return false;
+        return true;
+    }
 
     // Every other OpenAI-COMPAT host on this dialect (DeepSeek, Mistral,
     // OpenRouter's chat path, vLLM, Ollama) populates reasoning_content,
@@ -211,10 +254,14 @@ void note_dialect_rejected(std::string_view provider_id,
                            std::string_view model, Dialect rejected) noexcept {
     if (model.empty()) return;
     try {
-        std::scoped_lock lk(obs_mu());
-        auto& set = rejected == Dialect::Responses ? rejected_responses()
-                                                   : rejected_chat();
-        set.insert(Key{std::string{provider_id}, std::string{model}});
+        (void)observations().update(
+            [](const Observations& old, const Key& k, const bool& responses) {
+                Observations o = old;
+                (responses ? o.rejected_responses : o.rejected_chat).insert(k);
+                return o;
+            },
+            Key{std::string{provider_id}, std::string{model}},
+            rejected == Dialect::Responses);
     } catch (...) {
         return;   // an allocation failure here must never break a turn.
     }
@@ -224,9 +271,7 @@ void note_dialect_rejected(std::string_view provider_id,
 }
 
 void reset_dialect_observations() noexcept {
-    std::scoped_lock lk(obs_mu());
-    rejected_responses().clear();
-    rejected_chat().clear();
+    observations().store(Observations{});
 }
 
 } // namespace agentty::provider

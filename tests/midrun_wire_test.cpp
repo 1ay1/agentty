@@ -26,8 +26,9 @@
 #include <thread>
 #include <vector>
 
-#include <fcntl.h>
 #include <unistd.h>
+
+#include "wire_pipe.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -74,22 +75,8 @@ static int g_checks   = 0;
 
 // ── Non-blocking pipe writer; the read end is drained per frame so we
 //    capture exactly the bytes each compose emitted.
-static std::pair<Writer, int> make_pipe_writer() {
-    int fds[2];
-    if (pipe(fds) != 0) { std::perror("pipe"); std::abort(); }
-    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL, 0) | O_NONBLOCK);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
-    return {Writer{static_cast<platform::NativeHandle>(fds[1])}, fds[0]};
-}
-
-static std::string drain(int rfd) {
-    std::string out;
-    char buf[8192];
-    ssize_t n;
-    while ((n = read(rfd, buf, sizeof(buf))) > 0)
-        out.append(buf, static_cast<std::size_t>(n));
-    return out;
-}
+static std::pair<Writer, int> make_pipe_writer() { return wire_pipe::make_writer(); }
+static std::string drain(int rfd) { return wire_pipe::drain(rfd); }
 
 // Build the conversation Element tree for the current model state.
 static maya::Element build_root(const Model& m) {
@@ -205,9 +192,9 @@ TEST_CASE("growing live run no committed rewrite") {
     // Seed the first frame fresh, then carry Synced state across appends.
     std::optional<InlineFrame<Synced>> synced;
     const char* files[] = {
-        "maya/src/render/serialize.cpp", "maya/src/render/renderer.cpp",
-        "maya/include/maya/app/app.hpp", "src/runtime/app/update/frozen.cpp",
-        "src/runtime/app/update/stream.cpp", "maya/examples/agent_session.cpp",
+        "third_party/maya/src/render/serialize.cpp", "third_party/maya/src/render/renderer.cpp",
+        "third_party/maya/include/maya/app/app.hpp", "src/runtime/app/update/frozen.cpp",
+        "src/runtime/app/update/stream.cpp", "third_party/maya/examples/agent_session.cpp",
     };
     constexpr int kCards = 6;
     bool ok_all = true;
@@ -331,7 +318,7 @@ static ToolUse settled_grep(const std::string& tag, const std::string& path,
 TEST_CASE("grep read highlight no stale blit") {
     constexpr int kWidth = 100;
     constexpr int kTermH = 30;
-    const std::string path = "maya/src/render/serialize.cpp";
+    const std::string path = "third_party/maya/src/render/serialize.cpp";
 
     Model m;
     m.d.current.id = agentty::ThreadId{"wirehl"};
@@ -1409,8 +1396,7 @@ TEST_CASE("midrun trim output heavy no rewrite") {
     //    strand a duplicate) — the host must commit the dropped rows
     //    against the still-valid old frame BEFORE the next render.
     auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
-    using Cmd = maya::Cmd<agentty::Msg>;
-    const auto* commit = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    const auto* commit = std::get_if<maya::CommitScrollback>(&cmd.inner);
     CHECK(commit != nullptr,
           "trim must return commit_scrollback(N) for the top-deletion; "
           "none() leaves maya unable to reconcile and strands a duplicate.");
@@ -1419,8 +1405,8 @@ TEST_CASE("midrun trim output heavy no rewrite") {
     // by N before rendering the shorter tree. commit_inline_prefix's
     // internal clamp = min(N, prev_rows - term_h); since the dropped
     // entries overflowed, N never exceeds that bound.
-    if (commit && commit->rows > 0) {
-        const int safe = std::min(commit->rows, std::max(0, sa.rows() - kTermH));
+    if (commit && commit->debt.rows() > 0) {
+        const int safe = std::min(commit->debt.rows(), std::max(0, sa.rows() - kTermH));
         if (safe > 0)
             sa = std::move(sa).commit(sa.scrollback_marker(safe));
     }
@@ -1546,8 +1532,7 @@ TEST_CASE("midrun trim full body writes no rewrite") {
           "full-body trim setup: prefix must overflow the viewport");
 
     auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
-    using Cmd = maya::Cmd<agentty::Msg>;
-    const auto* commit = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    const auto* commit = std::get_if<maya::CommitScrollback>(&cmd.inner);
     CHECK(commit != nullptr,
           "full-body trim must return commit_scrollback(N) for the "
           "top-deletion; none() leaves maya unable to reconcile and "
@@ -1555,8 +1540,8 @@ TEST_CASE("midrun trim full body writes no rewrite") {
     // Apply the commit exactly as the production Cmd interpreter does:
     // advance the prior (old-content) Synced frame's prev_rows/prev_cells
     // by N before rendering the shorter tree.
-    if (commit && commit->rows > 0) {
-        const int safe = std::min(commit->rows, std::max(0, sa.rows() - kTermH));
+    if (commit && commit->debt.rows() > 0) {
+        const int safe = std::min(commit->debt.rows(), std::max(0, sa.rows() - kTermH));
         if (safe > 0)
             sa = std::move(sa).commit(sa.scrollback_marker(safe));
     }
@@ -1635,7 +1620,7 @@ TEST_CASE("model picker open close no scrollback growth") {
 
     // deps stub: ModelsSelect persists settings via deps().
     app::install_deps(app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const agentty::Thread&) {},
         .delete_thread = [](const agentty::ThreadId&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },
@@ -1790,8 +1775,7 @@ TEST_CASE("model picker open close no scrollback growth") {
             render_state(m);
             std::this_thread::sleep_for(std::chrono::milliseconds{8});
         }
-        auto [m2, cmd] = app::detail::models_update(
-            std::move(m), msg::ModelsMsg{ModelsSelect{}});  // close
+        auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::models_update, std::move(m), msg::ModelsMsg{ModelsSelect{}});  // close
         m = std::move(m2);
         (void)cmd;
         for (int f = 0; f < 5; ++f) {

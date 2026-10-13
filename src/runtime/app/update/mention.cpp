@@ -32,40 +32,40 @@ namespace agentty::app::detail {
 
 using maya::overload;
 
-Step mention_update(Model m, msg::MentionMsg mm) {
+Cmd mention_update(Model& m, msg::MentionMsg mm) {
     return std::visit(overload{
         // (No OpenMention arm: the panel opens from the COMPOSER's `@`
         // handler, which builds pn::Mention directly with the file listing
         // — see composer.cpp. A message nobody sent sat here for months.)
-        [&](CloseMention) -> Step {
+        [&](CloseMention) -> Cmd {
             ascend(m);   // usually → thread (opened by typing @), or a parent
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](MentionInput& e) -> Step {
+        [&](MentionInput& e) -> Cmd {
             if (auto* o = m.ui.panel.get<pn::Mention>()) o->picker.type(e.ch);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](MentionBackspace) -> Step {
+        [&](MentionBackspace) -> Cmd {
             auto* o = m.ui.panel.get<pn::Mention>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // Backspace on an empty query closes the picker — same
             // affordance as command palette + most chat apps. The picker
             // answers "was there anything to erase", so the test and the
             // mutation cannot drift apart.
             if (!o->picker.backspace()) m.ui.panel.close<pn::Mention>();
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](MentionMove& e) -> Step {
+        [&](MentionMove& e) -> Cmd {
             if (auto* o = m.ui.panel.get<pn::Mention>()) o->picker.move(e.delta);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](MentionSelect) -> Step {
+        [&](MentionSelect) -> Cmd {
             auto* o = m.ui.panel.get<pn::Mention>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             const auto* hit = o->picker.selected();
             if (!hit) {
                 m.ui.panel.close<pn::Mention>();
-                return done(std::move(m));
+                return Cmd::none();
             }
             // COPY, not move: the snapshot is shared and immutable now, so
             // stealing the string out of it would corrupt the cached index
@@ -92,7 +92,7 @@ Step mention_update(Model m, msg::MentionMsg mm) {
             auto placeholder = attachment::make_placeholder(idx);
             m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
             m.ui.composer.cursor += static_cast<int>(placeholder.size());
-            return done(std::move(m));
+            return Cmd::none();
         },
     }, mm);
 }

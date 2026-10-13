@@ -33,14 +33,19 @@ std::string emit_and_read(const std::string& msg) {
     // read back through the public accessor rather than re-opening a sink.
     logx::emit(logx::Channel::Wire, logx::Level::Error, "test.probe", msg);
     const auto lf = logx::log_file();
-    if (lf.empty()) return {};
+    // A missing sink must FAIL, not return "" — every assertion here is of
+    // the form find(secret) == npos, which an empty string satisfies. When
+    // ctest's env stopped naming a log file (AGENTTY_LOG_FILE was retired
+    // and this wiring wasn't updated), that turned the whole redaction
+    // suite green while it checked nothing, and a real leak shipped.
+    REQUIRE_MESSAGE(!lf.empty(),
+                    "no log sink: the probe would pass vacuously");
     std::ifstream in{std::string{lf}, std::ios::binary};
     std::string all{std::istreambuf_iterator<char>(in),
                     std::istreambuf_iterator<char>()};
-    // Return only the last line — earlier tests share the file.
-    if (all.empty()) return {};
+    REQUIRE_MESSAGE(!all.empty(), "log file is empty: nothing was emitted");
     auto end = all.find_last_not_of('\n');
-    if (end == std::string::npos) return {};
+    REQUIRE(end != std::string::npos);
     auto start = all.rfind('\n', end);
     return all.substr(start == std::string::npos ? 0 : start + 1);
 }
@@ -138,6 +143,8 @@ TEST_CASE("logx: real vendor key shapes are redacted") {
         {R"(AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIbKxKEY0123456789EXAMPLEKEY)", "wJalrXUtnFEM"},
         {R"({"anthropic_api_key":"sk-ant-VALUE9876543210abc"})", "VALUE9876543210"},
         {R"(gsk_GroqKeyLooksLikeThis0123456789abcd)", "GroqKeyLooksLike"},
+        // Brave's Search API header: a bare token, no vendor prefix to match.
+        {R"(X-Subscription-Token: BSAk1234567890abcdefghijKEYBODY)", "BSAk1234567890"},
         {R"(export ANTHROPIC_API_KEY=sk-ant-api03-abcdefghij0123456789)", "abcdefghij0123"},
         // A key pasted into the CONVERSATION, not a header — the path that
         // actually reaches the log, since headers are never logged.

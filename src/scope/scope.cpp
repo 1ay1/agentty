@@ -26,9 +26,9 @@ namespace agentty::scope {
 
 namespace {
 
-// The three dialect dirs in native-first precedence order — the within-locus
-// tiebreak. Kept in one place so plan() reads as the Locus × Dialect product.
-constexpr Dialect kDialects[] = {Dialect::Agentty, Dialect::Agents, Dialect::Claude};
+// NOTE: the dialect list is no longer a global here. It moved onto
+// Layout::dialects (scope.hpp) so each feature declares its own breadth and
+// plan() emits exactly what will be read — see the note above dir_name().
 
 // Is `dir` a real directory we can create/write files in? Generalises the
 // probe memory does before offering Project scope. Non-throwing.
@@ -66,8 +66,16 @@ constexpr Dialect kDialects[] = {Dialect::Agentty, Dialect::Agents, Dialect::Cla
 }  // namespace
 
 std::vector<Source> plan(const Layout& layout, const Env& env) {
+    // The feature's OWN dialect list, not a global one. An empty span would
+    // silently emit no Project/User sources at all, which reads as "this
+    // feature has no config" rather than "somebody passed {}" — so treat it
+    // as the default instead of honouring a value nobody can have meant.
+    const std::span<const Dialect> dialects =
+        layout.dialects.empty() ? std::span<const Dialect>{kNativeOnly}
+                                : layout.dialects;
+
     std::vector<Source> out;
-    out.reserve(1 + 2 * std::size(kDialects));
+    out.reserve(1 + 2 * dialects.size());
 
     // Explicit — an env-pointed file the user aimed at us. Highest precedence,
     // dialect-agnostic (the user named the exact path). Its base is the file's
@@ -85,7 +93,7 @@ std::vector<Source> plan(const Layout& layout, const Env& env) {
     // (Locus::Local is deliberately NOT emitted yet — the value exists in the
     // lattice, but no consumer opts in. See the header's migration note.)
     if (usable_project_root(env.project_root)) {
-        for (Dialect d : kDialects) {
+        for (Dialect d : dialects) {
             Source s;
             s.locus    = Locus::Project;
             s.dialect  = d;
@@ -99,7 +107,7 @@ std::vector<Source> plan(const Layout& layout, const Env& env) {
     // The native dialect anchors at user_native_base (util::user_root():
     // ~/.agentty or $AGENTTY_HOME); the interop dialects stay at ~.
     if (!env.home.empty() || !env.user_native_base.empty()) {
-        for (Dialect d : kDialects) {
+        for (Dialect d : dialects) {
             Source s;
             s.locus    = Locus::User;
             s.dialect  = d;
@@ -117,7 +125,9 @@ std::vector<Source> plan(const Layout& layout, const Env& env) {
         }
     }
 
-    (void)layout;  // plan lays out ROOTS; the leaf is joined by the caller/loader
+    // plan lays out ROOTS; the leaf is joined by the caller/loader. The
+    // DIALECT breadth above is the one part of the layout plan owns — see the
+    // note on Layout::dialects for why it moved off a global.
     return out;
 }
 

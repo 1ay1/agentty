@@ -17,7 +17,10 @@ public:
     OllamaProvider() = default;
     explicit OllamaProvider(Endpoint endpoint) : endpoint_(std::move(endpoint)) {}
 
-    provider::StreamResult stream(provider::Request req, provider::EventSink sink) {
+    // run_stream_sync takes no capability today; the cap is the
+    // Provider-concept contract (thread it through if the transport locks).
+    provider::StreamResult stream(const maya::unlocked&, provider::Request req,
+                                  provider::EventSink sink) {
         Request oreq;
         provider::lower_shared(oreq, req);          // shared core
         oreq.context_window = req.context_window;   // num_ctx sizing

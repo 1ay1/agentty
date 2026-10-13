@@ -44,7 +44,7 @@ const std::vector<std::string> kAllowed = {
 // whether to emit colour at all, which is the part a user can observe
 // (NO_COLOR / TERM=dumb).
 const std::vector<std::string> kAllowedRawSgr = {
-    "src/runtime/app/update/code_blocks.cpp",
+    "src/runtime/app/cmd_code_block_run.cpp",
 };
 
 [[nodiscard]] bool listed(const std::vector<std::string>& list,

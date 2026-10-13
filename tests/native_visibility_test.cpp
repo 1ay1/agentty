@@ -27,7 +27,7 @@
 // colour the user did not choose, computed from bytes that were not
 // channels. An effect that cannot be computed must degrade to NO EFFECT.
 //
-// maya/tests/test_blend_safety.cpp pins the helpers in isolation. This pins
+// third_party/maya/tests/test_blend_safety.cpp pins the helpers in isolation. This pins
 // the property end-to-end, on real rendered agentty frames, which is the
 // level #45 was actually reported at.
 #include "agtest.hpp"

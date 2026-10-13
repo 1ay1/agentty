@@ -724,3 +724,13 @@ TEST_CASE("tool_display_name always capitalises") {
     check(!tool_display_name("x").empty() && tool_display_name("x") == "X",
           "single char capitalises");
 }
+
+TEST_CASE("shell card shows the plain command") {
+    // No "Read ..." label: a shell detour must look like a shell call.
+    auto d = [](const char* cmd) {
+        return U::tool_timeline_detail(make_tool("shell", A::ToolUse::Running{},
+                                                 {{"command", cmd}}));
+    };
+    check(d("sed -n '10,40p' src/a.cpp") == "sed -n '10,40p' src/a.cpp", "inspection unlabelled");
+    check(d("cmake --build build -j12") == "cmake --build build -j12", "build unlabelled");
+}

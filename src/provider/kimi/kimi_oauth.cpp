@@ -8,13 +8,13 @@
 //   /api/oauth/token (grant_type=refresh_token)
 
 #include "agentty/provider/kimi/kimi_oauth.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
-#include <mutex>
 #include <random>
 #include <thread>
 #include <utility>
@@ -33,6 +33,8 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/io/http.hpp"
+
+#include <maya/runtime.hpp>
 
 namespace agentty::provider::kimi {
 namespace {
@@ -199,7 +201,7 @@ HttpResult post_form(std::string_view path, std::string body) {
     tos.connect = std::chrono::milliseconds(10'000);
     tos.total   = std::chrono::milliseconds(30'000);
 
-    auto resp = http::default_client().send(req, tos);
+    auto resp = http::default_client(::agentty::IoAccess::grant()).send(req, tos);
     if (!resp) { r.transport_error = resp.error().render(); return r; }
     r.status = resp->status;
     r.body   = std::move(resp->body);
@@ -207,7 +209,21 @@ HttpResult post_form(std::string_view path, std::string body) {
 }
 
 // ── Credential store ────────────────────────────────────────────────────────
-std::mutex& store_mutex() { static std::mutex m; return m; }
+// The creds file. Every read and write runs inside store().with.
+struct CredsFile {};
+maya::guarded<CredsFile>& store() { static maya::guarded<CredsFile> f; return f; }
+
+// signed_in() cache, keyed on the file's (mtime, size). Lock-free so views
+// (which can't hold capabilities) may call it.
+struct SignedInCache {
+    long long      mtime     = -1;
+    std::uintmax_t size      = 0;
+    bool           signed_in = false;
+};
+maya::snapshot<SignedInCache>& signed_in_cache() {
+    static maya::snapshot<SignedInCache> s{SignedInCache{}};
+    return s;
+}
 
 fs::path creds_path() { return auth::config_dir() / "kimi_credentials.json"; }
 
@@ -337,13 +353,11 @@ poll_for_token(const std::string& device_code, int interval_s, int timeout_s,
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
     int interval = interval_s > 0 ? interval_s : 5;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (cancelled && cancelled())
+        if (cancelled.stop_requested())
             return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
-        for (int slept = 0; slept < interval; ++slept) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (cancelled && cancelled())
-                return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
-        }
+        // The server's interval, cut short the moment the login is cancelled.
+        if (maya::delay_for(cancelled, std::chrono::seconds(interval)))
+            return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
         auto r = post_form(kTokenPath,
             form_encode({{"grant_type", "urn:ietf:params:oauth:grant-type:device_code"},
                          {"client_id", kClientId},
@@ -415,42 +429,36 @@ std::vector<std::pair<std::string, std::string>> device_headers() {
 
 fs::path credentials_path() { return creds_path(); }
 
-std::optional<KimiToken> load_token() {
-    std::scoped_lock lk(store_mutex());
-    return load_unlocked();
+std::optional<KimiToken> load_token(const maya::below<maya::leaf>& cap) {
+    return store().with(cap, [](CredsFile&) { return load_unlocked(); });
 }
 
-bool save_token(const KimiToken& tok) {
-    std::scoped_lock lk(store_mutex());
-    return save_unlocked(tok);
+bool save_token(const maya::below<maya::leaf>& cap, const KimiToken& tok) {
+    return store().with(cap, [](CredsFile&, KimiToken t) { return save_unlocked(t); }, tok);
 }
 
-bool clear_credentials() {
-    std::scoped_lock lk(store_mutex());
-    std::error_code ec;
-    return fs::remove(creds_path(), ec) || !ec;
+bool clear_credentials(Io, const maya::below<maya::leaf>& cap) {
+    return store().with(cap, [](CredsFile&) {
+        std::error_code ec;
+        return fs::remove(creds_path(), ec) || !ec;
+    });
 }
 
 bool signed_in() {
     // Called by the picker VIEW once per rendered frame — cache the boolean
     // keyed on the file's (mtime, size) so a fresh stat (~1µs) invalidates on
     // sign-in / sign-out / cross-process change without unseal+parse per frame.
-    std::scoped_lock lk(store_mutex());
-    static std::mutex cache_mu;
-    static bool cached = false;
-    static std::int64_t cached_mtime = -1;
-    static std::uintmax_t cached_size = 0;
-    std::scoped_lock clk(cache_mu);
+    // Lock-free: the read needs no lock because writers use atomic renames.
     std::error_code ec;
     auto st = fs::last_write_time(creds_path(), ec);
-    if (ec) { cached = false; cached_mtime = -1; cached_size = 0; return false; }
+    if (ec) { signed_in_cache().store(SignedInCache{}); return false; }
     auto sz = fs::file_size(creds_path(), ec);
-    auto mt = st.time_since_epoch().count();
-    if (mt == cached_mtime && sz == cached_size) return cached;
-    cached = load_unlocked().has_value();
-    cached_mtime = mt;
-    cached_size = sz;
-    return cached;
+    auto mt = static_cast<long long>(st.time_since_epoch().count());
+    const auto c = signed_in_cache().get();
+    if (mt == c.mtime && sz == c.size) return c.signed_in;
+    const bool in = load_unlocked().has_value();
+    signed_in_cache().store(SignedInCache{mt, sz, in});
+    return in;
 }
 
 void invalidate_cached_token() { g_force_refresh.store(true); }
@@ -461,8 +469,9 @@ parse_token_response(std::string_view json_body, std::int64_t now_ms) {
 }
 
 std::expected<KimiToken, OAuthError>
-login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled) {
-    if (cancelled && cancelled())
+login(const maya::below<maya::leaf>& cap, int timeout_s, DeviceCodeSink on_device_code,
+      CancelProbe cancelled) {
+    if (cancelled.stop_requested())
         return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
 
     std::string device_code;
@@ -474,16 +483,26 @@ login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled) {
     auto tok = poll_for_token(device_code, interval, timeout_s, cancelled);
     if (!tok) return std::unexpected(tok.error());
 
-    save_token(*tok);
+    save_token(cap, *tok);
     return *tok;
 }
 
-std::optional<KimiToken> fresh_token() {
-    // Serialize refreshes without holding store_mutex across the network call.
-    static std::mutex refresh_mu;
-    std::scoped_lock lk(refresh_mu);
+namespace {
+std::optional<KimiToken> fresh_token_locked(const maya::held<locks::auth_refresh>& h);
+}
 
-    auto cur = load_token();
+std::optional<KimiToken> fresh_token(const locks::below_auth_refresh& cap) {
+    // One refresh at a time; the store is never held across the network call.
+    struct RefreshLane {};
+    static maya::guarded<RefreshLane, locks::auth_refresh> one_at_a_time;
+    return one_at_a_time.with(cap, [](const maya::held<locks::auth_refresh>& h, RefreshLane&) {
+        return fresh_token_locked(h);
+    });
+}
+
+namespace {
+std::optional<KimiToken> fresh_token_locked(const maya::held<locks::auth_refresh>& h) {
+    auto cur = load_token(h);
     if (!cur) return std::nullopt;
 
     const bool force = g_force_refresh.exchange(false);
@@ -496,8 +515,9 @@ std::optional<KimiToken> fresh_token() {
         if (!force && cur->valid() && !cur->expired()) return cur;
         return std::nullopt;
     }
-    save_token(*refreshed);
+    save_token(h, *refreshed);
     return *refreshed;
 }
+} // namespace
 
 } // namespace agentty::provider::kimi

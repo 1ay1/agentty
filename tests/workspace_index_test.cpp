@@ -9,6 +9,7 @@
 #include "agentty/workspace/files.hpp"
 
 #include <doctest/doctest.h>
+#include "agtest.hpp"
 
 #include <algorithm>
 #include <string>
@@ -128,7 +129,7 @@ TEST_CASE("filter_files: git-dirty files lead the working set") {
     auto prev = fs::current_path();
     const auto prev_ws = agentty::tools::util::project_root();
     fs::current_path(repo);
-    agentty::tools::util::set_workspace_root(repo);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), repo);
     agentty::refresh_git_signals();
 
     std::vector<std::string> files = {
@@ -145,7 +146,7 @@ TEST_CASE("filter_files: git-dirty files lead the working set") {
     // see the sibling test below for why leaving a deleted path in
     // project_root() breaks a LATER test's bwrap sandbox rather than this one.
     fs::current_path(prev);
-    agentty::tools::util::set_workspace_root(prev_ws);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), prev_ws);
     std::error_code ec;
     fs::remove_all(repo, ec);
 }
@@ -165,18 +166,16 @@ TEST_CASE("prewarm walk bails promptly when cancelled") {
     auto prev = fs::current_path();
     const auto prev_ws = agentty::tools::util::project_root();
     fs::current_path(root);
-    agentty::tools::util::set_workspace_root(root);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
 
-    // Request cancel BEFORE kicking the walk: the loop's first cancel check
-    // fires and it bails almost immediately. join must not scan all 3000 files.
-    agentty::request_prewarm_cancel();
-    CHECK(agentty::prewarm_cancelled());
+    // Stop BEFORE kicking the walk: the loop's first check sees it and bails
+    // almost immediately. It must not scan all 3000 files.
+    std::stop_source stop;
+    stop.request_stop();
 
     const auto t0 = std::chrono::steady_clock::now();
-    agentty::prewarm_workspace_files();
-    agentty::prewarm_workspace_symbols();
-    agentty::join_workspace_prewarm();
-    agentty::join_workspace_symbols_prewarm();
+    agentty::prewarm_workspace_files(stop.get_token());
+    agentty::prewarm_workspace_symbols(agtest::cap(), stop.get_token());
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     CHECK(ms < 1000);   // generous; a full 3000-file scan is far slower
@@ -191,7 +190,7 @@ TEST_CASE("prewarm walk bails promptly when cancelled") {
     // but ONLY when run in-suite after this one — which is why it passed in
     // isolation and looked like an unrelated flake.
     fs::current_path(prev);
-    agentty::tools::util::set_workspace_root(prev_ws);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), prev_ws);
     std::error_code ec;
     fs::remove_all(root, ec);
 }

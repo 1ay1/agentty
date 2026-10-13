@@ -30,7 +30,7 @@ struct Probe {
     provider::ProviderRouter router() {
         provider::ProviderRouter r;
         r.set(provider::LongLived::Anthropic,
-              [this](provider::Request, provider::EventSink) {
+              [this](const maya::unlocked&, provider::Request, provider::EventSink) {
                   hit = "anthropic";
                   provider::StreamResult sr;
                   sr.end  = provider::StreamEnd::CleanClose;
@@ -38,7 +38,7 @@ struct Probe {
                   return sr;
               })
          .set(provider::LongLived::ChatGpt,
-              [this](provider::Request, provider::EventSink) {
+              [this](const maya::unlocked&, provider::Request, provider::EventSink) {
                   hit = "chatgpt";
                   provider::StreamResult sr;
                   sr.end   = provider::StreamEnd::TransportError;
@@ -51,7 +51,7 @@ struct Probe {
 
 static std::string route_for(const provider::Selection& sel) {
     Probe p;
-    provider::dispatch_stream(p.router(), sel, provider::Request{},
+    provider::dispatch_stream(agtest::cap(), p.router(), sel, provider::Request{},
                               provider::EventSink{});
     return p.hit;
 }
@@ -59,7 +59,7 @@ static std::string route_for(const provider::Selection& sel) {
 // Same, but return the StreamResult dispatch handed back (the outcome value).
 static provider::StreamResult result_for(const provider::Selection& sel) {
     Probe p;
-    return provider::dispatch_stream(p.router(), sel, provider::Request{},
+    return provider::dispatch_stream(agtest::cap(), p.router(), sel, provider::Request{},
                                      provider::EventSink{});
 }
 
@@ -250,10 +250,18 @@ TEST_CASE("hosted models share agent prompt policy") {
     const auto chatgpt   = provider::parse_selection("chatgpt");
     const auto local     = provider::parse_selection("llama.cpp");
 
-    const std::string full = provider::system_prompt_for(anthropic);
+    const std::string full = provider::system_prompt_for(::agentty::IoAccess::grant(), anthropic);
     CHECK(!full.empty());
-    CHECK(provider::system_prompt_for(chatgpt) == full);
-    CHECK(provider::system_prompt_for(local) != full);
+    CHECK(provider::system_prompt_for(::agentty::IoAccess::grant(), chatgpt) == full);
+    CHECK(provider::system_prompt_for(::agentty::IoAccess::grant(), local) != full);
+
+    // #91: a llama.cpp/vLLM on ANOTHER machine you run is still a local
+    // model and must get the local prompt (with its action rules), not the
+    // hosted one. It used to need host == localhost exactly.
+    auto lan = local;
+    lan.openai_endpoint.host = "192.168.1.40";
+    CHECK(provider::system_prompt_for(::agentty::IoAccess::grant(), lan)
+          == provider::system_prompt_for(::agentty::IoAccess::grant(), local));
 }
 
 

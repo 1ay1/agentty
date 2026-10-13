@@ -1,4 +1,5 @@
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -7,7 +8,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -35,6 +35,8 @@
 #include "agentty/io/http.hpp"
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
+
+#include <maya/runtime.hpp>
 
 namespace agentty::provider::chatgpt {
 namespace {
@@ -112,7 +114,7 @@ PostResult post(std::string_view path, std::string body, bool json_body) {
     tos.connect = std::chrono::milliseconds(10'000);
     tos.total   = std::chrono::milliseconds(30'000);
 
-    auto resp = http::default_client().send(req, tos);
+    auto resp = http::default_client(::agentty::IoAccess::grant()).send(req, tos);
     if (!resp) { r.transport_error = resp.error().render(); return r; }
     r.status = resp->status;
     r.body   = std::move(resp->body);
@@ -261,16 +263,13 @@ poll_device_authorization(const DeviceAuthorization& device, int timeout_s,
     using clock = std::chrono::steady_clock;
     const auto timeout = std::chrono::seconds{std::max(timeout_s, 1)};
     const auto deadline = clock::now() + timeout;
-    const auto was_cancelled = [&] { return cancelled && cancelled(); };
+    const auto was_cancelled = [&] { return cancelled.stop_requested(); };
+    // The server's interval (or what is left of the deadline), cut short the
+    // moment the login is cancelled.
     const auto wait_for_next_poll = [&] {
-        const auto wake = std::min(deadline, clock::now()
-            + std::chrono::seconds{device.interval_s});
-        while (clock::now() < wake && !was_cancelled()) {
-            std::this_thread::sleep_for(std::min(
-                std::chrono::milliseconds{100},
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    wake - clock::now())));
-        }
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - clock::now());
+        (void)maya::delay_for(cancelled,
+            std::min<std::chrono::milliseconds>(std::chrono::seconds{device.interval_s}, left));
     };
 
     while (clock::now() < deadline) {
@@ -377,8 +376,30 @@ std::string query_param(std::string_view target, std::string_view key) {
     return {};
 }
 
-CallbackResult wait_for_callback(int timeout_s,
-                                 const CodexCancelProbe& cancelled) {
+// The sockets a cancel should shut down, so a blocked select() wakes at once.
+// -1 = none. Read by the cancel callback, written by the waiting thread.
+// Lock-free: the cancel callback runs on whichever thread requests the stop
+// (it cannot carry a capability), so it must not take a guarded. `busy`
+// counts callbacks mid-shutdown; the waiter clears the fds and then waits
+// for `busy` to drain before it closes a socket, so the number cannot be
+// reused between the callback's read and its shutdown. (All seq_cst.)
+struct WakeFds {
+    std::atomic<std::intptr_t> srv{-1};
+    std::atomic<std::intptr_t> cli{-1};
+    std::atomic<int>           busy{0};
+};
+
+void shut_read(std::intptr_t fd) noexcept {
+    if (fd < 0) return;
+#if defined(_WIN32)
+    ::shutdown(static_cast<SOCKET>(fd), SD_RECEIVE);
+#else
+    ::shutdown(static_cast<int>(fd), SHUT_RD);
+#endif
+}
+
+CallbackResult wait_for_callback_impl(int timeout_s, const CodexCancelProbe& cancelled,
+                                      WakeFds& wake) {
     CallbackResult out;
 #if defined(_WIN32)
     WSADATA wsa;
@@ -413,35 +434,62 @@ CallbackResult wait_for_callback(int timeout_s,
     }
     if (::listen(srv, 1) != 0) { close_sock(srv); out.error = "listen failed"; return out; }
 
-    // Poll accept with a deadline so a user who abandons the browser doesn't
-    // hang the process forever.
+    // Wait for the browser up to the deadline. A cancel shuts the sockets
+    // down, which wakes select() at once, so the waits can run to the deadline
+    // instead of waking every second to check.
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::seconds(timeout_s);
+    const auto drain = [&wake] {
+        while (wake.busy.load() != 0) std::this_thread::yield();
+    };
+    const auto arm = [&wake](sock_t a, sock_t b) {
+        wake.srv.store(static_cast<std::intptr_t>(a));
+        wake.cli.store(static_cast<std::intptr_t>(b));
+    };
+    const auto disarm = [&wake, &drain] {
+        wake.srv.store(-1);
+        wake.cli.store(-1);
+        drain();
+    };
+    arm(srv, kInvalid);
+    // A cancel that landed before arming would otherwise be missed.
+    if (cancelled.stop_requested()) shut_read(static_cast<std::intptr_t>(srv));
+    const auto until_deadline = [&] {
+        const auto left = std::chrono::duration_cast<std::chrono::microseconds>(
+            deadline - std::chrono::steady_clock::now());
+        timeval tv{};
+        if (left.count() > 0) {
+            tv.tv_sec  = static_cast<decltype(tv.tv_sec)>(left.count() / 1'000'000);
+            tv.tv_usec = static_cast<decltype(tv.tv_usec)>(left.count() % 1'000'000);
+        }
+        return tv;
+    };
     for (;;) {
-        const bool cancel = cancelled && cancelled();
+        const bool cancel = cancelled.stop_requested();
         if (cancel || std::chrono::steady_clock::now() >= deadline) {
-            close_sock(srv);
+            disarm(); close_sock(srv);
             out.error = cancel ? "login cancelled" : "login timed out";
             return out;
         }
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET(srv, &rfds);
-        timeval tv{1, 0};   // 1s slices so cancel/timeout stay responsive
+        timeval tv = until_deadline();
         const int ready = ::select(static_cast<int>(srv + 1), &rfds, nullptr, nullptr, &tv);
         if (ready <= 0) continue;
 
         sock_t cli = ::accept(srv, nullptr, nullptr);
         if (cli == kInvalid) continue;
+        arm(srv, cli);
 
         // Read through short select() slices so a local peer that connects and
         // stalls cannot pin port 1455 or defeat cancellation/the deadline.
         std::string req;
         char buf[4096];
         while (req.size() <= 16384) {
-            const bool read_cancel = cancelled && cancelled();
+            const bool read_cancel = cancelled.stop_requested();
             if (read_cancel || std::chrono::steady_clock::now() >= deadline) {
-                close_sock(cli);
+                disarm(); close_sock(cli);
                 close_sock(srv);
                 out.error = read_cancel ? "login cancelled" : "login timed out";
                 return out;
@@ -449,7 +497,7 @@ CallbackResult wait_for_callback(int timeout_s,
             fd_set cli_rfds;
             FD_ZERO(&cli_rfds);
             FD_SET(cli, &cli_rfds);
-            timeval cli_tv{1, 0};
+            timeval cli_tv = until_deadline();
             const int readable = ::select(static_cast<int>(cli + 1), &cli_rfds,
                                           nullptr, nullptr, &cli_tv);
             if (readable < 0) break;
@@ -488,12 +536,25 @@ CallbackResult wait_for_callback(int timeout_s,
                            "Content-Length: " + std::to_string(page.size())
                          + "\r\nConnection: close\r\n\r\n" + page;
         (void)::send(cli, resp.data(), static_cast<int>(resp.size()), 0);
-        close_sock(cli);
+        disarm(); close_sock(cli);
         close_sock(srv);
         if (!ok) out.error = err.empty() ? "no authorization code in callback"
                                          : ("authorization denied: " + err);
         return out;
     }
+}
+
+CallbackResult wait_for_callback(int timeout_s, const CodexCancelProbe& cancelled) {
+    WakeFds wake;
+    std::stop_callback on_cancel(cancelled, [&wake] {
+        // Announce ourselves before reading, so the waiter's disarm() waits
+        // for this shutdown before it closes (and frees) the fd number.
+        wake.busy.fetch_add(1);
+        shut_read(wake.srv.load());
+        shut_read(wake.cli.load());
+        wake.busy.fetch_sub(1);
+    });
+    return wait_for_callback_impl(timeout_s, cancelled, wake);
 }
 
 // ── Credential (de)serialization ───────────────────────────────────────────
@@ -519,15 +580,12 @@ CodexCredentials from_json(const json& j) {
     return c;
 }
 
-std::mutex& store_mutex() {
-    static std::mutex m;
-    return m;
-}
+// The creds file. Every read and write runs inside store().with; the
+// generation bumps on each save or clear, so a refresh can tell whether the
+// file changed under it while the network call was out.
+struct Store { std::uint64_t generation = 0; };
+maya::guarded<Store>& store() { static maya::guarded<Store> s; return s; }
 
-std::uint64_t& store_generation() {
-    static std::uint64_t generation = 0; // guarded by store_mutex()
-    return generation;
-}
 
 std::optional<CodexCredentials> load_codex_credentials_unlocked() {
     std::ifstream ifs(auth::config_dir() / "codex_credentials.json",
@@ -574,6 +632,13 @@ bool save_codex_credentials_unlocked(const CodexCredentials& c) {
     return true;
 }
 
+struct Loaded { std::optional<CodexCredentials> creds; std::uint64_t generation = 0; };
+Loaded load_with_generation(const maya::below<maya::leaf>& cap) {
+    return store().with(cap, [](Store& st) {
+        return Loaded{load_codex_credentials_unlocked(), st.generation};
+    });
+}
+
 } // namespace
 
 bool CodexCredentials::expired(std::int64_t skew_ms) const noexcept {
@@ -584,24 +649,28 @@ fs::path codex_credentials_path() {
     return auth::config_dir() / "codex_credentials.json";
 }
 
+// Lock-free: saves publish by atomic rename and clears by remove, so a reader
+// sees the old file, the new file, or none — never a torn one. The store
+// lock only orders writers (and the refresh's generation check).
 std::optional<CodexCredentials> load_codex_credentials() {
-    std::scoped_lock lock{store_mutex()};
     return load_codex_credentials_unlocked();
 }
 
-bool save_codex_credentials(const CodexCredentials& c) {
-    std::scoped_lock lock{store_mutex()};
-    if (!save_codex_credentials_unlocked(c)) return false;
-    ++store_generation();
-    return true;
+bool save_codex_credentials(const maya::below<maya::leaf>& cap, const CodexCredentials& c) {
+    return store().with(cap, [](Store& st, CodexCredentials creds) {
+        if (!save_codex_credentials_unlocked(creds)) return false;
+        ++st.generation;
+        return true;
+    }, c);
 }
 
-bool clear_codex_credentials() {
-    std::scoped_lock lock{store_mutex()};
-    std::error_code ec;
-    const bool ok = fs::remove(codex_credentials_path(), ec) || !ec;
-    if (ok) ++store_generation();
-    return ok;
+bool clear_codex_credentials(const maya::below<maya::leaf>& cap) {
+    return store().with(cap, [](Store& st) {
+        std::error_code ec;
+        const bool ok = fs::remove(codex_credentials_path(), ec) || !ec;
+        if (ok) ++st.generation;
+        return ok;
+    });
 }
 
 std::string codex_authorize_url(const auth::PkceVerifier& verifier,
@@ -681,7 +750,7 @@ bool codex_device_auth_preferred() noexcept {
 std::expected<CodexCredentials, OAuthError>
 codex_device_login(CodexDeviceCodeSink on_device_code, int timeout_s,
                    CodexCancelProbe cancelled) {
-    if (cancelled && cancelled()) {
+    if (cancelled.stop_requested()) {
         return std::unexpected(OAuthError{OAuthErrorKind::Network,
             "device-code login cancelled"});
     }
@@ -697,7 +766,7 @@ codex_device_login(CodexDeviceCodeSink on_device_code, int timeout_s,
 
     auto grant = poll_device_authorization(*device, timeout_s, cancelled);
     if (!grant) return std::unexpected(grant.error());
-    if (cancelled && cancelled()) {
+    if (cancelled.stop_requested()) {
         return std::unexpected(OAuthError{OAuthErrorKind::Network,
             "device-code login cancelled"});
     }
@@ -721,14 +790,14 @@ codex_device_login(CodexDeviceCodeSink on_device_code, int timeout_s,
 }
 
 std::expected<CodexCredentials, OAuthError>
-codex_login(int timeout_s, CodexDeviceCodeSink on_device_code,
+codex_login(Io io, int timeout_s, CodexDeviceCodeSink on_device_code,
             CodexCancelProbe cancelled) {
     if (codex_device_auth_preferred())
         return codex_device_login(std::move(on_device_code), timeout_s,
                                   std::move(cancelled));
 
-    auth::PkceVerifier verifier{auth::random_urlsafe(64)};
-    auth::OAuthState   state{auth::random_urlsafe(32)};
+    auth::PkceVerifier verifier{auth::random_urlsafe(io, 64)};
+    auth::OAuthState   state{auth::random_urlsafe(io, 32)};
 
     const std::string url = codex_authorize_url(verifier, state);
     auth::open_browser(url);
@@ -748,7 +817,7 @@ codex_login(int timeout_s, CodexDeviceCodeSink on_device_code,
         return std::unexpected(OAuthError{OAuthErrorKind::BadResponse,
             "state mismatch — re-run login"});
 
-    if (cancelled && cancelled()) {
+    if (cancelled.stop_requested()) {
         return std::unexpected(OAuthError{OAuthErrorKind::Network,
             "login cancelled"});
     }
@@ -756,19 +825,25 @@ codex_login(int timeout_s, CodexDeviceCodeSink on_device_code,
     return c;
 }
 
-std::optional<CodexCredentials> codex_fresh_credentials() {
-    // Serialize refresh network calls, but do not hold store_mutex while the
-    // network is in flight: sign-out and a new login must remain responsive.
-    static std::mutex refresh_mu;
-    std::scoped_lock refresh_lock{refresh_mu};
+namespace {
+std::optional<CodexCredentials>
+codex_fresh_credentials_locked(const maya::held<locks::auth_refresh>& cap);
+}
 
-    std::optional<CodexCredentials> loaded;
-    std::uint64_t source_generation = 0;
-    {
-        std::scoped_lock store_lock{store_mutex()};
-        loaded = load_codex_credentials_unlocked();
-        source_generation = store_generation();
-    }
+std::optional<CodexCredentials> codex_fresh_credentials(const locks::below_auth_refresh& cap) {
+    // One refresh at a time. The store is only held for file IO, never
+    // across the network call, so sign-out and a new login stay responsive.
+    // Lock order: refresh lane (auth_refresh), then store (leaf).
+    static maya::guarded<bool, locks::auth_refresh> lane;
+    return lane.with(cap, [](const maya::held<locks::auth_refresh>& h, bool&) {
+        return codex_fresh_credentials_locked(h);
+    });
+}
+
+namespace {
+std::optional<CodexCredentials>
+codex_fresh_credentials_locked(const maya::held<locks::auth_refresh>& cap) {
+    auto [loaded, source_generation] = load_with_generation(cap);
     if (!loaded) return std::nullopt;
     if (!loaded->expired(/*skew_ms=*/60'000)) return loaded;
     if (loaded->refresh_token.empty()) return loaded;
@@ -780,12 +855,8 @@ std::optional<CodexCredentials> codex_fresh_credentials() {
     // concurrent refreshes mutually invalidate and spin the refresh loop).
     auth::CrossProcessFileLock xlock(codex_credentials_path());
     if (xlock.held()) {
-        std::optional<CodexCredentials> disk;
-        {
-            std::scoped_lock store_lock{store_mutex()};
-            disk = load_codex_credentials_unlocked();
-            source_generation = store_generation();
-        }
+        auto [disk, gen] = load_with_generation(cap);
+        source_generation = gen;
         if (!disk) return loaded;
         if (!disk->expired(/*skew_ms=*/60'000)) return disk;  // a peer refreshed
         if (disk->refresh_token.empty()) return disk;
@@ -795,20 +866,23 @@ std::optional<CodexCredentials> codex_fresh_credentials() {
     auto refreshed = codex_refresh(*loaded);
     if (!refreshed) return loaded;
 
-    std::scoped_lock store_lock{store_mutex()};
-    auto current = load_codex_credentials_unlocked();
-    const bool source_unchanged = current
-        && current->access_token == loaded->access_token
-        && current->refresh_token == loaded->refresh_token
-        && current->account_id == loaded->account_id;
-    if (store_generation() != source_generation || !source_unchanged) {
-        // Sign-out, account activation, another process, or a new login won
-        // the race. Never resurrect/overwrite it from the stale snapshot.
-        return current;
-    }
-    if (!save_codex_credentials_unlocked(*refreshed)) return loaded;
-    ++store_generation();
-    return *refreshed;
+    return store().with(cap, [](Store& st, std::uint64_t source_gen, CodexCredentials source,
+                           CodexCredentials fresh) -> std::optional<CodexCredentials> {
+        auto current = load_codex_credentials_unlocked();
+        const bool source_unchanged = current
+            && current->access_token == source.access_token
+            && current->refresh_token == source.refresh_token
+            && current->account_id == source.account_id;
+        if (st.generation != source_gen || !source_unchanged) {
+            // Sign-out, account activation, another process, or a new login
+            // won the race. Never resurrect/overwrite it from the stale snapshot.
+            return current;
+        }
+        if (!save_codex_credentials_unlocked(fresh)) return source;
+        ++st.generation;
+        return fresh;
+    }, source_generation, *loaded, *refreshed);
 }
+} // namespace
 
 } // namespace agentty::provider::chatgpt

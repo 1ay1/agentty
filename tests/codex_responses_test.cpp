@@ -41,6 +41,39 @@ static const Leaf* leaf(const Msg& m) {
 }
 
 // ── 1. Request body ─────────────────────────────────────────────────────────
+// ── 1b. Every function_call is paired, even one that never finished ──────────
+// The Responses API 400s "No tool output found for function call" when a
+// function_call has no function_call_output, and the history replays every
+// turn, so one cancelled call used to wedge the thread for good.
+TEST_CASE("unfinished call is paired with a synthetic output") {
+    provider::Request req;
+    req.model = "gpt-5-codex";
+    Message u; u.role = Role::User; u.text = "go";
+    req.messages.push_back(u);
+    Message a; a.role = Role::Assistant;
+    for (int st = 0; st < 3; ++st) {
+        ToolUse tc;
+        tc.id = ToolCallId{"call_" + std::to_string(st)};
+        tc.name = ToolName{"read"}; tc.args = json{{"path", "a"}};
+        if (st == 0) tc.status = ToolUse::Done{.output = "ok"};
+        else if (st == 1) tc.status = ToolUse::Pending{};
+        else tc.status = ToolUse::Running{};
+        a.tool_calls.push_back(tc);
+    }
+    req.messages.push_back(a);
+    const json body = cc::build_body_for_test(req);
+    std::map<std::string, int> calls, outputs;
+    for (const auto& it : body["input"]) {
+        if (it.value("type", "") == "function_call") ++calls[it["call_id"].get<std::string>()];
+        if (it.value("type", "") == "function_call_output") ++outputs[it["call_id"].get<std::string>()];
+    }
+    CHECK(calls.size() == 3);
+    for (const auto& [id, n] : calls) {
+        INFO(id);
+        CHECK(outputs[id] == 1);          // exactly one output per call
+    }
+}
+
 TEST_CASE("build body") {
     provider::Request req;
     req.model         = "gpt-5-codex";
@@ -222,6 +255,60 @@ TEST_CASE("sse parallel tool calls are id addressed") {
     CHECK(ends["call_2"] == 1);
 }
 
+TEST_CASE("sse an unaddressed delta with several calls open is not guessed") {
+    // The Responses dialect normally addresses every argument event with
+    // item_id. When it is ABSENT the codec fell back to `latest_tool_item`,
+    // which sounds ordered and is not: it is refreshed from
+    // `*open_tool_items.begin()` on an unordered_set, i.e. whichever item
+    // the hash happens to yield.
+    //
+    // With two calls open that is a coin flip, and the losing side appends
+    // one call's arguments to the other. The result still parses, so the
+    // corruption is silent and reaches a tool invocation — the same failure
+    // the chat decoder's ToolCallTracker refuses to commit by returning
+    // Ambiguous instead of picking.
+    std::vector<std::string> sse = {
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"edit"}})",
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"shell"}})",
+        // No item_id, two calls open — unattributable.
+        R"({"type":"response.function_call_arguments.delta","delta":"{\"path\":\"x\"}"})",
+        R"({"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1"}})",
+        R"({"type":"response.output_item.done","item":{"type":"function_call","id":"fc_2"}})",
+        R"({"type":"response.completed","response":{"usage":{}}})",
+    };
+
+    std::map<std::string, std::string> args;
+    for (const auto& m : cc::parse_sse_for_test(sse))
+        if (auto* d = leaf<StreamToolUseDelta>(m))
+            args[d->id.value] += d->partial_json;
+
+    // Neither call may receive the orphaned fragment. Dropping it is the
+    // honest outcome: the turn fails visibly on a missing field rather than
+    // running `edit` with a path that belonged to `shell`.
+    CHECK(args["call_1"].empty());
+    CHECK(args["call_2"].empty());
+}
+
+TEST_CASE("sse an unaddressed delta with ONE call open still lands") {
+    // The converse, and why this cannot simply be "always require item_id":
+    // with exactly one call in flight there is no ambiguity, and older
+    // servers legitimately omit the field. Refusing here would break them
+    // for no safety gain.
+    std::vector<std::string> sse = {
+        R"({"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"edit"}})",
+        R"({"type":"response.function_call_arguments.delta","delta":"{\"path\":\"x\"}"})",
+        R"({"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1"}})",
+        R"({"type":"response.completed","response":{"usage":{}}})",
+    };
+
+    std::map<std::string, std::string> args;
+    for (const auto& m : cc::parse_sse_for_test(sse))
+        if (auto* d = leaf<StreamToolUseDelta>(m))
+            args[d->id.value] += d->partial_json;
+
+    CHECK(json::parse(args["call_1"])["path"] == "x");
+}
+
 TEST_CASE("sse reasoning") {
     std::vector<std::string> sse = {
         R"({"type":"response.reasoning_summary_text.delta","delta":"thinking…"})",
@@ -275,6 +362,7 @@ TEST_CASE("build input replays reasoning") {
 
     Message a; a.role = Role::Assistant; a.text = "";
     a.reasoning_encrypted = "BLOB_A\nBLOB_B";   // two items in one turn
+    a.reasoning_site      = "chatgpt";          // minted by THIS backend
     ToolUse tc;
     tc.id = ToolCallId{"call_1"}; tc.name = ToolName{"shell"};
     tc.args = json{{"command", "ls"}};
@@ -294,6 +382,50 @@ TEST_CASE("build input replays reasoning") {
     CHECK(in[2]["encrypted_content"] == "BLOB_B");
     CHECK(in[3]["type"] == "function_call");      // reasoning precedes the call
     CHECK(in[4]["type"] == "function_call_output");
+}
+
+TEST_CASE("build input never replays another site's reasoning") {
+    // Encrypted reasoning is opaque AND account-scoped: only the backend
+    // that minted it can decrypt it. Sending a Copilot blob to ChatGPT is
+    // not a field the server ignores — it is a 400 that fails the WHOLE
+    // request ("Encrypted content item_id did not match the target item
+    // id", openclaw#72602, github/copilot-sdk#615).
+    //
+    // So the replay is gated on the minting site, and this pins the three
+    // ways the gate has to hold. Nothing else in the suite would notice:
+    // a wrongly-replayed blob produces a perfectly well-formed request.
+    const auto input_of = [](const Message& a) {
+        provider::Request req;
+        req.model = "gpt-5-codex";
+        Message u; u.role = Role::User; u.text = "go";
+        req.messages.push_back(u);
+        req.messages.push_back(a);
+        return cc::build_body_for_test(req)["input"];
+    };
+    const auto has_reasoning = [](const json& in) {
+        for (const auto& item : in)
+            if (item.value("type", "") == "reasoning") return true;
+        return false;
+    };
+
+    Message a; a.role = Role::Assistant; a.text = "done";
+    a.reasoning_encrypted = "BLOB";
+
+    // 1. Minted by THIS site — replayed, which is the whole feature.
+    a.reasoning_site = "chatgpt";
+    CHECK(has_reasoning(input_of(a)));
+
+    // 2. Minted by ANOTHER site — dropped. This is the user switching
+    //    provider with ^P mid-thread, which is a supported thing to do.
+    a.reasoning_site = "copilot";
+    CHECK(!has_reasoning(input_of(a)));
+
+    // 3. UNTAGGED — also dropped. Threads written before the tag existed
+    //    reload with an empty site, and "we don't know who minted this"
+    //    has to fail closed. Losing chain-of-thought continuity on an old
+    //    thread costs nothing visible; a 400 costs the turn.
+    a.reasoning_site.clear();
+    CHECK(!has_reasoning(input_of(a)));
 }
 
 TEST_CASE("sse error") {
@@ -419,3 +551,63 @@ TEST_CASE("stale tool result is budget capped") {
     CHECK(old_output.size() < 8192);         // tight head+tail budget
 }
 
+
+// ── The reasoning toggle must work on EVERY dialect ─────────────────────
+//
+// Reported against Copilot: turning reasoning off in the model panel still
+// showed the summary whenever a gpt-* model was selected, while Claude
+// models respected it. The split is not the vendor — it is the DIALECT.
+// Copilot routes gpt-* over Responses and claude-* over Anthropic, and of
+// the four transports only this codec was emitting reasoning
+// unconditionally. The toggle was not broken; it was unimplemented on one
+// of four paths, which is worse because it looks arbitrary.
+TEST_CASE("sse reasoning is suppressed when the user hides it") {
+    std::vector<std::string> sse = {
+        R"({"type":"response.output_item.added","item":{"type":"reasoning","id":"r1"}})",
+        R"({"type":"response.reasoning_summary_part.added","item_id":"r1"})",
+        R"({"type":"response.reasoning_summary_text.delta","delta":"pondering…"})",
+        R"({"type":"response.output_text.delta","delta":"the answer"})",
+        R"({"type":"response.completed","response":{"usage":{}}})",
+    };
+
+    // Visible: the summary text reaches the reducer.
+    std::string shown;
+    for (const auto& m : cc::parse_sse_for_test(sse, /*show_reasoning=*/true))
+        if (auto* t = leaf<StreamThinkingDelta>(m)) shown += t->text;
+    CHECK(shown == "pondering…");
+
+    // Hidden: no reasoning TEXT is stored…
+    std::string hidden;
+    int heartbeats = 0, boundaries = 0;
+    for (const auto& m : cc::parse_sse_for_test(sse, /*show_reasoning=*/false))
+        if (auto* t = leaf<StreamThinkingDelta>(m)) {
+            hidden += t->text;
+            ++heartbeats;
+            if (t->block_boundary) ++boundaries;
+        }
+    CHECK(hidden.empty());
+
+    // …but the event still fires, because it is the turn's LIVENESS signal:
+    // the reducer resets last_event_at and the retry counter on it. Swallow
+    // it entirely and a long silent reasoning phase looks like a stalled
+    // stream and gets retried.
+    CHECK(heartbeats > 0);
+    // No paragraph boundaries though — a boundary with no text around it
+    // would open an empty thinking block in the transcript.
+    CHECK(boundaries == 0);
+}
+
+TEST_CASE("sse hidden reasoning does not disturb the answer") {
+    // The regression guard: suppressing reasoning must not touch anything
+    // else on the stream.
+    std::vector<std::string> sse = {
+        R"({"type":"response.reasoning_summary_text.delta","delta":"think"})",
+        R"({"type":"response.output_text.delta","delta":"hello "})",
+        R"({"type":"response.output_text.delta","delta":"world"})",
+        R"({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}})",
+    };
+    std::string text;
+    for (const auto& m : cc::parse_sse_for_test(sse, /*show_reasoning=*/false))
+        if (auto* t = leaf<StreamTextDelta>(m)) text += t->text;
+    CHECK(text == "hello world");
+}

@@ -101,6 +101,39 @@ enum class Dialect : std::uint8_t { Agentty, Agents, Claude };
     return ".agentty";
 }
 
+// ── Dialect BREADTH: a per-feature choice, not a global ───────────────────
+//
+// Which dialects a feature reads is a property OF THE FEATURE, because it
+// answers a question only the feature can: do the same bytes work in both
+// tools? A skill is markdown with frontmatter and Claude reads the same
+// file, so reading `.claude/skills/` is free compatibility. `mcp.json` is
+// not an `.agents`/`.claude` convention at all — those tools do not put that
+// file there, and its schema is ours.
+//
+// This used to be ONE array inside plan(), shared by every caller, so the
+// ladder always had three dialects per locus and MCP filtered the extras
+// back out downstream (`if (src.dialect != Dialect::Agentty) continue;`).
+// Two decision sites for one decision: plan() reported six sources where
+// three were ever read, so anything built on plan() — a `config where`
+// command, a doc, a test — described behaviour that did not exist. Adding a
+// dialect LOOKED like it widened MCP and silently did nothing, because the
+// downstream filter still dropped it.
+//
+// Moving the choice onto Layout collapses that to one site. It also flips
+// the default to the safe end: a feature now gets `.agentty` ONLY and must
+// opt INTO interop, where before it got all three and had to remember to
+// narrow. Forgetting now fails closed — it reads one fewer directory,
+// instead of reading a cloned repo's `.claude/` by accident.
+
+// Native only. The default: a format nobody else writes.
+inline constexpr Dialect kNativeOnly[] = {Dialect::Agentty};
+
+// Native plus the interop conventions, in shadow order (native wins).
+// For PORTABLE content — skills, agents, commands — where the same file is
+// valid in another tool and reading theirs is drop-in compatibility.
+inline constexpr Dialect kPortable[] = {
+    Dialect::Agentty, Dialect::Agents, Dialect::Claude};
+
 // ── Source: a resolved, tagged origin — the carrier of the fold ───────────
 // A value that knows its own provenance. Constructed ONLY by the resolver
 // (via plan()), so you cannot fabricate configuration with no source: the
@@ -169,6 +202,16 @@ struct Layout {
     // An optional Explicit-locus override: if this env var names an existing
     // file, it becomes the highest-precedence source. Empty ⇒ no escape hatch.
     std::string_view explicit_env = {};
+
+    // WHICH dialects this feature reads, in shadow order. Defaults to native
+    // only (kNativeOnly) — see the note above dir_name(): a dialect earns a
+    // slot here only when the SAME BYTES work in both tools. Portable content
+    // (skills, agents, commands) passes kPortable; everything whose format we
+    // own leaves this alone.
+    //
+    // plan() emits exactly these and nothing else, so the ladder a caller can
+    // print is the ladder it reads. No consumer filters afterward.
+    std::span<const Dialect> dialects = kNativeOnly;
 };
 
 // ── Trust: first-class, bound to CONTENT — never inferred from Locus ──────
@@ -313,12 +356,21 @@ resolve_union(const Layout& layout, const Env& env, Key&& key, Load&& load) {
 //   2. skills/agents/commands — union. The four hand-written root arrays
 //                 collapse into plan()+resolve_union; shadow semantics are
 //                 preserved by the first-key-wins rule.
-//   3. MCP      — LAST, and the only one that GAINS behaviour: switch to
-//                 resolve_union (merge project+user servers), route edits to
-//                 item.source.base (fixes the wrong-file bug), and replace the
-//                 AGENTTY_MCP_ALLOW_PROJECT env gate with trust_of()+Approvals
-//                 (fixes the MCPoison-class exposure). Land it only once (1)
-//                 and (2) have shaken out the algebra in production.
+//   3. MCP      — LAST, and the only one that GAINED behaviour (done).
+//                 resolve_union merges project+user servers, edits route to
+//                 item.source.base (fixes the wrong-file bug), and the
+//                 AGENTTY_MCP_ALLOW_PROJECT env gate is now only a
+//                 back-compat pre-check in front of trust_of()+Approvals
+//                 (fixes the MCPoison-class exposure).
+//
+//                 bridge.cpp's own resolve_config() — a SECOND ladder that
+//                 returned one winning file — is deleted. It had disagreed
+//                 with plan() in the worst direction: a project mcp.json
+//                 silently stopped every USER server from running while
+//                 every surface still listed them. The `bool project_local`
+//                 it threaded through four functions is gone too; that was
+//                 provenance rebuilt by hand when Source::locus already
+//                 carried it.
 //
 // Locus::Local ships as a VALUE now (the algebra is complete + future-proof)
 // but is wired into no resolver until a concrete second consumer appears —

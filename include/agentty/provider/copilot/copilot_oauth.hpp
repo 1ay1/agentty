@@ -16,17 +16,42 @@
 // a refresh_token, Copilot uses the durable ghu_ token as the refresh source.
 
 #include <cstdint>
+#include <cstdlib>
 #include <expected>
 #include <functional>
+#include <stop_token>
 #include <optional>
 #include <string>
 #include <string_view>
 
 #include "agentty/auth/auth.hpp"   // OAuthError
+#include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 namespace agentty::provider::copilot {
 
 using auth::OAuthError;
+
+// ── Editor/plugin identity presented to Copilot ───────────────────────────
+// Copilot keys its per-account MODEL ROLLOUT to the (editor × plugin × api)
+// version it sees, not just the account — so a stale pin makes newer models
+// (e.g. a just-shipped Claude/GPT) absent from the Auto session even though the
+// same login sees them in an up-to-date VS Code. These are overridable at
+// runtime so you can mirror your installed VS Code Copilot Chat EXACTLY (Help →
+// About for the vscode/<ver>; Extensions → GitHub Copilot Chat for the
+// copilot-chat/<ver>) without recompiling. Defaults track a recent VS Code.
+[[nodiscard]] inline const char* client_editor_version() {
+    if (const char* e = std::getenv("AGENTTY_COPILOT_EDITOR_VERSION"); e && *e) return e;
+    return "vscode/1.105.1";
+}
+[[nodiscard]] inline const char* client_plugin_version() {
+    if (const char* e = std::getenv("AGENTTY_COPILOT_PLUGIN_VERSION"); e && *e) return e;
+    return "copilot-chat/0.32.0";
+}
+[[nodiscard]] inline const char* client_user_agent() {
+    if (const char* e = std::getenv("AGENTTY_COPILOT_USER_AGENT"); e && *e) return e;
+    return "GitHubCopilotChat/0.32.0";
+}
 
 // The durable GitHub credential from the device flow. This is what `agentty
 // login → GitHub Copilot` persists; it does not expire on its own (revocation
@@ -63,13 +88,15 @@ struct DeviceCode {
     int         expires_in = 900;
 };
 using DeviceCodeSink = std::function<void(const DeviceCode&)>;
-using CancelProbe    = std::function<bool()>;
+// Login stops when this is requested (Esc, a newer attempt, shutdown).
+using CancelProbe    = std::stop_token;
 
 // Run the full device flow: request a code, invoke `on_device_code` so the host
 // can display it (+ open the browser), then poll until the user authorises.
 // Persists the resulting GithubToken on success. Blocking; honours `cancelled`.
 [[nodiscard]] std::expected<GithubToken, OAuthError>
-login(int timeout_s, DeviceCodeSink on_device_code, CancelProbe cancelled);
+login(const maya::below<maya::leaf>&, int timeout_s, DeviceCodeSink on_device_code,
+      CancelProbe cancelled);
 
 // The account's real plan + quota entitlement, from GET
 // api.github.com/copilot_internal/user — the AUTHORITATIVE source for which
@@ -88,7 +115,8 @@ struct Entitlement {
 // Fetch (and briefly cache) the account entitlement. Best-effort: on any
 // failure returns {known=false}, and callers should degrade PERMISSIVELY (show
 // everything) rather than hide models on a transient network blip.
-[[nodiscard]] Entitlement account_entitlement();
+// Lock order: takes only leaves (its cache, the creds store).
+[[nodiscard]] Entitlement account_entitlement(const maya::below<maya::leaf>&);
 
 // ── Auto model selection ────────────────────────────────────────────
 // GitHub's "Auto" mode (POST {api}/models/session) is how Free/Limited plans
@@ -109,28 +137,39 @@ struct AutoSession {
     }
 };
 // The CAPI api-version the /models/session + auto-routed chat calls require.
+// Overridable (AGENTTY_COPILOT_API_VERSION) to match a newer VS Code Copilot
+// Chat, since the api-version also gates which models the Auto session lists.
 inline constexpr const char* kAutoApiVersion = "2026-08-01";
+[[nodiscard]] inline const char* client_api_version() {
+    if (const char* e = std::getenv("AGENTTY_COPILOT_API_VERSION"); e && *e) return e;
+    return kAutoApiVersion;
+}
 
 // Return a valid Auto session, fetching/refreshing as needed. nullopt when not
 // signed in or the endpoint is unavailable. Single-flight cached.
-[[nodiscard]] std::optional<AutoSession> auto_session();
-void invalidate_auto_session();
+// Lock order: takes copilot.auto_session, then (inside) auth.refresh and the
+// creds store. Callable holding nothing ranked at or above copilot_auto.
+[[nodiscard]] std::optional<AutoSession> auto_session(const locks::below_copilot_auto&);
+void invalidate_auto_session(const locks::below_copilot_auto&);
 
 // ── Persistence ──────────────────────────────────────────────────────────
-[[nodiscard]] std::optional<GithubToken> load_github_token();
-bool save_github_token(const GithubToken&);
-bool clear_credentials();                 // wipes both the ghu_ token and cache
+// The creds store is a leaf lock.
+[[nodiscard]] std::optional<GithubToken> load_github_token(const maya::below<maya::leaf>&);
+bool save_github_token(const maya::below<maya::leaf>&, const GithubToken&);
+bool clear_credentials(Io, const maya::below<maya::leaf>&);   // wipes the ghu_ token and cache
 [[nodiscard]] std::filesystem::path credentials_path();
 
 // True when a GitHub token is on disk (i.e. the user has signed in). Cheap; no
 // network. The proxy token may still need a first exchange.
-[[nodiscard]] bool signed_in();
+[[nodiscard]] bool signed_in();   // lock-free; safe from views
 
 // ── Token exchange / refresh ─────────────────────────────────────────────
 // Return a VALID Copilot proxy token, exchanging or refreshing from the stored
 // ghu_ token as needed. Single-flight + cross-process de-duplicated. nullopt
 // when not signed in or the exchange fails (chat disabled, network, revoked).
-[[nodiscard]] std::optional<CopilotToken> fresh_token();
+// Lock order: takes auth.refresh, then the creds store (leaf). Callable
+// holding nothing ranked at or above auth_refresh.
+[[nodiscard]] std::optional<CopilotToken> fresh_token(const locks::below_auth_refresh&);
 
 // Force a re-exchange on the next fresh_token() (called after a 401 from the
 // inference endpoint, in case the cached proxy token was revoked early).
@@ -142,12 +181,12 @@ void invalidate_cached_token();
 // reliable catalog signal (policy.state "enabled" still 400s on free tiers). So
 // we LEARN: when a turn 400s as unsupported, record the model id; list_models
 // then demotes it out of the usable set. Persisted per config dir.
-void note_unsupported_model(const std::string& model_id);
-[[nodiscard]] bool is_unsupported_model(const std::string& model_id);
+void note_unsupported_model(const maya::below<maya::leaf>&, const std::string& model_id);
+[[nodiscard]] bool is_unsupported_model(const maya::below<maya::leaf>&, const std::string& model_id);
 // Also record models that DID work, so a known-good one is never demoted by a
 // stale/transient 400.
-void note_supported_model(const std::string& model_id);
-[[nodiscard]] bool is_supported_model(const std::string& model_id);
+void note_supported_model(const maya::below<maya::leaf>&, const std::string& model_id);
+[[nodiscard]] bool is_supported_model(const maya::below<maya::leaf>&, const std::string& model_id);
 
 // ── Pure helpers (exposed for tests) ─────────────────────────────────────
 // Parse the `/copilot_internal/v2/token` success JSON into a CopilotToken,

@@ -1,21 +1,25 @@
 #pragma once
 // agentty::app::cmd — factories for the side-effecting commands the runtime issues.
 //
-// These wrap maya's Cmd<Msg> with agentty-specific glue: kicking off a streaming
+// These wrap maya's Cmd with agentty-specific glue: kicking off a streaming
 // turn, executing a tool, advancing pending tool execution after a turn ends.
 
 #include <maya/maya.hpp>
 
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "agentty/runtime/model.hpp"
+#include "agentty/runtime/cmd.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/io/http.hpp"   // http::CancelTokenPtr (run_tool)
+#include "agentty/provider/selection.hpp"  // provider::Selection (fetch_models)
+#include "agentty/tool/plugin.hpp"         // plugin::ServerSpec (edit_plugin)
 
 namespace agentty::app::cmd {
 
@@ -74,7 +78,7 @@ struct TurnRouting {
 // Mutates `m` to install a fresh cancel token in m.stream.cancel, then
 // dispatches the streaming task on a worker. Esc (CancelStream) flips the
 // token to abort the in-flight stream.
-[[nodiscard]] maya::Cmd<Msg> launch_stream(Model& m);
+[[nodiscard]] Cmd launch_stream(Model& m);
 
 // Build the Smart Mode ROUTING CARD for the turn about to launch, or
 // std::nullopt when orchestration is off (nothing to show). A synthetic,
@@ -96,21 +100,47 @@ struct TurnRouting {
 // immediately after every compaction.
 [[nodiscard]] std::vector<Message> wire_messages_for(const Thread& t);
 
+// The request that asks the model to summarise `t` for /compact: the wire
+// view (trimmed to fit `context_max`) plus the default summarisation prompt.
+[[nodiscard]] std::vector<Message> compaction_request_messages(const Thread& t,
+                                                              int context_max);
+// The summary text out of the model's reply (strips <summary> tags).
+[[nodiscard]] std::string summary_from_reply(std::string_view reply);
+
+// Wire-only trim to fit `ceiling` estimated tokens. Keeps the head, the
+// latest User message and the newest message; drops the rest oldest-first,
+// and the head only as a last resort. The result always opens with a User.
+void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling);
+
 // Bytes-based prefix token estimate computed against the wire view
 // (i.e. with compaction substitution applied). Same approximation as
 // `estimate_prefix_tokens(Thread)` but the right denominator for
 // auto-compaction logic and the context-gauge.
 [[nodiscard]] int estimate_wire_tokens(const Thread& t);
 
-[[nodiscard]] maya::Cmd<Msg> run_tool(ToolCallId id,
+// Fresh, process-unique tag for one tool dispatch. Stamp it on
+// ToolUse::Running and pass the same value to run_tool.
+[[nodiscard]] std::uint64_t next_tool_exec_seq() noexcept;
+
+[[nodiscard]] Cmd run_tool(ToolCallId id,
                                       ToolName tool_name,
                                       nlohmann::json args,
-                                      http::CancelTokenPtr cancel = {});
+                                      http::CancelTokenPtr cancel = {},
+                                      std::uint64_t exec_seq = 0,
+                                      // Fingerprint of the definition consent
+                                      // was given for; re-checked immediately
+                                      // before execute. 0 skips the check.
+                                      std::uint64_t approved_def_hash = 0,
+                                      // Skills whose bodies the model can
+                                      // already see, from
+                                      // skills::active_in(visible_text(thread)).
+                                      // The `skill` tool reads it to dedupe.
+                                      std::vector<std::string> active_skills = {});
 
 // Inspect the latest assistant turn and either fire off pending tool calls,
 // request permission, or kick the follow-up stream once tool results are in.
 // Mutates `m` (sets phase, may push a placeholder assistant message).
-[[nodiscard]] maya::Cmd<Msg> kick_pending_tools(Model& m);
+[[nodiscard]] Cmd kick_pending_tools(Model& m);
 
 // Resolve every PENDING *salvaged* tool call in the back assistant message
 // that byte-duplicates a call already terminal earlier in the same agent
@@ -150,57 +180,90 @@ struct SchedDecision {
 //
 // Given the full message history of the CURRENT agent turn (the run since the
 // last real User message), returns a non-empty nudge string when the loop
-// should be force-stopped, or std::nullopt to keep going. Two triggers:
+// should be force-stopped, or std::nullopt to keep going. Two triggers, both
+// keyed on REPETITION — the same call with byte-identical arguments — because
+// that is what distinguishes a stuck model from a busy one:
 //   (1) REPEAT: the same (tool, args) call appears >= kRepeatLimit times and
 //       its results were failures — the model is stuck re-trying a dead call.
 //       ALWAYS enforced (every production tool does this: aider's
 //       max_reflections, MindStudio's "2–3 attempts then stop"). A capable
 //       model that genuinely loops on a dead call benefits from it too.
-//   (2) RUNAWAY: the run has made >= kMaxToolTurns assistant tool-call turns
-//       without ever producing a plain-text answer — unbounded spend. Gated
-//       behind `enforce_step_cap`. No production tool applies a hard
-//       successful-step cap to a CAPABLE model by default: Claude Code's
-//       max_turns is UNLIMITED by default, aider never step-caps. So the
-//       caller passes enforce_step_cap=true ONLY for weak local models
-//       (qwen2.5-coder/codellama) and false for Claude / capable hosted
-//       models, which run until they finish on their own.
+//   (2) SUCCESS-REPEAT: the same (tool, args) call SUCCEEDS >= 6 times in one
+//       run — a model re-reading the same path with identical arguments six
+//       times and still not speaking is not going to converge on the seventh.
+//       Also always enforced.
+//
+// There is deliberately NO step cap. A raw count of tool turns is not evidence
+// of anything: a legitimate search → read → edit → verify run across a large
+// codebase spends dozens of distinct, productive steps. Claude Code's
+// max_turns is unlimited by default and aider never step-caps, for the same
+// reason. The old one was additionally gated on a model-id heuristic, so the
+// identical transcript stopped on a local model and ran fine on Claude.
 // The returned text is surfaced to the model as the final assistant turn so
 // it can recover gracefully (and the user sees why the loop stopped).
 struct LoopBreak {
     std::string reason;     // user/model-facing explanation
 };
 [[nodiscard]] std::optional<LoopBreak> agent_loop_should_break(
-    const std::vector<Message>& messages,
-    bool enforce_step_cap = true);
+    const std::vector<Message>& messages);
 
-[[nodiscard]] maya::Cmd<Msg> fetch_models();
+// Fetch the model catalog.
+//
+// The three-argument form takes what the worker needs INSTEAD of reaching
+// for it: the body used to call provider::active(), auth_snapshot() and
+// active_provider_id() from a worker thread, racing the UI thread's
+// provider switch — which is why auth_snapshot() needs a mutex at all.
+// jaal's rule for a task body is that everything it needs is an argument
+// (docs/concurrency.md §4.6), and a reducer on the UI thread simply knows
+// these values.
+//
+// `for_provider` is the staleness stamp the reducer compares at DELIVERY
+// time, so a catalog that lands after a switch is dropped instead of
+// installed against the wrong provider.
+//
+// Declared with the Selection itself: provider::active() already returns a
+// by-value snapshot taken under the selection mutex, so handing one to a
+// worker is exactly what it is for.
+// The credential is resolved on the worker, for `sel`.
+[[nodiscard]] Cmd fetch_models(provider::Selection sel,
+                                          std::string        for_provider);
+
+// The common case: fetch for the MODEL's active provider. Resolves the
+// arguments on the calling (UI) thread from `m` and forwards. Call this from a
+// reducer; the overload above is for a caller that already has them.
+[[nodiscard]] Cmd fetch_models(const Model& m);
 
 // Fetch a SPECIFIC provider's catalog without switching to it (fused picker
 // fan-out). Dispatches FusedCatalogLoaded{spec, models, ok}.
-[[nodiscard]] maya::Cmd<Msg> fetch_models_for(std::string spec);
+[[nodiscard]] Cmd fetch_models_for(std::string spec);
+
+// Re-measure the live context window of `model_id` on the active provider
+// when it is a local OpenAI-compatible endpoint (llama.cpp router, LM Studio,
+// Ollama). Dispatches ModelWindowProbed. A no-op Cmd for hosted providers.
+[[nodiscard]] Cmd probe_model_window(const Model& m, std::string model_id);
 
 // ── Self-update ─────────────────────────────────────────────
 // Background release check (24h-cached, never blocks a frame): dispatches
 // UpdateCheckDone. check_for_update() is safe to fire on every launch.
-[[nodiscard]] maya::Cmd<Msg> check_for_update();
-// Background models.dev capability-snapshot refresh (24h disk cache); pushes
-// declared reasoning + exact effort enums into the catalog registries. Fire
-// and forget — dispatches no Msg (registries are read at render/wire time).
-[[nodiscard]] maya::Cmd<Msg> refresh_modelsdev();
+[[nodiscard]] Cmd check_for_update();
 // Download + atomically install the given version; dispatches UpdateApplied.
-[[nodiscard]] maya::Cmd<Msg> perform_self_update(std::string version);
+[[nodiscard]] Cmd perform_self_update(std::string version);
 
 // ── In-app login modal ──────────────────────────────────────────────────
 // Fire-and-forget: shells out to the platform browser opener. Wrapped in
 // Cmd::task so a wedged xdg-open / open / ShellExecute can never block
 // the reducer tick.
-[[nodiscard]] maya::Cmd<Msg> open_browser_async(std::string url);
+[[nodiscard]] Cmd open_browser_async(std::string url);
+
+// Mint a PKCE verifier + state and the authorize URL for an Anthropic OAuth
+// login; replies with LoginOAuthMinted.
+[[nodiscard]] Cmd mint_oauth_login();
 
 // Run the OAuth code-exchange HTTP POST off the UI thread. Dispatches
 // LoginExchanged{result} on completion regardless of success/failure —
 // the reducer matches on `expected<OAuthToken, OAuthError>` to decide
 // whether to install creds or transition to Failed.
-[[nodiscard]] maya::Cmd<Msg> oauth_exchange(auth::OAuthCode    code,
+[[nodiscard]] Cmd oauth_exchange(auth::OAuthCode    code,
                                             auth::PkceVerifier verifier,
                                             auth::OAuthState   state);
 
@@ -211,7 +274,17 @@ struct LoopBreak {
 // sees a sticky "refreshing OAuth token…" toast in the bottom row
 // instead of the old pre-TUI stderr line, and startup is no longer
 // gated on the network round trip.
-[[nodiscard]] maya::Cmd<Msg> refresh_oauth(std::string refresh_token);
+[[nodiscard]] Cmd refresh_oauth(std::string refresh_token);
+
+// Read the Anthropic OAuth token and refresh it if it lapses within ~5 min.
+// Replies TokenRefreshed when it refreshed, else OAuthRefreshNotDue. The
+// caller sets m.s.oauth_refresh_in_flight; both replies clear it.
+[[nodiscard]] Cmd refresh_oauth_if_due();
+
+// A 401 parked the stream. Read the stored Anthropic refresh token and
+// refresh with it. Replies TokenRefreshed either way: success resumes the
+// stream, and "no refresh token stored" fails it with a sign-in hint.
+[[nodiscard]] Cmd refresh_oauth_for_401();
 
 // Allocate a process-unique identity for a ChatGPT login attempt. Async
 // progress/completion must carry it so an abandoned attempt cannot mutate a
@@ -221,36 +294,53 @@ struct LoopBreak {
 // Connect-probe a custom host off the UI thread: dial its model list
 // (configured path → /v1/models → Ollama /api/tags), detect the dialect,
 // dispatch HostProbed. Shares next_codex_login_attempt_id() so a stale
-// probe result (user Esc'd / resubmitted) is dropped by the reducer.
-[[nodiscard]] maya::Cmd<Msg> probe_host_async(
-    std::string spec, std::uint64_t attempt_id, auth::AuthHeader auth);
+// probe result (user Esc'd / resubmitted) is dropped by the reducer. The
+// worker resolves the host's saved key itself.
+[[nodiscard]] Cmd probe_host_async(std::string spec, std::uint64_t attempt_id);
 
-// Kick native ChatGPT OAuth off the UI thread. The attempt id correlates all
-// async messages; `cancel` is tripped when Esc closes that exact modal.
-[[nodiscard]] maya::Cmd<Msg> codex_login_async(
-    std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
+// The login workers are SUBSCRIPTIONS, not Cmds.
+//
+// Both block-poll a provider for up to 900 s while the user signs in, and
+// both must stop the moment the user presses Esc. That is precisely what a
+// keyed source is for: subscribe() returns one while the modal is up, and
+// jaal fires the body's stop_token when the key stops being returned — so
+// closing the modal IS cancelling the worker, rather than a second thing
+// that has to be remembered. (It was not remembered: as Cmds they polled on
+// after Esc, one leaked thread per abandoned attempt.)
+//
+// jaal also drops messages from a stopped generation, so a late result can
+// never land in a model that moved on. attempt_id stays anyway — it is what
+// the reducers match on, and it costs nothing.
+[[nodiscard]] Sub codex_login_sub(std::uint64_t attempt_id);
 
-// Kick a native OAuth device-flow login off the UI thread — provider-generic
-// (GitHub Copilot, Kimi, …). `provider` is the registry id, `provider_label`
-// the display name for the success toast. Shares next_codex_login_attempt_id()
-// for correlation; dispatches DeviceCodeReady then DeviceLoginDone.
-[[nodiscard]] maya::Cmd<Msg> device_login_async(
-    std::string provider, std::string provider_label,
-    std::uint64_t attempt_id, std::shared_ptr<std::atomic_bool> cancel);
+// Provider-generic device flow (GitHub Copilot, Kimi, …). `provider` is the
+// registry id, `provider_label` the display name for the success toast.
+// Dispatches DeviceCodeReady then DeviceLoginDone.
+[[nodiscard]] Sub device_login_sub(
+    std::string provider, std::string provider_label, std::uint64_t attempt_id);
 
 // Walk ~/.agentty/threads/ and parse every thread JSON off the UI thread.
 // Dispatches `ThreadsLoaded{vec}` on completion. The directory walk +
 // parse can take seconds with hundreds of multi-MB files in real-world
 // use, so it runs as a background task instead of blocking startup;
 // `init()` returns immediately with an empty thread list.
-[[nodiscard]] maya::Cmd<Msg> load_threads_async();
+[[nodiscard]] Cmd load_threads_async();
 
 // Connect/snapshot the MCP servers off the UI thread and dispatch
 // `PluginsUpdated{model}` when done — the reducer stores it in m.ui.plugins,
 // the single source the Plugins panel renders. reconnect=true respawns +
 // re-handshakes (add/remove/toggle/first open); reconnect=false just
 // snapshots the live pool. Mirrors load_threads_async.
-[[nodiscard]] maya::Cmd<Msg> load_plugins_async(bool reconnect);
+[[nodiscard]] Cmd load_plugins_async(bool reconnect);
+
+// Read the installed skills, approvals, commands and hooks state off the UI
+// thread; answers LibraryLoaded, which the reducer stores in m.ui.library.
+[[nodiscard]] Cmd load_library();
+
+// The settings pane's add-mode create: a plugin line into the user mcp.json,
+// or a starter command/agent file. Writes the disk off the fold and answers
+// with SettingsAddDone.
+[[nodiscard]] Cmd settings_add(settings::Category concern, std::string line);
 
 // Parse a single thread's JSON off the UI thread. Dispatched from the
 // thread picker's Enter handler so the synchronous ~30ms-per-thread
@@ -259,6 +349,56 @@ struct LoopBreak {
 // vanished, parse error) dispatches a `ThreadLoaded` with an empty
 // Thread so the reducer can no-op gracefully without leaving the
 // `thread_loading` flag stuck.
-[[nodiscard]] maya::Cmd<Msg> load_thread_async(ThreadId id);
+[[nodiscard]] Cmd load_thread_async(ThreadId id);
+
+// Re-sync the RAG retriever to `cfg` off the UI thread. An effect, so the
+// reducer RETURNS this rather than calling into the retriever itself: update()
+// stays a pure function of (Model, Msg), and the work runs where every other
+// background job runs — on jaal's pool, cancelled and waited for by the
+// kernel's own shutdown. Dispatches nothing; the retriever is its own state.
+[[nodiscard]] Cmd apply_rag_settings(store::RagConfig cfg);
+
+// Ask the live retriever what it knows about its embedder, for the RAG pane
+// opened at probe generation `gen`. The retriever is shared with tool threads,
+// so this reads it on a worker. Answers RagEmbedStatusRead.
+[[nodiscard]] Cmd read_rag_embed_status(std::uint64_t gen);
+
+// Open a TLS connection to the active provider's host ahead of the first
+// request, so the user's first turn skips the handshake.
+//
+// An EFFECT, so a reducer returns this rather than dialling itself. The target
+// is resolved HERE, synchronously, from the selection the reducer just set —
+// prewarm_target() is pure — and only the dial runs on the worker. That split
+// matters: resolving on the worker would read the active provider at some
+// later moment, after a fast second switch may have already changed it.
+// Dispatches nothing.
+[[nodiscard]] Cmd prewarm_provider(const Model& m);
+
+// Write one change to an mcp.json, off the UI thread, and report back.
+//
+// The write is a read + JSON rewrite + atomic rename, so a reducer must not
+// do it. It returns this instead; the worker performs the matching
+// tools::plugin::*() call and dispatches PluginEdited with the outcome, and
+// the reducer's handler for PluginEdited does what used to follow the call
+// inline (reload the plugin model, toast, close the pane, show a field
+// error). `reply` is the request echoed back with the outcome filled in, so
+// the handler acts on exactly what was asked even if the pane moved on.
+//
+// `spec` is consulted only for Add / Update.
+[[nodiscard]] Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
+                              tools::plugin::ServerSpec spec = {});
+
+// Write `parent`'s transcript for a fork, off the UI thread, and open its
+// directory to the read tool. Replies with ForkTranscriptWritten.
+[[nodiscard]] Cmd write_fork_transcript(Thread parent, fork_panel::Choice choice);
+
+// Work out why a clipboard read went unanswered (mosh, tmux config, ssh) and
+// reply with ClipboardDiagnosed. Walks /proc and asks tmux, hence a worker.
+// In cmd_clipboard_diag.cpp.
+[[nodiscard]] Cmd diagnose_clipboard(bool in_ssh);
+
+// Check whether a pasted path names an image file and read it, replying with
+// ImagePathSniffed. In cmd_image_paste.cpp.
+[[nodiscard]] Cmd sniff_image_path(std::string text);
 
 } // namespace agentty::app::cmd

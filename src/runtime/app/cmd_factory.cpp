@@ -1,4 +1,6 @@
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/library.hpp"
+#include "agentty/runtime/app/wire_audit.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -24,20 +26,27 @@
 #include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
-#include "agentty/util/modelsdev.hpp"
+#include "agentty/provider/openai/transport.hpp"
 #include "agentty/util/logx.hpp"
+
+#if AGENTTY_MCP
+#include <mcp/tools/util/bash_validate.hpp>
+#endif
 #include "agentty/util/dbglog.hpp"
 #include "agentty/tool/registry.hpp"
+#include "agentty/tool/skills.hpp"   // active_in: derived "already active" set
+#include "agentty/tool/mcp_tools_backends.hpp"   // rag_apply_settings_now
+#include "agentty/runtime/panel/settings/items.hpp"   // add_plugin_from_line / create_starter
 #include "agentty/mcp/client.hpp"   // plugin_model(), reload_mcp_plugins via registry
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/io/persistence.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
 namespace agentty::app::cmd {
 
-using maya::Cmd;
 
 namespace {
 
@@ -138,7 +147,7 @@ std::size_t dedup_releaked_salvage_calls(Model& m) {
         return false;
     };
     std::size_t mem_blocked = 0;
-    const auto now0 = std::chrono::steady_clock::now();
+    const auto now0 = m.now;
     for (auto& tc : msgs.back().tool_calls) {
         if (!tc.is_pending() && !tc.is_approved()) continue;
         if (!is_salvaged_call(tc.id)) continue;
@@ -154,7 +163,7 @@ std::size_t dedup_releaked_salvage_calls(Model& m) {
         return mem_blocked;
 
     std::size_t deduped = 0;
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = m.now;
     for (auto& tc : msgs.back().tool_calls) {
         if (!tc.is_pending() && !tc.is_approved()) continue;
         if (!is_salvaged_call(tc.id)) continue;   // only dedup salvaged leaks
@@ -395,16 +404,49 @@ std::size_t front_drop_count(const std::vector<Message>& v, int ceiling,
 // soft-trim ceilings produce different wire payloads from the same
 // source state. The next user turn that submits with more context
 // available will send a fatter prefix automatically.
+//
+// Three entries are protected: the head (task framing / compaction
+// summary), the LATEST User message (the request the model is serving
+// right now) and the newest message (the latest tool results). The rest
+// go oldest-first. Only if that still doesn't fit is the head dropped.
+} // namespace
+
 void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling) {
     if (ceiling <= 0 || v.size() <= 1) return;
-    // Sentinel: the leading entry stays put. Price every message once,
-    // find how many to drop from index 1 forward in a single pass, then
-    // erase them in ONE shift. If we run out of trimmable entries we send
-    // what we have — the upstream will hard-reject with a clear error,
-    // which is strictly better than the in-tool-burst yank.
-    const std::size_t drop = front_drop_count(v, ceiling, /*keep_head=*/1);
-    if (drop > 0)
-        v.erase(v.begin() + 1, v.begin() + 1 + static_cast<std::ptrdiff_t>(drop));
+
+    const std::size_t n = v.size();
+    std::size_t anchor = 0;
+    for (std::size_t i = n; i-- > 0;)
+        if (v[i].role == Role::User) { anchor = i; break; }
+
+    std::vector<MsgWeight> w(n);
+    std::size_t bytes = 0;
+    int images = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        w[i] = message_weight(v[i]);
+        bytes  += w[i].bytes;
+        images += w[i].images;
+    }
+
+    std::vector<char> drop(n, 0);
+    auto over = [&] { return tokens_from(bytes, images) > ceiling; };
+    auto take = [&](std::size_t i) {
+        drop[i] = 1;
+        bytes  -= w[i].bytes;
+        images -= w[i].images;
+    };
+    for (std::size_t i = 1; i + 1 < n && over(); ++i)
+        if (i != anchor) take(i);
+    // Last resort: the head. Never when it IS the live request.
+    if (over() && anchor != 0) take(0);
+
+    std::size_t out = 0;
+    for (std::size_t i = 0; i < n; ++i)
+        if (!drop[i]) {
+            if (out != i) v[out] = std::move(v[i]);
+            ++out;
+        }
+    v.resize(out);
     // Drop any leading Assistants exposed by the trim — the wire
     // must start with a User. (If [0] was a compaction-summary user,
     // it remains; if it was a real first-user-turn and we never
@@ -415,6 +457,7 @@ void soft_trim_to_ceiling(std::vector<Message>& v, int ceiling) {
     if (lead > 0) v.erase(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(lead));
 }
 
+namespace {
 
 // Normal-turn wire payload: if the thread has compaction records,
 // replace the prefix [0, latest.up_to_index) with one synthetic User
@@ -538,6 +581,21 @@ std::vector<Message> wire_messages_for_compaction(const Thread& t, int context_m
 
 } // namespace
 
+std::vector<Message> compaction_request_messages(const Thread& t, int context_max) {
+    return wire_messages_for_compaction(t, context_max, CompactionStyle{}, 0);
+}
+
+std::string summary_from_reply(std::string_view reply) {
+    std::string s{reply};
+    const auto open = s.find("<summary>");
+    const auto close = s.rfind("</summary>");
+    if (open != std::string::npos && close != std::string::npos && close > open)
+        s = s.substr(open + 9, close - open - 9);
+    const auto b = s.find_first_not_of(" \n\r\t");
+    const auto e = s.find_last_not_of(" \n\r\t");
+    return b == std::string::npos ? std::string{} : s.substr(b, e - b + 1);
+}
+
 std::vector<Message> wire_messages_for(const Thread& t) {
     return wire_messages_for_impl(t);
 }
@@ -646,7 +704,7 @@ TurnRouting resolve_turn_routing(const Model& m) {
     smart::RoleProfile prof =
         smart::resolve_role(role, m.d.model_id.value,
                             m.d.effort, m.d.available_models, m.d.smart,
-                            detail::active_provider_id());
+                            detail::active_provider_id(m));
 
     // Session cascade bias only. The per-workspace learned prior, the regret
     // denominator it needed and the plan-recall few-shot all went with the
@@ -673,24 +731,39 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
 
     const int bias = m.s.smart_effort_bias;
 
-    // Effort PROVENANCE — make the adaptive decision legible: base effort, the
-    // complexity step, and the blended correction that moved it. Every value
-    // here comes off `r`, so the card cannot describe a route other than the
-    // one being dispatched.
-    std::string note{effort_label(r.base)};
-    note += " \xe2\x86\x92 ";                       // →
-    note += smart::to_string(r.cx.tier);
-    // Lift provenance: the tier moved past the raw text score — an attached
-    // payload, a continuation cue ("continue" resuming hard work), or a
-    // correction floor ("still broken" never routes below Standard). Name it
-    // so a heavy route on a 3-word prompt doesn't read as classifier noise.
+    // Effort PROVENANCE — make the adaptive decision legible: where the effort
+    // STARTED and where it ENDED UP. Every value here comes off `r`, so the
+    // card cannot describe a route other than the one being dispatched.
+    //
+    // This used to read `base → tier` — an arrow between an EFFORT and a
+    // COMPLEXITY, two different units, with the tier then repeated verbatim in
+    // the segment immediately to its left. On the default settings it rendered
+    // as "effort off · complex   off → complex", which says nothing: the arrow
+    // appears to claim "off" became "complex".
+    //
+    // The arrow belongs to the effort, which is the thing that actually moved:
+    // base → resolved. When they are equal there was no movement to explain,
+    // so the arrow is dropped and only the REASON (why it held still) is kept.
+    std::string note;
+    if (r.base != r.effort) {
+        note += effort_label(r.base);
+        note += " \xe2\x86\x92 ";                   // →
+        note += effort_label(r.effort);
+    }
+
+    // Why the tier is what it is — only when it was LIFTED past the raw text
+    // score (an attached payload, a continuation cue resuming hard work, or a
+    // correction floor). Name it so a heavy route on a 3-word prompt doesn't
+    // read as classifier noise.
     if (r.cx.tier != r.cx_text.tier) {
-        if (smart::is_routing_correction(r.prompt)) note += " (correction)";
-        else if (smart::is_continuation_cue(r.prompt)) note += " (continuation)";
-        else note += " (payload)";
+        if (!note.empty()) note += " \xc2\xb7 ";
+        if (smart::is_routing_correction(r.prompt)) note += "correction";
+        else if (smart::is_continuation_cue(r.prompt)) note += "continuation";
+        else note += "payload";
     }
     if (bias != 0) {
-        note += " \xc2\xb7 session ";
+        if (!note.empty()) note += " \xc2\xb7 ";
+        note += "session ";
         note += (bias > 0 ? "+" : "-") + std::to_string(std::abs(bias));
     }
 
@@ -711,7 +784,7 @@ std::optional<Message> build_smart_routing_card(const Model& m) {
     return card;
 }
 
-Cmd<Msg> launch_stream(Model& m) {
+Cmd launch_stream(Model& m) {
     // Defer the wire-payload build to the worker. The UI thread used
     // to spend ~5-50 ms here on long threads (full t.messages deep
     // copy via wire_messages_for_impl, plus soft_trim_to_ceiling's
@@ -743,7 +816,41 @@ Cmd<Msg> launch_stream(Model& m) {
     // transitioned us into an active phase by the time launch_stream
     // runs, so active_ctx is non-null here.
     auto cancel = std::make_shared<http::CancelToken>();
-    if (auto* a = active_ctx(m.s.phase)) a->cancel = cancel;
+    if (auto* a = active_ctx(m.s.phase)) {
+        a->cancel = cancel;
+
+        // Start the per-stream clock HERE, at the one point every stream
+        // launch passes through -- submit, retry, truncation retry, the
+        // post-tool continuation, proactive-context release, compaction.
+        //
+        // It used to be (re)started only by the StreamStarted event, and only
+        // two transport families emit that: Anthropic (on message_start) and
+        // the Responses codec. The OpenAI-chat transport -- every OpenRouter,
+        // Groq, Mistral, llama.cpp and LM Studio user -- and Ollama emit none.
+        // On those, `started` stayed at the value submit stamped for the
+        // whole turn, so finalize_turn's ttft = first_delta_at - started
+        // absorbed:
+        //   * every retry's backoff sleep (a flaky free tier retries a lot)
+        //   * every PRIOR sub-turn's generation and every tool's runtime,
+        //     because the post-tool continuation never reset the clock
+        //
+        // That is why the stats panel was right on a stable paid Anthropic
+        // session and ballooned on OpenRouter's free tier: the accounting was
+        // fine, the clock it read was not being started.
+        //
+        // first_delta_at / live_delta_bytes / the rate sampler are reset with
+        // it, matching what StreamStarted did, so ttft and generation time
+        // are both per-stream. StreamStarted still resets them too, which on
+        // Anthropic just moves the origin forward by the connect time -- the
+        // honest place for "provider started answering".
+        const auto now = m.now;
+        a->started                = now;
+        a->last_event_at          = now;
+        a->first_delta_at         = {};
+        a->live_delta_bytes       = 0;
+        a->rate_last_sample_at    = {};
+        a->rate_last_sample_bytes = 0;
+    }
 
     // Snapshot the per-turn retry counter so the worker can stamp it on
     // the wire as x-stainless-retry-count. Reflecting the real attempt
@@ -755,24 +862,55 @@ Cmd<Msg> launch_stream(Model& m) {
         return 0;
     }();
 
-    // Capture the snapshot the worker needs. The Thread copy is the
-    // one unavoidable cost; everything else is small.
-    Thread thread_snapshot = m.d.current;
+    // Capture the snapshot the worker needs — but only the part of the
+    // transcript the wire can see. Both payload builders start from
+    // wire_messages_for_impl, which replaces messages[0, up_to_index) of
+    // the latest compaction with its summary and never reads them. Copying
+    // them anyway was the reducer's biggest per-round cost on a long
+    // thread: a 29 MB transcript with 17 compactions was deep-copied every
+    // round only for the worker to drop almost all of it. Rebase the
+    // snapshot to start at up_to_index (keeping the one compaction record
+    // the builder uses, re-pointed at index 0 + a placeholder message so
+    // the substitution rule still applies unchanged).
+    Thread thread_snapshot;
+    {
+        const Thread& cur = m.d.current;
+        thread_snapshot.id          = cur.id;
+        thread_snapshot.title       = cur.title;
+        thread_snapshot.forked_from = cur.forked_from;
+        thread_snapshot.rag_mode_override = cur.rag_mode_override;
+        thread_snapshot.created_at  = cur.created_at;
+        thread_snapshot.updated_at  = cur.updated_at;
+        std::size_t start = 0;
+        if (!cur.compactions.empty()) {
+            const auto& rec = cur.compactions.back();
+            if (rec.up_to_index > 0 && rec.up_to_index <= cur.messages.size())
+                start = rec.up_to_index;
+        }
+        if (start > 0) {
+            // One stand-in for the summarised prefix, so the rebased
+            // record (up_to_index = 1) passes the builder's bounds check and
+            // substitutes exactly as it would have on the full thread.
+            auto rec = cur.compactions.back();
+            rec.up_to_index = 1;
+            thread_snapshot.compactions.push_back(std::move(rec));
+            thread_snapshot.messages.reserve(1 + cur.messages.size() - start);
+            thread_snapshot.messages.emplace_back();
+        } else {
+            thread_snapshot.compactions = cur.compactions;
+            thread_snapshot.messages.reserve(cur.messages.size());
+        }
+        thread_snapshot.messages.insert(
+            thread_snapshot.messages.end(),
+            cur.messages.begin() + static_cast<std::ptrdiff_t>(start),
+            cur.messages.end());
+    }
     std::string session_key = thread_snapshot.id.value;
     const bool compacting  = m.s.compacting;
     const CompactionStyle compaction_style = m.s.compaction_style;
     const int  compaction_ceiling = m.s.compaction_ceiling;
     const int  context_max = m.s.context_max;
     std::string model_id   = m.d.model_id.value;
-    // auth_snapshot(), NOT deps().auth: the cached header is overwritten by
-    // background OAuth refreshes (token_refreshed → update_auth installs the
-    // ANTHROPIC bearer unconditionally), so reading the cache while e.g.
-    // Mistral is active ships Anthropic's OAuth token to api.mistral.ai →
-    // 401 "Invalid API Key". auth_snapshot resolves from the CURRENTLY-ACTIVE
-    // provider through the central credential layer (falling back to the
-    // cache only for oauth_native/local, whose transports own their tokens),
-    // so the wire credential can never drift from provider::active().
-    auth::AuthHeader auth  = auth_snapshot();
     // Reasoning effort, resolved + clamped to this model's capability here on
     // the UI thread (where the live Model is readable). Empty = off; an
     // unsupported tier degrades (Xhigh/Max → high) instead of 400ing.
@@ -785,17 +923,35 @@ Cmd<Msg> launch_stream(Model& m) {
 
     // Whether to ask the provider for visible reasoning at all.
     //
-    // Gated on the DISPLAY preference, because requesting reasoning you have
-    // told us to hide is the worst of both: you pay for the tokens and never
-    // see them. Appearance's "Thinking" row is the one place that question
-    // is asked — the model picker used to carry a second ^R toggle for the
-    // same thing, and the two could disagree in exactly this direction.
+    // THE EFFORT STRIP IS THE SSOT. "reasoning ‹off›" in the model picker
+    // means no reasoning is requested, full stop — that is the control the
+    // user reaches for, it is per-model (which is what the question actually
+    // depends on), and it is the only one of these that was ever wired to a
+    // key. Anything else that can contradict it is a bug, not a preference.
     //
-    // Collapsed still requests: a collapsed block is shown, just folded, and
-    // it cannot be unfolded if it was never sent.
-    const bool show_reasoning =
-        m.d.show_reasoning
-        && m.d.ui.thinking != ui_prefs::Thinking::Hidden;
+    // Two other inputs used to sit in this expression:
+    //
+    //   m.d.show_reasoning      — the old ^R toggle. Its handler still
+    //                             exists but nothing dispatches it (^R is
+    //                             review now), so the flag was frozen at
+    //                             whatever settings.json last held. It could
+    //                             only ever disagree with the strip.
+    //   ui.thinking != Hidden   — Appearance's display preference, which is
+    //                             about whether to RENDER a block we already
+    //                             have. Letting a render choice silently
+    //                             change what we REQUEST is how you get
+    //                             tokens paid for and dropped.
+    //
+    // Both are gone from the request path. `effort` alone decides, so the
+    // strip and the wire cannot drift: off there is off on the wire (see
+    // build_body — the `reasoning` field is omitted entirely with no tier).
+    // ui.thinking still governs DISPLAY of whatever comes back, which is
+    // the question Appearance is actually for.
+    //
+    // Compaction is the one override: a mechanical summarise never wants
+    // visible thinking regardless of tier. Both are applied at the single
+    // assignment to req.show_reasoning below, which reads req.effort so the
+    // orchestration path cannot drift from it either.
 
     // Look up the selected model's supports_tools from available_models.
     // Ollama models have this set via /api/show probe at list time. If
@@ -803,11 +959,13 @@ Cmd<Msg> launch_stream(Model& m) {
     // entirely (Zed-style: the model can only be used for plain chat).
     // std::nullopt = unknown/not probed = fall through to heuristic.
     std::optional<bool> model_supports_tools;
+    std::optional<bool> model_supports_vision;
     int model_context_window = 0;
     for (const auto& mi : m.d.available_models) {
         if (mi.id.value == model_id) {
-            model_supports_tools = mi.supports_tools;
-            model_context_window = mi.context_window;
+            model_supports_tools  = mi.supports_tools;
+            model_supports_vision = mi.supports_vision;
+            model_context_window  = mi.context_window;
             break;
         }
     }
@@ -828,7 +986,17 @@ Cmd<Msg> launch_stream(Model& m) {
     // compaction back up to the flagship).
     std::string compaction_model =
         smart::utility_model(model_id, m.d.available_models, m.d.smart,
-                             detail::active_provider_id());
+                             detail::active_provider_id(m));
+    // The compaction model's own window, when the catalog knows it. On a
+    // local router the summariser can be a different model loaded with a
+    // BIGGER context than the main one, and the payload should use it.
+    int compaction_model_window = 0;
+    if (compaction_model != model_id)
+        for (const auto& mi : m.d.available_models)
+            if (mi.id.value == compaction_model) {
+                compaction_model_window = mi.context_window;
+                break;
+            }
 
     // Layer 3a (orchestration): when active, the MAIN turn runs on the
     // Strategic role's (model, effort) so the flagship orchestrates and
@@ -890,20 +1058,72 @@ Cmd<Msg> launch_stream(Model& m) {
             m.d.smart.subagent_routing() ? 1 : 0,
             compacting ? 1 : 0);
 
-    return Cmd<Msg>::task(
-        [thread = std::move(thread_snapshot),
-         compacting, compaction_style, compaction_ceiling, context_max, retry_count,
-         orchestrate, turn_profile, turn_complexity,
-         session_key = std::move(session_key),
-         model_id = std::move(model_id),
-         compaction_model = std::move(compaction_model),
-         effort = std::move(effort),
-         show_reasoning,
-         model_supports_tools,
-         model_context_window,
-         auth = std::move(auth),
-         cancel]
-        (std::function<void(Msg)> dispatch) mutable {
+    // Everything the worker needs, as ONE value.
+    //
+    // jaal wants a captureless body with its inputs as arguments, and there
+    // are eighteen of them here. Eighteen parameters in a fixed order is a
+    // silent-swap waiting to happen — two ints and three strings adjacent,
+    // no compiler help — so they travel as a named struct instead. Same
+    // guarantee (the runtime copies it in, the body owns it), one argument,
+    // and every field reads at the use site.
+    //
+    // Plain aggregate on purpose: jaal walks it field by field to prove it's
+    // Sendable, so this needs no opt-in and stays honest if someone adds a
+    // borrowed field later — it stops compiling.
+    struct TurnInputs {
+        Thread              thread;
+        bool                compacting;
+        CompactionStyle     compaction_style;
+        int                 compaction_ceiling;
+        int                 context_max;
+        int                 retry_count;
+        bool                orchestrate;
+        smart::RoleProfile  turn_profile;
+        smart::Complexity   turn_complexity;
+        std::string         session_key;
+        std::string         model_id;
+        std::string         compaction_model;
+        int                 compaction_model_window;
+        std::string         effort;
+        std::optional<bool> model_supports_tools;
+        std::optional<bool> model_supports_vision;
+        // Resolved on the UI thread from `m.d.persisted`, not read from the
+        // seam inside the worker: the task body has no Model, and reaching
+        // through deps() there is a second reader of settings racing the
+        // reducers that write them. The answer can't change mid-turn anyway.
+        bool                org_blocks_vision;
+        int                 model_context_window;
+        http::CancelTokenPtr cancel;
+        // The provider this turn was launched against, from the MODEL — the
+        // same reason as org_blocks_vision. Reading the process global here,
+        // on the worker, meant a turn launched just before a provider switch
+        // could build its prompt for the provider the user had already left.
+        provider::Selection selection;
+    };
+
+    return cmd::io_task(
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token, TurnInputs in) {
+        auto& thread                  = in.thread;
+        const auto compacting         = in.compacting;
+        const auto compaction_style   = in.compaction_style;
+        const auto compaction_ceiling = in.compaction_ceiling;
+        const auto context_max        = in.context_max;
+        const auto retry_count        = in.retry_count;
+        const auto orchestrate        = in.orchestrate;
+        auto& turn_profile            = in.turn_profile;
+        const auto turn_complexity    = in.turn_complexity;
+        auto& session_key             = in.session_key;
+        auto& model_id                = in.model_id;
+        auto& compaction_model        = in.compaction_model;
+        const auto compaction_model_window = in.compaction_model_window;
+        auto& effort                  = in.effort;
+        const auto model_supports_tools  = in.model_supports_tools;
+        const auto model_supports_vision = in.model_supports_vision;
+        const auto model_context_window  = in.model_context_window;
+        // Resolved here, for the provider the turn was launched against: it
+        // reads the credential store, which a reducer can't.
+        auto auth                     = auth_snapshot(io, in.selection);
+        auto& cancel                  = in.cancel;
         // Build wire payload off the UI thread.
         provider::Request req;
         req.model         = compacting ? std::move(compaction_model)
@@ -934,8 +1154,8 @@ Cmd<Msg> launch_stream(Model& m) {
         // Prompt policy is shared by every entry point. Hosted Claude, Codex,
         // and OpenAI-compatible models receive the same complete agent/tool/RAG
         // instructions; only constrained local endpoints use a compact profile.
-        const auto sel_now = provider::active();
-        req.system_prompt = provider::system_prompt_for(sel_now);
+        const auto sel_now = in.selection;
+        req.system_prompt = provider::system_prompt_for(io, sel_now);
         // Layer 3a (orchestration): teach the Strategic model to keep the
         // thinking and DELEGATE mechanical work to subagents — the
         // orchestrator-workers pattern. Only on the main turn (never on the
@@ -1022,10 +1242,17 @@ Cmd<Msg> launch_stream(Model& m) {
         req.effort        = compacting ? std::string{}
                           : (orchestrate ? std::string{effort_wire(turn_profile.effort)}
                                          : std::move(effort));
-        // Reasoning display: never for compaction (a mechanical summarise);
-        // otherwise carry the user's global "show reasoning" preference so the
-        // Anthropic transport can request VISIBLE thinking.
-        req.show_reasoning = !compacting && show_reasoning;
+        // Reasoning display follows the effort ACTUALLY SENT, computed from
+        // req.effort rather than the pre-orchestration value: with a
+        // strategic role the turn profile can pick a different tier, and
+        // reading the captured `effort` there would ask for reasoning on a
+        // turn that sends none (or the reverse). One expression, one
+        // source — see the SSOT note where `show_reasoning` is computed.
+        //
+        // Compaction forces effort empty just above, so this is already
+        // false for it; the explicit `!compacting` stays as documentation
+        // of the intent rather than a load-bearing term.
+        req.show_reasoning = !compacting && !req.effort.empty();
         req.session_key   = std::move(session_key);
 
         // Capability gate: withhold tools ONLY on an explicit declaration of
@@ -1087,10 +1314,15 @@ Cmd<Msg> launch_stream(Model& m) {
             // window is the model's BASE (200K), not the 1M the parent picked.
             // Trim the compaction payload to that base window — trimming to 65%
             // of 1M (650K) would then overflow the 200K request and fail.
-            int compaction_ctx = context_max;
+            int compaction_ctx = compaction_model_window > 0
+                ? compaction_model_window : context_max;
             if (int base = ui::context_max_for_model(req.model);
-                base > 0 && (compaction_ctx <= 0 || base < compaction_ctx))
+                base > 0 && compaction_model_window <= 0
+                && (compaction_ctx <= 0 || base < compaction_ctx))
                 compaction_ctx = base;
+            // Tell the transport too (Ollama sizes num_ctx from it).
+            if (compaction_model_window > 0)
+                req.context_window = compaction_model_window;
             req.messages = wire_messages_for_compaction(thread, compaction_ctx, compaction_style, compaction_ceiling);
             drop_stale_proactive(req.messages);
             // req.tools left empty — summarisation is text-only.
@@ -1108,6 +1340,78 @@ Cmd<Msg> launch_stream(Model& m) {
                 const int soft_ceiling = static_cast<int>(
                     static_cast<double>(context_max) * 0.95);
                 soft_trim_to_ceiling(req.messages, soft_ceiling);
+            }
+            // ── Images: withhold ONLY on an explicit declaration ────────
+            //
+            // Same asymmetry as the tool gate below, for the same reason.
+            // A model that DECLARED vision:false rejects image parts — a
+            // hard 400 on most wires, or on Ollama an image it silently
+            // ignores while answering about text it cannot see. Stripping
+            // turns both into a normal turn that simply lacks the picture.
+            //
+            // Unknown still SENDS. Stripping on silence would remove
+            // images from every model no catalog describes, and a vision
+            // model whose screenshot we quietly dropped is
+            // indistinguishable from one that looked and was unhelpful.
+            //
+            // The SECOND reason to withhold is not about the model at all:
+            // this account's organisation may have image input disabled
+            // (Copilot: "vision is not enabled for this organization").
+            // That is an entitlement, learned from a 400 in a previous
+            // session and stored account-scoped — so it withholds on every
+            // model here, and stops the moment the user logs into an
+            // entitled account. Keeping it OUT of supports_vision is what
+            // makes that possible: a model blamed for a policy block would
+            // stay image-less forever.
+            const bool org_blocks_vision = in.org_blocks_vision;
+
+            if (!model_supports_vision.value_or(true) || org_blocks_vision) {
+                std::size_t stripped = 0;
+                for (auto& msg : req.messages) {
+                    stripped += msg.images.size();
+                    msg.images.clear();
+                }
+                if (stripped > 0) {
+                    AGT_LOG(Model, Info, "wire.images_withheld",
+                            "model={} stripped={} reason={}",
+                            model_id, stripped,
+                            org_blocks_vision ? "org_policy"
+                                              : "declared_text_only");
+                }
+            }
+            // ── Preflight: what is WRONG with this payload? ──────────
+            //
+            // The payload is final here — compaction substituted, trimming
+            // done, both branches converged. Audit it BEFORE it leaves,
+            // because after it leaves the only evidence is a 400 and a
+            // 90 KB body, and the defect is one empty string inside it.
+            //
+            // This never refuses to send. Providers disagree about what is
+            // legal and they change; a client that blocks a request the
+            // server would have accepted is worse than one that sends a
+            // request the server rejects. Every defect is a strong
+            // suspicion, named and counted, and the request still goes.
+            //
+            // The SHAPE line is the half that pays off even when the turn
+            // succeeds: `messages=48 tool_results=23 last_role=assistant`
+            // distinguishes one 400 from another when you cannot see the
+            // body, which is the reason GitHub's failure telemetry carries
+            // the same seven numbers.
+            {
+                const auto audit = audit_wire(req.messages);
+                AGT_LOG(Model, Debug, "wire.shape",
+                        "loop=main messages={} tool_calls={} tool_results={} "
+                        "images={} last_role={} defects={}",
+                        audit.message_count, audit.tool_call_count,
+                        audit.tool_result_count, audit.image_part_count,
+                        audit.last_role == Role::User ? "user" : "assistant",
+                        audit.defects.size());
+                for (const auto& d : audit.defects) {
+                    AGT_LOG(Model, Warn, "wire.defect",
+                            "loop=main kind={} message_index={} detail={}",
+                            describe(d.kind), d.message_index,
+                            d.detail.empty() ? "-" : d.detail);
+                }
             }
             // All tools, every profile. Gating is the policy layer's job
             // (`tool::DynamicDispatch::needs_permission`, called from
@@ -1148,16 +1452,16 @@ Cmd<Msg> launch_stream(Model& m) {
         // The check matches the worker's own cancellation gate, so once
         // the token is tripped no further events flow into the reducer
         // from this worker.
-        auto guarded = [dispatch, cancel](Msg m) {
+        auto guarded = [out, cancel](Msg m) {
             if (cancel && cancel->is_cancelled()) return;
-            dispatch(std::move(m));
+            out.send(Msg{std::move(m)});
         };
         try {
             // Pass `guarded` straight through as the EventSink instead of
             // wrapping it in a second lambda that just forwards to it — the
             // wrapper added one extra std::function indirection on every
             // delta (the wire's hottest path) for no behavioural gain.
-            deps().stream(std::move(req), guarded);
+            deps(io).stream(cap, std::move(req), guarded);
         } catch (const std::exception& e) {
             // The stream backend threw before producing a terminal event —
             // surface it as StreamError so the UI doesn't hang on the spinner.
@@ -1165,11 +1469,43 @@ Cmd<Msg> launch_stream(Model& m) {
         } catch (...) {
             guarded(StreamError{"stream backend: unknown exception"});
         }
-    });
+    },
+        TurnInputs{
+            .thread                  = std::move(thread_snapshot),
+            .compacting              = compacting,
+            .compaction_style        = compaction_style,
+            .compaction_ceiling      = compaction_ceiling,
+            .context_max             = context_max,
+            .retry_count             = retry_count,
+            .orchestrate             = orchestrate,
+            .turn_profile            = turn_profile,
+            .turn_complexity         = turn_complexity,
+            .session_key             = std::move(session_key),
+            .model_id                = std::move(model_id),
+            .compaction_model        = std::move(compaction_model),
+            .compaction_model_window = compaction_model_window,
+            .effort                  = std::move(effort),
+            .model_supports_tools    = model_supports_tools,
+            .model_supports_vision   = model_supports_vision,
+            .org_blocks_vision       = detail::entitlement_blocked(
+                                           m.d.persisted, m.d.auth,
+                                           domain::entitlement::Fact::VisionOrgPolicy,
+                                           detail::active_provider_id(m)),
+            .model_context_window    = model_context_window,
+            .cancel                  = cancel,
+            .selection               = m.d.selection,
+        });
 }
 
-Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
-                  http::CancelTokenPtr cancel) {
+std::uint64_t next_tool_exec_seq() noexcept {
+    static std::atomic<std::uint64_t> seq{0};
+    return seq.fetch_add(1, std::memory_order_relaxed) + 1;   // never 0
+}
+
+Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
+                  http::CancelTokenPtr cancel, std::uint64_t exec_seq,
+                  std::uint64_t approved_def_hash,
+                  std::vector<std::string> active_skills) {
     // task_isolated, NOT task: a tool that wedges (e.g. read on a hung NFS
     // mount, bash on a process that won't unblock) must not consume a slot
     // in the shared BG worker pool. With Cmd::task the pool's max workers
@@ -1179,23 +1515,47 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
     // surfaced as "tools randomly get stuck" once enough wedged calls
     // accumulated. Per-call detached thread costs ~100-300 µs of
     // construction; tools run seconds apart so it's noise.
-    return Cmd<Msg>::task_isolated(
-        [id = std::move(id),
-         name = std::move(tool_name),
-         args = std::move(args),
-         cancel = std::move(cancel)]
-        (std::function<void(Msg)> dispatch) {
-            // Install a thread-local progress sink *before* dispatch so the
-            // subprocess runner inside the tool can stream stdout+stderr to
-            // the UI as bytes arrive. RAII scope guarantees the sink is
-            // cleared even if the tool throws, so the next tool run can't
-            // inherit a stale dispatch lambda.
-            agentty::tools::progress::Scope progress_scope{
-                [dispatch, id](std::string_view snapshot) {
-                    dispatch(ToolExecProgress{id, std::string{snapshot}});
-                }};
-            agentty::tools::cancellation::Scope cancellation_scope{
-                [cancel] { return cancel && cancel->is_cancelled(); }};
+    return Cmd::task_isolated(
+        [](const maya::unlocked& cap, maya::Sink<Msg> sink, std::stop_token stop,
+           ToolCallId id, ToolName name, nlohmann::json args,
+           http::CancelTokenPtr cancel, std::uint64_t exec_seq,
+           std::uint64_t approved_def_hash,
+           std::vector<std::string> active_skills) {
+            // Everything this call carries besides its arguments, handed to
+            // the tool explicitly. The skills the model can already see were
+            // derived by the reducer from the visible transcript.
+            agentty::tools::CallContext ctx;
+            ctx.active_skills = std::move(active_skills);
+            // Every result this worker sends carries its exec_seq, so the
+            // reducer can drop it if the call it was started for is gone.
+            auto out = [exec_seq](ToolExecOutput o) {
+                o.exec_seq = exec_seq;
+                return o;
+            };
+            // Live output, so a subprocess inside the tool streams to the
+            // card as bytes arrive.
+            ctx.progress = [sink, id, exec_seq](std::string_view snapshot) {
+                sink.send(Msg{ToolExecProgress{id, std::string{snapshot}, exec_seq}});
+            };
+            // Cancelled on EITHER the turn's cancel token (user pressed
+            // escape) or jaal's stop_token (the app is shutting down). The
+            // second half used to be missing — this parameter was unnamed, so
+            // `request_stop()` at shutdown was silently dropped and a tool
+            // kept running.
+            //
+            // That is not just a slow exit, it is a use-after-free. These
+            // run on task_isolated threads; a `task` subagent mid-stream
+            // keeps calling cfg.stream(), which holds anthropic_provider /
+            // chatgpt_provider BY REFERENCE off main's stack — and main is
+            // unwinding. It only faults when a subagent happens to be
+            // streaming at quit, which is precisely when the user gives up on
+            // a long-running one and hits escape, so it reads as "subagents
+            // crash sometimes".
+            //
+            // Tokens, so anything below that needs to react (the subagent
+            // stream's cancel) attaches a stop_callback instead of polling.
+            ctx.cancel.push_back(stop);
+            if (cancel) ctx.cancel.push_back(cancel->token());
             try {
                 // ── pre_tool hooks (consent-gated, see hooks.hpp) ─────
                 // A blocking decision becomes the tool's error result: the
@@ -1203,16 +1563,41 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 // tool's own isolated thread, so a slow hook never wedges
                 // the UI — only this one call.
                 const std::string args_dump = args.dump();
+
+                // BEFORE the call, not just after. tool.exec below records
+                // the outcome, but it only ever runs if the tool RETURNS —
+                // so a tool that hangs, blocks on a prompt, or takes the
+                // process down with it leaves no trace at all, which is
+                // precisely the case you need the log for. This line is the
+                // "we went in" half of the pair; match it to tool.exec by
+                // (name, exec_seq).
+                //
+                // Args ride behind logx::body() because they are user data
+                // and routinely carry paths, env values and command lines;
+                // they appear only with AGENTTY_LOG_BODIES, same contract as
+                // the wire channel.
+                AGT_LOG(Tool, Debug, "tool.dispatch",
+                        "name={} seq={} args={}",
+                        name.value, exec_seq,
+                        ::agentty::logx::body(args_dump));
+
                 if (auto pre = tools::hooks::run_pre_tool(name.value,
                                                           args_dump);
                     pre.blocked) {
-                    dispatch(ToolExecOutput{id, std::unexpected(
+                    // A hook refusing the call is a decision someone made
+                    // about this run; without it the tool just reports an
+                    // error and the reason lives nowhere.
+                    AGT_LOG(Tool, Info, "tool.pre_hook_blocked",
+                            "name={} seq={} reason={}",
+                            name.value, exec_seq, pre.reason);
+                    sink.send(Msg{out(ToolExecOutput{id, std::unexpected(
                         tools::ToolError::unknown(
-                            "blocked by pre_tool hook: " + pre.reason))});
+                            "blocked by pre_tool hook: " + pre.reason))})});
                     return;
                 }
                 const auto t_start = std::chrono::steady_clock::now();
-                auto result = tool::DynamicDispatch::execute(name.value, args);
+                auto result = tool::DynamicDispatch::execute_approved(
+                    cap, name.value, args, approved_def_hash, ctx);
                 const auto t_ms = std::chrono::duration_cast<
                     std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t_start).count();
@@ -1222,14 +1607,38 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 // in the log with the arguments that produced it — the exact
                 // evidence that was missing when Copilot's tool calls were
                 // arriving empty.
+                // Shell calls also log what analyze_detour judged them
+                // (read / search / find / list / count / write / other), and
+                // whether that was a detour a native tool does better. Same
+                // classifier as the tip, so the log measures what the model
+                // was told.
+                std::string shell_cat = "-";
+#if AGENTTY_MCP
+                if (name.value == "shell" && args.is_object())
+                    if (auto it = args.find("command"); it != args.end() && it->is_string()) {
+                        namespace mu = ::mcp::tools::util;
+                        const auto d = mu::analyze_detour(it->get<std::string>());
+                        switch (d.intent) {
+                            case mu::Intent::ReadFile:  shell_cat = "read";   break;
+                            case mu::Intent::Search:    shell_cat = "search"; break;
+                            case mu::Intent::FindFiles: shell_cat = "find";   break;
+                            case mu::Intent::ListDir:   shell_cat = "list";   break;
+                            case mu::Intent::CountOnly: shell_cat = "count";  break;
+                            case mu::Intent::GitRead:   shell_cat = "git";    break;
+                            case mu::Intent::Write:     shell_cat = "write";  break;
+                            case mu::Intent::Other:     shell_cat = "other";  break;
+                        }
+                        if (d.substitutable()) shell_cat += "+detour";
+                    }
+#endif
                 AGT_LOGL(Tool, result ? ::agentty::logx::Level::Debug
                                       : ::agentty::logx::Level::Warn,
-                         "tool.exec", "name={} ms={} ok={} err={} args={}",
-                         name.value, t_ms, result ? 1 : 0,
+                         "tool.exec", "name={} seq={} ms={} ok={} err={} shell={} args={}",
+                         name.value, exec_seq, t_ms, result ? 1 : 0,
                          result ? std::string{"-"}
                                 : std::string{tools::to_string(result.error().kind)}
                                       + ": " + result.error().detail,
-                         args_dump);
+                         shell_cat, args_dump);
                 if (result) {
                     // post_tool hooks: fire-and-forget (never block, never
                     // rewrite the result).
@@ -1238,13 +1647,13 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                     // Carry the structured FileChange(s) — single-file (edit/
                     // write/apply_patch) via change, multi-file (replace) via
                     // changes — into the reducer for diff-review.
-                    dispatch(ToolExecOutput{id, std::move(result->text),
+                    sink.send(Msg{out(ToolExecOutput{id, std::move(result->text),
                                             std::move(result->change),
                                             std::move(result->changes),
-                                            std::move(result->images)});
+                                            std::move(result->images)})});
                 } else {
-                    dispatch(ToolExecOutput{id,
-                        std::unexpected(std::move(result).error())});
+                    sink.send(Msg{out(ToolExecOutput{id,
+                        std::unexpected(std::move(result).error())})});
                 }
             } catch (const std::exception& e) {
                 // DynamicDispatch already catches tool exceptions, but guard
@@ -1252,14 +1661,17 @@ Cmd<Msg> run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 // the tool never gets stuck in Running with no terminal Msg.
                 AGT_LOG(Tool, Error, "tool.dispatch_throw", "name={} err={}",
                         name.value, e.what());
-                dispatch(ToolExecOutput{id, std::unexpected(
+                sink.send(Msg{out(ToolExecOutput{id, std::unexpected(
                     tools::ToolError::unknown(
-                        std::string{"dispatch error: "} + e.what()))});
+                        std::string{"dispatch error: "} + e.what()))})});
             } catch (...) {
-                dispatch(ToolExecOutput{id, std::unexpected(
-                    tools::ToolError::unknown("dispatch error: unknown exception"))});
+                sink.send(Msg{out(ToolExecOutput{id, std::unexpected(
+                    tools::ToolError::unknown("dispatch error: unknown exception"))})});
             }
-        });
+        },
+        std::move(id), std::move(tool_name), std::move(args),
+        std::move(cancel), exec_seq, approved_def_hash,
+        std::move(active_skills));
 }
 
 namespace {
@@ -1400,13 +1812,29 @@ SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
 // transcript over the current agent run (everything after the last real User
 // message that isn't a synthetic TOOL-RESULT carrier) and applies two caps.
 std::optional<LoopBreak> agent_loop_should_break(
-        const std::vector<Message>& messages,
-        bool enforce_step_cap) {
+        const std::vector<Message>& messages) {
     // Tunables. Generous enough that a legitimate multi-step task (search →
     // read → edit → verify …) never trips, tight enough that a stuck model
     // bails in seconds rather than spinning until the user hits Esc.
     constexpr int kRepeatLimit  = 3;   // same failing call N times → stop
-    constexpr int kMaxToolTurns = 25;  // tool-call turns w/o a text answer
+    // Same SUCCEEDING call, byte-identical args, N times in one run → stop.
+    //
+    // Higher than kRepeatLimit because a repeat that WORKS is weaker
+    // evidence of a stuck model than one that fails: re-reading a file after
+    // editing it, or re-running a test, is legitimate. But a model that has
+    // called `read` on the same path six times with identical arguments and
+    // still has not spoken is not going to converge on the seventh.
+    //
+    // This is now the ONLY backstop against a loop that keeps succeeding.
+    // It was added because the step cap it backed up was gated on a name
+    // heuristic: a locally-hosted model with an unfamiliar name
+    // (`igpu/laguna-xs-2.1` behind a private gateway) is NOT recognised, so
+    // an identical-call loop ran with no limit at all — measured at 80
+    // successful repeats, which on a 22GB resident is minutes of GPU time
+    // going nowhere. That protection does not depend on the step cap and is
+    // unaffected by its removal: it keys on the call being IDENTICAL, which
+    // is evidence of being stuck rather than evidence of working hard.
+    constexpr int kSuccessRepeatLimit = 6;
 
     // Find the start of the current run: the last User message. (Sub-turn
     // continuations push Assistant placeholders; tool results live inside the
@@ -1428,6 +1856,8 @@ std::optional<LoopBreak> agent_loop_should_break(
     // streak. A success resets that call's streak; historical failures before
     // demonstrated recovery must not trip the breaker later.
     std::unordered_map<std::string, int> failure_streaks;
+    // The mirror, for calls that keep SUCCEEDING identically.
+    std::unordered_map<std::string, int> success_streaks;
     for (std::size_t i = run_start; i < messages.size(); ++i) {
         const auto& msg = messages[i];
         if (msg.role != Role::Assistant || msg.tool_calls.empty()) continue;
@@ -1441,9 +1871,11 @@ std::optional<LoopBreak> agent_loop_should_break(
             // per tool sub-turn — raw args.dump() made it O(N²) over the run).
             std::string key = tc.name.value + '\0'
                 + (tc.args.is_null() ? std::string{} : tc.args_dump());
+            const bool bad = tc.is_failed() || tc.is_rejected();
             auto& streak = failure_streaks[key];
-            if (tc.is_failed() || tc.is_rejected()) ++streak;
-            else streak = 0;
+            if (bad) ++streak; else streak = 0;
+            auto& ok_streak = success_streaks[key];
+            if (bad) ok_streak = 0; else ++ok_streak;
         }
     }
 
@@ -1460,24 +1892,58 @@ std::optional<LoopBreak> agent_loop_should_break(
                 "already know."};
         }
     }
-    // RUNAWAY step cap. Only enforced for weak local models (caller passes
-    // enforce_step_cap). Capable models (Claude, hosted GPT) are NEVER step-
-    // capped — matches Claude Code (max_turns unlimited by default) and aider
-    // (no step cap). A long, legitimate search→read→edit→verify run must not be
-    // cut off at an arbitrary count.
-    if (enforce_step_cap && tool_turns >= kMaxToolTurns) {
-        return LoopBreak{
-            "Stopped after " + std::to_string(tool_turns) + " tool steps "
-            "without finishing. Summarise what you found and answer the user "
-            "directly, or ask them how to proceed."};
+    // The same check for calls that keep SUCCEEDING. Applied to EVERY model,
+    // not just ones the id heuristic calls weak: an unfamiliar local id
+    // behind a private gateway is unrecognised by construction, and that is
+    // exactly the deployment where an unbounded loop costs the most (a 22GB
+    // resident re-running the same read for minutes).
+    //
+    // A repeat that works is weaker evidence than one that fails, so the
+    // threshold is higher — re-reading a file after editing it is normal.
+    // Six identical, successful, byte-for-byte calls without a text answer is
+    // not.
+    for (const auto& [key, streak] : success_streaks) {
+        if (streak >= kSuccessRepeatLimit) {
+            auto nul = key.find('\0');
+            std::string name = nul == std::string::npos ? key : key.substr(0, nul);
+            return LoopBreak{
+                "Stopped: the `" + name + "` tool was called "
+                + std::to_string(streak) + " times in a row with identical "
+                "arguments and the same result. You already have this output — "
+                "answer the user with what you know, or take a different "
+                "action."};
+        }
     }
+    // ── No step cap ─────────────────────────────────────────────────────
+    //
+    // There used to be a third trigger here: 25 tool turns in one run with
+    // no text answer, gated behind an `enforce_step_cap` flag that was true
+    // for local/custom endpoints and weak-looking model ids.
+    //
+    // It is gone because a STEP COUNT IS NOT EVIDENCE. The other two caps
+    // key on repetition — the same call, byte-identical arguments, over and
+    // over — which actually distinguishes a stuck model from a busy one. A
+    // raw count cannot: a search → read → edit → verify run across a large
+    // codebase legitimately spends dozens of distinct, productive steps, and
+    // cutting it off at an arbitrary number truncates real work with no
+    // finding to point at. The gate made it worse by being inconsistent —
+    // the same transcript was fine on Claude and stopped on a local model.
+    //
+    // This matches what the other agents do: Claude Code's max_turns is
+    // unlimited by default, aider never step-caps.
+    //
+    // What still bounds a runaway: the repeat caps above (universal), the
+    // context window, and the user hitting Esc. A model cycling through
+    // genuinely DIFFERENT calls forever is not something a counter should
+    // guess at — it is the thing the user is watching.
+    (void)tool_turns;
     return std::nullopt;
 }
 
-Cmd<Msg> kick_pending_tools(Model& m) {
-    if (m.d.current.messages.empty()) return Cmd<Msg>::none();
+Cmd kick_pending_tools(Model& m) {
+    if (m.d.current.messages.empty()) return Cmd::none();
     auto& last = m.d.current.messages.back();
-    if (last.role != Role::Assistant) return Cmd<Msg>::none();
+    if (last.role != Role::Assistant) return Cmd::none();
 
     // Bail early if the session is already Idle. This is the
     // late-arrival window: a tool worker thread can return a
@@ -1492,7 +1958,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     // Tools that were Pending/Approved at cancel-time are already
     // marked Failed/Rejected by CancelStream's teardown loop, so
     // there's nothing left to advance anyway.
-    if (m.s.is_idle()) return Cmd<Msg>::none();
+    if (m.s.is_idle()) return Cmd::none();
 
     // Drop re-leaked salvaged calls (weak local models re-emitting a tool
     // call they already ran this turn) BEFORE any promotion to Running, so a
@@ -1500,7 +1966,7 @@ Cmd<Msg> kick_pending_tools(Model& m) {
     // dedup_releaked_salvage_calls.
     dedup_releaked_salvage_calls(m);
 
-    std::vector<Cmd<Msg>> cmds;
+    std::vector<Cmd> cmds;
     bool any_pending = false;
 
     // Effect- and path-aware scheduler. When the assistant emits multiple
@@ -1534,15 +2000,20 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             if (m.d.session_grants.contains(tc.name.value)
                 || !tool::DynamicDispatch::needs_permission(tc.name.value, m.d.profile))
                 continue;
+            // Fingerprint the definition the user is about to be SHOWN, so
+            // the approval is tied to that definition and not just to the
+            // name. Verified again at launch (execute_approved).
+            const auto* shown = tools::find(tc.name.value);
             m.d.pending_permission = PendingPermission{
                 tc.id, tc.name,
                 "Tool " + tc.name.value + " needs permission under "
-                    + std::string{ui::profile_label(m.d.profile)} + " profile"};
+                    + std::string{ui::profile_label(m.d.profile)} + " profile",
+                shown ? shown->definition_hash() : 0};
             if (auto ctx = take_active_ctx(std::move(m.s.phase)); ctx)
                 m.s.phase = phase::AwaitingPermission{std::move(*ctx)};
             else
                 m.s.phase = phase::Idle{};   // late arrival: stay Idle
-            return Cmd<Msg>::none();
+            return Cmd::none();
         }
     }
 
@@ -1563,6 +2034,24 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // another sibling). Keep it Pending and do not dispatch it.
                 any_pending = true;
                 continue;
+            }
+            // Auto-allowed by the policy or by a standing grant. Record what
+            // was allowed at the moment of the decision; for this branch that
+            // is the same instant as the launch, so the window is nil, but
+            // recording it keeps every dispatch going through one check
+            // instead of two shapes of call.
+            //
+            // A STANDING grant is different: it was given earlier, possibly
+            // in a previous session, so the hash that matters is the one it
+            // was given for -- not whatever the name resolves to now. That is
+            // the whole point of recording it.
+            if (tc.approved_def_hash == 0) {
+                if (auto g = m.d.grant_def_hash.find(tc.name.value);
+                    g != m.d.grant_def_hash.end()) {
+                    tc.approved_def_hash = g->second;
+                } else if (const auto* allowed = tools::find(tc.name.value)) {
+                    tc.approved_def_hash = allowed->definition_hash();
+                }
             }
             {
                 // Effect/path-compatibility gate: the planner decided this
@@ -1585,12 +2074,22 @@ Cmd<Msg> kick_pending_tools(Model& m) {
                 // really begins — a tool that sat awaiting permission has a
                 // started_at minutes in the past, and charging that gap to
                 // the wedge budget killed freshly-approved tools (issue #40).
+                const auto seq = next_tool_exec_seq();
                 tc.status = ToolUse::Running{tc.started_at(), {}, {},
-                                             std::chrono::steady_clock::now()};
+                                             m.now,
+                                             seq};
                 auto cancel = active_ctx(m.s.phase)
                     ? active_ctx(m.s.phase)->cancel
                     : http::CancelTokenPtr{};
-                cmds.push_back(run_tool(tc.id, tc.name, tc.args, std::move(cancel)));
+                // Only the `skill` tool reads the active set, so only it pays
+                // for deriving one (a scan of the visible transcript).
+                std::vector<std::string> active_skills;
+                if (tc.name.value == "skill")
+                    active_skills = tools::skills::active_in(::agentty::visible_text(m.d.current));
+                cmds.push_back(run_tool(tc.id, tc.name, tc.args,
+                                        std::move(cancel), seq,
+                                        tc.approved_def_hash,
+                                        std::move(active_skills)));
 
                 // Tool wall-clock watchdog removed at user request.
                 // Tools now run for as long as their worker takes;
@@ -1642,8 +2141,9 @@ Cmd<Msg> kick_pending_tools(Model& m) {
         if (has_results) {
             // ── Doom-loop circuit breaker ────────────────────────────────
             // Before spending another model completion, check whether this
-            // agent run has stopped converging. Two independent caps, each
-            // matching what production agent tools ship:
+            // agent run has stopped converging. Both caps key on REPETITION —
+            // the same call with byte-identical arguments — because that is
+            // what distinguishes a stuck model from a busy one:
             //
             //   • REPEAT-FAILURE cap — the same call failed 3× in a row. This
             //     is the UNIVERSAL pattern (aider's max_reflections=3,
@@ -1651,30 +2151,31 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             //     model, Claude included: a capable model genuinely stuck on a
             //     dead call (bad path, wrong tool) is helped by it too.
             //
-            //   • RUNAWAY step cap (25 tool turns) — NOT something production
-            //     tools impose on a capable model: Claude Code's max_turns is
-            //     UNLIMITED by default, aider never step-caps. So it's enforced
-            //     ONLY for weak local models (qwen2.5-coder/codellama on the
-            //     Ollama native path) that doom-loop without a completion
-            //     signal. Claude (Kind::Anthropic) and capable hosted models
-            //     run as long as the task legitimately needs.
+            //   • SUCCESS-REPEAT cap — the same call SUCCEEDED 6× in one run.
+            //     Also universal. This is what caught the 80-repeat loop on a
+            //     local model behind a private gateway.
+            //
+            // There is NO step cap. A count of tool turns was never evidence
+            // of anything — a real search → read → edit → verify run across a
+            // large codebase spends dozens of distinct, productive steps — and
+            // gating it on a model-id heuristic meant the identical transcript
+            // stopped on a local model and ran fine on Claude. The whole
+            // `weak_step_cap` selector that used to be computed here went with
+            // it. Claude Code and aider both ship with no step cap for the
+            // same reason.
             //
             // If a cap trips, DON'T re-stream: surface the nudge as the run's
             // final assistant turn and drop to Idle so the loop ends in seconds
             // instead of spinning until the user hits Esc. The nudge also lands
             // in history, so a follow-up shows the model why it stopped.
-            const bool weak_step_cap =
-                provider::active().kind == provider::Kind::OpenAI
-                && is_weak_model(m.d.model_id.value);
-            if (auto brk = agent_loop_should_break(m.d.current.messages,
-                                                   /*enforce_step_cap=*/weak_step_cap)) {
+            if (auto brk = agent_loop_should_break(m.d.current.messages)) {
                 m.s.phase = phase::Idle{};
                 Message note;
                 note.role = Role::Assistant;
                 note.text = std::move(brk->reason);
                 m.d.current.messages.push_back(std::move(note));
-                deps().save_thread(m.d.current);
-                return Cmd<Msg>::batch(std::move(cmds));
+                cmds.push_back(Cmd(SaveThread{m.d.current}));
+                return Cmd::batch(std::move(cmds));
             }
 
             // when the prefix estimate crossed 90% of context_max,
@@ -1724,11 +2225,11 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             // a Tick land before the new sub-turn's StreamStarted resets
             // it, firing a spurious "stream stalled — no events for Ns".
             // The sub-turn is a fresh wire phase; start its clock now.
-            if (!reschedule_streaming(m.s.phase, [](phase::Active& c) {
-                    c.last_event_at = std::chrono::steady_clock::now();
+            if (!reschedule_streaming(m.s.phase, [&m](phase::Active& c) {
+                    c.last_event_at = m.now;
                     c.retry         = retry::Fresh{};
                 }))
-                return Cmd<Msg>::batch(std::move(cmds));   // late arrival
+                return Cmd::batch(std::move(cmds));   // late arrival
             Message placeholder;
             placeholder.role = Role::Assistant;
             m.d.current.messages.push_back(std::move(placeholder));
@@ -1742,19 +2243,19 @@ Cmd<Msg> kick_pending_tools(Model& m) {
             m.s.phase = phase::Idle{};
         }
     }
-    return Cmd<Msg>::batch(std::move(cmds));
+    return Cmd::batch(std::move(cmds));
 }
 
 // ── Self-update ────────────────────────────────────────────────
 
-Cmd<Msg> check_for_update() {
-    return Cmd<Msg>::task([](std::function<void(Msg)> dispatch) {
+Cmd check_for_update() {
+    return Cmd::task([](maya::Sink<Msg> out, std::stop_token) {
         // 24h-cached; the fast path is one small file read. Errors are
         // swallowed — an update NOTICE must never surface as a failure.
         try {
             auto c = update::check_latest(/*force=*/false);
             if (c.error.empty() && c.update_available) {
-                dispatch(Msg{UpdateCheckDone{true, std::move(c.latest),
+                out.send(Msg{UpdateCheckDone{true, std::move(c.latest),
                                              std::move(c.url)}});
                 return;
             }
@@ -1763,54 +2264,69 @@ Cmd<Msg> check_for_update() {
         } catch (...) {
             util::dbglog("update.check", "non-std exception");
         }
-        dispatch(Msg{UpdateCheckDone{}});
+        out.send(Msg{UpdateCheckDone{}});
     });
 }
 
-Cmd<Msg> refresh_modelsdev() {
-    return Cmd<Msg>::task_isolated([](std::function<void(Msg)>) {
-        // Fire-and-forget: registries are consulted at render/wire time, so
-        // there is no Msg to dispatch — the moment the fetch lands, the next
-        // frame's ladder/badges and the next request's clamp see it. Errors
-        // are swallowed; a metadata refresh must never surface as a failure.
-        try { (void)agentty::modelsdev::refresh(); }
-        catch (const std::exception& e) { util::dbglog("modelsdev.refresh", e.what()); }
-        catch (...) { util::dbglog("modelsdev.refresh", "non-std exception"); }
-    });
-}
-
-Cmd<Msg> perform_self_update(std::string version) {
-    return Cmd<Msg>::task([version = std::move(version)](
-                              std::function<void(Msg)> dispatch) {
+Cmd perform_self_update(std::string version) {
+    return Cmd::task([](maya::Sink<Msg> out, std::stop_token,
+                        std::string version) {
         try {
-            auto err = update::perform_update(version);
+            // Throttle: the HTTP layer calls back per chunk, which is
+            // thousands of times for a ~15 MB asset. Dispatching each one
+            // would flood the UI queue and make the update itself the
+            // slowest thing on screen. A frame is the finest granularity
+            // anyone can see, so coalesce to ~10/s and always let the
+            // final call through (total reached) so the bar lands on 100%.
+            auto last = std::chrono::steady_clock::now()
+                      - std::chrono::seconds{1};
+            auto err = update::perform_update(
+                version,
+                [&](std::size_t got, std::size_t total) {
+                    const auto now = std::chrono::steady_clock::now();
+                    const bool finished = total > 0 && got >= total;
+                    if (!finished && now - last < std::chrono::milliseconds{100})
+                        return;
+                    last = now;
+                    out.send(Msg{msg::MetaMsg{UpdateProgress{got, total}}});
+                });
             if (err.empty())
-                dispatch(Msg{UpdateApplied{true, version}});
+                out.send(Msg{UpdateApplied{true, version}});
             else
-                dispatch(Msg{UpdateApplied{false, std::move(err)}});
+                out.send(Msg{UpdateApplied{false, std::move(err)}});
         } catch (const std::exception& e) {
-            dispatch(Msg{UpdateApplied{false, e.what()}});
+            out.send(Msg{UpdateApplied{false, e.what()}});
         } catch (...) {
-            dispatch(Msg{UpdateApplied{false, "unknown error"}});
+            out.send(Msg{UpdateApplied{false, "unknown error"}});
         }
-    });
+    }, std::move(version));
 }
 
-Cmd<Msg> fetch_models() {
-    return Cmd<Msg>::task([](std::function<void(Msg)> dispatch) {
-        // Stamp the fetch with the provider it is FOR. The reducer compares
-        // this against the provider active at DELIVERY time and drops a
-        // stale payload — two quick provider switches otherwise interleave
-        // (A's slow fetch lands after B's) and install the wrong catalog.
-        const std::string for_provider = detail::active_provider_id();
-        try {
-            // ONE model-list router (provider/selection.cpp), dispatched on the
-            // same axes as the stream path. No is_chatgpt/OpenAI/Anthropic
-            // ladder here — a new provider inherits its catalog from its row.
-            // auth_snapshot(), not deps().auth: this runs on a WORKER thread
-            // and a bare read races the UI thread's auth swap mid-switch.
-            auto models = provider::list_models_for(provider::active(),
-                                                    auth_snapshot());
+Cmd fetch_models(const Model& m) {
+    // Resolve HERE, on the UI thread, from the MODEL, and hand the values to
+    // the body. Reading the process global instead was the bug a switch could
+    // hit: the reducer changes m.d.selection, the global is only published
+    // after the fold, so this would have fetched the OLD provider's catalog.
+    return fetch_models(m.d.selection,
+                        detail::active_provider_id(m));
+}
+
+Cmd fetch_models(provider::Selection sel,
+                 std::string for_provider) {
+    // Captureless body + args by value: jaal's rule (D7/D19) is that a task
+    // body captures NOTHING, so everything it reads is either an argument
+    // or a global it owns. A capture is a lifetime you have to reason about
+    // on another thread; an argument is a copy the runtime made for you.
+    return cmd::io_task(
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token,
+           provider::Selection sel, std::string for_provider) {
+            const auto auth = auth_snapshot(io, sel);
+            try {
+                // ONE model-list router (provider/selection.cpp), dispatched
+                // on the same axes as the stream path. No
+                // is_chatgpt/OpenAI/Anthropic ladder here — a new provider
+                // inherits its catalog from its row.
+                auto models = provider::list_models_for(io, cap, sel, auth);
             // EMPTY catalog on a LOCAL host = the server didn't answer (down,
             // wrong port, wrong path) — list_models returns {} on any HTTP
             // failure rather than throwing. Attach the reason so the reducer
@@ -1820,7 +2336,6 @@ Cmd<Msg> fetch_models() {
             // host is called out within seconds of Enter.
             std::string err;
             if (models.empty()) {
-                const auto& sel = provider::active();
                 if (sel.kind == provider::Kind::OpenAI
                     && !sel.openai_endpoint.use_tls)
                     err = "no response from " + sel.openai_endpoint.host + ":"
@@ -1836,8 +2351,8 @@ Cmd<Msg> fetch_models() {
                      "models.loaded", "provider={} count={} err={}",
                      for_provider, models.size(),
                      err.empty() ? std::string{"-"} : err);
-            dispatch(ModelsLoaded{std::move(models), for_provider,
-                                  std::move(err)});
+            out.send(Msg{ModelsLoaded{std::move(models), for_provider,
+                                      std::move(err)}});
         } catch (const std::exception& e) {
             // Dispatch an EMPTY ModelsLoaded carrying the reason (NOT a
             // StreamError) so the reducer always clears `models_loading`
@@ -1851,16 +2366,45 @@ Cmd<Msg> fetch_models() {
             // surfaces `error` as a transient status toast instead.
             AGT_LOG(Wire, Warn, "models.failed", "provider={} err={}",
                     for_provider, e.what());
-            dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
-                                  std::string{"models fetch: "} + e.what()});
+            out.send(Msg{ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
+                                      std::string{"models fetch: "} + e.what()}});
         } catch (...) {
-            dispatch(ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
-                                  "models fetch: unknown exception"});
+            out.send(Msg{ModelsLoaded{std::vector<ModelInfo>{}, for_provider,
+                                      "models fetch: unknown exception"}});
         }
-    });
+        },
+        std::move(sel), std::move(for_provider));
 }
 
-Cmd<Msg> fetch_models_for(std::string spec) {
+Cmd probe_model_window(const Model& m, std::string model_id) {
+    const auto& sel = m.d.selection;
+    // Only a local OpenAI-compatible host has a window that can change under
+    // us (a router swapping models). Ollama's native api isn't this route.
+    if (model_id.empty() || sel.kind != provider::Kind::OpenAI
+        || sel.openai_endpoint.native_api
+        || !provider::openai::detail::is_local_endpoint(sel.openai_endpoint))
+        return Cmd::none();
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg> out, std::stop_token,
+           std::string model_id, provider::Selection sel,
+           std::string for_provider) {
+            const auto& endpoint = sel.openai_endpoint;
+            const auto  auth     = auth_snapshot(io, sel);
+            int w = 0;
+            try {
+                w = provider::openai::probe_loaded_window(io, auth, endpoint,
+                                                          model_id);
+            } catch (...) {}
+            AGT_LOG(Wire, Info, "models.window_probe", "provider={} model={} window={}",
+                    for_provider, model_id, w);
+            out.send(Msg{ModelWindowProbed{for_provider, model_id, w}});
+        },
+        // The selection comes from the Model; the credential is resolved for
+        // it on the worker (a reducer can't read the store).
+        std::move(model_id), sel, detail::active_provider_id(m));
+}
+
+Cmd fetch_models_for(std::string spec) {
     // Fetch ANY provider's catalog WITHOUT switching to it — the fused
     // cross-provider picker fans one of these out per authed provider on
     // open. Builds a Selection from `spec` (not active()), so the router
@@ -1869,7 +2413,8 @@ Cmd<Msg> fetch_models_for(std::string spec) {
     // against a provider signed out mid-fetch). list_models_for falls back to
     // the bundled seed on empty auth / unreachable host, so this is fast and
     // non-empty for hosted providers even before a live fetch succeeds.
-    return Cmd<Msg>::task([spec = std::move(spec)](std::function<void(Msg)> dispatch) {
+    return cmd::io_task([](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token,
+                           std::string spec) {
         try {
             auto sel = provider::parse_selection(spec);
             // Resolve credentials for THIS spec — not auth_snapshot(), which
@@ -1880,72 +2425,95 @@ Cmd<Msg> fetch_models_for(std::string spec) {
                 sel.kind == provider::Kind::OpenAI
                     ? sel.openai_endpoint.label
                     : std::string{provider::default_provider_id()};
-            auto models = provider::list_models_for(
-                sel, provider::credentials::resolve(pid));
-            dispatch(FusedCatalogLoaded{spec, std::move(models), true});
+            auto models = provider::list_models_for(io, cap,
+                sel, provider::credentials::resolve(io, pid));
+            out.send(Msg{FusedCatalogLoaded{spec, std::move(models), true}});
         } catch (...) {
-            dispatch(FusedCatalogLoaded{spec, std::vector<ModelInfo>{}, false});
+            out.send(Msg{FusedCatalogLoaded{spec, std::vector<ModelInfo>{}, false}});
         }
-    });
+    }, std::move(spec));
 }
 
-Cmd<Msg> open_browser_async(std::string url) {
+Cmd open_browser_async(std::string url) {
     // task_isolated rather than task: posix_spawn / ShellExecute can
     // wedge on a hung WindowServer or a bizarre default-opener.
     // Isolated thread keeps a wedge from starving the shared BG pool.
-    return Cmd<Msg>::task_isolated([url = std::move(url)]
-                                   (std::function<void(Msg)>) {
-        // No dispatch — the reducer doesn't care whether the browser
+    return Cmd::task_isolated([](maya::Sink<Msg>, std::stop_token,
+                                 std::string url) {
+        // No send — the reducer doesn't care whether the browser
         // launched. The user can always paste auth_url manually from
         // the modal if their default opener is broken.
         auth::open_browser(url);
+    }, std::move(url));
+}
+
+Cmd mint_oauth_login() {
+    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token) {
+        LoginOAuthMinted r;
+        // random_urlsafe throws if the CSPRNG is unavailable. Fail closed
+        // into the modal's Failed state rather than mint a weak secret.
+        try {
+            r.verifier      = auth::PkceVerifier{auth::random_urlsafe(io, 128)};
+            r.state         = auth::OAuthState{auth::random_urlsafe(io, 32)};
+            r.authorize_url = auth::oauth_authorize_url(r.verifier, r.state);
+        } catch (const std::exception& e) {
+            r = LoginOAuthMinted{};
+            r.error = e.what();
+        }
+        out.send(Msg{msg::LoginMsg{std::move(r)}});
     });
 }
 
-Cmd<Msg> oauth_exchange(auth::OAuthCode    code,
+Cmd oauth_exchange(auth::OAuthCode    code,
                         auth::PkceVerifier verifier,
                         auth::OAuthState   state) {
-    return Cmd<Msg>::task(
-        [code = std::move(code),
-         verifier = std::move(verifier),
-         state = std::move(state)]
-        (std::function<void(Msg)> dispatch) {
+    return Cmd::task(
+        [](maya::Sink<Msg> out, std::stop_token,
+           auth::OAuthCode code, auth::PkceVerifier verifier,
+           auth::OAuthState state) {
             try {
                 auto r = auth::exchange_code(code, verifier, state);
-                dispatch(LoginExchanged{std::move(r)});
+                out.send(Msg{LoginExchanged{std::move(r)}});
             } catch (const std::exception& e) {
-                dispatch(LoginExchanged{std::unexpected(auth::OAuthError{
+                out.send(Msg{LoginExchanged{std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network,
-                    std::string{"exchange threw: "} + e.what()})});
+                    std::string{"exchange threw: "} + e.what()})}});
             } catch (...) {
-                dispatch(LoginExchanged{std::unexpected(auth::OAuthError{
+                out.send(Msg{LoginExchanged{std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network,
-                    "exchange threw: unknown exception"})});
+                    "exchange threw: unknown exception"})}});
             }
-        });
+        },
+        std::move(code), std::move(verifier), std::move(state));
 }
 
-Cmd<Msg> load_threads_async() {
+Cmd load_threads_async() {
     // task_isolated rather than task: the JSON parse can take seconds
     // on a deep history (the directory walk is `directory_iterator` +
     // `nlohmann::json::parse` per file). Isolating it keeps the shared
     // worker pool free for stream / tool tasks the user fires in the
     // meantime.
-    return Cmd<Msg>::task_isolated([](std::function<void(Msg)> dispatch) {
+    return cmd::io_task_isolated([](Io io, maya::Sink<Msg> out, std::stop_token) {
         try {
-            auto threads = deps().load_threads();
-            dispatch(ThreadsLoaded{std::move(threads)});
+            auto threads = deps(io).load_threads();
+            out.send(Msg{ThreadsLoaded{std::move(threads)}});
         } catch (...) {
             // Best-effort: a corrupt file is already logged + skipped
             // by load_all_threads, so any throw here is something the
             // user can't act on. Dispatch an empty list so the UI
             // doesn't sit on "loading…" forever.
-            dispatch(ThreadsLoaded{std::vector<Thread>{}});
+            out.send(Msg{ThreadsLoaded{std::vector<Thread>{}}});
         }
     });
 }
 
-Cmd<Msg> load_plugins_async(bool reconnect) {
+Cmd load_library() {
+    return cmd::io_task_isolated([](Io io, maya::Sink<Msg> out, std::stop_token) {
+        out.send(Msg{LibraryLoaded{read_library(io)}});
+    });
+}
+
+Cmd load_plugins_async(bool reconnect) {
     // Bring the MCP connection snapshot INTO the Model. reconnect=true runs
     // the full reload (respawn + handshake, bounded by the bridge's 15s
     // deadline) for add/remove/toggle and first open; reconnect=false just
@@ -1953,8 +2521,8 @@ Cmd<Msg> load_plugins_async(bool reconnect) {
     // PluginsUpdated{plugin_model()} so the reducer stores the result in
     // m.ui.plugins — the view reads THAT, never the global pool. This is the
     // Cmd→Msg discipline that makes the panel a pure function of the Model.
-    return Cmd<Msg>::task_isolated(
-        [reconnect](std::function<void(Msg)> dispatch) {
+    return Cmd::task_isolated(
+        [](maya::Sink<Msg> out, std::stop_token, bool reconnect) {
             if (reconnect) {
                 // Force the connect. On a COLD start nothing has accessed the
                 // registry yet, so the pool is unbuilt — touching registry()
@@ -1965,33 +2533,177 @@ Cmd<Msg> load_plugins_async(bool reconnect) {
                 (void)tools::registry();
                 (void)tools::reload_mcp_plugins();
             }
-            dispatch(PluginsUpdated{mcp::plugin_model()});
-        });
+            out.send(Msg{PluginsUpdated{mcp::plugin_model()}});
+        }, reconnect);
 }
 
-Cmd<Msg> load_thread_async(ThreadId id) {
+Cmd settings_add(settings::Category concern, std::string line) {
+    return cmd::io_task(
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token, settings::Category c, std::string l) {
+            const settings::AddResult r = (c == settings::Category::Plugins)
+                ? settings::add_plugin_from_line(io, cap, l)
+                : settings::create_starter(io, c, l);
+            out.send(Msg{SettingsAddDone{c, r.ok, r.message}});
+        }, concern, std::move(line));
+}
+
+Cmd read_rag_embed_status(std::uint64_t gen) {
+    return cmd::io_task_isolated([](Io io, maya::Sink<Msg> out, std::stop_token, std::uint64_t g) {
+        const auto st = tools::rag_embed_status(io);
+        RagEmbedStatusRead r;
+        r.gen        = g;
+        r.ready      = st.state == tools::RagEmbedStatus::State::Ready;
+        r.failed     = st.state == tools::RagEmbedStatus::State::Unavailable;
+        r.dim        = st.dim;
+        r.latency_ms = st.latency_ms;
+        r.reason     = st.reason;
+        out.send(Msg{std::move(r)});
+    }, gen);
+}
+
+Cmd apply_rag_settings(store::RagConfig cfg) {
+    // Isolated: the embedder re-probe is a network dial that may never
+    // return, and must not occupy a shared worker. The stop_token is the
+    // kernel's, so app shutdown reaches it with no registration on our side.
+    return Cmd::task_isolated(
+        [](maya::Sink<Msg>, std::stop_token st, store::RagConfig cfg) {
+            if (st.stop_requested()) return;
+            try {
+                tools::rag_apply_settings_now(cfg);
+            } catch (const std::exception& e) {
+                util::dbglog("rag.apply_settings", e.what());
+            } catch (...) {}
+        },
+        std::move(cfg));
+}
+
+Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
+                tools::plugin::ServerSpec spec) {
+    // task, not task_isolated: one small file rewrite, bounded, so a warm
+    // pooled worker is right. The body is captureless (jaal's task contract);
+    // everything rides as an argument.
+    //
+    // The path crosses as a std::string: jaal's Sendable check knows
+    // std::string owns its bytes, and has no entry for filesystem::path. The
+    // worker rebuilds the path, which is the same value either way.
+    return cmd::io_task(
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token,
+           std::string path_str, PluginEdited r, tools::plugin::ServerSpec spec) {
+            const std::filesystem::path path{path_str};
+            namespace pl = tools::plugin;
+            using K = PluginEdited::Kind;
+            auto record = [&r](pl::EditResult res) {
+                r.ok             = (res == pl::EditResult::Ok);
+                r.already_exists = (res == pl::EditResult::AlreadyExists);
+                r.parse_error    = (res == pl::EditResult::ParseError);
+            };
+            try {
+                switch (r.kind) {
+                case K::SetServerDisabled:
+                    record(pl::set_server_disabled(io, cap, path, r.server, r.flag));
+                    break;
+                case K::SetToolEnabled:
+                    record(pl::set_tool_enabled(io, cap, path, r.server, r.tool, r.flag));
+                    // A tool's enabled state is baked into the cached MCP
+                    // catalog, so the cache must drop it — here, on the
+                    // worker, right after the write it depends on, rather
+                    // than as a second global poke from the reducer.
+                    if (r.ok) tools::invalidate_mcp_catalog(io);
+                    break;
+                case K::Approve:
+                    r.ok = pl::approve_server(io, path, r.server);
+                    break;
+                case K::Remove:
+                    record(pl::remove_server(io, cap, path, r.server));
+                    break;
+                case K::Add:
+                    record(pl::add_server(io, cap, path, spec, /*force=*/false));
+                    break;
+                case K::Update:
+                    record(pl::update_server(io, cap, path, spec));
+                    break;
+                }
+            } catch (...) {
+                // An edit that throws reports as a failed write: the reducer
+                // shows its "could not write" path instead of hanging on a
+                // reply that never comes.
+                r.ok = false;
+            }
+            out.send(Msg{std::move(r)});
+        },
+        path.string(), std::move(reply), std::move(spec));
+}
+
+Cmd write_fork_transcript(Thread parent, fork_panel::Choice choice) {
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg> out, std::stop_token, Thread t,
+           fork_panel::Choice choice) {
+            ForkTranscriptWritten r{.parent_id = t.id.value, .choice = choice};
+            try {
+                r.path = persistence::write_thread_transcript_md(io, t).string();
+            } catch (...) {
+                r.path.clear();
+            }
+            // The transcript sits under ~/.agentty/threads, outside the
+            // workspace the read tool is sandboxed to. Open just that file
+            // (the mcp-cpp tools see the same read roots) so the model can
+            // read what the fork note points at, and nothing else there.
+            if (!r.path.empty())
+                tools::util::allow_fork_transcripts(io, persistence::threads_dir(), {r.path});
+            out.send(Msg{msg::ForkMsg{std::move(r)}});
+        },
+        std::move(parent), choice);
+}
+
+Cmd prewarm_provider(const Model& m) {
+    provider::PrewarmTarget t = provider::prewarm_target(m.d.selection);
+    if (!t.should_warm()) return Cmd::none();   // no effect to describe
+    // Plain task, not isolated: prewarm() only POSTS the dial to the http
+    // client's own pool and returns, so this occupies a worker for
+    // microseconds. The dial's lifetime is the client's, joined by its own
+    // join_prewarm() at teardown.
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg>, std::stop_token st, provider::PrewarmTarget t) {
+            if (st.stop_requested()) return;
+            http::default_client(io).prewarm(t.host, t.port, t.override_host,
+                                           t.override_port);
+        },
+        std::move(t));
+}
+
+Cmd load_thread_async(ThreadId id) {
     // task_isolated rather than task: a single big thread (multi-MB,
     // hundreds of messages) still takes 20-50ms of synchronous parse,
     // small enough to keep on the worker pool — but isolating matches
     // the load_threads_async policy and keeps the per-thread parse
     // off the same pool that tools/stream contend for.
-    return Cmd<Msg>::task_isolated(
-        [id = std::move(id)](std::function<void(Msg)> dispatch) {
+    return cmd::io_task_isolated(
+        [](Io io, maya::Sink<Msg> out, std::stop_token, ThreadId id) {
             try {
-                auto loaded = deps().load_thread(id);
+                auto loaded = deps(io).load_thread(id);
                 if (loaded) {
-                    dispatch(ThreadLoaded{std::move(*loaded)});
+                    // A reopened fork still points at its parent's transcript
+                    // outside the workspace; the grant from fork time died
+                    // with that session (#83).
+                    std::vector<std::string> transcripts;
+                    for (const auto& msg : loaded->messages)
+                        if (msg.fork_note && !msg.fork_transcript.empty())
+                            transcripts.push_back(msg.fork_transcript);
+                    if (!transcripts.empty())
+                        tools::util::allow_fork_transcripts(
+                            io, persistence::threads_dir(), transcripts);
+                    out.send(Msg{ThreadLoaded{std::move(*loaded)}});
                 } else {
                     // Disk read / parse failure: surface an empty
                     // Thread so the reducer clears `thread_loading`
                     // and the UI doesn't sit stuck on the spinner.
                     // Reducer detects empty ThreadId == no swap.
-                    dispatch(ThreadLoaded{Thread{}});
+                    out.send(Msg{ThreadLoaded{Thread{}}});
                 }
             } catch (...) {
-                dispatch(ThreadLoaded{Thread{}});
+                out.send(Msg{ThreadLoaded{Thread{}}});
             }
-        });
+        }, std::move(id));
 }
 
 std::uint64_t next_codex_login_attempt_id() noexcept {
@@ -1999,22 +2711,21 @@ std::uint64_t next_codex_login_attempt_id() noexcept {
     return next.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-Cmd<Msg> probe_host_async(std::string spec, std::uint64_t attempt_id,
-                          auth::AuthHeader auth) {
+Cmd probe_host_async(std::string spec, std::uint64_t attempt_id) {
     // Connect-probe a custom host on a worker: dial its model list
     // (configured path → /v1/models → Ollama /api/tags) and report the
     // DETECTED dialect. Bounded by probe_host's own 3s/6s timeouts, so the
     // modal's "probing…" state resolves quickly either way.
-    return Cmd<Msg>::task([spec = std::move(spec), attempt_id,
-                           auth = std::move(auth)]
-                          (std::function<void(Msg)> dispatch) {
+    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token,
+                        std::string spec, std::uint64_t attempt_id) {
         HostProbed r;
         r.attempt_id = attempt_id;
         r.spec       = spec;
         try {
             const auto sel = provider::parse_selection(spec);
+            const auto auth = provider::credentials::resolve(io, spec);
             const auto probe =
-                provider::openai::probe_host(auth, sel.openai_endpoint);
+                provider::openai::probe_host(io, auth, sel.openai_endpoint);
             using D = provider::openai::HostProbe::Dialect;
             if (probe.dialect != D::None) {
                 r.ok          = true;
@@ -2022,56 +2733,109 @@ Cmd<Msg> probe_host_async(std::string spec, std::uint64_t attempt_id,
                 r.native_api  = probe.dialect == D::OllamaNative;
                 r.model_count = probe.model_count;
                 r.latency_ms  = probe.latency_ms;
-            } else if (probe.http_status == 401 || probe.http_status == 403) {
-                r.error = "HTTP " + std::to_string(probe.http_status)
-                        + " \xe2\x80\x94 this host needs an API key";
-            } else if (probe.http_status != 0) {
-                r.error = "HTTP " + std::to_string(probe.http_status)
-                        + " \xe2\x80\x94 no model list at any known path";
+
+                // Did this host tell us a real context window?
+                //
+                // list_models runs the whole ladder including the runtime
+                // probe, so asking here costs one more request on a host
+                // that just answered in milliseconds — and it turns the
+                // add-host toast from "connected" into "connected, and the
+                // window is 8k", which is the fact that decides whether
+                // long sessions work.
+                //
+                // The largest window across the listed models is the right
+                // summary: the toast names what this host can do, and the
+                // per-model number is still shown in the picker.
+                //
+                // ADD TIME IS DIFFERENT from a routine refresh, so the
+                // address heuristic is bypassed here: force_probe asks the
+                // runtime routes regardless of what the host looks like.
+                // This is the one moment the user is sitting in front of a
+                // modal waiting for an answer about THIS host, so a few
+                // extra milliseconds are affordable in a way they are not
+                // on every background refresh — and the alternative is
+                // asking them a question the server can answer itself.
+                auto models = provider::openai::list_models(
+                    io, auth, sel.openai_endpoint, /*force_probe=*/true);
+                for (const auto& mi : models)
+                    if (mi.context_window > r.window_tokens)
+                        r.window_tokens = mi.context_window;
+
+                // A host that answered a runtime route IS self-hosted —
+                // /props, /api/ps, loaded_instances and meta.n_ctx are not
+                // things a hosted API serves. So when the probe worked on
+                // an address the heuristic would have excluded, remember
+                // the host: every later refresh then probes it too, without
+                // the user configuring anything.
+                //
+                // This is what replaces the settings toggle. The server
+                // already told us what it is; asking the user to confirm it
+                // would be asking them to repeat an answer we have.
+                const bool looks_local =
+                    provider::openai::detail::is_local_endpoint(sel.openai_endpoint);
+                if (r.window_tokens > 0 && !looks_local)
+                    r.learned_self_hosted = sel.openai_endpoint.host;
+                // Still nothing, and we would not normally have asked: the
+                // host is reachable but silent about its window AND does not
+                // look self-hosted. Nothing to remember, and nothing the UI
+                // can fix by itself.
+                r.probe_skipped = r.window_tokens <= 0 && !looks_local;
             } else {
-                r.error = "nothing listening \xe2\x80\x94 is the server "
-                          "running on that host:port?";
+                // One sentence per failure mode, from the probe's own taxonomy
+                // (HostProbe::explain). Three very different mistakes used to
+                // arrive here as the same unhelpful string — notably a 200 +
+                // HTML response, which is what you get from pasting a
+                // dashboard URL instead of the API base, and which used to
+                // report "HTTP 200 — no model list at any known path".
+                r.error = probe.explain();
+                r.needs_key =
+                    probe.failure == provider::openai::HostProbe::Failure::NeedsKey;
             }
         } catch (const std::exception& e) {
             r.error = e.what();
         } catch (...) {
             r.error = "probe failed";
         }
-        dispatch(std::move(r));
-    });
+        out.send(Msg{std::move(r)});
+    }, std::move(spec), attempt_id);
 }
 
-Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
-                            std::uint64_t attempt_id,
-                            std::shared_ptr<std::atomic_bool> cancel) {
+Sub device_login_sub(std::string provider, std::string provider_label,
+                     std::uint64_t attempt_id) {
     // Native OAuth device flow, provider-generic. Requests a one-time code
-    // (dispatched to the modal via DeviceCodeReady), then block-polls until the
-    // user approves. Every message carries provider + attempt_id so a stale
-    // worker can't complete a newer login; Esc trips `cancel` for cooperative
-    // shutdown. Runs isolated because login() blocks while the user signs in.
-    return Cmd<Msg>::task_isolated(
-        [provider = std::move(provider), provider_label = std::move(provider_label),
-         attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
-        const auto cancelled = [cancel] {
-            return cancel && cancel->load(std::memory_order_acquire);
-        };
+    // (dispatched to the modal via DeviceCodeReady), then block-polls until
+    // the user approves.
+    //
+    // A STREAM, keyed on the attempt. jaal keeps one run alive while
+    // subscribe() keeps returning this key, and fires the stop_token the
+    // moment it stops — which is exactly when the DeviceWaiting state goes
+    // away (Esc, success, or a newer attempt). So cancellation needs no flag
+    // and no bookkeeping: not asking for the subscription IS the cancel.
+    //
+    // Dedicated thread per stream, which is what this needs: login() blocks
+    // for as long as the user takes.
+    return Sub::stream(
+        "login/device/" + provider + "/" + std::to_string(attempt_id),
+        [](const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token stop, std::string provider,
+           std::string provider_label, std::uint64_t attempt_id) {
+        const std::stop_token cancelled = stop;
         auto emit_code = [&](std::string bare_url, std::string browser_url,
                              std::string user_code) {
-            dispatch(DeviceCodeReady{
+            out.send(Msg{DeviceCodeReady{
                 .provider = provider,
                 .attempt_id = attempt_id,
                 .verification_url = std::move(bare_url),
                 .browser_url = std::move(browser_url),
                 .user_code = std::move(user_code),
-            });
+            }});
         };
         auto done = [&](std::optional<std::string> error) {
-            dispatch(DeviceLoginDone{
+            out.send(Msg{DeviceLoginDone{
                 .provider = provider,
                 .provider_label = provider_label,
                 .attempt_id = attempt_id,
                 .error = std::move(error),
-            });
+            }});
         };
         try {
             // Each provider's login() shares the same shape (timeout,
@@ -2090,7 +2854,7 @@ Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
             // providers, not two.
             std::optional<std::string> err;
             if (provider == "copilot") {
-                auto r = provider::copilot::login(900,
+                auto r = provider::copilot::login(cap, 900,
                     [&](const provider::copilot::DeviceCode& c) {
                         // GitHub returns one URL (github.com/login/device); the
                         // user types the code there.
@@ -2098,7 +2862,7 @@ Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
                     }, cancelled);
                 if (!r) err = r.error().render();
             } else if (provider == "kimi") {
-                auto r = provider::kimi::login(900,
+                auto r = provider::kimi::login(cap, 900,
                     [&](const provider::kimi::DeviceCode& c) {
                         // Show + open the PRE-FILLED url (…?user_code=XXXX) so
                         // that on SSH/headless, the url the user manually opens
@@ -2119,69 +2883,116 @@ Cmd<Msg> device_login_async(std::string provider, std::string provider_label,
         } catch (...) {
             done(provider + " login threw");
         }
-    });
+    },
+        std::move(provider), std::move(provider_label), attempt_id);
 }
 
-Cmd<Msg> codex_login_async(std::uint64_t attempt_id,
-                           std::shared_ptr<std::atomic_bool> cancel) {
-    // Isolated because either OAuth mode blocks while the user signs in. Every
-    // message carries attempt_id so a late worker cannot complete a newer
-    // login, and Esc trips cancel for cooperative polling shutdown.
-    return Cmd<Msg>::task_isolated(
-        [attempt_id, cancel = std::move(cancel)](std::function<void(Msg)> dispatch) {
-        const auto cancelled = [cancel] {
-            return cancel && cancel->load(std::memory_order_acquire);
-        };
+Sub codex_login_sub(std::uint64_t attempt_id) {
+    // Same shape as device_login_sub: a keyed stream, so Esc stops it. Either
+    // OAuth mode blocks while the user signs in.
+    return cmd::io_stream(
+        "login/codex/" + std::to_string(attempt_id),
+        [](Io io, maya::Sink<Msg> out, std::stop_token stop, std::uint64_t attempt_id) {
+        const std::stop_token cancelled = stop;
         try {
             auto r = provider::chatgpt::codex_login(
-                900, [attempt_id, &dispatch](
+                io, 900, [attempt_id, out](
                          const provider::chatgpt::CodexDeviceCode& code) {
-                    dispatch(CodexDeviceCodeReady{
+                    out.send(Msg{CodexDeviceCodeReady{
                         .attempt_id = attempt_id,
                         .verification_url = code.verification_url,
                         .user_code = code.user_code,
-                    });
+                    }});
                 }, cancelled);
-            dispatch(CodexLoginDone{
+            out.send(Msg{CodexLoginDone{
                 .attempt_id = attempt_id,
                 .result = std::move(r),
-            });
+            }});
         } catch (const std::exception& e) {
-            dispatch(CodexLoginDone{
+            out.send(Msg{CodexLoginDone{
                 .attempt_id = attempt_id,
                 .result = std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network,
                     std::string{"ChatGPT login threw: "} + e.what()}),
-            });
+            }});
         } catch (...) {
-            dispatch(CodexLoginDone{
+            out.send(Msg{CodexLoginDone{
                 .attempt_id = attempt_id,
                 .result = std::unexpected(auth::OAuthError{
                     auth::OAuthErrorKind::Network,
                     "ChatGPT login threw: unknown exception"}),
-            });
+            }});
         }
+    }, attempt_id);
+}
+
+namespace {
+// Run the locked refresh and turn it into the Msg. After it, re-check that
+// the store still carries the token we got: an account switch can replace
+// the store after the worker saved, and installing the old account's bearer
+// would cross-wire them. That case reports Superseded, which the reducer
+// treats as benign.
+TokenRefreshed run_refresh(Io io, const std::string& refresh_token) {
+    try {
+        auto r = auth::refresh_access_token_locked(io, auth::RefreshToken{refresh_token});
+        if (r) {
+            auto on_disk = auth::load_credentials(io);
+            const auto* o = on_disk ? std::get_if<auth::cred::OAuth>(&*on_disk)
+                                    : nullptr;
+            if (!o || o->access_token != r->access_token)
+                return TokenRefreshed{std::unexpected(auth::OAuthError{
+                    auth::OAuthErrorKind::Superseded,
+                    "store no longer carries the refreshed token"})};
+        }
+        return TokenRefreshed{std::move(r)};
+    } catch (const std::exception& e) {
+        return TokenRefreshed{std::unexpected(auth::OAuthError{
+            auth::OAuthErrorKind::Network,
+            std::string{"refresh threw: "} + e.what()})};
+    } catch (...) {
+        return TokenRefreshed{std::unexpected(auth::OAuthError{
+            auth::OAuthErrorKind::Network,
+            "refresh threw: unknown exception"})};
+    }
+}
+}  // namespace
+
+Cmd refresh_oauth_if_due() {
+    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token) {
+        std::optional<std::string> tok;
+        try { tok = auth::oauth_proactive_refresh_token(io); } catch (...) {}
+        if (!tok) {
+            out.send(Msg{msg::LoginMsg{OAuthRefreshNotDue{}}});
+            return;
+        }
+        out.send(Msg{run_refresh(io, *tok)});
     });
 }
 
-Cmd<Msg> refresh_oauth(std::string refresh_token) {
-    return Cmd<Msg>::task(
-        [refresh_token = std::move(refresh_token)]
-        (std::function<void(Msg)> dispatch) {
-            try {
-                auto r = auth::refresh_access_token_locked(
-                    auth::RefreshToken{refresh_token});
-                dispatch(TokenRefreshed{std::move(r)});
-            } catch (const std::exception& e) {
-                dispatch(TokenRefreshed{std::unexpected(auth::OAuthError{
-                    auth::OAuthErrorKind::Network,
-                    std::string{"refresh threw: "} + e.what()})});
-            } catch (...) {
-                dispatch(TokenRefreshed{std::unexpected(auth::OAuthError{
-                    auth::OAuthErrorKind::Network,
-                    "refresh threw: unknown exception"})});
-            }
-        });
+Cmd refresh_oauth_for_401() {
+    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token) {
+        std::string rt;
+        try {
+            if (auto loaded = auth::load_credentials(io))
+                if (auto* o = std::get_if<auth::cred::OAuth>(&*loaded))
+                    rt = o->refresh_token;
+        } catch (...) {}
+        if (rt.empty()) {
+            // An API key or env token: nothing to refresh with.
+            out.send(Msg{TokenRefreshed{std::unexpected(auth::OAuthError{
+                auth::OAuthErrorKind::MissingToken,
+                "no refresh token stored; sign in again with /login"})}});
+            return;
+        }
+        out.send(Msg{run_refresh(io, rt)});
+    });
+}
+
+Cmd refresh_oauth(std::string refresh_token) {
+    return cmd::io_task(
+        [](Io io, maya::Sink<Msg> out, std::stop_token, std::string refresh_token) {
+            out.send(Msg{run_refresh(io, refresh_token)});
+        }, std::move(refresh_token));
 }
 
 } // namespace agentty::app::cmd

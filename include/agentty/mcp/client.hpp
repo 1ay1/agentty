@@ -24,11 +24,14 @@
 //     grafted onto the render/stream loop.
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "agentty/mcp/plugin_model.hpp"   // PluginModel value snapshot
 #include "agentty/tool/registry.hpp"   // ToolDef
@@ -145,6 +148,18 @@ void release_servers() noexcept;
 // the number of servers connected after the reload. Blocking (same
 // connect handshake + deadline as startup); call off the UI thread.
 [[nodiscard]] std::size_t mcp_reload();
+
+// MCP servers an ACP client (Zed, JetBrains) sent with session/new, in
+// mcp.json shape: {"name": {"command": ..., "args": [...], "env": {...}}} or
+// {"name": {"type": "http", "url": ..., "headers": {...}}}. They join the
+// pool alongside mcp.json and win on a name clash. Merged across sessions
+// (one editor, one list); reconnects only when something changed.
+void set_client_servers(const nlohmann::json& servers);
+[[nodiscard]] std::vector<std::string> configured_server_names_from_client();
+
+// The editor can open URL-mode elicitations: advertise them to MCP servers
+// (connections made after this) and report each finished one to `done`.
+void set_url_elicitation(std::function<void(const std::string& elicitation_id)> done);
 
 // ── Resources (MCP resources/*) ──────────────────────────────────────────
 // A resource the agent can read by URI (file, db row, API doc, …).

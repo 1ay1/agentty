@@ -24,6 +24,8 @@
 
 #include <string>
 
+#include <maya/runtime.hpp>
+
 #include "agentty/provider/provider.hpp"   // Request, EventSink, StreamResult
 
 namespace agentty::provider {
@@ -35,13 +37,14 @@ namespace agentty::provider {
 // UI shows a clean error instead of a silent hang. Returns a StreamResult
 // naming how the round ended (mapped from the ACP backend's own TurnResult) so
 // the ACP arm reports its outcome through the same value as the native ones.
-StreamResult stream_external_acp(const std::string&   agent_id,
+StreamResult stream_external_acp(const maya::unlocked& cap,
+                                 const std::string&    agent_id,
                                  Request               req,
                                  EventSink             sink);
 
 // Tear down every cached agent subprocess (idempotent). Called at shutdown; the
 // per-agent teardown uses ExternalAcpBackend's hardened watchdog so a wedged
-// agent can't hang the exit path.
-void release_acp_agents() noexcept;
+// agent can't hang the exit path. It waits on subprocesses: `unlocked`.
+void release_acp_agents(const maya::unlocked& cap) noexcept;
 
 } // namespace agentty::provider

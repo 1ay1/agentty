@@ -101,6 +101,20 @@ role_from_wire_name(std::string_view s) noexcept {
 struct RoleProfile {
     std::string             model;
     Effort effort = Effort::None;
+    // The provider that can serve `model`, when it is NOT the caller's own.
+    //
+    // Empty is the common case and means "dispatch where you already are".
+    // Non-empty only happens for a slot the user pinned on another endpoint:
+    // a model id is endpoint-scoped, so replaying it against the active
+    // provider is a 404 — the resolver used to drop such a pin for exactly
+    // that reason. Naming the provider instead lets a caller that CAN reach
+    // it (the subagent runner, via Config::stream_to) honour the pin, while
+    // one that cannot still falls back.
+    std::string             provider;
+
+    [[nodiscard]] bool cross_provider() const noexcept {
+        return !provider.empty();
+    }
 };
 
 // Per-role user overrides, persisted in settings. An empty `model` means "not
@@ -128,10 +142,56 @@ struct SlotOverride {
     // Empty means "unknown provenance" (a settings.json written before this
     // field existed) and is honoured everywhere, preserving old behaviour.
     std::string             provider;
+
+    // Structural equality. The subagent publisher (app/subscribe.cpp) keys on
+    // the config it pushes, and must republish exactly when a field the
+    // router reads changes — a hash could collide and silently keep a stale
+    // router running, which equality cannot.
+    [[nodiscard]] bool operator==(const SlotOverride&) const = default;
 };
 
 struct RoleConfig {
     bool enabled = false;   // Smart Mode master switch (off by default)
+
+    // The user named a model on the command line, so every role uses it.
+    //
+    // Smart Mode answers "should agentty optimise cost for me" — a
+    // preference. This answers "is --model binding" — a contract. They were
+    // the same switch, which is why turning Smart Mode OFF did not stop
+    // routing: it fell through to the tier auto-router instead, and a
+    // harness passing `--model X` still got compaction and read-only
+    // subagents billed to a different model (#70). Nothing in the docs said
+    // --model was a hint.
+    //
+    // Set wherever --model is parsed, and mirrored to both the CLI and TUI
+    // config sites through tuning::model_pinned() (257d566) -- the first
+    // version set it only on the headless path, so `agentty --model X`
+    // interactively had the same bug it was meant to fix.
+    bool pinned_model = false;
+
+    // Let a role run on a provider OTHER than the active one.
+    //
+    // OFF by default, and the default is the interesting part. A slot pinned
+    // on another endpoint is dispatchable -- credentials::resolve() answers
+    // for any provider and dispatch_stream() takes an explicit Selection --
+    // so the old "auth doesn't transfer" reason (docs/design/smart-mode.md
+    // §9) has expired. What has NOT expired is the cost: prompt caching is
+    // per-provider, so a role that hops endpoints re-sends its prefix
+    // uncached every turn. For a short read-only subagent that is a fair
+    // trade; for a chatty role it can cost more than the cheaper model
+    // saves.
+    //
+    // So it is a choice the user makes, not one inferred for them -- and
+    // with it off, a foreign pin behaves exactly as it did before: ignored
+    // in favour of this provider's own catalog, never dispatched as a 404.
+    bool cross_provider_roles = false;
+
+    // Developer escape hatches (AGENTTY_SMART_NO_INTERNAL / _NO_ORCHESTRATE
+    // / _NO_SUBAGENTS), filled in with the env overrides by
+    // settings::registry::apply_env. Never persisted, never in the UI.
+    bool no_internal    = false;
+    bool no_orchestrate = false;
+    bool no_subagents   = false;
 
     // ONE decision, three slots. There used to be seven more toggles here.
     //
@@ -141,7 +201,7 @@ struct RoleConfig {
     // of the cheap model" is not a preference worth a row — it is strictly
     // more expensive for no benefit. A toggle earns its place only where a
     // reasonable user would reasonably choose either way; these didn't.
-    // Debug/bisect escape hatches live in env vars (smart::tuning::layers()),
+    // Debug/bisect escape hatches live in env vars (the no_* fields above),
     // not in the UI.
     //
     // Four of them (learned routing, outcome feedback, speculative prewarm,
@@ -239,33 +299,21 @@ struct RoleConfig {
         return const_cast<SlotOverride&>(
             static_cast<const RoleConfig&>(*this).slot(r));
     }
+
+    // Structural equality, for the same reason as SlotOverride's: the
+    // subagent publisher republishes exactly when this changes.
+    [[nodiscard]] bool operator==(const RoleConfig&) const = default;
 };
 
-// Resolve the numeric routing policy: an env override wins, else the persisted
-// value already in `c`. Applied in place, so the struct that comes off disk
-// becomes the struct the router uses without a second shape.
-//
-// settings_registry::apply_env(RoleConfig&) does exactly this by walking the
-// table, and is what callers should use. This exists for the three knobs the
-// domain also exposes as bare accessors.
-inline void apply_tuning(RoleConfig& c) noexcept {
-    c.deep_margin       = tuning::deep_margin_env().value_or(c.deep_margin);
-    c.bias_clamp        = tuning::bias_clamp_env().value_or(c.bias_clamp);
-    c.complex_threshold =
-        tuning::complex_threshold_env().value_or(c.complex_threshold);
-}
-
-// Layer gates. Each is the master switch minus a developer escape hatch
-// (see smart_tuning.hpp). Defined out-of-class so the tuning header's
-// helpers are in scope; still header-inline, still trivially inlined.
+// Layer gates: the master switch minus a developer escape hatch.
 inline bool RoleConfig::internal_routing() const noexcept {
-    return enabled && !tuning::no_internal();
+    return enabled && !no_internal;
 }
 inline bool RoleConfig::orchestration() const noexcept {
-    return enabled && !tuning::no_orchestrate();
+    return enabled && !no_orchestrate;
 }
 inline bool RoleConfig::subagent_routing() const noexcept {
-    return enabled && !tuning::no_subagents();
+    return enabled && !no_subagents;
 }
 
 // ── Complexity → role ──────────────────────────────────────────
@@ -510,15 +558,39 @@ namespace detail {
 [[nodiscard]] inline RoleProfile resolve_role(
         ModelRole role,
         std::string_view parent_model,
-        Effort parent_effort,
+        Effort parent_effort_in,
         const std::vector<ModelInfo>& candidates,
         const RoleConfig& cfg,
         std::string_view active_provider = {}) {
     const std::string parent_wire = wire_model_id(parent_model);
+    // THE resolution point for the main turn. Auto means "no choice yet", and
+    // what it resolves to depends on the model in hand — so it is resolved
+    // HERE, against the parent's caps, before any stepping or clamping. Every
+    // line below (and effort_for_complexity downstream) then works on a real
+    // rung and never has to know Auto exists.
+    const Effort parent_effort =
+        resolve_auto_effort(parent_effort_in, resolved_caps(parent_wire));
     RoleProfile pass{parent_wire,
                      clamp_effort(parent_effort,
                                   resolved_caps(parent_wire))};
     if (!cfg.enabled) return pass;
+
+    // 0. A PINNED model wins before anything else, including an explicit
+    //    slot. The user named it on the command line; that is a contract, not
+    //    a hint (#70).
+    //
+    //    This check was added to role_model() and MISSED here, which left the
+    //    bug half fixed in the paths that matter most: resolve_role is what
+    //    the MAIN TURN goes through (cmd_factory's resolve_turn_routing) and
+    //    what Layer 3b uses for subagent roles. main_turn_role() can score a
+    //    simple turn as Implementation or Utility, so `--model opus` plus
+    //    Smart Mode still answered a trivial turn on sonnet or haiku -- the
+    //    original report ("still making requests to a different model than
+    //    the selected one") with Smart Mode left on.
+    //
+    //    Returns `pass`, which already carries the parent model at its
+    //    clamped effort, so a pinned run keeps the user's effort too.
+    if (cfg.pinned_model) return pass;
 
     // 1. Explicit user override for this slot wins outright — but only under
     //    the provider it was pinned on. A model id is endpoint-scoped, so
@@ -536,14 +608,25 @@ namespace detail {
         const bool provider_matches =
             active_provider.empty() || ov.provider.empty()
             || ov.provider == active_provider;
-        if (provider_matches) {
-            const std::string wire = wire_model_id(std::string_view{ov.model});
+        const std::string wire = wire_model_id(std::string_view{ov.model});
+        if (provider_matches)
             return RoleProfile{wire,
-                               clamp_effort(ov.effort,
-                                            resolved_caps(wire))};
-        }
-        // Foreign pin: fall through to the zero-config auto-fill below, which
-        // ranks over THIS provider's catalog. The pin is not cleared — switch
+                               clamp_effort(ov.effort, resolved_caps(wire)),
+                               {}};
+        // Foreign pin: NAME the provider it belongs to and let the caller
+        // decide. One that can dispatch there (the subagent runner, via
+        // Config::stream_to) honours the pin; one that cannot checks
+        // cross_provider() and falls back to the auto-fill below, which is
+        // what every caller used to get unconditionally.
+        //
+        // The effort is the pin's own, clamped against the pinned model --
+        // not the parent's. Effort is a property of the model that will run.
+        if (cfg.cross_provider_roles)
+            return RoleProfile{wire,
+                               clamp_effort(ov.effort, resolved_caps(wire)),
+                               ov.provider};
+        // Cross-provider routing is off: behave exactly as before and rank
+        // over THIS provider's catalog. The pin is not cleared -- switch
         // back and it applies again.
     }
 
@@ -595,26 +678,99 @@ namespace detail {
     return p;
 }
 
-// Convenience for the INTERNAL utility calls (compaction summary, commit
-// messages, HyDE query expansion, fork/thread retrieval). These already
-// default to the cheapest capable model even with Smart Mode OFF — so this
-// preserves that default and ONLY overrides it when the user has explicitly
-// pinned a Utility slot in Smart Mode. That way turning Smart Mode on can
-// steer these onto a specific cheap model, but turning it OFF never regresses
-// them back up to the flagship. Returns a WIRE model id.
+// ── The one question every router asks ──────────────────────────────────
+//
+// "Which model may this role run on?" Three sites used to answer it
+// independently — compaction, read-only subagents, and the utility turns —
+// each consulting routing policy in its own way. Three decision sites for
+// one decision, which is how `--model X` ended up binding for the main turn
+// and advisory everywhere else (#70).
+//
+// `floor` is the capability the role actually needs: Cheap for summarisation
+// (text in, text out), Mid for read-only exploration (deciding which of 40
+// grep hits matter is not mechanical work).
+//
+// Returns a WIRE model id.
+// Resolve a role to a (model, provider) target.
+//
+// The long form of role_model() below, for callers that can dispatch to a
+// provider other than their own. Everything else keeps calling role_model()
+// and gets the model alone.
+//
+// Effort is not set here: the internal roles this serves (compaction, titles,
+// read-only exploration) all run with effort off.
+[[nodiscard]] inline RoleProfile role_target(
+        std::string_view parent_model,
+        const std::vector<ModelInfo>& candidates,
+        const RoleConfig& cfg,
+        ModelCapabilities::Tier floor,
+        const SlotOverride* slot = nullptr,
+        std::string_view active_provider = {}) {
+    const std::string parent = wire_model_id(parent_model);
+
+    // A pinned model wins outright. The user named it on the command line;
+    // no cost heuristic outranks that.
+    if (cfg.pinned_model) return {parent, Effort::None, {}};
+
+    // AGENTTY_SMART_NO_INTERNAL=1 is documented as "compaction/titles stay on
+    // the main model", so it has to stop the tier fallback too -- it used to
+    // gate only the slot below, which left the downgrade running and made the
+    // promise false (#70).
+    if (slot == &cfg.utility && cfg.no_internal)
+        return {parent, Effort::None, {}};
+
+    // A Smart Mode slot the user set explicitly comes next.
+    if (slot && cfg.internal_routing() && slot->set && !slot->model.empty()) {
+        const bool same_provider = active_provider.empty()
+                                || slot->provider.empty()
+                                || slot->provider == active_provider;
+        if (same_provider)
+            return {wire_model_id(std::string_view{slot->model}),
+                    Effort::None, {}};
+        // Pinned on ANOTHER provider: name it, so a caller that can reach
+        // that endpoint honours the pin. Gated on the same opt-in as
+        // resolve_role -- ONE switch decides this for every role, rather
+        // than two resolvers disagreeing about whether hopping is allowed.
+        if (cfg.cross_provider_roles)
+            return {wire_model_id(std::string_view{slot->model}),
+                    Effort::None, slot->provider};
+        // Off: fall through and rank over this provider's own catalog.
+    }
+
+    // Otherwise route down to the cheapest model that clears the floor.
+    // Never routes UP, so a single-model account sees no change.
+    return {cheapest_capable_model(parent, candidates, floor),
+            Effort::None, {}};
+}
+
+[[nodiscard]] inline std::string role_model(
+        std::string_view parent_model,
+        const std::vector<ModelInfo>& candidates,
+        const RoleConfig& cfg,
+        ModelCapabilities::Tier floor,
+        const SlotOverride* slot = nullptr,
+        std::string_view active_provider = {}) {
+    auto t = role_target(parent_model, candidates, cfg, floor, slot,
+                         active_provider);
+    // A cross-provider target is not dispatchable by a caller that only has
+    // one endpoint, so it degrades to the old answer: fall back as if the
+    // slot were unset. Same behaviour this function has always had.
+    if (t.cross_provider())
+        return cheapest_capable_model(wire_model_id(parent_model), candidates,
+                                      floor);
+    return std::move(t.model);
+}
+
+// Utility turns: compaction summaries, thread titles, HyDE expansion. Text
+// in, text out, so the Cheap tier is enough.
 [[nodiscard]] inline std::string utility_model(
         std::string_view parent_model,
         const std::vector<ModelInfo>& candidates,
         const RoleConfig& cfg,
         std::string_view active_provider = {}) {
-    if (cfg.internal_routing()) {
-        if (const auto& ov = cfg.utility; ov.set && !ov.model.empty()
-            && (active_provider.empty() || ov.provider.empty()
-                || ov.provider == active_provider))
-            return wire_model_id(std::string_view{ov.model});
-    }
-    return cheapest_capable_model(wire_model_id(parent_model), candidates,
-                                  ModelCapabilities::Tier::Cheap);
+    return role_model(parent_model, candidates, cfg,
+                      ModelCapabilities::Tier::Cheap, &cfg.utility,
+                      active_provider);
 }
 
 // ── The Smart Mode overlay's rows, as a TYPE ────────────────────────────

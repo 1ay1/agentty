@@ -21,7 +21,7 @@ agentty
 
 First launch opens an auth modal. Pick one:
 
-- **API key** — paste an Anthropic `sk-ant-…` token, or any provider's key. Saved to `~/.config/agentty/credentials.json` (mode `0600`). Unambiguously in-bounds, and works headless/over SSH.
+- **API key** — paste an Anthropic `sk-ant-…` token, or any provider's key. Saved to `~/.agentty/credentials/credentials.json` (mode `0600`). Unambiguously in-bounds, and works headless/over SSH.
 - **OAuth (Claude Pro/Max)** — opens your browser to sign in with your existing subscription; the callback writes the token to the same file.
 
 :::tip

@@ -406,6 +406,74 @@ TEST_CASE("thread log: an empty or absent log is a valid empty thread") {
     CHECK(again->size() == 1u);
 }
 
+TEST_CASE("thread log: an in-flight tool call reloads as interrupted, not as itself") {
+    // A save fires on EVERY turn, including while a tool is still running.
+    // The reader deliberately coerces a pending/running call to Failed
+    // {"interrupted"}: a process that died mid-tool must not reload with a
+    // call that waits forever.
+    //
+    // That makes round-trip identity FALSE for an unsettled call, on
+    // purpose. save_thread_sync's verification gate compares what it wrote
+    // against what reads back, and it used to compare tool output
+    // unconditionally — so every save with a tool in flight reported "log
+    // verification FAILED" and refused to retire the legacy document.
+    // Observed on a live 2400-message thread, in bursts that healed the
+    // moment the tool completed.
+    //
+    // This pins the transform so the gate's exemption stays justified: if
+    // the reader ever starts preserving pending state, this test fails and
+    // the exemption can be removed.
+    const auto path = fresh_log("inflight");
+
+    Message m;
+    m.id   = MessageId{"m-inflight"};
+    m.role = Role::Assistant;
+    m.text = "running a tool";
+    ToolUse tc;
+    tc.id     = ToolCallId{"call-1"};
+    tc.name   = ToolName{"shell"};
+    tc.status = ToolUse::Running{};
+    m.tool_calls.push_back(tc);
+
+    auto log = ThreadLog::open_path(path);
+    REQUIRE(log.has_value());
+    REQUIRE(log->append(m));
+
+    const auto back = log->all();
+    REQUIRE(back.size() == 1u);
+    REQUIRE(back[0].tool_calls.size() == 1u);
+
+    // In memory an unsettled call has no output; on disk it has one.
+    CHECK(m.tool_calls[0].output().empty());
+    CHECK_FALSE(back[0].tool_calls[0].output().empty());
+    // And it comes back terminal, so a reload never waits on it.
+    CHECK(back[0].tool_calls[0].is_terminal());
+
+    // Everything the format DOES promise still round-trips exactly.
+    CHECK(back[0].id.value == m.id.value);
+    CHECK(back[0].text == m.text);
+    CHECK(back[0].tool_calls[0].id.value == tc.id.value);
+    CHECK(back[0].tool_calls[0].name.value == tc.name.value);
+
+    // A SETTLED call keeps its output verbatim — the exemption is scoped
+    // to the unsettled case and must not hide real loss.
+    Message done;
+    done.id   = MessageId{"m-done"};
+    done.role = Role::Assistant;
+    ToolUse fin;
+    fin.id     = ToolCallId{"call-2"};
+    fin.name   = ToolName{"shell"};
+    ToolUse::Done d;
+    d.output   = "real output";
+    fin.status = d;
+    done.tool_calls.push_back(fin);
+    REQUIRE(log->append(done));
+
+    const auto back2 = log->all();
+    REQUIRE(back2.size() == 2u);
+    CHECK(back2[1].tool_calls[0].output() == "real output");
+}
+
 TEST_CASE("thread log: metadata round-trips beside the messages") {
     // A Thread is more than its messages. The header is mutable and the
     // log is append-only, so it lives in a sidecar — and every field of

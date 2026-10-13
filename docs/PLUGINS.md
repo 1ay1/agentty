@@ -220,10 +220,7 @@ static std::string sh(const std::string& cmd) {
 }
 
 int main() {
-    StdioTransport transport(std::cin, std::cout);
-    Server server(transport.sink(),
-                  Implementation{"sysmon", "1.0.0",
-                                 std::string("System Monitor"),
+    Server server(Implementation{"sysmon", "1.0.0", std::string("System Monitor"),
                                  Nothing, Nothing, Nothing});
     server.set_capabilities(ServerCapabilities{
         .tools = ToolsCapability{false},
@@ -263,8 +260,15 @@ int main() {
         });
     }
 
-    transport.start(server.engine());
-    transport.join();   // serve until the host closes stdin
+    // Serve until the host closes stdin: a line in, the replies out.
+    Engine engine;
+    for (std::string line; std::getline(std::cin, line);) {
+        Effects fx = step(engine, Received{line});
+        for (auto& f : fx.send) std::cout << f << '\n';
+        for (auto& c : fx.calls) std::cout << server.handle(c) << '\n';
+        for (auto& n : fx.notifications) server.handle(n);
+        std::cout.flush();
+    }
     return 0;
 }
 ```
@@ -302,7 +306,7 @@ docstring + type hints, `register_tool` lambda = the decorated function,
 integration, different language — which is the whole point. (You can
 sanity-check any stdio server by piping `initialize` / `tools/list`
 JSON-RPC lines into it by hand; it's just newline-delimited JSON. See
-`mcp-cpp/examples/server_example.cpp` for the full-featured reference —
+`third_party/mcp-cpp/examples/server_example.cpp` for the full-featured reference —
 resources, prompts, structured output.)
 
 ## A real one: the Git Time-Machine (Python example)

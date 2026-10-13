@@ -78,10 +78,40 @@ namespace {
     return wire::has_wire_message_image(m, max_side);
 }
 
+// Bytes that cannot pass through a JSON string literal untouched.
+// Everything else (printable ASCII and every UTF-8 continuation byte) is
+// copied verbatim, so the escaper can move whole RUNS of them at a time.
+[[nodiscard]] inline const bool* json_escape_table() noexcept {
+    static const auto t = [] {
+        std::array<bool, 256> v{};
+        for (int i = 0; i < 0x20; ++i) v[static_cast<std::size_t>(i)] = true;
+        v[static_cast<unsigned char>('"')]  = true;
+        v[static_cast<unsigned char>('\\')] = true;
+        return v;
+    }();
+    return t.data();
+}
+
 void json_write_escaped_string(std::string& out, std::string_view s) {
+    // Copy the long stretches between escapes with one append each instead
+    // of a push_back per byte. Tool outputs and file contents are almost
+    // entirely plain bytes, so this is nearly a memcpy of each run; it is
+    // ~25% off the whole body encode, which a long thread pays on every
+    // round. Output is byte-identical to the per-byte version.
+    //
+    // The old per-call `out.reserve(out.size() + s.size() + 2)` is gone: it
+    // ran on the SHARED accumulating buffer once per string, so on a
+    // thousand-message body it re-asked for a capacity that was already
+    // there (and, when it did grow, grew to exactly the needed size rather
+    // than geometrically — defeating the amortised growth that keeps the
+    // append loop linear). The caller reserves the body once up front.
+    static const bool* escape = json_escape_table();
     out.push_back('"');
-    out.reserve(out.size() + s.size() + 2);
-    for (unsigned char c : s) {
+    std::size_t run = 0;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        const auto c = static_cast<unsigned char>(s[i]);
+        if (!escape[c]) { ++run; continue; }
+        if (run) { out.append(s.data() + i - run, run); run = 0; }
         switch (c) {
             case '"':  out.append("\\\"", 2); break;
             case '\\': out.append("\\\\", 2); break;
@@ -90,21 +120,16 @@ void json_write_escaped_string(std::string& out, std::string_view s) {
             case '\n': out.append("\\n",  2); break;
             case '\r': out.append("\\r",  2); break;
             case '\t': out.append("\\t",  2); break;
-            default:
-                if (c < 0x20) {
-                    // \u00XX for control bytes.
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out.append(buf, 6);
-                } else {
-                    // Printable + UTF-8 multibyte: passthrough. We
-                    // assume the caller already scrub_utf8'd inputs
-                    // (text bodies, tool outputs, args), so multi-byte
-                    // sequences here are well-formed.
-                    out.push_back(static_cast<char>(c));
-                }
+            default: {
+                // \u00XX for the remaining control bytes.
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                out.append(buf, 6);
+                break;
+            }
         }
     }
+    if (run) out.append(s.data() + s.size() - run, run);
     out.push_back('"');
 }
 
@@ -184,7 +209,7 @@ void write_image_block(std::string& out, const ImageContent& img,
     out.append(R"("media_type":)");
     json_write_escaped_string(out, wire::wire_media_type(img));
     out.append(R"(,"data":)");
-    json_write_escaped_string(out, util::base64_encode(img.bytes()));
+    json_write_escaped_string(out, img.base64());
     out.push_back('}');
     json_write_cache_control(out, pin, first);
     out.push_back('}');
@@ -235,7 +260,6 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
     // "(no output)" placeholder (not an error) for tools that
     // legitimately produced nothing.
     auto raw_output = tc.output();
-    std::string scrubbed;
     const bool non_terminal = !tc.is_terminal();
     const bool is_error = non_terminal || tc.is_failed() || tc.is_rejected();
     if (non_terminal) {
@@ -261,18 +285,20 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
         // block per surfaced image. The model reads them in order — text note
         // first, then the picture(s). Image bytes never fade (they're the
         // point of the call), only the text does.
-        std::string capped = wire::cap_tool_result_aged(raw_output, recency_rank, is_error);
-        scrubbed = scrub_utf8(capped);
+        std::string cap_buf, scrub_buf;
+        const std::string_view capped =
+            wire::cap_tool_result_aged_view(raw_output, recency_rank, is_error, cap_buf);
+        const std::string_view text = wire::scrub_utf8_view(capped, scrub_buf);
         if (!first) out.push_back(',');
         first = false;
         out.append("\"content\":[");
         bool block_first = true;
         // Text block (skip if the tool produced no text at all).
-        if (!scrubbed.empty()) {
+        if (!text.empty()) {
             out.push_back('{');
             bool tf = true;
             json_write_field(out, "type", "text", tf);
-            json_write_field(out, "text", scrubbed, tf);
+            json_write_field(out, "text", text, tf);
             out.push_back('}');
             block_first = false;
         }
@@ -287,9 +313,11 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
         // results, at any age) keep the full budget so the model can act on
         // them; stale successful results fade to a tight head+tail so a
         // 60 KiB read from 30 calls ago stops replaying in full every turn.
-        std::string capped = wire::cap_tool_result_aged(raw_output, recency_rank, is_error);
-        scrubbed = scrub_utf8(capped);
-        json_write_field(out, "content", scrubbed, first);
+        std::string cap_buf, scrub_buf;
+        const std::string_view capped =
+            wire::cap_tool_result_aged_view(raw_output, recency_rank, is_error, cap_buf);
+        json_write_field(out, "content",
+                         wire::scrub_utf8_view(capped, scrub_buf), first);
     }
     json_write_bool_field(out, "is_error", is_error, first);
     json_write_cache_control(out, pin, first);
@@ -378,10 +406,25 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
     }();
 
     std::string out;
-    // Conservative reserve: typical sessions are ~64 KiB; a write turn
-    // can push past 1 MiB. Either way, let the std::string growth
-    // strategy take it from here without an early reallocation.
-    out.reserve(64 * 1024);
+    // Size the buffer from what this thread actually holds instead of a flat
+    // 64 KiB. A long session's body runs to several MB, so the old guess
+    // meant a handful of reallocate-and-copy passes over a multi-MB buffer
+    // on every round — and now that the escaper no longer reserves per
+    // string, this is the one place that gets to size it. One cheap pass
+    // over the sizes we are about to write, plus ~40% for JSON escaping and
+    // block scaffolding, then let geometric growth cover any miss.
+    {
+        std::size_t want = 1024;
+        for (const auto& m : t.messages) {
+            want += m.text.size();
+            want += m.thinking.size() + m.thinking_signature.size();
+            for (const auto& b : m.thinking_blocks)
+                want += b.text.size() + b.signature.size() + b.redacted_data.size();
+            for (const auto& tc : m.tool_calls)
+                want += tc.args_dump().size() + tc.output().size() + 128;
+        }
+        out.reserve(want + want / 2);
+    }
     out.push_back('[');
 
     int emitted = 0;
@@ -533,10 +576,15 @@ void write_tool_result_block(std::string& out, const ToolUse& tc,
                 // user; only the wire payload sees the full bytes.
                 // No-op when m.attachments is empty (no expansion
                 // needed and no allocation either).
-                std::string wire_text = m.attachments.empty()
-                    ? m.text
-                    : attachment::expand(m.text, m.attachments);
-                write_text_block(out, scrub_utf8(wire_text), pin_if_last(do_pin, last_block));
+                std::string expanded;
+                const std::string_view wire_text =
+                    m.attachments.empty()
+                        ? std::string_view{m.text}
+                        : std::string_view{expanded =
+                              attachment::expand(m.text, m.attachments)};
+                std::string scrub_buf;
+                write_text_block(out, wire::scrub_utf8_view(wire_text, scrub_buf),
+                                 pin_if_last(do_pin, last_block));
             }
             if (has_tools) {
                 for (const auto& tc : m.tool_calls) {

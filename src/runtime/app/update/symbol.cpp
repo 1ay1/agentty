@@ -25,40 +25,40 @@ namespace agentty::app::detail {
 
 using maya::overload;
 
-Step symbol_update(Model m, msg::SymbolMsg sm) {
+Cmd symbol_update(Model& m, msg::SymbolMsg sm) {
     return std::visit(overload{
         // (No OpenSymbol arm: the panel opens from the COMPOSER's `#`
         // handler, which builds pn::Symbol directly — see composer.cpp.)
-        [&](CloseSymbol) -> Step {
+        [&](CloseSymbol) -> Cmd {
             ascend(m);   // usually → thread (opened by typing #), or a parent
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SymbolInput& e) -> Step {
+        [&](SymbolInput& e) -> Cmd {
             if (auto* o = m.ui.panel.get<pn::Symbol>()) o->picker.type(e.ch);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SymbolBackspace) -> Step {
+        [&](SymbolBackspace) -> Cmd {
             auto* o = m.ui.panel.get<pn::Symbol>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // Backspace on an empty query closes the picker. The picker
             // reports "there was nothing to erase" so the test and the
             // mutation cannot drift apart.
             if (!o->picker.backspace()) m.ui.panel.close<pn::Symbol>();
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SymbolMove& e) -> Step {
+        [&](SymbolMove& e) -> Cmd {
             if (auto* o = m.ui.panel.get<pn::Symbol>()) o->picker.move(e.delta);
-            return done(std::move(m));
+            return Cmd::none();
         },
-        [&](SymbolSelect) -> Step {
+        [&](SymbolSelect) -> Cmd {
             auto* o = m.ui.panel.get<pn::Symbol>();
-            if (!o) return done(std::move(m));
+            if (!o) return Cmd::none();
             // `selected()` folds the empty-list and out-of-range checks into
             // the type: a null result is the only failure mode.
             const auto* sym = o->picker.selected();
             if (!sym) {
                 m.ui.panel.close<pn::Symbol>();
-                return done(std::move(m));
+                return Cmd::none();
             }
             Attachment att;
             att.kind        = Attachment::Kind::Symbol;
@@ -72,7 +72,7 @@ Step symbol_update(Model m, msg::SymbolMsg sm) {
             auto placeholder = attachment::make_placeholder(idx);
             m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
             m.ui.composer.cursor += static_cast<int>(placeholder.size());
-            return done(std::move(m));
+            return Cmd::none();
         },
     }, sm);
 }

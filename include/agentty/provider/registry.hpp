@@ -24,7 +24,12 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
+
+#include "agentty/util/identity.hpp"
 
 namespace agentty::provider {
 
@@ -138,6 +143,29 @@ struct ProviderDescriptor {
     // Stored as a fixed 3-slot array of string_views; unused slots are "".
     std::array<std::string_view, 3> auth_env;
 
+    // Key PREFIXES unique enough to identify this provider from a pasted key
+    // alone, most specific first. Unused slots are "".
+    //
+    // Why this lives on the row: `agentty login` and the first-run modal both
+    // accept "an API key" and then had nowhere to ask which provider it
+    // belonged to, so every pasted key was written to the Anthropic store
+    // (issue #68). The prompt says "or any provider" and the code meant
+    // "Anthropic" -- a key for Groq was accepted, saved, and then failed on
+    // the first turn with an auth error naming the wrong vendor.
+    //
+    // Detection HAS to be a registry fact rather than a switch somewhere in
+    // the auth layer: a new provider already declares its host, its env vars
+    // and its wire dialect here, and a prefix table living anywhere else is
+    // one more place to forget. This is the same reasoning auth_env above
+    // follows.
+    //
+    // ONLY unambiguous prefixes belong here. `sk-` is shared by Anthropic,
+    // OpenAI and DeepSeek, so it identifies nothing and is deliberately
+    // absent -- a guess that silently picks the wrong provider is worse than
+    // asking, because the user then debugs a credential they believe is
+    // correct. An empty match means "ask", which is the honest outcome.
+    std::array<std::string_view, 2> key_prefixes;
+
     // The FIXED host to open a warm TLS connection to before the first turn,
     // when it is NOT derivable from the runtime Endpoint. Two backends need
     // this: Anthropic (the transport hardcodes api.anthropic.com; no Endpoint
@@ -200,6 +228,42 @@ struct ProviderDescriptor {
     // in a function instead of a field. With this column the lie has
     // somewhere true to live, and `endpoints_consistent()` checks it.
     std::string_view responses_path;   // "" = no Responses endpoint here.
+
+    // ── App attribution (optional) ───────────────────────────────────
+    // Some aggregators ask a client to NAME ITSELF, and give the user
+    // something back for it. OpenRouter is the case that exists today: a
+    // request carrying `HTTP-Referer` (+ `X-Title`) is credited to an app
+    // page, shows up in the public rankings, and — the part users actually
+    // feel — satisfies the models that only serve a recognised agent
+    // harness. Issue #74.
+    //
+    // A COLUMN, not a branch in the transport, for the reason the endpoint
+    // block above exists: the identity would otherwise be a string literal
+    // sitting next to an `if (label == "openrouter")`, which is the same
+    // shape as the 14-arm if-chain that drifted from these rows. Here the
+    // fact is one line next to the host it belongs to, every transport that
+    // dials the row picks it up for free, and a row that wants no
+    // attribution simply leaves it empty.
+    //
+    // This is deliberately NOT a general "static headers" escape hatch:
+    // Endpoint::extra_headers already plays that role for per-request
+    // protocol junk (Copilot's editor block, Kimi's device ids). This column
+    // is narrower on purpose — it answers "who is calling", so it holds a
+    // URL and a display name and nothing else, and the values come from the
+    // ONE place agentty states its own identity (identity.hpp).
+    bool             attribution = false;
+
+    // The row's API accepts OpenAI's `prompt_cache_key` body field.
+    //
+    // OpenAI-COMPATIBLE is not OpenAI: the compat layers validate the body
+    // strictly and 400 an unknown field, killing the turn (#93) --
+    //   Groq:   "property 'prompt_cache_key' is unsupported"
+    //   Gemini: "Unknown name \"prompt_cache_key\": Cannot find field."
+    // So this is opt-IN per row, set only where the API documents the field
+    // (OpenAI) or passes it through (OpenRouter, which routes to OpenAI and
+    // ignores it elsewhere). Omitting it costs a cache optimisation;
+    // sending it to a strict host costs the whole turn. When in doubt, omit.
+    bool             accepts_prompt_cache_key = false;
 
     // Ollama's NATIVE /api/chat protocol (NDJSON, structured tool_calls)
     // instead of its OpenAI-compat shim, which makes weak local models
@@ -300,6 +364,10 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      // re-arm on an account switch.
      .wire = Wire::AnthropicMessages, .lifetime = Lifetime::LongLived,
      .auth = AuthStyle::OAuthOrKey,
+     // sk-ant- covers both the API key (sk-ant-api03-) and the OAuth token
+     // (sk-ant-oat01-). Unambiguous, unlike the bare sk- that OpenAI and
+     // DeepSeek also use -- which is why neither of those rows has a prefix.
+     .key_prefixes = {"sk-ant-", ""},
      .prewarm_host = "api.anthropic.com",
      .method_menu = true, .oauth_proactive_refresh = true,
      .default_model = "claude-opus-4-5",
@@ -320,6 +388,8 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      // Reasoning models are routed here by dialect_for(). Not cosmetic:
      // GPT-5.4+ rejects tool calls on chat with a real reasoning effort.
      .responses_path = "/v1/responses",
+     // The field's home: documented on Chat Completions and Responses.
+     .accepts_prompt_cache_key = true,
      .default_model = "gpt-4o"},
 
     {.id = "chatgpt", .label = "ChatGPT",
@@ -371,6 +441,7 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
      .auth = AuthStyle::ApiKey,
      .auth_env = {"GROQ_API_KEY", "OPENAI_API_KEY", ""},
+     .key_prefixes = {"gsk_", ""},
      .host = "api.groq.com", .path = "/openai/v1/chat/completions",
      .models_path = "/openai/v1/models"},
 
@@ -379,11 +450,18 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
      .auth = AuthStyle::ApiKey,
      .auth_env = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""},
+     .key_prefixes = {"sk-or-v1-", "sk-or-"},
      .host = "openrouter.ai", .path = "/api/v1/chat/completions",
      .models_path = "/api/v1/models",
      // OpenRouter shipped an OpenAI-compatible Responses endpoint; upstream
      // reasoning models behind it need the same routing as first-party.
-     .responses_path = "/api/v1/responses"},
+     .responses_path = "/api/v1/responses",
+     // Name ourselves: OpenRouter credits attributed requests to an app page
+     // and some models only serve a recognised harness. Issue #74.
+     .attribution = true,
+     // Passed through to OpenAI upstreams (where it pins the cache node)
+     // and dropped for the others: OpenRouter normalises the body.
+     .accepts_prompt_cache_key = true},
 
     {.id = "together", .label = "Together",
      .blurb = "Open models on together.ai",
@@ -414,6 +492,7 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
      .auth = AuthStyle::ApiKey,
      .auth_env = {"XAI_API_KEY", "OPENAI_API_KEY", ""},
+     .key_prefixes = {"xai-", ""},
      .host = "api.x.ai", .path = "/v1/chat/completions",
      .models_path = "/v1/models"},
 
@@ -430,6 +509,13 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
      .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
      .auth = AuthStyle::ApiKey,
      .auth_env = {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"},
+     // AIzaSy is the legacy Developer API key prefix; AQ. is the newer
+     // AI-Studio-issued key format (see Google AI Studio forum reports --
+     // ai.google.dev/t/my-account-only-generates-aq-keys/170801 and
+     // sibling threads). New AI Studio accounts now issue AQ. keys
+     // exclusively, so leaving them unrouted sent every one of them to
+     // the Anthropic store on paste. Both prefixes carry a Gemini key.
+     .key_prefixes = {"AIzaSy", "AQ."},
      .host = "generativelanguage.googleapis.com",
      .path = "/v1beta/openai/chat/completions",
      .models_path = "/v1beta/openai/models"},
@@ -470,6 +556,33 @@ inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
     return nullptr;
 }
 
+// Which provider does this API key belong to, judged by its prefix alone?
+// Empty when no row claims it — which is the common case and NOT a failure.
+//
+// Why empty is a real answer: a bare `sk-` key could be OpenAI, DeepSeek or a
+// custom endpoint, and silently picking one is how issue #68 happened in the
+// first place. Every pasted key was written to the Anthropic store because the
+// prompt said "or any provider" while the code had no way to ask. The user
+// then debugged a credential they believed was correct, against an error
+// naming a vendor they had not chosen.
+//
+// So the contract is: a confident answer, or none. A caller that gets none
+// must ASK rather than assume. Longest match wins, so `sk-or-v1-` beats
+// `sk-or-` and a future `sk-ant-oat02-` cannot be shadowed by `sk-ant-`.
+[[nodiscard]] inline std::string_view provider_for_api_key(
+        std::string_view key) noexcept {
+    std::string_view best;
+    std::size_t best_len = 0;
+    for (const auto& p : kProviders) {
+        for (std::string_view pre : p.key_prefixes) {
+            if (pre.empty() || key.size() < pre.size()) continue;
+            if (key.substr(0, pre.size()) != pre) continue;
+            if (pre.size() > best_len) { best_len = pre.size(); best = p.id; }
+        }
+    }
+    return best;
+}
+
 // ── Compile-time invariants ─────────────────────────────────────────────
 // These are what make the single source of truth actually HOLD. The
 // `openai` row previously claimed Wire::OpenAIResponses while the
@@ -487,6 +600,11 @@ namespace detail {
 
 [[nodiscard]] constexpr bool endpoints_consistent() noexcept {
     for (const auto& p : kProviders) {
+        // Attribution names agentty to a HOST, so it only means something on a
+        // row we actually dial over HTTP. Checked BEFORE the http_dialled()
+        // bail below, because the rows that would get this wrong (the chatgpt
+        // / acp sentinels) are exactly the ones that bail.
+        if (p.attribution && !p.http_dialled()) return false;
         if (!p.http_dialled()) {
             // Not dialled over the compat transport ⇒ must not carry half
             // an endpoint (a stray path with no host is how rows rot).
@@ -528,6 +646,42 @@ namespace detail {
             if (kProviders[i].id == kProviders[j].id) return false;
     return true;
 }
+
+// No two providers may claim the same key prefix, and no prefix may be a
+// prefix OF another provider's prefix.
+//
+// The second half is the one that matters. provider_for_api_key() takes the
+// longest match, so `sk-or-v1-` beating `sk-or-` within OpenRouter is fine and
+// intended. But if a FUTURE row declared `sk-` while Anthropic declares
+// `sk-ant-`, every Anthropic key would still resolve correctly and every
+// unrecognised `sk-` key would silently resolve to that new provider -- which
+// is issue #68 again, wearing a different vendor's name. A prefix that can
+// swallow another row's keys must not compile.
+//
+// Checked at build time rather than tested, because the failure is silent at
+// runtime: the user gets a credential stored against the wrong provider and an
+// auth error that names someone they never chose.
+[[nodiscard]] constexpr bool key_prefixes_unambiguous() noexcept {
+    for (std::size_t i = 0; i < kProviders.size(); ++i) {
+        for (std::string_view a : kProviders[i].key_prefixes) {
+            if (a.empty()) continue;
+            for (std::size_t j = 0; j < kProviders.size(); ++j) {
+                if (i == j) continue;
+                for (std::string_view b : kProviders[j].key_prefixes) {
+                    if (b.empty()) continue;
+                    // Either being a prefix of the other is ambiguous ACROSS
+                    // rows; equality is the degenerate case of that.
+                    const auto n = a.size() < b.size() ? a.size() : b.size();
+                    if (a.substr(0, n) == b.substr(0, n)) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+static_assert(key_prefixes_unambiguous(),
+              "two providers claim overlapping API-key prefixes: a pasted key "
+              "would resolve to the wrong vendor's store (issue #68)");
 
 // Auth capabilities must be internally consistent. These fields replaced a
 // chain of provider-name compares in login.cpp, so a row that contradicts
@@ -618,6 +772,41 @@ static_assert(detail::auth_caps_consistent(),
 // provider show reasoning", which is what a provider-level row wants.
 [[nodiscard]] bool wire_streams_reasoning_text(
         std::string_view provider_id, std::string_view model = {}) noexcept;
+
+// The attribution headers for a provider row, or empty when the row doesn't
+// ask for them.
+//
+// ONE builder, so the chat path and the Responses path cannot disagree about
+// who agentty is. Both dialects dial the same host and both are credited to
+// the same app page, so a second spelling of these two headers is a bug
+// waiting for the day one of them is edited.
+//
+// Header names, from openrouter.ai/docs/app-attribution:
+//   HTTP-Referer  REQUIRED. The app URL, and the primary key for rankings.
+//                 Without it no app page exists and nothing else matters.
+//   X-Title       The display name. Does nothing on its own — it only
+//                 labels an app page that HTTP-Referer already created.
+//
+// On the name: the docs now call the title header `X-OpenRouter-Title` and
+// keep `X-Title` as a supported alias. We send `X-Title` deliberately — it
+// is what the overwhelming bulk of real traffic uses, it is still documented
+// as supported, and a shipped harness has already been bitten sending ONLY
+// the newer name (QwenLM/qwen-code#12072). Sending both would be the
+// belt-and-braces option, but two headers claiming one field is how you end
+// up with two app pages if a vendor ever disagrees with itself.
+//
+// Lowercase names: header names are case-insensitive per RFC 9110 and the
+// rest of agentty sends lowercase, so these match their neighbours on the
+// wire rather than the spelling used in vendor docs.
+[[nodiscard]] inline std::vector<std::pair<std::string, std::string>>
+attribution_headers(const ProviderDescriptor* row) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (!row || !row->attribution) return out;
+    out.reserve(2);
+    out.emplace_back("http-referer", std::string{util::identity::url});
+    out.emplace_back("x-title",      std::string{util::identity::name});
+    return out;
+}
 
 // The default provider's id — first row of the table.
 [[nodiscard]] inline std::string_view default_provider_id() noexcept {

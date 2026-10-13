@@ -396,7 +396,7 @@ fi  # end host-OS-specific binary builds
 if [ "$HOST_OS" = linux ] || [ "$HOST_OS" = macos ]; then
 hr "source tarball"
 tarball="agentty-$VERSION.tar.gz"
-# git archive alone OMITS submodule contents (mcp-cpp/), which breaks any
+# git archive alone OMITS submodule contents (third_party/), which breaks any
 # downstream that BUILDS FROM SOURCE (Termux build.sh, distro from-source
 # packages). Fold each submodule's own `git archive` into the same prefixed
 # tree so the tarball is self-contained. Homebrew (prebuilt-binary consumer)

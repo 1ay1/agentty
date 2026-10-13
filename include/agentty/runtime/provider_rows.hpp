@@ -18,7 +18,9 @@
 // is applied where the rows are built, so the reducer and view can never
 // disagree about which rows are visible or where the cursor lands.
 
+#include <algorithm>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -39,7 +41,14 @@ struct ProviderRow {
     // is not a built-in preset), switchable without re-entering its key.
     struct CustomHost { std::string spec; };
     // The trailing "Custom host…" sentinel that opens the free-text modal.
-    struct NewCustomHost {};
+    struct NewCustomHost {
+        // When the QUERY itself looks like an endpoint, the sentinel stops
+        // being a generic "Custom host…" escape hatch and becomes a concrete
+        // offer: "Use yolo-auto.com as a custom host". Non-empty here means
+        // the row is promoted to the TOP and Enter pre-fills the modal, so
+        // the user never retypes what they already typed.
+        std::string prefill;
+    };
 
     std::variant<Preset, Acp, CustomHost, NewCustomHost> kind;
 
@@ -58,44 +67,151 @@ struct ProviderRow {
     [[nodiscard]] bool is_new_custom_host() const {
         return std::holds_alternative<NewCustomHost>(kind);
     }
+    // The endpoint the "Custom host…" row would pre-fill, or empty when it is
+    // the plain escape hatch. Lets the view render the promoted phrasing and
+    // the reducer seed the modal from one place.
+    [[nodiscard]] const std::string* new_host_prefill() const {
+        if (auto* c = std::get_if<NewCustomHost>(&kind))
+            return c->prefill.empty() ? nullptr : &c->prefill;
+        return nullptr;
+    }
 };
+
+// Does this query look like an ENDPOINT the user wants to dial, rather than
+// the name of a built-in provider? True for "yolo-auto.com",
+// "localhost:8080", "https://gw.internal/api" — false for "kimi", "gpt-4o".
+//
+// WHY THIS EXISTS: agentty has spoken to any OpenAI-compatible host since
+// forever (`--provider host:port`, and the "Custom host…" row), but the picker
+// never SAID so. Someone who typed a hostname saw every familiar provider
+// vanish and one muted grey row left behind, which reads as "no, you can't".
+// The field evidence was a pull request adding a registry row for a service
+// the generic path already handled. The feature was there; the UI hid it.
+//
+// THE TWO FAILURE MODES ARE NOT SYMMETRIC, which is what sets the threshold:
+//   false NEGATIVE — user typed a real endpoint, gets no offer, concludes
+//                    agentty cannot reach their server. Costs the feature.
+//   false POSITIVE — an extra row appears offering to dial something that
+//                    isn't a host. Costs one row, and Enter would just fail
+//                    the probe with a clear message.
+// So lean permissive — but NOT so permissive that typing a MODEL name while
+// hunting for a provider shoves the real providers down. "gpt-4o", "v1.5" and
+// "3.5" all contain a dot or a dash and must stay false, because a user types
+// those into this box constantly.
+[[nodiscard]] inline bool query_looks_like_host(std::string_view q) {
+    // Trim first: a pasted endpoint usually arrives with whitespace, and the
+    // untrimmed form used to fail here while canonical_spec() accepted it —
+    // i.e. paste worked from the CLI but not from the picker.
+    while (!q.empty() && (q.front() == ' ' || q.front() == '\t')) q.remove_prefix(1);
+    while (!q.empty() && (q.back()  == ' ' || q.back()  == '\t'
+                       || q.back()  == '\r' || q.back() == '\n')) q.remove_suffix(1);
+
+    if (q.size() < 4) return false;                       // "a.b" is not a host
+    if (q.find(' ') != std::string_view::npos) return false;   // prose
+
+    // An explicit scheme is a declaration of intent; nothing else to check.
+    if (q.starts_with("http://") || q.starts_with("https://")) return true;
+
+    // An IPv6 literal must be bracketed to carry a port: "[::1]:8080".
+    if (q.front() == '[') return q.find(']') != std::string_view::npos;
+
+    // host:port — a colon followed by a digit. Strongest signal after a
+    // scheme, and the one that makes every localhost server work.
+    if (const auto colon = q.find(':');
+        colon != std::string_view::npos && colon > 0 && colon + 1 < q.size()
+        && q[colon + 1] >= '0' && q[colon + 1] <= '9') return true;
+
+    // A dotted name. Require the LAST dot-segment to look like a TLD or a
+    // path — i.e. start with a letter — so version and model strings ("v1.5",
+    // "3.5", "gpt-4.1") do not read as hosts. "yolo-auto.com" and
+    // "api.openai.com/v1" do.
+    const auto dot = q.rfind('.');
+    if (dot == std::string_view::npos || dot == 0 || dot + 1 >= q.size())
+        return false;
+    const char after = q[dot + 1];
+    const bool alpha = (after >= 'a' && after <= 'z') || (after >= 'A' && after <= 'Z');
+    if (!alpha) return false;
+    // ...and something alphabetic before the dot too, so "1.com" style noise
+    // and a bare ".com" stay out.
+    for (std::size_t i = 0; i < dot; ++i) {
+        const char c = q[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
+    }
+    return false;
+}
 
 // Build the provider picker's rows in display order, filtered by `query`.
 //
+//   [ "Use <query> as a custom host" ]  (FIRST, only when the query is
+//                                        endpoint-shaped — see below)
 //   [ presets matching query (fuzzy, ranked) ]
-//   [ ACP agents ]         (shown only when the query is empty — they aren't
-//   [ saved custom hosts ]  part of the provider search space)
+//   [ saved custom hosts matching query ]
+//   [ ACP agents ]         (shown only when the query is empty)
 //   [ "Custom host…" ]      (always last, so the escape hatch is reachable)
 //
-// `saved_custom_hosts` is passed in (the caller loads Settings once). When
-// `query` is non-empty, only preset rows are searched; the ACP / saved-host /
-// sentinel rows are hidden so the filtered list reads as "these providers match
-// what I typed" rather than a mixed bag. The sentinel is always appended so a
-// user can still open the custom-host modal after clearing the query.
+// `saved_custom_hosts` is passed in (the caller loads Settings once).
+//
+// TWO RULES EARN THEIR KEEP HERE:
+//
+// 1. A host-shaped query PROMOTES the sentinel to the top and pre-fills it.
+//    Typing an endpoint is an unambiguous statement of intent, and the answer
+//    should be the first thing you see, not the last — with Enter going
+//    straight to the probe instead of reopening an empty text field.
+//
+// 2. Saved custom hosts are SEARCHABLE. They used to vanish the moment you
+//    typed, which meant the one way to reach a host you had already saved was
+//    to scroll past every preset. A saved host is a provider; it belongs in
+//    the provider search space.
 [[nodiscard]] inline std::vector<ProviderRow> build_provider_rows(
     const std::vector<std::string>& saved_custom_hosts,
     std::string_view query) {
     std::vector<ProviderRow> rows;
     const auto presets = provider::providers();
+    rows.reserve(provider::providers().size() + saved_custom_hosts.size() + 4);
+
+    // Canonicalise ONCE, here, and offer the canonical form. The row the user
+    // sees is then byte-identical to the settings key that will be written, so
+    // "  YOLO-AUTO.COM/  " and "yolo-auto.com" cannot become two saved hosts.
+    const std::string canon = provider::canonical_spec(query);
+
+    // A saved host that matches the query is already reachable as its own row
+    // below; offering to re-add it would be a duplicate. Compare CANONICALLY —
+    // saved specs are stored canonical, so a raw compare would miss.
+    const bool already_saved =
+        std::find(saved_custom_hosts.begin(), saved_custom_hosts.end(), canon)
+            != saved_custom_hosts.end();
+
+    const bool offer_host = query_looks_like_host(query) && !already_saved;
+    if (offer_host)
+        rows.push_back({ProviderRow::NewCustomHost{canon}});
 
     // Presets, fuzzy-filtered + ranked by the shared SSOT filter so the reducer
     // and view see the exact same order.
     const std::vector<int> vis = provider::filter_provider_indices(query);
-    rows.reserve(vis.size() + 4);
     for (int idx : vis)
         rows.push_back({ProviderRow::Preset{&presets[static_cast<std::size_t>(idx)]}});
 
-    // ACP agents + saved custom hosts are not part of the provider text search;
-    // hide them while filtering so a query narrows to matching providers only.
+    // Saved custom hosts: case-insensitive substring match on the spec (they
+    // have no label or blurb to fuzzy-rank, and a host is something you recall
+    // by prefix). Case-insensitive because the saved form is lowercased but a
+    // user hunting for it may not type it that way.
+    for (const auto& spec : saved_custom_hosts) {
+        if (query.empty()
+            || spec.find(canon) != std::string::npos) {
+            rows.push_back({ProviderRow::CustomHost{spec}});
+        }
+    }
+
+    // ACP agents are not part of the provider text search.
     if (query.empty()) {
         for (auto& agent : provider::enumerate_acp_agents())
             rows.push_back({ProviderRow::Acp{std::move(agent)}});
-        for (const auto& spec : saved_custom_hosts)
-            rows.push_back({ProviderRow::CustomHost{spec}});
     }
 
-    // The "Custom host…" sentinel is always reachable.
-    rows.push_back({ProviderRow::NewCustomHost{}});
+    // The plain "Custom host…" sentinel is always reachable — unless it is
+    // already sitting at the top as a concrete offer.
+    if (!offer_host)
+        rows.push_back({ProviderRow::NewCustomHost{}});
     return rows;
 }
 

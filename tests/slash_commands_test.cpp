@@ -55,12 +55,12 @@ void discovery_and_shadowing(const fs::path& sandbox, const fs::path& home) {
                "Deploy the service: $ARGUMENTS");
     rescan();
 
-    const auto& all = cmds::all();
+    const auto& all = cmds::all(::agentty::IoAccess::grant());
     check(all.size() == 2, "two distinct names discovered (got "
                            + std::to_string(all.size()) + ")");
 
-    const auto* review = cmds::find("review");
-    check(review != nullptr, "review found");
+    const auto review = cmds::find(::agentty::IoAccess::grant(), "review");
+    check(review.has_value(), "review found");
     if (review) {
         check(review->source == "project", "project shadows user+claude roots");
         check(review->body == "Review $1 carefully.",
@@ -68,8 +68,8 @@ void discovery_and_shadowing(const fs::path& sandbox, const fs::path& home) {
         check(review->description == "project review", "frontmatter description");
         check(review->argument_hint == "<file>", "frontmatter argument-hint");
     }
-    const auto* deploy = cmds::find("deploy");
-    check(deploy != nullptr, "user-root .claude command found (Claude compat)");
+    const auto deploy = cmds::find(::agentty::IoAccess::grant(), "deploy");
+    check(deploy.has_value(), "user-root .claude command found (Claude compat)");
     if (deploy) check(deploy->source == "user", "deploy is user-sourced");
     std::println("PASS\n");
 }
@@ -79,8 +79,8 @@ void namespaced_subdirs(const fs::path& sandbox) {
     write_file(sandbox / ".agentty" / "commands" / "git" / "fixup.md",
                "Create a fixup commit for $1.");
     rescan();
-    const auto* c = cmds::find("git:fixup");
-    check(c != nullptr, "git/fixup.md discovered as git:fixup");
+    const auto c = cmds::find(::agentty::IoAccess::grant(), "git:fixup");
+    check(c.has_value(), "git/fixup.md discovered as git:fixup");
     std::println("PASS\n");
 }
 
@@ -89,8 +89,8 @@ void no_frontmatter_fallback(const fs::path& sandbox) {
     write_file(sandbox / ".agentty" / "commands" / "bare.md",
                "Just a bare prompt line.\nSecond line.");
     rescan();
-    const auto* c = cmds::find("bare");
-    check(c != nullptr, "frontmatter-less file loads");
+    const auto c = cmds::find(::agentty::IoAccess::grant(), "bare");
+    check(c.has_value(), "frontmatter-less file loads");
     if (c) {
         check(c->body == "Just a bare prompt line.\nSecond line.",
               "whole file is the body");
@@ -120,20 +120,20 @@ void try_expand_shapes(const fs::path& sandbox) {
     write_file(sandbox / ".agentty" / "commands" / "echo.md", "Echo: $ARGUMENTS");
     rescan();
 
-    auto r = cmds::try_expand("/echo hello world");
+    auto r = cmds::try_expand(::agentty::IoAccess::grant(), "/echo hello world");
     check(r.has_value() && *r == "Echo: hello world", "basic /name args");
 
-    r = cmds::try_expand("/echo");
+    r = cmds::try_expand(::agentty::IoAccess::grant(), "/echo");
     check(r.has_value() && *r == "Echo: ",
           "bare /name: empty $ARGUMENTS, template's own spacing is kept "
           "verbatim (got '" + r.value_or("<none>") + "')");
 
-    check(!cmds::try_expand("/etc/hosts is interesting").has_value(),
+    check(!cmds::try_expand(::agentty::IoAccess::grant(), "/etc/hosts is interesting").has_value(),
           "/unknown-name falls through as plain text");
-    check(!cmds::try_expand(" /echo hi").has_value(),
+    check(!cmds::try_expand(::agentty::IoAccess::grant(), " /echo hi").has_value(),
           "leading whitespace means prose, not a command");
-    check(!cmds::try_expand("/").has_value(), "bare slash is prose");
-    check(!cmds::try_expand("no slash").has_value(), "plain text untouched");
+    check(!cmds::try_expand(::agentty::IoAccess::grant(), "/").has_value(), "bare slash is prose");
+    check(!cmds::try_expand(::agentty::IoAccess::grant(), "no slash").has_value(), "plain text untouched");
     std::println("PASS\n");
 }
 
@@ -148,11 +148,13 @@ TEST_CASE("slash commands") {
     const fs::path home = sandbox / "home";
     fs::create_directories(home);
     fs::current_path(sandbox);
+    // home_dir() reads $HOME first, then $USERPROFILE: set both so an
+    // inherited $HOME (MSYS2/Git Bash) can't win, and clear AGENTTY_HOME.
+    ::setenv("HOME", home.string().c_str(), 1);
 #ifdef _WIN32
     _putenv_s("USERPROFILE", home.string().c_str());
-#else
-    ::setenv("HOME", home.string().c_str(), 1);
 #endif
+    ::unsetenv("AGENTTY_HOME");
 
     std::println("=== slash_commands_test ===");
     discovery_and_shadowing(sandbox, home);

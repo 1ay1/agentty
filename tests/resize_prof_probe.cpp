@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     if (p.extension() == ".jsonl") {
         if (auto log = ThreadLog::open_path(p)) loaded = log->load_thread();
     } else {
-        if (auto r = persistence::load_thread_file(p)) loaded = std::move(*r);
+        if (auto r = persistence::load_thread_file(::agentty::IoAccess::grant(), p)) loaded = std::move(*r);
     }
     if (!loaded) {
         std::fprintf(stderr, "load failed: %s\n", p.string().c_str());
@@ -77,7 +77,26 @@ int main(int argc, char** argv) {
 
     std::printf("%s: %zu messages\n", p.filename().string().c_str(),
                 m.d.current.messages.size());
-    std::printf("  frozen canvas: %zu entries, %zu rows (terminal %d rows)\n",
+    std::printf("  seeded canvas: %zu entries, %zu rows\n",
+                m.ui.frozen.size(), m.ui.frozen.row_total());
+
+    // Model the post-paint trim, because a resize never sees the seeded
+    // canvas. rehydrate seeds rehydrate_row_budget() rows; the first real
+    // frame paints them (that is the switch cost the user feels, and the
+    // rows scroll into native scrollback), and then the Tick arm in
+    // meta.cpp trims to frozen_row_budget() as soon as every block has a
+    // recorded height. From frame two onward the canvas is the SMALL one,
+    // and that is what every subsequent resize re-lays-out.
+    //
+    // Headless there is no paint, so record the heights the way the
+    // renderer would (the ledger's provability gate refuses to drop a
+    // block whose height was never recorded -- see scrollback_ledger.hpp).
+    for (std::size_t k = 0; k < m.ui.frozen.size(); ++k)
+        m.ui.frozen.record_paint(k, static_cast<int>(m.ui.frozen.block_rows(k)));
+    (void)app::detail::trim_frozen_if_oversized(m);
+
+    std::printf("  frozen canvas: %zu entries, %zu rows (terminal %d rows)"
+                "  <- steady state, post-trim\n",
                 m.ui.frozen.size(), m.ui.frozen.row_total(), rows);
 
     // A resize is a WIDTH change: every cached Element must re-layout at

@@ -10,6 +10,7 @@
 // the measured table of what actually varies between hosts.
 #include "agentty/provider/responses/responses.hpp"
 
+#include <maya/runtime.hpp>
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -30,6 +31,7 @@
 
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/stream_scaffold.hpp"
+#include "agentty/provider/error_class.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
@@ -73,7 +75,7 @@ std::string scrub_utf8(std::string_view in) {
 // Rebuilds the whole turn history each call (the Codex backend runs
 // store:false, so state is client-side). Every assistant tool_call becomes a
 // `function_call` item immediately followed by its `function_call_output`.
-json build_input(const provider::Request& req) {
+json build_input(const provider::Request& req, std::string_view site) {
     json input = json::array();
     // Count terminal-carrying tool results so each can be assigned a recency
     // rank (0 = newest) for the shared age-tiered wire budget. Without this a
@@ -113,7 +115,7 @@ json build_input(const provider::Request& req) {
                 content.push_back({
                     {"type", "input_image"},
                     {"image_url", "data:" + std::string{wire::wire_media_type(img)}
-                                    + ";base64," + util::base64_encode(img.bytes())},
+                                    + ";base64," + img.base64()},
                 });
             }
             if (content.empty()) continue;
@@ -132,7 +134,8 @@ json build_input(const provider::Request& req) {
         // produced (item-pairing invariant). Under store:false we send only
         // `encrypted_content` — NOT the server `id` (echoing a rs_… id makes
         // the backend do a lookup that 404s on a non-persisted response).
-        if (!m.reasoning_encrypted.empty()) {
+        if (!m.reasoning_encrypted.empty()
+            && !site.empty() && m.reasoning_site == site) {
             std::size_t start = 0;
             while (start <= m.reasoning_encrypted.size()) {
                 std::size_t nl = m.reasoning_encrypted.find('\n', start);
@@ -164,9 +167,22 @@ json build_input(const provider::Request& req) {
                 {"name", tc.name.value},
                 {"arguments", scrub_utf8(args)},
             });
-            // The result the host produced for this call (may be pending if
-            // the turn is still in flight — then we skip, the model re-requests).
-            if (tc.is_terminal()) {
+            // Every function_call MUST be followed by its function_call_output
+            // or the next request 400s ("No tool output found for function
+            // call"), and because the history replays every turn the thread
+            // stays wedged. A call that never finished (cancelled, stream
+            // died, still in flight when a request is built) gets a synthetic
+            // error output, the same rule the Anthropic and Chat transports
+            // follow. The in-memory ToolUse is untouched.
+            if (!tc.is_terminal()) {
+                input.push_back({
+                    {"type", "function_call_output"},
+                    {"call_id", tc.id.value},
+                    {"output", "(tool call did not complete \u2014 previous turn ended before this tool produced a result)"},
+                });
+                continue;
+            }
+            {
                 // Age-tiered wire budget (shared with every other transport):
                 // newest results keep the full budget, stale successes fade to
                 // a tight head+tail so a big dump stops replaying every turn.
@@ -201,7 +217,7 @@ json build_input(const provider::Request& req) {
                             {"type", "input_image"},
                             {"image_url",
                              "data:" + std::string{wire::wire_media_type(img)}
-                                 + ";base64," + util::base64_encode(img.bytes())},
+                                 + ";base64," + img.base64()},
                         });
                     }
                     input.push_back({
@@ -240,11 +256,11 @@ json build_tools(const provider::Request& req) {
 // `model` is deliberately NOT defaulted here: hosts can rewrite the slug
 // (Copilot's Auto session picks a server-blessed model), so the caller's
 // Target::model is authoritative and stream() stamps it after decoration.
-json build_body(const provider::Request& req) {
+json build_body(const provider::Request& req, std::string_view site) {
     json body{
         {"model", req.model},
         {"instructions", scrub_utf8(req.system_prompt)},
-        {"input", build_input(req)},
+        {"input", build_input(req, site)},
         {"tool_choice", "auto"},
         {"parallel_tool_calls", true},
         {"stream", true},
@@ -254,10 +270,30 @@ json build_body(const provider::Request& req) {
     // return human-readable summary text (response.reasoning_summary_text.*)
     // rather than silently burning thinking tokens — measured on both
     // ChatGPT and Copilot.
+    //
+    // With NO effort tier the field is omitted entirely. It used to send
+    // `reasoning: {summary: auto}` in that case, which is not "no opinion"
+    // — it is an explicit request for a reasoning summary. The picker's
+    // strip read `reasoning ‹off›` while every request asked for it, so the
+    // user saw thinking blocks they had switched off and paid for the
+    // tokens. The effort strip is the only place this is chosen, so `off`
+    // there has to mean off on the wire.
     if (!req.effort.empty())
         body["reasoning"] = json{{"effort", req.effort}, {"summary", "auto"}};
-    else
-        body["reasoning"] = json{{"summary", "auto"}};
+    // Output cap. Chat sends `max_tokens`, Anthropic sends `max_tokens`,
+    // Ollama sends `num_predict` — this dialect spells it
+    // `max_output_tokens`, and used to send nothing at all.
+    //
+    // A field on the neutral Request is a promise to the user. Kept by
+    // three implementations of four, it is worse than absent: it looks
+    // correct to whoever wrote it and arbitrary to whoever hits the one
+    // that ignores it. That is exactly how the reasoning toggle shipped
+    // broken for months (see the note above), so the same reading applies
+    // here even though nobody has reported it yet.
+    //
+    // 0 means "no opinion" and omits the field — the server's default is a
+    // better answer than a number we invented.
+    if (req.max_tokens > 0) body["max_output_tokens"] = req.max_tokens;
     return body;
 }
 
@@ -271,6 +307,66 @@ json build_body(const provider::Request& req) {
 struct ToolSlot {
     std::string call_id;   // the id a tool_result must echo
     std::string args;
+    // The item's position in the response's output[] array.
+    //
+    // This is the ONLY identity Copilot's proxy leaves intact. It rewrites
+    // `item_id` on argument frames into a ~440-char base64 blob (its
+    // encrypted reasoning content) that matches no item it ever announced,
+    // so every carrier looked unaddressable and all 45 tools dispatched
+    // with `{}`. Same root cause as openclaw#72602 and the copilot-sdk
+    // report: the proxy's id rewriting does not round-trip.
+    //
+    // -1 = the frame that opened this call carried no output_index.
+    int output_index = -1;
+};
+
+// ── The set of calls currently open, with no way to pick one arbitrarily ──
+//
+// A plain set exposes begin(), and `*s.begin()` on an unordered container is
+// an ARBITRARY element dressed up as a choice. That is exactly the bug this
+// codec shipped: a fallback named `latest_tool_item` was refreshed from
+// `*open_tool_items.begin()`, so "latest" meant whichever item the hash
+// happened to yield, and an unaddressed argument fragment was appended to a
+// coin-flip call.
+//
+// The discipline test scans for that literal shape, but a scanner only ever
+// catches the spelling it knows — `.back()`, `.front()`, a "most recent"
+// timestamp and a dozen other spellings of the same mistake would walk past
+// it. So the real fix is here, in the type: this exposes `sole()`, which
+// answers "is there exactly one, and if so which", and NOTHING that answers
+// "give me any one of them". A future decoder cannot reintroduce the bug
+// because there is no member to reintroduce it with.
+//
+// drain() exists because closing every open call at end of turn genuinely
+// wants all of them, and order does not matter when you are taking the lot.
+class OpenCalls {
+public:
+    void open(std::string item_id) { items_.insert(std::move(item_id)); }
+    bool close(const std::string& item_id) { return items_.erase(item_id) > 0; }
+
+    [[nodiscard]] std::size_t size()  const noexcept { return items_.size(); }
+    [[nodiscard]] bool        empty() const noexcept { return items_.empty(); }
+
+    // The one open call, or nullopt when there are zero or many.
+    //
+    // This is the ONLY read that yields a single id, and it is total: the
+    // "many" case has no answer, so a caller cannot accidentally receive a
+    // guess. Compare the old `*begin()`, which always returned something and
+    // was right only by luck.
+    [[nodiscard]] std::optional<std::string> sole() const {
+        if (items_.size() != 1) return std::nullopt;
+        return *items_.begin();   // attribution-ok: size()==1, no order to be wrong about
+    }
+
+    // Every open call, for the end-of-turn sweep. Taking all of them is not
+    // a choice, so there is nothing to get wrong.
+    [[nodiscard]] std::vector<std::string> drain() {
+        std::vector<std::string> out(items_.begin(), items_.end());
+        return out;
+    }
+
+private:
+    std::unordered_set<std::string> items_;
 };
 
 struct StreamCtx {
@@ -280,11 +376,38 @@ struct StreamCtx {
     // what argument events carry; the slot holds the call_id they must be
     // forwarded under.
     std::unordered_map<std::string, ToolSlot> tools;
-    std::unordered_set<std::string> open_tool_items;
-    std::string latest_tool_item;   // fallback for older events without item_id
+    OpenCalls open_tool_items;
     bool text_block_open = false;
+    // Mirrors req.show_reasoning. The other three transports (chat, ollama,
+    // anthropic) already gate on this; the Responses codec did not, so a
+    // user who turned reasoning OFF still saw the summary on every model
+    // riding this dialect (Copilot's gpt-*, ChatGPT/Codex). The toggle
+    // looked broken because it was — on one dialect out of four.
+    //
+    // HIDDEN still emits an EMPTY ThinkingDelta rather than nothing, the
+    // same shape the chat transport uses: the event is the turn's liveness
+    // signal (it resets last_event_at and the retry counter in the
+    // reducer), so swallowing it entirely would make a long silent reasoning
+    // phase look like a stalled stream. Empty text stores nothing.
+    bool show_reasoning = true;
+    // Which host this stream is talking to (responses::Site::id). Stamped
+    // onto every captured reasoning blob so the replay can check that the
+    // ciphertext is going back to the backend that can decrypt it.
+    std::string site;
     bool saw_function_call = false;
     bool terminated = false;
+    // ── Argument-routing health, counted for the whole response ────────
+    //
+    // A rate, not an incident. GitHub's client reports salvaged tool
+    // inputs in telemetry alongside quota, which is the tell that argument
+    // loss on a proxied wire is a normal state to be measured rather than
+    // an error to be logged once and forgotten.
+    //
+    // Summarised on `response.completed`, so one line per turn says whether
+    // this wire is healthy — instead of needing someone to count warnings
+    // in a 20 MB log, which is what the Copilot diagnosis actually took.
+    int salvaged_args  = 0;   // recovered because exactly one call was open
+    int unroutable_args = 0;  // dropped: nothing could own them safely
     StopReason stop = StopReason::EndTurn;
     // Diagnostic: how many reasoning-bearing events arrived this turn.
     // Lets a "reasoning is not showing" report be split into its two REAL
@@ -294,41 +417,156 @@ struct StreamCtx {
     int thinking_deltas = 0;
 };
 
+// Which open call does an argument event belong to?
+//
+// `item_id` is the answer whenever the server sends one, which is nearly
+// always. When it is absent we may only fall back if there is exactly ONE
+// call open — then there is nothing to be wrong about.
+//
+// With several open, any choice is a coin flip, and the losing side appends
+// one call's arguments to another. The result still PARSES, so the
+// corruption is silent and reaches a tool invocation: `edit` runs with a
+// path that belonged to `shell`. Returning empty drops the fragment, and the
+// turn then fails visibly on a missing required field — strictly better than
+// dispatching a tool with another call's bytes.
+//
+// This used to fall back to `latest_tool_item`, which sounds ordered and is
+// not: it was refreshed from `*open_tool_items.begin()` on an unordered_set,
+// so "latest" was whichever item the hash happened to yield. Same rule as
+// the chat decoder's wire::ToolCallTracker, which returns Ambiguous rather
+// than picking; see include/agentty/provider/wire/tool_calls.hpp.
+[[nodiscard]] std::string addressed_item(const StreamCtx& ctx, const json& j) {
+    // (1) output_index — the item's slot in the response's output[] array.
+    //
+    // Tried FIRST, ahead of item_id, because it is the one identity a proxy
+    // cannot rewrite without also renumbering the array it is describing.
+    // Copilot's proxy replaces `item_id` on argument frames with a ~440-char
+    // base64 blob (its encrypted reasoning content) that matches nothing it
+    // announced — so item_id was non-empty, looked authoritative, resolved
+    // to nobody, and every tool dispatched with `{}`. Matching on position
+    // sidesteps the rewriting entirely. Same failure documented in
+    // openclaw#72602 ("Encrypted content item_id did not match the target
+    // item id") and github/copilot-sdk#615.
+    if (const auto oi = j.find("output_index");
+        oi != j.end() && oi->is_number_integer()) {
+        const int idx = oi->get<int>();
+        for (const auto& [item, slot] : ctx.tools)
+            if (slot.output_index == idx) return item;
+        // A position we have no call for is NOT a reason to fall through to
+        // a rewritten item_id: the server told us exactly which slot it
+        // meant and we do not have it. Keep looking only via the
+        // unambiguous paths below.
+    }
+
+    // (2) item_id — correct on every well-behaved Responses server, and
+    // still the only handle when a frame carries no output_index.
+    if (const auto it = j.find("item_id");
+        it != j.end() && it->is_string()
+        && !it->get_ref<const std::string&>().empty()) {
+        const auto& id = it->get_ref<const std::string&>();
+        // Only trust it if it names a call we actually opened. An id that
+        // resolves to nothing is not authority, it is noise — treating it
+        // as authoritative is what suppressed the sole() fallback below and
+        // turned a routable single-call turn into `{}`.
+        if (ctx.tools.find(id) != ctx.tools.end()) return id;
+    }
+
+    // (3) Exactly one candidate means there is no order to be wrong about,
+    // and OpenCalls::sole() is the only read that can answer at all — it
+    // returns nullopt for zero or many rather than handing back an
+    // arbitrary item.
+    if (auto only = ctx.open_tool_items.sole()) return *only;
+    return {};
+}
+
 // Route an argument payload from ANY carrier into the slot and forward only
 // what is newly known. `total` = the server's complete view, not a fragment.
 void feed_tool_args(StreamCtx& ctx, const std::string& item_id,
                     std::string_view payload, bool total) {
-    const auto it = ctx.tools.find(item_id);
+    auto it = ctx.tools.find(item_id);
     if (it == ctx.tools.end()) {
         // An argument payload we can't route is a tool call about to fail
         // as "[invalid args]" — the model DID send the arguments, we just
         // couldn't attach them (item never opened / id mismatch / a carrier
         // event shape we don't know). Exactly the `.done` bug's failure
         // shape; must never be silent.
-        AGT_LOG(Wire, Warn, "responses.tool_args_unroutable",
-                "item_id={} known_items={} bytes={}",
-                item_id, ctx.tools.size(), payload.size());
-        return;
+        //
+        // ── SALVAGE ────────────────────────────────────────────────
+        //
+        // GitHub's own client ships `copilot_salvaged_tool_input_ids` in
+        // its telemetry — it reconstructs tool inputs that fail to route
+        // and reports how often. You do not build that unless it fires in
+        // production against your own servers. The lesson is that argument
+        // loss on a proxied wire is an EXPECTED state, not an error.
+        //
+        // So recover, but only where recovery cannot be wrong: exactly one
+        // call open means there is no order to get wrong and no second
+        // candidate to corrupt. `sole()` answers that and nothing else —
+        // it returns nullopt for zero OR many, so this cannot decay into
+        // "pick the most recent", which is the bug the whole seam exists
+        // to prevent.
+        //
+        // With several calls open we still drop. A rewritten id plus two
+        // candidates is a coin flip, and the losing side produces valid
+        // JSON dispatched to the wrong tool — strictly worse than one
+        // visibly broken turn.
+        if (auto only = ctx.open_tool_items.sole();
+            only && ctx.tools.count(*only)) {
+            AGT_LOG(Wire, Warn, "responses.tool_args_salvaged",
+                    "item_id={} recovered_to={} bytes={}",
+                    item_id, *only, payload.size());
+            ++ctx.salvaged_args;
+            it = ctx.tools.find(*only);
+        } else {
+            AGT_LOG(Wire, Warn, "responses.tool_args_unroutable",
+                    "item_id={} known_items={} open={} bytes={}",
+                    item_id, ctx.tools.size(),
+                    ctx.open_tool_items.size(), payload.size());
+            ++ctx.unroutable_args;
+            return;
+        }
     }
     const auto fresh = wire::unseen(it->second.args, payload, total);
+    // Which CARRIER delivered the bytes, and whether they were new. This is
+    // the line that separates the two ways a tool call ends up with `{}`:
+    //
+    //   no routed= line at all  → the server sent no arguments on any
+    //                             carrier (or they went to tool_args_
+    //                             unroutable above, which logs separately)
+    //   routed= with fresh=0    → the bytes arrived but we already had
+    //                             them, i.e. a redundant carrier — healthy
+    //   routed= with fresh>0    → arguments genuinely accumulated
+    //
+    // Copilot sends ONLY the `.done` snapshot, so on a healthy Copilot turn
+    // this is the single routed= line for the call, with total=1 and
+    // fresh=<all of it>. If that line is missing, the bug is upstream of
+    // the decoder.
+    AGT_LOG(Wire, Debug, "responses.tool_args_routed",
+            "item_id={} call_id={} total={} bytes={} fresh={} have={}",
+            item_id, it->second.call_id, total ? 1 : 0, payload.size(),
+            fresh.size(), it->second.args.size());
     if (!fresh.empty())
         ctx.sink(StreamToolUseDelta{ToolCallId{it->second.call_id},
                                     std::string{fresh}});
 }
 
 void close_tool(StreamCtx& ctx, const std::string& item_id) {
-    if (item_id.empty() || !ctx.open_tool_items.erase(item_id)) return;
-    if (const auto it = ctx.tools.find(item_id); it != ctx.tools.end())
+    if (item_id.empty() || !ctx.open_tool_items.close(item_id)) return;
+    if (const auto it = ctx.tools.find(item_id); it != ctx.tools.end()) {
+        // The verdict for this call, at the moment it is handed to the
+        // reducer. `args=0` here is the exact symptom the user sees as
+        // "[invalid args] path required" — having it in the log with the
+        // call_id attached turns that from a guess into a lookup, and the
+        // routed= lines above say whether the bytes ever arrived.
+        AGT_LOG(Wire, Debug, "responses.tool_closed",
+                "item_id={} call_id={} args={}",
+                item_id, it->second.call_id, it->second.args.size());
         ctx.sink(StreamToolUseEnd{ToolCallId{it->second.call_id}});
-    if (ctx.latest_tool_item == item_id) {
-        ctx.latest_tool_item = ctx.open_tool_items.empty()
-            ? std::string{} : *ctx.open_tool_items.begin();
     }
 }
 
 void close_all_tools(StreamCtx& ctx) {
-    std::vector<std::string> ids(ctx.open_tool_items.begin(),
-                                 ctx.open_tool_items.end());
+    std::vector<std::string> ids = ctx.open_tool_items.drain();
     for (const auto& id : ids) close_tool(ctx, id);
 }
 
@@ -340,6 +578,11 @@ void emit_usage(StreamCtx& ctx, const json& usage) {
 
 void dispatch(StreamCtx& ctx, std::string_view data) {
     if (data.empty() || data == "[DONE]") return;
+    // Ground truth, before any interpretation. The Chat transport already
+    // dumps its request body at Trace; this is the response half, and it is
+    // what settles "the server never sent the arguments" versus "we failed
+    // to route them" without another round of guessing.
+    AGT_LOG(Wire, Trace, "responses.frame", "raw={}", data);
     json j;
     try { j = json::parse(data); } catch (const std::exception& e) {
         // A frame we could not even parse is a DROPPED wire event — the
@@ -363,7 +606,9 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     if (type == "response.reasoning_summary_text.delta"
         || type == "response.reasoning_text.delta") {
         ++ctx.thinking_deltas;
-        ctx.sink(StreamThinkingDelta{j.value("delta", std::string{}), {}});
+        ctx.sink(StreamThinkingDelta{
+            ctx.show_reasoning ? j.value("delta", std::string{}) : std::string{},
+            {}});
         return;
     }
     // Summary PART boundary: the Responses API splits a reasoning summary
@@ -373,7 +618,8 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     // thought two…"). Emit a block boundary so the reducer inserts the
     // paragraph break — same event Anthropic uses for a new thinking block.
     if (type == "response.reasoning_summary_part.added") {
-        ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
+        if (ctx.show_reasoning)
+            ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
         return;
     }
     if (type == "response.output_item.added") {
@@ -382,11 +628,24 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         if (itype == "reasoning") {
             // New reasoning item — paragraph boundary for its summary text
             // (see above). Harmless if the item produces no visible text.
-            ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
+            // Suppressed when reasoning is hidden: a boundary with no text
+            // around it would open an empty thinking block.
+            if (ctx.show_reasoning)
+                ctx.sink(StreamThinkingDelta{{}, {}, /*block_boundary=*/true});
         }
-        if (itype == "function_call") {
+        if (itype == "function_call" || itype == "custom_tool_call") {
             // A new tool call opens. Close any prior text block first so the
             // reveal cursor snaps before the card (matches Anthropic seam).
+            //
+            // `custom_tool_call` is the same thing under the custom-tool
+            // protocol: a named call whose arguments stream on the
+            // custom_tool_call_input carriers instead of the
+            // function_call_arguments ones. It opens a slot identically,
+            // because everything downstream — attribution, argument
+            // accumulation, the ToolUse the reducer builds — is the same
+            // question. Recognising only `function_call` here would leave
+            // carrier (5) wired to a slot that never exists, which is a
+            // more confusing version of dropping the event outright.
             if (ctx.text_block_open) {
                 ctx.text_block_open = false;
                 ctx.sink(StreamTextBlockClosed{});
@@ -394,21 +653,41 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             const std::string item_id = item.value("id", std::string{});
             const std::string call_id = item.value("call_id", item_id);
             const std::string name    = item.value("name", std::string{});
-            ctx.tools[item_id] = ToolSlot{call_id, {}};
-            ctx.open_tool_items.insert(item_id);
-            ctx.latest_tool_item = item_id;
+            // The slot this item occupies in the response's output[] array.
+            // Captured here because this is the one frame whose item_id is
+            // trustworthy (the server is announcing the item, not
+            // referring back to it), so it is where position and identity
+            // can still be tied together. Later argument frames carry only
+            // the position on Copilot — see addressed_item.
+            const int out_idx = (j.contains("output_index")
+                                 && j["output_index"].is_number_integer())
+                              ? j["output_index"].get<int>() : -1;
+            ctx.tools[item_id] = ToolSlot{call_id, {}, out_idx};
+            ctx.open_tool_items.open(item_id);
             ctx.saw_function_call = true;
+            // The identity pairing, logged once per call. item_id is what
+            // later argument frames address; call_id is what the reducer and
+            // the tool dispatcher use. When they differ (they do on Copilot)
+            // a mismatch here is the difference between arguments landing
+            // and arguments going to tool_args_unroutable.
+            AGT_LOG(Wire, Debug, "responses.tool_open",
+                    "item_id={} call_id={} name={} output_index={}",
+                    item_id, call_id, name.empty() ? "<empty>" : name,
+                    out_idx);
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
             // Carrier (1): some backends deliver the whole args string
             // up-front on `added`. A snapshot, so route it as a total.
-            if (const auto a = item.value("arguments", std::string{}); !a.empty())
-                feed_tool_args(ctx, item_id, a, /*total=*/true);
+            // `input` is the custom-tool spelling of the same field.
+            auto a0 = item.value("arguments", std::string{});
+            if (a0.empty()) a0 = item.value("input", std::string{});
+            if (!a0.empty())
+                feed_tool_args(ctx, item_id, a0, /*total=*/true);
         }
         return;
     }
     // Carrier (2): incremental fragments. What Codex sends.
     if (type == "response.function_call_arguments.delta") {
-        feed_tool_args(ctx, j.value("item_id", ctx.latest_tool_item),
+        feed_tool_args(ctx, addressed_item(ctx, j),
                        j.value("delta", std::string{}), /*total=*/false);
         return;
     }
@@ -418,19 +697,52 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
     // server that also streamed fragments this is a no-op, because
     // observe_total() returns just the unseen suffix (usually nothing).
     if (type == "response.function_call_arguments.done") {
-        feed_tool_args(ctx, j.value("item_id", ctx.latest_tool_item),
+        feed_tool_args(ctx, addressed_item(ctx, j),
                        j.value("arguments", std::string{}), /*total=*/true);
+        return;
+    }
+    // Carrier (5): the CUSTOM tool-call input stream. Same two shapes as
+    // carriers (2) and (3) — `.delta` fragments then a `.done` snapshot —
+    // but under a different event name and with the payload on `input`
+    // rather than `delta`/`arguments`.
+    //
+    // A model using custom tool calling delivers its arguments ONLY here.
+    // We used to fall through to unhandled_event and drop them, which is
+    // the same silent `{}` dispatch that carrier (3) caused on Copilot —
+    // and for the same reason: a carrier nobody enumerated. GitHub's own
+    // client deserializes this one (`response.custom_tool_call_input.delta`
+    // sits beside the others in its event table), which is what prompted
+    // the check.
+    //
+    // Routed through the same feed_tool_args seam as every other carrier,
+    // so attribution, snapshot-vs-fragment reconciliation and logging are
+    // identical by construction rather than by care.
+    if (type == "response.custom_tool_call_input.delta") {
+        feed_tool_args(ctx, addressed_item(ctx, j),
+                       j.value("delta", std::string{}), /*total=*/false);
+        return;
+    }
+    if (type == "response.custom_tool_call_input.done") {
+        feed_tool_args(ctx, addressed_item(ctx, j),
+                       j.value("input", std::string{}), /*total=*/true);
         return;
     }
     if (type == "response.output_item.done") {
         const auto& item = j.value("item", json::object());
         const auto itype = item.value("type", std::string{});
-        if (itype == "function_call") {
+        if (itype == "function_call" || itype == "custom_tool_call") {
             const std::string item_id = item.value("id", std::string{});
             // Carrier (4): the completed item may restate the full arguments.
             // Last chance to learn them before the call is dispatched — a
             // no-op when an earlier carrier already supplied them.
-            if (const auto a = item.value("arguments", std::string{}); !a.empty())
+            //
+            // Custom tool calls carry the same snapshot under `input`
+            // instead of `arguments`; try both rather than assuming which
+            // protocol produced this item. Mislabelled here costs a whole
+            // call's arguments, and the cost of looking is one map lookup.
+            auto a = item.value("arguments", std::string{});
+            if (a.empty()) a = item.value("input", std::string{});
+            if (!a.empty())
                 feed_tool_args(ctx, item_id, a, /*total=*/true);
             close_tool(ctx, item_id);
         }
@@ -442,7 +754,7 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             // reasoning_summary_text.delta → StreamThinkingDelta.
             if (auto enc = item.value("encrypted_content", std::string{});
                 !enc.empty())
-                ctx.sink(StreamReasoning{std::move(enc)});
+                ctx.sink(StreamReasoning{std::move(enc), ctx.site});
             if (ctx.text_block_open) {
                 ctx.text_block_open = false;
                 ctx.sink(StreamTextBlockClosed{});
@@ -462,9 +774,11 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         // the model wants tool results before continuing.
         ctx.stop = ctx.saw_function_call ? StopReason::ToolUse : StopReason::EndTurn;
         AGT_LOG(Wire, Debug, "responses.completed",
-                "stop={} tool_calls={} thinking_deltas={}",
+                "stop={} tool_calls={} thinking_deltas={} "
+                "salvaged_args={} unroutable_args={}",
                 ctx.saw_function_call ? "tool_use" : "end_turn",
-                ctx.tools.size(), ctx.thinking_deltas);
+                ctx.tools.size(), ctx.thinking_deltas,
+                ctx.salvaged_args, ctx.unroutable_args);
         ctx.sink(StreamFinished{ctx.stop});
         ctx.terminated = true;
         return;
@@ -518,12 +832,29 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
             msg = compose(err);
             if (msg.empty()) msg = "Codex request failed";
         }
+        const json& err_obj = j.contains("error") && j["error"].is_object()
+                                  ? j["error"] : j;
+        std::string code = err_obj.value("code", err_obj.value("type", std::string{}));
+        if (code == "error") code.clear();   // the event discriminator, not a code
+        if (code.empty())
+            code = j.value("response", json::object())
+                       .value("error", json::object())
+                       .value("code", std::string{});
+        // The server already typed this failure. Map it to the equivalent
+        // HTTP status so the reducer classifies through the proven
+        // classify(HttpError) table rather than sniffing prose — the
+        // status line is long gone by the time an SSE error body arrives
+        // (it was 200), so without this the retry ladder is guessing from
+        // a human sentence. 0 = unrecognised, keeps the string path.
+        const int status = provider::wire_error_type_status(code);
         // The full wire error event, not just the composed one-liner: the
         // event may carry fields compose() doesn't surface (param, request
         // id) that decide a provider-side ticket vs a client bug.
-        AGT_LOG(Wire, Warn, "responses.error_event", "msg={} raw={}",
-                msg, data.substr(0, 2048));
-        ctx.sink(StreamError{msg, std::nullopt});
+        AGT_LOG(Wire, Warn, "responses.error_event",
+                "code={} status={} msg={} raw={}",
+                code.empty() ? "<none>" : code, status, msg,
+                data.substr(0, 2048));
+        ctx.sink(StreamError{msg, std::nullopt, status});
         ctx.terminated = true;
         return;
     }
@@ -543,11 +874,22 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
         && !type.starts_with("response.content_part")
         && !type.starts_with("response.output_text.done")
         && !type.contains("_summary_part")) {
-        static std::mutex           seen_mu;
-        static std::set<std::string> seen;
-        std::lock_guard lk(seen_mu);
-        if (seen.insert(type).second)
+        // Lock-free dedupe: a racing first sighting may log twice, which is
+        // harmless for a diagnostic line.
+        static maya::snapshot<std::set<std::string>> seen;
+        if (!seen.load()->contains(std::string{type})) {
+            seen.update([](const std::set<std::string>& s, const std::string& t) {
+                auto next = s; next.insert(t); return next;
+            }, std::string{type});
+            // On the WIRE channel, not dbglog. An unknown event is the
+            // single most useful line in a bug report about this dialect —
+            // and under `AGENTTY_LOG=wire=debug`, the filter someone
+            // debugging a transport actually runs, a dbglog line does not
+            // appear at all. A dropped carrier that is invisible on the one
+            // channel you would be watching is a dropped carrier twice.
+            AGT_LOG(Wire, Warn, "responses.unhandled_event", "type={}", type);
             util::dbglog("responses.unhandled_event", type);
+        }
     }
     ctx.sink(StreamHeartbeat{});
 }
@@ -560,15 +902,37 @@ void dispatch(StreamCtx& ctx, std::string_view data) {
 // framing, error-body capping, retry-after capture, watchdog timeouts and
 // the shared epilogue — is identical for every Responses backend, which is
 // the whole reason this module exists.
-provider::StreamResult stream(const Site& site, provider::Request req,
+namespace {
+provider::StreamResult stream_started(const Site& site,
+                                      std::expected<Target, std::string> target,
+                                      provider::Request req,
+                                      provider::EventSink sink);
+}
+
+provider::StreamResult stream(const maya::unlocked& cap, const Site& site,
+                              provider::Request req,
                               provider::EventSink sink) {
     sink(StreamStarted{});
-
     // Host resolves credentials + destination (may block on a token refresh,
-    // and may rewrite req.model — e.g. Copilot's Auto session picking a
-    // server-blessed slug). Auth prose is the host's: this layer never
+    // and may rewrite req.model). Auth prose is the host's: this layer never
     // invents remediation text it can't be sure of.
-    auto target = site.authorize(req);
+    auto target = site.authorize(cap, req);
+    return stream_started(site, std::move(target), std::move(req), std::move(sink));
+}
+
+provider::StreamResult stream(const Site& site,
+                              std::expected<Target, std::string> target,
+                              provider::Request req,
+                              provider::EventSink sink) {
+    sink(StreamStarted{});
+    return stream_started(site, std::move(target), std::move(req), std::move(sink));
+}
+
+namespace {
+provider::StreamResult stream_started(const Site& site,
+                                      std::expected<Target, std::string> target,
+                                      provider::Request req,
+                                      provider::EventSink sink) {
     if (!target) {
         sink(StreamError{target.error()});
         return provider::StreamResult::failed(
@@ -585,7 +949,7 @@ provider::StreamResult stream(const Site& site, provider::Request req,
     http::append_sse_no_buffer(hr.headers);
 
     try {
-        json body = build_body(req);
+        json body = build_body(req, site.id);
         // Host-specific fields layer on top of the neutral body.
         if (site.decorate_body) site.decorate_body(body, req);
         // The host's model choice is authoritative (see build_body).
@@ -596,8 +960,38 @@ provider::StreamResult stream(const Site& site, provider::Request req,
         return provider::StreamResult::failed("could not encode request");
     }
 
+    // Request metadata + the full body, matching the Chat transport's
+    // `openai.request` / `openai.request.body` pair exactly. Without these
+    // the Responses dialect was the one transport you could not debug from
+    // the log: a Copilot turn that came back with empty tool arguments gave
+    // you the decoded events but never what we ASKED for, so "did we send
+    // the tools?" and "did the server drop them?" looked identical. Body is
+    // NOT truncated — a rejected request is exactly when the last bytes
+    // matter.
+    //
+    // The tool count is on the Debug line rather than only in the Trace body
+    // because "how many tools did this turn advertise" is the first question
+    // when a model stops calling them, and it should not cost a full-body
+    // dump to answer.
+    std::size_t tool_count = 0;
+    try {
+        const auto parsed = json::parse(hr.body);
+        if (const auto t = parsed.find("tools");
+            t != parsed.end() && t->is_array())
+            tool_count = t->size();
+    } catch (...) { /* diagnostics only — never fail a turn to log it */ }
+
+    AGT_LOG(Wire, Debug, "responses.request",
+            "POST https://{}:{}{} site={} model={} tools={} reasoning={} bytes={}",
+            target->host, static_cast<unsigned>(target->port), target->path,
+            site.id, target->model.empty() ? req.model : target->model,
+            tool_count, req.show_reasoning ? 1 : 0, hr.body.size());
+    AGT_LOG(Wire, Trace, "responses.request.body", "bytes={} raw={}", hr.body.size(), ::agentty::logx::body(hr.body));
+
     StreamCtx ctx;
     ctx.sink = sink;
+    ctx.show_reasoning = req.show_reasoning;
+    ctx.site = std::string{site.id};
     // Shared scaffold: status/Retry-After capture, heartbeats, buffered-wait,
     // wire dump, capped error body. Our feed stops the read once dispatch()
     // fired the terminal event (deliberate post-`response.completed` abort —
@@ -615,7 +1009,7 @@ provider::StreamResult stream(const Site& site, provider::Request req,
 
     http::Timeouts tos = provider::stream_timeouts();
 
-    auto result = http::default_client().stream(hr, sc.handler(), tos, req.cancel);
+    auto result = http::default_client(::agentty::IoAccess::grant()).stream(hr, sc.handler(), tos, req.cancel);
 
     // Uniform end-of-turn pair (Debug summary + Warn raw error body) with the
     // dialect-specific counters appended.
@@ -648,11 +1042,14 @@ provider::StreamResult stream(const Site& site, provider::Request req,
         },
     });
 }
+} // namespace
 
 // ── Codec accessors (shared by hosts and tests) ───────────────────────────
-std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines) {
+std::vector<Msg> parse_sse_for_test(const std::vector<std::string>& sse_data_lines,
+                                    bool show_reasoning) {
     std::vector<Msg> out;
     StreamCtx ctx;
+    ctx.show_reasoning = show_reasoning;
     ctx.sink = [&](Msg m) { out.push_back(std::move(m)); };
     for (const auto& line : sse_data_lines) dispatch(ctx, line);
     return out;

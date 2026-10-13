@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cstdlib>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,21 +21,32 @@
 #include "agentty/runtime/fuzzy.hpp"
 #include "agentty/io/http.hpp"
 
+#include <maya/runtime.hpp>
+
 namespace agentty::provider {
 
 namespace {
-Selection  g_active{};
-std::mutex g_active_mu;   // guards g_active across the UI/worker thread split
+// Read by the UI thread (views, reducers) and by workers, replaced wholesale
+// by select(): a published immutable value, so active() needs no capability.
+// (Selection carries a registry row pointer, so it is not Shareable and
+// can't be a maya::snapshot; it is never mutated after publish.)
+maya::published<const Selection>& g_active() {
+    static maya::published<const Selection> s;
+    return s;
+}
 
-std::string g_auth_header;         // --auth-header override, "" = Bearer
-std::mutex  g_auth_header_mu;      // same UI/worker split as g_active
+// --auth-header override, "" = Bearer. Written once at startup.
+maya::snapshot<std::string>& g_auth_header() { static maya::snapshot<std::string> h; return h; }
 
-// Persist-on-success: the CLI custom-host spec awaiting proof (empty =
-// none). Written once at startup (main thread, pre-UI), consumed on the
-// UI thread by the ModelsLoaded reducer — the mutex covers the overlap.
-std::string g_unproven_spec;
-std::string g_unproven_model;
-std::mutex  g_unproven_mu;
+// Persist-on-success: the CLI custom-host spec awaiting proof (empty spec =
+// none). Written once at startup, consumed on the UI thread by the
+// ModelsLoaded reducer.
+struct Unproven { std::string spec; std::string model; };
+// take() swaps it out atomically, so exactly one consumer gets it.
+maya::published<const Unproven>& g_unproven() {
+    static maya::published<const Unproven> u;
+    return u;
+}
 
 std::string env_or_empty(std::string_view name) {
     if (name.empty()) return {};
@@ -58,32 +68,23 @@ std::vector<ModelInfo> bundled_models_for(std::string_view label) {
 }
 } // namespace
 
-void set_unproven_spec(std::string spec, std::string model_recall) {
-    std::lock_guard<std::mutex> lk(g_unproven_mu);
-    g_unproven_spec  = std::move(spec);
-    g_unproven_model = std::move(model_recall);
+void set_unproven_spec(Io, std::string spec, std::string model_recall) {
+    g_unproven().publish(std::make_shared<const Unproven>(
+        Unproven{std::move(spec), std::move(model_recall)}));
 }
 
-std::optional<std::pair<std::string, std::string>>
-take_unproven_spec(std::string_view spec_now) {
-    std::lock_guard<std::mutex> lk(g_unproven_mu);
-    if (g_unproven_spec.empty() || g_unproven_spec != spec_now)
-        return std::nullopt;
-    auto out = std::make_pair(std::move(g_unproven_spec),
-                              std::move(g_unproven_model));
-    g_unproven_spec.clear();
-    g_unproven_model.clear();
-    return out;
+std::optional<std::pair<std::string, std::string>> take_unproven_spec_at_launch(Io) {
+    const std::shared_ptr<const Unproven> u = g_unproven().take();
+    if (!u || u->spec.empty()) return std::nullopt;
+    return std::make_pair(u->spec, u->model);
 }
 
-void set_custom_auth_header(std::string name) {
-    std::lock_guard lk(g_auth_header_mu);
-    g_auth_header = std::move(name);
+void set_custom_auth_header(Io, std::string name) {
+    g_auth_header().store(std::move(name));
 }
 
 std::string custom_auth_header() {
-    std::lock_guard lk(g_auth_header_mu);
-    return g_auth_header;
+    return g_auth_header().get();
 }
 
 Selection parse_selection(std::string_view spec) {
@@ -189,7 +190,7 @@ auth::AuthHeader resolve_auth_for(std::string_view spec,
     return auth::AuthHeader{auth::ApiKeyHeader{std::move(key)}};
 }
 
-void select(Selection s) {
+void select(Io, Selection s) {
     // Publish the provider id as the capability-key scope BEFORE swapping the
     // selection in, so a resolved_caps() racing the switch sees, at worst,
     // the OLD scope with the OLD selection — never a mismatched pair.
@@ -231,13 +232,19 @@ void select(Selection s) {
                       : std::string{"-"},
             s.kind == Kind::ExternalAcp ? s.acp_agent_id : std::string{"-"});
 
-    std::lock_guard lk(g_active_mu);
-    g_active = std::move(s);
+    g_active().publish(std::make_shared<const Selection>(std::move(s)));
 }
 
 Selection active() {
-    std::lock_guard lk(g_active_mu);
-    return g_active;   // snapshot copy — see header for the race it closes
+    // Snapshot copy; see header for the race it closes.
+    const std::shared_ptr<const Selection> a = g_active().current();
+    return a ? *a : Selection{};
+}
+
+std::string Selection::catalog_id() const {
+    if (kind == Kind::OpenAI)      return openai_endpoint.label;
+    if (kind == Kind::ExternalAcp) return acp_agent_id;
+    return std::string{default_provider_id()};
 }
 
 std::string provider_display_name(const Selection& s) {
@@ -342,18 +349,18 @@ PrewarmTarget prewarm_target(const Selection& s) {
     return t;
 }
 
-void prewarm_active_provider() {
+void prewarm_active_provider(Io io) {
     // Uniform across native backends: resolve the warm target from the active
     // selection (pure, registry-driven — see prewarm_target) and open the
     // socket. No provider is privileged; the routing table lives in one
     // testable function, not this side-effecting wrapper.
     const PrewarmTarget t = prewarm_target(active());
     if (!t.should_warm()) return;
-    http::default_client().prewarm(t.host, t.port, t.override_host,
+    http::default_client(io).prewarm(t.host, t.port, t.override_host,
                                    t.override_port);
 }
 
-std::vector<ModelInfo> list_models_for(const Selection& sel,
+std::vector<ModelInfo> list_models_for(Io io, const maya::unlocked& cap, const Selection& sel,
                                        const auth::AuthHeader& auth) {
     // Dispatch on the CARRIED provider id, not on a re-derived label. The
     // three OAuth-native backends fetch their own catalogs because their
@@ -365,12 +372,12 @@ std::vector<ModelInfo> list_models_for(const Selection& sel,
     // through to the generic /v1/models GET (Copilot serves /models), and the
     // picker came up empty with no error.
     if (sel.kind == Kind::ExternalAcp) return {};   // the agent picks its own
-    if (sel.is_copilot()) return copilot::list_models();
-    if (sel.is_kimi())    return kimi::list_models();
-    if (sel.is_chatgpt()) return chatgpt::list_models();
-    if (sel.kind == Kind::Anthropic) return anthropic::list_models(auth);
+    if (sel.is_copilot()) return copilot::list_models(io, cap);
+    if (sel.is_kimi())    return kimi::list_models(io, cap);
+    if (sel.is_chatgpt()) return chatgpt::list_models(io, cap);
+    if (sel.kind == Kind::Anthropic) return anthropic::list_models(io, auth);
 
-    auto models = openai::list_models(auth, sel.openai_endpoint);
+    auto models = openai::list_models(io, auth, sel.openai_endpoint);
     // Hosted providers return nothing before a key is set (or when the fetch
     // fails). Seed from the bundled catalog so the picker is never stranded
     // empty; custom hosts have no seed and legitimately stay empty.

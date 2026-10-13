@@ -38,9 +38,6 @@
 #include "agentty/runtime/panel/palette.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/io/persistence.hpp"
-#include "agentty/tool/util/fs_helpers.hpp"
-#include <mcp/tools/util/fs_helpers.hpp>
-#include <filesystem>
 #include "agentty/tool/skills.hpp"
 #include "agentty/provider/selection.hpp"   // prewarm_active_provider
 
@@ -50,7 +47,6 @@ namespace agentty::app::detail {
 
 namespace fp   = agentty::fork_panel;
 namespace pick = agentty::ui::pick;
-using maya::Cmd;
 using maya::overload;
 
 namespace {
@@ -76,14 +72,13 @@ const char* label_of(fp::Choice c) {
 
 } // namespace
 
-Step fork_update(Model m, msg::ForkMsg fm) {
+Cmd fork_update(Model& m, msg::ForkMsg fm) {
     return std::visit(overload{
-        [&](OpenFork) -> Step {
+        [&](OpenFork) -> Cmd {
             if (m.d.current.messages.empty())
-                return {std::move(m), set_status_toast(m, "nothing to fork yet")};
+                return set_status_toast(m, "nothing to fork yet");
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
-                return {std::move(m),
-                        set_status_toast(m, "cannot fork while the agent is working")};
+                return set_status_toast(m, "cannot fork while the agent is working");
             // descend() already replaced whatever was open (the palette, if
             // ^F came from there) and stashed it as this panel's parent, so
             // Esc unwinds back to it. A close<Palette>() here used to follow,
@@ -91,18 +86,18 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             // now (the slot holds Fork), and if it ever stopped being one it
             // would be deleting the parent we just saved.
             m.ui.panel.descend(pn::Fork{{fp::Choice::RagPerTurn}});
-            return {std::move(m), Cmd<Msg>::none()};
+            return Cmd::none();
         },
-        [&](CloseFork) -> Step {
+        [&](CloseFork) -> Cmd {
             ascend(m);   // Esc: back to the palette that opened this, or close
-            return {std::move(m), Cmd<Msg>::none()};
+            return Cmd::none();
         },
-        [&](ForkMove& e) -> Step {
+        [&](ForkMove& e) -> Cmd {
             if (auto* o = m.ui.panel.get<pn::Fork>())
                 o->choice = fp::next_choice(o->choice, e.delta);
-            return {std::move(m), Cmd<Msg>::none()};
+            return Cmd::none();
         },
-        [&](ForkThread&) -> Step {
+        [&](ForkThread&) -> Cmd {
             const auto* picked = m.ui.panel.get<pn::Fork>();
             // No int->enum cast: the cursor already IS the choice, so a
             // reordered or resized row list cannot silently remap it.
@@ -110,42 +105,38 @@ Step fork_update(Model m, msg::ForkMsg fm) {
                                              : fp::Choice::RagOff;
             m.ui.panel.close<pn::Fork>();
             if (m.d.current.messages.empty())
-                return {std::move(m), set_status_toast(m, "nothing to fork yet")};
+                return set_status_toast(m, "nothing to fork yet");
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
-                return {std::move(m),
-                        set_status_toast(m, "cannot fork while the agent is working")};
+                return set_status_toast(m, "cannot fork while the agent is working");
 
-            // 1. Persist the parent untouched.
-            deps().save_thread(m.d.current);
-            const std::string parent_id = m.d.current.id.value;
-
-            // 2. Write the parent's transcript to a clean, readable file
-            //    the fork can READ ON DEMAND — the whole point of forking:
-            //    escape a full context window CHEAPLY. The new thread starts
-            //    EMPTY (near-zero tokens); the model pulls earlier context
-            //    from disk only if it needs it (exactly like manually
-            //    opening a new thread and asking it to read the old one).
-            const std::filesystem::path transcript =
-                persistence::write_thread_transcript_md(m.d.current);
-
-            // The transcript lives under ~/.agentty/threads — OUTSIDE the
-            // workspace the read tool is sandboxed to. Allowlist that dir
-            // for reads (both the agentty and mcp-cpp fs layers, since
-            // tools are served through mcp-cpp) so the model can actually
-            // read the file the note points it at.
-            if (!transcript.empty()) {
-                const auto dir = persistence::threads_dir();
-                tools::util::allow_read_root(dir);
-                ::mcp::tools::util::allow_read_root(dir);
-            }
+            // 1. Persist the parent untouched, and 2. write its transcript
+            //    to a clean, readable file the fork can READ ON DEMAND. That
+            //    is the whole point of forking: the new thread starts EMPTY
+            //    and the model pulls earlier context from disk only if it
+            //    needs it. The write runs on a worker; the fork is built when
+            //    ForkTranscriptWritten comes back.
+            return Cmd::batch(Cmd(SaveThread{m.d.current}),
+                              cmd::write_fork_transcript(m.d.current, choice));
+        },
+        [&](ForkTranscriptWritten& e) -> Cmd {
+            // The user may have moved on while the transcript was written
+            // (switched thread, started a turn, forked twice). Only fork the
+            // thread that asked, and only while it is still safe to.
+            if (m.d.current.id.value != e.parent_id) return Cmd::none();
+            if (m.d.current.messages.empty()) return Cmd::none();
+            if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
+                return Cmd::none();
+            const fp::Choice choice = e.choice;
+            const std::string& parent_id = e.parent_id;
+            const std::string& transcript = e.path;
 
             // 3. Build the fork: a FRESH, EMPTY thread with provenance +
             //    per-thread RAG override. No messages carried over.
             Thread fork;
-            fork.id = deps().new_thread_id();
+            fork.id = persistence::new_id();
             fork.forked_from = parent_id;
             fork.rag_mode_override = rag_mode_of(choice);
-            fork.created_at = fork.updated_at = std::chrono::system_clock::now();
+            fork.created_at = fork.updated_at = m.wall_now();
             fork.title = m.d.current.title.rfind("Fork: ", 0) == 0
                              ? m.d.current.title
                              : ("Fork: " + (m.d.current.title.empty()
@@ -170,10 +161,10 @@ Step fork_update(Model m, msg::ForkMsg fm) {
                 note.role = Role::User;
                 note.fork_note = true;
                 if (!transcript.empty()) {
-                    note.fork_transcript = transcript.string();
+                    note.fork_transcript = transcript;
                     note.text =
                         "This conversation is a fork of an earlier one. Its "
-                        "full transcript is saved at:\n  " + transcript.string() +
+                        "full transcript is saved at:\n  " + transcript +
                         "\nRead it with the `read` tool (or grep it) ONLY if "
                         "you need earlier context — don't read it "
                         "pre-emptively. The fork starts fresh precisely to "
@@ -197,25 +188,24 @@ Step fork_update(Model m, msg::ForkMsg fm) {
             //    trivially cheap (nothing to re-emit). rehydrate_frozen on
             //    an ~empty thread is a no-op; reset_inline paints the clean
             //    composer.
-            tools::skills::reset_activations();
             m.ui.view_cache.clear();
             m.d.current = std::move(fork);
-            deps().save_thread(m.d.current);
+            Cmd save_fork = Cmd(SaveThread{m.d.current});
             m.ui.panel.close<pn::ThreadList>();
             rehydrate_frozen(m);
             m.ui.needs_warmup_render = !m.ui.frozen.empty();
-            // The fork's first turn hits the network fresh — warm the socket
-            // now (idle TTL has usually evicted the launch-time prewarm)
-            // so it doesn't re-pay the handshake. Non-blocking.
-            provider::prewarm_active_provider();
 
             auto toast = set_status_toast(
                 m, std::string{"forked \xc2\xb7 fresh context · "} +
                        label_of(choice) +
                        " · prior transcript readable on demand",
                 std::chrono::seconds{5});
-            return {std::move(m),
-                    Cmd<Msg>::batch(std::move(toast), Cmd<Msg>::reset_inline())};
+            // The fork's first turn hits the network fresh, and the idle TTL
+            // has usually evicted the launch-time socket — so warm it, as an
+            // effect alongside the save.
+            return Cmd::batch(std::move(save_fork),
+                              cmd::prewarm_provider(m),
+                              std::move(toast), cmd::reset_inline());
         },
     }, fm);
 }

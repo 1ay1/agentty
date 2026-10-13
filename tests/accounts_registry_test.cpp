@@ -31,9 +31,9 @@ TEST_CASE("accounts registry list/upsert/get/remove/set_active") {
     ::unsetenv("AGENTTY_USE_KEYSTORE");
 
     // Empty registry.
-    CHECK(acc::list().empty(), "fresh registry lists nothing");
-    CHECK(acc::active_label("anthropic").empty(), "no active label initially");
-    CHECK(!acc::get("anthropic", "work").has_value(), "get on empty is nullopt");
+    CHECK(acc::list(::agentty::IoAccess::grant()).empty(), "fresh registry lists nothing");
+    CHECK(acc::active_label(::agentty::IoAccess::grant(), "anthropic").empty(), "no active label initially");
+    CHECK(!acc::get(::agentty::IoAccess::grant(), "anthropic", "work").has_value(), "get on empty is nullopt");
 
     // Upsert two Anthropic accounts + one ChatGPT.
     CHECK(acc::upsert("anthropic", "work",     R"({"method":"oauth"})"), "upsert work");
@@ -41,16 +41,16 @@ TEST_CASE("accounts registry list/upsert/get/remove/set_active") {
     CHECK(acc::upsert("chatgpt",   "team",     R"({"account_id":"acc_123"})"), "upsert chatgpt");
 
     // The most recent upsert per provider is active.
-    CHECK(acc::active_label("anthropic") == "personal", "newest upsert is active (anthropic)");
-    CHECK(acc::active_label("chatgpt")   == "team",     "chatgpt active label");
+    CHECK(acc::active_label(::agentty::IoAccess::grant(), "anthropic") == "personal", "newest upsert is active (anthropic)");
+    CHECK(acc::active_label(::agentty::IoAccess::grant(), "chatgpt")   == "team",     "chatgpt active label");
 
     // list_for scopes by provider.
-    CHECK(acc::list_for("anthropic").size() == 2, "two anthropic accounts");
-    CHECK(acc::list_for("chatgpt").size()   == 1, "one chatgpt account");
-    CHECK(acc::list().size() == 3, "three accounts total");
+    CHECK(acc::list_for(::agentty::IoAccess::grant(), "anthropic").size() == 2, "two anthropic accounts");
+    CHECK(acc::list_for(::agentty::IoAccess::grant(), "chatgpt").size()   == 1, "one chatgpt account");
+    CHECK(acc::list(::agentty::IoAccess::grant()).size() == 3, "three accounts total");
 
     // get returns the stored secret.
-    auto w = acc::get("anthropic", "work");
+    auto w = acc::get(::agentty::IoAccess::grant(), "anthropic", "work");
     CHECK(w.has_value() && w->secret == R"({"method":"oauth"})", "get returns work secret");
 
     // Persistence: a fresh read (new process would re-read the file) sees them.
@@ -60,28 +60,28 @@ TEST_CASE("accounts registry list/upsert/get/remove/set_active") {
 
     // Switch active explicitly.
     CHECK(acc::set_active("anthropic", "work"), "set_active work");
-    CHECK(acc::active_label("anthropic") == "work", "active is now work");
+    CHECK(acc::active_label(::agentty::IoAccess::grant(), "anthropic") == "work", "active is now work");
     CHECK(!acc::set_active("anthropic", "ghost"), "set_active on missing fails");
 
     // Upsert existing updates secret + bumps active, doesn't duplicate.
     CHECK(acc::upsert("anthropic", "work", R"({"method":"oauth","v":2})"), "re-upsert work");
-    CHECK(acc::list_for("anthropic").size() == 2, "no duplicate row after re-upsert");
-    auto w2 = acc::get("anthropic", "work");
+    CHECK(acc::list_for(::agentty::IoAccess::grant(), "anthropic").size() == 2, "no duplicate row after re-upsert");
+    auto w2 = acc::get(::agentty::IoAccess::grant(), "anthropic", "work");
     CHECK(w2 && w2->secret.find("\"v\":2") != std::string::npos, "secret updated in place");
 
     // Remove the active account → newest remaining is promoted.
-    CHECK(acc::remove("anthropic", "work"), "remove active work");
-    CHECK(acc::get("anthropic", "work") == std::nullopt, "work is gone");
-    CHECK(acc::active_label("anthropic") == "personal", "personal promoted to active");
-    CHECK(acc::list_for("anthropic").size() == 1, "one anthropic account left");
+    CHECK(acc::remove(::agentty::IoAccess::grant(), "anthropic", "work"), "remove active work");
+    CHECK(acc::get(::agentty::IoAccess::grant(), "anthropic", "work") == std::nullopt, "work is gone");
+    CHECK(acc::active_label(::agentty::IoAccess::grant(), "anthropic") == "personal", "personal promoted to active");
+    CHECK(acc::list_for(::agentty::IoAccess::grant(), "anthropic").size() == 1, "one anthropic account left");
 
     // Remove the last one → active label clears.
-    CHECK(acc::remove("anthropic", "personal"), "remove personal");
-    CHECK(acc::list_for("anthropic").empty(), "no anthropic accounts left");
-    CHECK(acc::active_label("anthropic").empty(), "active label cleared when empty");
+    CHECK(acc::remove(::agentty::IoAccess::grant(), "anthropic", "personal"), "remove personal");
+    CHECK(acc::list_for(::agentty::IoAccess::grant(), "anthropic").empty(), "no anthropic accounts left");
+    CHECK(acc::active_label(::agentty::IoAccess::grant(), "anthropic").empty(), "active label cleared when empty");
 
     // ChatGPT slot untouched by anthropic churn.
-    CHECK(acc::list_for("chatgpt").size() == 1, "chatgpt account still present");
+    CHECK(acc::list_for(::agentty::IoAccess::grant(), "chatgpt").size() == 1, "chatgpt account still present");
 
     // Reject empty provider/label.
     CHECK(!acc::upsert("", "x", "s"), "upsert rejects empty provider");

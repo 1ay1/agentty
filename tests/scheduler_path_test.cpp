@@ -71,7 +71,7 @@ TEST_CASE("scheduler path") {
 
     namespace fs = std::filesystem;
     const fs::path workspace = fs::temp_directory_path() / "agentty_scheduler_workspace";
-    agentty::tools::util::set_workspace_root(workspace);
+    agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), workspace);
 
     // (a) Two writes to DISJOINT files → BOTH promoted (run concurrently).
     {

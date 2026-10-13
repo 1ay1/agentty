@@ -403,7 +403,7 @@ struct ScrollState {
 
 ### Implementation note
 
-maya's `Scrollable` (`maya/include/maya/widget/scrollable.hpp`)
+maya's `Scrollable` (`third_party/maya/include/maya/widget/scrollable.hpp`)
 provides the viewport. agentty currently doesn't wrap its message stack in
 one — the gap is documented in the audit and tracked in the rebuild
 playbook.

@@ -21,6 +21,7 @@
 #include "agentty/runtime/app/subscribe.hpp"
 #include "agentty/runtime/panel/nav.hpp"
 #include "agentty/runtime/panel/smart_form.hpp"
+#include "agentty/runtime/panel/web_search_form.hpp"
 
 #include <string>
 #include <vector>
@@ -76,6 +77,10 @@ const std::vector<Case>& cases() {
              smart_form::Inputs in;
              m.ui.panel.descend(pn::SmartMode{{}, smart_form::build_form(in)});
          }},
+        {pn::Kind::WebSearch, "web search",
+         [](Model& m) {
+             m.ui.panel.descend(pn::WebSearch{{}, web_search_form::build_form(m.d.persisted.web_search, m.env.settings)});
+         }},
         {pn::Kind::Stats, "stats viewer",
          [](Model& m) { m.ui.panel.descend(pn::Stats{}); }},
         {pn::Kind::DiffReview, "diff review",
@@ -95,7 +100,7 @@ store::Settings g_settings;
 // routing, not persistence.
 void install_stub_deps() {
     app::install_deps(app::Deps{
-        .stream         = [](auto, auto) {},
+        .stream         = [](const maya::unlocked&, auto, auto) {},
         .save_thread    = [](const auto&) {},
         .delete_thread  = [](const auto&) {},
         .load_threads   = [] { return std::vector<Thread>{}; },

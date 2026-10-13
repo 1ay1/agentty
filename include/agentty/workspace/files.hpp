@@ -10,6 +10,7 @@
 // snapshot), but the act of walking the disk is a separate concern.
 
 #include <cstddef>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -28,25 +29,11 @@ namespace agentty {
 [[nodiscard]] util::Snapshot<std::vector<std::string>>
 list_workspace_files(std::size_t cap = 5000);
 
-// Kick the workspace-file walk on a background thread (single-flight, safe
-// to call repeatedly). After it lands, list_workspace_files() and the
-// picker's first open are instant. Call at startup.
-void prewarm_workspace_files(std::size_t cap = 5000);
-
-// Join the prewarm walk if it is still running. Called from main()'s teardown
-// before CRT/heap destruction so a fast pipe-EOF exit can't leave the detached
-// walk touching freed state (Windows 0xC0000005). No-op if it never ran or
-// already finished.
-void join_workspace_prewarm();
-
-// Cooperative shutdown for BOTH prewarm walks (files here + symbols). The
-// full-tree file scan and the multi-threaded symbol regex pass are otherwise
-// uncancellable, so join_workspace_*_prewarm() at teardown would block ^C
-// until they finish on a large repo. Teardown calls request_prewarm_cancel()
-// before the joins; the walk loops poll prewarm_cancelled() and bail early, so
-// the join still runs (keeping the Windows UAF guard) but returns promptly.
-void request_prewarm_cancel() noexcept;
-[[nodiscard]] bool prewarm_cancelled() noexcept;
+// Build the workspace file list (single-flight, safe to call repeatedly).
+// Synchronous: run it on a background task at startup. After it lands,
+// list_workspace_files() and the picker's first open are instant. Returns
+// early, publishing nothing, once `stop` is requested.
+void prewarm_workspace_files(std::stop_token stop = {}, std::size_t cap = 5000);
 
 // Drop the CALLING thread to the lowest scheduling priority the platform
 // offers (SCHED_IDLE on Linux, nice+19 elsewhere). For SPECULATIVE work

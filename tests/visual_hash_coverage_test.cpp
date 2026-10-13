@@ -147,37 +147,37 @@ const std::vector<Axis>& visual_axes() {
         // The panel's own footer promises "changes apply immediately";
         // these rows are what hold it to that.
         {"ui theme swap", [](Model& m) {
-            m.d.ui.theme = "Dracula";
+            m.d.ui().theme = "Dracula";
         }},
         {"ui color tier override", [](Model& m) {
-            m.d.ui.tier = agentty::ui_prefs::ColorTier::Ansi16;
+            m.d.ui().tier = agentty::ui_prefs::ColorTier::Ansi16;
         }},
         {"ui background polarity override", [](Model& m) {
-            m.d.ui.polarity = agentty::ui_prefs::Polarity::Light;
+            m.d.ui().polarity = agentty::ui_prefs::Polarity::Light;
         }},
         {"ui density", [](Model& m) {
-            m.d.ui.density = agentty::ui_prefs::Density::Compact;
+            m.d.ui().density = agentty::ui_prefs::Density::Compact;
         }},
         {"ui prose width cap", [](Model& m) {
-            m.d.ui.prose_width = 88;
+            m.d.ui().prose_width = 88;
         }},
         {"ui compact turns", [](Model& m) {
-            m.d.ui.compact_turns = true;
+            m.d.ui().compact_turns = true;
         }},
         {"ui motion", [](Model& m) {
-            m.d.ui.motion = agentty::ui_prefs::Motion::Off;
+            m.d.ui().motion = agentty::ui_prefs::Motion::Off;
         }},
         {"ui syntax highlighting", [](Model& m) {
-            m.d.ui.syntax = false;
+            m.d.ui().syntax = false;
         }},
         {"ui tool output", [](Model& m) {
-            m.d.ui.tool_output = agentty::ui_prefs::ToolOutput::Collapsed;
+            m.d.ui().tool_output = agentty::ui_prefs::ToolOutput::Collapsed;
         }},
         {"ui thinking", [](Model& m) {
-            m.d.ui.thinking = agentty::ui_prefs::Thinking::Hidden;
+            m.d.ui().thinking = agentty::ui_prefs::Thinking::Hidden;
         }},
         {"ui timestamps", [](Model& m) {
-            m.d.ui.timestamps = agentty::ui_prefs::Timestamps::Absolute;
+            m.d.ui().timestamps = agentty::ui_prefs::Timestamps::Absolute;
         }},
         {"phase Idle -> Streaming", [](Model& m) {
             m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
@@ -604,7 +604,7 @@ TEST_CASE("visual hash: a widget-paced frame gets no host time bucket") {
     // And the converse: with NO widget-paced frame pending, a host-paced
     // animation still gets its bucket — the deferral must not disable the
     // hash's own animations. An active turn is host-paced (Tick-driven).
-    maya::consume_animation_request_for_test();
+    maya::detail::animation_requested_ = false;
     REQUIRE(!maya::animation_pending());
     m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
     REQUIRE(m.s.active());
@@ -658,7 +658,7 @@ TEST_CASE("visual hash: an idle welcome screen is hash-stable") {
             CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
         }
     }
-    maya::consume_animation_request_for_test();
+    maya::detail::animation_requested_ = false;
     maya::testing::freeze_anim_clock(1000000);
 }
 
@@ -777,7 +777,7 @@ TEST_CASE("visual_hash: every scheme name hashes distinctly") {
 
     for (const auto& s : maya::theme::schemes) {
         Model m = baseline();
-        m.d.ui.theme = s.name;
+        m.d.ui().theme = s.name;
         const std::uint64_t h = hash_of(m);
         if (auto it = seen.find(h); it != seen.end())
             collisions.push_back(it->second + " == " + s.name);

@@ -25,10 +25,12 @@
 //   J. cancellation reaches the active provider Request token.
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -46,7 +48,9 @@ namespace fs = std::filesystem;
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/subagent.hpp"
+#include "agentty/tool/tool.hpp"
 #include "agentty/runtime/msg.hpp"
+#include "agtest_cap.hpp"
 
 using nlohmann::json;
 using namespace agentty;
@@ -71,11 +75,14 @@ bool has(const std::string& hay, std::string_view needle) {
 // runner's is_error path re-wraps as an unexpected through the bridge).
 struct TaskOut { std::string text; bool is_error = false; };
 
-TaskOut run_task(const std::string& prompt) {
-    const auto* td = tools::find("task");
+TaskOut run_task(const std::string& prompt, const tools::CallContext& ctx = {}) {
+    const auto* td = tool::DynamicDispatch::resolve("task");
     if (!td) return {"[task tool missing from registry]", true};
     json args; args["prompt"] = prompt;
-    auto r = td->execute(args);         // production dispatch, as cmd_factory does
+    // Production dispatch, as cmd_factory does: execute_with stamps the
+    // call's capability into the context, which the subagent runner needs
+    // for its provider/auth callbacks (CallContext::capability()).
+    auto r = tool::DynamicDispatch::execute_with(agtest::cap(), td, "task", args, ctx);
     if (!r) return {r.error().detail, true};
     return {r->text, false};
 }
@@ -90,7 +97,7 @@ void install_scripted_stream(Script script, bool with_auth = true) {
     tools::subagent::Config cfg;
     if (with_auth) cfg.auth = auth::ApiKeyHeader{"sk-test-not-real"};
     cfg.model = "test-model";
-    cfg.stream = [counter, script](provider::Request req,
+    cfg.stream = [counter, script](const maya::unlocked&, provider::Request req,
                                    provider::EventSink sink) {
         int turn = counter->fetch_add(1);
         provider::StreamResult result;
@@ -152,7 +159,6 @@ bool req_has_nudge(const provider::Request& req) {
 } // namespace
 
 int main() {
-    tools::wire_mcp_runtime("off");   // no bwrap wrapping — CI portability
     // Run from an EMPTY temp directory. This test drives the REAL subagent
     // runner, which executes REAL grep tool calls — each one spawns ripgrep
     // against the tool's workspace root (the process cwd). Left in the source
@@ -167,7 +173,7 @@ int main() {
         const auto dir = fs::temp_directory_path(ec)
             / ("agentty-subagent-test-" + std::to_string(::getpid()));
         fs::create_directories(dir, ec);
-        if (!ec) (void)!chdir(dir.c_str());
+        if (!ec) fs::current_path(dir, ec);
     }
     // Select a non-Anthropic provider: the runner only calls the disk-reading
     // fresh_auth_header() when active().kind == Anthropic. The OpenAI-family
@@ -176,7 +182,7 @@ int main() {
     {
         provider::Selection sel;
         sel.kind = provider::Kind::OpenAI;
-        provider::select(sel);
+        provider::select(::agentty::IoAccess::grant(), sel);
     }
 
     // ── A. Tool-only to the cap: never write prose. ─────────────────────
@@ -189,8 +195,19 @@ int main() {
                                    const provider::EventSink& sink) {
             if (turn == 0)
                 emit_text(sink, "I'll start by mapping the codebase structure.");
+            // The pattern must VARY per turn. The runner treats 6 identical
+            // SUCCEEDING calls (keyed on name+args, NOT call id) as a stuck
+            // loop and stops early with the doom-loop banner — which is a
+            // different exit than the turn budget this scenario is about.
+            //
+            // With a fixed pattern the outcome depended on whether each grep
+            // happened to succeed: locally the loop ran to the budget and the
+            // test passed, while on CI it tripped the doom check at turn 6 and
+            // failed in 1.9 s instead of 11 s. Varying the pattern pins the
+            // intended path regardless.
             emit_tool_call(sink, "t" + std::to_string(turn), "grep",
-                           json{{"pattern", "zzz_no_match_expected"}});
+                           json{{"pattern", "zzz_no_match_expected_"
+                                             + std::to_string(turn)}});
             emit_finish(sink, StopReason::ToolUse);
         });
         auto out = run_task("explore everything in exhaustive detail");
@@ -313,8 +330,11 @@ int main() {
         install_scripted_stream([](int turn, const provider::Request&,
                                    const provider::EventSink& sink) {
             if (turn < agentty::tools::subagent::max_turns_for(/*read_only=*/false) - 1) {   // final turns write prose
+                // Varied per turn — 6 identical succeeding calls trip the
+                // doom-loop check and exit before the cap (see scenario A).
                 emit_tool_call(sink, "t" + std::to_string(turn), "grep",
-                               json{{"pattern", "zzz_no_match_expected"}});
+                               json{{"pattern", "zzz_no_match_expected_"
+                                                 + std::to_string(turn)}});
                 emit_finish(sink, StopReason::ToolUse);
             } else {
                 emit_text(sink, "I mapped the modules and it all looks fine.");
@@ -339,8 +359,11 @@ int main() {
         install_scripted_stream([saw_nudge](int turn, const provider::Request& req,
                                             const provider::EventSink& sink) {
             if (req_has_nudge(req)) saw_nudge->store(true);
+            // Varied per turn — the nudge fires near the CAP, so this loop
+            // must not exit early on the doom-loop check (see scenario A).
             emit_tool_call(sink, "t" + std::to_string(turn), "grep",
-                           json{{"pattern", "zzz_no_match_expected"}});
+                           json{{"pattern", "zzz_no_match_expected_"
+                                             + std::to_string(turn)}});
             emit_finish(sink, StopReason::ToolUse);
         });
         (void)run_task("keep exploring forever");
@@ -380,17 +403,17 @@ int main() {
 
     // ── F. Cancellation interrupts retry backoff. ────────────────────────
     {
-        auto cancelled = std::make_shared<std::atomic<bool>>(false);
-        tools::cancellation::set([cancelled] { return cancelled->load(); });
-        install_scripted_stream([cancelled](int, const provider::Request&,
-                                            const provider::EventSink& sink) {
+        auto cancel = std::make_shared<std::stop_source>();
+        install_scripted_stream([cancel](int, const provider::Request&,
+                                         const provider::EventSink& sink) {
             emit_error(sink, "temporary network failure");
-            cancelled->store(true);
+            cancel->request_stop();
         });
+        tools::CallContext ctx;
+        ctx.cancel.push_back(cancel->get_token());
         const auto began = std::chrono::steady_clock::now();
-        auto out = run_task("cancel during retry backoff");
+        auto out = run_task("cancel during retry backoff", ctx);
         const auto elapsed = std::chrono::steady_clock::now() - began;
-        tools::cancellation::clear();
         check(out.is_error && has(out.text, "cancelled"),
               "F: cancellation returns an actionable retry error");
         check(elapsed < std::chrono::milliseconds(500),
@@ -461,7 +484,7 @@ int main() {
             emit_finish(sink, StopReason::MaxTokens);
         });
         auto out = run_task("produce an oversized report");
-        check(out.is_error && has(out.text, "max-token limit"),
+        check(out.is_error && has(out.text, "output limit"),
               "I: MaxTokens completion is reported as an error");
         check(!has(out.text, "\n\nPARTIAL_NOT_A_REPORT"),
               "I: partial MaxTokens prose is not returned as a clean report");
@@ -469,15 +492,18 @@ int main() {
 
     // ── J. Parent cancellation trips the active provider request token. ──
     {
-        auto cancelled = std::make_shared<std::atomic<bool>>(false);
+        // The parent call's cancel token, as cmd_factory puts it in the
+        // CallContext. The stream reacts to it the instant it trips.
+        auto parent = std::make_shared<std::stop_source>();
         auto request_cancelled = std::make_shared<std::atomic<bool>>(false);
-        tools::cancellation::set([cancelled] { return cancelled->load(); });
-        install_scripted_stream([cancelled, request_cancelled](
+        tools::CallContext parent_ctx;
+        parent_ctx.cancel.push_back(parent->get_token());
+        install_scripted_stream([parent, request_cancelled](
                                     int, const provider::Request& req,
                                     const provider::EventSink& sink) {
             check(static_cast<bool>(req.cancel),
                   "J: active subagent request has a cancellation token");
-            cancelled->store(true);
+            parent->request_stop();
             const auto until = std::chrono::steady_clock::now()
                              + std::chrono::milliseconds(500);
             while (std::chrono::steady_clock::now() < until
@@ -486,8 +512,7 @@ int main() {
             request_cancelled->store(req.cancel->is_cancelled());
             emit_error(sink, "cancelled");
         });
-        auto out = run_task("cancel active stream");
-        tools::cancellation::clear();
+        auto out = run_task("cancel active stream", parent_ctx);
         check(request_cancelled->load() && out.is_error,
               "J: parent cancellation reaches provider and stops the task");
     }
@@ -554,8 +579,8 @@ int main() {
     // just inflates its billed, cached prefix. The lean variant must drop
     // them while keeping the operational discipline it needs.
     {
-        const std::string full = provider::default_system_prompt(false);
-        const std::string lean = provider::default_system_prompt(true);
+        const std::string full = provider::default_system_prompt(::agentty::IoAccess::grant(), false);
+        const std::string lean = provider::default_system_prompt(::agentty::IoAccess::grant(), true);
         auto has = [](const std::string& s, const char* n) {
             return s.find(n) != std::string::npos;
         };
@@ -567,6 +592,244 @@ int main() {
               "M: lean prompt keeps the operational file-editing discipline");
         check(has(lean, "<environment>"),
               "M: lean prompt keeps the environment block");
+    }
+
+    // ── N. Sequential subagents of the SAME ROLE must not share a
+    // read-dedup context.
+    //
+    // The runner scopes `read`'s dedup per subagent (tools::reader), because
+    // the cache is shared and answers a repeat of the same (path, range) with
+    // "refer to the earlier tool_result" — a claim only true for the context
+    // that actually received those bytes. The id used to be derived from
+    // `&thread`, a LOCAL in run().
+    //
+    // That looks unique and is not. Subagents run on isolated worker
+    // threads, and sequential runs reuse the same stack, so `&thread` came
+    // back byte-identical every time (measured: six sequential threads, one
+    // address). Two explorers in a row therefore shared one context, and the
+    // second was refused every file the first had read — it saw "File
+    // unchanged since last read" for files it had never opened, burned its
+    // turns re-asking, and reported nothing useful. Exactly the bug the
+    // scope exists to prevent, reintroduced for the sequential case.
+    //
+    // Asserted through the observable consequence: both runs read the same
+    // file, and the second must get it fresh, not tagged as cached.
+    {
+        {
+            std::ofstream f("n_probe.txt");
+            f << "probe line\n";
+        }
+        // One output per run: the read's tool_result as the model saw it.
+        std::vector<std::string> outputs;
+        install_scripted_stream(
+            [&](int, const provider::Request& req, const provider::EventSink& sink) {
+                std::string seen;
+                bool have = false;
+                for (const auto& m : req.messages)
+                    for (const auto& tc : m.tool_calls)
+                        if (tc.name.value == "read") { seen = std::string{tc.output()}; have = true; }
+                if (!have) {
+                    emit_tool_call(sink, "n_read", "read", json{{"path", "n_probe.txt"}});
+                    emit_finish(sink, StopReason::ToolUse);
+                    return;
+                }
+                outputs.push_back(seen);
+                emit_text(sink, "REPORT_N");
+                emit_finish(sink);
+            });
+
+        (void)run_task("same role, run one");
+        (void)run_task("same role, run two");
+
+        check(outputs.size() == 2,
+              "N: both sequential subagent runs read the file");
+        check(outputs.size() == 2 && has(outputs[0], "probe line")
+                  && has(outputs[1], "probe line"),
+              "N: both reads returned the file");
+        check(outputs.size() == 2 && !has(outputs[1], "[cached"),
+              "N: the second run's read is fresh, not the first run's "
+              "cache entry (distinct read contexts)");
+    }
+
+    // ── O. The wall-clock deadline actually stops a run, and says so.
+    //
+    // kMaxTurns bounds COMPLETIONS, not time, and nothing else did either:
+    // a stream gets 30 min total with a 90 s idle timeout, and idle only
+    // fires on true silence — a backend that dribbles a keepalive and never
+    // finishes looks healthy to every layer below. Stacked against the turn
+    // and retry caps that was 80 x 3 x 30 min before the loop gave up, i.e.
+    // a `task` card that never comes back.
+    //
+    // Driven through the REAL runner with a deliberately slow stream and a
+    // 1-second budget (AGENTTY_SUBAGENT_MAX_SECONDS exists for exactly this
+    // — a 15-minute constant is not testable, and an untested stop path
+    // quietly stops working).
+    {
+        ::setenv("AGENTTY_SUBAGENT_MAX_SECONDS", "1", 1);
+        std::atomic<int> completions{0};
+        install_scripted_stream(
+            [&](int, const provider::Request&, const provider::EventSink& sink) {
+                const int n = completions.fetch_add(1) + 1;
+                // Slower than the budget / turn, so the deadline is what
+                // ends this run rather than the turn cap. Never emits a
+                // final report: the run must be stopped from OUTSIDE.
+                //
+                // Args must VARY per turn. The runner also has a
+                // repeat-success breaker (the identical call succeeding
+                // over and over is a loop too), and an earlier draft that
+                // re-read the same path tripped THAT at turn 3 instead of
+                // the clock — the test passed its timing checks while
+                // proving nothing about the deadline.
+                std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                emit_tool_call(sink, "t" + std::to_string(n), "read",
+                               json{{"path", "README.md"},
+                                    {"offset", n * 10}});
+                emit_finish(sink, StopReason::ToolUse);
+            });
+
+        const auto t0 = std::chrono::steady_clock::now();
+        auto out = run_task("loop until the clock runs out");
+        const auto elapsed = std::chrono::steady_clock::now() - t0;
+        ::unsetenv("AGENTTY_SUBAGENT_MAX_SECONDS");
+
+        const auto secs =
+            std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+        // Bounded: without the deadline this runs to the turn cap (32 for a
+        // read-only role) at 400 ms each = 12 s+, or forever on a real hang.
+        check(secs < 8,
+              "O: the run is stopped by the clock, not left to the turn cap");
+        check(completions.load() < 32,
+              "O: it stopped before exhausting the turn budget");
+        // And the report must NAME the clock. "out of time" and "out of
+        // turns" point at different causes (a slow backend vs a task too
+        // big), and the reader can only act on the difference if we say so.
+        check(has(out.text, "wall-clock"),
+              "O: the report names the wall-clock limit as the reason");
+        check(out.is_error,
+              "O: a deadline stop is an error, not a green success");
+    }
+
+    // ── P. A read-only subagent is routed DOWN, but not to the bottom.
+    //
+    // Read-only roles (explorer/reviewer) run on a cheaper model than the
+    // parent, because a fan-out of four explorers on a flagship is a lot of
+    // money for work that is mostly reading. The floor for that search used
+    // to be Tier::Cheap, which on Anthropic means every explorer ran on
+    // Haiku while the parent was Opus — tier 1 doing the investigation for
+    // tier 3.
+    //
+    // That is a silent quality cliff and the likeliest reason a `task`
+    // comes back thin: exploring is not mechanical, it is deciding which of
+    // 40 grep hits matter, and a weaker model reads the wrong files and
+    // then summarises them confidently. Nothing in the UI says why.
+    //
+    // Zed does not downgrade at all (Thread::new_subagent copies the
+    // parent's model). Mid is the middle position — real savings, no cliff.
+    // Pinned here because the floor is one enum argument, and dropping it
+    // back to Cheap would look like a harmless simplification.
+    {
+        std::vector<ModelInfo> rows;
+        for (const char* id : {"claude-haiku-4-5", "claude-sonnet-4-5",
+                               "claude-opus-4-5"}) {
+            ModelInfo mi;
+            mi.id = ModelId{id};
+            mi.supports_tools = true;
+            rows.push_back(std::move(mi));
+        }
+        const auto floor = ModelCapabilities::Tier::Mid;
+
+        check(cheapest_capable_model("claude-opus-4-5", rows, floor)
+                  == "claude-sonnet-4-5",
+              "P: a flagship parent routes read-only work to Mid, not Cheap");
+        // Never routes UP, and never sideways into a needless switch.
+        check(cheapest_capable_model("claude-sonnet-4-5", rows, floor)
+                  == "claude-sonnet-4-5",
+              "P: a Mid parent keeps its own model");
+        check(cheapest_capable_model("claude-haiku-4-5", rows, floor)
+                  == "claude-haiku-4-5",
+              "P: a Cheap parent is never routed UP");
+        // And the old floor is what it was: this documents the change rather
+        // than asserting a tautology.
+        check(cheapest_capable_model("claude-opus-4-5", rows,
+                                     ModelCapabilities::Tier::Cheap)
+                  == "claude-haiku-4-5",
+              "P: the old Cheap floor really did land on the weakest model");
+    }
+
+    // ── Q. Shutdown stops a running subagent, and WAITS for it.
+    //
+    // A subagent runs on a Cmd::task_isolated thread, which jaal detaches:
+    // "isolated threads are asked to stop but never waited for". So without
+    // a registry, main() can return while a subagent is still inside
+    // cfg.stream() — and that stream holds the provider objects by reference
+    // off main's stack. It only faults when a subagent happens to be
+    // streaming at quit, which is exactly when a user gives up on a slow one
+    // and hits escape, so it presents as "subagents crash sometimes".
+    //
+    // Zed avoids this structurally: a subagent is an owned Entity in a
+    // `running_subagents` list, and cancelling the parent awaits each one.
+    // We keep jaal's detach (a wedged syscall must not hold the process
+    // open) and add the registry + a BOUNDED wait, which is what turns the
+    // race into a handshake for every stream that is merely slow.
+    {
+        std::atomic<bool> in_stream{false};
+        std::atomic<bool> left_stream{false};
+        install_scripted_stream(
+            [&](int, const provider::Request& req,
+                const provider::EventSink& sink) {
+                // Model a stream that is alive but not finishing: sit here
+                // until the request's own cancel token trips, exactly as a
+                // real transport does when the bridge cancels it.
+                in_stream = true;
+                for (int i = 0; i < 400; ++i) {
+                    if (req.cancel && req.cancel->is_cancelled()) break;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                left_stream = true;
+                emit_text(sink, "REPORT_Q");
+                emit_finish(sink);
+            });
+
+        std::thread runner([&] { (void)run_task("hold a stream open"); });
+        // Wait until it is genuinely inside the stream, so we are testing
+        // the interesting case and not a race we won by luck.
+        for (int i = 0; i < 200 && !in_stream.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        check(in_stream.load(), "Q: the subagent reached its provider stream");
+
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::size_t stuck = tools::subagent::shutdown_running(
+            std::chrono::milliseconds(3000));
+        const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        runner.join();
+
+        check(stuck == 0,
+              "Q: shutdown reports every run left within the grace");
+        check(left_stream.load(),
+              "Q: the run actually left the provider stream, not just "
+              "got marked cancelled");
+        // The whole point is that it RETURNS rather than racing main's
+        // unwind — and returns promptly: the run's stop now reaches the
+        // stream through a stop_callback, not a 20 ms poll.
+        check(waited < 2000,
+              "Q: the wait is bounded, not an indefinite join");
+    }
+
+    // R. A run that starts AFTER shutdown has begun is refused, not missed.
+    //
+    // The old registry snapshotted its run list and then waited on that
+    // snapshot, so a run registering a moment later was never asked to stop
+    // and never waited for — it ran on into teardown with nobody tracking
+    // it. stop_group closes admission under the same lock as the count.
+    {
+        // Shutdown was already called by Q above, so the group is closed.
+        tools::subagent::RunRegistration late;
+        check(late.cancelled(),
+              "R: a run registering after shutdown starts already cancelled");
+        check(late.token().stop_requested(),
+              "R: and its stop_token is already stopped, so no branch is "
+              "needed at the call site");
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

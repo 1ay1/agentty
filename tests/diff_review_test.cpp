@@ -9,6 +9,7 @@
 // again.
 
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agtest_fx.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -32,14 +33,30 @@ void check(bool ok, const std::string& what) {
     if (!ok) { std::println("  FAIL: {}", what); ++g_fail; }
 }
 
-// Captures every write_file the reducer performs, so we can assert what would
-// hit disk without touching the real filesystem.
+// Captures every write_file the reducer ASKS FOR, so we can assert what
+// would hit disk without touching the real filesystem.
+//
+// Asks for, not performs: writing a file is an effect now — the reducer
+// returns a value describing the write and the host carries it out. These
+// cases assert on g_writes, so they have to play the host's part, which is
+// also the point: a write only shows up here if the arm actually returned
+// it.
 std::map<std::string, std::string> g_writes;
+
+// Run a step's effects into g_writes.
+template <class S>
+S&& apply_fx(S&& step) {
+    agtest::fx::Store store;
+    agtest::fx::run(step.second, store);
+    for (auto& [path, contents] : store.written_files)
+        g_writes[path] = contents;
+    return std::forward<S>(step);
+}
 
 void install_stub_deps() {
     g_writes.clear();
     agentty::app::install_deps(agentty::app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const Thread&) {},
         .delete_thread = [](const ThreadId&) {},
         .load_threads  = [] { return std::vector<Thread>{}; },
@@ -132,15 +149,16 @@ int main() {
             make_change("a.txt", before, after));
         m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
         // Two-press guard (commit 7498bf3f): from the OPEN pane the first
-        // ^X arms (no write), the second executes. Palette-driven reject
-        // (pane closed) executes on the first press.
-        auto armed = detail::diff_review_update(std::move(m), RejectAllChanges{});
+        // ^X arms (no write), the second executes. The palette's "Reject all"
+        // sends RejectAllChanges{confirmed=true} and bypasses the guard —
+        // that explicit path is already deliberate multi-step.
+        auto armed = apply_fx(detail::step(detail::diff_review_update, std::move(m), RejectAllChanges{}));
         check(g_writes.count("a.txt") == 0,
               "first reject-all press only arms, no write yet");
         check(armed.first.ui.panel.get<pn::DiffReview>()
                   && armed.first.ui.panel.get<pn::DiffReview>()->confirm_reject_all,
               "first reject-all press arms the confirm flag");
-        auto s = detail::diff_review_update(std::move(armed.first), RejectAllChanges{});
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(armed.first), RejectAllChanges{}));
         check(g_writes.count("a.txt") == 1, "reject-all wrote the file");
         check(g_writes["a.txt"] == before,
               "reject-all reverted the file to ORIGINAL contents");
@@ -157,7 +175,7 @@ int main() {
             std::expected<std::string, tools::ToolError>{"ok"},
             make_change("b.txt", before, after));
         m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
-        auto s = detail::diff_review_update(std::move(m), AcceptAllChanges{});
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(m), AcceptAllChanges{}));
         check(g_writes.empty(), "accept-all writes nothing (tool already wrote)");
         check(s.first.d.pending_changes.empty(), "queue cleared after accept-all");
     }
@@ -179,9 +197,9 @@ int main() {
         check(fc0.hunks.size() >= 2, "distinct edits produce >=2 hunks");
         m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
         // Accept the first hunk, reject the second, then close.
-        auto s1 = detail::diff_review_update(std::move(m), AcceptHunk{});
-        auto s2 = detail::diff_review_update(std::move(s1.first), RejectHunk{});
-        auto s3 = detail::diff_review_update(std::move(s2.first), CloseDiffReview{});
+        auto s1 = apply_fx(detail::step(detail::diff_review_update, std::move(m), AcceptHunk{}));
+        auto s2 = apply_fx(detail::step(detail::diff_review_update, std::move(s1.first), RejectHunk{}));
+        auto s3 = apply_fx(detail::step(detail::diff_review_update, std::move(s2.first), CloseDiffReview{}));
         check(g_writes.count("c.txt") == 1, "close persisted the mixed decision");
         // Written file keeps the accepted hunk (ONE) but reverts the rejected
         // one (FIFTEEN→15): starts with 'ONE', ends with '15'.
@@ -189,6 +207,152 @@ int main() {
         check(w.rfind("ONE", 0) == 0, "accepted hunk kept (ONE at top)");
         check(w.find("FIFTEEN") == std::string::npos, "rejected hunk reverted (no FIFTEEN)");
         check(w.find("\n15\n") != std::string::npos, "rejected line restored to 15");
+    }
+
+    // ── per-hunk ACCEPT on the LAST hunk auto-closes the pane ──────────
+    // Regression for the dangling-pane flow: with one hunk left, y/Enter must
+    // commit AND close in one press — no extra Esc whose advertised meaning
+    // flips between "apply" and "keep rest".
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"ok"},
+            make_change("d.txt", before, after));
+        m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(m), AcceptHunk{}));
+        // ACCEPTING writes nothing — the tool already put that content on
+        // disk, so persist() skips the file ("nothing to revert; disk is
+        // correct"). Same contract the accept-all case above asserts. This
+        // used to demand a write, which made "did it commit?" unanswerable
+        // for an all-accepted review and left the test permanently red.
+        // Re-writing identical bytes would also clobber anything the user
+        // changed since the tool ran.
+        check(g_writes.count("d.txt") == 0,
+              "accepting the last hunk needs no write — disk already matches");
+        check(s.first.d.pending_changes.empty(), "queue cleared on auto-close");
+        check(!s.first.ui.panel.is<agentty::ui::panel::DiffReview>(),
+              "pane closed itself after the last hunk was decided");
+    }
+
+    // ── per-hunk REJECT on the last hunk auto-closes too ────────────────
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"ok"},
+            make_change("e.txt", before, after));
+        m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(m), RejectHunk{}));
+        check(g_writes.count("e.txt") == 1 && g_writes["e.txt"] == before,
+              "last-hunk reject reverted the file (auto-closed)");
+        check(!s.first.ui.panel.is<agentty::ui::panel::DiffReview>(),
+              "pane closed itself after the last reject");
+    }
+
+    // ── mid-review, a per-hunk decision does NOT close the pane ─────────
+    {
+        install_stub_deps();
+        const std::string b = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+        const std::string a = "ONE\n2\n3\n4\n5\n6\n7\n8\n9\nTEN\n";
+        Model m = with_live_tool("t1");
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"ok"},
+            make_change("m.txt", b, a));
+        m.ui.panel.descend(agentty::ui::panel::DiffReview{{0, 0}});
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(m), AcceptHunk{}));
+        check(s.first.ui.panel.is<agentty::ui::panel::DiffReview>(),
+              "pane stays open while pending hunks remain");
+        check(s.first.d.pending_changes.size() == 1, "queue kept mid-review");
+    }
+
+    // ── X with the pane CLOSED: two-press via the domain guard ─────────
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"ok"},
+            make_change("x1.txt", before, after));
+        check(m.ui.panel.get<pn::DiffReview>() == nullptr, "pane closed");
+        auto armed = apply_fx(detail::step(detail::diff_review_update, std::move(m), RejectAllChanges{}));
+        check(g_writes.count("x1.txt") == 0, "closed-pane X first press arms only");
+        check(armed.first.d.reject_all_armed, "domain guard armed by first X");
+        auto done = apply_fx(detail::step(detail::diff_review_update, std::move(armed.first), RejectAllChanges{}));
+        check(g_writes.count("x1.txt") == 1 && g_writes["x1.txt"] == before,
+              "second closed-pane X reverts the file");
+        check(!done.first.d.reject_all_armed, "guard consumed after execution");
+        check(!done.first.ui.panel.is<agentty::ui::panel::DiffReview>(),
+              "reject-all from outside leaves no pane behind");
+    }
+
+    // ── a CONFIRMED reject-all (the palette row) skips the guard ────────
+    // The palette pick is already open → select → Enter, so a second press
+    // would be ceremony. The intent rides on the MESSAGE rather than the
+    // caller pre-writing the reducer's own guard state, which is why this
+    // executes on the first step from BOTH pane states.
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"ok"},
+            make_change("x6.txt", before, after));
+        check(m.ui.panel.get<pn::DiffReview>() == nullptr, "pane closed");
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(m),
+                                       RejectAllChanges{/*confirmed=*/true}));
+        check(g_writes.count("x6.txt") == 1 && g_writes["x6.txt"] == before,
+              "confirmed reject-all reverts on the FIRST press");
+        check(!s.first.d.reject_all_armed,
+              "confirmed reject-all leaves no armed guard behind");
+        check(s.first.d.pending_changes.empty(), "queue cleared");
+    }
+
+    // ── any review traffic other than the arming press disarms the guard ─
+    // (The closed-pane X guard follows the open-pane ^X rule: the first press
+    // arms, ANY other diff-review message — open review, accept, navigation —
+    // disarms, so a half-armed destructive key can't survive the next action.
+    // The only closed-pane messages are open/accept/reject, all of which
+    // should clear or resolve the guard.)
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"ok"},
+            make_change("x2.txt", before, after));
+        m.d.reject_all_armed = true;
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(m), DiffReviewScroll{3}));
+        check(!s.first.d.reject_all_armed,
+              "any non-arming diff-review message disarms the closed-pane guard");
+        check(g_writes.count("x2.txt") == 0, "no write on stray navigation");
+        check(!s.first.d.pending_changes.empty(), "queue untouched");
+    }
+
+    // ── AcceptAll consumes an armed guard (no stale guard into next turn) ──
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"ok"},
+            make_change("x3.txt", before, after));
+        m.d.reject_all_armed = true;
+        auto s = apply_fx(detail::step(detail::diff_review_update, std::move(m), AcceptAllChanges{}));
+        check(!s.first.d.reject_all_armed, "accept-all consumed the armed guard");
+        check(s.first.d.pending_changes.empty(), "accept-all cleared the queue");
+    }
+
+    // ── a new submit clears the armed guard too (no stale guard) ─────
+    {
+        install_stub_deps();
+        Model m = with_live_tool("t1");
+        detail::apply_tool_output(m, ToolCallId{"t1"},
+            std::expected<std::string, tools::ToolError>{"ok"},
+            make_change("x5.txt", before, after));
+        m.d.reject_all_armed = true;
+        m.d.model_id = ModelId{"claude-sonnet-4-5"};  // submit needs a model
+        m.ui.composer.text = "next question";
+        auto s = apply_fx(detail::step(detail::submit_message, std::move(m)));
+        check(!s.first.d.reject_all_armed,
+              "submitting clears the armed guard (implicit accept)");
+        check(s.first.d.pending_changes.empty(), "submit cleared the queue");
     }
 
     // ── submitting a new message clears the review window ──────────────
@@ -203,7 +367,7 @@ int main() {
         check(!m.d.pending_changes.empty(), "queued before submit");
         m.d.model_id = ModelId{"claude-sonnet-4-5"};  // submit needs a model
         m.ui.composer.text = "next question";
-        auto s = detail::submit_message(std::move(m));
+        auto s = detail::step(detail::submit_message, std::move(m));
         check(s.first.d.pending_changes.empty(),
               "submitting a new message clears the pending-changes queue");
     }
@@ -220,7 +384,7 @@ int main() {
         m.d.model_id = ModelId{""};             // no model resolved yet
         m.ui.composer.text = "hello local model";
         const std::size_t before_n = m.d.current.messages.size();
-        auto s = detail::submit_message(std::move(m));
+        auto s = detail::step(detail::submit_message, std::move(m));
         check(s.first.d.current.messages.size() == before_n,
               "empty-model submit pushes NO message (no dead-loop turn)");
         check(s.first.ui.composer.text == "hello local model",
@@ -237,7 +401,7 @@ int main() {
             ToolCallId{"t1"},
             std::expected<std::string, tools::ToolError>{"edited"},
             make_change("wired.cpp", before, after)};
-        auto s = detail::tool_update(std::move(m), msg::ToolMsg{std::move(e)});
+        auto s = detail::step(detail::tool_update, std::move(m), msg::ToolMsg{std::move(e)});
         check(s.first.d.pending_changes.size() == 1,
               "ToolExecOutput through the reducer queues the change");
         check(!s.first.d.pending_changes.empty()

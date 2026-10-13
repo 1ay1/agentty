@@ -53,6 +53,15 @@ enum class Intent : std::uint8_t {
     CaretLeft, CaretRight, CaretHome, CaretEnd,
     ClearField,
     LeaveField,                // Enter/Esc while editing
+    // Tab. Means "accept the suggestion" to a pane that offers completion,
+    // and nothing at all to one that does not -- apply() ignores it, so a
+    // form without a completer is unaffected.
+    //
+    // Tab rather than Enter because Enter already means "commit this field and
+    // move on" everywhere in this layer; stealing it for completion would make
+    // the one field that completes behave unlike every other field. Tab has no
+    // prior meaning in a form, so it costs nothing to claim.
+    Complete,
     // Choosing
     MenuPrev, MenuNext,
     MenuCommit, MenuCancel,

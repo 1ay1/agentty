@@ -90,10 +90,15 @@ struct OAuthExchanging {
 // Native ChatGPT (Codex) login is in flight. Local sessions wait for the
 // port-1455 browser callback. SSH sessions use device authorization and this
 // same state is updated with the URL + one-time code as soon as OpenAI issues
-// them. Esc closes the modal; the bounded worker eventually exits.
+// them.
+//
+// HOLDING THIS STATE IS WHAT RUNS THE WORKER: subscribe() returns a stream
+// keyed on attempt_id while it is set, so leaving this state (Esc, success,
+// a newer attempt) is what cancels the poll loop. There is no cancel flag —
+// there was one, and it became dead when the worker moved to a stop_token,
+// which is how Esc came to leak a thread polling for another 900 s.
 struct ChatGptWaiting {
     std::uint64_t                      attempt_id = 0;
-    std::shared_ptr<std::atomic_bool> cancel;
     bool                               device_auth = false;
     std::string                        authorize_url;
     std::string                        user_code;
@@ -105,13 +110,14 @@ struct ChatGptWaiting {
 // the DeviceCodeReady message lands. `provider` is the canonical registry id
 // ("copilot", "kimi") — it drives the panel title, the completion dispatch, and
 // the account label. One state for every device-flow provider so the panel,
-// key-handling, and copy shortcuts are written once. Esc closes the modal; the
-// bounded worker eventually exits.
+// key-handling, and copy shortcuts are written once.
+//
+// As with ChatGptWaiting, holding this state is what runs the worker — see
+// the note there.
 struct DeviceWaiting {
     std::string                        provider;      // "copilot" | "kimi" | …
     std::string                        provider_label; // "GitHub Copilot" | "Kimi"
     std::uint64_t                      attempt_id = 0;
-    std::shared_ptr<std::atomic_bool> cancel;
     std::string                        authorize_url;  // BARE url shown in the panel (has a code field)
     std::string                        browser_url;     // pre-filled url auto-opened + copied by `u`
     std::string                        user_code;

@@ -23,12 +23,15 @@
 #include "agentty/provider/provider.hpp"
 #include "agentty/runtime/app/settings_cache.hpp"
 #include "agentty/store/store.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::app {
 
 struct Deps {
     // ── Provider seam ────────────────────────────────────────────────────
-    std::function<void(provider::Request, provider::EventSink)> stream;
+    // Called by the turn worker (a cmd::io_task body), which holds no lock;
+    // it passes its `unlocked` down to the provider.
+    std::function<void(const maya::unlocked&, provider::Request, provider::EventSink)> stream;
 
     // ── Store seam (just the calls update.cpp actually makes) ────────────
     std::function<void(const Thread&)>          save_thread;
@@ -64,37 +67,41 @@ struct Deps {
     // small, user-initiated write, so it runs synchronously in the reducer.
     std::function<void(const std::string&, const std::string&)> write_file;
 
-    // ── Auth context (swapped live by update_auth / switch_provider) ─────
-    // UI-THREAD readers may use this field directly (all writers run on the
-    // UI thread, inside reducers). A WORKER thread must go through
-    // auth_snapshot() instead — a bare read here races the UI thread's
-    // move-assign during a live provider switch / login (torn std::string).
+    // The auth header to start with. install_deps() moves it into the live
+    // store below; read it with live_auth(), replace it with update_auth().
     auth::AuthHeader auth;
 };
 
-[[nodiscard]] const Deps& deps();
+// The seams do IO (stream, threads, settings), so reaching them takes an Io.
+[[nodiscard]] const Deps& deps(Io);
 void install_deps(Deps d);
 
-// Mutex-guarded copy of Deps::auth for WORKER-thread readers (e.g. the
-// background model-catalog fetch). Same UI/worker split that gives
-// provider::active() its lock — see selection.cpp.
-[[nodiscard]] auth::AuthHeader auth_snapshot();
+// Resolve the credential for the ACTIVE provider, as a value.
+//
+// Call this on the UI thread and hand the result to whatever needs it. It
+// used to be called FROM worker bodies (the catalog fetch, the window
+// probe), which is why it takes the lock at all: a worker reading the auth
+// cache races the UI thread's swap mid provider-switch. Those bodies now
+// take the header as an argument — jaal's rule that everything a task
+// needs is an argument — so the remaining callers are all on the UI
+// thread and the lock guards only the login flow's live replace.
+//
+// It resolves through provider::credentials rather than reading the cache
+// directly, so the credential can never drift from the provider it is for —
+// the class of bug behind an Anthropic OAuth token being sent to Mistral.
+//
+// Inside a fold, pass the MODEL's selection (m.d.selection): the process
+// global is only published after the fold, so mid-switch it still names the
+// provider being left. The no-argument form is for code off the loop, which
+// has no Model and reads the published copy.
+[[nodiscard]] auth::AuthHeader auth_snapshot(Io, const provider::Selection& sel);
+[[nodiscard]] auth::AuthHeader auth_snapshot(Io);
 
-// Live-replace just the auth context after install. Used by the in-app
-// login modal: when the user finishes signing in, the reducer dispatches
-// a Cmd that calls this so the next stream pick up the new bearer
-// without restarting the process. Safe to call from the UI thread —
-// streams in flight cache the header at request-build time.
-void update_auth(auth::AuthHeader auth);
-
-// Live-switch the active provider after install. The provider picker
-// dispatches a Cmd that calls this when the user selects a new backend:
-// it installs the new `provider::Selection` (process-global) AND swaps
-// `Deps::auth` to that provider's resolved credentials, so the next
-// stream targets the new backend with the right key. The stream seam
-// itself dispatches on `provider::active()` at call time, so no
-// std::function needs replacing here. Safe to call from the UI thread.
-void switch_provider(auth::AuthHeader auth);
+// The live auth header: installed by install_deps(), replaced by the host's
+// InstallAuth effect. Safe from any thread (a maya::guarded value); a copy
+// comes out, so a stream holds its own header for its whole life.
+[[nodiscard]] auth::AuthHeader live_auth();
+void update_auth(Io, auth::AuthHeader auth);
 
 // Convenience: bind a Provider + Store satisfying the concepts.
 template <provider::Provider P, store::Store S>
@@ -103,19 +110,32 @@ void install(P& p, S& s, auth::AuthHeader auth) {
     // place a Deps is built — is what makes "a reducer never blocks on
     // settings IO" a property of the framework rather than a rule eight call
     // sites have to remember. See runtime/app/settings_cache.hpp.
-    auto seam = settings_cache::wrap(
-        [&s] { return s.load_settings(); },
-        [&s](const store::Settings& x) { s.save_settings(x); });
+    //
+    // Lock order: Deps is an EFFECT seam. Its functions are called only by
+    // the effect host and by init(), on the loop thread between steps, where
+    // no lock is held (update() and view() cannot take locks). So the seam
+    // re-states that as a capability root, in this one reviewed place (lint:
+    // cap_roots), and everything behind it is checked. The disk save is the
+    // store's QUIET save, so the cache's own write doesn't invalidate it.
+    auto seam = maya::thread_root([&](const maya::unlocked& cap) {
+        return settings_cache::wrap(cap,
+            [&s] { return s.load_settings(); },
+            [&s](const maya::unlocked& c, const store::Settings& x) { s.save_settings_quiet(c, x); });
+    });
 
     install_deps(Deps{
-        .stream = [&p](provider::Request req, provider::EventSink sink) {
-            p.stream(std::move(req), std::move(sink));
+        .stream = [&p](const maya::unlocked& c, provider::Request req, provider::EventSink sink) {
+            p.stream(c, std::move(req), std::move(sink));
         },
         .save_thread     = [&s](const Thread& t) { s.save_thread(t); },
         .load_threads    = [&s] { return s.load_threads(); },
         .load_thread     = [&s](const ThreadId& id) { return s.load_thread(id); },
-        .load_settings   = std::move(seam.load),
-        .save_settings   = std::move(seam.save),
+        .load_settings   = [l = std::move(seam.load)] {
+            return maya::thread_root([&](const maya::unlocked& c) { return l(c); });
+        },
+        .save_settings   = [sv = std::move(seam.save)](const store::Settings& x) {
+            maya::thread_root([&](const maya::unlocked& c) { sv(c, x); });
+        },
         .new_thread_id   = [&s] { return s.new_id(); },
         .title_from      = [&s](std::string_view t) { return s.title_from(t); },
         .auth            = std::move(auth),
