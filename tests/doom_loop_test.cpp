@@ -280,3 +280,85 @@ TEST_CASE("empty and text only no break") {
     check(!agent_loop_should_break(msgs).has_value(), "text-only turn no break");
 }
 
+// ── 9. #90: the first trip NUDGES and the run continues ───────────────────────────
+// apply_nudge mirrors kick_pending_tools: the reason is appended to the
+// target call's output, which is how the breaker later knows it nudged.
+namespace {
+void apply_nudge(std::vector<Message>& msgs,
+                 const agentty::app::cmd::LoopBreak& b) {
+    for (auto& m : msgs)
+        for (auto& tc : m.tool_calls) {
+            if (tc.id != b.target) continue;
+            if (auto* f = std::get_if<ToolUse::Failed>(&tc.status))
+                f->output += "\n\n" + b.reason;
+            if (auto* d = std::get_if<ToolUse::Done>(&tc.status))
+                d->output += "\n\n" + b.reason;
+        }
+}
+}  // namespace
+
+TEST_CASE("issue 90 first failure trip nudges instead of stopping") {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"path", "app/src/ui"}};
+    for (int i = 0; i < 3; ++i) msgs.push_back(asst_call("list_dir", a, Term::Failed));
+    auto brk = agent_loop_should_break(msgs);
+    check(brk.has_value(), "3x failing list_dir trips the guard");
+    check(brk && !brk->stop, "first trip is a nudge, not a stop");
+    check(brk && brk->target == msgs.back().tool_calls[0].id,
+          "nudge targets the newest call of the streak");
+    check(brk && brk->reason.rfind("Stopped", 0) != 0,
+          "nudge text does not claim the run stopped");
+}
+
+TEST_CASE("issue 90 model changes course after nudge") {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"path", "app/src/ui"}};
+    for (int i = 0; i < 3; ++i) msgs.push_back(asst_call("list_dir", a, Term::Failed));
+    auto brk = agent_loop_should_break(msgs);
+    check(brk && !brk->stop, "nudge first");
+    if (brk) apply_nudge(msgs, *brk);
+    check(!agent_loop_should_break(msgs).has_value(),
+          "a delivered nudge doesn't fire again on the same streak");
+    msgs.push_back(asst_call("write", json{{"path", "app/src/ui/A.java"}}, Term::Done));
+    check(!agent_loop_should_break(msgs).has_value(),
+          "a different follow-up call runs freely");
+}
+
+TEST_CASE("issue 90 identical call after nudge stops") {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"path", "app/src/ui"}};
+    for (int i = 0; i < 3; ++i) msgs.push_back(asst_call("list_dir", a, Term::Failed));
+    auto brk = agent_loop_should_break(msgs);
+    check(brk && !brk->stop, "nudge first");
+    if (brk) apply_nudge(msgs, *brk);
+    msgs.push_back(asst_call("list_dir", a, Term::Failed));
+    auto brk2 = agent_loop_should_break(msgs);
+    check(brk2 && brk2->stop, "ignoring the nudge stops the run");
+    check(brk2 && brk2->reason.rfind("Stopped", 0) == 0, "stop text says Stopped");
+}
+
+TEST_CASE("issue 90 rejection streak still stops at once") {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"command", "rm -rf build"}};
+    for (int i = 0; i < 3; ++i) msgs.push_back(asst_call("shell", a, Term::Rejected));
+    auto brk = agent_loop_should_break(msgs);
+    check(brk && brk->stop, "user rejected it 3x: stop, a nudge can't help");
+}
+
+TEST_CASE("issue 90 success repeat nudges then stops") {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"path", "log.txt"}};
+    for (int i = 0; i < 6; ++i) msgs.push_back(asst_call("read", a, Term::Done));
+    auto brk = agent_loop_should_break(msgs);
+    check(brk && !brk->stop, "6x identical success: nudge first");
+    if (brk) apply_nudge(msgs, *brk);
+    msgs.push_back(asst_call("read", a, Term::Done));
+    auto brk2 = agent_loop_should_break(msgs);
+    check(brk2 && brk2->stop, "identical read after the nudge stops");
+}
+

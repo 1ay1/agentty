@@ -199,10 +199,18 @@ struct SchedDecision {
 // max_turns is unlimited by default and aider never step-caps, for the same
 // reason. The old one was additionally gated on a model-id heuristic, so the
 // identical transcript stopped on a local model and ran fine on Claude.
-// The returned text is surfaced to the model as the final assistant turn so
-// it can recover gracefully (and the user sees why the loop stopped).
+// Two strengths (#90). The FIRST time a streak reaches its limit the breaker
+// only NUDGES: the explanation is appended to the offending call's tool
+// result and the run continues, so the model gets one turn to change the
+// arguments, switch tools, or answer — instead of the run going Idle and
+// looking frozen until the user types again. Only if the model repeats the
+// identical call AFTER that nudge does the breaker STOP the run; the text is
+// then surfaced as the final assistant turn (and the user sees why).
+// Rejections always stop: the user refused the call, a nudge can't help.
 struct LoopBreak {
     std::string reason;     // user/model-facing explanation
+    bool        stop = true;   // false = nudge: annotate `target`, keep going
+    ToolCallId  target{};      // nudge only: the call whose result carries it
 };
 [[nodiscard]] std::optional<LoopBreak> agent_loop_should_break(
     const std::vector<Message>& messages);

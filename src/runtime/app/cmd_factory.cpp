@@ -1811,6 +1811,34 @@ SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
 // agent_loop_should_break for the rationale. Walks BACK from the end of the
 // transcript over the current agent run (everything after the last real User
 // message that isn't a synthetic TOOL-RESULT carrier) and applies two caps.
+
+namespace {
+// Prefix of the nudge text kick_pending_tools appends to a tool result. Its
+// presence in a call's output is how the breaker knows a streak was already
+// nudged — the transcript is the only state, so the decision survives a
+// reload and needs no extra field on Model.
+constexpr std::string_view kLoopNudgeMarker = "[agentty loop guard] ";
+
+// One (tool, args) key's consecutive run of identical outcomes.
+struct Streak {
+    int        count = 0;
+    bool       nudged = false;                // a call in it carries the nudge
+    bool       repeated_after_nudge = false;  // …and the model called it again
+    bool       last_rejected = false;
+    ToolCallId last_id{};
+
+    void add(const ToolUse& tc) {
+        if (nudged) repeated_after_nudge = true;
+        if (tc.output().find(kLoopNudgeMarker) != std::string::npos)
+            nudged = true;
+        ++count;
+        last_rejected = tc.is_rejected();
+        last_id = tc.id;
+    }
+    void reset() { *this = Streak{}; }
+};
+} // namespace
+
 std::optional<LoopBreak> agent_loop_should_break(
         const std::vector<Message>& messages) {
     // Tunables. Generous enough that a legitimate multi-step task (search →
@@ -1855,9 +1883,9 @@ std::optional<LoopBreak> agent_loop_should_break(
     // (name + canonical args) → consecutive terminal failure/rejection
     // streak. A success resets that call's streak; historical failures before
     // demonstrated recovery must not trip the breaker later.
-    std::unordered_map<std::string, int> failure_streaks;
+    std::unordered_map<std::string, Streak> failure_streaks;
     // The mirror, for calls that keep SUCCEEDING identically.
-    std::unordered_map<std::string, int> success_streaks;
+    std::unordered_map<std::string, Streak> success_streaks;
     for (std::size_t i = run_start; i < messages.size(); ++i) {
         const auto& msg = messages[i];
         if (msg.role != Role::Assistant || msg.tool_calls.empty()) continue;
@@ -1872,24 +1900,40 @@ std::optional<LoopBreak> agent_loop_should_break(
             std::string key = tc.name.value + '\0'
                 + (tc.args.is_null() ? std::string{} : tc.args_dump());
             const bool bad = tc.is_failed() || tc.is_rejected();
-            auto& streak = failure_streaks[key];
-            if (bad) ++streak; else streak = 0;
-            auto& ok_streak = success_streaks[key];
-            if (bad) ok_streak = 0; else ++ok_streak;
+            (bad ? failure_streaks : success_streaks)[key].add(tc);
+            (bad ? success_streaks : failure_streaks)[key].reset();
         }
     }
 
-    for (const auto& [key, streak] : failure_streaks) {
-        if (streak >= kRepeatLimit) {
-            auto nul = key.find('\0');
-            std::string name = nul == std::string::npos ? key : key.substr(0, nul);
-            return LoopBreak{
-                "Stopped: the `" + name + "` tool failed or was rejected "
-                + std::to_string(streak) + " consecutive times with the same "
+    // A streak at its limit nudges once, then stops (#90). See LoopBreak.
+    auto judge = [](const std::string& key, const Streak& s,
+                    std::string reason) -> std::optional<LoopBreak> {
+        (void)key;
+        // Already nudged and the model has not repeated the call since:
+        // the nudge is doing its job (it moved on, or is answering).
+        if (s.nudged && !s.repeated_after_nudge) return std::nullopt;
+        const bool stop = s.nudged || s.last_rejected;
+        if (stop)
+            reason = "Stopped: " + reason;
+        else
+            reason = std::string{kLoopNudgeMarker} + reason
+                   + " If you repeat this exact call, the run will stop.";
+        return LoopBreak{std::move(reason), stop, s.last_id};
+    };
+    auto tool_of = [](const std::string& key) {
+        auto nul = key.find('\0');
+        return nul == std::string::npos ? key : key.substr(0, nul);
+    };
+
+    for (const auto& [key, s] : failure_streaks) {
+        if (s.count >= kRepeatLimit) {
+            if (auto b = judge(key, s,
+                "The `" + tool_of(key) + "` tool failed or was rejected "
+                + std::to_string(s.count) + " consecutive times with the same "
                 "arguments. Re-trying the identical call won't help — "
                 "change the arguments (check the path/target exists, or pick a "
                 "different tool), or answer the user directly with what you "
-                "already know."};
+                "already know.")) return b;
         }
     }
     // The same check for calls that keep SUCCEEDING. Applied to EVERY model,
@@ -1902,16 +1946,14 @@ std::optional<LoopBreak> agent_loop_should_break(
     // threshold is higher — re-reading a file after editing it is normal.
     // Six identical, successful, byte-for-byte calls without a text answer is
     // not.
-    for (const auto& [key, streak] : success_streaks) {
-        if (streak >= kSuccessRepeatLimit) {
-            auto nul = key.find('\0');
-            std::string name = nul == std::string::npos ? key : key.substr(0, nul);
-            return LoopBreak{
-                "Stopped: the `" + name + "` tool was called "
-                + std::to_string(streak) + " times in a row with identical "
+    for (const auto& [key, s] : success_streaks) {
+        if (s.count >= kSuccessRepeatLimit) {
+            if (auto b = judge(key, s,
+                "The `" + tool_of(key) + "` tool was called "
+                + std::to_string(s.count) + " times in a row with identical "
                 "arguments and the same result. You already have this output — "
                 "answer the user with what you know, or take a different "
-                "action."};
+                "action.")) return b;
         }
     }
     // ── No step cap ─────────────────────────────────────────────────────
@@ -2164,18 +2206,45 @@ Cmd kick_pending_tools(Model& m) {
             // it. Claude Code and aider both ship with no step cap for the
             // same reason.
             //
-            // If a cap trips, DON'T re-stream: surface the nudge as the run's
-            // final assistant turn and drop to Idle so the loop ends in seconds
-            // instead of spinning until the user hits Esc. The nudge also lands
-            // in history, so a follow-up shows the model why it stopped.
+            // A trip first NUDGES (#90): the explanation is appended to the
+            // offending call's result and the run continues, so the model gets
+            // one turn to change course instead of the run going Idle and
+            // looking frozen until the user types again. Only a repeat of the
+            // identical call after that nudge (or a rejection streak) STOPS:
+            // surface the text as the run's final assistant turn and drop to
+            // Idle. Either way it lands in history, so a follow-up shows the
+            // model why.
             if (auto brk = agent_loop_should_break(m.d.current.messages)) {
-                m.s.phase = phase::Idle{};
-                Message note;
-                note.role = Role::Assistant;
-                note.text = std::move(brk->reason);
-                m.d.current.messages.push_back(std::move(note));
-                cmds.push_back(Cmd(SaveThread{m.d.current}));
-                return Cmd::batch(std::move(cmds));
+                bool nudged = false;
+                if (!brk->stop) {
+                    // The streak's newest call is normally in `last`, but
+                    // search the whole transcript from the end to be sure.
+                    for (auto it = m.d.current.messages.rbegin();
+                         it != m.d.current.messages.rend() && !nudged; ++it)
+                    for (auto& tc : it->tool_calls) {
+                        if (tc.id != brk->target) continue;
+                        std::string* out = nullptr;
+                        if (auto* d = std::get_if<ToolUse::Done>(&tc.status))
+                            out = &d->output;
+                        else if (auto* f = std::get_if<ToolUse::Failed>(&tc.status))
+                            out = &f->output;
+                        if (out) {
+                            if (!out->empty()) *out += "\n\n";
+                            *out += brk->reason;
+                            nudged = true;
+                        }
+                        break;
+                    }
+                }
+                if (!nudged) {
+                    m.s.phase = phase::Idle{};
+                    Message note;
+                    note.role = Role::Assistant;
+                    note.text = std::move(brk->reason);
+                    m.d.current.messages.push_back(std::move(note));
+                    cmds.push_back(Cmd(SaveThread{m.d.current}));
+                    return Cmd::batch(std::move(cmds));
+                }
             }
 
             // when the prefix estimate crossed 90% of context_max,
