@@ -380,6 +380,13 @@ if(APPLE AND AGENTTY_USE_MIMALLOC)
                    "override corrupts the heap; using the system allocator.")
     set(AGENTTY_USE_MIMALLOC OFF CACHE BOOL "" FORCE)
 endif()
+# Sanitizers bring their own allocator. Under TSan, mimalloc's malloc
+# override crashes at startup (tsan's dlsym mallocs into mimalloc before
+# tsan's pthread hooks exist), so keep it out of sanitizer builds.
+if((AGENTTY_SANITIZE_ALL OR AGENTTY_SANITIZE) AND AGENTTY_USE_MIMALLOC)
+    message(STATUS "agentty: mimalloc DISABLED under sanitizers.")
+    set(AGENTTY_USE_MIMALLOC OFF CACHE BOOL "" FORCE)
+endif()
 set(AGENTTY_HAS_MIMALLOC FALSE)
 if(AGENTTY_USE_MIMALLOC)
     set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)

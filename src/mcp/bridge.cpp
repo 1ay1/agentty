@@ -137,19 +137,15 @@ maya::published<ConnectionPool>& g_pool() {
     return p;
 }
 
-// Serializes the ENTIRE connect-and-swap in mcp_tools(). Two independent
-// callers reach mcp_tools() — connect_initial_mcp() (first catalog access,
-// under the registry's cache.mu) and mcp_reload() (add/remove/toggle/panel-
-// open, under reload_mu). Those are DIFFERENT mutexes, so without this both
-// could run mcp_tools() at once: each spawns the full server set (the "date
-// connected" printed 4×), and a late/concurrent build could mutate a pool a
-// reader (plugin_model) is iterating — a data race that SIGSEGVs with no
-// abort message. One coarse mutex around the whole build makes connect+swap
-// strictly sequential; readers take current_pool() and are unaffected. Connects are rare (startup / explicit toggles), so serializing
-// them costs nothing on the hot path.
+// Two callers reach mcp_tools(): connect_initial_mcp() (first catalog
+// access, claimed by the registry's connect_phase atomic) and mcp_reload()
+// (claimed by the registry's reload state word). Those are separate claims,
+// so without g_connecting() both could build at once: the full server set
+// spawned twice, and a late build mutating a pool plugin_model() is
+// reading. Connects are rare, so serializing them is free.
 // The pool a rebuild replaced. Destroying it stops its servers (joins their
 // peers), which must not happen under g_connecting(); it waits here and
-// mcp_tools() drops it after the lock.
+// mcp_tools() drops it after the gate.
 maya::published<ConnectionPool>& g_retired() {
     static maya::published<ConnectionPool> r;
     return r;
@@ -159,7 +155,7 @@ maya::published<ConnectionPool>& g_retired() {
 // Not a jaal lock: mcp_tools() is reached from the tool registry's lazy
 // build, which has dozens of callers and no capability, and the build
 // itself blocks for seconds (spawning servers, RPC handshakes). A gate a
-// loser waits on in short sleeps holds nothing, so it can't be half of a
+// loser waits on (atomic::wait) holds nothing, so it can't be half of a
 // lock-order cycle; the build never waits for anything a waiter holds.
 std::atomic<bool>& g_connecting() {
     static std::atomic<bool> c{false};

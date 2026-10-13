@@ -999,6 +999,12 @@ add_test(NAME layering_jaal
          COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_SOURCE_DIR}/third_party/maya/third_party/jaal
                  -P ${CMAKE_SOURCE_DIR}/third_party/maya/third_party/jaal/tests/lint/layering.cmake)
 set_tests_properties(layering_maya layering_jaal PROPERTIES LABELS static TIMEOUT 120)
+# maya's seam.sh: only host/ and the re-export headers touch jaal, no
+# detached threads, one SIGWINCH owner. Nothing ran it, so it went stale.
+add_test(NAME maya_seam
+         COMMAND sh ${CMAKE_SOURCE_DIR}/third_party/maya/tests/seam.sh
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/third_party/maya)
+set_tests_properties(maya_seam PROPERTIES LABELS static TIMEOUT 60)
 # The libraries agentty vendors hold no runtime, keep one copy of the JSON-RPC
 # core, and jsonrpc-cpp stays a leaf (docs/PROTOCOL_LIBRARIES.md §7).
 find_package(Python3 COMPONENTS Interpreter QUIET)

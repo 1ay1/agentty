@@ -11,8 +11,8 @@
 //   lists        a jaal::snapshot (replaced wholesale on refresh)
 //   poisoned     an atomic flag
 //   busy         one call at a time: an atomic claimed by compare-and-swap.
-//                A caller that loses waits for the holder to finish, in
-//                short sleeps -- a wait on an atomic, not on a lock, so it
+//                A caller that loses blocks in atomic::wait until the
+//                holder releases -- a wait on an atomic, not on a lock, so it
 //                can't nest with any lock the caller holds into a cycle
 //                (the holder never waits for anything the caller holds:
 //                it waits only for the server's reply, delivered by the
