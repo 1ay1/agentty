@@ -1667,7 +1667,7 @@ void AgentServer::replay_history_body(const Cap& cap, const std::string& session
     replay_compactions_before(total);
 }
 
-a::InitializeResult AgentServer::on_initialize(const Cap& cap, const a::InitializeParams& p) {
+a::InitializeResult AgentServer::on_initialize(const Cap&, const a::InitializeParams& p) {
     a::InitializeResult r;
     // Remember whether the client can host terminals for us. Zed advertises
     // this; a bare/test client may not. Gates the live-terminal execution of
@@ -2257,7 +2257,7 @@ void AgentServer::on_authenticate(const a::AuthenticateParams& p) {
                           "still not signed in. Run `agentty login` and try again.");
 }
 
-void AgentServer::on_logout(const Cap& cap) {
+void AgentServer::on_logout(const Cap&) {
     auth::clear_credentials(IoAccess::grant());   // ACP handler, not a reducer
     auth_.store(auth::AuthHeader{auth::ApiKeyHeader{""}});
 }
