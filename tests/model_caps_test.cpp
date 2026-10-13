@@ -4,27 +4,26 @@
 // doom-loop guards. Lock the classification so a catalog edit can't silently
 // flip a hosted/strong model into degraded mode (or vice-versa).
 
-#include <cstdio>
+#include <algorithm>
+#include <string>
 #include <string_view>
+#include <vector>
+
+#include "agtest.hpp"
+
+#include "agentty/domain/capkey.hpp"
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/provider/selection.hpp"
+#include "agentty/provider/registry.hpp"
 
 using namespace agentty;
 
-static int g_failures = 0;
 
-#define CHECK(cond)                                                      \
-    do {                                                                 \
-        if (!(cond)) {                                                   \
-            std::fprintf(stderr, "FAIL %s:%d  %s\n",                     \
-                         __FILE__, __LINE__, #cond);                     \
-            ++g_failures;                                                \
-        }                                                                \
-    } while (0)
 
 static bool weak(std::string_view id) { return is_weak_model(id); }
 
-static void test_claude_never_weak() {
+TEST_CASE("claude never weak") {
     // Every hosted Claude family is strong, all generations.
     CHECK(!weak("claude-opus-4-5"));
     CHECK(!weak("claude-sonnet-4-5-20250101"));
@@ -33,7 +32,7 @@ static void test_claude_never_weak() {
     CHECK(!weak("claude-opus-4-5[1m]"));      // 1m suffix stripped first
 }
 
-static void test_small_local_coder_weak() {
+TEST_CASE("small local coder weak") {
     // The model from the bug report and its small siblings.
     CHECK(weak("qwen2.5-coder:7b"));
     CHECK(weak("qwen2.5-coder:3b"));
@@ -47,13 +46,13 @@ static void test_small_local_coder_weak() {
     CHECK(weak("smollm2:1.7b"));
 }
 
-static void test_large_models_strong() {
+TEST_CASE("large models strong") {
     // Large models with NO weak-family signal follow tool schemas reliably.
     CHECK(!weak("llama3.1:70b"));
     CHECK(!weak("mixtral:8x22b"));            // 22b matched, no weak family
 }
 
-static void test_weak_family_wins_over_size() {
+TEST_CASE("weak family wins over size") {
     // Known weak / coder-only families leak tool JSON at ANY size — the
     // weak-family signal beats the raw >= 14B size shortcut.
     CHECK(weak("qwen2.5-coder:14b"));         // the live case
@@ -62,7 +61,7 @@ static void test_weak_family_wins_over_size() {
     CHECK(weak("deepseek-coder:33b"));
 }
 
-static void test_tool_trained_families_strong() {
+TEST_CASE("tool trained families strong") {
     // Tool-trained families are strong even at smaller sizes.
     CHECK(!weak("qwen3:8b"));
     CHECK(!weak("llama3.1:8b"));
@@ -81,14 +80,14 @@ static void test_tool_trained_families_strong() {
     CHECK(!weak("deepseek-r1:32b"));
 }
 
-static void test_tiny_strong_family_still_weak() {
+TEST_CASE("tiny strong family still weak") {
     // Even a tool-trained family is unreliable when explicitly tiny (<= 3B).
     CHECK(weak("llama3.1:1b"));
     CHECK(weak("qwen3:1.7b"));               // 1b matched from "1.7b"? see note
     CHECK(weak("granite3.1-moe:3b"));
 }
 
-static void test_unknown_id_defaults_strong() {
+TEST_CASE("unknown id defaults strong") {
     // A hosted OpenAI-family id with no size/family signal is assumed capable.
     CHECK(!weak("gpt-4o"));
     CHECK(!weak("gpt-4o-mini"));
@@ -98,7 +97,7 @@ static void test_unknown_id_defaults_strong() {
     CHECK(!weak("some-random-hosted-model"));
 }
 
-static void test_bare_size_signal() {
+TEST_CASE("bare size signal") {
     // No recognised family but a small size tag → weak; large → strong.
     CHECK(weak("mystery:7b"));
     CHECK(!weak("mystery:70b"));
@@ -107,7 +106,7 @@ static void test_bare_size_signal() {
     CHECK(!weak("bigbird"));                 // no leading digits
 }
 
-static void test_max_output_tokens() {
+TEST_CASE("max output tokens") {
     // Claude 4.x Sonnet/Opus → 64000 (the edit-truncation fix).
     CHECK(max_output_tokens_for("claude-sonnet-4-5") == 64000);
     CHECK(max_output_tokens_for("claude-opus-4-5") == 64000);
@@ -131,7 +130,7 @@ static void test_max_output_tokens() {
     CHECK(max_output_tokens_for("claude-fable-5[1m]") == 64000);
 }
 
-static void test_flagship_lane_caps() {
+TEST_CASE("flagship lane caps") {
     using agentty::ModelCapabilities;
     // Fable/Mythos 5 must decode as a KNOWN Claude family (else they'd be
     // treated as unknown/non-Claude: wrong output cap, no effort, no betas).
@@ -152,22 +151,968 @@ static void test_flagship_lane_caps() {
     CHECK(ModelCapabilities::from_id("claude-fable-5[1m]").extended_context_1m);
 }
 
-int main() {
-    test_claude_never_weak();
-    test_small_local_coder_weak();
-    test_large_models_strong();
-    test_weak_family_wins_over_size();
-    test_tool_trained_families_strong();
-    test_tiny_strong_family_still_weak();
-    test_unknown_id_defaults_strong();
-    test_bare_size_signal();
-    test_max_output_tokens();
-    test_flagship_lane_caps();
+TEST_CASE("gpt5 codex caps") {
+    using agentty::ModelCapabilities;
+    using agentty::Effort;
+    using agentty::effort_wire_for;
 
-    if (g_failures == 0) {
-        std::printf("model_caps_test: all checks passed\n");
-        return 0;
+    // gpt-5.x (ChatGPT/Codex Responses) decodes as Family::Gpt with effort.
+    {
+        const auto c = ModelCapabilities::from_id("gpt-5.6-sol");
+        CHECK(c.is_gpt());
+        CHECK(c.is_known_family());
+        CHECK(c.generation == 5);
+        CHECK(c.revision == 6);
+        CHECK(c.supports_effort());
+        CHECK(c.supports_effort_xhigh());
+        CHECK(c.supports_effort_max());     // gpt-5.6 flagship line takes max
+        CHECK(!c.is_weak_tool_user());
     }
-    std::fprintf(stderr, "model_caps_test: %d check(s) failed\n", g_failures);
-    return 1;
+    // gpt-5.4 supports the ladder up to xhigh but NOT max.
+    {
+        const auto c = ModelCapabilities::from_id("gpt-5.4");
+        CHECK(c.is_gpt());
+        CHECK(c.generation == 5);
+        CHECK(c.revision == 4);
+        CHECK(c.supports_effort());
+        CHECK(c.supports_effort_xhigh());
+        CHECK(!c.supports_effort_max());
+        // A stale `max` pick degrades to the NEAREST supported tier —
+        // xhigh here — rather than 400ing (or over-shooting down to high).
+        CHECK(effort_wire_for(Effort::Max, c) == "xhigh");
+        CHECK(effort_wire_for(Effort::Xhigh, c) == "xhigh");
+    }
+    // Plain `gpt-5` (no revision) still gets effort.
+    {
+        const auto c = ModelCapabilities::from_id("gpt-5");
+        CHECK(c.is_gpt());
+        CHECK(c.generation == 5);
+        CHECK(c.supports_effort());
+    }
+    // `minimal` is OpenAI's gpt-5+ bottom tier. It must be in the DERIVED
+    // ladder for the Gpt family (gen >= 5), map to the "minimal" wire value,
+    // and sit BELOW low so a Minimal request never rounds up.
+    {
+        const auto c = ModelCapabilities::from_id("gpt-5.6-sol");
+        CHECK(effort_wire_for(Effort::Minimal, c) == "minimal");
+        const auto ladder = agentty::available_efforts(c);
+        // auto + off + minimal + low + medium + high + xhigh + max
+        REQUIRE(ladder.size() >= 4);
+        CHECK(ladder[0] == Effort::Auto);
+        CHECK(ladder[1] == Effort::None);
+        CHECK(ladder[2] == Effort::Minimal);
+        CHECK(ladder[3] == Effort::Low);
+        // A Minimal request stays minimal (nearest at-or-below is itself).
+        CHECK(agentty::clamp_effort(Effort::Minimal, c) == Effort::Minimal);
+    }
+    // gpt-5.4-mini output ceiling is the large-output 64k (not the 16k
+    // non-Claude default).
+    CHECK(agentty::max_output_tokens_for("gpt-5.4-mini") == 64000);
+    CHECK(agentty::max_output_tokens_for("gpt-5.6-sol") == 64000);
+
+    // CRITICAL non-regression: gpt-4o / gpt-4.1 / gpt-3.5 must NOT be caught
+    // by the gpt-5 family logic — they stay generic OpenAI-compat (no effort,
+    // 16k cap). Older gpt-* over the OpenAI-compat transport relies on this.
+    for (const char* legacy : {"gpt-4o", "gpt-4.1", "gpt-4o-mini", "gpt-3.5-turbo"}) {
+        const auto c = ModelCapabilities::from_id(legacy);
+        CHECK(!c.is_gpt());
+        CHECK(!c.supports_effort());
+        CHECK(agentty::max_output_tokens_for(legacy) == 16384);
+    }
+}
+
+// Anthropic thinking-mode selection: 4.5-and-earlier need the legacy
+// enabled+budget_tokens body; 4.6+/4.7/4.8 + flagship 5 need adaptive.
+// Sending adaptive to 4.5 400s ("adaptive thinking is not supported on this
+// model") — the exact bug this pins.
+TEST_CASE("anthropic thinking mode: adaptive vs enabled by revision") {
+    using agentty::ModelCapabilities;
+    auto adaptive = [](const char* id) {
+        return ModelCapabilities::from_id(id).uses_adaptive_thinking();
+    };
+    // LEGACY enabled+budget_tokens (adaptive would 400):
+    CHECK(!adaptive("claude-opus-4-5"));
+    CHECK(!adaptive("claude-opus-4-5[1m]"));
+    CHECK(!adaptive("claude-sonnet-4-5"));
+    CHECK(!adaptive("claude-opus-4-1"));
+    CHECK(!adaptive("claude-sonnet-4-0"));
+    // ADAPTIVE (enabled/budget_tokens would 400):
+    CHECK(adaptive("claude-opus-4-6"));
+    CHECK(adaptive("claude-opus-4-7"));
+    CHECK(adaptive("claude-opus-4-8"));
+    CHECK(adaptive("claude-opus-4-8[1m]"));
+    CHECK(adaptive("claude-sonnet-4-6"));
+    // Flagship 5 lane is adaptive.
+    CHECK(adaptive("claude-opus-5"));
+    CHECK(adaptive("claude-fable-5"));
+    CHECK(adaptive("claude-mythos-5"));
+
+    // COMPOSITION INVARIANT: Opus 4.5 is the one extended-thinking-only
+    // (enabled-mode) model that ALSO supports output_config.effort — the
+    // transport composes effort WITH budget_tokens on its enabled path. Pin
+    // both facts so a caps refactor can't silently drop the effort tier.
+    {
+        const auto c45 = ModelCapabilities::from_id("claude-opus-4-5");
+        CHECK(!c45.uses_adaptive_thinking());  // enabled + budget_tokens
+        CHECK(c45.supports_effort());          // AND effort composes
+        // Sonnet 4.5 is enabled-mode but does NOT support effort — so the
+        // transport must send budget_tokens WITHOUT output_config.effort.
+        const auto s45 = ModelCapabilities::from_id("claude-sonnet-4-5");
+        CHECK(!s45.uses_adaptive_thinking());
+        CHECK(!s45.supports_effort());
+    }
+}
+
+TEST_CASE("compat reasoning effort (chat wire)") {
+    using agentty::ModelCapabilities;
+    using agentty::Effort;
+    using agentty::effort_wire_for;
+    using agentty::cycle_effort;
+
+    // OpenAI-Chat-wire reasoning models are NOT in the Claude/GPT family
+    // ladder, but expose the top-level reasoning_effort enum (low|med|high).
+    for (const char* id : {"mistral-small-latest", "mistral-medium-latest",
+                           "mistral-small-3-2", "mistral-medium-3-5",
+                           "deepseek-reasoner", "deepseek-r1",
+                           "grok-4", "grok-4-fast", "grok-3-mini",
+                           "gemini-2.5-flash-thinking",
+                           "gpt-oss-120b", "gpt-oss:20b",
+                           "o1", "o3", "o4-mini"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.reasoning_compat);
+        CHECK(c.supports_effort());
+        // 3-level enum only — no max / xhigh on this wire.
+        CHECK(!c.supports_effort_max());
+        CHECK(!c.supports_effort_xhigh());
+        // `minimal` is a gpt-5-only tier — compat models must NOT expose it
+        // (it would 400; their ladder is low|medium|high).
+        CHECK((agentty::effort_set_of(c) & agentty::effort_bit(Effort::Minimal)) == 0);
+        CHECK(!c.is_known_family());   // stays orthogonal to the family ladder
+        // A stale Max/Xhigh pick degrades to `high` instead of 400ing.
+        CHECK(effort_wire_for(Effort::Max, c)    == "high");
+        CHECK(effort_wire_for(Effort::Xhigh, c)  == "high");
+        CHECK(effort_wire_for(Effort::None, c)   == "");
+        // The picker can cycle effort on these models.
+        CHECK(cycle_effort(Effort::None, +1, c) != Effort::None);
+    }
+
+    // Non-Mistral compat models keep the full low|medium|high enum.
+    for (const char* id : {"deepseek-reasoner", "grok-3-mini", "o3",
+                           "gemini-2.5-flash-thinking", "gpt-oss-120b"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(!c.effort_high_only);
+        CHECK(effort_wire_for(Effort::Medium, c) == "medium");
+        CHECK(effort_wire_for(Effort::Low, c)    == "low");
+    }
+
+    // Mistral-platform models take a BINARY enum — {none, high} only; the
+    // API 400s on low/medium ("supported values: [high, none]"). Any active
+    // tier must collapse to `high`, the ladder to off→high, and clamp to High.
+    for (const char* id : {"mistral-small-latest", "mistral-medium-latest",
+                           "mistral-medium-3-5", "mistral-small-3-2"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.effort_high_only);
+        CHECK(effort_wire_for(Effort::Low, c)    == "high");
+        CHECK(effort_wire_for(Effort::Medium, c) == "high");
+        CHECK(effort_wire_for(Effort::High, c)   == "high");
+        CHECK(effort_wire_for(Effort::Max, c)    == "high");
+        CHECK(effort_wire_for(Effort::None, c)   == "");
+        CHECK(agentty::clamp_effort(Effort::Medium, c) == Effort::High);
+        CHECK(agentty::clamp_effort(Effort::None, c)   == Effort::None);
+        // The ladder leads with `auto` (the default anchor) then off, then the
+        // one ON rung this model accepts.
+        const auto ladder = agentty::available_efforts(c);
+        REQUIRE(ladder.size() == 3);
+        CHECK(ladder[0] == Effort::Auto);
+        CHECK(ladder[1] == Effort::None);
+        CHECK(ladder[2] == Effort::High);
+        // On a one-rung ladder the midpoint IS that rung, so auto means high.
+        CHECK(agentty::auto_base_effort(c) == Effort::High);
+        CHECK(effort_wire_for(Effort::Auto, c) == "high");
+    }
+
+    // Non-reasoning / native-reasoning lines that share a prefix must NOT light
+    // up: grok-code-fast (coder), deepseek-chat, gemini-2.5-pro (no thinking
+    // suffix), and — crucially — magistral-*, which reasons NATIVELY and
+    // REJECTS reasoning_effort (422). codestral is a code model, no reasoning.
+    for (const char* id : {"grok-code-fast-1", "magistral-medium-latest",
+                           "magistral-small-latest", "codestral-latest",
+                           "deepseek-chat", "gemini-2.5-pro"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(!c.reasoning_compat);
+        CHECK(!c.supports_effort());
+        CHECK(effort_wire_for(Effort::High, c) == "");
+    }
+
+    // Claude / GPT are family-gated — the compat flag must stay OFF for them
+    // even though they DO support effort through their own ladder.
+    for (const char* id : {"claude-opus-4-5", "gpt-5.6-sol"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(!c.reasoning_compat);
+        CHECK(c.supports_effort());   // via family, not the compat flag
+    }
+}
+
+TEST_CASE("per-model reasoning override registry") {
+    using agentty::ModelCapabilities;
+    using agentty::resolved_caps;
+    using agentty::set_reasoning_override;
+    using agentty::clear_reasoning_override;
+    using agentty::clear_reasoning_overrides;
+    using agentty::reasoning_override_for;
+
+    clear_reasoning_overrides();
+
+    // No override → resolved_caps matches pure inference.
+    //   codestral-latest: a code model, NOT a reasoner → no compat.
+    //   mistral-small-latest: Mistral Small 4, adjustable reasoning → compat.
+    CHECK(!resolved_caps("codestral-latest").reasoning_compat);
+    CHECK(resolved_caps("mistral-small-latest").reasoning_compat);
+    CHECK(reasoning_override_for("codestral-latest") == -1);
+
+    // Force ON a model the catalog does NOT recognize as a reasoner.
+    set_reasoning_override("codestral-latest", true);
+    CHECK(reasoning_override_for("codestral-latest") == 1);
+    {
+        const auto c = resolved_caps("codestral-latest");
+        CHECK(c.reasoning_compat);
+        CHECK(c.supports_effort());
+        CHECK(!c.supports_effort_max());   // still a 3-level enum
+    }
+
+    // Force OFF a model inference WOULD light up (Mistral Small 4).
+    set_reasoning_override("mistral-small-latest", false);
+    CHECK(reasoning_override_for("mistral-small-latest") == 0);
+    {
+        const auto c = resolved_caps("mistral-small-latest");
+        CHECK(!c.reasoning_compat);
+        CHECK(!c.supports_effort());
+    }
+
+    // An override must NOT leak onto the family-gated Claude/GPT lane.
+    set_reasoning_override("claude-opus-4-5", false);
+    {
+        const auto c = resolved_caps("claude-opus-4-5");
+        CHECK(!c.reasoning_compat);
+        CHECK(c.supports_effort());   // family ladder wins; override ignored
+    }
+
+    // Clearing one restores inference for that id only.
+    clear_reasoning_override("mistral-small-latest");
+    CHECK(reasoning_override_for("mistral-small-latest") == -1);
+    CHECK(resolved_caps("mistral-small-latest").reasoning_compat);
+    // The other override still stands (codestral forced on).
+    CHECK(resolved_caps("codestral-latest").reasoning_compat);
+
+    clear_reasoning_overrides();   // leave global state clean for other tests
+    CHECK(reasoning_override_for("codestral-latest") == -1);
+}
+
+TEST_CASE("live-catalog reasoning declaration") {
+    using agentty::resolved_caps;
+    using agentty::set_catalog_reasoning;
+    using agentty::catalog_reasoning_for;
+    using agentty::set_reasoning_override;
+    using agentty::clear_reasoning_overrides;
+    using agentty::Effort;
+
+    clear_reasoning_overrides();
+
+    // Mistral's live catalog says the dated mistral-medium-2505 does NOT
+    // reason (it 400s on reasoning_effort) even though the id substring
+    // matches from_id's "mistral-medium" rule — the catalog must win.
+    set_catalog_reasoning("mistral-medium-2505", false);
+    CHECK(catalog_reasoning_for("mistral-medium-2505") == 0);
+    CHECK(!resolved_caps("mistral-medium-2505").supports_effort());
+
+    // …and magistral-medium-latest DOES accept it now, though from_id
+    // excludes magistral — again the catalog wins.
+    set_catalog_reasoning("magistral-medium-latest", true);
+    CHECK(catalog_reasoning_for("magistral-medium-latest") == 1);
+    {
+        const auto c = resolved_caps("magistral-medium-latest");
+        CHECK(c.supports_effort());
+        // Still a Mistral-platform id → binary {none, high} ladder.
+        CHECK(c.effort_high_only);
+        CHECK(agentty::effort_wire_for(Effort::Medium, c) == "high");
+    }
+
+    // The user's explicit per-model override outranks the catalog.
+    set_reasoning_override("magistral-medium-latest", false);
+    CHECK(!resolved_caps("magistral-medium-latest").supports_effort());
+    clear_reasoning_overrides();
+    CHECK(resolved_caps("magistral-medium-latest").supports_effort());
+
+    // Reset the catalog entries so other tests see inference behaviour.
+    set_catalog_reasoning("mistral-medium-2505", true);
+    set_catalog_reasoning("magistral-medium-latest", false);
+}
+
+TEST_CASE("models.dev bare-key collision poisons to no-info") {
+    using agentty::merge_catalog_reasoning;
+    using agentty::catalog_reasoning_for;
+    using agentty::resolved_caps;
+
+    // The real bug: models.dev aggregates ~50 providers into one document and
+    // agentty records each model's reasoning fact under its BARE tail too
+    // (the cross-provider lookup namespace). Different aggregators disagree
+    // about the SAME bare id — e.g. one lists an old dated Mistral Large as a
+    // reasoning model, the canonical provider lists it as instruct-only. A
+    // last-writer-wins record lit a phantom off/high effort chip on Mistral
+    // Large 3 that never emitted any thinking.
+    const std::string bare = "mistral-large-2402";
+
+    // First source: instruct-only (the truthful one).
+    merge_catalog_reasoning(bare, false);
+    CHECK(catalog_reasoning_for(bare) == 0);
+
+    // A second source DISAGREES (claims it reasons) → the key is poisoned to
+    // "no info" (-1) rather than flipped to a phantom-reasoning true.
+    merge_catalog_reasoning(bare, true);
+    CHECK(catalog_reasoning_for(bare) == -1);
+
+    // Once poisoned it stays ambiguous — later writers can't resurrect it,
+    // so a stray aggregator can never re-light the chip.
+    merge_catalog_reasoning(bare, true);
+    merge_catalog_reasoning(bare, false);
+    CHECK(catalog_reasoning_for(bare) == -1);
+
+    // With no catalog declaration standing, resolution falls to id-inference:
+    // "mistral-large" is NOT in infer_reasoning_compat's reasoning list, so
+    // the effort chip is correctly absent.
+    CHECK(!resolved_caps(bare).supports_effort());
+
+    // Agreeing sources do NOT poison — a fact backed by consensus survives.
+    const std::string agree = "deepseek-v4-flash";
+    merge_catalog_reasoning(agree, true);
+    merge_catalog_reasoning(agree, true);
+    CHECK(catalog_reasoning_for(agree) == 1);
+}
+
+TEST_CASE("capability tiers") {
+    using T = ModelCapabilities::Tier;
+    auto tier = [](std::string_view id) { return ModelCapabilities::tier_for(id); };
+    // Anthropic lane ordering matches the vendor's own naming.
+    CHECK(tier("claude-haiku-4-5")        == T::Cheap);
+    CHECK(tier("claude-3-5-haiku-20241022") == T::Cheap);
+    CHECK(tier("claude-sonnet-4-5-20250101") == T::Mid);
+    CHECK(tier("claude-opus-4-5")         == T::Flagship);
+    // OpenAI: mini/nano demote to the cheap lane; full gpt-5.x is flagship/mid.
+    CHECK(tier("gpt-5-mini")   == T::Cheap);
+    CHECK(tier("gpt-4o-mini")  == T::Cheap);
+    CHECK(tier("gpt-5-nano")   == T::Cheap);
+    CHECK(tier("gpt-5.6")      == T::Flagship);
+    // Weak local models never rank above Weak even with a cheap-ish id.
+    CHECK(tier("qwen2.5-coder:7b") == T::Weak);
+    // Ordering is a real total order.
+    CHECK(T::Weak < T::Cheap);
+    CHECK(T::Cheap < T::Mid);
+    CHECK(T::Mid < T::Flagship);
+}
+
+static ModelInfo mi(std::string_view id) {
+    ModelInfo m;
+    m.id = ModelId{std::string{id}};
+    return m;
+}
+
+TEST_CASE("router hardening nonchat and oseries") {
+    using T = ModelCapabilities::Tier;
+    // Non-chat assets a raw OpenAI /v1/models dump lists must NEVER be picked.
+    for (const char* asset : {"text-embedding-3-small", "text-embedding-3-large",
+                              "dall-e-3", "whisper-1", "tts-1", "tts-1-hd",
+                              "omni-moderation-latest", "gpt-4o-transcribe",
+                              "gpt-4o-realtime-preview", "gpt-image-1"}) {
+        CHECK(!is_dispatchable_model(asset));
+    }
+    // Real chat models stay dispatchable.
+    for (const char* chat : {"gpt-5", "gpt-5-mini", "claude-haiku-4-5",
+                             "claude-opus-4-5", "o1", "o3-mini", "gpt-4o"}) {
+        CHECK(is_dispatchable_model(chat));
+    }
+    // o-series: base o1/o3 are pricey reasoning models (Flagship, never picked
+    // as "cheap"); the -mini variants are genuinely cheap.
+    CHECK(ModelCapabilities::tier_for("o1")      == T::Flagship);
+    CHECK(ModelCapabilities::tier_for("o3")      == T::Flagship);
+    CHECK(ModelCapabilities::tier_for("o1-mini") == T::Cheap);
+    CHECK(ModelCapabilities::tier_for("o3-mini") == T::Cheap);
+
+    // End-to-end: a realistic raw OpenAI listing. The router must skip every
+    // asset + o1 and land on the genuinely-cheap gpt-5-mini, not an embedding.
+    std::vector<ModelInfo> raw = {
+        mi("gpt-5"), mi("gpt-5-mini"), mi("o1"),
+        mi("text-embedding-3-small"), mi("dall-e-3"), mi("whisper-1"),
+        mi("gpt-4o-realtime-preview")};
+    for (auto& m : raw)
+        if (m.id.value.rfind("gpt-5", 0) == 0) m.context_window = 272000;
+    const std::string picked = cheapest_capable_model("gpt-5", raw);
+    CHECK(picked == "gpt-5-mini");
+    CHECK(is_dispatchable_model(picked));
+
+    // If the ONLY cheaper candidates are non-chat assets, keep the parent
+    // (no regression, never route to an embedding model).
+    std::vector<ModelInfo> assets_only = {
+        mi("gpt-5"), mi("text-embedding-3-large"), mi("dall-e-3")};
+    CHECK(cheapest_capable_model("gpt-5", assets_only) == "gpt-5");
+}
+
+TEST_CASE("cheapest capable router") {
+    // Typical Anthropic pool: parent Opus, cheaper Sonnet + Haiku available.
+    std::vector<ModelInfo> pool = {
+        mi("claude-opus-4-5"), mi("claude-sonnet-4-5"), mi("claude-haiku-4-5")};
+    // Read-only role floor defaults to Cheap → picks the CHEAPEST capable one.
+    CHECK(cheapest_capable_model("claude-opus-4-5", pool) == "claude-haiku-4-5");
+    // Parent already cheap → nothing strictly cheaper → keep the parent.
+    CHECK(cheapest_capable_model("claude-haiku-4-5", pool) == "claude-haiku-4-5");
+    // Single-model provider → no change, no regression.
+    std::vector<ModelInfo> solo = {mi("claude-opus-4-5")};
+    CHECK(cheapest_capable_model("claude-opus-4-5", solo) == "claude-opus-4-5");
+    // Empty pool → keep parent.
+    CHECK(cheapest_capable_model("claude-opus-4-5", {}) == "claude-opus-4-5");
+    // A weak local model in the pool is never chosen.
+    std::vector<ModelInfo> mixed = {
+        mi("claude-opus-4-5"), mi("qwen2.5-coder:7b"), mi("claude-sonnet-4-5")};
+    CHECK(cheapest_capable_model("claude-opus-4-5", mixed) == "claude-sonnet-4-5");
+    // A probe that reported no tool support disqualifies a candidate.
+    std::vector<ModelInfo> notools = {mi("claude-opus-4-5"), mi("claude-haiku-4-5")};
+    notools[1].supports_tools = false;
+    CHECK(cheapest_capable_model("claude-opus-4-5", notools) == "claude-opus-4-5");
+
+    // REGRESSION: the routed id must NEVER carry the `[1m]`/`[2m]` extended-
+    // context picker marker. That marker makes the transport send the
+    // `context-1m` beta, which 400s the whole subagent request on a
+    // subscription that isn't entitled to the long-context beta
+    // ("long context beta is not yet available for this subscription"). A
+    // subagent never needs a 1M window, so the router strips it — both when a
+    // cheaper candidate is chosen and when the `[1m]` parent is kept as-is.
+    std::vector<ModelInfo> pool_1m = {
+        mi("claude-opus-4-5"), mi("claude-sonnet-4-5"), mi("claude-haiku-4-5")};
+    CHECK(cheapest_capable_model("claude-opus-4-5[1m]", pool_1m) == "claude-haiku-4-5");
+    // Parent-kept path (nothing strictly cheaper) still drops the marker.
+    std::vector<ModelInfo> solo_1m = {mi("claude-opus-4-5[1m]")};
+    CHECK(cheapest_capable_model("claude-opus-4-5[1m]", solo_1m) == "claude-opus-4-5");
+    CHECK(cheapest_capable_model("claude-opus-4-5[1m]", {}) == "claude-opus-4-5");
+}
+
+// A subagent must NEVER carry the picker-only `[1m]`/`[2m]` extended-context
+// marker: it would make the transport send the entitlement-gated context-1m
+// beta, which 400s ("long context beta is not yet available") and kills the
+// whole fan-out. run_one_completion derives req.model as
+// `wire_model_id(<cheapest-or-parent>)`; this locks that the marker is gone in
+// every branch (cheaper-found, kept-parent, write-role, single-model).
+TEST_CASE("subagent model never 1m") {
+    using agentty::wire_model_id;
+    auto has_1m = [](std::string_view s) {
+        return s.find("[1m]") != std::string_view::npos
+            || s.find("[2m]") != std::string_view::npos;
+    };
+
+    // Parent on a 1M variant, cheaper NON-1M model available (read-only role):
+    // router picks the cheaper clean id, wire_model_id is a further no-op.
+    std::vector<ModelInfo> pool = {
+        mi("claude-opus-4-5"), mi("claude-sonnet-4-5"), mi("claude-haiku-4-5")};
+    auto ro = wire_model_id(cheapest_capable_model("claude-opus-4-5[1m]", pool));
+    CHECK(!has_1m(ro));
+    CHECK(ro == "claude-haiku-4-5");
+
+    // Single-model provider on a 1M variant: router KEEPS the parent (with the
+    // marker) — wire_model_id is what strips it. This is the exact case that
+    // used to 400.
+    std::vector<ModelInfo> solo = {mi("claude-opus-4-5")};
+    auto kept = wire_model_id(cheapest_capable_model("claude-opus-4-5[1m]", solo));
+    CHECK(!has_1m(kept));
+    CHECK(kept == "claude-opus-4-5");
+
+    // Write-role path (req.model = cfg.model, no router): still stripped.
+    CHECK(!has_1m(wire_model_id(std::string{"claude-sonnet-4-5[1m]"})));
+    CHECK(wire_model_id(std::string{"claude-sonnet-4-5[1m]"}) == "claude-sonnet-4-5");
+
+    // A plain (non-1M) parent is unaffected end-to-end.
+    CHECK(wire_model_id(cheapest_capable_model("claude-sonnet-4-5", pool))
+          == "claude-haiku-4-5");
+}
+
+TEST_CASE("context window detection") {
+    using agentty::ModelCapabilities;
+    auto win = [](std::string_view id) {
+        return ModelCapabilities::from_id(id).context_window();
+    };
+    auto suffix = [](std::string_view id) {
+        return ModelCapabilities::from_id(id).supports_1m_suffix();
+    };
+
+    // supports_1m_suffix(): mirrors Claude Code's catalog `supports_1m_suffix`
+    // flag — the Sonnet-4 line, Opus-4 line, and Haiku 4.5 may be offered a
+    // `[1m]` variant; gen<=3 models may not.
+    CHECK(suffix("claude-sonnet-4-5"));
+    CHECK(suffix("claude-sonnet-4-5-20250101"));
+    CHECK(suffix("claude-sonnet-4"));
+    CHECK(suffix("claude-opus-4-5"));
+    CHECK(suffix("claude-haiku-4-5"));
+    CHECK(!suffix("claude-3-5-sonnet-20241022"));   // gen 3, no 1M variant
+    CHECK(!suffix("claude-3-opus"));
+    // Flagship next-gen lane (Fable/Mythos 5+).
+    CHECK(suffix("claude-fable-5"));
+    CHECK(suffix("claude-mythos-5"));
+
+    // context_window(): base 200k for every known Claude model; 1M ONLY when
+    // the explicit `[1m]` variant is picked (matches Claude Code, which keeps
+    // the base id at 200k and binds 1M to the `<id>[1m]` picker entry).
+    CHECK(win("claude-sonnet-4-5") == 200000);        // base id → 200k
+    CHECK(win("claude-sonnet-4-5[1m]") == 1000000);   // [1m] variant → 1M
+    CHECK(win("claude-opus-4-5") == 200000);
+    CHECK(win("claude-opus-4-5[1m]") == 1000000);
+    CHECK(win("claude-haiku-4-5") == 200000);
+    CHECK(win("claude-haiku-4-5[1m]") == 1000000);
+    // Unknown / local families report 0 so the caller prefers a probed window.
+    CHECK(win("qwen2.5-coder:7b") == 0);
+    CHECK(win("some-random-model") == 0);
+
+    // COMPACTION INVARIANT: the compaction path strips the `[1m]` marker
+    // (wire_model_id) so the wire window is the BASE, then trims the payload
+    // to that base — NOT to 65% of 1M, which would overflow the 200K request.
+    // context_max_for_model composes these; assert the pure equivalent here:
+    // the window of the STRIPPED id is always the 200K base, never 1M.
+    {
+        using agentty::wire_model_id;
+        CHECK(win(wire_model_id("claude-opus-4-5[1m]")) == 200000
+              && "compaction runs on the base window, not the parent's 1M");
+        CHECK(win(wire_model_id("claude-sonnet-4-5[1m]")) == 200000);
+        // A non-1M parent is unchanged.
+        CHECK(win(wire_model_id("claude-opus-4-5")) == 200000);
+    }
+}
+
+TEST_CASE("wire model id strip") {
+    using agentty::wire_model_id;
+    // The `[1m]`/`[2m]` picker marker must NEVER reach the wire (the API 404s
+    // on `claude-sonnet-5[1m]`). wire_model_id strips it, mirroring Claude
+    // Code's Yu().
+    CHECK(wire_model_id("claude-sonnet-5[1m]") == "claude-sonnet-5");
+    CHECK(wire_model_id("claude-opus-4-8[1m]") == "claude-opus-4-8");
+    CHECK(wire_model_id("claude-sonnet-4-5[2m]") == "claude-sonnet-4-5");
+    // A bare id (no marker) is returned unchanged.
+    CHECK(wire_model_id("claude-opus-4-8") == "claude-opus-4-8");
+    CHECK(wire_model_id("gpt-5.6-sol") == "gpt-5.6-sol");
+    CHECK(wire_model_id("qwen2.5-coder:7b") == "qwen2.5-coder:7b");
+    // Marker mid-string (defensive) is still removed.
+    CHECK(wire_model_id("claude-opus-4-8[1m]-preview") == "claude-opus-4-8-preview");
+    CHECK(wire_model_id("") == "");
+}
+
+TEST_CASE("model picker ordering") {
+    using agentty::ModelInfo;
+    using agentty::ModelId;
+    using agentty::model_picker_less;
+
+    auto mi = [](std::string_view id) {
+        return ModelInfo{ModelId{std::string{id}}, std::string{id}, "anthropic"};
+    };
+
+    // Regression: Fable/Mythos are the NEWEST flagship-tier lane and must
+    // never sink below Opus/Sonnet/Haiku just because a fixed family-name
+    // bucket order happened to list them last. Feed the exact jumble Anthropic
+    // returns (arbitrary /v1/models order) and sort with the shared
+    // comparator.
+    std::vector<ModelInfo> v = {
+        mi("claude-opus-4-8"),   mi("claude-opus-4-7"),
+        mi("claude-sonnet-4-6"), mi("claude-opus-4-6"),
+        mi("claude-opus-4-5"),   mi("claude-haiku-4-5"),
+        mi("claude-sonnet-4-5"), mi("claude-fable-5"),
+    };
+    std::stable_sort(v.begin(), v.end(), model_picker_less);
+
+    // Fable 5 (flagship tier, generation 5) must lead every Opus (flagship
+    // tier, generation 4.x) — newest flagship wins, not last-in-bucket.
+    CHECK(v.front().id.value == "claude-fable-5");
+
+    // Every flagship-tier model (Opus + Fable) sorts before every Mid-tier
+    // model (Sonnet), which sorts before every Cheap-tier model (Haiku).
+    auto flagship_end = std::find_if(v.begin(), v.end(), [](const ModelInfo& m) {
+        return ModelCapabilities::from_id(m.id.value).tier()
+            != ModelCapabilities::Tier::Flagship;
+    });
+    auto sonnet_end = std::find_if(flagship_end, v.end(), [](const ModelInfo& m) {
+        return ModelCapabilities::from_id(m.id.value).tier()
+            != ModelCapabilities::Tier::Mid;
+    });
+    CHECK(std::distance(v.begin(), flagship_end) == 5);   // 4 Opus + 1 Fable
+    CHECK(std::distance(flagship_end, sonnet_end) == 2);  // 2 Sonnet
+    CHECK(sonnet_end == v.end() - 1);                     // 1 Haiku, trailing
+
+    // Within the flagship tier, newest generation leads (Fable 5 > Opus 4.8
+    // > Opus 4.7 > Opus 4.6 > Opus 4.5).
+    std::vector<std::string> flagship_order;
+    for (auto it = v.begin(); it != flagship_end; ++it)
+        flagship_order.push_back(it->id.value);
+    CHECK((flagship_order == std::vector<std::string>{
+        "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
+        "claude-opus-4-6", "claude-opus-4-5"}));
+}
+
+// ── capkey: the canonical capability-key discipline ──────────────────────
+// The mistral-medium-3-5 vs -3.5 two-ladders bug was a KEYING bug: two
+// spellings of one model resolved through different keys to different facts.
+// capkey makes that class unrepresentable — these tests lock the three rules.
+TEST_CASE("capkey: one spelling (norm_model folds separators, never alnums)") {
+    using agentty::capkey::norm_model;
+    using agentty::capkey::norm_tail;
+    // Spelling variants of the SAME model → one key. (Cases straight from
+    // the models.dev corpus: 269 real multi-spelling groups unify this way.)
+    CHECK(norm_model("mistral-medium-3.5") == "mistral-medium-3-5");
+    CHECK(norm_model("Kimi-K2.5")          == "kimi-k2-5");
+    CHECK(norm_model("kimi k2.5")          == "kimi-k2-5");
+    CHECK(norm_model("GLM_5.2")            == "glm-5-2");
+    CHECK(norm_model("gpt-oss:20b")        == "gpt-oss-20b");
+    // Alphanumerics are NEVER altered — distinct models can't merge.
+    CHECK(norm_model("gpt-5-5") != norm_model("gpt-55"));
+    // Separator runs collapse; edges trim.
+    CHECK(norm_model("--a..b__c--")        == "a-b-c");
+    // Vendor prefixes strip via norm_tail.
+    CHECK(norm_tail("mistralai/Mistral-Medium-3.5") == "mistral-medium-3-5");
+    CHECK(norm_tail("bare-model")                    == "bare-model");
+}
+
+TEST_CASE("capkey: one provider namespace (identity-anchored dev mapping)") {
+    using agentty::capkey::resolve_dev_provider;
+    using agentty::capkey::dev_scope;
+    // Anchor 1: exact id.
+    CHECK(resolve_dev_provider("mistral", "MISTRAL_API_KEY", "") == "mistral");
+    CHECK(resolve_dev_provider("groq", "GROQ_API_KEY", "") == "groq");
+    // Anchor 2: primary env var — models.dev "google" carries GOOGLE_API_KEY
+    // first, which is NOT agentty's gemini row's primary (GEMINI_API_KEY),
+    // so it does NOT match via env… but "togetherai" ↔ TOGETHER_API_KEY does.
+    CHECK(resolve_dev_provider("togetherai", "TOGETHER_API_KEY", "")
+          == "together");
+    // Anchor 3: api host (github-copilot pins api.githubcopilot.com).
+    CHECK(resolve_dev_provider("github-copilot", "GITHUB_TOKEN",
+                               "https://api.githubcopilot.com") == "copilot");
+    // Unknown aggregators land in the inert foreign namespace.
+    CHECK(dev_scope("requesty", "REQUESTY_API_KEY", "https://api.requesty.ai")
+          == "dev:requesty");
+}
+
+TEST_CASE("capkey: registry keys normalise on write AND read") {
+    using agentty::set_catalog_effort_set;
+    using agentty::catalog_effort_set_for;
+    using agentty::Effort;
+    using agentty::effort_bit;
+    // Write with one spelling, read with another — same fact. This is the
+    // regression lock for the two-ladders screenshot bug.
+    const std::uint8_t hi = effort_bit(Effort::High);
+    set_catalog_effort_set("mistral/regr-model-3.5", hi);
+    CHECK(catalog_effort_set_for("Regr-Model-3-5", "mistral")
+          == static_cast<int>(hi));
+    CHECK(catalog_effort_set_for("regr_model_3.5", "mistral")
+          == static_cast<int>(hi));
+}
+
+TEST_CASE("capkey: [1m]/[2m] context markers fold out of capability keys") {
+    using agentty::capkey::norm_model;
+    // Capability facts belong to the MODEL, not the context-window variant:
+    // a fact learned under the wire id must hit under the picker's marked id.
+    CHECK(norm_model("claude-opus-4-8[1m]") == "claude-opus-4-8");
+    CHECK(norm_model("claude-sonnet-5[2m]") == "claude-sonnet-5");
+    CHECK(norm_model("claude-opus-4-8")     == "claude-opus-4-8");
+    // A bracket that is NOT the marker survives untouched.
+    CHECK(norm_model("weird[3x]model") == "weird[3x]model");
+}
+
+TEST_CASE("clamp_effort: empty/unknown ids never wipe the user's tier") {
+    using agentty::clamp_effort;
+    using agentty::resolved_caps;
+    using agentty::Effort;
+    // resolved_caps("") has no effort support — a blind clamp would collapse
+    // the user's tier to None. The model-switch sites guard on empty id; this
+    // locks the caps-side behaviour those guards rely on.
+    CHECK(clamp_effort(Effort::High, resolved_caps("")) == Effort::None);
+}
+
+// ── Capability-scope robustness ───────────────────────────────────────
+// Capability facts are keyed "provider/model" so the SAME bare model id
+// served by two hosts can carry different ladders. These pin the two
+// invariants that make that safe across every provider.
+
+TEST_CASE("caps scope: learned facts are per-provider, never cross-talk") {
+    // Two hosts serving the same bare id must not share a learned ladder.
+    const std::string id = "mistral-small-latest";
+    set_learned_effort_set(scoped_caps_key(id, "mistral"),
+                           static_cast<int>(effort_bit(Effort::Low) | effort_bit(Effort::High)));
+    set_learned_effort_set(scoped_caps_key(id, "openrouter"),
+                           static_cast<int>(effort_bit(Effort::Medium)));
+
+    const auto a = resolved_caps(id, "mistral");
+    const auto b = resolved_caps(id, "openrouter");
+    CHECK(a.effort_set_known);
+    CHECK(b.effort_set_known);
+    CHECK(a.effort_set != b.effort_set);   // no bleed between hosts
+
+    // An unknown host falls back rather than inheriting a neighbour's set.
+    const auto c = resolved_caps(id, "some-unconfigured-host");
+    CHECK(c.effort_set != a.effort_set);
+}
+
+TEST_CASE("caps scope: [1m] variant shares the base model's facts") {
+    // norm_model folds the context marker on PURPOSE — a capability fact
+    // belongs to the model, not the window variant — so a fact learned
+    // on the wire id must still hit when looked up under the picker's
+    // [1m]-marked id. (Row IDENTITY keeps the marker; see norm_row_id.)
+    const std::string base = "claude-opus-4-8";
+    const std::string one_m = "claude-opus-4-8[1m]";
+    CHECK(capkey::norm_model(base) == capkey::norm_model(one_m));
+    CHECK(capkey::norm_row_id(base) != capkey::norm_row_id(one_m));
+    // Same scope key ⇒ one fact serves both.
+    CHECK(scoped_caps_key(base, "anthropic")
+          == scoped_caps_key(one_m, "anthropic"));
+}
+
+TEST_CASE("caps scope: provider::select publishes the SAME id lookups use") {
+    // The ambient caps scope must equal what the rest of the tree calls
+    // the provider id (modal.cpp's active_provider_id()), or facts are
+    // filed under one key and looked up under another — they can never
+    // be found again. Regression: external ACP agents published the
+    // DEFAULT id ("anthropic") as their scope while every catalog /
+    // recents / fused row was keyed by the agent id.
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::ExternalAcp;
+        s.acp_agent_id = "my-acp-agent";
+        provider::select(::agentty::IoAccess::grant(), s);
+        CHECK(caps_provider_scope() == "my-acp-agent");
+    }
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::OpenAI;
+        s.openai_endpoint.label = "groq";
+        provider::select(::agentty::IoAccess::grant(), s);
+        CHECK(caps_provider_scope() == "groq");
+    }
+    {
+        provider::Selection s;
+        s.kind = provider::Kind::Anthropic;
+        provider::select(::agentty::IoAccess::grant(), s);
+        CHECK(caps_provider_scope() == std::string{provider::default_provider_id()});
+    }
+}
+
+TEST_CASE("wire dialect reasoning-text transmissibility") {
+    using provider::wire_streams_reasoning_text;
+    // Copilot is MIXED, so the answer is per MODEL — measured against a live
+    // Auto session against api.individual.githubcopilot.com:
+    //   gpt-5-mini / mai-code-*  stream over the Responses API, which DOES
+    //                            return reasoning summary text
+    //   claude-* / gpt-4.x       are chat-only, which returns none
+    // agentty routes the first group over /responses precisely so the
+    // thinking is visible, so the picker may honestly say "✦ shown" there
+    // while saying "n/a on this API" one row below.
+    CHECK(wire_streams_reasoning_text("copilot", "gpt-5-mini"));
+    CHECK(wire_streams_reasoning_text("copilot", "mai-code-1.1-flash"));
+    CHECK(!wire_streams_reasoning_text("copilot", "claude-haiku-4.5"));
+    CHECK(!wire_streams_reasoning_text("copilot", "gpt-4.1"));
+    // No model named ⇒ the coarse provider-level question ("could ANY model
+    // here show reasoning?"), which for Copilot is now yes.
+    CHECK(wire_streams_reasoning_text("copilot"));
+    // agentty's `openai` row DEFAULTS to api.openai.com/v1/chat/completions,
+    // but the row now also advertises /v1/responses, so — exactly like
+    // Copilot above — the answer became per MODEL rather than per row.
+    //
+    // This assertion used to be a flat `!...("openai")`. That was right when
+    // the row could ONLY dial chat (and before that it was wrong for the
+    // opposite reason: the row was mislabelled Wire::OpenAIResponses and the
+    // dialect-only predicate answered "yes" by accident). Now the honest
+    // answer is split:
+    //   gpt-4o     → chat, no reasoning on the wire
+    //   gpt-5+     → routed to /responses precisely so thinking is visible
+    CHECK(!wire_streams_reasoning_text("openai", "gpt-4o"));
+    CHECK(wire_streams_reasoning_text("openai", "gpt-5"));
+    // GPT-5.4+ is not merely preferred on Responses — chat REJECTS tool calls
+    // at any real reasoning effort, so an agent turn must go there.
+    CHECK(wire_streams_reasoning_text("openai", "gpt-5.4"));
+    // No model named ⇒ the coarse provider-level question, which for openai
+    // is now yes for the same reason it is yes for Copilot: SOME model here
+    // can show reasoning. (The picker asks this before a model is chosen.)
+    CHECK(wire_streams_reasoning_text("openai"));
+    CHECK(wire_streams_reasoning_text("chatgpt"));
+    // Anthropic streams thinking blocks natively.
+    CHECK(wire_streams_reasoning_text("anthropic"));
+    // OpenAI-COMPAT servers on the SAME dialect DO populate
+    // reasoning_content (DeepSeek-R1, Mistral, OpenRouter, vLLM) — the
+    // rule is per-host, not per-dialect.
+    CHECK(wire_streams_reasoning_text("mistral"));
+    CHECK(wire_streams_reasoning_text("openrouter"));
+    // Unknown / custom host: assume yes rather than hiding a real feature.
+    CHECK(wire_streams_reasoning_text("localhost:8080"));
+}
+
+// ── the runaway step cap applies to models we cannot vouch for ───────────
+//
+// The cap (25 tool turns with no text answer) is the last backstop against
+// a doom loop. The two caps above it key on IDENTICAL arguments — same
+// failing call 3×, same succeeding call 6× — so a model that cycles
+// through DIFFERENT calls escapes both and only this one is left.
+//
+// It used to be enforced only when `is_weak_model(id)` said yes, which
+// inverted the polarity: the LESS agentty knew about a model, the LESS
+// protection it got. The heuristic is tuned for hosted and Ollama naming
+// (`:7b` tags, known family prefixes), so every llama.cpp GGUF filename
+// and every LM Studio `publisher/model` key reads as "not weak" and ran
+// uncapped. That is the "loops forever in tool calls" report.
+//
+// These lock the CLASSIFICATION the gate is built from. The gate itself
+// lives in cmd_factory (it reads provider::active()); what is pinned here
+// is the fact that made the old gate wrong.
+
+TEST_CASE("local model ids are NOT recognised as weak") {
+    // Exactly the shapes a local server reports. Every one of these is a
+    // capable model running locally, and every one reads not-weak — so a
+    // cap gated on is_weak_model() never fires for any of them.
+    //
+    // This is not a bug in is_weak_model: it answers "is this a SMALL
+    // model I recognise", and none of these are that. It is a bug in using
+    // that answer as "is this model safe to run uncapped".
+    CHECK(!weak("qwen3-30b-a3b"));                  // llama.cpp --alias
+    CHECK(!weak("Qwen3-30B-A3B-Q4_K_M.gguf"));      // llama.cpp default id (-m path)
+    CHECK(!weak("gpt-oss-20b"));
+    CHECK(!weak("GLM-4.6-Q4_K_M.gguf"));
+    CHECK(!weak("Devstral-Small-2507-Q8_0.gguf"));
+    CHECK(!weak("qwen/qwen3.5-9b"));                // LM Studio key shape
+    CHECK(!weak("igpu/laguna-xs-2.1"));             // private gateway, from the 80-turn report
+}
+
+TEST_CASE("the ollama-shaped ids the heuristic DOES catch") {
+    // Not deleted: on the Ollama native path these tags are real and the
+    // heuristic is right. The point is that this shape is the only one it
+    // covers, which is why it cannot be the sole gate.
+    CHECK(weak("qwen2.5-coder:7b"));
+    CHECK(weak("codellama:7b"));
+    CHECK(weak("phi3:3.8b"));
+}
+
+TEST_CASE("provider rows know which backends are local") {
+    // The fact the corrected gate keys on. A row that runs on this machine
+    // cannot vouch for its model's loop behaviour the way a hosted backend
+    // can, so it gets the backstop regardless of what the id looks like.
+    const auto* ollama = provider::preset_for("ollama");
+    REQUIRE(ollama != nullptr);
+    CHECK(ollama->is_local);
+
+    const auto* anthropic = provider::preset_for("anthropic");
+    REQUIRE(anthropic != nullptr);
+    CHECK(!anthropic->is_local);
+
+    const auto* openai = provider::preset_for("openai");
+    REQUIRE(openai != nullptr);
+    CHECK(!openai->is_local);
+}
+
+// ── Dotted version ids (GitHub Copilot's /models spelling) ──────────────
+//
+// Copilot returns `claude-opus-4.7`, not `claude-opus-4-7`. The family
+// token matched, so `is_opus()` was true and NOTHING looked broken — but
+// the version parse required a token of <= 2 chars ('4','.','7' is three),
+// so generation and revision both stayed 0. Every gate that reads the
+// NUMBER then silently answered "old model": effort max/xhigh withheld on
+// the whole Copilot Claude lane, and the display label collapsed to a bare
+// "Opus" so 4.7 and 4.8 rendered as two identical picker rows.
+//
+// Both spellings must decode identically.
+TEST_CASE("dotted and dashed version ids decode identically") {
+    using agentty::ModelCapabilities;
+    struct Pair { const char* dotted; const char* dashed; };
+    for (auto p : {Pair{"claude-opus-4.7",   "claude-opus-4-7"},
+                   Pair{"claude-opus-4.5",   "claude-opus-4-5"},
+                   Pair{"claude-sonnet-4.6", "claude-sonnet-4-6"},
+                   Pair{"claude-haiku-4.5",  "claude-haiku-4-5"},
+                   Pair{"claude-fable-5.1",  "claude-fable-5-1"}}) {
+        const auto a = ModelCapabilities::from_id(p.dotted);
+        const auto b = ModelCapabilities::from_id(p.dashed);
+        CHECK(a.family     == b.family);
+        CHECK(a.generation == b.generation);
+        CHECK(a.revision   == b.revision);
+        CHECK(a.generation_4_or_later == b.generation_4_or_later);
+        CHECK(a.supports_effort()       == b.supports_effort());
+        CHECK(a.supports_effort_max()   == b.supports_effort_max());
+        CHECK(a.supports_effort_xhigh() == b.supports_effort_xhigh());
+        CHECK(ModelCapabilities::tier_for(p.dotted)
+              == ModelCapabilities::tier_for(p.dashed));
+    }
+}
+
+TEST_CASE("copilot dotted claude ids reach the full effort ladder") {
+    using agentty::ModelCapabilities;
+    // The user-visible symptom: xhigh shipped with Opus 4.7, and a Copilot
+    // session could never select it because the id decoded as generation 0.
+    const auto o47 = ModelCapabilities::from_id("claude-opus-4.7");
+    CHECK(o47.is_opus());
+    CHECK(o47.generation == 4);
+    CHECK(o47.revision   == 7);
+    CHECK(o47.generation_4_or_later);
+    CHECK(o47.supports_effort());
+    CHECK(o47.supports_effort_max());
+    CHECK(o47.supports_effort_xhigh());
+
+    // A dotted revision must not be mistaken for the NEXT token's revision:
+    // `claude-haiku-4.5-latest` is 4.5, and `latest` is a variant word.
+    const auto h = ModelCapabilities::from_id("claude-haiku-4.5-latest");
+    CHECK(h.is_haiku());
+    CHECK(h.generation == 4);
+    CHECK(h.revision   == 5);
+
+    // Two-digit revisions stay in range.
+    const auto s = ModelCapabilities::from_id("claude-sonnet-5.10");
+    CHECK(s.generation == 5);
+    CHECK(s.revision   == 10);
+}
+
+TEST_CASE("version parse rejects dates and malformed versions") {
+    using agentty::ModelCapabilities;
+    // The guard the old <= 2 length check existed for. An 8-digit date must
+    // never read as a generation — 20241022 would pass every `>= 4` gate.
+    for (const char* id : {"claude-3-5-sonnet-20241022",
+                           "claude-3-opus-20240229"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.generation == 0);
+        CHECK(!c.generation_4_or_later);
+    }
+    // Malformed dotted forms are not versions: trailing dot, leading dot,
+    // and a second dot all leave the version unset rather than guessing.
+    for (const char* id : {"claude-opus-4.", "claude-opus-.7",
+                           "claude-opus-4.7.1"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.is_opus());          // family still decodes
+        CHECK(c.generation == 0);    // but no version is invented
+    }
+    // The gpt branch is bounded the same way, so a date-shaped token there
+    // cannot become a generation either.
+    CHECK(ModelCapabilities::from_id("gpt-20250514").generation == 0);
+    // And the pre-5 ids stay Unknown (generic OpenAI compat), as before.
+    CHECK(!ModelCapabilities::from_id("gpt-4o").is_gpt());
+    CHECK(!ModelCapabilities::from_id("gpt-4.1").is_gpt());
+}
+
+TEST_CASE("the [1m] suffix survives a dotted version") {
+    using agentty::ModelCapabilities;
+    const auto c = ModelCapabilities::from_id("claude-opus-4.5[1m]");
+    CHECK(c.is_opus());
+    CHECK(c.generation == 4);
+    CHECK(c.revision   == 5);
+    CHECK(c.extended_context_1m);
+    CHECK(c.context_window() == 1000000);
+}
+
+TEST_CASE("every live copilot claude id decodes a version") {
+    using agentty::ModelCapabilities;
+    // The real /models payload. Each of these is a Claude-family id whose
+    // version is dotted; a generation of 0 on any of them means the picker
+    // folds siblings into one row and the effort ladder is withheld.
+    for (const char* id : {"claude-opus-4.7", "claude-opus-4.8",
+                           "claude-opus-5",   "claude-opus-5.5",
+                           "claude-sonnet-4.6", "claude-sonnet-5",
+                           "claude-sonnet-5.5", "claude-haiku-4.5",
+                           "claude-fable-5",  "claude-fable-5.1"}) {
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.is_known_family());
+        CHECK(c.generation >= 4);
+        CHECK(c.generation_4_or_later);
+    }
 }

@@ -17,7 +17,12 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/domain/id.hpp"
+#include "agentty/domain/rag_mode.hpp"
+#include "agentty/domain/lazy_bytes.hpp"
+#include "agentty/domain/smart_mode.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/util/base64.hpp"
+#include "agentty/util/sendable.hpp"
 
 namespace agentty {
 
@@ -31,6 +36,74 @@ enum class Role : std::uint8_t { User, Assistant, System };
     }
     return "?";
 }
+
+// A vision image carried by a User message OR a tool_result. Bytes are
+// held RAW (not base64) and lazily — see LazyBytes above for why, and for
+// the correctness rules that make it safe.
+class ImageContent {
+public:
+    using Source = LazyBytes::Source;
+
+    std::string media_type;  // "image/png", "image/jpeg", "image/webp", "image/gif"
+
+    ImageContent() = default;
+    ImageContent(std::string mt, std::string raw_bytes)
+        : media_type(std::move(mt)), data_(std::move(raw_bytes)) {}
+
+    static ImageContent lazy(std::string mt, Source src) {
+        ImageContent img;
+        img.media_type = std::move(mt);
+        img.data_      = LazyBytes::lazy(std::move(src));
+        return img;
+    }
+
+    [[nodiscard]] const std::string& bytes() const { return data_.bytes(); }
+    void set_bytes(std::string raw) {
+        data_.set_bytes(std::move(raw));
+        // A fresh cell, not a reset: copies made earlier keep the encoding
+        // of the bytes they still hold (mirrors LazyBytes::set_bytes).
+        b64_ = std::make_shared<B64Cell>();
+    }
+    [[nodiscard]] const Source& source() const noexcept { return data_.source(); }
+    [[nodiscard]] bool materialised() const noexcept { return data_.materialised(); }
+
+    // Base64 of bytes(), encoded ONCE and shared by every copy of this
+    // image. The wire encoders need base64 (Anthropic's `data`, OpenAI's
+    // data: URL) while the model state keeps the raw bytes to avoid the
+    // +33% memory, so each request used to re-encode every image from
+    // scratch: a handful of screenshots in a thread is megabytes of base64
+    // rebuilt on EVERY round, which dominated the body encode on any thread
+    // with images in it.
+    //
+    // The cell is a shared_ptr, like LazyBytes' own, so the per-turn Thread
+    // snapshot shares the encoding with the live model rather than copying
+    // or recomputing it. Invalidated by set_bytes(); a lazily-materialised
+    // image encodes on first use, which is also when its bytes first load.
+    [[nodiscard]] const std::string& base64() const {
+        // The cell is created eagerly (cheap, no encoding) so that the
+        // pointer itself is never written concurrently — only the once_flag
+        // inside it is, and that is what it is for. Encoding is pure, so
+        // concurrent readers all observe the same bytes.
+        std::call_once(b64_->once, [&] { b64_->text = util::base64_encode(bytes()); });
+        return b64_->text;
+    }
+
+    // Kept so existing call sites that installed the image resolver still
+    // compile; both types share one resolver, since both resolve the same
+    // kind of Source against the same blob store.
+    using Resolver = LazyBytes::Resolver;
+    static void set_resolver(Resolver r) noexcept { LazyBytes::set_resolver(r); }
+
+private:
+    struct B64Cell {
+        std::once_flag once;
+        std::string    text;
+    };
+    LazyBytes data_;
+    // Never null. Copies share the cell (and so the encoding); set_bytes
+    // installs a FRESH one so other copies keep their already-valid text.
+    std::shared_ptr<B64Cell> b64_ = std::make_shared<B64Cell>();
+};
 
 // `ToolUse::Status` is a sum type. Each alternative owns the data that is
 // actually meaningful in that state — `Running` holds the live progress
@@ -50,22 +123,89 @@ struct ToolUse {
     // reads it via started_at()).
     struct Pending  { std::chrono::steady_clock::time_point started_at{}; };
     struct Approved { std::chrono::steady_clock::time_point started_at{}; };
-    struct Running  {
+    struct Running {
         std::chrono::steady_clock::time_point started_at{};
         // Live stdout+stderr snapshot for a running tool. Shown in the card
         // while status is Running so the user sees progress immediately
         // instead of waiting until the whole command finishes.
         std::string progress_text;
+        // Wall-clock of the most recent progress snapshot. The hung-syscall
+        // wedge net (update/meta.cpp Tick) measures liveness from
+        // max(started_at, last_progress_at) instead of started_at alone, so a
+        // long-but-HEALTHY tool that keeps emitting progress (a subagent
+        // churning through tool calls, a multi-minute build streaming output)
+        // is never guillotined by the flat wedge cap — only a tool that has
+        // gone genuinely silent past the cap trips it. Zero until the first
+        // ToolExecProgress lands; the wedge net treats zero as "no progress
+        // yet" and falls back to started_at.
+        std::chrono::steady_clock::time_point last_progress_at{};
+        // When EXECUTION actually began — as distinct from when the card was
+        // born (started_at, above).
+        //
+        // These are two different questions and one field cannot answer
+        // both:
+        //
+        //   started_at      — "how long has this card existed?"  → DISPLAY.
+        //                     Stamped at StreamToolUseStart so the elapsed
+        //                     timer covers arg-streaming too; freezing it
+        //                     there reads as "stuck".
+        //   executing_since — "how long has this been RUNNING?"  → LIVENESS.
+        //                     Stamped when the tool is actually dispatched.
+        //
+        // Conflating them was issue #40: a tool awaiting permission is not
+        // running, but the wedge net measured from started_at, so the time a
+        // HUMAN spent deciding was billed against the tool's 330 s budget.
+        // Step away for six minutes, approve, and the first Tick killed a
+        // command that had not executed a single instruction — reported as
+        // "ran 400s with no progress", which was true of the card and false
+        // of the tool.
+        //
+        // Zero means "not recorded" (older threads, tests constructing
+        // Running directly); readers fall back to started_at, which is the
+        // pre-fix behaviour and correct whenever there was no approval gap.
+        std::chrono::steady_clock::time_point executing_since{};
+        // Unique per dispatch (next_tool_exec_seq). The worker echoes it on
+        // its progress/result so a stale worker can't hit a reused id.
+        std::uint64_t exec_seq = 0;
+
+        // The instant from which "has this gone quiet?" should be measured.
+        // Every liveness consumer goes through this rather than reaching for
+        // a field, so a future third clock cannot be half-adopted.
+        [[nodiscard]] std::chrono::steady_clock::time_point
+        liveness_origin() const noexcept {
+            auto base = executing_since.time_since_epoch().count() != 0
+                      ? executing_since : started_at;
+            if (last_progress_at.time_since_epoch().count() != 0
+                && last_progress_at > base)
+                base = last_progress_at;
+            return base;
+        }
     };
     struct Done {
+        // Field ORDER is pinned: ~70 aggregate-initialisation sites across
+        // tests and update code bind {started, finished, output[, images]}
+        // positionally. executing_since therefore goes LAST with a default
+        // — the old shape remains valid and binds it to "not recorded".
         std::chrono::steady_clock::time_point started_at{};
         std::chrono::steady_clock::time_point finished_at{};
         std::string output;
+        // Images a tool chose to surface to a vision model (e.g. `read` on an
+        // image file). Raw bytes; the wire encodes them as image blocks inside
+        // this call's tool_result, right after the text. Empty for text tools.
+        std::vector<ImageContent> images;
+        // EXECUTION window start (dispatch), copied from
+        // Running::executing_since at settle. Zero = "not recorded" (older
+        // persisted threads, tests constructing Done directly); consumers
+        // fall back to started_at — correct whenever dispatch happened
+        // immediately, i.e. whenever there was no approval gap.
+        std::chrono::steady_clock::time_point executing_since{};
     };
     struct Failed {
         std::chrono::steady_clock::time_point started_at{};
         std::chrono::steady_clock::time_point finished_at{};
         std::string output;
+        // Same convention as Done: last, defaulted, zero = not recorded.
+        std::chrono::steady_clock::time_point executing_since{};
     };
     struct Rejected {
         std::chrono::steady_clock::time_point finished_at{};
@@ -112,6 +252,18 @@ struct ToolUse {
     // we've consumed; the next decode pass resumes there.
     mutable std::string stream_decoded_value;
     std::size_t         stream_decode_through = 0;
+    // Amortization cursor for the edit/todo structured preview. Those two
+    // branches can't use write's incremental cached-offset decode (they
+    // mirror a growing ARRAY of objects, not one long string), so they lean
+    // on try_parse_partial(args_streaming), which is O(|args_streaming|) per
+    // call. Running it every ~120 ms tick is quadratic over a large multi-
+    // edit call. Instead we re-parse only once the buffer has grown by
+    // kStreamParseGrowth bytes since the last parse — the preview lags by at
+    // most that many bytes (imperceptible) but the parse COUNT drops from
+    // one-per-tick to one-per-growth-window, cutting the cumulative cost by
+    // that factor. Holds the args_streaming size at the last structured
+    // parse; 0 = never parsed.
+    std::size_t         stream_parse_through = 0;
     // Set when StreamToolUseEnd / finalize_turn detected that the
     // wire ended inside a string value. finalize_turn's retry loop
     // treats this exactly like a missing-required-field truncation:
@@ -121,8 +273,13 @@ struct ToolUse {
     // Streaming-time scratch only — not persisted; default-init on
     // load is correct.
     bool           stream_mid_string_truncated = false;
+    // The tool definition that consent was given for -- either by the user at
+    // the prompt, or by the policy when it auto-allowed. Checked immediately
+    // before execute, so a catalog rebuilt in between (tools/list_changed, an
+    // mcp reload) cannot swap a different tool under an approved name.
+    // 0 means nothing was recorded and the check is skipped.
+    std::uint64_t  approved_def_hash = 0;
     Status         status   = Pending{};
-    bool           expanded = true;
 
     // ── State predicates ─────────────────────────────────────────────────
     [[nodiscard]] bool is_pending()  const noexcept { return std::holds_alternative<Pending>(status);  }
@@ -161,6 +318,14 @@ struct ToolUse {
         if (auto* f = std::get_if<Failed>(&status)) return f->output;
         return empty;
     }
+    // Images a completed tool surfaced (read on an image file). Empty for
+    // every non-Done state and every text tool. The wire renders these as
+    // image blocks inside this call's tool_result.
+    [[nodiscard]] const std::vector<ImageContent>& done_images() const noexcept {
+        static const std::vector<ImageContent> empty;
+        if (auto* d = std::get_if<Done>(&status)) return d->images;
+        return empty;
+    }
     [[nodiscard]] const std::string& progress_text() const noexcept {
         static const std::string empty;
         if (auto* r = std::get_if<Running>(&status)) return r->progress_text;
@@ -177,6 +342,91 @@ struct ToolUse {
             if constexpr (requires { s.finished_at; }) return s.finished_at;
             else return {};
         }, status);
+    }
+
+    // When execution ACTUALLY began (dispatch), as distinct from
+    // started_at() (card birth). Done/Failed carry their own
+    // executing_since — copied from Running when the tool settles; older
+    // terminal states fall back to started_at, matching the pre-#40
+    // behaviour that is correct whenever there was no approval gap.
+    [[nodiscard]] std::chrono::steady_clock::time_point executing_since() const noexcept {
+        return std::visit([](const auto& s) -> std::chrono::steady_clock::time_point {
+            if constexpr (requires { s.executing_since; } && requires { s.started_at; }) {
+                return s.executing_since.time_since_epoch().count() != 0
+                     ? s.executing_since : s.started_at;
+            }
+            else if constexpr (requires { s.started_at; }) return s.started_at;
+            else return {};
+        }, status);
+    }
+
+    // EXECUTION-window read for the stats fold and the persistence
+    // serializer. The two use cases have OPPOSITE semantics:
+    //
+    //   executing_since()   → liveness display: "how long has this been
+    //                         RUNNING?" falls back to card birth for old
+    //                         states (no approval gap) so the elapsed
+    //                         timer keeps a value.
+    //   exec_window_at()    → accounting: only a RECORDED execution
+    //                         window is a fact. A tool that never
+    //                         dispatched (Rejected, salvaged-as-
+    //                         "not run", args-parse failure) has no
+    //                         executing_since and must report none —
+    //                         falling back to its card-birth stamp would
+    //                         bill approval wait / park time as tool
+    //                         time and re-create the 2h20m lie the
+    //                         executing_since fix removed.
+    [[nodiscard]] std::optional<std::chrono::steady_clock::time_point>
+    exec_window_at() const noexcept {
+        return std::visit([](const auto& s)
+            -> std::optional<std::chrono::steady_clock::time_point> {
+            if constexpr (requires { s.executing_since; }) {
+                return s.executing_since.time_since_epoch().count() != 0
+                     ? std::optional{s.executing_since} : std::nullopt;
+            }
+            return std::nullopt;
+        }, status);
+    }
+
+    // ── Settle: the ONE way to move a tool into a terminal state ──────────
+    //
+    // Every terminal transition has to carry the execution window across the
+    // status overwrite, because Running is the only state that holds it and
+    // the overwrite destroys Running. That was being done by hand at ~17
+    // sites as "capture executing_since(), overwrite, write it back" -- and
+    // every one of them read the WRONG accessor.
+    //
+    // executing_since() is the LIVENESS read: for a tool that never
+    // dispatched it falls back to started_at, card birth, so the elapsed
+    // timer has something to show. Copied into Failed::executing_since that
+    // fallback stops being a display convenience and becomes a recorded
+    // fact: "this tool started executing at card birth". exec_window_at()
+    // then reports it as a real window, and the fold bills the entire card
+    // life -- permission wait, queueing, the user's lunch -- as tool time.
+    //
+    // It only bites on a tool that settles BEFORE dispatch, which is exactly
+    // the set of paths where a turn goes wrong: rejected at the prompt,
+    // cancelled while queued, watchdog-killed with args never finished,
+    // stream death, token refresh failure. On a turn where nothing goes wrong
+    // every tool dispatches first, the copied value is the real stamp, and
+    // the numbers are right -- which is why it looked fine on a stable paid
+    // provider and drifted on a flaky one.
+    //
+    // These helpers read exec_window_at(), so "never dispatched" stays
+    // "never dispatched" through the settle. Use them instead of assigning
+    // Failed{}/Done{} directly to a live tool.
+    void settle_failed(std::chrono::steady_clock::time_point now,
+                       std::string output) {
+        const auto window = exec_window_at();   // BEFORE the overwrite
+        status = Failed{started_at(), now, std::move(output)};
+        if (window) std::get<Failed>(status).executing_since = *window;
+    }
+    void settle_done(std::chrono::steady_clock::time_point now,
+                     std::string output,
+                     std::vector<ImageContent> images = {}) {
+        const auto window = exec_window_at();   // BEFORE the overwrite
+        status = Done{started_at(), now, std::move(output), std::move(images)};
+        if (window) std::get<Done>(status).executing_since = *window;
     }
 
     // String tag for serialization / logging. Stable across versions; the
@@ -230,21 +480,8 @@ struct ToolUse {
         mix(progress_text().size());
         mix(args_streaming.size());
         mix(static_cast<std::uint64_t>(status.index()));
-        mix(expanded ? 1ULL : 0ULL);
         return k;
     }
-};
-
-/// Image content attached to a User message. Serialized on the wire
-/// as an Anthropic image content block — `{"type":"image","source":
-/// {"type":"base64","media_type":"...","data":"..."}}`. Bytes are
-/// stored raw in memory (NOT base64) so the in-RAM representation
-/// stays compact; encoding happens at the JSON write boundary.
-/// Persisted on disk as base64 so a loaded thread can be re-sent on
-/// a follow-up turn without re-asking the user for the file.
-struct ImageContent {
-    std::string media_type;  // "image/png", "image/jpeg", "image/webp", "image/gif"
-    std::string bytes;       // raw image bytes, NOT base64
 };
 
 struct Message {
@@ -279,6 +516,32 @@ struct Message {
     /// corresponding ImageContent's path.
     std::vector<Attachment>   attachments;
     std::string streaming_text;
+    // The wire model id that ACTUALLY served this assistant turn, and the
+    // Smart Mode role it was routed as. Empty = "whatever was selected"
+    // (no Smart Mode, or a turn from before this field existed).
+    //
+    // Why this is stored per-message rather than read from Model::d.model_id
+    // at render time: under Smart Mode the turn is dispatched on the
+    // resolved ROLE model (`strategic_profile.model` in launch_stream), which
+    // is frequently NOT the model in the picker. Rendering the header from
+    // the live selection therefore lied — the badge said "Mistral" while
+    // every byte came from GLM. It also lied retroactively: switching models
+    // relabelled every turn already in the transcript. A turn's provenance is
+    // a property OF THE TURN, so it lives on the turn.
+    ModelId served_model;
+    // Which role slot produced it. Drives the accent colour on the turn
+    // header so delegation is visible at a glance. Absent when Smart Mode
+    // was off — which is a different statement from "the empty role", and
+    // is why this is optional rather than a sentinel enumerator.
+    //
+    // ModelRole, not a string, and the drift this prevents had ALREADY
+    // happened: the writer emitted only "strategic", the view matched
+    // "strategic"/"implementation"/"utility" (two dead branches), and the
+    // existing role_label() helper produces "impl" — three spellings of
+    // one concept, none checked by the compiler. Using role_label() at
+    // the writer, the obvious tidy-up, would have silently broken the
+    // accent colour. See docs/STRONG_TYPES_AUDIT.md §Finding 2.
+    std::optional<smart::ModelRole> served_role;
     // ── Extended/adaptive thinking (Assistant turns only) ──────────────
     // When effort is on, the Claude provider enables adaptive thinking and
     // the model emits a leading `thinking` content block (text — usually
@@ -289,8 +552,116 @@ struct Message {
     // the first content block of the assistant message on the wire, and
     // persist them so a reloaded thread can still be continued. Empty for
     // User turns and for Assistant turns produced without thinking.
+    //
+    // MULTI-BLOCK: with the interleaved-thinking beta (and on any wire that
+    // emits several thinking blocks per response) ONE assistant message can
+    // carry SEVERAL independently-signed blocks. Each signature covers its
+    // own block's exact text, so merging them (concat texts + keep last
+    // signature) corrupts every block and 400s the replay. `thinking_blocks`
+    // keeps the (text, signature) pairs separate and IN ORDER — the
+    // authoritative replay source. `thinking` remains the concatenated
+    // DISPLAY text (blocks joined \n\n) and `thinking_signature` mirrors the
+    // last block's signature for backward compat with older persisted
+    // threads (wire replay falls back to the legacy pair when the vector is
+    // empty).
+    struct ThinkingBlock {
+        std::string text;
+        std::string signature;
+        // Non-empty = this is a REDACTED thinking block: Anthropic's safety
+        // system encrypted the whole block into an opaque `data` payload
+        // (arrives complete in content_block_start). It must be replayed as
+        // {"type":"redacted_thinking","data":…} before the tool_use it
+        // precedes, or the follow-up 400s ("Expected thinking or
+        // redacted_thinking but found tool_use"). Never rendered.
+        std::string redacted_data;
+    };
+    std::vector<ThinkingBlock> thinking_blocks;
     std::string thinking;
     std::string thinking_signature;
+    // Wall-clock reasoning time for the "Reasoned · ~N tokens · 3.2s" header
+    // meter, kept as a small state machine rather than one latched number:
+    //
+    //   reasoning_started_ms  the OPEN phase's steady-clock stamp, 0 = no
+    //                         phase open. Not persisted (steady clock).
+    //   reasoning_ms          time ACCUMULATED over closed phases, and the
+    //                         persisted one, so a reloaded thread still
+    //                         shows how long the turn thought.
+    //
+    // Two fields because a turn can think more than once: interleaved
+    // thinking and multi-item Responses streams reason again after a tool
+    // call, so the phase re-opens and the total adds up. A single "sealed
+    // once" duration made the SECOND thinking phase invisible to the view,
+    // which then had to guess at it from whether the typewriter happened to
+    // be mid-glide.
+    std::int64_t reasoning_started_ms = 0;
+    std::int64_t reasoning_ms = 0;
+    // ── Codex/Responses reasoning replay (Assistant turns only) ─────────
+    // The Responses API is the OpenAI analogue of Anthropic's thinking
+    // block. When we request `include:["reasoning.encrypted_content"]`, each
+    // reasoning output item carries an OPAQUE `encrypted_content` blob. To
+    // keep chain-of-thought across tool rounds under `store:false` (the
+    // stateless Codex mode), that blob MUST be replayed as a `reasoning`
+    // item in the next request's `input[]` — WITHOUT its server id (echoing
+    // the id triggers a failing server-side lookup). We capture it here
+    // during streaming, replay it ahead of this turn's function_call items,
+    // and persist it so a reloaded thread stays continuable. `reasoning_summary`
+    // is the human-visible summary text (shown as the thinking block); it is
+    // NOT sent back (only encrypted_content is). Empty for User turns and for
+    // Assistant turns produced without reasoning. Multiple reasoning items in
+    // one turn are joined newline-separated in order.
+    std::string reasoning_encrypted;
+    // WHICH site minted those blobs (`responses::Site::id` — "chatgpt",
+    // "copilot", …). Empty on turns with no encrypted reasoning.
+    //
+    // The ciphertext is opaque AND account-scoped: only the backend that
+    // produced it can decrypt it. Replaying a ChatGPT blob to Copilot is
+    // not a no-op, it is a 400 — "Encrypted content item_id did not match
+    // the target item id" — and it fails the whole request, not just the
+    // reasoning item. That is openclaw#72602 and github/copilot-sdk#615,
+    // both filed against exactly this: a thread that switches provider
+    // mid-conversation and carries its reasoning across.
+    //
+    // We had no such tag, so nothing stopped it. Switch provider with ^P
+    // on a thread that has Codex reasoning captured, and every subsequent
+    // turn sends ciphertext the new backend cannot read. Today that is
+    // masked — Copilot rejects the `include`, so the field only ever
+    // fills on ChatGPT — which means the bug is latent, waiting for a
+    // second site to start returning blobs. Latent is not fixed.
+    //
+    // Recording the origin is what makes the replay decidable: send a blob
+    // only to the site that minted it, and drop it silently otherwise.
+    // Dropping costs continuity of chain-of-thought across a provider
+    // switch, which the user just asked for anyway; sending costs the turn.
+    std::string reasoning_site;
+    std::string reasoning_summary;
+
+    // Unified reasoning text for DISPLAY, across every provider. All three
+    // reasoning wires funnel their VISIBLE text into `thinking` via
+    // StreamThinkingDelta: Anthropic `thinking_delta`, Codex
+    // `reasoning_summary_text.delta`, and OpenAI-compat `reasoning_content`
+    // (DeepSeek / Grok / o-series). `reasoning_summary` is a legacy fallback
+    // for any path that populated it directly. One accessor keeps the view,
+    // the render key, and the toggle logic provider-agnostic (DRY): the UI
+    // shows a reasoning block iff this is non-empty.
+    [[nodiscard]] std::string_view reasoning_display_text() const noexcept {
+        if (!thinking.empty())          return thinking;
+        return reasoning_summary;
+    }
+    [[nodiscard]] bool has_reasoning() const noexcept {
+        return !reasoning_display_text().empty();
+    }
+    /// Is a thinking phase OPEN on the wire right now? Stamped by the first
+    /// thinking delta, cleared when an answer byte or a tool call seals it.
+    /// This is the honest answer to "is it still thinking" — it survives a
+    /// quiet gap in the stream, which an animation flag does not.
+    [[nodiscard]] bool thinking_open() const noexcept {
+        return reasoning_started_ms != 0;
+    }
+    /// Total thinking time so far: closed phases plus the open one.
+    [[nodiscard]] std::int64_t thinking_elapsed_ms(std::int64_t now_ms) const noexcept {
+        if (!thinking_open()) return reasoning_ms;
+        return reasoning_ms + std::max<std::int64_t>(0, now_ms - reasoning_started_ms);
+    }
     // Smoothing buffer. Anthropic's SSE batches deltas at the server's
     // tokenizer rate — a single content_block_delta can carry 50+ chars,
     // and several can arrive in one TCP read. If we appended each
@@ -321,6 +692,74 @@ struct Message {
     bool text_block_closed = false;
     std::vector<ToolUse> tool_calls;
     std::chrono::system_clock::time_point timestamp = std::chrono::system_clock::now();
+
+    // ── Per-turn telemetry (Assistant turns only) ──────────────────────
+    //
+    // Sealed once at finalize_turn, then never touched. This is the same
+    // argument `served_model` won: a turn's provenance is a property OF
+    // THE TURN, so it lives on the turn rather than being recomputed from
+    // session state that has already been thrown away.
+    //
+    // It has to be stored, because the counters it captures are VOLATILE.
+    // `transient_retries`, `mid_stream_failures` and friends live on
+    // phase::Active, which is reset at the start of every turn — by the
+    // time a stats panel opens they are gone, so no amount of walking the
+    // transcript can recover them. Same for the cache split: the ratio is
+    // computed on every turn today and discarded.
+    //
+    // Cost is one struct write per turn. Nothing per token, nothing per
+    // frame: ~50 bytes on a message that already carries kilobytes.
+    struct Telemetry {
+        // Wall-clock, in two halves that answer different questions.
+        // ttft is "did the provider make me wait", stream is "was
+        // generation slow" — a single total conflates a queueing problem
+        // with a throughput one, and they have different fixes.
+        std::uint32_t ttft_ms   = 0;   // request launch → first content byte
+        std::uint32_t stream_ms = 0;   // first byte → stop
+
+        // Usage as the wire reported it. input_tokens EXCLUDES the cache
+        // fields (Anthropic's convention), so the true prefix size is
+        // input + cache_read + cache_creation — see cache_hit_ratio().
+        std::uint32_t input_tokens     = 0;
+        std::uint32_t output_tokens    = 0;
+        // Billed WITHIN output_tokens, never added to it.
+        std::uint32_t reasoning_tokens = 0;
+        std::uint32_t cache_read       = 0;
+        std::uint32_t cache_creation   = 0;
+
+        // Transport health. Non-zero means the turn survived something.
+        std::uint16_t transient_retries    = 0;
+        std::uint16_t mid_stream_failures  = 0;
+        std::uint16_t no_progress_failures = 0;
+
+        // Bytes the transport actually delivered. Divided by stream_ms
+        // this is the honest throughput, which token counts are not:
+        // tokens arrive in bursts and only settle at the usage frame.
+        std::uint32_t wire_bytes = 0;
+
+        // Share of the prefix served from cache, or -1 when this turn
+        // reported no prefix at all. A sentinel rather than 0.0 because
+        // "no cache hit" and "nothing to hit" are different readings and
+        // averaging them together understates every session.
+        [[nodiscard]] double cache_hit_ratio() const noexcept {
+            const double prefix = static_cast<double>(input_tokens)
+                                + static_cast<double>(cache_read)
+                                + static_cast<double>(cache_creation);
+            if (prefix <= 0.0) return -1.0;
+            return static_cast<double>(cache_read) / prefix;
+        }
+        [[nodiscard]] bool degraded() const noexcept {
+            return transient_retries || mid_stream_failures
+                || no_progress_failures;
+        }
+    };
+    // Absent on user messages, on assistant turns that predate this field,
+    // and on turns that never reached finalize_turn. optional rather than a
+    // zeroed struct because "not measured" and "measured as zero" are
+    // different, and a sentinel that conflates them puts fake zeroes in
+    // every denominator that averages over turns.
+    std::optional<Telemetry> telemetry;
+
     std::optional<CheckpointId> checkpoint_id;
     // Set when the turn ended in a stream-level error (overloaded, 5xx,
     // network drop, mid-stream parse failure, etc.). Carries just the
@@ -339,6 +778,90 @@ struct Message {
     // Mirrors Claude Code's `isCompactSummary` field on the synthesised
     // post-compact message (binary near offset 92759504).
     bool is_compact_summary = false;
+
+    // Proactive RETRIEVED-CONTEXT injection, if this message is one.
+    //
+    // Set on the synthetic User message that carries PROACTIVELY RETRIEVED
+    // context (SOTA "active retrieval", FLARE/Self-RAG family): when the
+    // user submits a knowledge-shaped question, submit_message silently
+    // runs the RAG pipeline and, only on a HIGH-confidence hit, inserts one
+    // of these just before the assistant placeholder. On the wire it is a
+    // normal User message whose text is a fenced <retrieved-context> block
+    // the model can ground on; in the transcript the view renders a compact
+    // one-line "retrieved context" affordance instead of the raw block.
+    // Never shown as the user's own words, and skipped by the doom-loop /
+    // run-start walk (not a real human turn boundary — see
+    // agent_loop_should_break).
+    //
+    // This was three independent fields — `bool proactive_context`, plus a
+    // `double proactive_confidence = -1.0` and a `bool proactive_expanded`
+    // documented as "only meaningful when proactive_context is true". Three
+    // fields describe eight states when only two shapes are real, and the
+    // confidence carried a sentinel INSIDE its own domain: the field is a
+    // probability in [0,1], so -1.0 was a value the type said was a
+    // confidence and the reader had to know was not. Grouping them says it
+    // once: absent = an ordinary message, engaged = these facts are real.
+    //
+    // The persisted shape is unchanged — it was already nested this way
+    // (`if (proactive_context) { … confidence … }`), so on-disk the sum
+    // type existed and only the in-memory type disagreed.
+    struct ProactiveContext {
+        // Retrieval confidence that gated the injection, from the RAG funnel
+        // (ProactiveHit.confidence), so the transcript card can render a
+        // real bar. Absent when the funnel did not report one. Wire-inert.
+        std::optional<double> confidence;
+        // View-only: show each source's FULL passage text instead of the
+        // one-line snippet. Toggled by Ctrl+U (ToggleRetrievedExpanded) on
+        // the newest such card. Wire-inert and NOT persisted — a display
+        // preference that resets to collapsed on reload. Folded into
+        // compute_render_key so flipping it invalidates the cached Element.
+        bool expanded = false;
+    };
+    std::optional<ProactiveContext> proactive;
+
+    // Is this a retrieved-context message? The question every consumer
+    // actually asks; reads better than `.proactive.has_value()` at the ~8
+    // sites that only need the boolean.
+    [[nodiscard]] bool is_proactive_context() const noexcept {
+        return proactive.has_value();
+    }
+
+    // Smart Mode routing telemetry (view-only, wire-inert, not persisted).
+    // When `smart_routing` is set, this is a synthetic zero-text card that
+    // renders the per-turn ROUTING DECISION as a first-class thread event
+    // (🧠 "Smart Mode"): which model + effort the turn was routed to, the
+    // classified complexity that scaled it, and which layers are active. It
+    // is NOT a real user/assistant turn — skipped by every wire/loop walk
+    // exactly like proactive_context. The actual subagent delegations render
+    // as ordinary `task` tool cards; this card is the DECISION, they are the
+    // execution.
+    bool        smart_routing        = false;
+    std::string smart_route_model;    // wire id the Strategic turn ran on
+    std::string smart_route_effort;   // effort label ("off"/"high"/…)
+    std::string smart_route_complexity; // "trivial"/"simple"/"standard"/"complex"
+    std::string smart_route_note;     // effort PROVENANCE, e.g.
+                                      // "medium → complex · learned +1 · session -1"
+                                      // — makes the adaptive decision legible.
+    bool        smart_route_orchestrate = false;  // delegation directive active
+    bool        smart_route_subagents   = false;  // per-role subagent routing
+
+    // Fork provenance card (view-visible, wire-VISIBLE). When `fork_note`
+    // is set, this is a synthetic Role::User message seeded at the head of
+    // a freshly-forked thread. Two jobs:
+    //   1. VIEW: renders as a first-class "\u2443 Forked" event card (glyph +
+    //      "Forked" label + a one-line body) so a brand-new fork is NOT a
+    //      blank screen — the user sees, as a thread event, that the fork
+    //      happened and that the parent transcript is readable on demand.
+    //   2. WIRE: unlike smart_routing/proactive_context, this message IS
+    //      sent to the model (its `text` is the transcript pointer). It is
+    //      a User message on purpose — the ChatGPT/Responses transport
+    //      DROPS mid-thread System messages (folded into `instructions`),
+    //      so a System note could vanish and the model would never learn
+    //      the parent transcript exists. A User message survives every
+    //      provider path. `fork_transcript` holds the path for the card's
+    //      body (the wire `text` carries the full instruction).
+    bool        fork_note        = false;
+    std::string fork_transcript;   // path to the parent transcript .md (may be empty)
 
     // FNV-1a over the fields that turn_element / turn_config consume
     // when building the rendered Element. The view cache stamps the
@@ -362,6 +885,16 @@ struct Message {
     [[nodiscard]] std::uint64_t compute_render_key() const {
         std::uint64_t k = 1469598103934665603ULL;
         auto mix = [&](std::uint64_t v) { k = (k ^ v) * 1099511628211ULL; };
+        // Mix a string's CONTENT, not just its length. Length alone is a
+        // fine proxy for "did this large body change" (a streaming text
+        // buffer only ever grows), but it is wrong for short identifiers
+        // drawn from a small set: two model ids of equal length would
+        // collide and one turn's header would reuse the other's cached
+        // Element. FNV-1a over the bytes, same constant as `mix`.
+        auto mix_str = [&](std::string_view s) {
+            for (unsigned char c : s) k = (k ^ c) * 1099511628211ULL;
+            mix(s.size());
+        };
         mix(static_cast<std::uint64_t>(role));
         mix(text.size());
         mix(streaming_text.size());
@@ -369,11 +902,19 @@ struct Message {
         mix(images.size());
         mix(attachments.size());
         for (const auto& a : attachments) {
-            // Body bytes don't change after submit; mixing size is
-            // enough to invalidate the render cache on a hypothetical
+            // Body bytes don't change after submit; mixing the byte count
+            // is enough to invalidate the render cache on a hypothetical
             // future edit and cheap enough to keep here.
+            //
+            // `byte_count` and NOT `body.bytes().size()`: this runs on
+            // every frame that rebuilds a turn, and the body may be an
+            // unmaterialised blob reference. Asking it for its size would
+            // read a 2 MB build log off disk to compute a hash — turning
+            // the render path into exactly the eager load LazyBytes
+            // exists to avoid. byte_count is stored metadata and is
+            // already what the chip displays.
             mix(static_cast<std::uint64_t>(a.kind));
-            mix(a.body.size());
+            mix(a.byte_count);
             mix(a.path.size());
             mix(a.name.size());
             mix(static_cast<std::uint64_t>(a.line_count));
@@ -382,6 +923,44 @@ struct Message {
         for (const auto& tc : tool_calls) mix(tc.compute_render_key());
         mix(error ? error->size() + 1 : 0ULL);   // distinguish empty vs absent
         mix(is_compact_summary ? 1ULL : 0ULL);
+        mix(proactive ? 2ULL : 0ULL);
+        mix(proactive && proactive->expanded ? 4ULL : 0ULL);
+        // Reasoning block: its text grows during streaming, and the block
+        // switches from the live thought stream to a settled one-line summary
+        // once the answer starts. Mixing the length + a "has answer body"
+        // bit re-renders the cached Element across that transition. Uses the
+        // unified accessor so all providers key identically.
+        mix(reasoning_display_text().size());
+        // Turn provenance drives the header label + role tag, so a message
+        // whose served_model differs from another's must not reuse its
+        // cached Element.
+        //
+        // The VALUE, not its size. Mixing sizes distinguished the three
+        // roles only by luck — "strategic" is 9 characters, and any
+        // future 9-character role would have collided with it, leaving a
+        // cached header painted in the wrong accent colour. Same hazard
+        // for two model ids of equal length. An enum has no such
+        // ambiguity, and the model id is hashed properly.
+        mix_str(served_model.value);
+        mix(served_role ? static_cast<std::uint64_t>(*served_role) + 1ULL : 0ULL);
+        if (smart_routing) {
+            mix(8ULL);
+            mix(smart_route_model.size());
+            mix(smart_route_effort.size());
+            mix(smart_route_complexity.size());
+            mix(smart_route_note.size());
+            mix((smart_route_orchestrate ? 16ULL : 0ULL)
+                | (smart_route_subagents ? 32ULL : 0ULL));
+        }
+        if (fork_note) {
+            mix(64ULL);
+            mix(fork_transcript.size());
+        }
+        // Quantize confidence to a bar-relevant bucket so a card whose
+        // confidence changed (re-injection) invalidates the cache, without
+        // churning on float noise. Only proactive messages carry it.
+        if (proactive && proactive->confidence)
+            mix(static_cast<std::uint64_t>(*proactive->confidence * 100.0) + 1ULL);
         return k;
     }
 };
@@ -390,6 +969,26 @@ struct Thread {
     ThreadId    id;
     std::string title;
     std::vector<Message> messages;
+    // Provenance: if this thread was forked (branched) from another, the
+    // parent thread's id. Empty for a normal thread. Persisted so the thread
+    // list can show a "forked from …" hint and the history stays traceable.
+    std::string forked_from;
+    // Per-thread proactive-RAG override. Absent = inherit the global RAG
+    // mode; engaged = this thread's own behaviour. Set by the fork picker.
+    //
+    // This was `int rag_mode_override = -1`, with the comment obliged to
+    // spell out the encoding ("-1 inherit, 0 On, 1 FirstTurnOnly, 2 Off") —
+    // which is the tell: a comment documenting which integers are legal is a
+    // type that has not been written down. Consumers cast back to compare,
+    // so a value outside the enum was representable and silently meant
+    // "inherit". optional says both halves in the type: whether there is an
+    // override at all, and — if so — that it is a RagMode and nothing else.
+    //
+    // The enum lives in domain/rag_mode.hpp rather than store/, because
+    // store/store.hpp includes THIS header — depending on it from here would
+    // be a cycle. It is vocabulary, not storage, so domain/ is where it
+    // belongs; store:: keeps an alias so existing spellings still compile.
+    std::optional<RagMode> rag_mode_override;
     std::chrono::system_clock::time_point created_at = std::chrono::system_clock::now();
     std::chrono::system_clock::time_point updated_at = std::chrono::system_clock::now();
 
@@ -417,6 +1016,31 @@ struct Thread {
         std::string summary;             // model output, <summary>…</summary> stripped
         std::chrono::system_clock::time_point created_at =
             std::chrono::system_clock::now();
+        // What the squeeze ACHIEVED, in estimated tokens.
+        //
+        // Compaction's whole job is to make the next request fit. Without
+        // these two numbers nobody can tell a compaction that reclaimed
+        // 180k tokens from one that reclaimed 400 — both look identical in
+        // the transcript, both leave a summary, and the second one means
+        // the very next turn compacts again and the thread livelocks
+        // summarising itself.
+        //
+        // GitHub's runtime tracks the same pair (`preCompactionTokens` /
+        // `postCompactionTokens`) for the same reason: a reclaim is a
+        // RATE to watch, not an event that either happened or didn't.
+        //
+        // 0/0 on records written before this existed — absent, not zero
+        // reclaim. `reclaimed()` returns nullopt rather than inventing a
+        // number, so an old thread reads as "unknown" instead of "this
+        // compaction did nothing".
+        int tokens_before = 0;
+        int tokens_after  = 0;
+
+        // Tokens this compaction reclaimed, or nullopt when unmeasured.
+        [[nodiscard]] std::optional<int> reclaimed() const noexcept {
+            if (tokens_before <= 0 || tokens_after <= 0) return std::nullopt;
+            return tokens_before - tokens_after;
+        }
     };
     std::vector<CompactionRecord> compactions;
 };
@@ -456,10 +1080,78 @@ struct Thread {
     return from_bytes + images * kTokensPerImage;
 }
 
+// The TEXT the model can currently see, as views into the Thread — no copy.
+//
+// The visibility rule is compaction's: the latest CompactionRecord drops
+// messages[0..up_to_index) and its summary stands in for them (a malformed
+// record falls back to the whole transcript, as the wire builder does). This
+// answers "is this string in what the model sees" — the derivation behind
+// skills::active_in — so it returns string_views of every visible message's
+// text and every tool result's output, never a deep copy.
+//
+// Lives here, beside Thread, because it is a fact about a Thread: the TUI's
+// tool dispatch and the ACP server both derive from it, and neither should
+// have to reach into the other's layer. Keep in step with the wire builder
+// (cmd_factory.cpp wire_messages_for_impl); the two state one rule.
+//
+// The views borrow from `t`; keep `t` alive and unmodified while using them.
+[[nodiscard]] inline std::vector<std::string_view> visible_text(const Thread& t) {
+    std::size_t from = 0;
+    std::vector<std::string_view> out;
+    if (!t.compactions.empty()) {
+        const auto& rec = t.compactions.back();
+        if (rec.up_to_index != 0 && rec.up_to_index <= t.messages.size()) {
+            from = rec.up_to_index;
+            out.push_back(rec.summary);
+        }
+    }
+    out.reserve(out.size() + (t.messages.size() - from) * 2);
+    for (std::size_t i = from; i < t.messages.size(); ++i) {
+        const auto& msg = t.messages[i];
+        if (!msg.text.empty()) out.push_back(msg.text);
+        // A skill body arrives as a TOOL RESULT (the `skill` tool's output),
+        // so tool outputs are part of what the model sees, not only text.
+        for (const auto& tc : msg.tool_calls)
+            if (const auto& o = tc.output(); !o.empty()) out.push_back(o);
+    }
+    return out;
+}
+
+// NOTE: the compaction-AWARE estimate lives in cmd_factory as
+// `cmd::estimate_wire_tokens(Thread)`. It scores the substituted wire view
+// (summary in place of the covered prefix) using the same bytes/3.5 +
+// ~1500-per-image basis as the function above, so the two are comparable.
+// Do not add a second one here — three estimators that must agree is two
+// too many, and CompactionRecord's before/after pair is only meaningful
+// while both sides come from the same scorer.
+
 struct PendingPermission {
     ToolCallId  id;
     ToolName    tool_name;
     std::string reason;
+    // The definition the user is being SHOWN, fingerprinted. Verified again
+    // at launch, because an MCP server can redefine a tool name while the
+    // prompt is on screen and the grant is recorded against the name.
+    // 0 means "not recorded", which skips the check.
+    std::uint64_t def_hash = 0;
 };
 
 } // namespace agentty
+
+// ImageContent owns its bytes (LazyBytes) and a shared base64 cell, and
+// LazyBytes owns a content-addressed Source plus the bytes it resolves to.
+// Moving either to another thread is safe: every lazily-filled slot is
+// written exactly once under std::call_once and read through an acquire load
+// after, so a thread either runs the fill or waits for it and then sees the
+// finished bytes. (That discipline is not incidental — jaal's Sendable found
+// a real race in LazyBytes on its first run against this code, 19 TSan
+// reports to zero, and it is D7's worked example. The fix is what makes
+// these opt-ins honest rather than silencers.)
+//
+// Sendable, NOT Frozen. Frozen means nothing reachable through a const T can
+// change, and here the memoised bytes and the memoised base64 both can,
+// behind const accessors. That is D8's distinction exactly — safe to MOVE to
+// one other thread, not safe to SHARE between two — so these say Sendable
+// only, and maya::shared<ImageContent> stays correctly impossible.
+MAYA_SENDABLE(agentty::LazyBytes);
+MAYA_SENDABLE(agentty::ImageContent);

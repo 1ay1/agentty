@@ -136,7 +136,12 @@ enum class Kind : std::uint8_t {
     Read,
     Edit,
     Write,
+    Move,
+    Remove,
     Bash,
+    ProcessStart,
+    ProcessPoll,
+    ProcessStop,
     Grep,
     Glob,
     ListDir,
@@ -145,16 +150,25 @@ enum class Kind : std::uint8_t {
     WebSearch,
     FindDefinition,
     Diagnostics,
+    Test,
     GitStatus,
     GitDiff,
     GitLog,
+    GitShow,
+    GitBlame,
     GitCommit,
+    GitBranch,
+    GitStash,
+    GitRebase,
+    GitCherryPick,
     Remember,
     Forget,
     Wipe,
     Task,
     Skill,
     SearchDocs,
+    SearchCode,
+    RepoMap,
 };
 
 inline constexpr std::array kCatalog = {
@@ -162,7 +176,12 @@ inline constexpr std::array kCatalog = {
     ToolSpec{"read",            Kind::Read,           {Effect::ReadFs},                     false,   detail::sec{20},   80000,  ToolSpec::TruncStrategy::Head},
     ToolSpec{"edit",            Kind::Edit,           {Effect::ReadFs, Effect::WriteFs},    true,    detail::sec{20},   40000,  ToolSpec::TruncStrategy::Head},
     ToolSpec{"write",           Kind::Write,          {Effect::WriteFs},                    true,    detail::sec{20},   40000,  ToolSpec::TruncStrategy::Head},
-    ToolSpec{"bash",            Kind::Bash,           {Effect::Exec},                       true,    detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only matches log-stream usage
+    ToolSpec{"move",            Kind::Move,           {Effect::ReadFs, Effect::WriteFs},    false,   detail::sec{20},   4000,   ToolSpec::TruncStrategy::Head},
+    ToolSpec{"remove",          Kind::Remove,         {Effect::ReadFs, Effect::WriteFs},    false,   detail::sec{20},   4000,   ToolSpec::TruncStrategy::Head},
+    ToolSpec{"shell",           Kind::Bash,           {Effect::Exec},                       true,    detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},
+    ToolSpec{"process_start",   Kind::ProcessStart,   {Effect::Exec},                       false,   detail::sec{30},   4000,   ToolSpec::TruncStrategy::Tail},
+    ToolSpec{"process_poll",    Kind::ProcessPoll,    {},                                   false,   detail::sec{5},    30000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"process_stop",    Kind::ProcessStop,    {Effect::Exec},                       false,   detail::sec{10},   30000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only matches log-stream usage
     ToolSpec{"grep",            Kind::Grep,           {Effect::ReadFs},                     false,   detail::sec{45},   30000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"glob",            Kind::Glob,           {Effect::ReadFs},                     false,   detail::sec{30},   25000,  ToolSpec::TruncStrategy::Head},
     ToolSpec{"list_dir",        Kind::ListDir,        {Effect::ReadFs},                     false,   detail::sec{20},   25000,  ToolSpec::TruncStrategy::Head},
@@ -170,11 +189,18 @@ inline constexpr std::array kCatalog = {
     ToolSpec{"web_fetch",       Kind::WebFetch,       {Effect::Net},                        false,   detail::sec{30},   30000,  ToolSpec::TruncStrategy::Head},
     ToolSpec{"web_search",      Kind::WebSearch,      {Effect::Net},                        false,   detail::sec{20},   25000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"find_definition", Kind::FindDefinition, {Effect::ReadFs},                     false,   detail::sec{30},   25000,  ToolSpec::TruncStrategy::HeadTail},
-    ToolSpec{"diagnostics",     Kind::Diagnostics,    {Effect::Exec},                       false,   detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only
+    ToolSpec{"diagnostics",     Kind::Diagnostics,    {Effect::Exec},                       false,   detail::sec{0},    30000,  ToolSpec::TruncStrategy::Tail},
+    ToolSpec{"test",            Kind::Test,           {Effect::Exec},                       false,   detail::sec{0},    40000,  ToolSpec::TruncStrategy::Tail},   // subprocess-managed; tail-only
     ToolSpec{"git_status",      Kind::GitStatus,      {Effect::ReadFs},                     false,   detail::sec{20},   30000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"git_diff",        Kind::GitDiff,        {Effect::ReadFs},                     false,   detail::sec{20},   60000,  ToolSpec::TruncStrategy::HeadTail},  // diffs can be big; bigger budget
     ToolSpec{"git_log",         Kind::GitLog,         {Effect::ReadFs},                     false,   detail::sec{20},   30000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"git_show",        Kind::GitShow,        {Effect::ReadFs},                     false,   detail::sec{20},   60000,  ToolSpec::TruncStrategy::HeadTail},
+    ToolSpec{"git_blame",       Kind::GitBlame,       {Effect::ReadFs},                     false,   detail::sec{20},   40000,  ToolSpec::TruncStrategy::HeadTail},
     ToolSpec{"git_commit",      Kind::GitCommit,      {Effect::WriteFs},                    true,    detail::sec{30},   0,      ToolSpec::TruncStrategy::Head},   // pre-commit hooks can be slow; output stays small
+    ToolSpec{"git_branch",      Kind::GitBranch,      {Effect::WriteFs},                    false,   detail::sec{20},   20000,  ToolSpec::TruncStrategy::Head},   // list/create/switch/delete; output stays small
+    ToolSpec{"git_stash",       Kind::GitStash,       {Effect::WriteFs},                    false,   detail::sec{30},   50000,  ToolSpec::TruncStrategy::Head},   // list/push/pop/apply/drop/show
+    ToolSpec{"git_rebase",      Kind::GitRebase,      {Effect::WriteFs},                    false,   detail::sec{60},   50000,  ToolSpec::TruncStrategy::Head},   // onto/continue/abort/skip; can run hooks
+    ToolSpec{"git_cherry_pick", Kind::GitCherryPick,  {Effect::WriteFs},                    false,   detail::sec{60},   50000,  ToolSpec::TruncStrategy::Head},   // pick/continue/abort/skip
     // Memory tools — append/remove records in ~/.agentty/memory.jsonl (user)
     // or <workspace>/.agentty/memory.jsonl (project). Loaded back into the
     // system prompt under <learned-memory> on every turn. Tiny IO footprint,
@@ -204,6 +230,18 @@ inline constexpr std::array kCatalog = {
     // the trailing lower-ranked block; 60s covers a first-call index
     // build + batch embed of a modest corpus.
     ToolSpec{"search_docs",     Kind::SearchDocs,     {Effect::ReadFs, Effect::Net},        false,   detail::sec{60},   30000,  ToolSpec::TruncStrategy::HeadTail},
+    // search_code — SEMANTIC code retrieval (hybrid complement to grep):
+    // BM25 + optional dense embeddings over source chunks, for conceptual
+    // queries that share no token with the code. Reads the tree (ReadFs) and
+    // queries the local Ollama embed endpoint (Net). First call walks +
+    // indexes the tree, so the 60s budget mirrors search_docs.
+    ToolSpec{"search_code",     Kind::SearchCode,     {Effect::ReadFs, Effect::Net},        false,   detail::sec{60},   30000,  ToolSpec::TruncStrategy::HeadTail},
+    // repo_map — aider-style token-budgeted PageRank skeleton of the
+    // codebase (def/ref graph, signature lines). The output is already
+    // budget-packed by the tool itself (≤60 KB by its own budget arg),
+    // so the dispatcher cap is a safety net. Head: the map is ranked
+    // best-first, so truncation from the tail loses only low-rank files.
+    ToolSpec{"repo_map",        Kind::RepoMap,        {Effect::ReadFs},                     false,   detail::sec{30},   60000,  ToolSpec::TruncStrategy::Head},
 };
 
 // Wire-string → Kind. `std::nullopt` for names not in the catalog so the
@@ -227,6 +265,31 @@ inline constexpr std::array kCatalog = {
 [[nodiscard]] constexpr const ToolSpec* lookup(std::string_view name) noexcept {
     for (const auto& s : kCatalog) if (s.name == name) return &s;
     return nullptr;
+}
+
+// ── Scheduling-effects view ──────────────────────────────────────
+// `effects` answers the PERMISSION question ("how much trust does this
+// tool need?"); this answers the CONCURRENCY question ("what does it
+// actually contend on?"). They coincide for every tool except `task`:
+//
+//   • task carries Effect::Exec for permission — a subagent can run bash,
+//     so it must gate like bash.
+//   • But for SCHEDULING, Exec means "exclusive: unbounded blast radius,
+//     nothing else may run" — which serialised every task and blocked all
+//     sibling tools behind a running subagent. That defeats the tool's
+//     entire purpose: task exists precisely so the model can fan out
+//     several isolated investigations CONCURRENTLY (Claude Code runs its
+//     Task tool in parallel waves for the same reason). The subagent's
+//     own tool calls are individually effect-gated + path-scheduled
+//     inside its loop, so the parent scheduling it as coarse-Exec is
+//     double-counting contention that the inner dispatch already manages.
+//
+// So task schedules as {ReadFs, Net} — composable with reads, with other
+// tasks, and with disjoint-path writers — while its permission gate stays
+// Exec. Any future tool with the same split gets a row here.
+[[nodiscard]] constexpr EffectSet sched_effects(const ToolSpec& s) noexcept {
+    if (s.name == "task") return {Effect::ReadFs, Effect::Net};
+    return s.effects;
 }
 
 // Fixed-string non-type template parameter so a tool factory can write
@@ -263,6 +326,15 @@ template <FixedName Name>
 // catalog above gets an instant signal if they break an invariant.
 namespace proofs {
 
+// NOTE on sanitizer builds: GCC's ASan/UBSan instrument the module-level
+// `constexpr kCatalog` global, and that instrumentation leaks into the
+// `consteval` evaluation of the proofs below ("not a constant expression").
+// The proofs are valid — they compile and pass in every NORMAL build, which is
+// the real gate. Under AGENTTY_SANITIZER_BUILD we skip re-evaluating them so
+// the sanitizer can do its actual job (RUNTIME memory-safety checking). See
+// the CMake AGENTTY_SANITIZE_ALL block for the full rationale.
+#ifndef AGENTTY_SANITIZER_BUILD
+
 // Every name in the catalog is unique.
 consteval bool all_names_unique() {
     for (std::size_t i = 0; i < kCatalog.size(); ++i)
@@ -277,16 +349,20 @@ static_assert(all_names_unique(), "tool catalog has duplicate names");
 // `name_of(kind)` is total.
 consteval bool kinds_bijective() {
     constexpr Kind kAll[] = {
-        Kind::Read, Kind::Edit, Kind::Write, Kind::Bash,
+        Kind::Read, Kind::Edit, Kind::Write, Kind::Move, Kind::Remove,
+        Kind::Bash, Kind::ProcessStart, Kind::ProcessPoll, Kind::ProcessStop,
         Kind::Grep, Kind::Glob, Kind::ListDir, Kind::Todo,
         Kind::WebFetch, Kind::WebSearch, Kind::FindDefinition,
-        Kind::Diagnostics, Kind::GitStatus, Kind::GitDiff,
-        Kind::GitLog, Kind::GitCommit,
+        Kind::Diagnostics, Kind::Test, Kind::GitStatus, Kind::GitDiff,
+        Kind::GitLog, Kind::GitShow, Kind::GitBlame, Kind::GitCommit,
+        Kind::GitBranch, Kind::GitStash, Kind::GitRebase, Kind::GitCherryPick,
         Kind::Remember, Kind::Forget,
         Kind::Wipe,
         Kind::Task,
         Kind::Skill,
         Kind::SearchDocs,
+        Kind::SearchCode,
+        Kind::RepoMap,
     };
     if (std::size(kAll) != kCatalog.size()) return false;
     for (auto k : kAll) {
@@ -315,7 +391,7 @@ consteval bool all_names_present() {
 static_assert(all_names_present(), "every tool needs a non-empty name");
 
 // Lookup works for every catalog entry.
-static_assert(lookup("bash")     != nullptr);
+static_assert(lookup("shell")    != nullptr);
 static_assert(lookup("git_commit") != nullptr);
 static_assert(lookup("nonexistent") == nullptr);
 
@@ -326,7 +402,9 @@ static_assert(lookup("nonexistent") == nullptr);
 consteval bool only_known_exec_tools() {
     for (const auto& s : kCatalog) {
         if (!s.effects.has(Effect::Exec)) continue;
-        if (s.name != "bash" && s.name != "diagnostics" && s.name != "task")
+        if (s.name != "shell" && s.name != "diagnostics" && s.name != "test"
+            && s.name != "process_start" && s.name != "process_stop"
+            && s.name != "task")
             return false;
     }
     return true;
@@ -354,8 +432,8 @@ static_assert(lookup("todo")->effects.empty());
 // Read-side tools must NOT have WriteFs / Net / Exec.
 consteval bool readonly_invariants() {
     constexpr std::string_view kReadOnly[] = {
-        "read","grep","glob","list_dir","find_definition",
-        "git_status","git_diff","git_log",
+        "read","grep","glob","list_dir","find_definition","repo_map",
+        "git_status","git_diff","git_log","git_show","git_blame",
     };
     for (auto n : kReadOnly) {
         auto* s = lookup(n);
@@ -374,12 +452,12 @@ consteval bool only_web_is_net() {
     for (const auto& s : kCatalog) {
         if (!s.effects.has(Effect::Net)) continue;
         if (s.name != "web_fetch" && s.name != "web_search" &&
-            s.name != "search_docs") return false;
+            s.name != "search_docs" && s.name != "search_code") return false;
     }
     return true;
 }
 static_assert(only_web_is_net(),
-              "Only web_fetch/web_search/search_docs may carry Effect::Net");
+              "Only web_fetch/web_search/search_docs/search_code may carry Effect::Net");
 
 // ── Per-tool timeout proofs ─────────────────────────────────────────────
 // Pin the wall-clock-watchdog values so a careless edit (set 0 on the
@@ -390,7 +468,7 @@ static_assert(only_web_is_net(),
 // timeout in `subprocess.cpp`; the overlay watchdog must be 0 to
 // avoid double-gating.
 consteval bool subprocess_tools_have_no_overlay_timeout() {
-    auto* b = lookup("bash");
+    auto* b = lookup("shell");
     auto* d = lookup("diagnostics");
     return b && d && b->max_seconds == std::chrono::seconds{0}
                   && d->max_seconds == std::chrono::seconds{0};
@@ -408,7 +486,8 @@ consteval bool other_tools_have_bounded_timeout() {
         // bash/diagnostics own their subprocess timeout; `task` owns its
         // budget via a bounded sub-agent turn count (no single syscall to
         // watchdog). All three set max_seconds=0 deliberately.
-        if (s.name == "bash" || s.name == "diagnostics" || s.name == "task")
+        if (s.name == "shell" || s.name == "diagnostics" || s.name == "test"
+            || s.name == "task")
             continue;
         if (s.max_seconds < seconds{1} || s.max_seconds > seconds{300}) return false;
     }
@@ -516,6 +595,56 @@ consteval bool eager_streaming_is_justified() {
 static_assert(eager_streaming_is_justified(),
               "a pure (effect-less) tool other than `todo` opted into "
               "eager_input_streaming — review the rationale");
+
+// ── Scheduling-effects divergence proof ─────────────────────────────────
+// `sched_effects` answers the CONCURRENCY question and is allowed to
+// differ from `effects` (the PERMISSION question) for exactly one tool:
+// `task`. The divergence is load-bearing — it's what lets subagents fan
+// out concurrently instead of serialising behind a coarse Exec lock — but
+// until now nothing pinned it. A rename of `task`, a change to its
+// catalog effects, or a stray edit to `sched_effects` could silently
+// collapse the divergence (re-serialising every subagent) or spread it to
+// another tool (letting an Exec tool run unscheduled). These proofs make
+// any such drift a build error at the point it's introduced.
+
+// For every tool EXCEPT `task`, scheduling effects == permission effects.
+// No tool may quietly acquire a scheduling identity that differs from the
+// capabilities the policy gates on.
+consteval bool sched_effects_match_except_task() {
+    for (const auto& s : kCatalog) {
+        if (s.name == "task") continue;   // the one sanctioned divergence
+        if (sched_effects(s) != s.effects) return false;
+    }
+    return true;
+}
+static_assert(sched_effects_match_except_task(),
+              "a tool other than `task` has sched_effects != effects — "
+              "scheduling identity must match the permission capability set "
+              "for every tool but the sanctioned `task` divergence");
+
+// `task`'s divergence is EXACT, not incidental: it gates as Exec (a
+// subagent can run bash, so permission must be strict) but SCHEDULES as
+// {ReadFs, Net} (composable with reads, other tasks, and disjoint-path
+// writers). Pin both halves so neither can rot independently.
+consteval bool task_divergence_is_exact() {
+    auto* t = lookup("task");
+    if (!t) return false;
+    // Permission side: strict Exec, nothing weaker.
+    if (!t->effects.has(Effect::Exec)) return false;
+    // Scheduling side: exactly {ReadFs, Net} — Exec DROPPED so subagents
+    // don't serialise behind a coarse exclusive lock.
+    auto sched = sched_effects(*t);
+    if (sched.has(Effect::Exec))     return false;
+    if (!sched.has(Effect::ReadFs))  return false;
+    if (!sched.has(Effect::Net))     return false;
+    if (sched.has(Effect::WriteFs))  return false;
+    return true;
+}
+static_assert(task_divergence_is_exact(),
+              "`task` must gate as Exec but schedule as exactly {ReadFs, Net} — "
+              "the divergence that lets subagents run concurrently");
+
+#endif  // AGENTTY_SANITIZER_BUILD
 
 } // namespace proofs
 

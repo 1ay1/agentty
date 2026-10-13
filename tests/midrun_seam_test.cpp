@@ -20,7 +20,6 @@
 // already on screen. Any divergence in the committed prefix is a
 // duplication bug.
 
-#include <cstdio>
 #include <algorithm>
 #include <chrono>
 #include <string>
@@ -30,9 +29,12 @@
 #include <nlohmann/json.hpp>
 
 #include <maya/render/canvas.hpp>
+#include <maya/core/anim_clock.hpp>   // maya::testing::freeze_anim_clock
 #include <maya/render/renderer.hpp>
 #include <maya/style/theme.hpp>
 #include <maya/widget/app_layout.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
@@ -51,18 +53,8 @@ using agentty::ToolUse;
 using std::chrono::steady_clock;
 using std::chrono::milliseconds;
 
-static int g_failures = 0;
 static int g_checks   = 0;
 
-#define CHECK(cond, msg)                                                   \
-    do {                                                                   \
-        ++g_checks;                                                        \
-        if (!(cond)) {                                                     \
-            ++g_failures;                                                  \
-            std::fprintf(stderr, "  FAIL [%s:%d] %s\n",                    \
-                         __FILE__, __LINE__, (msg));                       \
-        }                                                                  \
-    } while (0)
 
 static std::string code_block(int n) {
     std::string out;
@@ -116,7 +108,7 @@ static std::vector<std::string> render_rows(const Model& m,
     maya::StylePool pool;
     maya::Canvas canvas(width, height, &pool);
     canvas.clear();
-    maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
 
     std::vector<std::string> rows;
     const int max_row = canvas.max_content_row();
@@ -163,7 +155,7 @@ static int first_committed_divergence(const std::vector<std::string>& prev,
 // settle-freeze the whole run once at the end. Assert the committed
 // prefix never changes between consecutive snapshots, INCLUDING across
 // the final settle-time freeze.
-static void test_incremental_freeze_prefix_stable() {
+TEST_CASE("incremental freeze prefix stable") {
     constexpr int N = 30;
     // A realistic viewport: maya keeps the bottom `term_h` rows on
     // screen; everything above has overflowed into native scrollback
@@ -261,7 +253,7 @@ static void test_incremental_freeze_prefix_stable() {
 //   frame B: edit Done    (terminal GitDiff body)
 //   frame C: turn settles — the single settle-time freeze fires
 // and assert the committed prefix is stable A->B and B->C.
-static void test_single_edit_stream_to_freeze() {
+TEST_CASE("single edit stream to freeze") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -374,7 +366,7 @@ static void test_single_edit_stream_to_freeze() {
 // frame B: read DONE (full body) — card grows by ~12 rows
 // frame C: mid-run freeze fires
 // The committed prefix must be byte-stable A->B and B->C.
-static void test_read_then_edit_batch_freeze() {
+TEST_CASE("read then edit batch freeze") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -476,7 +468,7 @@ static void test_read_then_edit_batch_freeze() {
 // rows above the viewport, any height/shape change across the settle
 // strands the streaming copy in scrollback and the settled card paints
 // below it — the duplicated Actions box the user reports.
-static void test_single_write_stream_to_freeze() {
+TEST_CASE("single write stream to freeze") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -632,7 +624,7 @@ static std::string assembled_body(const Model& m) {
 //   (1) the committed scrollback prefix never mutates (no duplication),
 //   (2) the assembled body equals the original bytes at every step,
 //   (3) the settle-time freeze (the ONLY freeze) is row-stable too.
-static void test_streaming_text_prefix_freeze() {
+TEST_CASE("streaming text prefix freeze") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -736,7 +728,7 @@ static void test_streaming_text_prefix_freeze() {
 // assistant_run_hash_id, so the handoff must be a pure cache hit — any
 // row shift across the freeze strands the live copy in scrollback and
 // the card duplicates.
-static void test_tall_card_live_to_frozen_seam() {
+TEST_CASE("tall card live to frozen seam") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -808,10 +800,13 @@ static void test_tall_card_live_to_frozen_seam() {
     // And the diff body must appear EXACTLY once across the whole render
     // (no second copy stranded). The settled edit shows its FULL body, so
     // any body line appears exactly once — count a line from the last
-    // hunk; >1 copy means a stranded scrollback duplicate.
+    // hunk; >1 copy means a stranded scrollback duplicate. NB: the edit card
+    // caps its rendered diff at kMaxDiffLines (200) — pick a probe line well
+    // inside that window (compute(90) ≈ body row 186) so the assertion tracks
+    // the seam, not the cap elision.
     int copies = 0;
     for (const auto& row : frozen)
-        if (row.find("compute(119) + offset") != std::string::npos) ++copies;
+        if (row.find("compute(90) + offset") != std::string::npos) ++copies;
     CHECK(copies == 1,
           "edit diff body rendered more than once after freeze (duplicate)");
 }
@@ -828,7 +823,7 @@ static void test_tall_card_live_to_frozen_seam() {
 // lands at up_to_index == frozen_through (compaction does NOT mutate
 // messages), and a tall post-compaction turn streams LIVE then settles.
 // See INLINE_SCROLLBACK.md pin #3 (divider symmetry).
-static void test_compaction_boundary_live_to_frozen_seam() {
+TEST_CASE("compaction boundary live to frozen seam") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -940,7 +935,7 @@ static void test_compaction_boundary_live_to_frozen_seam() {
     // And the tall edit body appears exactly once (no stranded copy).
     int body_copies = 0;
     for (const auto& row : frozen)
-        if (row.find("compute(119) + offset") != std::string::npos)
+        if (row.find("compute(90) + offset") != std::string::npos)
             ++body_copies;
     CHECK(body_copies == 1,
           "post-compaction edit body rendered more than once (duplicate)");
@@ -956,7 +951,7 @@ static void test_compaction_boundary_live_to_frozen_seam() {
 // freeze must not shift a committed row. (Distinct from the unit-level
 // symmetry test above, which forces the boundary into the live tail to
 // exercise build_live_tail's divider+number code directly.)
-static void test_compaction_submit_freezes_divider() {
+TEST_CASE("compaction submit freezes divider") {
     constexpr int kTermH = 40;
 
     Model m;
@@ -1079,7 +1074,7 @@ static void test_compaction_submit_freezes_divider() {
 
     int body_copies = 0;
     for (const auto& row : frozen)
-        if (row.find("compute(119) + offset") != std::string::npos)
+        if (row.find("compute(90) + offset") != std::string::npos)
             ++body_copies;
     CHECK(body_copies == 1,
           "post-compaction edit body rendered more than once (duplicate)");
@@ -1120,7 +1115,7 @@ static void push_write_turn(Model& m, const std::string& tag, int rows) {
 //   settle-time freeze_through (the single freeze). Then the next
 //   submit. At turn 3 we snapshot every step and assert turn 2's
 //   committed rows are byte-stable across the whole turn-3 sequence.
-static void test_multi_turn_write_pairs_seam() {
+TEST_CASE("multi turn write pairs seam") {
     constexpr int kTermH = 40;
     constexpr int kRows  = 60;   // each write overflows a 40-row viewport
 
@@ -1260,20 +1255,216 @@ static void test_multi_turn_write_pairs_seam() {
 // once at settle — is covered by test_incremental_freeze_prefix_stable
 // (above) and the single/write/read seam tests below.
 
-int main() {
-    std::printf("midrun_seam_test\n");
-    test_incremental_freeze_prefix_stable();
-    test_single_edit_stream_to_freeze();
+// ── Settled-prefix HOIST correctness (the perf split must be invisible).
+//    turn_config_for_assistant_run hoists the leading quiescent sub-turns
+//    of an in-flight run into ONE cacheable bare Turn to keep per-frame
+//    build O(1) in turn depth. The split must NEVER change what the user
+//    sees: every settled tool card must still render EXACTLY once, and
+//    the row output must be identical frame-to-frame as the prefix grows
+//    (a hoisted card silently vanishing, or a stale cache blitting an
+//    old prefix, is the "sometimes not working" bug this guards).
+TEST_CASE("prefix hoist all cards present") {
+    Model m;
+    m.d.current.id = agentty::ThreadId{"hoist"};
+    Message u; u.role = Role::User; u.text = "do many edits";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);   // User frozen
 
-    test_single_write_stream_to_freeze();
-    test_read_then_edit_batch_freeze();
-    test_streaming_text_prefix_freeze();
-    test_tall_card_live_to_frozen_seam();
-    test_compaction_boundary_live_to_frozen_seam();
-    test_compaction_submit_freezes_divider();
-    test_multi_turn_write_pairs_seam();
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    if (g_failures) { std::printf("FAILED\n"); return 1; }
-    std::printf("PASSED\n");
-    return 0;
+    constexpr int N = 24;   // deep enough that the hoist engages
+    std::vector<std::string> prev;
+
+    for (int e = 0; e < N; ++e) {
+        // A settled edit sub-turn lands (all prior ones become the
+        // hoistable quiescent prefix).
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("h" + std::to_string(e)));
+        m.d.current.messages.push_back(std::move(a));
+
+        // Streaming successor placeholder = the live edge (never hoisted).
+        Message ph; ph.role = Role::Assistant; ph.streaming_text = "working";
+        m.d.current.messages.push_back(std::move(ph));
+        m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+        auto cur = render_rows(m);
+
+        // (1) EVERY settled edit card so far must be present EXACTLY
+        //     once. settled_edit stamps tc.output()="edited-<tag>"; the
+        //     card renders the tool name + path src/<tag>.cpp, so the
+        //     unique path is our per-card marker. A hoisted card that
+        //     vanished (defer poisoning / stale prefix cache) drops its
+        //     marker; a double-emit (spurious gap / duplicated slot)
+        //     bumps the count above one.
+        for (int k = 0; k <= e; ++k) {
+            const std::string marker = "src/h" + std::to_string(k) + ".cpp";
+            int copies = 0;
+            for (const auto& row : cur)
+                if (row.find(marker) != std::string::npos) ++copies;
+            CHECK(copies == 1,
+                  ("settled card " + marker
+                   + " not rendered exactly once in a "
+                   + std::to_string(e + 1) + "-deep in-flight run "
+                   + "(got " + std::to_string(copies)
+                   + ") — prefix hoist dropped or duplicated a card").c_str());
+        }
+
+        // (2) The committed prefix must be byte-stable across the grow
+        //     (a stale prefix cache blitting an old shape would rewrite
+        //     an already-overflowed row).
+        if (!prev.empty()) {
+            int d = first_committed_divergence(prev, cur, /*term_h=*/40);
+            CHECK(d < 0,
+                  "prefix hoist rewrote a committed row as the run grew");
+        }
+        prev = std::move(cur);
+
+        m.d.current.messages.pop_back();   // drop placeholder
+    }
+
+    // (3) Settle-freeze the whole run: the frozen output must contain
+    //     each card exactly once too (the split→flat handoff is clean).
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+    auto frozen = render_rows(m);
+    for (int k = 0; k < N; ++k) {
+        const std::string marker = "src/h" + std::to_string(k) + ".cpp";
+        int copies = 0;
+        for (const auto& row : frozen)
+            if (row.find(marker) != std::string::npos) ++copies;
+        CHECK(copies == 1,
+              ("card " + marker + " not exactly once after settle-freeze")
+                  .c_str());
+    }
 }
+
+// ── The user-reported failure the hoist introduced: a RUNNING tool at
+//    the live edge during a deep run, then the user texts AGAIN. Two
+//    distinct bugs are asserted here, neither of which the all-settled
+//    hoist test above can hit (it only ever has terminal cards):
+//
+//    (A) A still-Running tool card must render while it is running. In a
+//        deep run the quiescent-prefix hoist must NOT swallow the edge
+//        sub-turn whose tool is non-terminal — its spinner/progress has
+//        to keep updating, so it must stay in the eagerly-built tail.
+//
+//    (B) When a NEW user turn (and its assistant reply) is appended after
+//        that run, the just-settled tool cards above must still render
+//        exactly once AND the committed prefix must not be rewritten.
+//        The reported symptom ("reply comes but the earlier tool card's
+//        output shows up broken") is a committed-row rewrite here — a
+//        stale hoisted-prefix cache blitting an old shape over rows that
+//        already overflowed into native scrollback.
+static ToolUse running_edit(const std::string& tag) {
+    ToolUse t;
+    t.id   = ToolCallId{"edit_" + tag};
+    t.name = ToolName{"edit"};
+    nlohmann::json edits = nlohmann::json::array();
+    edits.push_back({{"old_text", code_block(4)},
+                     {"new_text", code_block(4)}});
+    t.args = {{"path", "src/" + tag + ".cpp"}, {"edits", edits}};
+    t.status = ToolUse::Running{steady_clock::now(), ""};
+    return t;
+}
+
+TEST_CASE("running tool then followup user turn") {
+    constexpr int kTermH = 40;
+    Model m;
+    m.d.current.id = agentty::ThreadId{"run+followup"};
+    Message u; u.role = Role::User; u.text = "do a deep run";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);
+
+    constexpr int N = 24;   // deep enough that the hoist engages
+    // Build a deep run of SETTLED edit sub-turns.
+    for (int e = 0; e < N; ++e) {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("r" + std::to_string(e)));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    // The live edge: a sub-turn whose tool is STILL RUNNING.
+    {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(running_edit("live"));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    auto with_running = render_rows(m);
+
+    // (A) The running card MUST be present (its path marker shows).
+    {
+        const std::string marker = "src/live.cpp";
+        int copies = 0;
+        for (const auto& row : with_running)
+            if (row.find(marker) != std::string::npos) ++copies;
+        CHECK(copies >= 1,
+              "running tool card missing while its tool is running "
+              "(hoist swallowed the live edge)");
+    }
+    // Every settled card present exactly once, too.
+    for (int k = 0; k < N; ++k) {
+        const std::string marker = "src/r" + std::to_string(k) + ".cpp";
+        int copies = 0;
+        for (const auto& row : with_running)
+            if (row.find(marker) != std::string::npos) ++copies;
+        CHECK(copies == 1,
+              ("settled card " + marker + " not exactly once with a "
+               "running edge").c_str());
+    }
+
+    // The tool finishes; the run settles and freezes (turn-end).
+    agentty::app::detail::with_live_tool(
+        m, ToolCallId{"edit_live"}, [&](ToolUse& t) {
+            auto now = steady_clock::now();
+            t.status = ToolUse::Done{now - milliseconds{5}, now,
+                                     "edited-live"};
+        });
+    m.s.phase = agentty::phase::Idle{};
+    agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+    auto after_settle = render_rows(m);
+
+    // Committed prefix stable across settle.
+    {
+        int d = first_committed_divergence(with_running, after_settle, kTermH);
+        CHECK(d < 0,
+              "committed prefix rewritten when the running tool settled");
+    }
+
+    // (B) The user TEXTS AGAIN: new User turn + a fresh assistant reply.
+    Message u2; u2.role = Role::User; u2.text = "now explain what you did";
+    m.d.current.messages.push_back(std::move(u2));
+    Message a2; a2.role = Role::Assistant; a2.streaming_text = "Sure — I ";
+    m.d.current.messages.push_back(std::move(a2));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    auto with_reply = render_rows(m);
+
+    // Every tool card from the prior run must STILL render exactly once.
+    for (int k = 0; k < N; ++k) {
+        const std::string marker = "src/r" + std::to_string(k) + ".cpp";
+        int copies = 0;
+        for (const auto& row : with_reply)
+            if (row.find(marker) != std::string::npos) ++copies;
+        CHECK(copies == 1,
+              ("prior-run card " + marker + " broke after a follow-up "
+               "user turn (got " + std::to_string(copies) + ")").c_str());
+    }
+    {
+        const std::string marker = "src/live.cpp";
+        int copies = 0;
+        for (const auto& row : with_reply)
+            if (row.find(marker) != std::string::npos) ++copies;
+        CHECK(copies == 1,
+              ("the once-running card broke after a follow-up user turn "
+               "(got " + std::to_string(copies) + ")").c_str());
+    }
+    // And the committed prefix (the whole frozen run) must be byte-stable
+    // across the new user turn's arrival.
+    {
+        int d = first_committed_divergence(after_settle, with_reply, kTermH);
+        CHECK(d < 0,
+              "committed prefix rewritten when a follow-up user turn "
+              "arrived after a deep tool run");
+    }
+}
+

@@ -4,15 +4,19 @@
 // definitions found. Same family as files.hpp: a pure-I/O scanner
 // that the runtime's `#` picker consumes.
 //
-// SymbolEntry lives here (not in runtime/symbol_palette.hpp)
+// SymbolEntry lives here (not in runtime/panel/symbol.hpp)
 // because its shape is dictated by what the scanner emits; the UI
-// state is downstream — symbol_palette::Open just holds a vector
+// state is downstream — symbol::Open just holds a vector
 // of these.
 
 #include <cstddef>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "agentty/util/snapshot.hpp"
+#include <maya/runtime.hpp>
 
 namespace agentty {
 
@@ -24,11 +28,26 @@ struct SymbolEntry {
 
 // Walk the workspace once, return all definitions matched by the
 // language regex set. Cached per-process: first call walks the
-// disk; subsequent calls return the cached vector by const-ref.
-// Cap at `cap` entries to bound the picker's working set on huge
-// repos.
-[[nodiscard]] const std::vector<SymbolEntry>&
+// disk; subsequent calls share the cached buffer. Cap at `cap`
+// entries to bound the picker's working set on huge repos.
+//
+// Returns a SNAPSHOT rather than a const-ref. The const-ref form was a
+// latent use-after-free: it copied the owning shared_ptr into a block-scoped
+// local and returned a reference that outlived it. A Snapshot carries the
+// ownership out with the data, so the buffer cannot be freed while a caller
+// still holds the handle. See util/snapshot.hpp.
+[[nodiscard]] util::Snapshot<std::vector<SymbolEntry>>
 list_workspace_symbols(std::size_t cap = 50000);
+
+// Run the (parallel) symbol scan — single-flight, safe to call repeatedly.
+// Synchronous: run it on a background task at startup so the first `#` is
+// instant. Returns early, publishing nothing, once `stop` is requested.
+void prewarm_workspace_symbols(const maya::unlocked& cap, std::stop_token stop = {},
+                               std::size_t max_entries = 50000);
+
+// Non-blocking: is the symbol index built yet? The composer opens the
+// `#` picker INSTANTLY and shows "indexing…" until this returns true.
+[[nodiscard]] bool symbols_ready();
 
 // Case-insensitive substring filter on the symbol NAME (not path).
 // Returns indices into `entries` so the dispatcher resolves the

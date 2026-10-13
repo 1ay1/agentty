@@ -1,0 +1,190 @@
+// persistence_proactive_test — the proactive-context marker + confidence
+// survive a real save→disk→load round-trip.
+//
+// Regression lock for the persistence fix in src/io/persistence.cpp:
+// proactive_context was previously NOT serialized, so a reloaded thread
+// surfaced the raw <retrieved-context> block as a plain user turn. Now the
+// flag AND the retrieval confidence (which drives the transcript card's
+// bar) round-trip. This test drives the PUBLIC persistence API (save_thread
+// + flush_pending_saves + load_thread_file) against an isolated $HOME so it
+// touches real disk, not a mock.
+
+#include "agtest.hpp"
+
+#include "agentty/io/persistence.hpp"
+
+#include <cstdlib>
+#include <filesystem>
+#include <string>
+
+#include <unistd.h>   // getpid
+
+namespace fs = std::filesystem;
+using namespace agentty;
+
+
+TEST_CASE("persistence proactive") {
+    // Isolate the data dir: persistence::data_dir() resolves $HOME/.agentty.
+    auto tmp = fs::temp_directory_path()
+             / ("agentty_persist_test_" + std::to_string(::getpid()));
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    ::setenv("HOME", tmp.c_str(), 1);
+    ::unsetenv("USERPROFILE");   // data_dir() prefers this on Windows; clear it
+
+    Thread t;
+    t.id    = persistence::new_id();
+    t.title = "round-trip";
+
+    // A normal user turn.
+    Message user;
+    user.id   = MessageId{"m-user"};
+    user.role = Role::User;
+    user.text = "how does retry backoff work?";
+    t.messages.push_back(user);
+
+    // The proactive context turn — the thing under test.
+    Message ctx;
+    ctx.id                   = MessageId{"m-ctx"};
+    ctx.role                 = Role::User;
+    ctx.proactive = Message::ProactiveContext{.confidence = 0.82};
+    ctx.text = "<retrieved-context>\n[docs:http/retry.md:12]\n"
+               "exponential backoff with full jitter\n</retrieved-context>";
+    t.messages.push_back(ctx);
+
+    // Assistant reply (proactive_context must NOT leak onto normal turns).
+    Message reply;
+    reply.id   = MessageId{"m-reply"};
+    reply.role = Role::Assistant;
+    reply.text = "It uses exponential backoff with full jitter, capped at 30s.";
+    t.messages.push_back(reply);
+
+    // A fork-provenance note — same marker-message shape (Role::User +
+    // wire-inert flag). fork_note + fork_transcript must round-trip so a
+    // reloaded fork still renders the "\u2443 Forked" card and still points the
+    // model at the parent transcript.
+    Message fnote;
+    fnote.id   = MessageId{"m-fork"};
+    fnote.role = Role::User;
+    fnote.fork_note       = true;
+    fnote.fork_transcript = "/tmp/threads/parent.transcript.md";
+    fnote.text = "This conversation is a fork of an earlier one. Its full "
+                 "transcript is saved at:\n  /tmp/threads/parent.transcript.md";
+    t.messages.push_back(fnote);
+
+    // ── Round-trip through real disk ────────────────────────────────────
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+
+    // Through the store seam: a saved thread now lives in the log format
+    // and <id>.json is retired once it verifies.
+    auto log_path = persistence::threads_dir() / (t.id.value + ".jsonl");
+    check(fs::exists(log_path), "thread written to disk");
+
+    auto loaded = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
+    check(loaded.has_value(), "thread reloaded without error");
+    if (!loaded) { REQUIRE(loaded.has_value()); return; }
+
+    const auto& msgs = loaded->messages;
+    check(msgs.size() == 4, "all four messages survived");
+    if (msgs.size() != 4) { REQUIRE(msgs.size() == 4); return; }
+
+    // The proactive turn kept its identity.
+    check(msgs[1].is_proactive_context(),
+          "proactive-context identity survived reload");
+    check(msgs[1].proactive && msgs[1].proactive->confidence
+       && *msgs[1].proactive->confidence > 0.81
+       && *msgs[1].proactive->confidence < 0.83,
+          "proactive confidence (0.82) survived reload");
+
+    // Neither the plain user nor the assistant turn picked up the marker.
+    // A normal turn simply has no proactive block — there is no sentinel to
+    // preserve, which is the point: "not a proactive message" and "a
+    // proactive message with an odd confidence" are no longer the same
+    // shape.
+    check(!msgs[0].is_proactive_context() && !msgs[2].is_proactive_context(),
+          "proactive identity did not leak onto normal turns");
+    check(!msgs[0].proactive && !msgs[2].proactive,
+          "normal turns carry no proactive block at all");
+
+    // The fork note kept its identity and its transcript pointer.
+    check(msgs[3].fork_note, "fork_note flag survived reload");
+    check(msgs[3].fork_transcript == "/tmp/threads/parent.transcript.md",
+          "fork_transcript path survived reload");
+    check(msgs[3].role == Role::User,
+          "fork note stays a User message (provider-proof) across reload");
+    check(!msgs[0].fork_note && !msgs[1].fork_note && !msgs[2].fork_note,
+          "fork_note did not leak onto other turns");
+
+    fs::remove_all(tmp);
+}
+
+TEST_CASE("persistence: a tool in flight does not fail log verification") {
+    // save_thread_sync writes the log, re-reads it, and compares. Only if
+    // that verification passes does it delete the legacy <id>.json. The
+    // comparison used to check tool output unconditionally — but the reader
+    // deliberately coerces a pending/running call to Failed{"interrupted"},
+    // so output() is "" in memory and "interrupted" on disk.
+    //
+    // A save fires on EVERY turn, so any turn with a tool still running hit
+    // that difference, logged "log verification FAILED", and kept the legacy
+    // document alive. Seen on a live 2400-message thread: 37 failures in
+    // bursts that healed the moment the tool finished. Nothing was lost, but
+    // the migration never completed and the error said nothing usable.
+    //
+    // This drives the REAL save path with a tool mid-flight and asserts the
+    // migration completes anyway.
+    auto tmp = fs::temp_directory_path()
+             / ("agentty_inflight_test_" + std::to_string(::getpid()));
+    fs::remove_all(tmp);
+    fs::create_directories(tmp);
+    ::setenv("HOME", tmp.c_str(), 1);
+    ::unsetenv("USERPROFILE");
+
+    Thread t;
+    t.id    = persistence::new_id();
+    t.title = "in flight";
+
+    Message user;
+    user.id   = MessageId{"m-user"};
+    user.role = Role::User;
+    user.text = "run something";
+    t.messages.push_back(user);
+
+    // The assistant turn the reducer saves while the tool is STILL RUNNING.
+    Message asst;
+    asst.id   = MessageId{"m-asst"};
+    asst.role = Role::Assistant;
+    asst.text = "running it now";
+    ToolUse tc;
+    tc.id     = ToolCallId{"call-live"};
+    tc.name   = ToolName{"shell"};
+    tc.status = ToolUse::Running{};
+    asst.tool_calls.push_back(tc);
+    t.messages.push_back(asst);
+
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+
+    const auto log_path    = persistence::threads_dir() / (t.id.value + ".jsonl");
+    const auto legacy_path = persistence::threads_dir() / (t.id.value + ".json");
+
+    check(fs::exists(log_path), "log written with a tool in flight");
+    // THE ASSERTION THAT WAS FAILING IN PRODUCTION: verification passed, so
+    // the legacy document was retired rather than kept forever.
+    check(!fs::exists(legacy_path),
+          "legacy document retired despite the in-flight tool");
+
+    // And the turn still reloads intact, with the call made terminal so a
+    // reload never waits on a tool whose process is gone.
+    auto loaded = persistence::load_thread_by_id(::agentty::IoAccess::grant(), t.id);
+    REQUIRE(loaded.has_value());
+    REQUIRE(loaded->messages.size() == 2u);
+    REQUIRE(loaded->messages[1].tool_calls.size() == 1u);
+    check(loaded->messages[1].tool_calls[0].is_terminal(),
+          "the in-flight call reloaded terminal, not pending");
+    check(loaded->messages[1].text == "running it now",
+          "the assistant text survived");
+
+    fs::remove_all(tmp);
+}

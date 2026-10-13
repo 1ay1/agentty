@@ -1,0 +1,18 @@
+# tests/lint/elm_allowlist.txt — reducers that still reach outside the Model.
+#
+# This is the Elm DEBT LIST, not a list of exceptions. Every line is a file
+# under src/runtime/app/ whose reducer still does something update() should
+# only describe. elm_purity.cmake fails on any violation NOT listed here, and
+# elm_purity_tight fails on any listed name that is no longer used — so the
+# list can only shrink. When it is empty, agentty is pure Elm.
+#
+# Format: `path: name name ...` with names from elm_purity.cmake
+#   clock env fileio subprocess static thread tty disk_lookup
+# STOPWATCHES, not debt. The `clock` grants below are not reducers reading the
+# time: every reducer reads the fold's time from Model::now, which jaal hands
+# update(). These two time how long work INSIDE the reducer takes (a submit's
+# stages, a thread load) and log the interval. That needs two readings of a real clock — one fold instant would
+# make every interval zero — and the result never reaches the Model, so a
+# replay is unaffected. Each site says so in a comment.
+update/submit.cpp: clock
+update/thread_list.cpp: clock

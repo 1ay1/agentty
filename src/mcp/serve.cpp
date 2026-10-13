@@ -1,7 +1,9 @@
 // agentty::mcp::serve_stdio — expose agentty's native tools OVER MCP.
 //
-// The inverse of bridge.cpp. We build a single mcp::Server over stdio and
-// register every tool in tools::registry() as an MCP tool. A registered tool's
+// The inverse of bridge.cpp. We build one mcp::Server (a table of what we
+// answer), register every tool in tools::native_registry() that agentty's
+// settings allow (tools::withheld_by_policy) as an MCP tool, and serve it over
+// stdio on an rpc::Peer. A registered tool's
 // handler round-trips through tool::DynamicDispatch::execute(name, args) — the
 // SAME dispatch the agent loop uses — so output budgets, the empty-args guard,
 // and crash isolation all apply identically. The result (an ExecResult =
@@ -26,9 +28,16 @@
 
 #include <mcp/mcp.hpp>
 
+#include "agentty/rpc/peer.hpp"
+
 #include <cstdio>
 #include <iostream>
 #include <string>
+
+#if defined(_WIN32)
+#  include <fcntl.h>
+#  include <io.h>
+#endif
 
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"
@@ -97,10 +106,8 @@ using ::mcp::Json;
 
 } // namespace
 
-int serve_stdio() {
-    ::mcp::StdioTransport transport(std::cin, std::cout);
+int serve_stdio(const maya::unlocked& cap) {
     ::mcp::Server server(
-        transport.sink(),
         ::mcp::Implementation{"agentty", AGENTTY_VERSION,
                               std::string("agentty native tools"),
                               ::mcp::Nothing, ::mcp::Nothing, ::mcp::Nothing});
@@ -113,23 +120,73 @@ int serve_stdio() {
         "diagnostics, and git. Filesystem tools are sandboxed to the workspace "
         "the agentty process was launched in.");
 
-    // Register every native tool. The handler routes through the very same
-    // DynamicDispatch the agent loop uses, so behaviour is identical.
-    std::size_t n = 0;
-    for (const auto& def : tools::registry()) {
+    // MCP 2026-07-28 stateless core: advertise `server/discover` cacheability.
+    // Our tool catalog is static for the process lifetime (built once from
+    // tools::registry()), so a modern client may cache the discover result for
+    // an hour and skip re-enumerating on reconnect. The discover handler and
+    // per-request `_meta` reading come with mcp::Server.
+    server.set_discover_cache(::mcp::CacheHint{3'600'000, "public"});
+
+    // Register every native tool agentty's own settings allow. agentty is the
+    // parent: a tool switched off for the model (Settings → Web Search) is
+    // not offered to another MCP client either — not listed, so not callable
+    // through this server. The policy is read once here (env overrides
+    // applied), matching the static catalog the discover cache advertises;
+    // the dispatch closure still refuses web_search when off, as a backstop.
+    // The handler routes through the very same DynamicDispatch the agent loop
+    // uses, so behaviour is identical.
+    //
+    // Lock order: calls are answered on the peer's reader thread, which holds
+    // nothing and hands its `unlocked` to on_call (rpc/peer.hpp). mcp-cpp's
+    // Server then invokes the tool closure synchronously inside
+    // server.handle(c), with a signature it fixes (no capability). So on_call
+    // parks a pointer to its capability in this frame-local slot for the
+    // duration of handle(), and the closure reads it back: the capability
+    // never outlives the call that proved it, and never leaves the thread.
+    struct CallScope { const maya::unlocked* cap = nullptr; };
+    auto scope = std::make_shared<CallScope>();
+    std::size_t n = 0, withheld = 0;
+    for (const auto& def : tools::native_registry()) {
+        if (tools::withheld_by_policy(def)) { ++withheld; continue; }
         const std::string name = def.name.value;
         server.register_tool(spec_for(def),
-            [name](const Json& args) -> ::mcp::CallToolResult {
+            [name, scope](const Json& args) -> ::mcp::CallToolResult {
+                if (!scope->cap)
+                    return to_call_result(std::unexpected(tools::ToolError::unknown(
+                        "tool called outside a request")));
                 return to_call_result(
-                    tool::DynamicDispatch::execute(name, args));
+                    tool::DynamicDispatch::execute(*scope->cap, name, args));
             });
         ++n;
     }
 
-    std::fprintf(stderr, "agentty: MCP server ready on stdio (%zu tools)\n", n);
+    if (withheld)
+        std::fprintf(stderr,
+            "agentty: MCP server ready on stdio (%zu tools; %zu withheld by "
+            "settings)\n", n, withheld);
+    else
+        std::fprintf(stderr, "agentty: MCP server ready on stdio (%zu tools)\n", n);
 
-    transport.start(server.engine());
-    transport.join();   // run until stdin closes
+    // Calls are answered on the reader, one at a time, in arrival order.
+    rpc::Dispatch d;
+    d.on_call = [&server, scope](const maya::unlocked& c, const ::mcp::Call& call) {
+        scope->cap = std::addressof(c);
+        struct Clear { CallScope& s; ~Clear() { s.cap = nullptr; } } clear{*scope};
+        return std::optional<std::string>(server.handle(call));
+    };
+    d.on_notification = [&server](const maya::unlocked&, const ::mcp::Notification& note) {
+        server.handle(note);
+    };
+    std::cout.flush();
+#if defined(_WIN32)
+    // Text mode would turn every '\n' of the framing into "\r\n".
+    _setmode(_fileno(stdin),  _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
+    rpc::Peer peer(rpc::fd_channel(0, 1), std::move(d), "mcp-serve");
+    peer.start();
+    peer.wait_closed(cap);   // run until stdin closes
+    peer.stop(cap);
     return 0;
 }
 

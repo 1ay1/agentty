@@ -1,4 +1,5 @@
 #include "agentty/runtime/view/status_bar/phase_chip.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
 
 #include <chrono>
 #include <string>
@@ -6,6 +7,7 @@
 
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/provider/selection.hpp"   // provider::active (local-host verb)
 
 namespace agentty::ui {
 
@@ -68,7 +70,7 @@ maya::PhaseChip::Config phase_chip_config(const Model& m) {
     float phase_elapsed = -1.0f;
     if (const auto* a = active_ctx(m.s.phase);
         a && phase_active && a->started.time_since_epoch().count() != 0) {
-        auto now = std::chrono::steady_clock::now();
+        auto now = maya::anim_now();
         auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
                        now - a->started).count();
         phase_elapsed = static_cast<float>(ms) / 1000.0f;
@@ -127,11 +129,23 @@ maya::PhaseChip::Config phase_chip_config(const Model& m) {
         breathing = true;
         elapsed   = phase_elapsed;
     }
-    // ── 6. Streaming — model is composing ────────────────────────────
+    // ── 6. Streaming — model is composing ────────────────────────────────
     else if (is_streaming) {
         glyph     = spinner;
-        verb      = "Streaming";
-        color     = maya::Color::bright_cyan();
+        // LOCAL providers process the prompt in complete silence before the
+        // first token — on a 20-30B model that can be minutes. "Streaming"
+        // while nothing streams reads like a hang and drove users to kill
+        // healthy sessions (part of the "model locks" report). Say what is
+        // actually happening until the first byte lands.
+        verb = "Streaming";
+        if (const auto* a = active_ctx(m.s.phase);
+            a && a->first_delta_at.time_since_epoch().count() == 0) {
+            const auto& sel = m.d.selection;
+            if (sel.kind == provider::Kind::OpenAI
+                && !sel.openai_endpoint.use_tls)
+                verb = "processing\xe2\x80\xa6";
+        }
+        color     = ui::status_info;
         breathing = true;
         elapsed   = phase_elapsed;
     }

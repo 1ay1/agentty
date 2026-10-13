@@ -1,0 +1,276 @@
+---
+title: Zed / JetBrains / ACP
+description: Run agentty as an Agent Client Protocol agent inside Zed or a JetBrains IDE — streaming responses, inline diffs, native permission prompts, session reload, and a one-command air-gapped setup. Same engine as the TUI, driven over JSON-RPC on stdio.
+nav_section: Advanced
+nav_order: 20
+slug: acp
+---
+
+agentty speaks the [Agent Client Protocol](https://agentclientprotocol.com) — the same protocol Zed and JetBrains use to drive Claude Code, Codex and Gemini. Point your editor at the `agentty acp` subcommand and your terminal agent becomes a first-class agent panel inside it: streaming responses, inline diffs for every edit, and native permission prompts before any file write or shell command.
+
+## Set up in Zed
+
+Add this to Zed's `settings.json` (`zed: open settings`):
+
+```json
+{
+  "agent_servers": {
+    "agentty": {
+      "command": "agentty",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+Then open the agent panel (`cmd-?` / `ctrl-?`), pick **agentty** from the agent list, and prompt. Auth is whatever `agentty login` already set up — the ACP process reads the same `~/.agentty/credentials/credentials.json`, so there's nothing extra to configure.
+
+## Set up in a JetBrains IDE
+
+IntelliJ IDEA, PyCharm, GoLand, WebStorm and the rest support ACP through AI Assistant's **AI Chat**. agentty isn't in the curated registry, so add it as a custom agent.
+
+In AI Chat, click the **⋮** menu → **Add Custom Agent**. That creates `~/.jetbrains/acp.json` and opens it. Add agentty under `agent_servers`:
+
+```json
+{
+  "agent_servers": {
+    "agentty": {
+      "command": "/usr/local/bin/agentty",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+Then pick **agentty** from the chat mode selector and prompt.
+
+:::note Use an absolute path
+Unlike Zed, JetBrains launches the command without a login shell, so `"agentty"` alone usually won't resolve. Run `which agentty` and paste the full path. This is the single most common reason a custom agent fails to start.
+:::
+
+A JetBrains subscription is **not** required to use ACP agents. If agentty doesn't appear in the list, check that `acp.json` parses and restart the IDE.
+
+### MCP servers
+
+JetBrains can expose its own MCP servers to the agent via `default_mcp_settings`:
+
+```json
+{
+  "default_mcp_settings": {
+    "use_custom_mcp": true,
+    "use_idea_mcp": false
+  },
+  "agent_servers": {
+    "agentty": {
+      "command": "/usr/local/bin/agentty",
+      "args": ["acp"]
+    }
+  }
+}
+```
+
+`use_custom_mcp` (default `true`) passes through the MCP servers you configured in the IDE; `use_idea_mcp` (default `false`) exposes the built-in IntelliJ MCP server, which gives the agent IDE-native tools like refactorings and inspections.
+
+agentty has [its own MCP configuration](mcp.html) in `~/.agentty/mcp.json`, and the two are additive — servers you configure here are on top of whatever the IDE passes in.
+
+:::warning WSL is not supported
+JetBrains does not currently support ACP agents under the Windows Subsystem for Linux. On Windows, run the IDE and agentty natively, or use the TUI.
+:::
+
+### Collecting logs
+
+If something misbehaves, AI Chat's **⋮** menu → **Get ACP Logs** downloads an archive of the agent's logs. For the full JSON-RPC traffic, enable `llm.agent.extended.logging` in the Registry (**Help → Find Action → Registry**) and restart.
+
+agentty's own log is independent and often more useful: `AGENTTY_LOG=debug` on the `env` block, then read `~/.agentty/logs/agentty.log`. See [logging](logging.html).
+
+## Model & permission profile
+
+The model and thinking level are picked per session from the editor (see below). `-m` in the `args` only sets the starting model, and does **not** change your TUI's saved model:
+
+```json
+{
+  "agent_servers": {
+    "agentty": {
+      "command": "agentty",
+      "args": ["acp", "-m", "claude-haiku-4-5", "--profile", "ask"]
+    }
+  }
+}
+```
+
+`--profile` picks how eagerly Zed prompts you before a tool runs:
+
+- **`ask`** (default) — prompt for `write` / `edit` / `bash` / network; read-only inspection (`read` / `grep` / `glob` / `list_dir`) runs without a dialog so the loop stays fluid.
+- **`minimal`** — prompt for *everything* that touches the outside world, reads included. Tightest leash.
+- **`write`** — fully autonomous: *every* tool (`write` / `edit` / `bash` / network included) runs without a prompt. Loosest leash — the same auto-approve-everything tier as the TUI's Write mode.
+
+## What you can set from the editor
+
+Everything below shows up in Zed's (and JetBrains') session controls. No
+relaunch, no `-m`; each session keeps its own choice.
+
+| Control | What it does |
+|---|---|
+| **Model** | Every model on every provider you're signed into, grouped by provider, the same list as the TUI's ctrl+/ picker. Picking a model on another provider routes that session there with that provider's own credential. |
+| **Thinking** | Reasoning effort for the selected model: Auto, Off, and the levels that model actually accepts (low / medium / high, plus xhigh or max where supported). The list changes with the model. |
+| **Show thinking** | Stream the model's reasoning into the chat as a collapsible thought, or keep it hidden. Shown to clients that support toggle options. |
+| **Mode** | The permission tier: Ask, Write or Minimal (below). |
+
+Bad values are errors, not silent fallbacks: an unknown model, an effort the
+model doesn't take, or an unknown option id come back as `InvalidParams` with
+the allowed values. The full new state comes back in the response, so the
+editor's controls always match what agentty will actually use.
+
+## What works over ACP
+
+- **Streaming text and thinking** — the reply renders token by token, and the model's reasoning streams as a collapsible thought when thinking is on. Signed thinking blocks are kept, so Claude tool turns with thinking work over ACP.
+- **Images in prompts** — paste or attach a screenshot and it reaches the model as an image. A text-only model has the image withheld rather than the turn failed. Audio is not advertised; no provider agentty ships accepts it.
+- **Tool calls** — every `read` / `edit` / `bash` / `grep` / … shows up as a tool card with the right icon, the raw arguments, and live status (pending → running → done/failed). A `read` renders as a gutter-numbered excerpt; other output is markdown-escaped so file contents render verbatim.
+- **Live terminals** — in Zed, a shell command gets a real terminal inside its tool card: output streams in as it runs (colors included) and the card shows the exit code. The command still runs in agentty's own sandbox; only the display is the editor's.
+- **Inline diffs and follow-along** — `write` and `edit` emit ACP `diff` content, and file tools carry the path as a `location`, so the editor opens and highlights the file being touched.
+- **Permission prompts** — side-effecting tools (`bash`, `write`, `edit`, network) trigger the editor's dialog with four choices: Allow, Always allow *tool*, Reject, Always reject *tool*. "Always" lasts for the session; a tool you always rejected is refused without asking again.
+- **Slash commands** — `/compact`, `/new`, your own commands from `.agentty/commands` or `.claude/commands` (with their argument hints), and every installed skill as `/<skill-name>`. A command expands into its prompt and a skill loads its instructions before the model sees them, the same as in the TUI; the chat title stays what you typed. `/compact` summarises the conversation so later turns send the summary instead of the whole history (the transcript stays visible); `/new` clears the context and keeps the tab.
+- **Compaction progress** — editors that render compactions (ACP 1.11) see `/compact` as an entry that streams its summary and ends completed, failed or cancelled. Others get a one-line note in the chat.
+- **Context usage** — after each turn a `usage_update` reports tokens in use and the model's window, for the editor's context meter.
+- **Notices** — editors that render notices (ACP 1.11) get a warning once the context window passes 85%, and the provider's error when a request fails. Notices are never sent to an editor that didn't ask for them.
+- **Live progress for every tool** — a subagent's step-by-step log, a long test run, or a shell in an editor without terminals shows its latest output in the card while it runs.
+- **Automatic retries** — if the provider is overloaded, rate-limited or the connection drops before any reply arrived, agentty waits (honouring `Retry-After`) and tries again, up to four times, with a notice saying so. Once text or a tool call has streamed, it stops and reports instead, so nothing runs twice.
+- **MCP prompts as commands** — prompts from your MCP servers appear in the `/` menu (grouped as MCP in Zed) with their arguments as the hint, and expand when used. `/compact` and `/new` are tagged as agent actions, so Zed runs them rather than echoing them.
+- **Errors with a reason** — a failed turn comes back as an error carrying the provider's message (`HTTP 400: …`), not as a silent `refusal`. Cancelling always comes back as `cancelled`.
+- **Sessions** — `session/new`, `load`, `resume`, `fork`, `list`, `close`, `delete`, plus `logout`. Fork copies a chat (history, model, thinking, mode) into a new one. `session/list` is newest first with titles and last-active times, paged. Every session lives in the same thread store as the TUI, so a chat started in the editor shows up in the TUI and the other way round.
+- **Reopening a chat** — `session/load` works from a fresh agent process and from any `cwd`, and replays the conversation (messages, thinking, tool cards, compactions) before returning the session's mode and controls.
+- **Live titles** — the first message names the chat, and each turn bumps its last-active time.
+- **Sign-in** — with no credentials agentty offers a terminal login: the editor opens a terminal running `agentty login`, and once you finish, agentty picks up the new credentials without a restart. Editors without terminal login get a "run `agentty login`" prompt instead.
+- **Every session in its own folder** — tools work in the session's folder, not wherever the agent was started: relative paths, shell commands and the sandbox all follow the session's `cwd`. Extra workspace folders the editor sends (`additionalDirectories`, for multi-root workspaces) are readable and writable too; anything else stays refused.
+- **Questions from MCP servers** — when an MCP server asks the user for input mid-call (elicitation), the editor shows it as a form tied to the tool card, and your answer goes back to the server. If the editor supports URL elicitation, a server can also send you to a link (say, an OAuth page); the editor asks before opening it, and agentty passes on the server's "done".
+- **JetBrains AIR** — JetBrains' AIR client gets edits as one exact git patch each (`diffPatch`), the format it renders natively. It also gets AIR's presentation hints: a permission heading, the mode kind (`standard` / `auto_review`), a shell command's own summary as its title, the task tool marked as a subagent, skills tagged with their `SKILL.md`, and the token counts of a compaction. Other editors get the plain diff and none of the extra keys.
+- **Your editor's MCP servers** — servers you configured in Zed (context servers) or JetBrains are passed to agentty with each session and their tools show up for the model, alongside your `mcp.json`. stdio, HTTP and SSE are all supported.
+- **Cancellation** — stop a turn and the in-flight stream tears down; `$/cancel_request` is honoured too. An open permission dialog or MCP form is withdrawn with `$/cancel_request`, so the editor can close it.
+- **Queued prompts** — a prompt sent while a turn is running waits for it and then runs, in order. Cancelling stops the running turn and everything queued behind it.
+- **Subagents as sessions** — each `task` run is kept as its own session (under `threads/subagents/`, same retention as threads). The task card points at it with `_meta.subagent_session_info`, so Zed can open the subagent's transcript nested under the card.
+- **Workspace sandbox** — file tools stay inside the session's `cwd`; `bash` runs in the same OS sandbox as the TUI.
+
+:::tip
+The ACP agent is the *same* engine as the TUI — same provider, same tools, same wire-message shaping, same permission policy — just driven over JSON-RPC on stdio instead of a terminal. Any other ACP client (not just Zed) works the same way.
+:::
+
+## The protocol surface
+
+`agentty acp` speaks newline-delimited JSON-RPC 2.0 over stdio and implements
+ACP v1 as of 1.11:
+
+- **methods:** `initialize`, `authenticate`, `logout`, `session/new`, `load`, `resume`, `fork`, `list`, `close`, `delete`, `set_mode`, `set_config_option`, `prompt`, `cancel`, and `$/cancel_request`
+- **updates:** `agent_message_chunk`, `agent_thought_chunk`, `user_message_chunk` (replay), `tool_call`, `tool_call_update`, `plan`, `available_commands_update`, `current_mode_update`, `config_option_update`, `session_info_update`, `usage_update`, `notice`, `compaction_update`, `compaction_summary_chunk`
+- **calls to the editor:** `session/request_permission`, `elicitation/create`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*` when the editor offers them; notifications `elicitation/complete` and `$/cancel_request`
+
+Notices, compaction entries and toggle options are only sent when the editor
+advertises them in `clientCapabilities.session`; live terminals only when it
+advertises `_meta.terminal_output` (Zed) or `terminal_output_delta`; MCP
+elicitations only when it advertises `elicitation.form` (or `elicitation.url`
+for links); AIR extras only when it declares `_meta.jetbrains.air` (patches
+only with `diffPatch`). Diagnostics go to stderr;
+stdout is only the protocol.
+
+`tests/acp/run_acp_client.sh` drives the real binary the way Zed and JetBrains
+do and checks every message against the official ACP v1 schema
+(`tests/acp/schema/v1`). It runs in ctest as `acp_client_test`.
+
+:::tip
+Run `agentty acp` by hand and it sits waiting for newline-delimited JSON-RPC on stdin (diagnostics go to stderr; stdout is the protocol channel). The repo ships two reference clients: `scripts/acp_smoke.py` drives a full initialize → prompt → tool → permission round-trip, and `scripts/acp_methods_test.py` exercises the rest of the v1 method surface (modes, list/resume/close/delete, logout) offline. The wire protocol itself lives in the `acp-cpp` submodule — agentty no longer hand-rolls JSON-RPC.
+:::
+
+## Loosen the workspace or sandbox
+
+The same `--workspace` and `--sandbox` switches the TUI accepts apply in ACP mode (they run before the agent starts), so you can loosen or disable both from the Zed `args`:
+
+```json
+{
+  "agent_servers": {
+    "agentty": {
+      "command": "agentty",
+      "args": ["acp", "--workspace", "/", "--sandbox", "off"]
+    }
+  }
+}
+```
+
+## agentty-in-Zed on an air-gapped remote
+
+Yes — you can run agentty inside Zed against a server with **zero internet access**. Your laptop relays every byte; nothing runs on the remote besides the agent and your shell session. `agentty airgap <host> --acp` generates the whole Zed config for you, so there's no hand-assembled `ssh -N -R` tunnel or `env` block to maintain.
+
+### The two machines
+
+- **Laptop** — has internet, has your Anthropic OAuth/API key, runs Zed, runs `ssh`. This is the relay. *Everything below is done here.*
+- **Remote** — the air-gapped box. No internet. Runs `agentty acp`, spawned by Zed over ssh.
+
+### Prerequisites
+
+1. `agentty` installed on **both** machines (`which agentty` on each prints a path).
+2. Passwordless SSH from laptop to remote (`ssh user@remote echo ok` returns `ok` without prompting). If it prompts, run `ssh-copy-id user@remote` first.
+3. You're logged in on the laptop (`agentty status` shows OAuth or API key). If not: `agentty login`.
+4. Zed installed on the laptop.
+
+### One-time setup (two commands, ~5 seconds)
+
+From the laptop:
+
+```bash
+# 1. Copy your Anthropic credentials to the remote (once):
+agentty airgap --setup user@remote
+
+# 2. Print the Zed config block for this remote:
+agentty airgap user@remote --acp -m claude-haiku-4-5 --profile ask
+```
+
+The second command **prints to stderr and exits** — it does not start anything. You'll see something like:
+
+```text
+agentty airgap --acp: add this to Zed's settings.json
+  → /home/you/.config/zed/settings.json:
+
+  "agent_servers": {
+    "agentty (airgap)": {
+      "command": "ssh",
+      "args": ["-T", "-R", "1080", "-o", "ExitOnForwardFailure=yes", ...
+              "user@remote",
+              "AGENTTY_SOCKS_PROXY=localhost:1080 exec agentty acp -m claude-haiku-4-5 --profile ask"]
+    }
+  }
+```
+
+### Wire it into Zed (one paste)
+
+1. Open Zed's settings: `cmd-,` (macOS) or `ctrl-,` (Linux).
+2. Paste the printed `"agent_servers"` block into the JSON. If you already have an `agent_servers` object, merge the `"agentty (airgap)"` key into it.
+3. Save.
+
+### Use it
+
+1. Open the agent panel in Zed: `cmd-?` / `ctrl-?`.
+2. From the agent picker, pick **agentty (airgap)**.
+3. Prompt.
+
+That's it. Zed spawns `ssh` directly — a single process is the tunnel, the agent, and the JSON-RPC transport. Zed owns its lifecycle: close the agent panel and the ssh + remote `agentty acp` both die. No background `ssh -N`, no wrapper script, no daemon.
+
+### What's happening under the hood
+
+- Zed runs `ssh -R 1080 user@remote 'AGENTTY_SOCKS_PROXY=localhost:1080 exec agentty acp …'` directly.
+- `-R 1080` exposes a SOCKS5 proxy on the remote's `localhost:1080`. The remote `agentty` routes every outbound connection (chat, OAuth refresh, `web_fetch`, `web_search`) through it. Those connections tunnel back over SSH and are dialed by your laptop.
+- ACP JSON-RPC flows over ssh's stdio. No extra port, no extra process.
+- TLS still negotiates end-to-end with the real upstream (api.anthropic.com etc.). The laptop sees encrypted bytes only — it can't MITM.
+
+:::warn Trust model (read before --setup)
+`--setup` copies your laptop's `~/.agentty/credentials/credentials.json` to the remote (chmod 600). That file contains your OAuth refresh token (or API key). A compromised remote can exfiltrate it independent of the tunnel. **agentty airgap protects the network between laptop and remote, not the remote itself** — treat the remote as a credential-bearing peer, not a sandboxed proxy. See [SSH Air-gap](/docs/airgap).
+:::
+
+### Troubleshooting
+
+- **Zed shows the agent greyed out / "failed to start"** — check `~/.local/share/zed/logs/Zed.log` (Linux) or `~/Library/Logs/Zed/Zed.log` (macOS) for the ssh spawn line. Common causes: `ssh` not on Zed's PATH (rare), the remote prompts for a password (run `ssh-copy-id` first), or `agentty` isn't on the remote's PATH (pass `--remote-agentty /full/path/to/agentty` to the `airgap` command, then re-print the config).
+- **"connection refused" or "could not resolve host" mid-turn** — the SOCKS tunnel dropped, usually a flaky network on the laptop. Close the agent panel in Zed and reopen — Zed respawns ssh.
+- **Slow first response** — the first TLS handshake to api.anthropic.com tunnels through ssh, adding ~100 ms. Subsequent turns reuse the connection.
+- **`agentty: command not found` in the ssh spawn log** — agentty isn't on the remote shell's non-interactive PATH (`ssh user@remote 'echo $PATH'` shows what Zed sees). Install it system-wide on the remote, or re-print the config with `--remote-agentty /full/path/to/agentty`.
+- **The remote needs a non-default ssh port / key / jump host** — export `AGENTTY_AIRGAP_SSH="-p 2222 -i ~/.ssh/work -J bastion"` before running `agentty airgap … --acp`. Those flags get embedded into the printed config.
+
+:::tip
+Want to confirm the tunnel works before touching Zed? `agentty airgap user@remote` (no `--acp`) launches the agentty *TUI* running on the remote, in your local terminal. If that works, the ACP version will too — same tunnel, different transport.
+:::

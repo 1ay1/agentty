@@ -1,0 +1,156 @@
+---
+title: CLI Reference
+description: Every agentty subcommand and flag.
+nav_section: User Manual
+nav_order: 60
+slug: cli
+---
+
+agentty is one binary with a handful of subcommands and flags.
+
+## Running
+
+```bash
+agentty                                # run in the current directory
+agentty -w ~/code/project              # run against another workspace
+agentty -m claude-opus-4-5             # pick a model for the session
+agentty --provider openai -m gpt-4o    # run against a different backend
+agentty --provider kimi                # sign in with Kimi (no API key)
+agentty --provider deepseek -m deepseek-v4-pro   # DeepSeek (DEEPSEEK_API_KEY)
+agentty --provider ollama              # local model, no key, no cloud
+agentty -k sk-ant-…                     # single-session key, never written to disk
+agentty --sandbox on                   # require an OS sandbox for bash/diagnostics
+```
+
+## Subcommands
+
+| Command | What it does |
+|---|---|
+| `agentty` | Start an interactive thread in the workspace. |
+| `agentty login` | Authenticate non-interactively (useful over SSH). |
+| `agentty logout` | Clear stored credentials. |
+| `agentty status` | Print which auth source will be used. |
+| `agentty airgap user@host` | Run the agent on a remote host through an SSH SOCKS tunnel. |
+| `agentty acp` | Run headless as an [Agent Client Protocol](/docs/acp) agent for Zed (JSON-RPC over stdio). |
+| `agentty run [prompt]` | Run one prompt with tools and print only the answer. For scripts and CI; see [below](#agentty-run). |
+| `agentty mcp-serve` | Serve agentty's native tools over [MCP](/docs/mcp) (stdio). Point any MCP client at it. |
+| `agentty mcp-login <server>` | Authorize an OAuth-gated MCP server from `mcp.json` (OAuth 2.1 + PKCE via your browser). |
+| `agentty mcp-logout <server>` | Remove a stored MCP server token. |
+| `agentty mcp-status` | List configured MCP servers and their authorization state. |
+| `agentty plugin add\|list\|remove\|approve` | Manage [plugins](/docs/plugins) — a plugin *is* an MCP server (any language). e.g. `agentty plugin add today --python today.py`, `--uvx pkg`, `--npx pkg`, `--http <url>`, or `-- cmd args`; `--project` targets the repo config. Plugins never run until approved. |
+| `agentty hooks [list]` | Show configured lifecycle [hooks](/docs/hooks) + approval state. `agentty hooks approve` inspects and approves the active hooks file (hooks never run unapproved; any change re-gates). |
+| `agentty skills` | List discovered [Agent Skills](/docs/skills) with spec-lint diagnostics (exit 1 on warnings — CI-friendly). |
+| `agentty diagnostics` | Collect a redacted bug-report bundle (build info, provider, log tail) to `~/.agentty/logs/agentty-diagnostics.txt`. See [Logging](/docs/logging#reporting-a-bug). |
+| `agentty config` | Every folder agentty reads or writes, where it is, and how big. `agentty config <name>` (e.g. `threads`, `mcp`) shows one in detail. See [Storage](/docs/storage). |
+| `agentty config env` | Every storage variable and its current value. |
+| `agentty config move <dir> <path>` | Move a folder's data (refuses while agentty runs, verifies the copy), then print the `export` line to add. `default` moves it back. |
+| `agentty config doctor` | Check every folder is usable, secrets are private, and storage variables are valid. Exit 1 if something needs fixing. |
+| `agentty config clean [--yes]` | List files older versions left behind; `--yes` deletes them. |
+| `agentty rag-bench [dir]` | Benchmark [`search_docs` retrieval](/docs/retrieval#measure-it-agentty-rag-bench) on your own corpus — recall@k / MRR / nDCG per pipeline stage. Defaults to the auto-discovered docs folder; pass a directory to override. |
+| `agentty update` | Update agentty in place to the latest release. `--check` reports whether an update is available without installing it. |
+| `agentty --version` | Print `agentty <version>` and exit. |
+| `agentty --help` | Print usage and exit. |
+
+## agentty run
+
+Runs one prompt through the agent loop (tools, sandbox, no UI) and prints the answer to stdout. Errors go to stderr, so stdout is safe to capture. When a run fails, stderr ends with one `agentty run: <status>: <reason>` line saying why.
+
+```bash
+agentty run "add a --dry-run flag to the cli"
+git diff | agentty run "review this"          # piped input is added to the prompt
+agentty run --agent reviewer -o review.md "review src/"
+agentty run --json --timeout 10m --max-turns 40 "fix the failing test"
+agentty run --read-only --no-network "review this repo for secrets"   # safe on untrusted code
+agentty run --save "plan the migration" && agentty run --resume last "now do step 1"
+```
+
+| Flag | Effect |
+|---|---|
+| `--agent <type>` | Role: `general` (default), `explorer`, `reviewer`, `tester`, `coder`, or one of your own [subagents](/docs/subagents). |
+| `--json` | Print one JSON object: `status`, `result`, `error`, `model`, `turns`, `tool_calls`, `tool_errors`, `usage` (tokens, plus `last_input_tokens` and `context_window`), `duration_ms`. |
+| `-o`, `--output <file>` | Write the answer (or the JSON) to a file instead of stdout. |
+| `--max-turns <n>` | Stop after n model turns (default 80, or 32 for read-only roles). |
+| `--timeout <d>` | Stop after `90`, `90s`, `5m` or `1h` (default 15m). A running tool is killed when time is up. |
+| `--effort <level>` | Let the model think: `low`, `medium`, `high`, `xhigh`, `max` or `auto`. Clamped to what the model supports. Off by default. |
+| `--read-only` | Only tools that read. Writes, commands and network tools are hidden from the model and refused if it asks anyway. |
+| `--no-network` | Commands run with no network at all (an empty network namespace), and network tools are refused. Needs the claybin sandbox; without it the run won't start. |
+| `--save` | Save the conversation as a thread. The id is in `--json` output and in `-v`. |
+| `--resume <id\|last>` | Continue a saved thread with a new prompt. `last` is the newest. Saves the result back to the same thread. |
+| `-v`, `--verbose` | Stats on stderr at the end, including how full the context window got. |
+| `--events jsonl` | One JSON line per event on stderr (see below). |
+
+Ctrl-C or SIGTERM stops the run and kills the tool it's running; a second Ctrl-C exits at once.
+
+### Events
+
+With `--events jsonl` stderr gets one JSON object per line while the run goes, and stdout still gets only the answer:
+
+```json
+{"ev":"turn","turn":1,"seq":0}
+{"ev":"reasoning","turn":1,"text":"the test fails because…","seq":1}
+{"ev":"tool","tool":"read","ms":3,"ok":true,"args_sha":"1a2b3c4d","seq":2}
+{"ev":"text","turn":2,"text":"Fixed it by…","seq":3}
+```
+
+`reasoning` lines appear when the provider streams the model's thinking. Models that reason on their own (deepseek-r1 and similar, which send `reasoning_content`) show it without any flag; for Claude add `--effort` so it thinks at all. Text is batched per paragraph, so join the fields of one kind in order to get the whole thing.
+
+```bash
+agentty run --effort high --events jsonl "fix the flaky test" 2> events.jsonl
+jq -r 'select(.ev=="reasoning") | .text' events.jsonl
+```
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Finished with an answer. |
+| 1 | The agent failed or ran out of turns. Any partial answer is still printed. |
+| 2 | Bad usage (unknown flag, bad value, no prompt). |
+| 3 | Provider or auth problem. |
+| 4 | `--resume` found no such thread. |
+| 5 | The model's context window filled up. stderr says how big the window was and how big the last prompt got. |
+| 124 | Hit `--timeout`. |
+| 130 / 143 | Stopped by Ctrl-C / SIGTERM. |
+
+## Command palette
+
+Inside a thread there are no typed `/command` literals — press `^K` (or `/` on an empty composer) to open a fuzzy command palette. The fixed command set:
+
+| Command | What it does |
+|---|---|
+| New thread | Start a fresh conversation. |
+| Compact context | Replace history with a structured summary to reclaim the context window. Runs on the cheapest capable model on the active provider, not the flagship you're chatting with, so a compaction costs a fraction of a normal turn. |
+| Compaction depth | Cycle how full the context window gets before agentty auto-compacts in the background: 75% Aggressive → 90% Balanced → 95% Deep. Higher rides deeper into the window before summarizing — useful on a 1M-context model (see [Providers](/docs/providers#1m-context-models)). Persists across restarts. |
+| Review changes | Open the diff review pane (also `^R`). |
+| Accept all / Reject all changes | Apply or discard every pending hunk. |
+| Rewind to checkpoint | Jump to an earlier turn's worktree snapshot via a diff-preview picker (git repo + idle session; see [Checkpoints](/docs/threads#checkpoints)). |
+| Cycle profile | Write → Ask → Minimal (also `S-Tab`). |
+| Open model picker / Switch provider | Change the active model (`^/`) or backend (`^P`). |
+| Open threads / Open plan | Browse saved conversations (`^J`) or view the todo plan (`^T`). |
+| Run code block | Run a fenced block from the last reply (`^G`). |
+| Login / Quit | Sign in, or exit agentty. |
+
+## Options
+
+These mirror `agentty --help` exactly.
+
+| Flag | Effect |
+|---|---|
+| `-k`, `--key <key>` | API-key override for this session; never written to disk. |
+| `-m`, `--model <id>` | Model id for the session (e.g. `claude-opus-4-5`). |
+| `--provider <p>` | LLM backend: `anthropic` (default) or an OpenAI-compatible one — `openai` · `chatgpt` · `copilot` · `kimi` · `deepseek` · `gemini` · `xai` · `mistral` · `groq` · `openrouter` · `together` · `cerebras` · `fireworks` · `ollama`, a raw `host:port`, or a full URL `https://host/path` for servers with a custom path prefix. Persisted like `-m`; switch live with `^P`. See [Providers & Models](/docs/providers). |
+| `-p`, `--profile <mode>` | ACP permission tier (Zed shows the prompts): `ask` (default) · `minimal` (also prompt reads) · `write` (never prompts — fully autonomous). |
+| `-w`, `--workspace <dir>` | Sandbox filesystem tools to this directory (default: cwd). Tools refuse paths outside it. Pass `--workspace /` to disable the gate. |
+| `--sandbox <mode>` | Wrap `bash`/`diagnostics` in an OS-native sandbox. `auto` (default) · `on` (require a backend) · `off` (disable). |
+| `--log-file <path>` | Write the diagnostic log here instead of `~/.agentty/logs/agentty.log`. *What* gets captured is `AGENTTY_LOG` (default: warnings and errors). See [Logging](/docs/logging). |
+| `--events jsonl` | Headless `run` only: one JSON object per line on **stderr** while the run goes: `turn`, `reasoning` and `text` as the model writes them, and `tool` per tool call (`{"ev":"tool","seq":3,"tool":"read","ms":12,"ok":true,"args_sha":"a3f1c09d"}`). stdout keeps the answer, so a script can capture both. `args_sha` is a hash, not the arguments: it answers "were these two calls identical" without putting paths or command lines in your logs. See [Events](#events). |
+| `-V`, `--version` | Print the agentty version and exit. |
+| `-h`, `--help` | Show usage and exit. |
+
+## Air-gap flags
+
+Passed to `agentty airgap` — see `agentty airgap --help`.
+
+| Flag | Effect |
+|---|---|
+| `--setup` | Copy credentials to the remote on first run. |
+| `--acp` | Print a ready-to-paste Zed `agent_servers` config that tunnels `agentty acp` over ssh stdio. Flags after it are forwarded to the remote agent. See [Zed / ACP](/docs/acp#airgap). |
+| `--remote-agentty <path>` | Path to agentty on the remote if it isn't on `PATH`. |

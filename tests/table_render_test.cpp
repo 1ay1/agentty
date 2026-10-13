@@ -4,8 +4,9 @@
 // exact failure the user saw: the renderer is spec-correct, so the fix
 // lives in the system prompt, not here. This test pins the renderer
 // behaviour so we know which shape renders as a grid.
-#include <cstdio>
 #include <string>
+
+#include "agtest.hpp"
 
 #include <maya/widget/markdown.hpp>
 
@@ -49,9 +50,8 @@ static bool has_table(const std::string& src) {
     return found;
 }
 
-int main() {
-    int failures = 0;
-
+TEST_CASE("table render") {
+    
     // ── 1. WELL-FORMED table: header line starts at '|', blank line
     //    before it. Must classify as Table.
     std::printf("[well-formed table]\n");
@@ -62,12 +62,7 @@ int main() {
         "|-----|-------------|\n"
         "| airgap/ | SSH airgap / SOCKS5 relay |\n"
         "| diff/ | Diff rendering for edits |\n";
-    if (!has_table(good)) {
-        std::printf("  FAIL: expected a Table block, got none\n");
-        ++failures;
-    } else {
-        std::printf("  OK: rendered as a Table grid\n");
-    }
+    CHECK_MESSAGE(has_table(good), "expected a Table block, got none");
 
     // ── 2. MALFORMED (the model's shape): lead-in prose on the SAME line
     //    as the header. GFM rejects it → Paragraph (wall of pipes). This
@@ -77,15 +72,6 @@ int main() {
         "Source layout (src/): | Dir | Likely role | airgap/ | SSH airgap |\n"
         "|---|---|\n"
         "| diff/ | Diff rendering |\n";
-    if (has_table(bad)) {
-        std::printf("  FAIL: parser accepted a non-conformant table "
-                    "(would mean the bug is elsewhere)\n");
-        ++failures;
-    } else {
-        std::printf("  OK: correctly rendered as Paragraph "
-                    "(the wall-of-pipes the user reported)\n");
-    }
-
-    std::printf("\n%s\n", failures == 0 ? "PASSED" : "FAILED");
-    return failures == 0 ? 0 : 1;
+    CHECK_MESSAGE(!has_table(bad),
+                  "parser accepted a non-conformant table (bug is elsewhere)");
 }

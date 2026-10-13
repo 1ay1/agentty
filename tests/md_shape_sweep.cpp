@@ -18,6 +18,7 @@
 
 using namespace maya;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static constexpr int kWidth = 80;
 static constexpr int kTermH = 40;
 
@@ -69,10 +70,32 @@ static std::vector<Shape> corpus() {
     s.push_back({"table_alignment",
         "| L | C | R |\n|:--|:-:|--:|\n| a | b | c |\n\nafter\n"});
     s.push_back({"strikethrough", "~~struck~~ text and more\n\nafter\n"});
+    // Real-world regression (user report): paragraph with inline code, a
+    // "Summary:" lead-in, bold-lead-in bullets carrying multibyte chars
+    // (→, —) and inline code, then a trailing paragraph + question. The
+    // first paragraph stayed hidden during streaming and burst in later;
+    // the composer bounced while the list streamed.
+    s.push_back({"push_summary_report",
+        "Master pushed cleanly (`0b34b32..2528c70`).\n"
+        "\n"
+        "Summary:\n"
+        "- **Pulled**: rebased local master onto `origin/master`, picking "
+        "up the remote's `0b34b32` (static-PIE build) commit.\n"
+        "- **Pushed**: your 2 commits (checkpoints + always-allow grants, "
+        "now `2539fb0`/`2528c70`) \xe2\x86\x92 `origin/master`. Fast-forward, no "
+        "force needed.\n"
+        "- **Review work** stays local-only on the `review` branch + "
+        "`review-feature` tag \xe2\x80\x94 **not** on master, not pushed.\n"
+        "\n"
+        "You asked to push \"Master\" specifically, so I left the `review` "
+        "branch/tag local. Want me to push those to the remote too (as a "
+        "`review` branch you can pick up later), or keep them local?\n"});
     return s;
 }
 
 static int rows_of(const Canvas& c) { return c.max_content_row() + 1; }
+
+}  // namespace (fold)
 
 int main() {
     StylePool pool_dummy;
@@ -93,7 +116,7 @@ int main() {
                 RenderContextGuard guard(ctx);
                 Canvas c(kWidth, 2000, &pool);
                 c.clear();
-                render_tree(md.build(), c, pool, theme::dark, nodes, true);
+                render_tree(md.build(), c, pool, theme::native, nodes, true);
                 return rows_of(c);
             };
 

@@ -6,28 +6,20 @@
 #include <utility>
 
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
 
 namespace agentty::provider::anthropic {
 
 class AnthropicProvider {
 public:
-    void stream(provider::Request req, provider::EventSink sink) {
+    // run_stream_sync takes no capability today; the cap is the
+    // Provider-concept contract (thread it through if the transport locks).
+    provider::StreamResult stream(const maya::unlocked&, provider::Request req,
+                                  provider::EventSink sink) {
         Request areq;
-        areq.model         = std::move(req.model);
-        areq.system_prompt = std::move(req.system_prompt);
-        areq.messages      = std::move(req.messages);
-        areq.max_tokens    = req.max_tokens;
-        areq.auth          = std::move(req.auth);
-        areq.retry_count   = req.retry_count;
-        areq.effort        = std::move(req.effort);
-        areq.tools.reserve(req.tools.size());
-        for (auto& t : req.tools)
-            areq.tools.push_back({std::move(t.name),
-                                  std::move(t.description),
-                                  std::move(t.input_schema),
-                                  t.eager_input_streaming});
-        run_stream_sync(std::move(areq), std::move(sink), std::move(req.cancel));
+        provider::lower_shared(areq, req);   // model/system/messages/tools/max_tokens/auth/retry/effort
+        return run_stream_sync(std::move(areq), std::move(sink), std::move(req.cancel));
     }
 };
 

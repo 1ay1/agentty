@@ -26,6 +26,8 @@
 // the user invokes `agentty mcp-serve`; the normal TUI/ACP paths never touch
 // it, so cold start is unaffected.
 
+#include <maya/capability.hpp>   // tiny: the capability types only
+
 namespace agentty::mcp {
 
 // Run agentty as an MCP server over stdio (newline-delimited JSON-RPC on
@@ -33,7 +35,8 @@ namespace agentty::mcp {
 // Registers every tool in tools::registry() and blocks serving requests until
 // stdin closes. Returns a process exit code. The provider/subagent/sandbox
 // seams must already be wired by the caller (main.cpp does this) so tools like
-// `task` and `bash` behave exactly as they do in the TUI.
-[[nodiscard]] int serve_stdio();
+// `task` and `bash` behave exactly as they do in the TUI. It blocks until
+// stdin closes and joins its reader: `unlocked`.
+[[nodiscard]] int serve_stdio(const maya::unlocked&);
 
 } // namespace agentty::mcp

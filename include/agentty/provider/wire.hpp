@@ -31,11 +31,41 @@
 // of a live stream, so the per-line dispatch must inline. No virtuals, no
 // std::function on the hot path.
 
+#include <concepts>
 #include <cstddef>
+#include <cstring>
 #include <string>
 #include <string_view>
 
 namespace agentty::provider::wire {
+
+// ── Callback contracts ────────────────────────────────────────────────────
+// The framers are templated on their dispatch callback (it must inline on the
+// hot path — no std::function). These concepts pin the EXACT call shape each
+// framer expects, so passing a wrong-arity / wrong-type callable is a clean
+// one-line concept-mismatch at the call site instead of a deep
+// template-instantiation error inside feed(). The required signature that used
+// to live only in a comment is now checked by the compiler.
+//
+//   LineSink   — invoked as on_line(std::string_view)
+//   EventSink  — invoked as on_event(std::string_view name,
+//                                     std::string_view data, char* padded)
+template <class F>
+concept LineSink = std::invocable<F&, std::string_view>;
+
+template <class F>
+concept EventSink =
+    std::invocable<F&, std::string_view, std::string_view, char*>;
+
+// Trailing readable bytes SseFramer keeps live past the end of every
+// dispatched `data:` payload. Set equal to simdjson::SIMDJSON_PADDING (64) so
+// a transport can hand the accumulator straight to simdjson's ondemand parser
+// WITHOUT the per-frame memcpy-into-a-padded-scratch dance — simdjson only
+// requires the padding bytes be *readable* (SIMD over-reads tolerate junk),
+// which the reserved accumulator satisfies. Kept as a local constant so
+// wire.hpp stays free of a simdjson include; a static_assert in the transport
+// pins it to the real SIMDJSON_PADDING.
+inline constexpr std::size_t kSseSimdPadding = 64;
 
 // Compact `buf` (erasing the already-consumed prefix) only once `read_pos`
 // crosses this — turns the per-chunk drain from O(buffered bytes) to
@@ -71,7 +101,7 @@ public:
     // invoked as `on_line(std::string_view)`; the view is valid only for the
     // duration of the call (it points into the internal buffer, which may be
     // compacted afterward).
-    template <class OnLine>
+    template <LineSink OnLine>
     void feed(const char* data, std::size_t len, OnLine&& on_line) {
         buf_.append(data, len);
         std::string_view buf{buf_};
@@ -122,19 +152,39 @@ public:
     explicit SseFramer(std::size_t compact_threshold = kDefaultCompactThreshold,
                        std::size_t data_accum_max     = kDefaultSseDataAccumMax)
         : lines_(compact_threshold), data_accum_max_(data_accum_max) {
-        data_accum_.reserve(8 * 1024);
+        // Reserve payload headroom PLUS the simd padding tail so the common
+        // single-line `data:` frame never reallocates and the accumulator's
+        // storage always has kSseSimdPadding readable bytes past the payload.
+        data_accum_.reserve(8 * 1024 + kSseSimdPadding);
     }
 
     // Feed raw bytes; dispatch every complete event. `on_event` is invoked as
-    // `on_event(std::string_view event_name, std::string_view data)`. Both
-    // views are valid only for the duration of the call.
-    template <class OnEvent>
+    // `on_event(std::string_view event_name, std::string_view data,
+    //           char* padded_data)`. All three refer to the same payload:
+    // `data` is the read-only view; `padded_data` points at the SAME bytes in
+    // the accumulator's storage but guarantees kSseSimdPadding readable
+    // trailing bytes (for an in-place simdjson ondemand parse with no
+    // memcpy). `padded_data` is nullptr only for the degenerate empty payload.
+    // All are valid only for the duration of the call.
+    template <EventSink OnEvent>
     void feed(const char* data, std::size_t len, OnEvent&& on_event) {
         lines_.feed(data, len, [&](std::string_view line) {
             if (line.empty()) {
-                if (!skip_event_ && (!data_accum_.empty() || !event_name_.empty()))
+                if (!skip_event_ && (!data_accum_.empty() || !event_name_.empty())) {
+                    // Ensure kSseSimdPadding readable bytes past the payload.
+                    // reserve() guarantees capacity; the bytes in [size,
+                    // capacity) are readable (they belong to the allocation),
+                    // which is all simdjson's SIMD over-read requires. The
+                    // reserve is a no-op on the hot path once the accumulator
+                    // has grown to its steady-state size.
+                    if (data_accum_.capacity() < data_accum_.size() + kSseSimdPadding)
+                        data_accum_.reserve(data_accum_.size() + kSseSimdPadding);
+                    char* padded = data_accum_.empty()
+                        ? nullptr : data_accum_.data();
                     on_event(std::string_view{event_name_},
-                             std::string_view{data_accum_});
+                             std::string_view{data_accum_},
+                             padded);
+                }
                 event_name_.clear();
                 data_accum_.clear();
                 skip_event_ = false;
@@ -177,5 +227,296 @@ private:
     bool        skip_event_ = false;
     std::size_t data_accum_max_;
 };
+
+// ── Tool-result wire budget (age-tiered "tool result clearing") ───────────
+//
+// SINGLE SOURCE OF TRUTH for how much of a tool's output ships on the wire.
+// Every transport (Anthropic, OpenAI-compat, Ollama native) used to size tool
+// results differently — Anthropic had the full head+tail cap + age-tiering;
+// the others shipped the raw output with only a coarse global scrub cap. A
+// giant `read`/`grep`/`bash` dump therefore replayed IN FULL on every
+// subsequent turn on the OpenAI/Ollama paths, burning context on the very
+// models (local + smaller-window) that can least afford it. Now the policy
+// lives once, here, and all three transports call it.
+//
+// The full TRANSCRIPT is never touched — only the WIRE copy of each tool
+// result is sized by (a) its byte length and (b) how RECENT the call is.
+// Rationale, from Anthropic's context-engineering guidance: "once a tool has
+// been called deep in the message history, why would the agent need to see
+// the raw result again?" Claude Code keeps the most-recent results at full
+// fidelity and fades the rest.
+//
+//   rank 0 .. kFullResultWindow-1  → full budget (active working set)
+//   rank >= kFullResultWindow      → tight head+tail (recall WHAT it returned,
+//                                    not replay it)
+//
+// `recency_rank` is 0 for the newest terminal tool result in the thread and
+// grows toward the oldest. Two invariants keep this loss-free for reasoning:
+//   • ERROR results are NEVER faded — the model needs the full failure text
+//     to recover, however old.
+//   • Results already smaller than the faded budget ship verbatim regardless
+//     of age — there's nothing to gain by touching them (cap_tool_result is a
+//     no-op under budget).
+
+inline constexpr std::size_t kToolResultFullBudget  = 64u * 1024u;
+inline constexpr std::size_t kToolResultFadedBudget = 2u  * 1024u;
+inline constexpr int         kFullResultWindow      = 8;
+
+// Cache note: the fade cliff (rank >= kFullResultWindow) advances by one every
+// turn, but this is NOT a per-turn cache churn. Once a result crosses the
+// cliff it is capped to a DETERMINISTIC 2 KiB head+tail that depends only on
+// its raw bytes — so its wire form is byte-IDENTICAL at rank 8, 9, 10… The
+// only mutation is the single turn a given result first crosses 8→faded,
+// which re-caches that one block once. Everything before it (already faded)
+// and after it (still full) is unchanged, so the anchor's cached prefix holds.
+
+// ── UTF-8 validation & scrubbing ────────────────────────────────────────────
+//
+// Streamed model output can carry an invalid UTF-8 byte sequence — a
+// multi-byte code point split across two SSE frames and mis-stitched, an
+// overlong encoding, or a lone surrogate. Serialising that straight into a
+// JSON request body makes the NEXT request 400 ("invalid UTF-8"), wedging the
+// whole conversation. Every transport must scrub text before it goes on the
+// wire. All three used to carry their OWN copy, and they diverged: two
+// (OpenAI, Ollama) only checked continuation-byte shape and silently accepted
+// overlong sequences and surrogates; only Anthropic's rejected them. This is
+// the single, strict source of truth — it validates min-codepoint (no
+// overlong), the 0x10FFFF ceiling, and the D800..DFFF surrogate hole.
+[[nodiscard]] inline bool is_valid_utf8(std::string_view in) noexcept {
+    const auto* p = reinterpret_cast<const unsigned char*>(in.data());
+    const auto* end = p + in.size();
+    while (p < end) {
+        unsigned char c = *p;
+        if (c < 0x80) { ++p; continue; }
+        int extra; unsigned char mask; std::uint32_t min_cp;
+        if      ((c & 0xE0) == 0xC0) { extra = 1; mask = 0x1F; min_cp = 0x80; }
+        else if ((c & 0xF0) == 0xE0) { extra = 2; mask = 0x0F; min_cp = 0x800; }
+        else if ((c & 0xF8) == 0xF0) { extra = 3; mask = 0x07; min_cp = 0x10000; }
+        else return false;
+        if (p + extra >= end) return false;
+        std::uint32_t cp = c & mask;
+        for (int k = 1; k <= extra; ++k) {
+            unsigned char d = p[k];
+            if ((d & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (d & 0x3F);
+        }
+        if (cp < min_cp || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+            return false;
+        p += extra + 1;
+    }
+    return true;
+}
+
+// Return `in` unchanged if already valid UTF-8 (the common case, zero-copy on
+// the fast path); otherwise replace every ill-formed byte/sequence with U+FFFD
+// (\uFFFD, the Unicode replacement character). Strict: overlong encodings and
+// surrogate code points are treated as invalid and replaced.
+[[nodiscard]] inline std::string scrub_utf8(std::string_view in) {
+    if (is_valid_utf8(in)) return std::string{in};
+
+    std::string out;
+    out.reserve(in.size());
+    auto repl = [&] { out.append("\xEF\xBF\xBD"); };
+    std::size_t i = 0;
+    while (i < in.size()) {
+        unsigned char c = static_cast<unsigned char>(in[i]);
+        if (c < 0x80) { out.push_back(static_cast<char>(c)); ++i; continue; }
+        int extra; unsigned char mask; std::uint32_t min_cp;
+        if      ((c & 0xE0) == 0xC0) { extra = 1; mask = 0x1F; min_cp = 0x80; }
+        else if ((c & 0xF0) == 0xE0) { extra = 2; mask = 0x0F; min_cp = 0x800; }
+        else if ((c & 0xF8) == 0xF0) { extra = 3; mask = 0x07; min_cp = 0x10000; }
+        else { repl(); ++i; continue; }
+        if (i + static_cast<std::size_t>(extra) >= in.size()) { repl(); ++i; continue; }
+        std::uint32_t cp = c & mask;
+        bool ok = true;
+        for (int k = 1; k <= extra; ++k) {
+            unsigned char d = static_cast<unsigned char>(in[i + static_cast<std::size_t>(k)]);
+            if ((d & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (d & 0x3F);
+        }
+        if (!ok || cp < min_cp || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            repl(); ++i; continue;
+        }
+        out.append(in.data() + i, static_cast<std::size_t>(extra + 1));
+        i += static_cast<std::size_t>(extra) + 1;
+    }
+    return out;
+}
+
+// Back up an index to the start of the UTF-8 code point it lands in. `i` is a
+// prospective cut point; if it falls inside a multi-byte sequence we walk left
+// until a lead byte (or 0). Bounded at 3 continuation bytes (max UTF-8
+// sequence is 4 bytes).
+[[nodiscard]] inline std::size_t utf8_floor(std::string_view s, std::size_t i) noexcept {
+    if (i >= s.size()) return s.size();
+    std::size_t steps = 0;
+    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80 && steps < 3) {
+        --i; ++steps;
+    }
+    return i;
+}
+
+// Advance an index forward to the next UTF-8 code-point boundary.
+[[nodiscard]] inline std::size_t utf8_ceil(std::string_view s, std::size_t i) noexcept {
+    std::size_t steps = 0;
+    while (i < s.size() && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80 && steps < 3) {
+        ++i; ++steps;
+    }
+    return i;
+}
+
+// Wire-only byte-budget cap for a single tool result. A 500 KiB grep or a
+// `read` of a giant file otherwise bloats EVERY subsequent request (the result
+// replays on each turn) until auto-compaction eventually kicks in. Mirrors
+// Zed's take_text_within_byte_budget (thread.rs): cap at a byte budget, cut on
+// a UTF-8 boundary, splice a marker so the model knows bytes were elided. We
+// keep head + tail (not just head) because tool output often carries the
+// operative summary or error at the END (compiler tally, "N matches", exit
+// status). Transcript is untouched — the user still sees the full output; only
+// the wire copy is trimmed.
+[[nodiscard]] inline std::string cap_tool_result(std::string_view in, std::size_t budget) {
+    if (in.size() <= budget) return std::string{in};
+
+    const std::size_t elided = in.size() - budget;
+    std::string marker = "\n\n...[" + std::to_string(elided)
+                       + " bytes elided to fit wire budget; full output is "
+                         "in the transcript]...\n\n";
+
+    // Pathologically small budget: hard-truncate the head on a boundary.
+    if (marker.size() + 16 >= budget) {
+        return std::string{in.substr(0, utf8_floor(in, budget))};
+    }
+
+    const std::size_t body_budget = budget - marker.size();
+    const std::size_t head_len    = (body_budget * 7) / 10;
+    const std::size_t tail_len    = body_budget - head_len;
+
+    const std::size_t head_cut  = utf8_floor(in, head_len);
+    const std::size_t tail_from = utf8_ceil(in, in.size() - tail_len);
+
+    std::string out;
+    out.reserve(head_cut + marker.size() + (in.size() - tail_from));
+    out.append(in.substr(0, head_cut));
+    out.append(marker);
+    out.append(in.substr(tail_from));
+    return out;
+}
+
+// The wire budget for a tool result at the given recency rank. Errors keep the
+// full budget at any age; recent results keep it; stale successful results
+// fade to the tight head+tail budget.
+[[nodiscard]] inline std::size_t faded_tool_budget(int recency_rank, bool is_error) noexcept {
+    const bool faded = !is_error && recency_rank >= kFullResultWindow;
+    return faded ? kToolResultFadedBudget : kToolResultFullBudget;
+}
+
+// Convenience: cap a tool result by its age. One call every transport shares —
+// pick the budget from (recency_rank, is_error), then head+tail-cap to it.
+[[nodiscard]] inline std::string cap_tool_result_aged(std::string_view raw,
+                                                      int recency_rank,
+                                                      bool is_error) {
+    return cap_tool_result(raw, faded_tool_budget(recency_rank, is_error));
+}
+
+// Cap WITHOUT copying when nothing needs removing. The body encoder calls
+// this for every tool result on every round and then escapes the result
+// into the output buffer, so when the result already fits (the common case)
+// the intermediate std::string was pure allocate-copy-free churn. Returns a
+// view into `in` on the fast path; `owned` holds the bytes only when a cap
+// actually had to be built, and must outlive the returned view.
+[[nodiscard]] inline std::string_view cap_tool_result_view(std::string_view in,
+                                                           std::size_t budget,
+                                                           std::string& owned) {
+    if (in.size() <= budget) return in;
+    owned = cap_tool_result(in, budget);
+    return owned;
+}
+
+[[nodiscard]] inline std::string_view cap_tool_result_aged_view(std::string_view raw,
+                                                                int recency_rank,
+                                                                bool is_error,
+                                                                std::string& owned) {
+    return cap_tool_result_view(raw, faded_tool_budget(recency_rank, is_error), owned);
+}
+
+// Same idea for the UTF-8 scrub: valid input (almost always) is returned as
+// a view instead of a copy. `owned` carries the repaired bytes otherwise.
+[[nodiscard]] inline std::string_view scrub_utf8_view(std::string_view in,
+                                                      std::string& owned) {
+    if (is_valid_utf8(in)) return in;
+    owned = scrub_utf8(in);
+    return owned;
+}
+
+// ── Leaked-tool-call sniffer ─────────────────────────────────────────────────
+// Weak local models (served over the OpenAI-compat and Ollama-native paths)
+// frequently emit a tool call as PLAIN TEXT instead of using the native
+// tool_calls channel: a bare `{"name":...}` object, a `[{...}]` array, a
+// `<tool_call>…` XML tag, or a ```json fence. Both transports hold streamed
+// text back (instead of showing it as prose) as long as it COULD still be
+// resolving into one of those shapes, then salvage the completed blob into a
+// real tool call at end-of-turn.
+//
+// This is the shared "is the held text still a plausible tool-call prefix?"
+// predicate that drives that hold. It is conservative on the OPEN side: it
+// returns true while a prefix is still ambiguous (only whitespace seen, a bare
+// `{` with nothing after it yet, an incomplete `<tool_call>` tag, a lone
+// ```` ``` ````) so the transport keeps waiting rather than flushing a
+// half-formed call as prose. It returns false the moment the text commits to
+// being prose (`{` followed by a non-key char, a ```` ```cpp ```` fence, any
+// other leading character).
+//
+// It was copy-pasted — identical logic, drifted whitespace — in both the
+// openai and ollama transports; a fix to one (e.g. a new wrapper shape) had to
+// be mirrored by hand. This is the single source of truth. Pure
+// string_view→bool: no StreamCtx, no JSON, no allocation.
+[[nodiscard]] inline bool could_be_tool_json(std::string_view s) noexcept {
+    // Skip leading whitespace.
+    std::size_t i = 0;
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t'
+                            || s[i] == '\n' || s[i] == '\r')) ++i;
+    if (i >= s.size()) return true;  // only whitespace so far, still undecided
+
+    std::string_view rest = s.substr(i);
+
+    // Pattern 1: bare JSON object starting with `{`. The brace may be followed
+    // by whitespace/newlines before the first key (pretty-printed JSON from
+    // local models), so accept `{`, `{<ws>`, `{"` (key) and `{}` (empty).
+    if (rest.front() == '{') {
+        if (rest.size() == 1) return true;  // just `{` so far
+        std::string_view after = rest.substr(1);
+        std::size_t k = 0;
+        while (k < after.size() && (after[k] == ' ' || after[k] == '\t'
+               || after[k] == '\n' || after[k] == '\r')) ++k;
+        if (k == after.size()) return true;       // only whitespace after `{`
+        return after[k] == '"' || after[k] == '}'; // key start or empty object
+    }
+
+    // Pattern 2: JSON array starting with `[{` (or a lone `[` still resolving).
+    if (rest.starts_with("[{") || rest.starts_with("[ {")) return true;
+    if (rest == "[" || rest == "[ ") return true;
+
+    // Pattern 3: <tool_call> XML tag (and any incomplete prefix of it).
+    if (rest.starts_with("<tool_call>")) return true;
+    constexpr std::string_view kTag = "<tool_call>";
+    if (rest.size() < kTag.size() && rest.front() == '<') {
+        for (std::size_t j = 0; j < rest.size(); ++j)
+            if (rest[j] != kTag[j]) return false;  // diverged
+        return true;                                // exact prefix match
+    }
+
+    // Pattern 4: ```json fence (or a lone ``` still resolving — but NOT a
+    // committed non-json fence like ```cpp).
+    if (rest.starts_with("```json")) return true;
+    if (rest.starts_with("```")) {
+        if (rest.size() <= 3) return true;  // just ``` so far
+        std::string_view after = rest.substr(3);
+        return after.empty() || after[0] == '\n' || after[0] == '\r'
+            || after[0] == ' ' || after[0] == '\t' || after[0] == 'j';
+    }
+
+    // Anything else is committed prose.
+    return false;
+}
 
 } // namespace agentty::provider::wire

@@ -33,10 +33,12 @@
 #include <chrono>
 #include <cstdio>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include <maya/app/app.hpp>            // maya::detail::animation_requested_
+#include "agtest.hpp"
+
+#include <maya/device/frame_request.hpp>  // maya::detail::animation_requested_
+#include <maya/core/anim_clock.hpp>     // maya::testing::advance_anim_clock_ms
 #include <maya/render/canvas.hpp>
 #include <maya/render/renderer.hpp>
 #include <maya/style/theme.hpp>
@@ -49,19 +51,6 @@
 using agentty::Model;
 using agentty::Message;
 using agentty::Role;
-
-static int g_failures = 0;
-static int g_checks   = 0;
-
-#define CHECK(cond, msg)                                                   \
-    do {                                                                   \
-        ++g_checks;                                                        \
-        if (!(cond)) {                                                     \
-            ++g_failures;                                                  \
-            std::fprintf(stderr, "  FAIL [%s:%d] %s\n",                    \
-                         __FILE__, __LINE__, (msg));                       \
-        }                                                                  \
-    } while (0)
 
 // Render the CONVERSATION region only (frozen + live tail) and report
 // whether any widget in it requested an animation frame during build.
@@ -80,14 +69,34 @@ static bool frame_requests_animation(const Model& m,
     maya::StylePool pool;
     maya::Canvas canvas(width, height, &pool);
     canvas.clear();
-    maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
 
     return maya::detail::animation_requested_;
 }
 
+// Deterministic reveal drain. The maya reveal cursor advances by
+// anim_now_ms() (maya/core/anim_clock.hpp), so a test drives it by
+// ADDING to the test-only anim skew instead of sleeping against a
+// wall-clock deadline — the old sleep_for(16ms) + steady_clock::now()
+// deadline pattern flakes under CPU starvation (wall time burns while
+// the process is descheduled, the deadline expires before the ramp
+// finishes). Here each step advances exactly 16 ms of anim time and
+// runs `step` (which must call build() to consume it). Bounded to
+// `max_steps` frames (default 600 = 9.6 s of anim time, far past any
+// ramp) so a genuinely stuck reveal still terminates the loop with the
+// predicate true, tripping the caller's CHECK.
+template <class Pred, class Step>
+static void drain_reveal(Pred still_animating, Step step,
+                         int max_steps = 600) {
+    for (int i = 0; i < max_steps && still_animating(); ++i) {
+        maya::testing::advance_anim_clock_ms(16);
+        step();
+    }
+}
+
 // ── (1) The caret must stay armed across an arbitrarily long inter-
 //        delta gap while the phase says Streaming. ──────────────────────
-static void test_caret_armed_across_delta_gap() {
+TEST_CASE("caret armed across delta gap") {
     std::printf("test_caret_armed_across_delta_gap\n");
 
     Model m;
@@ -115,43 +124,46 @@ static void test_caret_armed_across_delta_gap() {
     // generous deadline). Once reveal_in_progress() is false, the ONLY
     // legitimate arming source left while the wire is open is the
     // phase gate under test.
-    auto& cache = m.ui.view_cache.message_md(
-        m.d.current.id, m.d.current.messages.back().id);
-    const auto catch_up_deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds{5};
-    while (cache.streaming && cache.streaming->reveal_in_progress()
-           && std::chrono::steady_clock::now() < catch_up_deadline) {
-        (void)frame_requests_animation(m);   // build() advances the cursor
-        std::this_thread::sleep_for(std::chrono::milliseconds{16});
-    }
-    CHECK(cache.streaming && !cache.streaming->reveal_in_progress(),
-          "reveal cursor reached the live edge (test precondition)");
+    // NB: the entry migrates between the pinned (live) and settled maps
+    // as its lifecycle flips, and in the two-map ViewCache a migration is
+    // a node transfer that invalidates any long-lived reference. So the
+    // drain re-fetches through the NON-migrating peek() each step instead
+    // of caching an Entry& across frame_requests_animation calls.
+    const auto rip = [&] {
+        const auto* mc =
+            m.ui.view_cache.peek(m.d.current.id, m.d.current.messages.back().id);
+        return mc && mc->streaming && mc->streaming->reveal_in_progress();
+    };
+    drain_reveal(rip, [&] { (void)frame_requests_animation(m); });  // build() advances the cursor
+    CHECK(!rip(), "reveal cursor reached the live edge (test precondition)");
 
     // Simulate the killer gap: NO new bytes, wire still open. TWO
     // clocks must lapse for the probe to be honest:
     //   • the widget's internal recency window (maya reveal_fx,
     //     age_at_tail_ms ≤ 250 ms keeps it self-arming every build) —
-    //     defeated by REAL elapsed time (sleep > 250 ms);
+    //     defeated by advancing the anim clock (maya reads anim_now_ms);
     //   • agentty's cache recency window (kRevealActiveMs = 3 s) —
-    //     too long to sleep out in a test; backdate the stamp instead,
-    //     exactly what a slow model's gap does to it.
+    //     agentty reads REAL steady_clock there, so backdate the stamp
+    //     directly, exactly what a slow model's gap does to it.
     // Past both windows, maya's quiescent regime arms only once per
     // 33/100 ms phase bucket — NOT every frame — so consecutive
     // same-bucket builds return false unless agentty's phase gate
     // (wire_streaming_here) holds the caret armed. That's the gate
     // under test.
-    std::this_thread::sleep_for(std::chrono::milliseconds{400});
-    cache.last_grow_tick =
-        std::chrono::steady_clock::now() - std::chrono::seconds{10};
+    maya::testing::advance_anim_clock_ms(400);
+    m.ui.view_cache
+        .message_md_live(m.d.current.id, m.d.current.messages.back().id)
+        .last_grow_tick_ms =
+        maya::anim_now_ms() - 10000;   // simulate a 10 s inter-delta gap
 
     // Six back-to-back frames inside the gap — EVERY one must re-arm.
     // A timeout-only gate leaves same-phase-bucket frames unarmed and
     // fails here (verified by sabotaging the gate to timeout-only).
     for (int f = 0; f < 6; ++f) {
         CHECK(frame_requests_animation(m),
-              "caret STILL armed mid-gap (real 400 ms + simulated 10 s, "
+              "caret STILL armed mid-gap (400 ms + simulated 10 s, "
               "zero new bytes, phase=Streaming) — a timeout race fails here");
-        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        maya::testing::advance_anim_clock_ms(2);
     }
 
     // Sanity: the gate is the phase, not the backdated clock. Flip the
@@ -164,7 +176,7 @@ static void test_caret_armed_across_delta_gap() {
 
 // ── (2) After settle, the caret must disarm once the finalize ramp
 //        completes — idle must not burn frames forever. ────────────────
-static void test_caret_disarms_after_settle() {
+TEST_CASE("caret disarms after settle") {
     std::printf("test_caret_disarms_after_settle\n");
 
     Model m;
@@ -191,15 +203,14 @@ static void test_caret_disarms_after_settle() {
 
     // The widget runs a ~200 ms finalize ramp (request_finalize(200))
     // gliding the reveal cursor to the live edge; frames during the
-    // ramp legitimately re-arm. Poll until it disarms, with a hard
-    // deadline far beyond the ramp — if it never disarms, the caret
-    // (and 60 fps wakes) would run forever at idle.
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds{3};
+    // ramp legitimately re-arm. Advance the anim clock frame by frame
+    // until it disarms — bounded far past the ramp. If it never disarms,
+    // the caret (and 60 fps wakes) would run forever at idle and the
+    // CHECK below fires.
     bool disarmed = false;
-    while (std::chrono::steady_clock::now() < deadline) {
+    for (int i = 0; i < 600 && !disarmed; ++i) {
         if (!frame_requests_animation(m)) { disarmed = true; break; }
-        std::this_thread::sleep_for(std::chrono::milliseconds{16});
+        maya::testing::advance_anim_clock_ms(16);
     }
     CHECK(disarmed,
           "caret disarms after settle + finalize ramp (idle must not "
@@ -225,7 +236,7 @@ static void test_caret_disarms_after_settle() {
 //        freeze taken on a still-animating turn snapshots a shape that
 //        diverges from the live frame in maya's prev_cells, re-emitting
 //        the whole turn over committed scrollback. ────────────────────
-static void test_freeze_gated_on_reveal_drain() {
+TEST_CASE("freeze gated on reveal drain") {
     std::printf("test_freeze_gated_on_reveal_drain\n");
 
     Model m;
@@ -281,16 +292,14 @@ static void test_freeze_gated_on_reveal_drain() {
 
     // Drain the reveal to completion (build() advances the cursor; the
     // finalize ramp flips live_ off once the cursor reaches the edge).
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds{5};
-    while (std::chrono::steady_clock::now() < deadline
-           && (cache.streaming->reveal_in_progress()
-               || cache.streaming->is_finalizing()
-               || cache.streaming->is_live()
-               || cache.streaming->is_parsing())) {
-        (void)cache.streaming->build();
-        std::this_thread::sleep_for(std::chrono::milliseconds{16});
-    }
+    drain_reveal(
+        [&] {
+            return cache.streaming->reveal_in_progress()
+                   || cache.streaming->is_finalizing()
+                   || cache.streaming->is_live()
+                   || cache.streaming->is_parsing();
+        },
+        [&] { (void)cache.streaming->build(); });
 
     // Now the widget has flipped live_ off on its own and the live tail
     // has painted the settled shape — the gate must OPEN so the freeze
@@ -311,13 +320,13 @@ static void test_freeze_gated_on_reveal_drain() {
 //        phase has left Streaming (e.g. a mid-run tool round-trip:
 //        Streaming → ExecutingTool → Streaming) AND the reveal cursor
 //        has caught up to the live edge. In that pinned-but-live window
-//        render_live_overlay_ still animates the scramble/gradient/
+//        render_live_panel_ still animates the scramble/gradient/
 //        pulsing caret every frame, so the RAF must keep firing or the
 //        turn looks frozen mid-response. is_streaming() is false here, so
 //        the phase gate (wire_streaming_here) does NOT cover it; the
 //        is_live() term must. Reproduces "md feels stuck in the middle
 //        when the stream is slow / pauses for a tool". ──────────────────
-static void test_caret_armed_when_live_but_phase_not_streaming() {
+TEST_CASE("caret armed when live but phase not streaming") {
     std::printf("test_caret_armed_when_live_but_phase_not_streaming\n");
 
     Model m;
@@ -336,20 +345,22 @@ static void test_caret_armed_when_live_but_phase_not_streaming() {
     CHECK(frame_requests_animation(m),
           "armed on the first streaming frame (sets the widget live_)");
 
-    auto& cache = m.ui.view_cache.message_md(
-        m.d.current.id, m.d.current.messages.back().id);
     // Drain the reveal cursor to the live edge so reveal_in_progress()
-    // can't be what arms the frame below.
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds{5};
-    while (cache.streaming && cache.streaming->reveal_in_progress()
-           && std::chrono::steady_clock::now() < deadline) {
-        (void)frame_requests_animation(m);
-        std::this_thread::sleep_for(std::chrono::milliseconds{16});
-    }
-    CHECK(cache.streaming && cache.streaming->is_live(),
+    // can't be what arms the frame below. Re-fetch through the
+    // non-migrating peek() each step: frame_requests_animation migrates
+    // the entry between the pinned/settled maps, invalidating any held
+    // Entry&.
+    const auto live_state = [&] {
+        const auto* mc =
+            m.ui.view_cache.peek(m.d.current.id, m.d.current.messages.back().id);
+        return mc ? mc->streaming.get() : nullptr;
+    };
+    drain_reveal(
+        [&] { auto* s = live_state(); return s && s->reveal_in_progress(); },
+        [&] { (void)frame_requests_animation(m); });
+    CHECK(live_state() && live_state()->is_live(),
           "widget still live after reaching the edge (precondition)");
-    CHECK(cache.streaming && !cache.streaming->reveal_in_progress(),
+    CHECK(live_state() && !live_state()->reveal_in_progress(),
           "reveal cursor reached the live edge (precondition)");
 
     // The wire briefly leaves Streaming for a tool round-trip. The
@@ -358,20 +369,23 @@ static void test_caret_armed_when_live_but_phase_not_streaming() {
     // clock past kRevealActiveMs (3 s) so the since_grow window can't be
     // what arms it either. Now ONLY the is_live() term remains.
     m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
-    cache.last_grow_tick =
-        std::chrono::steady_clock::now() - std::chrono::seconds{10};
+    m.ui.view_cache
+        .message_md_live(m.d.current.id, m.d.current.messages.back().id)
+        .last_grow_tick_ms =
+        maya::anim_now_ms() - 10000;   // simulate a 10 s inter-delta gap
 
-    // Sleep past maya's own recency window so its quiescent regime only
-    // self-arms once per phase bucket — consecutive same-bucket builds
-    // would return false without agentty's is_live() gate.
-    std::this_thread::sleep_for(std::chrono::milliseconds{400});
+    // Advance the anim clock past maya's own recency window so its
+    // quiescent regime only self-arms once per phase bucket —
+    // consecutive same-bucket builds would return false without
+    // agentty's is_live() gate.
+    maya::testing::advance_anim_clock_ms(400);
 
     for (int f = 0; f < 6; ++f) {
         CHECK(frame_requests_animation(m),
               "caret STILL armed while live_ but phase=ExecutingTool, "
               "cursor at edge, recency window expired — the is_live() RAF "
               "term must keep the typewriter caret breathing");
-        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        maya::testing::advance_anim_clock_ms(2);
     }
 }
 
@@ -387,7 +401,7 @@ static void test_caret_armed_when_live_but_phase_not_streaming() {
 //        rebuild the run under FrozenBuildScope (show_all) at a possibly
 //        different height, and strand a duplicate in scrollback. This locks
 //        the two gates' predicate sets together so they can't drift. ─────
-static void test_freeze_gate_blocks_while_widget_live() {
+TEST_CASE("freeze gate blocks while widget live") {
     std::printf("test_freeze_gate_blocks_while_widget_live\n");
 
     Model m;
@@ -443,16 +457,76 @@ static void test_freeze_gate_blocks_while_widget_live() {
           "stamped the cacheable key — freeze is a byte-identical cache HIT)");
 }
 
-int main() {
-    std::printf("stream_liveness_test — the caret must never look "
-                "frozen while a response is in flight\n\n");
+// ── (6) DEEP RUN, live edge below many settled sub-turns. The reported
+//        low-CPU stall: in a long autopilot run the streaming edge is a
+//        fresh placeholder message BELOW dozens of settled tool sub-turns.
+//        turn_config_for_assistant_run wraps each SETTLED sub-turn in its
+//        own stably-keyed bare Turn (maya blits it, flat cost) but MUST
+//        keep the still-streaming edge built inline so its
+//        cached_markdown_for re-arms the animation frame every build. If
+//        the edge were stably keyed (e.g. because its text prefix looked
+//        settled), maya would blit the cached component, cached_markdown_
+//        for would never re-run, the RAF would never re-arm, and the
+//        typewriter would freeze mid-turn at ~0% CPU until an unrelated
+//        hash axis flips. This asserts the edge stays armed. ────────────
+TEST_CASE("deep run live edge stays armed") {
+    std::printf("test_deep_run_live_edge_stays_armed\n");
 
-    test_caret_armed_across_delta_gap();
-    test_caret_disarms_after_settle();
-    test_caret_armed_when_live_but_phase_not_streaming();
-    test_freeze_gated_on_reveal_drain();
-    test_freeze_gate_blocks_while_widget_live();
+    Model m;
+    m.d.current.id = agentty::ThreadId{"liveness6"};
+    Message u; u.role = Role::User; u.text = "do a long series of edits";
+    m.d.current.messages.push_back(std::move(u));
+    agentty::app::detail::clear_frozen(m);
+    agentty::app::detail::freeze_through(m, 1);
 
-    std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
-    return g_failures == 0 ? 0 : 1;
+    // Many SETTLED tool-only sub-turns (each its own Assistant message) —
+    // the deep run's quiescent prefix. Tool terminal, no prose.
+    for (int e = 0; e < 40; ++e) {
+        Message a; a.role = Role::Assistant;
+        agentty::ToolUse tc;
+        tc.id   = agentty::ToolCallId{"e" + std::to_string(e)};
+        tc.name = agentty::ToolName{"edit"};
+        tc.args = {{"path", "src/f" + std::to_string(e) + ".cpp"}};
+        auto now = std::chrono::steady_clock::now();
+        tc.status = agentty::ToolUse::Done{
+            now - std::chrono::milliseconds{5}, now, "edited"};
+        a.tool_calls.push_back(std::move(tc));
+        m.d.current.messages.push_back(std::move(a));
+    }
+
+    // The LIVE EDGE: a fresh streaming placeholder with live prose bytes,
+    // mid-tool-execution phase (the wire left Streaming for a tool
+    // round-trip). This is the message that must stay inline + armed.
+    Message edge; edge.role = Role::Assistant;
+    edge.streaming_text = "Now I will summarize the edits I performed";
+    m.d.current.messages.push_back(std::move(edge));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    CHECK(frame_requests_animation(m, 100, 4000),
+          "armed on the first streaming frame of the deep-run edge");
+
+    // The edge keeps receiving bytes (a real stream), so it stays live.
+    // Across several frames — including after the recency clock is
+    // backdated past kRevealActiveMs and the phase leaves Streaming for a
+    // tool round-trip — the edge's build must re-arm the animation frame
+    // EVERY time. If the deep-run keying swallowed the edge into a cached
+    // bare Turn, cached_markdown_for would stop running and the arm would
+    // drop (the low-CPU freeze).
+    m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
+    for (int f = 0; f < 6; ++f) {
+        // Feed a byte so the edge is unambiguously still streaming, and
+        // backdate the per-message recency clock so the since_grow window
+        // can't be what arms it — only the inline reveal path can.
+        m.d.current.messages.back().streaming_text += ".";
+        auto& edge_cache = m.ui.view_cache.message_md(
+            m.d.current.id, m.d.current.messages.back().id);
+        edge_cache.last_grow_tick_ms =
+            maya::anim_now_ms() - 10000;   // simulate a 10 s inter-delta gap
+        CHECK(frame_requests_animation(m, 100, 4000),
+              "deep-run live edge STILL armed (40 settled sub-turns above, "
+              "phase=ExecutingTool, recency expired) — the streaming edge "
+              "must be built inline, never stably keyed");
+        maya::testing::advance_anim_clock_ms(2);
+    }
 }
+
+

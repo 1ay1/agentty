@@ -1,43 +1,53 @@
 TERMUX_PKG_HOMEPAGE=https://github.com/1ay1/agentty
-TERMUX_PKG_DESCRIPTION="AI pair programming in your terminal — one static binary, any model"
+TERMUX_PKG_DESCRIPTION="AI pair programming in your terminal — one binary, any model"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="LICENSE"
 TERMUX_PKG_MAINTAINER="@1ay1"
-TERMUX_PKG_VERSION="0.2.6"
-# agentty pulls maya / acp-cpp / mcp-cpp as git submodules, and its CMake
-# FetchContent's nlohmann-json + simdjson at configure time. A GitHub source
-# TARBALL contains none of that, so we build from a recursive git clone
-# instead of TERMUX_PKG_SRCURL.
-TERMUX_PKG_SRCURL=git+https://github.com/1ay1/agentty
-TERMUX_PKG_GIT_BRANCH=v${TERMUX_PKG_VERSION}
+TERMUX_PKG_VERSION="0.9.2"
+
+# The RELEASE tarball, not a GitHub source archive and not a git clone.
+#
+# agentty vendors maya / acp-cpp / mcp-cpp / rag-cpp as git submodules, so
+# `archive/refs/tags/…` is unbuildable — it contains four empty directories.
+# The release artifact is assembled with submodules included, which means
+# this recipe needs no network after the source step: no `git submodule
+# update`, no configure-time clone.
+TERMUX_PKG_SRCURL=https://github.com/1ay1/agentty/releases/download/v${TERMUX_PKG_VERSION}/agentty-${TERMUX_PKG_VERSION}.tar.gz
+TERMUX_PKG_SHA256=9dadc6130fba3a5a13ee3728d2e200b063f54fb273cadaa99e33e9439bced6c3
 TERMUX_PKG_AUTO_UPDATE=true
 
-# Runtime + build dependencies available in the Termux repos. mimalloc is
-# NOT packaged for Termux — agentty's CMake silently disables it when absent,
-# and we pass -DAGENTTY_USE_MIMALLOC=OFF below to be explicit.
-TERMUX_PKG_DEPENDS="openssl, libnghttp2, libc++"
+TERMUX_PKG_DEPENDS="libc++, libnghttp2, openssl"
+# nlohmann-json and simdjson are header/static deps resolved by find_package.
+# agentty's CMake declares both with FIND_PACKAGE_ARGS, so a system copy is
+# used when present and nothing is downloaded at configure time.
 TERMUX_PKG_BUILD_DEPENDS="nlohmann-json, simdjson"
 
-# agentty is C++26 (needs Termux's clang, which supports it) and links its
-# own copy of maya/acp/mcp statically. The resulting binary is a normal
-# dynamically-linked Termux executable (PIE) — NOT the fully-static release
-# artifact — so it plays nicely with the Termux linker on Android 14+.
+# C++26; Termux's clang handles it. Two flags are load-bearing for packaging:
+#
+#   AGENTTY_USE_MIMALLOC=OFF — mimalloc is the only dependency with no Termux
+#   package and no find_package fallback, so leaving it on would fetch at
+#   configure time. Bionic's allocator is fine; the mimalloc win is a
+#   desktop-workload optimisation.
+#
+#   AGENTTY_STANDALONE=OFF — upstream's release binaries are fully static for
+#   generic Linux. Termux wants an ordinary dynamically-linked PIE against its
+#   own openssl/nghttp2, which is what OFF produces.
+#
+#   MAYA_NATIVE_TUNING=OFF — maya defaults to -march=native, which asks the
+#   compiler about the machine it is RUNNING on. Cross-compiling for aarch64
+#   from an x86_64 builder, that is the wrong CPU entirely. maya also refuses
+#   native tuning when CMAKE_CROSSCOMPILING is set, but stating it here keeps
+#   the package correct regardless of which maya revision gets vendored.
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
--DCMAKE_BUILD_TYPE=Release
--DAGENTTY_AUTO_PULL_MAYA=OFF
--DAGENTTY_USE_MIMALLOC=OFF
--DAGENTTY_STANDALONE=OFF
+-DAGENTTY_AUTO_PULL_SUBMODULES=OFF
 -DAGENTTY_BUILD_TESTS=OFF
+-DAGENTTY_COMPILER_CACHE=OFF
+-DAGENTTY_STANDALONE=OFF
+-DAGENTTY_USE_MIMALLOC=OFF
+-DMAYA_NATIVE_TUNING=OFF
 "
 
-termux_step_post_get_source() {
-	# The GIT_BRANCH clone above is shallow and does NOT recurse submodules.
-	# Pull maya / acp-cpp / mcp-cpp so the build tree is complete. This runs
-	# in TERMUX_PKG_SRCDIR before configure; network is allowed at this step.
-	git -C "$TERMUX_PKG_SRCDIR" submodule update --init --recursive --depth 1
-}
-
 termux_step_make_install() {
-	install -Dm700 "$TERMUX_PKG_BUILDDIR/agentty" \
+	install -Dm755 "$TERMUX_PKG_BUILDDIR/agentty" \
 		"$TERMUX_PREFIX/bin/agentty"
 }

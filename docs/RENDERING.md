@@ -6,7 +6,10 @@ maya owns every Element, every chrome glyph, every layout decision,
 every breathing animation. The host app constructs no Elements.
 
 Read this alongside [`UI.md`](UI.md), which catalogs the maya DSL
-primitives that the widgets are built on top of.
+primitives that the widgets are built on top of, and
+[`STREAMING_REVEAL.md`](STREAMING_REVEAL.md), which covers the live
+typewriter reveal animation — its bugs, fixes, and the profiling method for
+debugging new burst/stutter complaints.
 
 ---
 
@@ -40,7 +43,7 @@ primitives that the widgets are built on top of.
 │  ┃ ╰────────────────────────────────────────────────────╯       │         │ ─┘
 │                                                                          │
 │  ╭─────────────────────────────────────────────────────────────────╮     │ ─┐
-│  │ Changes (2 files)        Ctrl+R review  A accept  X reject      │     │  │ ChangesStrip
+│  │ Changes (2 files)   Ctrl+R review  Ctrl+A accept  Ctrl+X reject │     │  │ ChangesStrip
 │  │ 2 files changed  +12  -3                                        │     │  │ (only when
 │  │   ~ src/auth/login.ts        +5 -2                              │     │  │  pending)
 │  │   + src/auth/types.ts        +7 -1                              │     │  │
@@ -130,7 +133,7 @@ maya::AppLayout                               top-level chat-app frame
 │
 ├── maya::ChangesStrip                       pending-edits banner
 │       │
-│       ├── header row                       "Changes (2 files)  Ctrl+R review  A accept  X reject"
+│       ├── header row                       "Changes (2 files)  Ctrl+R review  Ctrl+A accept  Ctrl+X reject"
 │       └── maya::FileChanges                file list with +/− line counts
 │
 ├── maya::Composer                           bordered input box
@@ -165,7 +168,7 @@ maya::AppLayout                               top-level chat-app frame
                                              opaque background to mask the base
 ```
 
-Every name above is a real widget at `maya/include/maya/widget/<name>.hpp`.
+Every name above is a real widget at `third_party/maya/include/maya/widget/<name>.hpp`.
 
 ---
 
@@ -414,12 +417,12 @@ prompts, hint keys); the widget owns the layout, the wordmark gradient
 ### `maya::ChangesStrip` — pending edits banner
 
 ```
-╭─────────────────────────────────────────────────────╮
-│ Changes (2 files)   Ctrl+R review  A accept  X reject│
-│ 2 files changed  +12  -3                             │
-│   ~ src/auth/login.ts        +5 -2                   │
-│   + src/auth/types.ts        +7 -1                   │
-╰─────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────╮
+│ Changes (2 files)  Ctrl+R review  Ctrl+A accept  Ctrl+X reject│
+│ 2 files changed  +12  -3                                     │
+│   ~ src/auth/login.ts        +5 -2                           │
+│   + src/auth/types.ts        +7 -1                           │
+╰──────────────────────────────────────────────────────────────╯
 ```
 
 When `cfg.changes` is empty, the widget renders to an empty Element so
@@ -630,7 +633,7 @@ participates only at the entry: building the top-level Config tree.
 ### maya widgets — flat directory, hierarchy in headers
 
 ```
-maya/include/maya/widget/
+third_party/maya/include/maya/widget/
 ├── app_layout.hpp                top-level frame: Thread + ChangesStrip + Composer + StatusBar + Overlay
 ├── thread.hpp                    welcome | conversation branch
 ├── conversation.hpp              list of typed Turn::Configs + optional in-flight

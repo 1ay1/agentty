@@ -22,14 +22,62 @@
 
 namespace agentty::app::detail {
 
-// Keys models sometimes emit in place of our canonical field name. Mirrors
-// the ArgReader alias table — keep in sync.
+// Keys models sometimes emit in place of our canonical field name.
+//
+// These predate the command family below. mcp-cpp's ArgReader has its own
+// alias tables now (src/tools/util/arg_reader.cpp), and read/grep/shell tidy
+// more shapes there; these lists are agentty's host-side tolerance, used by
+// canonify, by salvage_args and by the required-field guard below.
+//
+// WIDENING ONE OF THESE HAS TWO CONSUMERS, not one. The required-field guard
+// only READS the table (an alias satisfies the check and nothing is rewritten),
+// but salvage_args CANONIFIES through it -- `pick("old_string", kOldStrAliases)`
+// copies the first alias it finds onto the canonical key. That is safe today
+// for a reason worth writing down rather than rediscovering: salvage only runs
+// on a TRUNCATED stream, ended_inside_string() refuses the mid-string case
+// first, and every dispatcher reads both spellings anyway, so the rewrite is a
+// no-op in effect. Add an alias whose canonical twin is read literally
+// somewhere and that stops being true.
 inline constexpr std::string_view kPathAliases[]    = {"path", "file_path", "filepath", "filename"};
-inline constexpr std::string_view kOldStrAliases[]  = {"old_string", "old_str", "oldStr"};
-inline constexpr std::string_view kNewStrAliases[]  = {"new_string", "new_str", "newStr"};
+// old_text/new_text are transcript-evidenced (Laguna S 2.1, agentty session
+// of 2026-10-03, do_edit.md trace): the edit tool's edits[] entries are keyed
+// old_text/new_text (see edit_schema), and the model leaks that spelling into
+// the TOP-LEVEL old_string/new_string slots. parse_edit_args accepts both
+// spellings at both levels (top level probes `old_string` then `old_text`;
+// edits[] probes the reverse), so dispatch was never the failure — the guard
+// was. `old`/`search`/`find`/`from` are deliberately NOT listed: no transcript
+// shows a model emitting them, and unlike the _text forms they are not the
+// schema's own vocabulary for this tool.
+inline constexpr std::string_view kOldStrAliases[]  = {"old_string", "old_text",
+                                                       "old_str", "oldStr"};
+inline constexpr std::string_view kNewStrAliases[]  = {"new_string", "new_text",
+                                                       "new_str", "newStr"};
 inline constexpr std::string_view kContentAliases[] = {"content", "file_text", "text",
                                                         "file_content", "contents",
                                                         "body", "data"};
+// Keys models emit for the shell tool's `command` parameter. Laguna S 2.1
+// (and models cross-trained on OpenAI-style specs) reliably send `cmd`.
+//
+// NOT mirrored from mcp-cpp's ArgReader, despite what the comment above says
+// about the older lists. ArgReader is a plain keyed reader -- str(key),
+// require_str(key), raw(key) -- with no alias table at all; the only "cmd"
+// anywhere nearby is cmd.exe detection in util/child_process.hpp. So
+// canonification here is not a convenience that duplicates dispatch, it is
+// THE mechanism: relax the guard without canonifying and a `cmd`-shaped call
+// stops failing loudly and starts reaching a dispatcher that reads `command`,
+// finds nothing, and runs an empty string. Guard and canonify ship together
+// or not at all.
+//
+// Kept deliberately SHORT. Every entry is a key whose value we will hand to a
+// shell, so a wrong guess does not cost a failed call -- it executes the wrong
+// string. `shell` and `run` were dropped for that reason: `shell` as a key on
+// a tool NAMED shell is ambiguous rather than a spelling of "the command",
+// and `run` is a real agentty subcommand that a model could plausibly send
+// meaning something else (notably to process_start). Add an alias only with a
+// transcript showing a model actually emitting it.
+inline constexpr std::string_view kCommandAliases[] = {"command", "cmd",
+                                                       "shell_command",
+                                                       "script", "cmdline"};
 inline constexpr std::string_view kDisplayDescription = "display_description";
 
 // Hard cap on the live content preview shown during streaming. The widget
@@ -52,6 +100,45 @@ sniff_any(const std::string& raw,
         if (v) return v;
     }
     return std::nullopt;
+}
+
+// Rename alias keys to their canonical name IN PLACE in a parsed args
+// object: for the first alias of `canon` present in the object (with
+// `canon` itself absent), copy the value under `canon`. The original
+// entry stays so a model re-reading its own call still finds what it sent.
+// Returns true when any rename happened (callers use it to mark_args_dirty).
+[[nodiscard]] inline bool canonify_alias_keys(nlohmann::json& args,
+                                              std::string_view canon,
+                                              std::span<const std::string_view> keys) {
+    if (!args.is_object()) return false;
+    bool changed = false;
+    for (auto k : keys) {
+        if (k == canon) continue;
+        auto it = args.find(std::string{k});
+        if (it == args.end() || !it->is_string()) continue;
+        if (args.contains(std::string{canon})) break;   // canonical wins
+        args[std::string{canon}] = *it;                 // copy: alias entry stays intact
+        changed = true;
+    }
+    return changed;
+}
+
+// Canonify the alias keys the given built-in tool is known to receive into
+// their canonical names, in place. Currently covers the `command` family
+// (shell / diagnostics / test / process_start): Laguna S 2.1 and models
+// cross-trained on OpenAI-style specs emit `cmd` for shell.
+//
+// The tools read a few aliases themselves now (mcp-cpp ArgReader), but the
+// card, the permission prompt and the guard read the canonical key, so the
+// rename still matters here.
+//
+// Returns true when anything was renamed.
+[[nodiscard]] inline bool canonify_tool_args(std::string_view tool_name,
+                                             nlohmann::json& args) {
+    if (tool_name == "shell" || tool_name == "diagnostics"
+        || tool_name == "test" || tool_name == "process_start")
+        return canonify_alias_keys(args, "command", kCommandAliases);
+    return false;
 }
 
 // Attempt to parse the streaming buffer via the partial-JSON closer. Returns
@@ -134,11 +221,29 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
         }
         case K::Bash:
         case K::Diagnostics:
-            if (!is_nonempty_string("command")) return "command";
+        case K::ProcessStart: {
+            if (is_nonempty_string_any(kCommandAliases)) return {};
+            // shell also runs a command sent as an argv list.
+            auto it = args.find("command");
+            if (it != args.end() && it->is_array() && !it->empty()) return {};
+            return "command";
+        }
+        case K::ProcessPoll:
+        case K::ProcessStop:
+            if (!is_nonempty_string("id")) return "id";
+            return {};
+        case K::Move:
+            if (!is_nonempty_string("source")) return "source";
+            if (!is_nonempty_string("destination")) return "destination";
+            return {};
+        case K::Remove:
+            if (!is_nonempty_string_any(kPathAliases)) return "path";
             return {};
         case K::Grep:
-            if (!is_nonempty_string("pattern")) return "pattern";
-            return {};
+            // Same spellings the tool reads (mcp-cpp ArgReader's pattern aliases).
+            for (const char* k : {"pattern", "query", "q", "regex", "search", "term", "match", "pat"})
+                if (is_nonempty_string(k)) return {};
+            return "pattern";
         case K::FindDefinition:
             if (!is_nonempty_string("symbol")) return "symbol";
             return {};
@@ -150,6 +255,9 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
             return {};
         case K::GitCommit:
             if (!is_nonempty_string("message")) return "message";
+            return {};
+        case K::GitBlame:
+            if (!is_nonempty_string_any(kPathAliases)) return "path";
             return {};
         case K::Remember:
             // remember requires the `text` body. `scope` is optional.
@@ -174,22 +282,55 @@ missing_required_field(std::string_view tool_name, const nlohmann::json& args) {
             // skill requires the `name` of the skill to load.
             if (!is_nonempty_string("name")) return "name";
             return {};
-        // `path` is nice-to-have but not strictly required for these
-        // (list_dir/glob default to cwd; read without path is already a tool
-        // error — surfacing it from the tool itself preserves the typed
-        // ToolError chain instead of converting to a stream-level salvage
-        // failure here).
         case K::Read:
-        case K::ListDir:
+            // `read` without a path can only ever fail, so treating it as a
+            // truncation is strictly better than letting it dispatch.
+            //
+            // This case used to sit in the no-required group below, arguing
+            // that the tool's own "[invalid args] path required" preserves the
+            // typed ToolError chain. Mining 40 recent threads refuted it: 44
+            // of 3323 reads died exactly that way, 33 with args `{}`. The
+            // typed error is real but useless here -- it skips the
+            // transparent retry, burns the turn, and tells the model it forgot
+            // an argument when the truth is the wire cut mid-arguments.
+            if (is_nonempty_string_any(kPathAliases)) return {};
+            // read also takes these (mcp-cpp ArgReader's path aliases) and a
+            // paths:[...] array.
+            for (const char* k : {"file", "filePath", "dir", "directory", "target", "pathname"})
+                if (is_nonempty_string(k)) return {};
+            for (const char* k : {"paths", "files", "file_paths"})
+                if (auto it = args.find(k); it != args.end() && it->is_array() && !it->empty())
+                    return {};
+            return "path";
         case K::Glob:
+            // Same reasoning: the pattern IS the query, and glob without one
+            // has nothing to match. (`path` genuinely defaults to cwd.)
+            if (!is_nonempty_string("pattern")) return "pattern";
+            return {};
+        // `path` is nice-to-have but not strictly required for these:
+        // list_dir defaults to cwd, and the git tools validate per-action
+        // with richer messages than this guard could produce.
+        case K::ListDir:
         case K::GitDiff:
         case K::GitLog:
         case K::GitStatus:
+        case K::GitShow:
+        case K::GitBranch:   // `name` requirement is action-dependent; the
+                             // tool's own parser gives the richer error.
+        case K::GitStash:    // action-gated; parser validates per-action.
+        case K::GitRebase:   // upstream required only for action=onto.
+        case K::GitCherryPick: // commits required only for action=pick.
+        case K::Test:
         case K::WebSearch:
+        case K::RepoMap:
+        case K::SearchCode:
         case K::Todo:
             return {};
     }
-    return {};   // unreachable: switch is exhaustive over Kind
+    // No default: — switch is exhaustive over Kind, so a new tool Kind
+    // re-triggers -Wswitch here (a build error under -Werror) rather than
+    // silently falling through to "no required fields". DESIGN.md rule.
+    return {};   // unreachable
 }
 
 } // namespace agentty::app::detail

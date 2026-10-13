@@ -22,6 +22,8 @@
 //
 // No transport, no network: this is the machinery in isolation.
 
+#include "agtest.hpp"
+
 #include "agentty/io/fsm.hpp"
 
 #include <cassert>
@@ -137,7 +139,7 @@ fsm::Result<Owning2, Err> advance_fail(Owning&& s) {
     return std::unexpected(Err{ "boom" });
 }
 
-int main() {
+TEST_CASE("fsm") {
     edge_guards_compile();
 
     // (a) Successful transition: no cleanup log (handle moved forward, the
@@ -184,6 +186,4 @@ int main() {
         assert(log.empty());
         g_log = nullptr;
     }
-
-    return 0;
 }

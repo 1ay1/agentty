@@ -9,6 +9,8 @@
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/tool/util/utf8.hpp"
+#include "agentty/domain/ui_live.hpp"   // path_roots, project agents
 
 namespace agentty::ui {
 
@@ -20,20 +22,72 @@ std::string tool_display_name(const std::string& n) {
     if (n == "read")            return "Read";
     if (n == "write")           return "Write";
     if (n == "edit")            return "Edit";
-    if (n == "bash")            return "Bash";
+    if (n == "move")            return "Move";
+    if (n == "remove")          return "Remove";
+    if (n == "shell")           return "Shell";
+    if (n == "process_start")   return "Process Start";
+    if (n == "process_poll")    return "Process Poll";
+    if (n == "process_stop")    return "Process Stop";
     if (n == "grep")            return "Grep";
     if (n == "glob")            return "Glob";
     if (n == "list_dir")        return "List";
+    if (n == "repo_map")        return "Repo Map";
     if (n == "todo")            return "Todo";
     if (n == "web_fetch")       return "Fetch";
     if (n == "web_search")      return "Search";
     if (n == "find_definition") return "Definition";
-    if (n == "diagnostics")     return "Diag";
+    if (n == "search_structural") return "Structural";
+    if (n == "extract")         return "Extract";
+    if (n == "aggregate")       return "Aggregate";
+    if (n == "read_filter")     return "Read Filter";
+    if (n == "json_query")      return "JSON Query";
+    if (n == "outline")         return "Outline";
+    if (n == "apply_patch")     return "Patch";
+    if (n == "replace")         return "Replace";
+    if (n == "rewrite_structural") return "Rewrite";
+    if (n == "diagnostics")     return "Diagnostics";
+    if (n == "test")            return "Test";
     if (n == "git_status")      return "Git Status";
     if (n == "git_diff")        return "Git Diff";
     if (n == "git_log")         return "Git Log";
+    if (n == "git_show")        return "Git Show";
+    if (n == "git_blame")       return "Git Blame";
     if (n == "git_commit")      return "Git Commit";
-    return n;
+    if (n == "git_branch")      return "Git Branch";
+    if (n == "git_stash")       return "Git Stash";
+    if (n == "git_rebase")      return "Git Rebase";
+    if (n == "git_cherry_pick") return "Git Cherry-Pick";
+    if (n == "remember")        return "Remember";
+    if (n == "forget")          return "Forget";
+    if (n == "wipe_memory")     return "Wipe Memory";
+    if (n == "task")            return "Agent";
+    if (n == "skill")           return "Skill";
+    if (n == "search_docs")     return "Docs Search";
+    if (n == "search_code")     return "Code Search";
+    if (n == "mcp_search_tools") return "MCP Tool Search";
+    if (n == "mcp_call")         return "MCP Call";
+    // Fallback for any UNMAPPED tool name (MCP-provided tools, a raw name the
+    // model emitted, future built-ins not yet in the table above): Title-Case
+    // it so the timeline is visually consistent — no tool ever renders as a
+    // bare lowercase token. Splits on '_'/'-'/space, upcases each word's first
+    // letter, and turns the separators into spaces (e.g. "foo_bar" -> "Foo Bar").
+    if (n.empty()) return n;
+    std::string out;
+    out.reserve(n.size());
+    bool at_word_start = true;
+    for (char c : n) {
+        if (c == '_' || c == '-' || c == ' ') {
+            if (!out.empty() && out.back() != ' ') out.push_back(' ');
+            at_word_start = true;
+            continue;
+        }
+        if (at_word_start && c >= 'a' && c <= 'z')
+            out.push_back(static_cast<char>(c - 'a' + 'A'));
+        else
+            out.push_back(c);
+        at_word_start = false;
+    }
+    return out;
 }
 
 // Tool category — semantic grouping for color + stats badge.
@@ -55,17 +109,25 @@ std::string tool_display_name(const std::string& n) {
 //   vcs     (git_*)                               → role_info (blue, "context-shift")
 //   plan    (todo)                                → status_warn (yellow, planning)
 maya::Color tool_category_color(const std::string& n) {
-    if (n == "edit" || n == "write")  return role_brand;
-    if (n == "bash")                  return code_text;
+    if (n == "edit" || n == "write" || n == "move" || n == "remove")
+        return role_brand;
+    if (n == "shell" || n == "diagnostics" || n == "test"
+        || n.rfind("process_", 0) == 0)
+        return code_text;
     if (n == "todo")                  return status_warn;
+    if (n == "task")                  return role_brand_alt;   // agent identity
     if (n.rfind("git_", 0) == 0)      return role_info;
     return code_path;
 }
 
 std::string_view tool_category_label(const std::string& n) {
-    if (n == "edit" || n == "write")  return "mutate";
-    if (n == "bash")                  return "execute";
+    if (n == "edit" || n == "write" || n == "move" || n == "remove")
+        return "mutate";
+    if (n == "shell" || n == "diagnostics" || n == "test"
+        || n.rfind("process_", 0) == 0)
+        return "execute";
     if (n == "todo")                  return "plan";
+    if (n == "task")                  return "agent";
     if (n.rfind("git_", 0) == 0)      return "vcs";
     return "inspect";
 }
@@ -86,20 +148,93 @@ maya::AgentEventStatus tool_event_status(const ToolUse& tc) {
 
 namespace {
 
+[[nodiscard]] bool safe_bool_arg(const nlohmann::json& args,
+                                 const char* key, bool fallback = false) {
+    if (!args.is_object()) return fallback;
+    auto it = args.find(key);
+    return it != args.end() && it->is_boolean() ? it->get<bool>() : fallback;
+}
+
+// Relative to the launch cwd, else "~/" under home. The roots come from
+// Model::env via the per-frame publish (ui_live.hpp), never from the OS.
 std::string pretty_path(std::string p) {
     if (p.empty()) return p;
-    std::error_code ec;
-    auto cwd = std::filesystem::current_path(ec).string();
-    if (!ec && !cwd.empty() && p.size() > cwd.size()
+    const auto roots = agentty::ui_prefs::path_roots();
+    const std::string& cwd = roots.cwd;
+    if (!cwd.empty() && p.size() > cwd.size()
         && p.compare(0, cwd.size(), cwd) == 0 && p[cwd.size()] == '/')
         return p.substr(cwd.size() + 1);
-    if (const char* home = std::getenv("HOME"); home && *home) {
-        std::string h{home};
-        if (p.size() > h.size() && p.compare(0, h.size(), h) == 0
-            && p[h.size()] == '/')
-            return std::string{"~/"} + p.substr(h.size() + 1);
-    }
+    const std::string& h = roots.home;
+    if (!h.empty() && p.size() > h.size() && p.compare(0, h.size(), h) == 0
+        && p[h.size()] == '/')
+        return std::string{"~/"} + p.substr(h.size() + 1);
     return p;
+}
+
+// Parse the leading count out of a tool output that begins "Found N …"
+// (grep: "Found N matches across M files", glob: "Found N file(s):").
+// Returns -1 when the output doesn't match, so callers can fall back.
+// Counting rendered LINES (the old behaviour) inflated the number —
+// grep output includes ### context headers, 2 context lines per hit and
+// blank separators, so "· 45 matches" showed for 3 real hits.
+[[nodiscard]] int parse_found_count(const std::string& out) {
+    constexpr std::string_view kTag = "Found ";
+    if (out.rfind(kTag, 0) != 0) return -1;
+    int n = 0;
+    bool got = false;
+    for (std::size_t i = kTag.size(); i < out.size(); ++i) {
+        const char c = out[i];
+        if (c >= '0' && c <= '9') { n = n * 10 + (c - '0'); got = true; }
+        else break;
+    }
+    return got ? n : -1;
+}
+
+// True line count for a `read`. count_lines(tc.output()) is WRONG here: a read
+// output is decorated — an optional `display_description` line, an optional
+// symbol header, and a trailing `[showing lines A-B of N ...]` / `[... of N
+// ...]` hint the tool appends — so re-counting rows inflates the number and
+// disagrees with the file. The tool already reports the file's real length as
+// the `of N` in that hint (also `of N lines` in the outline/1-KiB fallbacks);
+// read it as the authoritative count. Returns -1 when there's no such marker
+// (a small file read whole, no truncation), so the caller falls back to a
+// plain content-line count.
+[[nodiscard]] int parse_read_total_lines(const std::string& out) {
+    // read reports the file's real length in two shapes:
+    //   • content / 1-KiB fallback: "[showing lines A-B of N ...]" — " of N"
+    //     followed by end-of-number + (" lines" | "]" | ";" | " more").
+    //   • symbol outline: "path — K definitions across N lines:" — the
+    //     count sits after "across ".
+    // Scan for both; the last plausible match wins (the marker is always in
+    // the trailing hint / header, never earlier prose). Returns -1 when
+    // neither shape is present (small file read whole).
+    auto num_after = [&](std::size_t i, int& n) -> std::size_t {
+        n = 0; bool got = false;
+        while (i < out.size() && out[i] >= '0' && out[i] <= '9') {
+            n = n * 10 + (out[i] - '0'); got = true; ++i;
+        }
+        return got ? i : std::string::npos;
+    };
+    int found = -1;
+    for (std::size_t p = out.find(" of "); p != std::string::npos;
+         p = out.find(" of ", p + 1)) {
+        int n = 0;
+        std::size_t e = num_after(p + 4, n);
+        if (e == std::string::npos) continue;
+        std::string_view rest{out.data() + e, out.size() - e};
+        if (rest.rfind(" lines", 0) == 0 || rest.rfind("]", 0) == 0
+         || rest.rfind(";", 0) == 0    || rest.rfind(" more", 0) == 0)
+            found = n;
+    }
+    for (std::size_t p = out.find("across "); p != std::string::npos;
+         p = out.find("across ", p + 1)) {
+        int n = 0;
+        std::size_t e = num_after(p + 7, n);
+        if (e == std::string::npos) continue;
+        std::string_view rest{out.data() + e, out.size() - e};
+        if (rest.rfind(" lines", 0) == 0) found = n;
+    }
+    return found;
 }
 
 } // namespace
@@ -109,18 +244,76 @@ std::string pretty_path(std::string p) {
 // actual command for bash, the pattern for grep, etc. When the tool
 // has settled, folds in post-completion stats so the timeline doubles
 // as a compact result log without expanding individual cards.
-std::string tool_timeline_detail(const ToolUse& tc) {
-    auto safe = [&](const char* k) -> std::string { return safe_arg(tc.args, k); };
-    auto path = pick_arg(tc.args, {"path", "file_path", "filepath", "filename"});
+// Concise, human-readable failure reason for a Failed tool, pulled from its
+// output. Tool errors render as "[kind] detail" (ToolError::render); we want
+// the KIND ("invalid args", "out of workspace", "not found", …) plus a short
+// slice of detail so the header tells the user WHY at a glance instead of
+// looking identical to a success. Bash carries no [kind] tag — its failure is
+// an "[exit code N]" / "[terminated by signal …]" trailer instead — so we sniff
+// that too. Returns "" when there's nothing meaningful to show.
+static std::string tool_failure_reason(const ToolUse& tc) {
+    const std::string& out = tc.output();
+    if (out.empty()) return {};
+
+    // "[kind] detail" — the structured ToolError shape.
+    if (out.front() == '[') {
+        if (auto close = out.find(']'); close != std::string::npos && close > 1) {
+            std::string kind = out.substr(1, close - 1);
+            // A bracketed exit trailer ("[exit code 1]") is not a kind — fall
+            // through to the bash sniff below.
+            if (kind.rfind("exit code", 0) != 0
+             && kind.rfind("terminated", 0) != 0)
+                return kind;
+        }
+    }
+    // Bash-style trailer, wherever it lands in the output.
+    if (out.find("[terminated by signal") != std::string::npos)
+        return "terminated";
+    if (auto p = out.rfind("[exit code "); p != std::string::npos) {
+        auto e = out.find(']', p);
+        if (e != std::string::npos)
+            return out.substr(p + 1, e - p - 1);   // "exit code N"
+    }
+    // Unstructured error text: take the first short line.
+    std::string first = out.substr(0, out.find('\n'));
+    if (first.size() > 48) first = first.substr(0, 47) + "\xe2\x80\xa6";
+    return first;
+}
+
+// The per-tool detail body (success-shaped). tool_timeline_detail wraps this
+// to append a uniform failure summary, so no individual tool branch has to
+// remember to surface its own failure — one code path owns that.
+static std::string tool_timeline_detail_base(const ToolUse& tc) {
+    // Streaming-aware string arg: parsed args first (authoritative once the
+    // ~120 ms reparse catches up), then a scrape of the raw partial JSON so
+    // the value shows the INSTANT its bytes arrive on the wire. Applied
+    // uniformly here so EVERY tool's header (command, pattern, query, url,
+    // ref, symbol, …) goes live during streaming instead of sitting on a bare
+    // "…" — the same fix the file path got, now for all args in one place.
+    auto safe = [&](const char* k) -> std::string {
+        if (auto v = safe_arg(tc.args, k); !v.empty()) return v;
+        return pick_streaming_string(tc.args_streaming, k);
+    };
+    auto path = tool_path_arg(tc);
     const auto& n = tc.name.value;
     const auto path_pp = pretty_path(path);
 
     if (n == "read") {
         auto detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
-        if (auto off = safe_int_arg(tc.args, "offset", 0); off > 0)
-            detail += " @" + std::to_string(off);
+        // Symbol reads are the encouraged idiom — say WHAT was read, not
+        // just where. Streaming-live like every other arg via safe().
+        if (auto sym = safe("symbol"); !sym.empty())
+            detail += " \xc2\xb7 " + sym + "()";
+        // Both spellings of the range start (offset / Zed-style start_line).
+        int off = safe_int_arg(tc.args, "offset", 0);
+        if (off == 0) off = safe_int_arg(tc.args, "start_line", 0);
+        if (off > 0) detail += " @" + std::to_string(off);
         if (tc.is_done()) {
-            int lines = count_lines(tc.output());
+            // Prefer the file's true length that read reports in its
+            // "[showing lines A-B of N]" footer; only re-count the (decorated)
+            // output when there's no such marker (small file read whole).
+            int lines = parse_read_total_lines(tc.output());
+            if (lines < 0) lines = count_lines(tc.output());
             if (lines > 1) detail += "  \xc2\xb7  " + std::to_string(lines) + " lines";
         }
         return detail;
@@ -150,9 +343,24 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         // "edit i/N" band headers; nothing is lost.
         return path_pp;
     }
-    if (n == "bash" || n == "diagnostics") {
+    if (n == "move") {
+        // safe() is streaming-aware, so source/destination show live too.
+        auto src = pretty_path(safe("source"));
+        auto dst = pretty_path(safe("destination"));
+        if (src.empty() && dst.empty()) return "\xe2\x80\xa6";
+        return src + "  \xe2\x86\x92  " + dst;
+    }
+    if (n == "remove") {
+        auto detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+        if (safe_bool_arg(tc.args, "recursive"))
+            detail += "  \xc2\xb7  recursive";
+        return detail;
+    }
+    if (n == "shell" || n == "diagnostics") {
         auto cmd = safe("command");
         if (cmd.empty()) return "\xe2\x80\xa6";
+        // plain command only. a "Read ..." label made a shell detour look
+        // like a native call and hid it from the user.
         if (auto nl = cmd.find('\n'); nl != std::string::npos)
             cmd = cmd.substr(0, nl) + " \xe2\x80\xa6";
         if (tc.is_done()) {
@@ -161,13 +369,36 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         }
         return cmd;
     }
+    if (n == "process_start") {
+        auto cmd = safe("command");
+        if (cmd.empty()) return "\xe2\x80\xa6";
+        if (auto nl = cmd.find('\n'); nl != std::string::npos)
+            cmd = cmd.substr(0, nl) + " \xe2\x80\xa6";
+        return cmd;
+    }
+    if (n == "process_poll" || n == "process_stop") {
+        auto id = safe("id");
+        if (id.empty()) id = safe("session_id");
+        return id.empty() ? std::string{"\xe2\x80\xa6"} : "session " + id;
+    }
+    if (n == "test") {
+        auto detail = safe("command");
+        if (detail.empty()) detail = safe("filter");
+        if (detail.empty()) detail = safe("target");
+        if (detail.empty()) detail = "auto-detect";
+        if (auto nl = detail.find('\n'); nl != std::string::npos)
+            detail = detail.substr(0, nl) + " \xe2\x80\xa6";
+        return detail;
+    }
     if (n == "grep") {
         auto pat = safe("pattern");
         if (pat.empty()) return "\xe2\x80\xa6";
         std::string detail = path_pp.empty() ? pat : pat + "  in  " + path_pp;
         if (tc.is_done()) {
-            int matches = count_lines(tc.output());
-            if (matches > 0) detail += "  \xc2\xb7  " + std::to_string(matches) + " matches";
+            int matches = parse_found_count(tc.output());
+            if (matches == 0)     detail += "  \xc2\xb7  no matches";
+            else if (matches > 0) detail += "  \xc2\xb7  " + std::to_string(matches)
+                                          + (matches == 1 ? " match" : " matches");
         }
         return detail;
     }
@@ -176,15 +407,107 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         if (pat.empty()) return "\xe2\x80\xa6";
         std::string detail = pat;
         if (tc.is_done()) {
-            int hits = count_lines(tc.output());
-            if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits) + " hits";
+            int hits = parse_found_count(tc.output());
+            if (hits == 0)     detail += "  \xc2\xb7  no hits";
+            else if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits)
+                                       + (hits == 1 ? " hit" : " hits");
         }
+        return detail;
+    }
+    if (n == "extract" || n == "aggregate") {
+        // Pattern-projection tools: the regex is the story; add the path
+        // scope when present. (These previously fell to display_description
+        // — BLANK whenever the model omitted it.)
+        auto pat = safe("pattern");
+        if (pat.empty()) return "\xe2\x80\xa6";
+        if (pat.size() > 48) {
+            pat.resize(tools::util::safe_utf8_cut(pat, 47));
+            pat += "\xe2\x80\xa6";
+        }
+        return path_pp.empty() ? pat : pat + "  in  " + path_pp;
+    }
+    if (n == "read_filter") {
+        auto pat = safe("pattern");
+        std::string detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+        if (!pat.empty()) detail += "  \xc2\xb7  " + pat;
+        if (tc.is_done()) {
+            // Count the emitted content rows (each is `N\t…`); the collapsed
+            // gap markers `⋯ N lines ⋯` don't start with a digit, so they're
+            // naturally excluded.
+            const auto& out = tc.output();
+            int kept = 0;
+            bool at_line_start = true;
+            for (char c : out) {
+                if (at_line_start && c >= '0' && c <= '9') ++kept;
+                at_line_start = (c == '\n');
+            }
+            if (kept > 0)
+                detail += "  \xc2\xb7  " + std::to_string(kept)
+                        + (kept == 1 ? " line" : " lines");
+        }
+        return detail;
+    }
+    if (n == "json_query") {
+        auto q = safe("query");
+        if (q.empty()) q = "\xe2\x80\xa6";
+        return path_pp.empty() ? q : path_pp + "  \xc2\xb7  " + q;
+    }
+    if (n == "outline")
+        return path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+    if (n == "apply_patch") {
+        // Mirror edit: the path is the identity; hunk count from the patch.
+        std::string detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+        auto patch = safe("patch");
+        if (!patch.empty()) {
+            int hunks = 0;
+            for (std::size_t p = 0;
+                 (p = patch.find("@@", p)) != std::string::npos; p += 2)
+                ++hunks;
+            hunks /= 2;   // each hunk header carries a pair of @@
+            if (hunks > 0)
+                detail += "  \xc2\xb7  " + std::to_string(hunks)
+                        + (hunks == 1 ? " hunk" : " hunks");
+        }
+        return detail;
+    }
+    if (n == "replace") {
+        // find → replacement across a glob; the dry-run/apply mode matters.
+        auto find_s = safe("find");
+        if (find_s.empty()) return "\xe2\x80\xa6";
+        if (find_s.size() > 32) {
+            find_s.resize(tools::util::safe_utf8_cut(find_s, 31));
+            find_s += "\xe2\x80\xa6";
+        }
+        std::string detail = find_s;
+        if (auto g = safe("glob"); !g.empty()) detail += "  in  " + g;
+        if (!safe_bool_arg(tc.args, "apply"))
+            detail += "  \xc2\xb7  dry-run";
         return detail;
     }
     if (n == "list_dir") {
         std::string detail = path_pp.empty() ? std::string{"."} : path_pp;
         if (tc.is_done()) {
-            int entries = count_lines(tc.output());
+            // Count real entry rows only. list_dir output can carry a leading
+            // `display_description` line and trailing `[>1000 entries, …]` /
+            // `[… truncated …]` notices; counting those (as raw count_lines
+            // did) over-reports the entry total. Skip the description prepend
+            // and any bracketed notice line.
+            const std::string desc = safe_arg(tc.args, "display_description");
+            int entries = 0;
+            const std::string& out = tc.output();
+            std::size_t start = 0;
+            bool first = true;
+            while (start <= out.size()) {
+                std::size_t nl = out.find('\n', start);
+                std::string_view line{out.data() + start,
+                    (nl == std::string::npos ? out.size() : nl) - start};
+                const bool is_desc = first && !desc.empty() && line == desc;
+                const bool is_notice = !line.empty() && line.front() == '[';
+                if (!line.empty() && !is_desc && !is_notice) ++entries;
+                first = false;
+                if (nl == std::string::npos) break;
+                start = nl + 1;
+            }
             if (entries > 0) detail += "  \xc2\xb7  " + std::to_string(entries) + " entries";
         }
         return detail;
@@ -200,6 +523,18 @@ std::string tool_timeline_detail(const ToolUse& tc) {
                                  + (hits == 1 ? " file" : " files");
         }
         return detail;
+    }
+    if (n == "search_structural") {
+        auto pattern = safe("pattern");
+        if (pattern.empty()) pattern = "\xe2\x80\xa6";
+        if (auto nl = pattern.find('\n'); nl != std::string::npos)
+            pattern = pattern.substr(0, nl) + " \xe2\x80\xa6";
+        return path_pp.empty() ? pattern : pattern + "  in  " + path_pp;
+    }
+    if (n == "repo_map") {
+        auto focus = safe("focus");
+        auto root = path_pp.empty() ? std::string{"."} : path_pp;
+        return focus.empty() ? root : focus + "  in  " + root;
     }
     if (n == "web_fetch") {
         std::string detail = safe("url");
@@ -227,6 +562,21 @@ std::string tool_timeline_detail(const ToolUse& tc) {
             }
             if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits)
                                  + (hits == 1 ? " result" : " results");
+        }
+        return detail;
+    }
+    if (n == "git_show") {
+        auto ref = safe("ref");
+        if (ref.empty()) ref = "HEAD";
+        return path_pp.empty() ? ref : ref + "  \xc2\xb7  " + path_pp;
+    }
+    if (n == "git_blame") {
+        std::string detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
+        auto start = safe_int_arg(tc.args, "start_line", 0);
+        auto end = safe_int_arg(tc.args, "end_line", 0);
+        if (start > 0) {
+            detail += "  @" + std::to_string(start);
+            if (end > start) detail += "-" + std::to_string(end);
         }
         return detail;
     }
@@ -340,6 +690,27 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         }
         return detail;
     }
+    if (n == "wipe_memory") {
+        auto scope = safe("scope");
+        if (scope.empty()) scope = "project";
+        const bool confirm = safe_bool_arg(tc.args, "confirm");
+        return "[" + scope + "] " + (confirm ? "confirmed wipe" : "preview");
+    }
+    if (n == "skill") {
+        auto name = safe("name");
+        return name.empty() ? std::string{"\xe2\x80\xa6"} : name;
+    }
+    if (n == "search_docs" || n == "search_code" || n == "mcp_search_tools") {
+        auto query = safe("query");
+        if (query.empty()) return "\xe2\x80\xa6";
+        if (auto nl = query.find('\n'); nl != std::string::npos)
+            query = query.substr(0, nl) + " \xe2\x80\xa6";
+        return query;
+    }
+    if (n == "mcp_call") {
+        auto name = safe("name");
+        return name.empty() ? std::string{"\xe2\x80\xa6"} : name;
+    }
     if (n == "todo") {
         if (tc.args.is_object()) {
             auto it = tc.args.find("todos");
@@ -348,7 +719,9 @@ std::string tool_timeline_detail(const ToolUse& tc) {
                 for (const auto& td : *it) {
                     if (!td.is_object()) continue;
                     ++total;
-                    auto st = td.value("status", std::string{"pending"});
+                    auto status_it = td.find("status");
+                    auto st = status_it != td.end() && status_it->is_string()
+                        ? status_it->get<std::string>() : std::string{"pending"};
                     if (st == "completed")        ++done;
                     else if (st == "in_progress") ++in_progress;
                 }
@@ -361,23 +734,70 @@ std::string tool_timeline_detail(const ToolUse& tc) {
         return "\xe2\x80\xa6";
     }
     if (n == "task") {
-        // Header detail = the model's one-line display_description; once the
-        // subagent settles, append its turn count parsed from the report
-        // header ("Subagent report (N turns):") so the card doubles as a
-        // compact result log without expanding.
-        std::string detail = safe("display_description");
-        if (detail.empty()) detail = "subagent";
+        // Header detail: "type · what it's doing". The agent type leads —
+        // in a parallel fan-out of subagents it's the discriminator the
+        // user scans for. Falls back to the prompt's first line when the
+        // model omitted display_description. Once settled, append the turn
+        // count parsed from the report header ("Subagent report (type, N
+        // turns):") so the card doubles as a compact result log.
+        std::string type = safe("agent_type");
+        if (type.empty()) type = "general";
+        // Provenance: a PROJECT-scoped persona rode in on the workspace (a
+        // clone could author its role prompt), so tag it so an injected agent
+        // is never invisible. Built-in and the user's own agents get no tag —
+        // the clean common case. Transparency, not a gate: the agent still
+        // runs, its tools still pass the normal permission/sandbox checks.
+        std::string type_tag = type;
+        bool project = false;
+        for (const auto& a : agentty::ui_prefs::path_roots().project_agents)
+            if (a == type) { project = true; break; }
+        if (project) type_tag += " (project agent)";
+        std::string what = safe("display_description");
+        if (what.empty()) {
+            what = safe("prompt");
+            if (auto nl = what.find('\n'); nl != std::string::npos)
+                what.resize(nl);
+            if (what.size() > 60) {
+                what.resize(tools::util::safe_utf8_cut(what, 57));
+                what += "\xe2\x80\xa6";
+            }
+        }
+        std::string detail = type_tag;
+        if (!what.empty()) detail += "  \xc2\xb7  " + what;
         if (tc.is_terminal()) {
             const auto& out = tc.output();
             if (auto p = out.find("report ("); p != std::string::npos) {
-                if (auto end = out.find(')', p); end != std::string::npos)
-                    detail += "  \xc2\xb7  " + out.substr(p + 8, end - (p + 8));
+                if (auto end = out.find(')', p); end != std::string::npos) {
+                    // "(type, N turns)" — keep only the "N turns" half; the
+                    // type is already leading the detail.
+                    std::string inner = out.substr(p + 8, end - (p + 8));
+                    if (auto comma = inner.find(", "); comma != std::string::npos)
+                        inner = inner.substr(comma + 2);
+                    detail += "  \xc2\xb7  " + inner;
+                }
             }
-            if (tc.is_failed()) detail += "  \xc2\xb7  failed";
         }
         return detail;
     }
     return safe_arg(tc.args, "display_description");
+}
+
+// Public entry: the success-shaped detail plus, for a Failed tool, a uniform
+// "· reason" suffix so every failed tool tells the user WHY at a glance (a
+// failed edit/read/bash no longer looks identical to a successful one). One
+// code path owns the failure summary; individual tool branches stay
+// success-only. Rejected/aborted tools are intentionally left plain — they
+// weren't errors, and their glyph already says "skipped".
+std::string tool_timeline_detail(const ToolUse& tc) {
+    std::string detail = tool_timeline_detail_base(tc);
+    if (tc.is_failed()) {
+        std::string reason = tool_failure_reason(tc);
+        if (reason.empty()) reason = "failed";
+        // Avoid a redundant "· failed · failed" if a base branch already said it.
+        if (detail.find(reason) == std::string::npos)
+            detail += "  \xc2\xb7  " + reason;
+    }
+    return detail;
 }
 
 } // namespace agentty::ui

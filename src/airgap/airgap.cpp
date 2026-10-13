@@ -3,7 +3,7 @@
 // *has* internet to reach an air-gapped host that doesn't:
 //
 //   agentty airgap user@host                 # connect + run remote agentty
-//   agentty airgap --setup user@host         # also: scp ~/.config/agentty/credentials.json -> remote
+//   agentty airgap --setup user@host         # also: scp ~/.agentty/credentials/credentials.json -> remote
 //
 // What it does:
 //   - `ssh -R 1080` (port-only form) tells OpenSSH to expose a SOCKS5
@@ -30,6 +30,7 @@
 // future contributor with a Win32 box to test on.
 
 #include "agentty/airgap/airgap.hpp"
+#include "agentty/auth/auth.hpp"
 #include "agentty/util/env.hpp"
 
 #include <cstdio>
@@ -49,10 +50,9 @@
 #  endif
 #  include <windows.h>
 #else
-#  include <spawn.h>
-#  include <sys/wait.h>
-#  include <unistd.h>
-extern char** environ;
+#  include <cerrno>
+#  include <poll.h>
+#  include <maya/runtime.hpp>
 #endif
 
 namespace fs = std::filesystem;
@@ -89,14 +89,14 @@ void print_usage() {
         "  the network path between laptop and remote can't MITM you.\n"
         "\n"
         "  Trust boundary (read this before --setup): the remote ends up\n"
-        "  with a copy of ~/.config/agentty/credentials.json, which contains\n"
+        "  with a copy of ~/.agentty/credentials/credentials.json, which contains\n"
         "  your OAuth refresh token (or API key). A compromised remote\n"
         "  can therefore exfiltrate your Anthropic credentials independent\n"
         "  of the tunnel. agentty airgap protects the *network* between\n"
         "  laptop and remote, not the remote itself — treat the remote as\n"
         "  a credential-bearing peer, not a sandboxed proxy.\n"
         "\n"
-        "  --setup            Copy ~/.config/agentty/credentials.json from\n"
+        "  --setup            Copy ~/.agentty/credentials/credentials.json from\n"
         "                     this laptop to the remote (chmod 600) before\n"
         "                     launching.  Run this once on first connect or\n"
         "                     after re-OAuthing locally.\n"
@@ -186,48 +186,35 @@ int run_sync(const std::vector<std::string>& argv) {
 #else
 int run_sync(const std::vector<std::string>& argv) {
     if (argv.empty()) return -1;
-
-    // posix_spawn wants `char* const*`; build a contiguous argv buffer
-    // from the std::strings without const-casting their internals.
-    std::vector<char*> raw;
-    raw.reserve(argv.size() + 1);
-    for (const auto& s : argv) raw.push_back(const_cast<char*>(s.c_str()));
-    raw.push_back(nullptr);
-
-    pid_t pid = -1;
-    int rc = ::posix_spawnp(&pid, raw[0], /*file_actions=*/nullptr,
-                            /*attr=*/nullptr, raw.data(), environ);
-    if (rc != 0) {
-        std::fprintf(stderr,
-            "agentty airgap: failed to spawn `%s`: %s\n",
-            raw[0], std::strerror(rc));
+    namespace pf = maya::platform;
+    // ssh prompts and draws on our terminal, so it keeps our stdio and our
+    // session (a new session would lose the controlling tty).
+    pf::process_spec spec;
+    spec.argv        = argv;
+    spec.stdin_from  = pf::stream_to::inherit;
+    spec.stdout_to   = pf::stream_to::inherit;
+    spec.stderr_to   = pf::stream_to::inherit;
+    spec.new_session = false;
+    auto p = pf::posix_process::spawn(spec);
+    if (!p) {
+        std::fprintf(stderr, "agentty airgap: failed to spawn `%s`: %s\n",
+                     argv[0].c_str(), std::strerror(p.error().native));
         return -1;
     }
-
-    int status = 0;
-    while (::waitpid(pid, &status, 0) == -1) {
-        if (errno == EINTR) continue;
-        std::fprintf(stderr,
-            "agentty airgap: waitpid failed: %s\n", std::strerror(errno));
-        return -1;
-    }
-    if (WIFEXITED(status))   return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-    return -1;
+    // Block on the exit handle; this is a foreground CLI step.
+    pollfd pfd{p->exit_handle().get(), POLLIN, 0};
+    while (::poll(&pfd, 1, -1) < 0 && errno == EINTR) {}
+    auto st = p->reap();
+    if (!st) return -1;
+    return st->how == pf::exit_status::kind::exited ? st->code : 128 + st->code;
 }
 #endif
 
-// Copy ~/.config/agentty/credentials.json from this laptop to the remote.
-// Three steps: ensure the remote directory exists, scp the file, fix
-// perms.  Each step is run synchronously; we abort on the first failure
-// so the user sees exactly which step blew up.
+// Copy this machine's credentials.json to the remote's default store,
+// ~/.agentty/credentials/. Three steps: mkdir, scp, chmod; abort on the
+// first failure so the user sees which one broke.
 int copy_credentials(const std::string& remote) {
-    std::string home = home_dir();
-    if (home.empty()) {
-        std::fprintf(stderr, "agentty airgap: HOME is unset.\n");
-        return 1;
-    }
-    fs::path local = fs::path{home} / ".config" / "agentty" / "credentials.json";
+    const fs::path local = agentty::auth::credentials_path();
     std::error_code ec;
     if (!fs::exists(local, ec) || ec) {
         std::fprintf(stderr,
@@ -243,7 +230,7 @@ int copy_credentials(const std::string& remote) {
     // 1) mkdir + chmod 700 for the remote config dir.  -p is idempotent.
     if (int rc = run_sync({
             "ssh", remote,
-            "mkdir -p ~/.config/agentty && chmod 700 ~/.config/agentty",
+            "mkdir -p ~/.agentty/credentials && chmod 700 ~/.agentty ~/.agentty/credentials",
         }); rc != 0) {
         std::fprintf(stderr,
             "agentty airgap: remote mkdir failed (ssh exit %d).\n", rc);
@@ -252,7 +239,7 @@ int copy_credentials(const std::string& remote) {
 
     // 2) scp the credentials file.
     {
-        std::string dest = remote + ":.config/agentty/credentials.json";
+        std::string dest = remote + ":.agentty/credentials/credentials.json";
         if (int rc = run_sync({"scp", "-q", local.string(), dest});
             rc != 0) {
             std::fprintf(stderr,
@@ -265,7 +252,7 @@ int copy_credentials(const std::string& remote) {
     //    the loader expects 0600 for the OAuth token.
     if (int rc = run_sync({
             "ssh", remote,
-            "chmod 600 ~/.config/agentty/credentials.json",
+            "chmod 600 ~/.agentty/credentials/credentials.json",
         }); rc != 0) {
         std::fprintf(stderr,
             "agentty airgap: remote chmod failed (ssh exit %d).\n", rc);

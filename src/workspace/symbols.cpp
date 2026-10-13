@@ -1,13 +1,20 @@
+#include <maya/runtime.hpp>
 #include "agentty/workspace/symbols.hpp"
+#include "agentty/workspace/files.hpp"   // deprioritize_prewarm_thread
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <regex>
+#include <stop_token>
 #include <string_view>
 #include <system_error>
+#include <thread>
+#include <vector>
 
 #include "agentty/tool/util/fs_helpers.hpp"
 
@@ -116,45 +123,232 @@ bool scan_file(const fs::path& root, const fs::path& file,
 
 } // namespace
 
-const std::vector<SymbolEntry>& list_workspace_symbols(std::size_t cap) {
-    static std::once_flag once;
-    static std::vector<SymbolEntry> cached;
-    std::call_once(once, [cap]{
-        const auto& root = tools::util::workspace_root();
-        if (root.empty()) return;
+// ── Cache + async prewarm (mirrors files.cpp) ─────────────────────
+// The symbol scan is the expensive one: std::regex across every line of up
+// to 5000 source files. Running that on the `#` keystroke froze the UI for
+// seconds on a large repo, so it moved to a background pool at startup.
+//
+// But "background" was only true of the THREAD, not of the COST. The pool
+// took min(hardware_concurrency, 12) workers and ran them flat out, so
+// launching agentty in a real repo pinned every core for ~6 s: measured
+// 1129% CPU on this 2864-file tree, against 98% in a one-file directory.
+// On a laptop that is a fan spinning up and battery burned before the user
+// has typed anything (issue #38; #36 is the same complaint from the other
+// end — a high-latency mosh session where the launch burst is felt most).
+//
+// The work itself is worth doing; what was wrong is its PRIORITY. This is a
+// speculative cache for a picker the user may never open, so it must lose
+// every race against real work:
+//
+//   1. Fewer workers. Half the cores, capped at 4 — the scan is ~4x faster
+//      than serial, and the last 8 threads buy a fraction of a second
+//      while making the machine unusable.
+//   2. Lowest scheduler priority. SCHED_IDLE (Linux) / nice+19 elsewhere
+//      means the scan only runs on cores nothing else wants, so the burst
+//      becomes invisible to the foreground instead of competing with it.
+//   3. Yield between files, so even at equal priority the workers are
+//      interruptible rather than monopolising a core for their quantum.
+namespace {
+// The published symbol index. AtomicSnapshot for the same reason as the file
+// list in files.cpp: a `mutex + shared_ptr` pair needs the lock on the LOAD
+// too (copying the handle races the store), which is the half everyone drops.
+util::AtomicSnapshot<std::vector<SymbolEntry>> g_symbols;
+// Single-flight latch for the symbol scan lives beside
+// prewarm_workspace_symbols below, next to the only code that reads it.
+
+// `fan` is the caller's proof it holds no lock, needed to open the parallel
+// maya::scope. A caller without one (the cold synchronous picker fetch) passes
+// nullptr and the scan runs as a single share on the calling thread.
+std::vector<SymbolEntry> build_symbol_list(const maya::unlocked* fan, std::size_t cap,
+                                           std::stop_token stop = {}) {
+    std::vector<SymbolEntry> out;
+    const auto root = tools::util::project_root();
+    if (root.empty()) return out;
+
+    // 1. Collect candidate source files (cheap directory walk).
+    std::vector<fs::path> src;
+    {
         std::error_code ec;
-        std::size_t files_scanned = 0;
         constexpr std::size_t kFileCap = 5000;
         for (auto it = fs::recursive_directory_iterator(
                  root, fs::directory_options::skip_permission_denied, ec);
-             it != fs::recursive_directory_iterator() && cached.size() < cap
-                 && files_scanned < kFileCap;
-             it.increment(ec)) {
-            if (ec) { ec.clear(); continue; }
+             it != fs::recursive_directory_iterator() && src.size() < kFileCap;
+             ) {
+            if (stop.stop_requested()) return {};   // bail early on shutdown
+            if (ec) {
+                ec.clear();
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
+                continue;
+            }
             const auto& entry = *it;
             auto fn = entry.path().filename().string();
-            const bool is_dir = entry.is_directory(ec);
+            std::error_code qec;
+            const bool is_dir = entry.is_directory(qec);
             if (is_dir && tools::util::should_skip_dir(fn)) {
                 it.disable_recursion_pending();
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
                 continue;
             }
             if (is_dir && it.depth() > 0 && fn.starts_with(".")) {
                 it.disable_recursion_pending();
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
                 continue;
             }
-            if (is_dir) continue;
-            if (!entry.is_regular_file(ec)) continue;
-            auto ext = entry.path().extension().string();
-            if (!is_source_ext(ext)) continue;
-            ++files_scanned;
-            if (!scan_file(root, entry.path(), cached, cap)) break;
+            if (is_dir) {
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
+                continue;
+            }
+            if (!entry.is_regular_file(qec)) {
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
+                continue;
+            }
+            if (!is_source_ext(entry.path().extension().string())) {
+                std::error_code step_ec;
+                it.increment(step_ec);
+                if (step_ec) break;
+                continue;
+            }
+            src.push_back(entry.path());
+            std::error_code step_ec;
+            it.increment(step_ec);
+            if (step_ec) break;
         }
-        std::sort(cached.begin(), cached.end(),
-                  [](const SymbolEntry& a, const SymbolEntry& b){
-                      return a.name < b.name;
-                  });
-    });
-    return cached;
+    }
+    if (src.empty()) return out;
+
+    // 2. Scan files in parallel — each worker builds a local vector, then
+    //    we merge. The regex pass is CPU-bound; fanning it out across cores
+    //    turns a multi-second cold scan into a fraction of it.
+    //
+    //    HALF the cores, capped at 4. This used to be min(cores, 12), which
+    //    on any modern laptop meant "all of them": measured 1129% CPU for
+    //    ~6 s at launch. The scan is sublinear in threads anyway (it is I/O
+    //    plus allocator-bound as much as CPU), so the last eight workers
+    //    bought a fraction of a second and cost the user their machine.
+    //    Leaving half the cores free also means the UI thread, the provider
+    //    dial and the RAG warm-up never queue behind this.
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 4;
+    unsigned nthreads = std::max(1u, hw / 2);
+    nthreads = std::min<unsigned>(nthreads, 4);
+    nthreads = std::min<unsigned>(nthreads, (unsigned)src.size());
+
+    std::atomic<std::size_t> next{0};
+    std::vector<std::vector<SymbolEntry>> partials(nthreads);
+    auto share = [&](unsigned t) {
+                // Lowest priority: this is a speculative cache for a picker
+                // that may never open, so it must only use cores nothing
+                // else wants.
+                if (fan) deprioritize_prewarm_thread();
+                auto& local = partials[t];
+                for (;;) {
+                    if (stop.stop_requested()) return;   // drain on shutdown
+                    std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= src.size()) return;
+                    if (local.size() >= cap) return;
+                    try { (void)scan_file(root, src[i], local, cap); }
+                    catch (...) { /* skip a file that trips the matcher */ }
+                    // Give the scheduler a seam between files. Belt and
+                    // braces for the case where SCHED_IDLE was refused (a
+                    // restricted container): without it a worker can hold a
+                    // core for its whole quantum mid-burst.
+                    std::this_thread::yield();
+                }
+    };
+    if (fan) {
+        // maya::scope joins every helper before it returns (and on a throw),
+        // which is what makes the [&] captures of `partials` and `next` safe.
+        maya::scope(*fan, stop, [&](maya::nursery& n) {
+            for (unsigned t = 0; t < nthreads; ++t) {
+                (void)n.spawn([&share, t] { share(t); });
+            }
+        });
+    } else {
+        for (unsigned t = 0; t < nthreads; ++t) share(t);
+    }
+    for (auto& p : partials) {
+        for (auto& e : p) {
+            out.push_back(std::move(e));
+            if (out.size() >= cap) break;
+        }
+        if (out.size() >= cap) break;
+    }
+    std::sort(out.begin(), out.end(),
+              [](const SymbolEntry& a, const SymbolEntry& b){ return a.name < b.name; });
+    return out;
+}
+} // namespace
+
+namespace {
+// Single-flight latch. NOT a thread — this module does not own one.
+//
+// WHO runs the scan is the caller's business: init.cpp hands it to maya's
+// Cmd::task_isolated. What has to live HERE is only "don't scan twice at
+// once", because that is a property of the cache being filled.
+std::atomic<bool>& sym_building() {
+    static std::atomic<bool> b{false};
+    return b;
+}
+}  // namespace
+
+void prewarm_workspace_symbols(const maya::unlocked& lk, std::stop_token stop, std::size_t cap) {
+    // SYNCHRONOUS — see files.cpp for the full rationale. In short: agentty
+    // had two mechanisms for "run this in the background" (maya's Cmd seam
+    // and hand-rolled std::threads), and the duplication is what let the git
+    // refresh ship with a bare detached thread and no single-flight at all.
+    // There is one mechanism now, and it is maya's.
+    //
+    // Honouring `stop` matters more here than for the file walk: the scan
+    // reads symbol_patterns(), a function-local static vector<std::regex>,
+    // and jaal's shutdown waits for us only if we return.
+    if (g_symbols.has_value()) return;
+    bool expected = false;
+    if (!sym_building().compare_exchange_strong(expected, true)) return;
+
+    // The directory walk before the pool is single-threaded but still
+    // thousands of stat() calls; it gets the same treatment so the whole
+    // prewarm — walk and scan — stays out of the foreground's way.
+    deprioritize_prewarm_thread();
+    auto syms = build_symbol_list(std::addressof(lk), cap, stop);
+    if (!stop.stop_requested()) g_symbols.store(std::move(syms));
+    sym_building() = false;
+}
+
+bool symbols_ready() {
+    return g_symbols.has_value();
+}
+
+// Returns a Snapshot, not a const-ref.
+//
+// THE BUG THIS CLOSES: the old body took the lock, copied the shared_ptr into
+// a block-scoped local, and returned `*c` — so the only thing keeping the
+// buffer alive died at the closing brace while the reference escaped. It was
+// benign only because this cache is write-once today; one invalidation
+// (workspace switch, refresh, cap change) turns it into a live UAF.
+//
+// The sibling in files.cpp dodged it by returning BY VALUE — safe, but a deep
+// copy of every entry on each of the several calls one keystroke makes. That
+// the two siblings picked opposite sides of a safety/speed tradeoff is the
+// tell that the tradeoff was never supposed to be theirs to make: a shared
+// immutable snapshot is both safe AND O(1), and now both use it.
+util::Snapshot<std::vector<SymbolEntry>> list_workspace_symbols(std::size_t cap) {
+    if (auto warm = g_symbols.load(); warm.has_value()) return warm;
+    // Cold synchronous caller: build inline + publish. Two cold callers may
+    // both scan rather than one waiting on the other's multi-second walk —
+    // see list_workspace_files for the same trade.
+    auto built = util::make_snapshot(build_symbol_list(nullptr, cap));
+    g_symbols.store(built);
+    return built;
 }
 
 std::vector<std::size_t>

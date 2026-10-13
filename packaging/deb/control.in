@@ -13,4 +13,5 @@ Description: Blazing-fast Claude in your terminal
  the agent on hosts without direct internet access.
  .
  Drop-in alternative to claude-code with no Node, Python, or Electron
- runtime. Authenticates with Claude Pro/Max OAuth or ANTHROPIC_API_KEY.
+ runtime. Bring your own model: any provider API key, a local Ollama model,
+ or Claude Pro/Max OAuth.

@@ -18,21 +18,29 @@
 #include <acp/acp.hpp>
 
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
-#include <istream>
 #include <mutex>
-#include <condition_variable>
-#include <ostream>
-#include <streambuf>
 #include <string>
+#include <set>
 #include <thread>
 #include <vector>
 
+#include <unistd.h>
+#if defined(_WIN32)
+#include <fcntl.h>   // _O_BINARY
+#include <io.h>      // _pipe
+#endif
+
+#include "agtest.hpp"
+
 #include "agentty/acp/server.hpp"
+#include "agentty/rpc/peer.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -40,100 +48,123 @@
 using namespace acp;
 namespace ag = agentty;
 
-#define CHECK(cond) do { if (!(cond)) { \
-    std::fprintf(stderr, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); \
-    std::exit(1); } } while (0)
-
-namespace {
-
-// A blocking byte channel: writers push bytes, the istream side blocks in
-// underflow() until bytes arrive or the channel is closed (EOF).
-class Pipe {
-public:
-    void write_line(const std::string& s) {
-        std::lock_guard lk(mu_); buf_ += s; buf_ += '\n'; cv_.notify_all();
-    }
-    // Blocking single-byte read; returns -1 on EOF (closed + drained).
-    int getc() {
-        std::unique_lock lk(mu_);
-        cv_.wait(lk, [&]{ return pos_ < buf_.size() || closed_; });
-        if (pos_ >= buf_.size()) return -1;
-        return static_cast<unsigned char>(buf_[pos_++]);
-    }
-    void close() { { std::lock_guard lk(mu_); closed_ = true; } cv_.notify_all(); }
-private:
-    std::mutex mu_; std::condition_variable cv_;
-    std::string buf_; std::size_t pos_ = 0; bool closed_ = false;
-};
-
-// istream over a Pipe (blocking).
-class PipeInBuf : public std::streambuf {
-public:
-    explicit PipeInBuf(Pipe& p) : pipe_(p) {}
-protected:
-    int underflow() override {
-        int c = pipe_.getc();
-        if (c < 0) return traits_type::eof();
-        ch_ = static_cast<char>(c);
-        setg(&ch_, &ch_, &ch_ + 1);
-        return traits_type::to_int_type(ch_);
-    }
-private:
-    Pipe& pipe_; char ch_ = 0;
-};
-
-// ostream that forwards completed lines to a Pipe (the other direction).
-class PipeOutBuf : public std::streambuf {
-public:
-    explicit PipeOutBuf(Pipe& p) : pipe_(p) {}
-protected:
-    int overflow(int c) override {
-        if (c == traits_type::eof()) return c;
-        if (c == '\n') { pipe_.write_line(acc_); acc_.clear(); }
-        else acc_.push_back(static_cast<char>(c));
-        return c;
-    }
-private:
-    Pipe& pipe_; std::string acc_;
-};
-
-} // namespace
-
-int main() {
+TEST_CASE("acp integration end-to-end") {
     namespace fs = std::filesystem;
     // The write tool's sandbox refuses paths outside the workspace root.
     // Point the root at a tmp dir we own so the scripted `write` succeeds.
-    const fs::path tmp = fs::temp_directory_path() / "agentty_acp_it";
+    // PID-unique so the suite stays hermetic under parallel CTest (-j).
+    const fs::path tmp = fs::temp_directory_path() /
+                         ("agentty_acp_it_" + std::to_string(::getpid()));
+    fs::remove_all(tmp);
     fs::create_directories(tmp);
-    ag::tools::util::set_workspace_root(tmp);
+    // Sandbox persistence too: AgentServer::persist() writes every turn
+    // to persistence::threads_dir() = $HOME/.agentty/threads. Without
+    // redirecting HOME, every ctest run deposited the scripted "please
+    // write the file" thread (plus acp_sessions.json entries) into the
+    // DEVELOPER'S real thread history — they showed up when cycling
+    // threads in the real app. data_dir() re-reads the env on each call,
+    // so setting it here (before any persistence touch) is sufficient.
+    setenv("HOME", tmp.string().c_str(), 1);
+    setenv("USERPROFILE", tmp.string().c_str(), 1);   // win32 branch of data_dir
+    ag::tools::util::set_workspace_root(::agentty::IoAccess::grant(), tmp);
     const fs::path target = tmp / "out.txt";
     fs::remove(target);
 
     // ── Scripted provider ──────────────────────────────────────────────────
     std::atomic<int> completions{0};
-    auto stream = [&](ag::provider::Request req, ag::provider::EventSink sink) {
+    std::atomic<bool> read_mode{false};
+    std::atomic<bool> bash_mode{false};
+    // What the MODEL actually received for the last turn. An ACP image block
+    // is only useful if it survives all the way onto the Request — declaring
+    // the capability and then dropping the bytes is the failure this guards.
+    std::atomic<int> saw_images{0};
+    std::string      saw_media_type;
+    std::string      saw_bytes;
+    std::mutex       saw_mu;
+    auto stream = [&](const maya::unlocked&, ag::provider::Request req, ag::provider::EventSink sink) {
         int n = completions.fetch_add(1);
+        {
+            std::lock_guard lk(saw_mu);
+            for (const auto& m : req.messages) {
+                if (m.images.empty()) continue;
+                saw_images.store(static_cast<int>(m.images.size()));
+                saw_media_type = m.images.front().media_type;
+                saw_bytes      = m.images.front().bytes();
+            }
+        }
+        if (bash_mode.load() && n % 2 == 0) {
+            // Bash-turn first completion: stream a `bash` tool call, so we can
+            // assert the fenced command-output card body (the "bash shows no
+            // output" fix). No terminal capability in this harness, so it runs
+            // the internal path and the result lands as fenced text.
+            std::string tcid = "tc_bash_" + std::to_string(n);
+            const ag::ToolCallId call_id{tcid};
+            sink(ag::Msg{ag::StreamStarted{}});
+            sink(ag::Msg{ag::StreamTextDelta{"Running. "}});
+            sink(ag::Msg{ag::StreamToolUseStart{call_id, ag::ToolName{"shell"}}});
+            sink(ag::Msg{ag::StreamToolUseDelta{call_id,
+                "{\"command\":\"printf 'hello-stdout\\\\n'\"}"}});
+            sink(ag::Msg{ag::StreamToolUseEnd{call_id}});
+            sink(ag::Msg{ag::StreamUsage{1100, 30, 0, 0}});
+            sink(ag::Msg{ag::StreamFinished{ag::StopReason::ToolUse}});
+            return;
+        }
+        if (read_mode.load() && n % 2 == 0) {
+            // Read-turn first completion: stream a `read` tool call on the
+            // file, so we can assert the line-numbered result content shape.
+            std::string tcid = "tc_read_" + std::to_string(n);
+            const ag::ToolCallId call_id{tcid};
+            sink(ag::Msg{ag::StreamStarted{}});
+            sink(ag::Msg{ag::StreamTextDelta{"Reading. "}});
+            sink(ag::Msg{ag::StreamToolUseStart{call_id, ag::ToolName{"read"}}});
+            // RELATIVE path on purpose. A model writes "note.txt" far more
+            // often than an absolute path, and Zed silently drops a
+            // location it cannot resolve as absolute — so the server has to
+            // absolutise against the session cwd. Using target.string()
+            // here (already absolute) would make that fix untestable.
+            std::string args = std::string("{\"path\":\"")
+                             + target.filename().string() + "\"}";
+            sink(ag::Msg{ag::StreamToolUseDelta{call_id, args}});
+            sink(ag::Msg{ag::StreamToolUseEnd{call_id}});
+            sink(ag::Msg{ag::StreamUsage{1200, 40, 0, 0}});
+            sink(ag::Msg{ag::StreamFinished{ag::StopReason::ToolUse}});
+            return;
+        }
         if (n % 2 == 0) {
             // First completion of a turn: stream text + a `write` tool call.
             std::string tcid = "tc_write_" + std::to_string(n);
             sink(ag::Msg{ag::StreamStarted{}});
             sink(ag::Msg{ag::StreamTextDelta{"Writing the file. "}});
+            const ag::ToolCallId call_id{tcid};
             sink(ag::Msg{ag::StreamToolUseStart{
-                ag::ToolCallId{tcid}, ag::ToolName{"write"}}});
-            std::string args = std::string("{\"path\":\"") + target.string()
+                call_id, ag::ToolName{"write"}}});
+            // RELATIVE on purpose — a model writes "out.txt" far more often
+            // than an absolute path, and Zed silently DROPS a location it
+            // cannot resolve as absolute (resolve_location falls back to
+            // open_local_buffer only `if is_absolute`). Using target.string()
+            // here would make the server's absolutise() untestable.
+            std::string args = std::string("{\"path\":\"")
+                             + target.filename().string()
                              + "\",\"content\":\"hello from acp\\n\"}";
-            sink(ag::Msg{ag::StreamToolUseDelta{args}});
-            sink(ag::Msg{ag::StreamToolUseEnd{}});
+            sink(ag::Msg{ag::StreamToolUseDelta{call_id, args}});
+            sink(ag::Msg{ag::StreamToolUseEnd{call_id}});
             sink(ag::Msg{ag::StreamUsage{1200, 40, 0, 0}});
             sink(ag::Msg{ag::StreamFinished{ag::StopReason::ToolUse}});
         } else {
             // Second completion: the tool result for the prior call must be in
             // history (whether it succeeded or was rejected).
-            std::string want = "tc_write_" + std::to_string(n - 1);
+            // Second completion: the tool result for the prior call must be in
+            // history (whether it succeeded or was rejected). The prior call is
+            // a write (tc_write_) or, in read_mode, a read (tc_read_).
+            std::string want_w = "tc_write_" + std::to_string(n - 1);
+            std::string want_r = "tc_read_"  + std::to_string(n - 1);
+            std::string want_b = "tc_bash_"  + std::to_string(n - 1);
             bool saw_tool_result = false;
             for (const auto& m : req.messages)
                 for (const auto& tc : m.tool_calls)
-                    if (tc.id.value == want) saw_tool_result = true;
+                    if (tc.id.value == want_w || tc.id.value == want_r
+                        || tc.id.value == want_b)
+                        saw_tool_result = true;
             CHECK(saw_tool_result);
             sink(ag::Msg{ag::StreamTextDelta{"Done."}});
             sink(ag::Msg{ag::StreamUsage{1300, 10, 0, 0}});
@@ -141,37 +172,65 @@ int main() {
         }
     };
 
-    // ── Wire two live pipes between agent and client ───────────────────────
-    Pipe c2a, a2c;
-    PipeInBuf  a_in_buf(c2a);  std::istream agent_in(&a_in_buf);
-    PipeOutBuf a_out_buf(a2c); std::ostream agent_out(&a_out_buf);
-    StdioTransport agent_tx(agent_in, agent_out);
+    // ── Wire two real OS pipes between agent and client ────────────────────
+    // c2a = client→agent, a2c = agent→client. Both sides run on rpc::Peer.
+    int c2a[2], a2c[2];
+#if defined(_WIN32)
+    // _O_NOINHERIT: _pipe's handles are inheritable by default, so any child
+    // a tool spawns mid-test would hold the write ends open and the readers
+    // would never see EOF at teardown (the process then hangs on exit).
+    CHECK(::_pipe(c2a, 1 << 16, _O_BINARY | _O_NOINHERIT) == 0);
+    CHECK(::_pipe(a2c, 1 << 16, _O_BINARY | _O_NOINHERIT) == 0);
+#else
+    CHECK(::pipe(c2a) == 0);
+    CHECK(::pipe(a2c) == 0);
+#endif
 
     ag::auth::AuthHeader cred = ag::auth::ApiKeyHeader{"sk-test-not-empty"};
     CHECK(!ag::auth::is_empty(cred));
 
-    ag::acp::AgentServer server(agent_tx, stream, cred, "claude-test", ag::Profile::Ask);
-    std::thread agent_thread([&]{ server.serve(); });   // start()+join() on agent_tx
+    auto server = maya::co_owned<ag::acp::AgentServer>::make(
+        ag::rpc::fd_channel(c2a[0], a2c[1]), stream, cred, "claude-test", ag::Profile::Ask);
+    std::thread agent_thread([&]{ server->serve(agtest::cap()); });   // returns at EOF on c2a
 
-    // ── Client side (AgentConnection) ──────────────────────────────────────
-    PipeOutBuf c_out_buf(c2a); std::ostream client_out(&c_out_buf);
-    auto client_sink = [&](std::string_view line) {
-        client_out.write(line.data(), static_cast<std::streamsize>(line.size()));
-        client_out.put('\n'); client_out.flush();
-    };
+    // ── Client side ────────────────────────────────────────────────────────
 
     std::atomic<int> agent_text_chunks{0};
     std::atomic<int> tool_calls{0};
+    // Every ToolCallUpdate must reference an id a ToolCall already announced.
+    //
+    // This is not a style rule — it is what Zed's client DOES with a stray
+    // update: acp_thread.rs's update_tool_call() looks the id up, finds
+    // nothing, and renders a visible "Tool call not found" FAILURE card in
+    // the user's panel. So an unpaired update is not silently ignored; it
+    // shows up as a broken tool in the transcript.
+    std::set<std::string> announced_tool_ids;
+    std::atomic<int>      orphan_tool_updates{0};
+    std::atomic<int>      relative_locations{0};
     std::atomic<int> tool_completed{0};
     std::atomic<int> tool_failed{0};
     std::string last_tool_text;
+    std::string tc_title;
+    std::string tc_name;
+    std::string perm_title;
+    std::atomic<bool> tc_is_edit_kind{false};
+    std::atomic<bool> tc_announce_diff{false};
+    std::atomic<bool> perm_announce_diff{false};
     std::atomic<int> usage_updates{0};
     std::atomic<int> perm_requests{0};
+    std::atomic<int> avail_cmds{0};
+    std::atomic<int> config_opts{0};
+    std::atomic<int> session_infos{0};
+    std::atomic<bool> saw_model_option{false};
+    std::atomic<bool> saw_mode_option{false};
+    std::atomic<bool> saw_skill_or_compact_cmd{false};
+    std::string last_session_title;
     std::string transcript;
     std::mutex transcript_mu;
 
-    ClientHandlers ch;
-    ch.on_session_update = [&](const SessionUpdateMsg& m) {
+    struct Client {};
+    jsonrpc::Router<Client> router;
+    router.on<to_client::SessionUpdate>([&](Client&, const SessionUpdateMsg& m) {
         match(m.update,
             [&](const SU_AgentMessageChunk& c) {
                 ++agent_text_chunks;
@@ -181,15 +240,54 @@ int main() {
                     },
                     [&](const auto&) {});
             },
-            [&](const SU_ToolCall&) { ++tool_calls; },
+            [&](const SU_ToolCall& t) {
+                ++tool_calls;
+                std::lock_guard lk(transcript_mu);
+                announced_tool_ids.insert(t.toolCall.toolCallId.value);
+                // Locations must be ABSOLUTE. Zed's resolve_location tries
+                // project_path_for_absolute_path, then falls back to
+                // open_local_buffer only `if is_absolute(path)` — a relative
+                // path matches neither, returns None, and the location is
+                // silently dropped. Follow-along just stops moving; nothing
+                // errors, so this is invisible without an assertion.
+                for (const auto& l : t.toolCall.locations)
+                    if (!l.path.empty() && !std::filesystem::path(l.path).is_absolute())
+                        ++relative_locations;
+                tc_title = t.toolCall.title;
+                // The PROGRAMMATIC name (spec 1.8.0), distinct from the
+                // human title. A client grouping or filtering by tool
+                // identity cannot recover it from "Reading src/main.cpp".
+                if (t.toolCall.name) tc_name = *t.toolCall.name;
+                if (t.toolCall.kind == ToolKind::Edit) tc_is_edit_kind.store(true);
+                for (const auto& cc : t.toolCall.content)
+                    match(cc, [&](const TCC_Diff&) { tc_announce_diff.store(true); },
+                              [&](const auto&) {});
+            },
             [&](const SU_ToolCallUpdate& u) {
+                { std::lock_guard lk(transcript_mu);
+                  if (!announced_tool_ids.count(u.update.toolCallId.value))
+                      ++orphan_tool_updates;
+                  // Locations ride on the UPDATE, not the initial ToolCall:
+                  // at announce time the args haven't finished streaming, so
+                  // there is no path yet. This is where the absolute-path
+                  // contract actually has to hold.
+                  if (u.update.locations)
+                      for (const auto& l : *u.update.locations)
+                          if (!l.path.empty() && !std::filesystem::path(l.path).is_absolute())
+                              ++relative_locations; }
                 if (u.update.status && *u.update.status == ToolCallStatus::Completed)
                     ++tool_completed;
                 if (u.update.status && *u.update.status == ToolCallStatus::Failed)
                     ++tool_failed;
+                if (u.update.title) {
+                    std::lock_guard lk(transcript_mu); tc_title = *u.update.title;
+                }
+                if (u.update.kind && *u.update.kind == ToolKind::Edit)
+                    tc_is_edit_kind.store(true);
                 if (u.update.content)
                     for (const auto& cc : *u.update.content)
                         match(cc,
+                            [&](const TCC_Diff&) { tc_announce_diff.store(true); },
                             [&](const TCC_Content& c) {
                                 match(c.content,
                                     [&](const TextContent& t) {
@@ -199,12 +297,40 @@ int main() {
                             }, [&](const auto&){});
             },
             [&](const SU_Usage&) { ++usage_updates; },
+            [&](const SU_AvailableCommands& ac) {
+                ++avail_cmds;
+                for (const auto& c : ac.availableCommands)
+                    if (c.name == "compact" || c.name == "new")
+                        saw_skill_or_compact_cmd.store(true);
+            },
+            [&](const SU_ConfigOptions& co) {
+                ++config_opts;
+                for (const auto& o : co.configOptions) {
+                    if (o.id == "model") saw_model_option.store(true);
+                    if (o.id == "mode") saw_mode_option.store(true);
+                }
+            },
+            [&](const SU_SessionInfo& si) {
+                ++session_infos;
+                if (si.title) {
+                    std::lock_guard lk(transcript_mu);
+                    last_session_title = *si.title;
+                }
+            },
             [&](const auto&) {});
-    };
+    });
     std::atomic<bool> reject_mode{false};
     // Approve the write when asked (or reject when reject_mode is set).
-    ch.on_request_permission = [&](const RequestPermissionParams& p) {
+    router.on<to_client::RequestPermission>([&](Client&, const RequestPermissionParams& p) {
         ++perm_requests;
+        {
+            std::lock_guard lk(transcript_mu);
+            if (p.toolCall.title) perm_title = *p.toolCall.title;
+            if (p.toolCall.content)
+                for (const auto& cc : *p.toolCall.content)
+                    match(cc, [&](const TCC_Diff&) { perm_announce_diff.store(true); },
+                              [&](const auto&) {});
+        }
         auto want = reject_mode.load() ? PermissionOptionKind::RejectOnce
                                        : PermissionOptionKind::AllowOnce;
         std::string chosen;
@@ -212,49 +338,156 @@ int main() {
             if (o.kind == want) chosen = o.optionId;
         return RequestPermissionResult{
             RequestPermissionOutcome{PO_Selected{chosen, Json::object()}}, Json::object()};
-    };
-
-    AgentConnection agent(client_sink, std::move(ch));
-    // The client reads a2c; pump it into the agent connection's engine.
-    std::thread client_pump([&]{
-        PipeInBuf cin_buf(a2c); std::istream cin_stream(&cin_buf);
-        std::string l;
-        while (std::getline(cin_stream, l)) {
-            if (!l.empty()) agent.engine().feed_line(l);
-        }
     });
+
+    Client client_ctx;
+    ag::rpc::Dispatch dispatch;
+    dispatch.on_call         = [&](const maya::unlocked&, const jsonrpc::Call& c) { return router.handle(client_ctx, c); };
+    dispatch.on_notification = [&](const maya::unlocked&, const jsonrpc::Notification& n) { router.handle(client_ctx, n); };
+    ag::rpc::Peer agent(ag::rpc::fd_channel(a2c[0], c2a[1]), std::move(dispatch), "acp-client");
+    agent.start();
+    // A call that must succeed; a failure throws the RpcError like the old
+    // future-based client did, so the error-code checks below read the same.
+    auto must = [](auto r) {
+        if (!r) throw r.error();
+        return std::move(*r);
+    };
 
     // ── Drive the protocol ─────────────────────────────────────────────────
     InitializeParams ip;
     ip.clientCapabilities.fs.readTextFile = true;
     ip.clientCapabilities.fs.writeTextFile = true;
-    auto init = agent.initialize(ip).get();
+    auto init = must(agent.call<to_agent::Initialize>(agtest::cap(), ip));
     CHECK(init.protocolVersion == kProtocolVersion);
     CHECK(init.agentCapabilities.loadSession == true);
     CHECK(init.agentCapabilities.promptCapabilities.embeddedContext == true);
+    // Images are DECLARED because they are now decoded into the prompt
+    // rather than dropped. Declaring a capability we then discard is worse
+    // than not declaring it: the client shows the attachment as sent.
+    CHECK(init.agentCapabilities.promptCapabilities.image == true);
+    // Audio stays undeclared — no provider we ship accepts it.
+    CHECK(init.agentCapabilities.promptCapabilities.audio == false);
     CHECK(init.agentInfo.has_value() && init.agentInfo->name == "agentty");
 
     NewSessionParams nsp; nsp.cwd = tmp.string();
-    auto ns = agent.session_new(nsp).get();
+    auto ns = must(agent.call<to_agent::SessionNew>(agtest::cap(), nsp));
     CHECK(!ns.sessionId.value.empty());
     CHECK(ns.modes.has_value());
+    // The selectors ride on the result itself, not only on the update that
+    // follows: JetBrains builds its dropdown from the result.
+    REQUIRE(ns.configOptions.has_value());
     CHECK(ns.modes->currentModeId.value == "ask");
     CHECK(ns.modes->availableModes.size() == 3);
 
+    // Shell parity with Zed's native agent: session/new advertises the
+    // slash-command menu (compact/new + skills) and the model-picker config
+    // option, as session/update notifications.
+    CHECK(avail_cmds.load() >= 1);
+    CHECK(saw_skill_or_compact_cmd.load());
+    CHECK(config_opts.load() >= 1);
+    CHECK(saw_model_option.load());
+    // Clean cut: on a v1 connection (the default build), the permission mode
+    // is surfaced ONLY via SessionModeState (ns.modes, checked above) — NOT as
+    // a config option. The v2 `mode` config-option path is exercised only
+    // under an ACP_ENABLE_V2_DRAFT build with a v2 client; here it must be
+    // absent so the two surfaces never overlap.
+    if (init.protocolVersion < 2)
+        CHECK(!saw_mode_option.load());
+
+    // The MODEL option is version-agnostic. session/set_config_option applies
+    // a value from the option's own list and echoes the complete config state.
+    {
+        auto model_opt = std::find_if(ns.configOptions->begin(), ns.configOptions->end(),
+                                      [](const ConfigOption& o) { return o.id == "model"; });
+        REQUIRE(model_opt != ns.configOptions->end());
+        std::string pick;
+        match(model_opt->options,
+              [&](const CSO_Ungrouped& u) { if (!u.items.empty()) pick = u.items.back().value; },
+              [&](const CSO_Grouped& g) {
+                  if (!g.items.empty() && !g.items[0].options.empty())
+                      pick = g.items[0].options.back().value;
+              });
+        REQUIRE(!pick.empty());
+        auto set = must(agent.call<to_agent::SessionSetConfig>(agtest::cap(), 
+            SetConfigOptionParams{ns.sessionId, "model", Json(pick), Json::object()}));
+        bool reflected = false;
+        for (const auto& o : set.configOptions)
+            if (o.id == "model" && o.currentValue == pick) reflected = true;
+        CHECK(reflected);   // the result carries the new state
+    }
+    // A model that is on no signed-in provider is a client mistake.
+    {
+        int code = 0;
+        try {
+            must(agent.call<to_agent::SessionSetConfig>(agtest::cap(), 
+                SetConfigOptionParams{ns.sessionId, "model", Json("no-such-model-xyz"),
+                                      Json::object()}));
+        } catch (const RpcError& e) { code = e.code; } catch (...) {}
+        CHECK(code == errc::InvalidParams);
+    }
+    // An unknown configId is a hard error, not a silent no-op — and the
+    // CODE matters, not just that it threw.
+    //
+    // Zed branches on it (agent_servers/src/acp.rs): AuthRequired opens the
+    // sign-in flow, any other non-InternalError is surfaced to the user
+    // verbatim, and InternalError is treated as "the agent broke" — it digs
+    // into err.data looking for a crash detail and otherwise shows a
+    // generic failure. So reporting a CLIENT mistake as InternalError
+    // blames the agent for a bad request and buries the actionable message.
+    {
+        int  code = 0;
+        Json data;
+        bool threw = false;
+        try {
+            must(agent.call<to_agent::SessionSetConfig>(agtest::cap(), 
+                SetConfigOptionParams{ns.sessionId, "temperatuer", Json("9"),
+                                      Json::object()}));
+        } catch (const RpcError& e) {
+            threw = true; code = e.code; data = e.data;
+        } catch (...) { threw = true; }
+        CHECK(threw);
+        CHECK(code == errc::InvalidParams);      // NOT InternalError
+        // And it says what WOULD have worked, so the client can act.
+        CHECK(data.contains("supported"));
+    }
+
+    // Same for an unknown sessionId: the client sent a bad id, we did not
+    // crash.
+    {
+        int  code = 0;
+        try {
+            must(agent.call<to_agent::SessionSetMode>(agtest::cap(), 
+                SetModeParams{SessionId{"no-such-session"},
+                              SessionModeId{"ask"}, Json::object()}));
+        } catch (const RpcError& e) { code = e.code; }
+          catch (...) {}
+        CHECK(code == errc::InvalidParams);
+    }
+
     // set_mode round-trip (switch to minimal then back to ask). Keep the
     // session in Ask before the prompt so the `write` tool gates on the user.
-    agent.session_set_mode(SetModeParams{ns.sessionId, SessionModeId{"minimal"}, Json::object()}).get();
-    agent.session_set_mode(SetModeParams{ns.sessionId, SessionModeId{"ask"}, Json::object()}).get();
+    must(agent.call<to_agent::SessionSetMode>(agtest::cap(), SetModeParams{ns.sessionId, SessionModeId{"minimal"}, Json::object()}));
+    must(agent.call<to_agent::SessionSetMode>(agtest::cap(), SetModeParams{ns.sessionId, SessionModeId{"ask"}, Json::object()}));
 
     PromptParams pp;
     pp.sessionId = ns.sessionId;
     pp.prompt.push_back(TextContent{"please write the file", Nothing, Json::object()});
-    auto pr = agent.session_prompt(pp).get();   // resolves only after full turn
+    auto pr = must(agent.call<to_agent::SessionPrompt>(agtest::cap(), pp));   // resolves only after full turn
 
     CHECK(pr.stopReason == StopReason::EndTurn);
     CHECK(completions.load() == 2);             // two model completions ran
+    // The first prompt pushed a live session title to Zed's sidebar.
+    CHECK(session_infos.load() >= 1);
+    { std::lock_guard lk(transcript_mu);
+      CHECK(!last_session_title.empty()); }
     CHECK(perm_requests.load() == 1);           // write asked once
     CHECK(tool_calls.load() == 1);
+    // No update referenced an unannounced id. Zed renders those as a
+    // "Tool call not found" failure card, so this is user-visible breakage,
+    // not a protocol nicety.
+    CHECK(orphan_tool_updates.load() == 0);
+    // Every location we emitted was absolute (see the collector above).
+    CHECK(relative_locations.load() == 0);
     if (tool_completed.load() != 1) {
         std::lock_guard lk(transcript_mu);
         std::fprintf(stderr, "tool_failed=%d last_tool_text=[%s]\n",
@@ -263,6 +496,22 @@ int main() {
     CHECK(tool_completed.load() == 1);
     CHECK(usage_updates.load() == 2);
     CHECK(agent_text_chunks.load() >= 2);
+
+    // The tool card is first-class: title is project-relative ("write out.txt",
+    // not the absolute tmp path), kind maps write→Edit, and an announce-time
+    // diff card is shown before the tool runs — on both the tool_call update
+    // and the permission request. This is the claude-code-acp parity work.
+    { std::lock_guard lk(transcript_mu);
+      CHECK(tc_title.rfind("Write ", 0) == 0);
+      CHECK(tc_title.find('/') == std::string::npos);   // relative, no dir sep
+      // …and the programmatic name rides alongside it. Stabilised in spec
+      // 1.8.0; without it a client can only ever show the prose title, so
+      // grouping/filtering/iconography by tool identity is impossible.
+      CHECK(tc_name == "write");
+      CHECK(perm_title.rfind("Write ", 0) == 0); }
+    CHECK(tc_is_edit_kind.load());
+    CHECK(tc_announce_diff.load());
+    CHECK(perm_announce_diff.load());
 
     { std::lock_guard lk(transcript_mu);
       CHECK(transcript.find("Writing the file.") != std::string::npos);
@@ -284,21 +533,94 @@ int main() {
     PromptParams pp2;
     pp2.sessionId = ns.sessionId;
     pp2.prompt.push_back(TextContent{"write it again", Nothing, Json::object()});
-    auto pr2 = agent.session_prompt(pp2).get();
+    auto pr2 = must(agent.call<to_agent::SessionPrompt>(agtest::cap(), pp2));
 
     CHECK(pr2.stopReason == StopReason::EndTurn);
     CHECK(perm_requests.load() == perms_before + 1);   // asked again
     CHECK(tool_failed.load()   == failed_before + 1);   // rejected → failed
     CHECK(!fs::exists(target));                          // never written
 
+    // ── Turn 3: a `read` result must come back LINE-NUMBERED and fenced,
+    //    matching claude-code-acp's card body (the "tool UI looks different"
+    //    fix). Scripted provider emits a read of the file we wrote in turn 1,
+    //    then ends the turn. ──────────────────────────────────────────────────
+    // Re-create the file (turn 2 rejected/removed it).
+    { std::ofstream f(target); f << "alpha\nbeta *star* line\ngamma\n"; }
+    reject_mode.store(false);
+    read_mode.store(true);
+    last_tool_text.clear();
+
+    PromptParams pp3;
+    pp3.sessionId = ns.sessionId;
+    pp3.prompt.push_back(TextContent{"read it", Nothing, Json::object()});
+    auto pr3 = must(agent.call<to_agent::SessionPrompt>(agtest::cap(), pp3));
+    CHECK(pr3.stopReason == StopReason::EndTurn);
+    { std::lock_guard lk(transcript_mu);
+      // The Read card body is a fenced, tab-numbered excerpt: "```\n1\talpha…".
+      CHECK(last_tool_text.rfind("```", 0) == 0);
+      CHECK(last_tool_text.find("1\talpha") != std::string::npos);
+      CHECK(last_tool_text.find("2\tbeta")  != std::string::npos); }
+
+    // ── Turn 4: a `bash` result must show its OUTPUT in the card body as a
+    //    fenced block (the "bash shows no output" fix). No terminal capability
+    //    here, so it runs the internal path; the completion must carry the
+    //    captured stdout, fenced. ───────────────────────────────────────
+    read_mode.store(false);
+    bash_mode.store(true);
+    last_tool_text.clear();
+
+    PromptParams pp4;
+    pp4.sessionId = ns.sessionId;
+    pp4.prompt.push_back(TextContent{"run it", Nothing, Json::object()});
+    auto pr4 = must(agent.call<to_agent::SessionPrompt>(agtest::cap(), pp4));
+    CHECK(pr4.stopReason == StopReason::EndTurn);
+    { std::lock_guard lk(transcript_mu);
+      // The bash card body is fenced and contains the command's stdout.
+      CHECK(last_tool_text.find("```")          != std::string::npos);
+      CHECK(last_tool_text.find("hello-stdout") != std::string::npos); }
+
+    // ── An image in a prompt reaches the model ─────────────────────────────
+    //
+    // The server used to have an EMPTY visitor arm for ImageContent, so a
+    // screenshot pasted into Zed's agent panel was silently discarded — the
+    // words went, the picture didn't, on a build whose TUI has had vision
+    // for months. A dropped block is indistinguishable from a model that
+    // ignored the image, which is why nobody reported it.
+    //
+    // Asserting on what the MODEL received (not just that the capability is
+    // declared) is the point: declaring `image` and then dropping the bytes
+    // would be worse than not declaring it at all.
+    {
+        // A 1x1 PNG, base64 — the smallest thing that is unambiguously an
+        // image and survives a decode byte-for-byte.
+        const std::string png_b64 =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        PromptParams ip2;
+        ip2.sessionId = ns.sessionId;
+        ip2.prompt.push_back(TextContent{"what is in this image?", Nothing, Json::object()});
+        ip2.prompt.push_back(ImageContent{png_b64, "image/png", Nothing, Nothing,
+                                          Json::object()});
+        (void)must(agent.call<to_agent::SessionPrompt>(agtest::cap(), ip2));
+
+        std::lock_guard lk(saw_mu);
+        CHECK(saw_images.load() == 1);
+        CHECK(saw_media_type == "image/png");
+        // Decoded, not passed through as base64: the model layer wants raw
+        // bytes, and a PNG starts with the 8-byte signature.
+        CHECK(saw_bytes.size() > 8);
+        CHECK(saw_bytes.compare(1, 3, "PNG") == 0);
+    }
+
     // close round-trip.
-    agent.session_close(CloseSessionParams{ns.sessionId, Json::object()}).get();
+    must(agent.call<to_agent::SessionClose>(agtest::cap(), CloseSessionParams{ns.sessionId, Json::object()}));
 
     // ── Tear down ──────────────────────────────────────────────────────────
-    c2a.close();   // EOF on the agent's reader → serve() returns
+    ::close(c2a[1]);   // EOF on the agent's reader → serve() returns
     agent_thread.join();
-    a2c.close();   // EOF on the client pump
-    client_pump.join();
+    ::close(a2c[1]);   // EOF on our reader
+    agent.stop(agtest::cap());
+    ::close(c2a[0]);
+    ::close(a2c[0]);
 
     fs::remove(target);
     std::fprintf(stderr, "acp_integration: OK (turn=%d perms=%d toolcalls=%d "
@@ -306,5 +628,4 @@ int main() {
                  completions.load(), perm_requests.load(), tool_calls.load(),
                  tool_completed.load(), usage_updates.load(), agent_text_chunks.load());
     std::printf("acp_integration OK\n");
-    return 0;
 }

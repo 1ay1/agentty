@@ -1,22 +1,47 @@
 #include "agentty/io/http.hpp"
+
+#include "agentty/util/logx.hpp"
 #include "agentty/io/fsm.hpp"
+#include "agentty/io/inflate.hpp"
 #include "agentty/io/tls.hpp"
 #include "agentty/util/env.hpp"
 
+// A prewarm dial can be DETACHED at shutdown (see join_prewarm()) when it is
+// wedged in a blocking getaddrinfo(). But the more common race is a prewarm
+// TLS handshake still running keygen in a background thread when the process
+// exits: main() drains it via join_prewarm(), but a standalone binary (e.g. a
+// test) that triggers a prewarm and never drains lets that thread outlive
+// main() and race the C-runtime atexit handlers — mimalloc's mi_process_detach
+// (frees the heap the thread allocates from) and OpenSSL's OPENSSL_cleanup
+// (destroys the CRYPTO rwlocks EVP_PKEY_generate reads). Either fault is a
+// shutdown SIGSEGV. Two mitigations:
+//   1. mi_option_destroy_on_exit=0 (load-time ctor below) — mimalloc leaves
+//      the heap for the OS rather than freeing it under a live detached dial.
+//   2. AGENTTY_NO_PREWARM=1 (checked in Client::prewarm) — the test harness
+//      opts out of the dial entirely, so no undrained network thread is ever
+//      spawned. Tests don't need the latency win; the app still prewarms.
+#if defined(AGENTTY_USE_MIMALLOC)
+#  include <mimalloc.h>
+#endif
+
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
-#include <condition_variable>
 #include <cstdint>
+#include <random>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
-#include <mutex>
+#include <limits>
 #include <optional>
 #include <string>
+#include <stop_token>
 #include <thread>
+
+#include <maya/runtime.hpp>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -91,6 +116,20 @@ namespace agentty::http {
 
 using clock_t_ = std::chrono::steady_clock;
 using ms_t     = std::chrono::milliseconds;
+
+#if defined(AGENTTY_USE_MIMALLOC)
+namespace {
+// Runs once when this TU loads. A prewarm dial detached at shutdown — or one
+// in a standalone binary that never calls join_prewarm() — keeps allocating
+// from the heap while mimalloc's atexit handler (mi_process_detach) frees it,
+// faulting on freed metadata. Leave the heap for the OS to reclaim at true
+// process exit instead, which is what the detach path already assumes.
+const bool mimalloc_no_destroy_on_exit = [] {
+    mi_option_set(mi_option_destroy_on_exit, 0);
+    return true;
+}();
+} // namespace
+#endif
 
 // ---------------------------------------------------------------------------
 // HttpError implementations. The static factories are inline in the header;
@@ -194,6 +233,12 @@ struct Endpoint {
     uint16_t    port = 443;
     std::string dial_host;  // TCP target override; empty = use host
     uint16_t    dial_port = 0; // TCP port override; 0 = use port
+    // Re-validate every resolved IP against the SSRF blocklist before
+    // connect(). Carried from Request::ssrf_guard. NOT part of the pool
+    // identity below (a guarded and unguarded request to the same host would
+    // resolve to the same address anyway; the guard only ever tightens, and
+    // web-tool endpoints don't share the pool with provider traffic).
+    bool        ssrf_guard = false;
 
     [[nodiscard]] std::string_view tcp_host() const noexcept {
         return dial_host.empty() ? std::string_view{host} : std::string_view{dial_host};
@@ -349,6 +394,13 @@ public:
     [[nodiscard]] bool was_pooled() const noexcept { return was_pooled_; }
     void set_pooled(bool v) noexcept { was_pooled_ = v; }
 
+    // How long this connection sat idle in the pool before this acquire, in
+    // ms (0 for a fresh dial). Diagnostic only: a mid-stream hangup whose
+    // idle age clusters at a fixed value is a proxy/edge idle timeout, which
+    // is fixable by evicting sooner; random ages are ordinary network loss.
+    [[nodiscard]] long long idle_ms() const noexcept { return idle_ms_; }
+    void set_idle_ms(long long v) noexcept { idle_ms_ = v; }
+
     // Liveness for pool reuse. Two stages:
     //   (1) nghttp2 thinks the session has work to do or is at least
     //       readable. If neither, the session has wound down.
@@ -433,6 +485,7 @@ private:
     // Reuse marker — see was_pooled(). Defaults false (fresh dial);
     // Pool::acquire flips it true before handing the connection out.
     bool             was_pooled_            = false;
+    long long        idle_ms_               = 0;
 };
 
 // -----------------------------------------------------------------------
@@ -736,6 +789,56 @@ socks5_negotiate(socket_t fd, std::string_view dest_host, uint16_t dest_port,
         return r;
     return {};
 }
+
+// SSRF guard: is this RESOLVED address one an untrusted (model-supplied) URL
+// must never reach? Covers loopback, RFC1918 private, link-local (incl. the
+// 169.254.169.254 cloud-metadata endpoint), CGNAT, and the v6 equivalents
+// (incl. IPv4-mapped ::ffff:a.b.c.d, which is re-checked as its v4 address so
+// ::ffff:127.0.0.1 can't sneak a loopback past the v6 arm). This runs AFTER
+// getaddrinfo(), on the exact sockaddr we are about to connect() to — so a
+// public hostname that DNS-rebinds to an internal IP is caught at the socket,
+// where the target is authoritative. Only consulted when Endpoint::ssrf_guard
+// is set (web tools); provider + local-model traffic is never gated.
+[[nodiscard]] bool blocked_sockaddr(const sockaddr* sa) noexcept {
+    auto v4_blocked = [](uint32_t h /*host order*/) noexcept {
+        const uint8_t a = (h >> 24) & 0xFF, b = (h >> 16) & 0xFF;
+        if (a == 0)   return true;                       // 0.0.0.0/8 "this host"
+        if (a == 127) return true;                       // loopback
+        if (a == 10)  return true;                       // RFC1918
+        if (a == 172 && (b & 0xF0) == 16) return true;    // 172.16/12
+        if (a == 192 && b == 168) return true;            // 192.168/16
+        if (a == 169 && b == 254) return true;            // link-local + metadata
+        if (a == 100 && (b & 0xC0) == 64) return true;    // 100.64/10 CGNAT
+        if (a >= 224) return true;                        // multicast / reserved
+        return false;
+    };
+    if (!sa) return true;                                 // unknown = refuse
+    if (sa->sa_family == AF_INET) {
+        const auto* s = reinterpret_cast<const sockaddr_in*>(sa);
+        return v4_blocked(ntohl(s->sin_addr.s_addr));
+    }
+    if (sa->sa_family == AF_INET6) {
+        const auto* s = reinterpret_cast<const sockaddr_in6*>(sa);
+        const uint8_t* b = s->sin6_addr.s6_addr;
+        // IPv4-mapped ::ffff:a.b.c.d — re-check as the v4 address.
+        static const uint8_t mapped[12] =
+            {0,0,0,0, 0,0,0,0, 0,0,0xFF,0xFF};
+        if (std::memcmp(b, mapped, 12) == 0) {
+            uint32_t h = (uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16)
+                       | (uint32_t(b[14]) << 8) | uint32_t(b[15]);
+            return v4_blocked(h);
+        }
+        if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) return true;  // fe80::/10 link-local
+        if ((b[0] & 0xFE) == 0xFC) return true;                  // fc00::/7 ULA
+        if (b[0] == 0xFF) return true;                           // ff00::/8 multicast
+        // ::1 loopback and :: unspecified.
+        bool all_zero = true;
+        for (int i = 0; i < 15; ++i) if (b[i]) { all_zero = false; break; }
+        if (all_zero && (b[15] == 0 || b[15] == 1)) return true;
+        return false;
+    }
+    return true;   // non-IP family (AF_UNIX etc.) — never for a web dial
+}
 } // namespace
 
 std::expected<socket_t, HttpError>
@@ -759,7 +862,18 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
             std::string{"getaddrinfo: "} + gai_strerror(gai)));
     }
 
+    // getaddrinfo() is a blocking resolve with no cancellation hook — if a
+    // shutdown tripped the token while we were inside it (e.g. a prewarm dial
+    // racing a fast pipe-EOF exit), abort now rather than push on into the
+    // connect loop. Keeps join_prewarm() from waiting on a dial nobody wants.
+    if (cancel && cancel->is_cancelled()) {
+        ::freeaddrinfo(res);
+        return std::unexpected(HttpError::cancelled("cancelled after resolve"));
+    }
+
     auto deadline = clock_t_::now() + tos.connect;
+    if (tos.absolute_deadline && *tos.absolute_deadline < deadline)
+        deadline = *tos.absolute_deadline;
 
     // After a successful TCP connect, this finishes the dial: SOCKS5
     // negotiation if a proxy is configured (so the returned fd is a
@@ -774,8 +888,21 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
         return fd;
     };
 
+    // SSRF guard is meaningless through a SOCKS proxy: there we dial the
+    // (trusted, user-configured) proxy and it resolves the upstream remotely,
+    // so the addresses in `res` are the PROXY's, not the target's. Only apply
+    // the resolved-IP blocklist on a direct dial.
+    const bool ssrf_check = ep.ssrf_guard && !sx.active();
+
     std::string last_err;
     for (addrinfo* p = res; p; p = p->ai_next) {
+        // Post-resolution SSRF gate: refuse an internal/loopback/link-local/
+        // metadata address the model-supplied hostname resolved to (DNS
+        // rebinding). Checked here, on the exact sockaddr we'd connect() to.
+        if (ssrf_check && blocked_sockaddr(p->ai_addr)) {
+            last_err = "blocked address (SSRF guard)";
+            continue;
+        }
         socket_t fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (fd == kBadSocket) { last_err = "socket() failed"; continue; }
 #if !defined(_WIN32)
@@ -881,6 +1008,8 @@ dial_tcp(const Endpoint& ep, Timeouts tos, CancelToken* cancel) {
 std::expected<void, HttpError>
 tls_handshake(socket_t fd, tls::SSL* ssl, Timeouts tos, CancelToken* cancel) {
     auto deadline = clock_t_::now() + tos.connect;
+    if (tos.absolute_deadline && *tos.absolute_deadline < deadline)
+        deadline = *tos.absolute_deadline;
     while (true) {
         int r = SSL_connect(ssl);
         if (r == 1) return {};
@@ -999,6 +1128,8 @@ Connection::pump_initial(Timeouts tos) {
     // is fully usable before we return it from dial_*.  Bounded by the
     // connect deadline passed in.
     auto deadline = clock_t_::now() + tos.connect;
+    if (tos.absolute_deadline && *tos.absolute_deadline < deadline)
+        deadline = *tos.absolute_deadline;
     std::string err;
     while (nghttp2_session_want_write(session_)) {
         auto s = pump_send_impl(ssl_, session_, pend_buf_, pend_off_,
@@ -1084,8 +1215,9 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
         WantWrite,   // TLS couldn't flush all outbound bytes; add POLLOUT
     };
 
-    std::optional<clock_t_::time_point> deadline;
-    if (tos.total.count() > 0) deadline = clock_t_::now() + tos.total;
+    std::optional<clock_t_::time_point> deadline = tos.absolute_deadline;
+    if (!deadline && tos.total.count() > 0)
+        deadline = clock_t_::now() + tos.total;
 
     // Liveness clocks. `last_rx` is refreshed whenever SSL_read returns
     // plaintext bytes (DATA, PING ACK, WINDOW_UPDATE — any frame counts as
@@ -1094,6 +1226,8 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
     const auto start_at = clock_t_::now();
     auto last_rx   = start_at;
     auto last_ping = start_at;
+    auto last_activity_report = start_at - std::chrono::seconds{1};
+    auto last_buffered_report = start_at;
 
     std::string err;
 
@@ -1108,7 +1242,21 @@ Connection::run(const Request& req, StreamCtx& sctx, Timeouts tos,
         size_t bytes_in = 0;
         auto in = pump_recv(ssl_, session_, &err, &bytes_in);
         if (in == PumpIn::Error)   return std::unexpected(HttpError::protocol(err));
-        if (bytes_in > 0) last_rx = clock_t_::now();
+        if (bytes_in > 0) {
+            last_rx = clock_t_::now();
+            if (sctx.handler && sctx.handler->on_activity
+                && last_rx - last_activity_report >= std::chrono::seconds{1}) {
+                last_activity_report = last_rx;
+                sctx.handler->on_activity();
+            }
+            if (sctx.handler && sctx.handler->on_buffered_wait
+                && !sctx.data_delivered
+                && last_rx - start_at >= std::chrono::seconds{30}
+                && last_rx - last_buffered_report >= std::chrono::seconds{15}) {
+                last_buffered_report = last_rx;
+                sctx.handler->on_buffered_wait();
+            }
+        }
         if (in == PumpIn::Closed) {
             // Peer closed the TLS session.  If the stream also closed,
             // we're done; otherwise surface as an error.
@@ -1545,12 +1693,77 @@ std::size_t plain_parse_head(std::string_view in, int& status, Headers& headers)
     return hdr_end + 4;
 }
 
-[[nodiscard]] bool headers_say_chunked(const Headers& h) {
-    for (const auto& e : h)
-        if (e.name == "transfer-encoding"
-            && e.value.find("chunked") != std::string::npos)
-            return true;
-    return false;
+enum class TransferFraming { Identity, Chunked, Invalid };
+
+[[nodiscard]] TransferFraming transfer_framing(const Headers& headers) {
+    bool saw = false;
+    for (const auto& h : headers) {
+        if (h.name != "transfer-encoding") continue;
+        if (saw) return TransferFraming::Invalid;
+        saw = true;
+        std::string_view value = h.value;
+        while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+            value.remove_prefix(1);
+        while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
+            value.remove_suffix(1);
+        // We requested identity and only implement the standard final chunked
+        // coding. Reject coding stacks instead of leaking encoded bytes into
+        // the SSE parser.
+        if (value.empty() || value.find(',') != std::string_view::npos)
+            return TransferFraming::Invalid;
+        std::string lower{value};
+        for (char& c : lower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (lower != "chunked") return TransferFraming::Invalid;
+    }
+    return saw ? TransferFraming::Chunked : TransferFraming::Identity;
+}
+
+// Decode a response body in place per its `content-encoding`. agentty asks for
+// `identity`, but a gateway can gzip anyway (z.ai's /models does — issue #30);
+// without this the compressed bytes reach the JSON parser as garbage and the
+// model list silently comes back empty. On success the body is replaced with
+// the inflated bytes and the header is rewritten to `identity` so no consumer
+// double-decodes or mis-reports the length. On failure (unknown encoding or
+// corrupt stream) the raw body is LEFT UNTOUCHED and a warning is logged —
+// degrading to the previous behaviour rather than dropping the response. The
+// 64 MiB cap bounds a decompression bomb (API JSON is far smaller).
+void content_decode_body(Headers& headers, std::string& body) {
+    constexpr std::size_t kMaxInflated = 64ull * 1024 * 1024;
+    for (auto& h : headers) {
+        if (h.name != "content-encoding") continue;
+        if (h.value.empty()) return;
+        auto decoded = io::compress::decode_content_encoding(
+            h.value, body, kMaxInflated);
+        if (!decoded) {
+            AGT_LOG(Net, Warn, "http.content_encoding.undecodable",
+                    "encoding={} bytes={}", h.value, body.size());
+            return;   // keep the raw body — caller may still salvage it
+        }
+        body = std::move(*decoded);
+        h.value = "identity";   // downstream sees plain, correctly-sized bytes
+        return;
+    }
+}
+
+[[nodiscard]] bool parse_content_length(const Headers& headers,
+                                        std::optional<size_t>& out) {
+    out.reset();
+    for (const auto& h : headers) {
+        if (h.name != "content-length") continue;
+        if (h.value.empty()) return false;
+        size_t value = 0;
+        for (char c : h.value) {
+            if (c < '0' || c > '9'
+                || value > (std::numeric_limits<size_t>::max()
+                            - static_cast<size_t>(c - '0')) / 10)
+                return false;
+            value = value * 10 + static_cast<size_t>(c - '0');
+        }
+        if (out && *out != value) return false;
+        out = value;
+    }
+    return true;
 }
 
 // Incremental de-chunker. Feed it raw body bytes as they arrive; it appends
@@ -1558,42 +1771,70 @@ std::size_t plain_parse_head(std::string_view in, int& status, Headers& headers)
 // Returns false on a malformed chunk header. `done` is set when the
 // terminating 0-length chunk is seen.
 struct ChunkDecoder {
-    std::string pending;     // undecoded bytes carried across feeds
-    bool   done = false;
+    std::string pending;
+    bool awaiting_trailers = false;
+    bool done = false;
+
     bool feed(std::string_view bytes, std::string& out) {
+        if (done) return bytes.empty();
         pending.append(bytes);
-        size_t p = 0;
-        while (p < pending.size()) {
-            auto ln = pending.find("\r\n", p);
-            if (ln == std::string::npos) break;            // need more bytes
-            size_t sz = 0; bool any = false; bool overflow = false;
-            for (size_t k = p; k < ln; ++k) {
-                char c = pending[k];
-                int d = (c >= '0' && c <= '9') ? c - '0'
-                      : (c >= 'a' && c <= 'f') ? c - 'a' + 10
-                      : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
-                if (d < 0) break;          // chunk-ext (";...") or CRLF — stop
-                // Guard the accumulation: a hostile/garbled size field must
-                // not overflow size_t (which would wrap the full-chunk bounds
-                // check below and corrupt the decode). Cap well under any real
-                // chunk size; >256 MiB is malformed for our use.
-                if (sz > (static_cast<size_t>(1) << 28)) { overflow = true; break; }
-                sz = sz * 16 + static_cast<size_t>(d); any = true;
+        for (;;) {
+            if (awaiting_trailers) {
+                // Empty trailer section is one CRLF; otherwise wait for the
+                // trailer block terminator. Cap it like response headers.
+                if (pending.starts_with("\r\n")) {
+                    pending.erase(0, 2);
+                    done = true;
+                    return pending.empty();
+                }
+                const auto end = pending.find("\r\n\r\n");
+                if (end == std::string::npos)
+                    return pending.size() <= 64 * 1024;
+                pending.erase(0, end + 4);
+                done = true;
+                return pending.empty();
             }
-            if (overflow) { done = true; return false; }    // malformed: abort
-            if (!any && ln == p) { p = ln + 2; continue; }  // stray CRLF
-            size_t data_start = ln + 2;
-            if (sz == 0) { done = true; return true; }       // last chunk
-            if (data_start + sz + 2 > pending.size()) break;  // need full chunk
+
+            const auto ln = pending.find("\r\n");
+            if (ln == std::string::npos)
+                return pending.size() <= 1024; // chunk-size line cap
+            const std::string_view line{pending.data(), ln};
+            const auto semi = line.find(';');
+            const std::string_view digits = line.substr(0, semi);
+            if (digits.empty()) return false;
+
+            size_t sz = 0;
+            for (char c : digits) {
+                const int d = (c >= '0' && c <= '9') ? c - '0'
+                            : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                            : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+                if (d < 0 || sz > (static_cast<size_t>(1) << 28))
+                    return false;
+                sz = sz * 16 + static_cast<size_t>(d);
+            }
+            const size_t data_start = ln + 2;
+            if (sz == 0) {
+                pending.erase(0, data_start);
+                awaiting_trailers = true;
+                continue;
+            }
+            if (sz > (static_cast<size_t>(1) << 28)) return false;
+            if (data_start > pending.size()
+                || sz > pending.size() - data_start
+                || pending.size() - data_start - sz < 2) {
+                return true; // incomplete chunk
+            }
+            const size_t data_end = data_start + sz;
+            if (pending[data_end] != '\r' || pending[data_end + 1] != '\n')
+                return false;
             out.append(pending, data_start, sz);
-            p = data_start + sz + 2;                          // skip data + CRLF
+            pending.erase(0, data_end + 2);
         }
-        if (p > 0) pending.erase(0, p);
-        return true;
     }
 };
 
 } // namespace
+
 
 // Cleartext HTTP/1.1 streaming SSE read. Mirrors what Client::stream does for
 // h2, but over a raw socket: dial, write the request, read until the head is
@@ -1601,7 +1842,8 @@ struct ChunkDecoder {
 // to on_chunk until the server closes or sends the terminal 0-chunk.
 std::expected<void, HttpError>
 plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
-             Timeouts tos, CancelToken* cancel) {
+             Timeouts tos, CancelToken* cancel, bool& accepted_post) {
+    accepted_post = false;
     auto fd_or = dial_tcp(ep, tos, cancel);
     if (!fd_or) return std::unexpected(std::move(fd_or).error());
     socket_t fd = *fd_or;
@@ -1610,6 +1852,8 @@ plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
     // Streaming: no total cap (tos.total==0 for chat). Use idle as the wedge
     // guard; fall back to a generous fixed write deadline.
     auto write_deadline = clock_t_::now() + std::chrono::milliseconds{30'000};
+    if (tos.absolute_deadline && *tos.absolute_deadline < write_deadline)
+        write_deadline = *tos.absolute_deadline;
     std::string head_wire = plain_build_request(ep, req, /*keep_alive=*/false);
     if (auto r = plain_send_all(fd, head_wire.data(), head_wire.size(),
                                write_deadline, cancel); !r) {
@@ -1621,14 +1865,22 @@ plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
     int  status = 0;
     Headers headers;
     bool chunked = false;
+    std::optional<size_t> content_length;
+    size_t body_received = 0;
     ChunkDecoder dechunk;
     bool delivered_any = false;
     auto last_rx = clock_t_::now();
+    auto last_activity_report = last_rx - std::chrono::seconds{1};
 
     char buf[64 * 1024];
     while (true) {
         if (cancel && cancel->is_cancelled()) {
             cleanup(); return std::unexpected(HttpError::cancelled("h1 plain stream"));
+        }
+        if (tos.absolute_deadline && clock_t_::now() >= *tos.absolute_deadline) {
+            cleanup();
+            return std::unexpected(HttpError::timeout(
+                "h1 plain stream operation deadline exceeded"));
         }
 #if defined(_WIN32)
         int r = ::recv(fd, buf, sizeof(buf), 0);
@@ -1637,22 +1889,57 @@ plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
 #endif
         if (r > 0) {
             last_rx = clock_t_::now();
+            if (handler.on_activity
+                && last_rx - last_activity_report >= std::chrono::seconds{1}) {
+                last_activity_report = last_rx;
+                handler.on_activity();
+            }
             if (!head_done) {
                 inbuf.append(buf, static_cast<size_t>(r));
                 auto body_at = plain_parse_head(inbuf, status, headers);
                 if (body_at != std::string_view::npos) {
                     head_done = true;
-                    chunked = headers_say_chunked(headers);
+                    const auto framing = transfer_framing(headers);
+                    chunked = framing == TransferFraming::Chunked;
+                    if (status == 0
+                        || framing == TransferFraming::Invalid
+                        || !parse_content_length(headers, content_length)
+                        || (chunked && content_length)) {
+                        cleanup();
+                        return std::unexpected(HttpError::protocol(
+                            "h1 plain invalid or ambiguous response framing"));
+                    }
                     if (handler.on_headers) handler.on_headers(status, headers);
+                    accepted_post = req.method == HttpMethod::Post
+                                 && status >= 200 && status < 300;
+                    if (!chunked && content_length && *content_length == 0) {
+                        cleanup();
+                        return {};
+                    }
                     std::string body0 = inbuf.substr(body_at);
                     inbuf.clear();
                     if (!body0.empty()) {
                         std::string payload;
-                        if (chunked) { dechunk.feed(body0, payload); }
-                        else payload = std::move(body0);
+                        if (chunked && !dechunk.feed(body0, payload)) {
+                            cleanup();
+                            return std::unexpected(HttpError::protocol(
+                                "h1 plain malformed chunk framing"));
+                        }
+                        if (!chunked) payload = std::move(body0);
+                        body_received += payload.size();
+                        if (content_length && body_received > *content_length) {
+                            cleanup();
+                            return std::unexpected(HttpError::protocol(
+                                "h1 plain body exceeds Content-Length"));
+                        }
                         if (!payload.empty() && handler.on_chunk) {
                             delivered_any = true;
                             if (!handler.on_chunk(payload)) { cleanup(); return {}; }
+                        }
+                        if (!chunked && content_length
+                            && body_received == *content_length) {
+                            cleanup();
+                            return {};
                         }
                         if (chunked && dechunk.done) { cleanup(); return {}; }
                     }
@@ -1660,18 +1947,42 @@ plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
                 continue;
             }
             std::string payload;
-            if (chunked) { dechunk.feed(std::string_view{buf, (size_t)r}, payload); }
-            else payload.assign(buf, static_cast<size_t>(r));
+            if (chunked && !dechunk.feed(
+                    std::string_view{buf, static_cast<size_t>(r)}, payload)) {
+                cleanup();
+                return std::unexpected(HttpError::protocol(
+                    "h1 plain malformed chunk framing"));
+            }
+            if (!chunked) payload.assign(buf, static_cast<size_t>(r));
+            body_received += payload.size();
+            if (content_length && body_received > *content_length) {
+                cleanup();
+                return std::unexpected(HttpError::protocol(
+                    "h1 plain body exceeds Content-Length"));
+            }
             if (!payload.empty() && handler.on_chunk) {
                 delivered_any = true;
                 if (!handler.on_chunk(payload)) { cleanup(); return {}; }
             }
+            if (!chunked && content_length
+                && body_received == *content_length) {
+                cleanup();
+                return {};
+            }
             if (chunked && dechunk.done) { cleanup(); return {}; }
             continue;
         }
-        if (r == 0) {   // peer closed — clean end of a Connection: close stream
+        if (r == 0) {
             cleanup();
-            if (!head_done && handler.on_headers) handler.on_headers(status, headers);
+            if (!head_done)
+                return std::unexpected(HttpError::protocol(
+                    "h1 plain peer closed before response headers"));
+            if (chunked && !dechunk.done)
+                return std::unexpected(HttpError::peer_closed(
+                    "h1 plain peer closed mid-chunked stream"));
+            if (!chunked && content_length && body_received != *content_length)
+                return std::unexpected(HttpError::peer_closed(
+                    "h1 plain peer closed before Content-Length body completed"));
             return {};
         }
         int e = sock_last_err();
@@ -1683,6 +1994,14 @@ plain_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
         }
         // would-block: poll with the idle guard.
         int rem = 200;
+        if (tos.absolute_deadline) {
+            rem = remaining_ms(tos.absolute_deadline, rem);
+            if (rem <= 0) {
+                cleanup();
+                return std::unexpected(HttpError::timeout(
+                    "h1 plain stream operation deadline exceeded"));
+            }
+        }
         if (tos.idle.count() > 0) {
             auto since = clock_t_::now() - last_rx;
             if (since >= tos.idle) {
@@ -1765,20 +2084,28 @@ plain_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
     if (body_at == std::string_view::npos)
         return std::unexpected(HttpError::protocol("h1 plain: no header terminator"));
     std::string body = in.substr(body_at);
-    if (headers_say_chunked(headers)) {
-        ChunkDecoder d; std::string decoded; d.feed(body, decoded);
+    const auto framing = transfer_framing(headers);
+    if (framing == TransferFraming::Invalid)
+        return std::unexpected(HttpError::protocol(
+            "h1 plain unsupported Transfer-Encoding"));
+    if (framing == TransferFraming::Chunked) {
+        ChunkDecoder d;
+        std::string decoded;
+        if (!d.feed(body, decoded) || !d.done)
+            return std::unexpected(HttpError::protocol(
+                "h1 plain malformed or truncated chunk framing"));
         body = std::move(decoded);
     }
+    content_decode_body(headers, body);
     return Response{ status, std::move(headers), std::move(body) };
 }
 
 // -----------------------------------------------------------------------
 // HTTP/1.1 unary fallback.
 //
-// The core transport is h2-only: dial_new() hard-rejects any peer that
-// negotiates anything other than h2 via ALPN.  That's correct for the
-// streaming chat path (it relies on h2 flow-control + multiplexing) and for
-// a direct connection to Anthropic's edge, which always speaks h2.
+// The pooled core transport prefers h2 for flow control and multiplexing.
+// Unary and streaming requests both have a one-connection HTTP/1.1 fallback
+// for TLS intermediaries that remove h2 from ALPN.
 //
 // But an air-gapped host reaches the internet through a SOCKS/SSH tunnel,
 // and the far side of that tunnel is frequently a TLS-intercepting corporate
@@ -1789,12 +2116,9 @@ plain_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
 // and — because the failure is classified Tls, not Auth — the mid-session
 // refresh-retry never fires.
 //
-// This speaks HTTP/1.1 for *unary* requests only.  One request, one
-// response, `Connection: close` so the body ends at EOF (no need to parse
-// chunked transfer-encoding or trust Content-Length).  Streaming stays
-// h2-only.  TLS is still pinned on ep.host, so the intercepting proxy is
-// inside the user's own trust boundary (they configured the tunnel) and
-// can't reach anything we didn't already send it.
+// The unary fallback below buffers one complete response. The streaming
+// fallback later in this file incrementally de-chunks SSE and uses an absolute
+// deadline because HTTP/1.1 has no protocol-level PING.
 // True iff `e` is the specific "peer negotiated something other than h2"
 // failure raised in dial_new — the one case the h1 fallback is meant for.
 // Matched on the detail substring set at the single reject site below.
@@ -1938,38 +2262,279 @@ h1_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
         headers.push_back({ std::move(name), std::string{line.substr(vb)} });
     }
 
-    // If the server *did* send chunked despite Connection: close, decode it;
-    // otherwise the body is already the raw bytes after the headers.
-    for (const auto& h : headers) {
-        if (h.name == "transfer-encoding" && h.value.find("chunked") != std::string::npos) {
-            std::string decoded;
-            size_t p = 0;
-            while (p < body.size()) {
-                auto ln = body.find("\r\n", p);
-                if (ln == std::string::npos) break;
-                size_t sz = 0; bool overflow = false;
-                for (size_t k = p; k < ln; ++k) {
-                    char c = body[k];
-                    int d = (c >= '0' && c <= '9') ? c - '0'
-                          : (c >= 'a' && c <= 'f') ? c - 'a' + 10
-                          : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
-                    if (d < 0) break;
-                    if (sz > (static_cast<size_t>(1) << 28)) { overflow = true; break; }
-                    sz = sz * 16 + static_cast<size_t>(d);
-                }
-                if (overflow) break;          // malformed size field
-                p = ln + 2;
-                if (sz == 0) break;
-                if (p + sz > body.size()) break;
-                decoded.append(body, p, sz);
-                p += sz + 2;  // skip chunk + trailing CRLF
-            }
-            body = std::move(decoded);
-            break;
+    const auto framing = transfer_framing(headers);
+    std::optional<size_t> content_length;
+    if (framing == TransferFraming::Invalid
+        || !parse_content_length(headers, content_length)
+        || (framing == TransferFraming::Chunked && content_length)) {
+        return std::unexpected(HttpError::protocol(
+            "h1 unary invalid or ambiguous response framing"));
+    }
+    if (framing == TransferFraming::Chunked) {
+        ChunkDecoder decoder;
+        std::string decoded;
+        if (!decoder.feed(body, decoded) || !decoder.done) {
+            return std::unexpected(HttpError::protocol(
+                "h1 unary malformed or truncated chunk framing"));
+        }
+        body = std::move(decoded);
+    } else if (content_length && body.size() != *content_length) {
+        return std::unexpected(HttpError::peer_closed(
+            "h1 unary Content-Length body was truncated"));
+    }
+
+    content_decode_body(headers, body);
+    return Response{ status, std::move(headers), std::move(body) };
+}
+
+// TLS HTTP/1.1 streaming fallback for corporate gateways that strip h2 from
+// ALPN. SSE does not require HTTP/2: chunked HTTP/1.1 preserves the same event
+// boundaries. Unlike the direct h2 path, an h1 intermediary cannot be probed
+// with PING frames and may intentionally buffer the body, so this path emits a
+// bounded waiting heartbeat while the socket remains open and relies on the
+// absolute request deadline as its final wedge guard.
+std::expected<void, HttpError>
+h1_tls_stream(const Endpoint& ep, const Request& req, StreamHandler& handler,
+              Timeouts tos, CancelToken* cancel, bool& accepted_post) {
+    accepted_post = false;
+    auto fd_or = dial_tcp(ep, tos, cancel);
+    if (!fd_or) return std::unexpected(std::move(fd_or).error());
+    socket_t fd = *fd_or;
+
+    tls::SSL* ssl = tls::wrap_client(static_cast<int>(fd), ep.host);
+    if (!ssl) {
+        sock_close(fd);
+        return std::unexpected(HttpError::tls("SSL_new failed"));
+    }
+    auto cleanup = [&] { tls::free_ssl(ssl); sock_close(fd); };
+    if (auto r = tls_handshake(fd, ssl, tos, cancel); !r) {
+        cleanup();
+        return std::unexpected(std::move(r).error());
+    }
+
+    const unsigned char* alpn = nullptr;
+    unsigned int alpn_len = 0;
+    SSL_get0_alpn_selected(ssl, &alpn, &alpn_len);
+    const bool h1 = alpn_len == 0
+        || (alpn_len == 8 && alpn
+            && std::memcmp(alpn, "http/1.1", 8) == 0);
+    if (!h1) {
+        cleanup();
+        return std::unexpected(HttpError::tls(
+            "HTTP/1.1 fallback negotiated an unexpected ALPN protocol"));
+    }
+
+    const auto deadline = tos.absolute_deadline.value_or(
+        clock_t_::now() + (tos.total.count() > 0 ? tos.total
+                                                 : std::chrono::minutes{30}));
+    std::string wire = plain_build_request(ep, req, /*keep_alive=*/false);
+    size_t off = 0;
+    while (off < wire.size()) {
+        if (cancel && cancel->is_cancelled()) {
+            cleanup();
+            return std::unexpected(HttpError::cancelled("h1 TLS stream write"));
+        }
+        const int n = SSL_write(ssl, wire.data() + off,
+            static_cast<int>(std::min<size_t>(wire.size() - off, 1 << 20)));
+        if (n > 0) {
+            off += static_cast<size_t>(n);
+            continue;
+        }
+        const int e = SSL_get_error(ssl, n);
+        if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) {
+            cleanup();
+            return std::unexpected(HttpError::tls(
+                "h1 TLS stream write: " + tls::last_error(ssl)));
+        }
+        const int rem = remaining_ms(deadline, 200);
+        if (rem <= 0) {
+            cleanup();
+            return std::unexpected(HttpError::timeout(
+                "h1 TLS stream write timed out"));
+        }
+        pollfd pfd{fd, e == SSL_ERROR_WANT_READ ? short(POLLIN)
+                                                : short(POLLOUT), 0};
+        const int pr = sock_poll(&pfd, 1, rem);
+        if (pr < 0 && !sock_intr(sock_last_err())) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 TLS stream write poll failed"));
+        }
+        if (pfd.revents & (POLLERR | POLLNVAL)) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 TLS stream write hangup"));
         }
     }
 
-    return Response{ status, std::move(headers), std::move(body) };
+    std::string inbuf;
+    bool head_done = false;
+    int status = 0;
+    Headers headers;
+    bool chunked = false;
+    std::optional<size_t> content_length;
+    size_t body_received = 0;
+    ChunkDecoder dechunk;
+    auto last_activity = clock_t_::now() - std::chrono::seconds{15};
+    char buf[64 * 1024];
+
+    for (;;) {
+        if (cancel && cancel->is_cancelled()) {
+            cleanup();
+            return std::unexpected(HttpError::cancelled("h1 TLS stream read"));
+        }
+        if (clock_t_::now() >= deadline) {
+            cleanup();
+            return std::unexpected(HttpError::timeout(
+                "h1 TLS stream reached its absolute deadline"));
+        }
+
+        const int n = SSL_read(ssl, buf, sizeof(buf));
+        if (n > 0) {
+            const auto now = clock_t_::now();
+            if (handler.on_activity
+                && now - last_activity >= std::chrono::seconds{1}) {
+                last_activity = now;
+                handler.on_activity();
+            }
+            if (!head_done) {
+                inbuf.append(buf, static_cast<size_t>(n));
+                if (inbuf.size() > 64 * 1024) {
+                    cleanup();
+                    return std::unexpected(HttpError::protocol(
+                        "h1 TLS response headers exceed 64 KiB"));
+                }
+                const auto body_at = plain_parse_head(inbuf, status, headers);
+                if (body_at == std::string_view::npos) continue;
+                head_done = true;
+                const auto framing = transfer_framing(headers);
+                chunked = framing == TransferFraming::Chunked;
+                if (status == 0
+                    || framing == TransferFraming::Invalid
+                    || !parse_content_length(headers, content_length)
+                    || (chunked && content_length)) {
+                    cleanup();
+                    return std::unexpected(HttpError::protocol(
+                        "h1 TLS invalid or ambiguous response framing"));
+                }
+                if (handler.on_headers) handler.on_headers(status, headers);
+                accepted_post = req.method == HttpMethod::Post
+                             && status >= 200 && status < 300;
+                if (!chunked && content_length && *content_length == 0) {
+                    cleanup();
+                    return {};
+                }
+                std::string initial = inbuf.substr(body_at);
+                inbuf.clear();
+                if (!initial.empty()) {
+                    std::string payload;
+                    if (chunked && !dechunk.feed(initial, payload)) {
+                        cleanup();
+                        return std::unexpected(HttpError::protocol(
+                            "h1 TLS malformed chunk framing"));
+                    }
+                    if (!chunked) payload = std::move(initial);
+                    body_received += payload.size();
+                    if (content_length && body_received > *content_length) {
+                        cleanup();
+                        return std::unexpected(HttpError::protocol(
+                            "h1 TLS body exceeds Content-Length"));
+                    }
+                    if (!payload.empty() && handler.on_chunk
+                        && !handler.on_chunk(payload)) {
+                        cleanup();
+                        return {};
+                    }
+                    if (!chunked && content_length
+                        && body_received == *content_length) {
+                        cleanup();
+                        return {};
+                    }
+                    if (chunked && dechunk.done) {
+                        cleanup();
+                        return {};
+                    }
+                }
+                continue;
+            }
+
+            std::string payload;
+            if (chunked && !dechunk.feed(
+                    std::string_view{buf, static_cast<size_t>(n)}, payload)) {
+                cleanup();
+                return std::unexpected(HttpError::protocol(
+                    "h1 TLS malformed chunk framing"));
+            }
+            if (!chunked) payload.assign(buf, static_cast<size_t>(n));
+            body_received += payload.size();
+            if (content_length && body_received > *content_length) {
+                cleanup();
+                return std::unexpected(HttpError::protocol(
+                    "h1 TLS body exceeds Content-Length"));
+            }
+            if (!payload.empty() && handler.on_chunk
+                && !handler.on_chunk(payload)) {
+                cleanup();
+                return {};
+            }
+            if (!chunked && content_length
+                && body_received == *content_length) {
+                cleanup();
+                return {};
+            }
+            if (chunked && dechunk.done) {
+                cleanup();
+                return {};
+            }
+            continue;
+        }
+
+        const int e = SSL_get_error(ssl, n);
+        if (e == SSL_ERROR_ZERO_RETURN || (e == SSL_ERROR_SYSCALL && n == 0)) {
+            cleanup();
+            if (!head_done)
+                return std::unexpected(HttpError::protocol(
+                    "h1 TLS peer closed before response headers"));
+            if (chunked && !dechunk.done)
+                return std::unexpected(HttpError::peer_closed(
+                    "h1 TLS peer closed mid-chunked stream"));
+            if (!chunked && content_length && body_received != *content_length)
+                return std::unexpected(HttpError::peer_closed(
+                    "h1 TLS peer closed before Content-Length body completed"));
+            return {};
+        }
+        if (e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) {
+            cleanup();
+            return std::unexpected(HttpError::tls(
+                "h1 TLS stream read: " + tls::last_error(ssl)));
+        }
+
+        const int rem = remaining_ms(deadline, 200);
+        pollfd pfd{fd, e == SSL_ERROR_WANT_WRITE ? short(POLLOUT)
+                                                 : short(POLLIN), 0};
+        const int pr = sock_poll(&pfd, 1, rem);
+        if (pr < 0 && !sock_intr(sock_last_err())) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 TLS stream read poll failed"));
+        }
+        if (pfd.revents & (POLLERR | POLLNVAL)) {
+            cleanup();
+            return std::unexpected(HttpError::socket_hangup(
+                "h1 TLS stream read hangup"));
+        }
+
+        // HTTP/1 has no protocol PING. This does not claim wire activity: it
+        // reports an explicit bounded buffering state so the UI can explain
+        // why DATA may arrive only at completion while the absolute deadline
+        // remains the final guardrail.
+        const auto now = clock_t_::now();
+        if (handler.on_buffered_wait
+            && now - last_activity >= std::chrono::seconds{15}) {
+            last_activity = now;
+            handler.on_buffered_wait();
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -1996,10 +2561,35 @@ h1_unary_send(const Endpoint& ep, const Request& req, Timeouts tos,
 // connections 5× longer when SOCKS is active sidesteps that — the
 // kMaxLifetime ceiling (10 min) still bounds tenure for proxy-drain
 // safety so we don't hang on to a connection forever.
+// AGENTTY_POOL_IDLE_TTL (seconds) overrides both defaults.
+//
+// The default 90 s is longer than the idle timeout many corporate proxies,
+// VPNs and CDN edges enforce (30-60 s is common). When the network kills the
+// connection first, agentty discovers the corpse only when it writes — and if
+// that write already produced a 2xx, the stream is semantically committed, so
+// it CANNOT be replayed without risking a duplicate assistant turn. The user
+// sees `h2 socket hangup (server accepted request; not replayed
+// automatically)` mid-answer.
+//
+// Setting this BELOW the network's timeout converts that visible failure into
+// an invisible fresh dial: the pool evicts the entry itself instead of finding
+// it dead. `http.stream_hangup` logs the idle age of each hangup, so the right
+// value is measurable rather than guessed — if hangups cluster near 60000 ms,
+// set this to 45.
+//
+// 0 disables pooling entirely (dial fresh every request) — the safest setting
+// on a hostile network, at the cost of a TLS handshake per turn.
 inline auto idle_ttl() noexcept -> std::chrono::seconds {
-    static const std::chrono::seconds v =
-        agentty_socks_proxy().active() ? std::chrono::seconds(450)
-                                    : std::chrono::seconds(90);
+    static const std::chrono::seconds v = [] {
+        if (const char* e = std::getenv("AGENTTY_POOL_IDLE_TTL"); e && *e) {
+            char* end = nullptr;
+            const long n = std::strtol(e, &end, 10);
+            if (end != e && n >= 0 && n <= 3600)
+                return std::chrono::seconds(n);
+        }
+        return agentty_socks_proxy().active() ? std::chrono::seconds(450)
+                                              : std::chrono::seconds(90);
+    }();
     return v;
 }
 constexpr auto kMaxLifetime = std::chrono::minutes(10);
@@ -2045,67 +2635,222 @@ constexpr std::size_t kMaxPoolEntriesPerEndpoint = 16;
     return true;
 }
 
+} // namespace
+} // namespace agentty::http
+
+// A Connection solely owns its socket, SSL and nghttp2 session (the dtor
+// frees all three); pend_buf_ points into that same session. Only a
+// connection whose run() succeeded is pooled, and run() clears the session's
+// user_data on success, so a pooled one points at nothing outside itself.
+MAYA_SENDABLE(agentty::http::Connection);
+
+namespace agentty::http {
+namespace {
+
+// Lock-free by design, not a guarded map: acquire()/release() run inside
+// network code that is itself reached from ranked lock bodies (the
+// auth_refresh lane refreshes a token over HTTPS while holding rank 15), and
+// freeing a stale connection runs SSL_shutdown -> new_session_cb (the tls
+// ticket snapshot). A lock here would need a capability threaded through
+// every http call in the program. Instead the pool is a fixed array of slots,
+// each owned by whoever wins a CAS on its state word:
+//
+//   Empty --CAS--> Busy (filler writes payload) --store--> Full
+//   Full  --CAS--> Busy (claimer inspects/takes) --store--> Empty | Full
+//
+// Nobody ever WAITS on a Busy slot -- a claim that loses just skips it -- so
+// nothing here can block or deadlock. The cost is that a connection being
+// inspected by another thread is invisible for those microseconds, and the
+// caller dials fresh instead: harmless for a cache.
 class Pool {
+    enum : int { kEmpty = 0, kBusy = 1, kFull = 2 };
+    // Per-endpoint cap is kMaxPoolEntriesPerEndpoint; agentty talks to a
+    // handful of endpoints, so 64 slots never constrain real use. If they
+    // fill, release() evicts the oldest entry overall.
+    static constexpr std::size_t kSlots = 64;
+
+    struct Slot {
+        std::atomic<int> state{kEmpty};
+        PooledConn       entry;   // owned by the thread that set kBusy
+    };
+
+    bool claim(Slot& s) noexcept {
+        int expected = kFull;
+        return s.state.compare_exchange_strong(expected, kBusy,
+                                               std::memory_order_acquire);
+    }
+
 public:
     std::unique_ptr<Connection> acquire(const Endpoint& ep) {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = map_.find(ep);
-        if (it == map_.end()) return nullptr;
-        auto& stack = it->second;
+        // Stale entries are freed as they're found; no lock is held anywhere
+        // in this class, so SSL_shutdown -> new_session_cb is fine.
         const auto now = clock_t_::now();
-        while (!stack.empty()) {
-            auto p = std::move(stack.back());
-            stack.pop_back();
-            // Three-stage liveness check: idle TTL → nghttp2 protocol state →
-            // socket-level FIN/RST. Each stage is cheap and catches a class
-            // of stale connections the previous one misses.
-            // Four-stage liveness check: total lifetime → idle TTL →
-            // nghttp2 protocol state → socket-level FIN/RST. Each stage
+        // Newest first, like the old LIFO stack: the most recently released
+        // socket is the likeliest to still be warm.
+        for (;;) {
+            Slot* best = nullptr;
+            for (auto& s : slots_) {
+                if (!claim(s)) continue;
+                if (!(s.entry.conn->endpoint() == ep)) {
+                    s.state.store(kFull, std::memory_order_release);
+                    continue;
+                }
+                if (!best || s.entry.released_at > best->entry.released_at) {
+                    if (best) best->state.store(kFull, std::memory_order_release);
+                    best = &s;
+                } else {
+                    s.state.store(kFull, std::memory_order_release);
+                }
+            }
+            if (!best) return nullptr;
+            PooledConn p = std::move(best->entry);
+            best->entry = {};
+            best->state.store(kEmpty, std::memory_order_release);
+            // Four-stage liveness check: total lifetime -> idle TTL ->
+            // nghttp2 protocol state -> socket-level FIN/RST. Each stage
             // is cheap and catches a class of stale connections the
             // previous one misses; lifetime in particular catches the
             // proxy-drain case that no client-side check can detect.
-            if (now - p.created_at  > kMaxLifetime) continue;
-            if (now - p.released_at > idle_ttl())   continue;
-            if (!p.conn->is_alive())                continue;
-            if (!socket_is_alive(p.conn->fd()))     continue;
-            p.conn->set_pooled(true);   // reused socket — see was_pooled()
+            if (now - p.created_at  > kMaxLifetime
+                || now - p.released_at > idle_ttl()
+                || !p.conn->is_alive()
+                || !socket_is_alive(p.conn->fd())) {
+                continue;   // `p` freed here; look for the next-newest
+            }
+            p.conn->set_pooled(true);   // reused socket -- see was_pooled()
+            p.conn->set_idle_ms(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - p.released_at).count());
             return std::move(p.conn);
         }
-        return nullptr;
     }
 
     void release(std::unique_ptr<Connection> c) {
         if (!c || !c->is_alive()) return;
-        c->set_pooled(false);   // back in the pool — next acquirer re-marks
-        std::lock_guard<std::mutex> lk(mu_);
-        auto& stack = map_[c->endpoint()];
-        if (stack.size() >= kMaxPoolEntriesPerEndpoint) {
-            // Drop the oldest (front) — its idle clock is most advanced and
-            // it's the most likely candidate for the peer to have closed by
-            // the time we'd next reach for it. Keeping the freshest 16 also
-            // matches stdio LRU intuition for a small fixed-size pool.
-            stack.erase(stack.begin());
+        c->set_pooled(false);   // back in the pool -- next acquirer re-marks
+        const Endpoint ep = c->endpoint();
+
+        // Full for this endpoint: drop the oldest, the likeliest to have
+        // been closed by the peer by the time we'd reach for it. Counting is
+        // best-effort under concurrency (a slot mid-claim is not seen),
+        // which can overshoot the cap by the number of racing releasers.
+        std::size_t same = 0;
+        Slot* oldest = nullptr;
+        for (auto& s : slots_) {
+            if (!claim(s)) continue;
+            if (s.entry.conn->endpoint() == ep) {
+                ++same;
+                if (!oldest || s.entry.released_at < oldest->entry.released_at) {
+                    if (oldest) oldest->state.store(kFull, std::memory_order_release);
+                    oldest = &s;
+                    continue;
+                }
+            }
+            s.state.store(kFull, std::memory_order_release);
         }
-        // We don't track the original dial time on Connection; release
-        // time stands in for "how old is this entry in the pool." Good
-        // enough — the lifetime cap is about pool tenure, not socket age.
+        std::unique_ptr<Connection> evicted;
+        if (oldest) {
+            if (same >= kMaxPoolEntriesPerEndpoint) {
+                evicted = std::move(oldest->entry.conn);
+                oldest->entry = {};
+                oldest->state.store(kEmpty, std::memory_order_release);
+            } else {
+                oldest->state.store(kFull, std::memory_order_release);
+            }
+        }
+        evicted.reset();
+
+        // Release time stands in for dial time; the lifetime cap is about
+        // pool tenure, not socket age.
         const auto now = clock_t_::now();
-        stack.push_back({std::move(c), now, now});
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            for (auto& s : slots_) {
+                int expected = kEmpty;
+                if (!s.state.compare_exchange_strong(expected, kBusy,
+                                                     std::memory_order_acquire))
+                    continue;
+                s.entry = PooledConn{std::move(c), now, now};
+                s.state.store(kFull, std::memory_order_release);
+                return;
+            }
+            // Every slot taken: evict the oldest entry overall, then retry.
+            Slot* victim = nullptr;
+            for (auto& s : slots_) {
+                if (!claim(s)) continue;
+                if (!victim || s.entry.released_at < victim->entry.released_at) {
+                    if (victim) victim->state.store(kFull, std::memory_order_release);
+                    victim = &s;
+                } else {
+                    s.state.store(kFull, std::memory_order_release);
+                }
+            }
+            if (!victim) break;
+            PooledConn gone = std::move(victim->entry);
+            victim->entry = {};
+            victim->state.store(kEmpty, std::memory_order_release);
+        }
+        // Lost every race: just drop `c` (closes the socket). Pool is a cache.
     }
 
 private:
-    std::mutex mu_;
-    std::unordered_map<Endpoint, std::vector<PooledConn>, EndpointHash> map_;
+    std::array<Slot, kSlots> slots_{};
 };
 
 } // namespace
+} // namespace agentty::http
+
+// Every member is reached only through a CAS-claimed slot (see above).
+MAYA_SYNC(agentty::http::Pool);
+
+namespace agentty::http {
+
+namespace test {
+std::expected<std::string, std::string>
+decode_chunked(const std::vector<std::string>& fragments) {
+    ChunkDecoder decoder;
+    std::string output;
+    for (const auto& fragment : fragments) {
+        if (!decoder.feed(fragment, output))
+            return std::unexpected("malformed chunk framing");
+    }
+    if (!decoder.done)
+        return std::unexpected("truncated chunk framing");
+    return output;
+}
+
+std::expected<bool, std::string> is_chunked(const Headers& headers) {
+    const auto framing = transfer_framing(headers);
+    if (framing == TransferFraming::Invalid)
+        return std::unexpected("invalid transfer encoding");
+    return framing == TransferFraming::Chunked;
+}
+} // namespace test
 
 // ---------------------------------------------------------------------------
 // Client::Impl
 // ---------------------------------------------------------------------------
+// Pool is a lock-free slot array, so dials on other threads can share it.
+using PoolRef = maya::co_owned<Pool>;
+
 struct Client::Impl {
-    Config cfg;
-    Pool   pool;
+    Config  cfg;
+    PoolRef pool_ref = PoolRef::make();
+    Pool&   pool     = *pool_ref;
+
+    // Outstanding prewarm() dials. OWNED (not detached) so join_prewarm()
+    // can cancel and wait for them before CRT/OpenSSL teardown, closing the
+    // exit-race UAF that manifests as heap corruption on a fast exit. The
+    // waiting is maya::pool's: it is bounded, so a dial genuinely
+    // wedged in a blocking getaddrinfo() is abandoned at the deadline rather
+    // than hanging teardown.
+    // Prewarm dials run here. Replaces a vector<thread> + a per-dial `done`
+    // atomic + a 10 ms poll loop in join_prewarm(): the pool already does
+    // "ask to stop, wait for a bounded grace on a condition variable, then
+    // abandon", without the polling, and its abandonment is safe because a
+    // worker co-owns the pool's state. One worker is not a cap on dials —
+    // each is posted isolated, since a dial can wedge in a blocking
+    // getaddrinfo() and must not occupy a shared worker.
+    maya::pool                      prewarm_pool{/*max_workers=*/1};
 };
 
 Client::Client() : Client(Config{}) {}
@@ -2119,12 +2864,19 @@ Client::Client(Config cfg) : impl_(std::make_unique<Impl>()) {
     (void)tls::shared_context(impl_->cfg.insecure);
 }
 
+// No explicit join: a destructor can't be handed `unlocked`. The prewarm
+// pool's own destructor does the same bounded stop-and-wait. The default
+// client is leaked and never destroyed; main() joins it with a capability.
 Client::~Client() = default;
 
 // Helper: grab a connection from the pool or dial fresh.
 static std::expected<std::unique_ptr<Connection>, HttpError>
 acquire_or_dial(Pool& pool, const Endpoint& ep, Timeouts tos, CancelTokenPtr cancel) {
-    if (auto c = pool.acquire(ep)) return c;
+    if (auto c = pool.acquire(ep)) {
+        AGT_LOG(Perf, Debug, "http.acquire", "pool=hit host={}", ep.host);
+        return c;
+    }
+    AGT_LOG(Perf, Debug, "http.acquire", "pool=miss host={} dial=fresh", ep.host);
     return dial_new(ep, tos, std::move(cancel));
 }
 
@@ -2153,27 +2905,51 @@ static bool is_cancelled(const CancelTokenPtr& c) {
 }
 
 // Backoff between attempts. Attempt 0 → no wait (fastest path for the common
-// stale-pool case). Attempt N → 100*N ms. Cancellable: returns false if the
-// token trips during the wait so the caller bails without another attempt.
+// stale-pool case). Attempt N → a randomised wait in [0, base·2^(N-1)] with
+// base = 100 ms, i.e. FULL JITTER over an exponentially growing window
+// (attempt 1 → [0,100] ms, attempt 2 → [0,200] ms). Jitter is not cosmetic:
+// agentty fans out parallel subagent streams and multiple instances hit the
+// same edge, so a fixed backoff makes every retrier re-dial in lockstep and
+// re-synchronise the very overload/RST that triggered the retry (thundering
+// herd). Randomising each waiter's delay decorrelates them. The window stays
+// small (≤ 200 ms at kMaxAttempts=3) so worst-case added latency is bounded.
+// Cancellable: returns false if the token trips during the wait so the caller
+// bails without another attempt.
 static bool backoff_sleep(int attempt, const CancelTokenPtr& cancel) {
     if (attempt <= 0) return true;
-    auto budget = std::chrono::milliseconds(100 * attempt);
-    auto end = clock_t_::now() + budget;
-    while (clock_t_::now() < end) {
-        if (is_cancelled(cancel)) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return true;
+    // Exponentially growing ceiling: 100·2^(attempt-1) ms, capped so a future
+    // bump to kMaxAttempts can't blow the latency budget.
+    constexpr long kBaseMs = 100;
+    constexpr long kCapMs  = 2'000;
+    long ceiling = kBaseMs << (attempt - 1);   // 100, 200, 400, ...
+    if (ceiling > kCapMs || ceiling <= 0) ceiling = kCapMs;
+    // Full jitter: uniform in [0, ceiling]. thread_local RNG so parallel
+    // stream/send loops don't contend on a shared generator or a global lock.
+    thread_local std::mt19937_64 rng{[] {
+        std::random_device rd;
+        return (static_cast<std::uint64_t>(rd()) << 32) ^ rd()
+             ^ static_cast<std::uint64_t>(
+                 std::chrono::steady_clock::now().time_since_epoch().count());
+    }()};
+    std::uniform_int_distribution<long> dist(0, ceiling);
+    const auto budget = std::chrono::milliseconds(dist(rng));
+    // Wakes the instant the request is cancelled; no token means a plain wait.
+    return !maya::delay_for(cancel ? cancel->token() : std::stop_token{}, budget);
 }
 
 HttpResult
 Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
-    Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port };
+    Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port, req.ssrf_guard };
     HttpError last_err = HttpError::unknown("send: no attempts made");
 
     // Cleartext local server (Ollama / llama.cpp) — no TLS, no h2, no pool.
-    if (req.plaintext)
-        return plain_unary_send(ep, req, tos, cancel.get());
+    if (req.plaintext) {
+        auto r = plain_unary_send(ep, req, tos, cancel.get());
+        if (!r)
+            AGT_LOG(Net, Warn, "http.local_failed", "host={}:{} err={}",
+                    ep.host, ep.port, r.error().render());
+        return r;
+    }
 
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
         if (is_cancelled(cancel)) return std::unexpected(HttpError::cancelled());
@@ -2187,6 +2963,14 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
             : dial_new(ep, tos, cancel);
         if (!conn_or) {
             last_err = std::move(conn_or).error();
+            // Connect failures are the single most common "agentty is broken"
+            // report (wrong port, dead local server, proxy, DNS, TLS). Each
+            // attempt is logged with the endpoint it tried, so the log names
+            // the host instead of the user guessing at it.
+            AGT_LOG(Net, Warn, "http.connect_failed",
+                    "host={}:{} attempt={}/{} err={}",
+                    ep.host, ep.port, attempt + 1, kMaxAttempts,
+                    last_err.render());
             // An ALPN downgrade won't fix itself on retry — bail to the h1
             // fallback below immediately rather than burning the retry budget.
             if (is_alpn_h2_failure(last_err)) break;
@@ -2198,6 +2982,7 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
         auto ok = conn->run(req, sctx, tos, cancel);
         if (ok) {
             impl_->pool.release(std::move(conn));
+            content_decode_body(sctx.headers, sctx.buffered_body);
             return Response{ sctx.status, std::move(sctx.headers),
                              std::move(sctx.buffered_body) };
         }
@@ -2210,10 +2995,9 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
         if (is_cancelled(cancel)) break;
     }
 
-    // h2 unreachable because the peer (an intercepting proxy on an air-gapped
-    // tunnel) only offers http/1.1.  Unary requests have no h2 dependency, so
-    // retry once over HTTP/1.1.  Streaming (Client::stream) deliberately has
-    // no such fallback — it needs h2 multiplexing + flow-control.
+    // h2 unreachable because the peer only offers HTTP/1.1. Unary requests
+    // retry through the buffered h1 path here; Client::stream uses the
+    // incremental h1 TLS path below.
     if (is_alpn_h2_failure(last_err) && !is_cancelled(cancel)) {
         if (auto h1 = h1_unary_send(ep, req, tos, cancel.get()); h1)
             return std::move(*h1);
@@ -2227,12 +3011,46 @@ Client::send(const Request& req, Timeouts tos, CancelTokenPtr cancel) {
 HttpStreamResult
 Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
                CancelTokenPtr cancel) {
-    Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port };
+    Endpoint ep{ req.host, req.port, req.dial_host, req.dial_port, req.ssrf_guard };
+    std::optional<clock_t_::time_point> operation_deadline;
+    if (tos.total.count() > 0)
+        operation_deadline = clock_t_::now() + tos.total;
+    const auto remaining_timeouts = [&]() -> std::optional<Timeouts> {
+        Timeouts current = tos;
+        if (!operation_deadline) return current;
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            *operation_deadline - clock_t_::now());
+        if (left.count() <= 0) return std::nullopt;
+        current.total = left;
+        current.connect = std::min(current.connect, left);
+        current.absolute_deadline = operation_deadline;
+        return current;
+    };
 
     // Cleartext local server (Ollama / llama.cpp) — plain HTTP/1.1 chunked
     // SSE over a raw socket. No TLS, no h2, no connection pool.
-    if (req.plaintext)
-        return plain_stream(ep, req, handler, tos, cancel.get());
+    if (req.plaintext) {
+        auto plain_tos = remaining_timeouts();
+        if (!plain_tos)
+            return std::unexpected(HttpError::timeout(
+                "stream operation deadline exceeded"));
+        bool accepted_post = false;
+        auto plain = plain_stream(ep, req, handler, *plain_tos, cancel.get(),
+                                  accepted_post);
+        if (!plain && accepted_post) {
+            plain.error().non_replayable = true;
+            plain.error().detail +=
+                " (server accepted request; not replayed automatically)";
+        }
+        // Local endpoints take this separate no-retry path, so the retry
+        // loop's logging never sees them — yet "is my Ollama/llama.cpp
+        // actually running on that port?" is the most common local failure
+        // of all. Log the endpoint that was tried.
+        if (!plain)
+            AGT_LOG(Net, Warn, "http.local_failed", "host={}:{} err={}",
+                    ep.host, ep.port, plain.error().render());
+        return plain;
+    }
 
     HttpError last_err = HttpError::unknown("stream: no attempts made");
     // Persist across attempts so the synthesised on_headers (if we never got
@@ -2255,20 +3073,40 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
 
     for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
         if (is_cancelled(cancel)) { last_err = HttpError::cancelled(); break; }
+        auto attempt_tos = remaining_timeouts();
+        if (!attempt_tos) {
+            last_err = HttpError::timeout("stream operation deadline exceeded");
+            break;
+        }
         if (!backoff_sleep(attempt, cancel)) { last_err = HttpError::cancelled(); break; }
+        attempt_tos = remaining_timeouts();
+        if (!attempt_tos) {
+            last_err = HttpError::timeout("stream operation deadline exceeded");
+            break;
+        }
 
         const bool from_pool = (attempt == 0 && stale_pool_redials == 0);
         auto conn_or = from_pool
-            ? acquire_or_dial(impl_->pool, ep, tos, cancel)
-            : dial_new(ep, tos, cancel);
-        if (!conn_or) { last_err = std::move(conn_or).error(); continue; }
+            ? acquire_or_dial(impl_->pool, ep, *attempt_tos, cancel)
+            : dial_new(ep, *attempt_tos, cancel);
+        if (!conn_or) {
+            last_err = std::move(conn_or).error();
+            // ALPN downgrade is stable across retries. SSE works over
+            // HTTP/1.1, so fall through to the TLS h1 streaming path below.
+            if (is_alpn_h2_failure(last_err)) break;
+            continue;
+        }
         auto conn = std::move(*conn_or);
         const bool was_reused = from_pool && conn->was_pooled();
 
         StreamCtx sctx{};
         sctx.handler = &handler;
-        auto ok = conn->run(req, sctx, tos, cancel);
-        if (sctx.data_delivered) committed = true;
+        auto ok = conn->run(req, sctx, *attempt_tos, cancel);
+        const bool accepted_non_idempotent =
+            req.method == HttpMethod::Post
+            && sctx.headers_delivered
+            && sctx.status >= 200 && sctx.status < 300;
+        if (sctx.data_delivered || accepted_non_idempotent) committed = true;
         last_status  = sctx.status;
         last_headers = std::move(sctx.headers);
         if (ok) {
@@ -2276,12 +3114,25 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
             return {};
         }
         last_err = std::move(ok).error();
+        if (accepted_non_idempotent) {
+            last_err.non_replayable = true;
+            last_err.detail += " (server accepted request; not replayed automatically)";
+            // The user-visible "socket hangup … not replayed" banner. Record
+            // HOW LONG the connection had been idle before it died and whether
+            // it came from the pool: a hangup that clusters at a fixed idle
+            // age is a proxy/edge idle timeout (fixable by lowering the pool
+            // TTL below it), while random ages are genuine network loss. That
+            // distinction is invisible from the banner alone.
+            AGT_LOG(Net, Warn, "http.stream_hangup",
+                    "host={}:{} reused={} idle_ms={} status={} err={}",
+                    ep.host, ep.port, was_reused ? 1 : 0,
+                    was_reused ? conn->idle_ms() : 0,
+                    sctx.status, last_err.render());
+        }
 
-        // Once a real SSE DATA chunk reached the caller, the stream is
-        // semantically committed — retrying would produce duplicate
-        // content_block events and a second pass at the reducer's
-        // tool_use state machine. Headers-only (no data) is still
-        // replay-safe, so we do NOT break merely on headers_delivered.
+        // Once DATA arrived, or a 2xx response proved a non-idempotent POST
+        // was accepted, replaying here could duplicate model work. Let the
+        // provider/runtime classify the interruption instead.
         if (committed) break;
         if (is_cancelled(cancel)) break;
 
@@ -2299,6 +3150,22 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
         }
     }
 
+    if (is_alpn_h2_failure(last_err) && !is_cancelled(cancel)) {
+        if (auto h1_tos = remaining_timeouts()) {
+            bool accepted_post = false;
+            auto h1 = h1_tls_stream(ep, req, handler, *h1_tos, cancel.get(),
+                                    accepted_post);
+            if (!h1 && accepted_post) {
+                h1.error().non_replayable = true;
+                h1.error().detail +=
+                    " (server accepted request; not replayed automatically)";
+            }
+            return h1;
+        }
+        return std::unexpected(HttpError::timeout(
+            "stream operation deadline exceeded before HTTP/1.1 fallback"));
+    }
+
     // If we never delivered data, synthesise an on_headers so the caller's
     // contract ("fires at least once") still holds.
     if (!committed && handler.on_headers) {
@@ -2309,11 +3176,29 @@ Client::stream(const Request& req, StreamHandler handler, Timeouts tos,
 
 void Client::prewarm(std::string host, uint16_t port,
                      std::string dial_host, uint16_t dial_port) {
-    // Fire-and-forget thread.  Swallows errors — this is opportunistic;
-    // the first real request will dial again if prewarm failed.
-    std::thread([this,
-                 host = std::move(host), port,
-                 dial_host = std::move(dial_host), dial_port]() mutable {
+    // AGENTTY_NO_PREWARM suppresses the latency-hiding dial entirely. Set by
+    // the test harness: a prewarm is a detached background TLS handshake to a
+    // real host, and a standalone binary that never calls join_prewarm() lets
+    // it outlive main() and race libcrypto/allocator atexit teardown
+    // (shutdown SIGSEGV). Tests don't need the latency win, so opt out.
+    if (const char* e = util::env::get_or_null<util::env::Var::NoPrewarm>();
+        e && *e == '1')
+        return;
+    // A prewarm dial races process exit: on a fast teardown (immediate
+    // pipe-stdin EOF) main() can return while this dial is mid-SSL_connect,
+    // and the CRT/OpenSSL static state gets freed under it — heap corruption.
+    // So the work is OWNED by a pool, not detached, and carries a cancel
+    // token; a shutdown join_prewarm() trips the token (which shuts the
+    // dialing socket to wake poll()) and the pool waits before teardown.
+    // Swallows errors — opportunistic.
+    //
+    // No `done` flag any more: it existed so join_prewarm()'s poll loop could
+    // tell a settled dial from a wedged one, and the pool answers that from
+    // its own accounting without polling.
+    auto cancel = std::make_shared<CancelToken>();
+    impl_->prewarm_pool.post_isolated(
+        [](std::stop_token st, PoolRef pool, CancelTokenPtr cancel,
+           std::string host, uint16_t port, std::string dial_host, uint16_t dial_port) {
 #if !defined(_WIN32)
         // Block every signal so SIGWINCH / SIGINT / SIGTERM route to the
         // main thread's handlers instead of being delivered here mid
@@ -2324,14 +3209,52 @@ void Client::prewarm(std::string host, uint16_t port,
         sigfillset(&all);
         pthread_sigmask(SIG_BLOCK, &all, nullptr);
 #endif
+        // Bridge the pool's stop to the app's cancel token, so a shutdown
+        // reaches the dial's poll loops even if join_prewarm() was never
+        // called — which is exactly the standalone-binary case documented at
+        // the top of this file.
+        const std::stop_callback cancel_on_stop(st, [cancel] {
+            cancel->cancel();
+        });
+        if (cancel->is_cancelled() || st.stop_requested()) return;
         Endpoint ep{ std::move(host), port,
                      std::move(dial_host), dial_port };
-        auto r = dial_new(ep, Timeouts{}, /*cancel=*/nullptr);
-        if (r) impl_->pool.release(std::move(*r));
-    }).detach();
+        // Short, bounded connect budget. A prewarm is pure latency-hiding —
+        // it must never wedge the process at exit. With the default 10 s
+        // connect timeout a dial stuck in TCP/TLS would keep join_prewarm()
+        // blocked for up to 10 s on a fast pipe-EOF exit; cap it hard so the
+        // shutdown wait returns promptly (and the dial's poll loops re-check
+        // the cancel token every 200 ms within that window).
+        Timeouts warm_tos{};
+        warm_tos.connect = std::chrono::milliseconds{4'000};
+        auto r = dial_new(ep, warm_tos, cancel);
+        if (r && !cancel->is_cancelled()) pool->release(std::move(*r));
+    }, impl_->pool_ref, std::move(cancel), std::move(host), port,
+       std::move(dial_host), dial_port);
 }
 
-Client& default_client() {
+void Client::join_prewarm(const maya::unlocked& cap) noexcept {
+    // shutdown() requests stop on every dial before it waits, and each dial
+    // turns that into its cancel token (the stop_callback above), so the
+    // dials abort at their next poll slice.
+    // One call replaces a hand-rolled bounded wait: the pool requests stop on
+    // every dial, waits out its grace on a condition variable, and abandons
+    // whatever is still stuck. That last case is the dial wedged inside a
+    // blocking getaddrinfo() — a hostile/offline resolver can stall for
+    // seconds — and abandoning it is safe for the same reason the old detach
+    // was: default_client() is a deliberately-leaked singleton, so its pool /
+    // OpenSSL statics are never destroyed and a still-running dial cannot
+    // race a destructor. The OS reclaims the thread at process exit.
+    //
+    // What the old version did instead: a per-dial `done` atomic, and a loop
+    // that slept 10 ms at a time until a 2 s deadline before deciding whether
+    // to join or detach. That is a condition variable spelled as a poll — up
+    // to 200 wakeups per dial on a slow exit, and a shutdown that could not
+    // notice a dial finishing sooner than its next 10 ms tick.
+    (void)impl_->prewarm_pool.shutdown(cap);
+}
+
+Client& default_client(Io) {
     // Deliberately leaked: process lifetime.  Avoids destruction-order
     // races with maya's worker threads that may be mid-request at exit.
     static Client* c = new Client{};
@@ -2370,6 +3293,63 @@ DialOverride parse_dial_env(const char* var_name) {
 }
 } // namespace
 
+// Exported, testable SSRF range check on a numeric IP LITERAL. Mirrors the
+// anonymous-namespace blocked_sockaddr() used by the dialer on each RESOLVED
+// address (both are pinned by ssrf_guard_test, so they can't drift): loopback,
+// RFC1918 private, link-local incl. 169.254.169.254 metadata, CGNAT, ULA,
+// multicast, and IPv4-mapped IPv6 re-checked as its v4 address. Fails closed
+// on anything that isn't a parseable numeric IP.
+bool ssrf_ip_blocked(std::string_view ip_literal) noexcept {
+    auto v4_blocked = [](uint32_t h /*host order*/) noexcept {
+        const uint8_t a = (h >> 24) & 0xFF, b = (h >> 16) & 0xFF;
+        if (a == 0)   return true;                        // 0.0.0.0/8
+        if (a == 127) return true;                        // loopback
+        if (a == 10)  return true;                        // RFC1918
+        if (a == 172 && (b & 0xF0) == 16) return true;     // 172.16/12
+        if (a == 192 && b == 168) return true;             // 192.168/16
+        if (a == 169 && b == 254) return true;             // link-local + metadata
+        if (a == 100 && (b & 0xC0) == 64) return true;     // 100.64/10 CGNAT
+        if (a >= 224) return true;                         // multicast / reserved
+        return false;
+    };
+
+    std::string s{ip_literal};
+    if (s.size() >= 2 && s.front() == '[' && s.back() == ']')
+        s = s.substr(1, s.size() - 2);
+    if (s.empty()) return true;
+
+    in_addr a4{};
+    if (::inet_pton(AF_INET, s.c_str(), &a4) == 1)
+        return v4_blocked(ntohl(a4.s_addr));
+
+    in6_addr a6{};
+    if (::inet_pton(AF_INET6, s.c_str(), &a6) == 1) {
+        const uint8_t* b = a6.s6_addr;
+        static const uint8_t mapped[12] = {0,0,0,0, 0,0,0,0, 0,0,0xFF,0xFF};
+        if (std::memcmp(b, mapped, 12) == 0) {
+            uint32_t h = (uint32_t(b[12]) << 24) | (uint32_t(b[13]) << 16)
+                       | (uint32_t(b[14]) << 8) | uint32_t(b[15]);
+            return v4_blocked(h);
+        }
+        if (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) return true;  // fe80::/10
+        if ((b[0] & 0xFE) == 0xFC) return true;                  // fc00::/7 ULA
+        if (b[0] == 0xFF) return true;                           // ff00::/8
+        bool all_zero = true;
+        for (int i = 0; i < 15; ++i) if (b[i]) { all_zero = false; break; }
+        if (all_zero && (b[15] == 0 || b[15] == 1)) return true; // :: / ::1
+        return false;
+    }
+    return true;   // not a numeric IP — fail closed
+}
+
+// The three overrides below parse their env var EXACTLY ONCE, into a
+// function-local static, and cache the result for the process lifetime.
+// This is deliberate, not an oversight: a dial target that changed
+// mid-session would silently re-route in-flight connection reuse (the
+// pool is keyed on the logical host, not the dialed one), which is far
+// harder to debug than a value that is simply fixed at startup. Set
+// these before launching agentty; changing them afterwards has no
+// effect until restart. Initialization is thread-safe per [stmt.dcl]/4.
 const DialOverride& agentty_api_host_override() {
     static const DialOverride cached =
         parse_dial_env(util::env::name<util::env::Var::ApiHost>().data());

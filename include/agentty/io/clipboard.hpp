@@ -65,4 +65,23 @@ read_clipboard_image(std::string* error_out = nullptr);
 [[nodiscard]] std::optional<std::string>
 read_clipboard_text(std::string* error_out = nullptr);
 
+/// Write plain UTF-8 text to the system clipboard via platform-native
+/// tooling — the reliable path that does NOT depend on the terminal
+/// honouring OSC 52:
+///
+///   macOS         → pbcopy
+///   Linux/Wayland → wl-copy
+///   Linux/X11     → xclip -selection clipboard
+///   Windows       → clip.exe
+///
+/// This exists because OSC 52 clipboard WRITE is opt-in (off by default)
+/// in Terminal.app and iTerm2, so agentty's maya `write_clipboard` Cmd
+/// silently no-ops there. Callers should issue BOTH this and the OSC 52
+/// Cmd: OSC 52 still carries the copy across an SSH/tmux hop to a remote
+/// clipboard, while this handles the common local-macOS case.
+///
+/// Returns true on success. On failure writes a one-line diagnostic to
+/// `*error_out` (tool missing, subprocess spawn/write failed).
+bool write_clipboard_text(std::string_view text, std::string* error_out = nullptr);
+
 } // namespace agentty

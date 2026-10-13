@@ -1,0 +1,505 @@
+#pragma once
+// agentty::ui::panel — the EXCLUSIVE panel slot, as a sum type.
+//
+// Model::UI used to carry 16 independent panel fields (pick::OneAxis
+// here, an ad-hoc Closed|Open variant there). "Only one overlay open at
+// a time" was a CONVENTION enforced by ~17 scattered
+// `m.ui.X = pick::Closed{}` writes inside every Open* reducer — forget
+// one and two overlays were open at once, with the router (overlay.hpp)
+// papering over the ambiguity at dispatch time.
+//
+// Now every exclusive panel lives in ONE slot:
+//
+//     m.ui.panel.descend(pn::Models{{.index = 3}});  // open OVER (Esc unwinds)
+//     m.ui.panel.replace(pn::Providers{{2}});         // hop SIDEWAYS (keep parent)
+//     m.ui.panel.is<pn::Models>()                     // open?
+//     m.ui.panel.get<pn::Models>()                    // payload* or nullptr
+//     m.ui.panel.close<pn::Models>()                  // close IF topmost
+//
+// One slot, one variant — so "two exclusive panels open" is not a bug we
+// guard against anymore, it is UNREPRESENTABLE. All the rival-closing
+// writes are deleted, not relocated.
+//
+// What a variant does NOT give you is the parent chain, and that is where
+// every navigation bug has lived. Assignment used to be the way to open,
+// and it discarded the chain silently — so Esc from a panel opened out of
+// another panel left the stack entirely. Assignment is now DELETED; see
+// the three moves (descend / replace / restore) on State below, which is
+// the single place that story is told.
+//
+// Deliberate NON-members (the exceptions that shape the design):
+//   • login      — a 9-state auth machine with Origin-frame navigation;
+//                  Closed is a first-class member of ITS variant.
+//   • permission — m.d.pending_permission is DOMAIN state: the stream
+//                  reducer raises it mid-turn, potentially while an
+//                  overlay is open. Both must coexist; the router just
+//                  hands permission the keyboard.
+//   • todo       — an AMBIENT pane, not a modal: it stays open UNDER a
+//                  picker and unclaimed keys fall through to global. Its
+//                  open flag stays on TodoState.
+// panel::top() (overlay.hpp) composes these four sources — login,
+// permission, this slot, todo — into the one priority answer, which is
+// now four checks instead of twenty.
+//
+// Each alternative INHERITS its overlay's existing Open payload
+// (pick::OpenAt, palette::Open, …): same fields, same invariants, same
+// manipulation code — plus a distinct TYPE so the slot can tell overlays
+// apart and call sites name them directly.
+//
+// Pointer lifetime: get<K>() points INTO the slot. Assigning the slot
+// destroys the previous alternative — capture what you need BEFORE
+// opening a different overlay. (This was equally true with separate
+// fields: assigning pick::Closed{} destroyed the payload too.)
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <maya/core/scroll_state.hpp>   // WebSearch::scroll
+
+#include "agentty/runtime/panel/common.hpp"
+#include "agentty/domain/smart_mode.hpp"   // smart::OverlayRow
+#include "agentty/runtime/panel/palette.hpp"
+#include "agentty/runtime/panel/mention.hpp"
+#include "agentty/runtime/panel/symbol.hpp"
+#include "agentty/runtime/panel/code_blocks.hpp"
+#include "agentty/runtime/panel/skills.hpp"
+#include "agentty/runtime/panel/stats.hpp"
+#include "agentty/runtime/panel/tool_output.hpp"
+#include "agentty/runtime/panel/checkpoints.hpp"
+#include "agentty/runtime/panel/rag.hpp"
+#include "agentty/runtime/panel/settings/list.hpp"
+#include "agentty/runtime/panel/fork.hpp"
+#include "agentty/runtime/panel/appearance.hpp"
+#include "agentty/runtime/panel/sandbox.hpp"
+#include "agentty/runtime/panel/form.hpp"
+
+namespace agentty::ui::panel {
+
+struct None {};
+
+// ── From: the panel this one was opened OVER, as a full snapshot ──────
+//
+// Esc must unwind ONE level, and "one level up" depends on how you got
+// here — which a panel cannot know unless it is told. The old answer
+// (settings_origin::Origin) named the parent KIND plus hand-picked fields
+// (a palette row, a settings category+row) and back_to() RECONSTRUCTED the
+// parent from them — every field the reconstruction forgot (the palette's
+// half-typed query) was user state silently thrown away, and every panel
+// that wanted the behaviour needed its own stamp at every opener.
+//
+// A From carries the parent's ENTIRE slot value instead. Restoring is
+// copying it back — nothing to reconstruct, nothing to forget — and the
+// stashed parent contains ITS from, so palette → settings list → pane
+// unwinds level by level without any stack to keep in sync with the slot:
+// the chain lives inside the values, bounded by how deep a user actually
+// descended.
+//
+// shared_ptr<const>: Model is copied by value in the reducer loop, so the
+// snapshot must be cheap to copy and safe to share — immutable, restored
+// BY COPY, never mutated in place. Snapshot is defined after Variant (the
+// type is self-referential through this one indirection).
+//
+// Restored state can be STALE — the model may have changed while the child
+// was open (a stream ended; a setting was applied). ascend()'s caller owns
+// revalidation: clamp cursors, rebuild forms. See app::detail::ascend().
+struct Snapshot;
+class From {
+public:
+    From() = default;
+    [[nodiscard]] bool empty() const noexcept { return !s_; }
+    [[nodiscard]] const Snapshot* get() const noexcept { return s_.get(); }
+    static From of(Snapshot s);
+private:
+    std::shared_ptr<const Snapshot> s_;
+};
+
+// Base every alternative inherits: where Esc goes. Default-empty = "opened
+// over the thread", so Esc closes.
+struct WithFrom { From from; };
+
+// ── The exclusive panels: one distinct type each, payload inherited ───
+struct Models     : pick::OpenAt, WithFrom {
+    // Smart-Mode slot-assign mode: this picker was opened BY a SmartMode
+    // Pick row to pin a model into `assign_slot`, and Enter writes the pin
+    // instead of switching the model. Carried ON the panel — the mode is a
+    // property of THIS picker instance, not of the app — so abandoning the
+    // picker (close, hop to providers) structurally abandons the mode; no
+    // parked flag to remember to reset. The SmartMode pane it must restore
+    // rides in `from` like every other parent (the snapshot carries the
+    // form, advanced flag and nested chain — nothing else to park).
+    std::optional<smart::ModelRole> assign_slot;
+};
+struct Providers  : pick::OpenAt, WithFrom {};
+struct ThreadList      : pick::OpenAt, WithFrom {};
+// Smart Mode carries a typed ROW, not an index. The other pickers list a
+// variable number of runtime-derived entries, so an int cursor is the honest
+// representation there; Smart Mode's rows are a fixed, named set, and
+// spelling them as an int is what let the cursor drift onto rows that do not
+// exist (see smart::OverlayRow for the full post-mortem).
+// Smart Mode carries its FORM, not an int cursor. Row identity, navigation,
+// the env-pin lock and the picker hand-off all come from the shared form
+// layer, so this pane behaves identically to Retrieval and to every future
+// config surface — and an out-of-range cursor is not representable.
+struct SmartMode : WithFrom {
+    agentty::form::Form form;
+    // Show the advanced routing-policy rows (^A). View state, not config — it
+    // dies with the overlay and is not persisted. Held HERE because every
+    // rebuild (a slot assignment reopens the pane) must preserve it, or the
+    // rows would vanish the moment the user pinned a model.
+    bool advanced = false;
+};
+// Settings → Web Search. Carries its FORM, like Smart Mode: rows, cursor,
+// the env lock and text editing all come from the shared form layer. The
+// rows are the settings registry's web_search.* rows, so this pane holds no
+// config of its own — it is rebuilt from the Model after every commit.
+//
+// The scroll offset lives HERE, not in Model::UI's scroll bag: the slot walk
+// hashes it (so the frame gate sees a scroll), and it dies with the pane (so
+// reopening starts at the top). The shape pn::Stats established.
+struct WebSearch : WithFrom {
+    agentty::form::Form form;
+    mutable maya::ScrollState scroll = [] {
+        maya::ScrollState s;
+        s.auto_dispatch = false;   // the form layer owns movement
+        return s;
+    }();
+    // Where each keyed service's API key comes from, as read off the UI
+    // thread when the pane opened (WebSearchKeysRead): service id ->
+    // "stored", "env: ...", or "" for none. Never the key itself. Until the
+    // read answers, `keys_read` is false and the key rows say so.
+    std::vector<std::pair<std::string, std::string>> key_origins;
+    bool          keys_read = false;
+    // Bumped by every key read, store and removal, so only the newest read's
+    // answer is shown.
+    std::uint64_t keys_gen  = 0;
+    // Key origins arrived while a field was being edited; rebuild the rows as
+    // soon as the edit ends.
+    bool          rows_stale = false;
+};
+struct Palette  : agentty::palette::Open, WithFrom {};
+struct Mention         : agentty::mention::Open, WithFrom {};
+struct Symbol          : agentty::symbol::Open, WithFrom {};
+struct CodeBlocks      : agentty::code_blocks::Open, WithFrom {};
+struct CodeBlockResult : agentty::code_blocks::Result, WithFrom {};
+struct ToolOutput      : agentty::tool_output::Open, WithFrom {};
+struct Checkpoints     : agentty::checkpoints::Open, WithFrom {};
+struct Rag     : agentty::rag_settings::Open, WithFrom {};
+struct SettingsList    : agentty::settings::ListOpen, WithFrom {};
+// Plugin detail/add editor — one form pane for BOTH flows. `server` empty
+// == ADD mode (the `kind` choice row rebuilds the field set as the user
+// picks stdio/http/passthrough…); non-empty == editing that server's entry
+// (identity rows locked, config rows editable, Save force-overwrites).
+// `project` routes the write to ./.agentty/mcp.json vs the user file.
+struct PluginEdit : WithFrom {
+    agentty::form::Form form;
+    std::string server;      // "" = add mode
+    bool        project = false;
+    // The kind the CURRENT field set was built for. When the `kind` choice
+    // changes, the reducer rebuilds the form for the new kind while
+    // preserving name/url text the user already typed — same rebuild-
+    // preserve pattern as SmartMode's advanced toggle.
+    std::string built_kind;
+};
+// The Appearance pane. A form, like SmartMode/PluginEdit — grouped rows,
+// live on every keystroke. `picking` + `picker` are the theme browser
+// floating OVER it: a Pick row hands off rather than growing the dropdown
+// into a worse picker, and the pane stays painted behind so the list is
+// its own preview.
+//
+// Composed, not doubly-inherited: the visual gate decomposes a panel via
+// structured bindings, which two bases with members make ill-formed.
+struct Appearance : WithFrom {
+    agentty::ui::panel::AppearancePane pane;
+};
+// The Sandbox pane. Also composed rather than doubly-inherited, for the same
+// structured-binding reason. Carries the whole pane (form + live wall
+// preview + blocked log) because the preview is recomputed from the form on
+// every edit, so the two have to travel together.
+struct Sandbox : WithFrom {
+    agentty::ui::panel::SandboxPane pane;
+};
+// The path/port list editor, opened FROM a Sandbox Pick row.
+//
+// Its own slot rather than a mode of Sandbox: it has its own form, its own
+// keys, its own commit and its own completer. Folding it in would give one
+// pane two forms plus a "which am I editing" flag -- the two-bools-for-three-
+// states shape that has already produced two bugs in this pane.
+struct SandboxList : WithFrom {
+    agentty::ui::panel::SandboxListPane pane;
+};
+struct Fork            : agentty::fork_panel::Open, WithFrom {};
+struct DiffReview      : pick::OpenAtCell, WithFrom {};
+struct Stats           : agentty::stats_panel::Open, WithFrom {};
+struct Skills          : agentty::skills_panel::Open, WithFrom {};
+
+using Variant = std::variant<
+    None,
+    Models, Providers, ThreadList, SmartMode, WebSearch,
+    Palette, Mention, Symbol,
+    CodeBlocks, CodeBlockResult, ToolOutput, Checkpoints,
+    Rag, SettingsList, PluginEdit, Appearance, Sandbox, SandboxList, Fork,
+    DiffReview, Stats, Skills>;
+
+// The one indirection that lets the type refer to itself: a stashed parent
+// is a whole slot value, from included.
+struct Snapshot { Variant v; };
+inline From From::of(Snapshot s) {
+    From f;
+    f.s_ = std::make_shared<const Snapshot>(std::move(s));
+    return f;
+}
+
+template <class K>
+concept Alternative = requires(Variant v) { std::holds_alternative<K>(v); };
+
+// The slot itself: a thin wrapper so call sites read as intent
+// (`m.ui.panel.is<pn::Models>()`) rather than as variant plumbing.
+//
+// ── The three moves ────────────────────────────────────────────────
+//
+// Navigation is a STACK, and there are exactly three things you can do to
+// it. They differ ONLY in what happens to the parent chain, which is
+// precisely the part a call site kept getting wrong:
+//
+//   descend(k)  DOWN.     k.from snapshots what is open. Esc unwinds to it.
+//                         For an Open* handler: "open k over here".
+//   replace(k)  SIDEWAYS. k INHERITS the current panel's parent. For a hop
+//                         between siblings (^P from the model picker to the
+//                         provider picker) — the panel you leave is gone,
+//                         but where you CAME FROM is unchanged.
+//   restore(k)  UP.       k is put back verbatim, chain included. For
+//                         ascend(), and for rebuilding the panel you are
+//                         already inside.
+//
+// Every one of these has been a bug at least once, always the same shape:
+// a call site that meant one and spelled another, with no type to stop it.
+//
+//   • `operator=` was a fourth, unnamed move that DROPPED the chain. It
+//     was documented as "use descend at OPEN sites" — a comment, so it was
+//     not enforced: 13 Open* reducers assigned and 8 descended. palette →
+//     providers → Esc left the stack entirely. It is now DELETED.
+//   • The sideways hop was spelled `close<Old>(); descend(New);`, which
+//     reads like "swap panels" and means "drop the grandparent": close()
+//     leaves None, so descend() finds nothing to stash. palette → models →
+//     ^P → Esc exited instead of returning to the palette. That is what
+//     replace() exists to say.
+//
+// So the rule is: if you are changing what is in the slot, you must name
+// which of the three you mean. There is no unnamed way left.
+class State {
+public:
+    State() = default;
+
+    // Assignment is deleted: it silently discarded the parent chain. Say
+    // descend(k) to go DOWN, replace(k) to go SIDEWAYS, or restore(k) to
+    // put a panel back with the chain it already carries.
+    template <Alternative K>
+    State& operator=(K k) = delete;
+
+    template <Alternative K>
+    [[nodiscard]] bool is() const noexcept {
+        return std::holds_alternative<K>(v_);
+    }
+    template <Alternative K>
+    [[nodiscard]] K* get() noexcept { return std::get_if<K>(&v_); }
+    template <Alternative K>
+    [[nodiscard]] const K* get() const noexcept { return std::get_if<K>(&v_); }
+
+    [[nodiscard]] bool any_open() const noexcept {
+        return !std::holds_alternative<None>(v_);
+    }
+
+    // Close K IF it is the open overlay; leave any other overlay alone.
+    // Mirrors the old per-field close semantics: a stale CloseModels
+    // arriving after the user hopped to the provider picker must not
+    // close the provider picker.
+    template <Alternative K>
+    void close() noexcept {
+        if (std::holds_alternative<K>(v_)) v_ = None{};
+    }
+    // Close unconditionally (whatever is open).
+    void close_all() noexcept { v_ = None{}; }
+
+    // Open K OVER the current overlay: K's `from` becomes a snapshot of
+    // whatever is open now, so Esc can restore it verbatim — query, cursor,
+    // nested from and all. Opening over None stashes nothing (from stays
+    // empty) and Esc simply closes: "the thread" needs no snapshot.
+    //
+    // Re-opening the SAME kind is a rebuild, not a descent. Without that
+    // check, a reducer that reopens its own panel to refresh it (Smart Mode
+    // does this on every slot assignment) would stash the panel as its own
+    // parent, and Esc would peel identical copies one at a time instead of
+    // leaving. The new panel keeps the chain the old one had.
+    template <Alternative K>
+    void descend(K k) {
+        if (std::holds_alternative<K>(v_)) {
+            k.from = std::move(std::get<K>(v_).from);
+        } else if (!std::holds_alternative<None>(v_)) {
+            k.from = From::of(Snapshot{std::move(v_)});
+        }
+        v_ = std::move(k);
+    }
+
+    // SIDEWAYS: swap the open panel for K, keeping ITS parent.
+    //
+    // A hop between siblings — ^P from the model picker to the provider
+    // picker, or any "leave this, open that at the same level". The panel
+    // you are leaving is discarded; where you CAME FROM is not.
+    //
+    // This used to be spelled `close<Old>(); descend(New);`, which reads
+    // like a swap and behaves like a truncation: close() leaves None, so
+    // the descend() that follows finds nothing to stash and silently drops
+    // the grandparent. palette → models → ^P → Esc then exited the stack
+    // instead of returning to the palette.
+    //
+    // Over None this is just an open with no parent, which is the same
+    // thing descend() would do — a hop from nothing lands on nothing.
+    template <Alternative K>
+    void replace(K k) {
+        k.from = std::visit(
+            [](auto& a) -> From {
+                if constexpr (requires { a.from; }) return std::move(a.from);
+                else return From{};
+            },
+            v_);
+        v_ = std::move(k);
+    }
+
+    // Put K back exactly as given — its `from` is already whatever it should
+    // be. For ascend() restoring a stashed parent, and for a reducer
+    // rebuilding the panel it is already inside.
+    //
+    // The counterpart to descend: a restore that descended would stash the
+    // child as its own parent and Esc would cycle instead of unwinding.
+    template <Alternative K>
+    void restore(K k) {
+        v_ = std::move(k);
+    }
+
+    // How many panels Esc would have to walk to leave. 0 = nothing open.
+    // Exposed for tests and diagnostics: the depth is the property the
+    // navigation contract is actually about.
+    [[nodiscard]] int depth() const noexcept {
+        int n = 0;
+        const Variant* cur = &v_;
+        while (!std::holds_alternative<None>(*cur)) {
+            ++n;
+            const From* f = std::visit(
+                [](const auto& a) -> const From* {
+                    if constexpr (requires { a.from; }) return &a.from;
+                    else return nullptr;
+                },
+                *cur);
+            if (!f || f->empty()) break;
+            cur = &f->get()->v;
+        }
+        return n;
+    }
+
+    // Give the CURRENTLY-OPEN overlay a parent, if it has none yet. The
+    // caller pattern: a dispatcher (palette select, settings-list action)
+    // snapshots itself, closes, runs the command — and then adopts, so
+    // WHATEVER the command opened inherits the dispatcher as its Esc
+    // target. Generic: the dispatcher needs no per-command knowledge, and
+    // a command that opened nothing (None) or re-opened something that
+    // already has a parent is left alone.
+    void adopt(From f) {
+        std::visit(
+            [&](auto& a) {
+                if constexpr (requires { a.from; })
+                    if (a.from.empty()) a.from = std::move(f);
+            },
+            v_);
+    }
+
+    // Restore the parent this overlay was opened over. False if there is
+    // none (opened over the thread, or a pre-descend code path) — the
+    // caller closes instead. The restored state may be STALE; the caller
+    // owns revalidation (app::detail::ascend wraps both).
+    [[nodiscard]] bool ascend() {
+        const From* f = std::visit(
+            [](const auto& a) -> const From* {
+                if constexpr (requires { a.from; }) return &a.from;
+                else return nullptr;
+            },
+            v_);
+        if (!f || f->empty()) return false;
+        // Copy out BEFORE overwriting: the snapshot lives inside v_.
+        auto keep = f->get();
+        Variant restored = keep->v;
+        v_ = std::move(restored);
+        return true;
+    }
+
+    [[nodiscard]] const Variant& raw() const noexcept { return v_; }
+
+private:
+    Variant v_;
+};
+
+// ── Kind: the routing name shared by dispatcher and view ────────────────
+enum class Kind {
+    None,
+    Login,
+    Permission,
+    Palette,
+    Mention,
+    Symbol,
+    CodeBlocks,
+    CodeBlockResult,
+    ToolOutput,
+    Checkpoints,
+    Rag,
+    SettingsList,
+    PluginEdit,
+    Appearance,
+    Sandbox,
+    SandboxList,
+    Fork,
+    Models,
+    Providers,
+    ThreadList,
+    SmartMode,
+    WebSearch,
+    DiffReview,
+    Todo,
+    Stats,
+    Skills,
+};
+
+// Slot alternative → Kind. An exhaustive visitor: adding an alternative
+// without an arm here is a compile error, not a silent misroute.
+[[nodiscard]] inline Kind kind_of(const State& s) noexcept {
+    struct V {
+        Kind operator()(const None&)            const { return Kind::None; }
+        Kind operator()(const Models&)     const { return Kind::Models; }
+        Kind operator()(const Providers&)  const { return Kind::Providers; }
+        Kind operator()(const ThreadList&)      const { return Kind::ThreadList; }
+        Kind operator()(const SmartMode&)       const { return Kind::SmartMode; }
+        Kind operator()(const WebSearch&)       const { return Kind::WebSearch; }
+        Kind operator()(const Palette&)  const { return Kind::Palette; }
+        Kind operator()(const Mention&)         const { return Kind::Mention; }
+        Kind operator()(const Symbol&)          const { return Kind::Symbol; }
+        Kind operator()(const CodeBlocks&)      const { return Kind::CodeBlocks; }
+        Kind operator()(const CodeBlockResult&) const { return Kind::CodeBlockResult; }
+        Kind operator()(const ToolOutput&)      const { return Kind::ToolOutput; }
+        Kind operator()(const Checkpoints&)     const { return Kind::Checkpoints; }
+        Kind operator()(const Rag&)     const { return Kind::Rag; }
+        Kind operator()(const SettingsList&)    const { return Kind::SettingsList; }
+        Kind operator()(const PluginEdit&)      const { return Kind::PluginEdit; }
+        Kind operator()(const Appearance&)      const { return Kind::Appearance; }
+        Kind operator()(const Sandbox&)         const { return Kind::Sandbox; }
+        Kind operator()(const SandboxList&)     const { return Kind::SandboxList; }
+        Kind operator()(const Fork&)            const { return Kind::Fork; }
+        Kind operator()(const DiffReview&)      const { return Kind::DiffReview; }
+        Kind operator()(const Stats&)           const { return Kind::Stats; }
+        Kind operator()(const Skills&)          const { return Kind::Skills; }
+    };
+    return std::visit(V{}, s.raw());
+}
+
+} // namespace agentty::ui::panel

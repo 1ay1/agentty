@@ -1,6 +1,9 @@
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/util/home_dir.hpp"
 
-#include <mcp/tools/util/fs_helpers.hpp>   // mirror the workspace root into mcp-cpp
+#include <maya/runtime.hpp>
+#include <mcp/tools/native_files.hpp>
+#include <mcp/tools/util/fs_helpers.hpp>   // project_root(): one rule for both layers
 
 #include <algorithm>
 #include <atomic>
@@ -8,7 +11,6 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <mutex>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -279,16 +281,31 @@ fs::path normalize_path(std::string_view s) {
     // getpwnam_r for that and the model's never seen it work.)
     std::string expanded;
     if (!s.empty() && s.front() == '~' && (s.size() == 1 || s[1] == '/')) {
-        if (const char* home = std::getenv("HOME"); home && *home) {
-            expanded = home;
+        // Home root via the unified resolver ($HOME on POSIX/MSYS2,
+        // $USERPROFILE on native Windows) — a bare getenv("HOME") left `~/…`
+        // unexpanded on native Windows (HOME usually unset), turning the arg
+        // into `<project_root>/~/…` and failing the tool with NotFound.
+        const fs::path home = agentty::util::home_dir();
+        if (!home.empty()) {
+            expanded = home.string();
             expanded.append(s.data() + 1, s.size() - 1);
             s = expanded;
         }
     }
     fs::path p{s};
-    std::error_code ec;
-    if (!p.is_absolute()) p = fs::absolute(p, ec);
-    return p;
+    if (!p.is_absolute()) {
+        // Resolve relative to the ACTIVE PROJECT (cwd clamped inside the
+        // access boundary), NOT the tool thread's cwd via fs::absolute()
+        // and NOT the raw boundary. fs::absolute() anchored to whatever
+        // cwd the worker thread happened to have, which could fail the
+        // workspace-containment check for a path the model reasonably
+        // expected to be in-bounds; the raw boundary would turn
+        // `src/foo.cpp` into `/src/foo.cpp` under `--workspace /`.
+        // project_root() is the right anchor and, by default, equals the
+        // boundary so common launches are unchanged.
+        p = project_root() / p;
+    }
+    return p.lexically_normal();
 }
 
 namespace {
@@ -307,21 +324,37 @@ fs::path& mutable_workspace_root() {
 
 } // namespace
 
-void set_workspace_root(fs::path root) {
+void set_workspace_root(Io, fs::path root) {
     std::error_code ec;
+    // On Windows, weakly_canonical can fail on junctions/reparse points.
+    // If canonicalisation fails, use the path as-is (it's already absolute
+    // or we normalize it below). This degrades gracefully rather than
+    // rejecting valid workspace roots.
     auto canon = fs::weakly_canonical(root, ec);
     auto resolved = ec ? std::move(root) : std::move(canon);
-    // Mirror into mcp-cpp's util layer: the local tool set is served by the
-    // mcp-cpp toolset (filesystem tools enforce the workspace boundary there),
-    // so agentty's root MUST be the same root mcp sees. Doing it here — in the
-    // single canonical setter — means every caller (main.cpp, ACP, tests)
-    // gets the boundary mirrored automatically, with no second seam to forget.
-    ::mcp::tools::util::set_workspace_root(resolved);
+    // Ensure it's absolute; on Windows some bad canonicalisations might
+    // return relative paths in error cases.
+    if (!resolved.is_absolute()) {
+        std::error_code aec;
+        auto abs = fs::absolute(resolved, aec);
+        if (!aec) resolved = std::move(abs);
+    }
+    // The mcp-cpp tools read this same root: the tool state agentty hands
+    // them takes the boundary from here on every call.
     mutable_workspace_root() = std::move(resolved);
 }
 
 const fs::path& workspace_root() {
     return mutable_workspace_root();
+}
+
+fs::path project_root() {
+    // mcp-cpp's rule (the cwd, clamped inside the boundary), over our
+    // boundary, so agentty-native and mcp-served tools resolve relative paths
+    // to the identical directory.
+    static ::mcp::tools::NativeFileSystem disk;   // stateless: one is enough
+    return ::mcp::tools::util::project_root(
+        ::mcp::tools::util::bounds_from(disk, workspace_root(), {}));
 }
 
 bool is_within_workspace(const fs::path& target) {
@@ -331,19 +364,40 @@ bool is_within_workspace(const fs::path& target) {
     // perfect for write targets where the file doesn't exist yet but the
     // parent directory does, and it resolves symlinks so an in-workspace
     // link pointing at /etc fails the prefix check.
+    // On Windows, this can fail on junctions/reparse points. If it fails,
+    // retry on the parent (common write-target case: file doesn't exist yet
+    // but the directory does). If even that fails, try a parent-relative
+    // approach as a last resort.
     auto canon_target = fs::weakly_canonical(target, ec);
     if (ec) {
         // weakly_canonical failed (e.g. a parent component is a dangling
-        // symlink, or EACCES walking the chain). Do NOT fall back to a
-        // plain absolute() — that skips symlink resolution and would let
-        // a crafted link escape the boundary. Retry on the parent dir
-        // (the common write-target case: file doesn't exist yet but the
-        // directory does, and canonicalising it still resolves symlinks),
-        // then re-attach the filename. If even that fails, deny.
+        // symlink, or EACCES walking the chain, or a Windows reparse point).
+        // Do NOT fall back to a plain absolute() — that skips symlink
+        // resolution and would let a crafted link escape the boundary.
+        // Retry on the parent dir (the common write-target case: file doesn't
+        // exist yet but the directory does, and canonicalising it still
+        // resolves symlinks), then re-attach the filename.
         std::error_code pec;
-        auto parent = fs::weakly_canonical(target.parent_path(), pec);
-        if (pec || parent.empty()) return false;
-        canon_target = parent / target.filename();
+        auto parent = target.parent_path();
+        if (!parent.empty()) {
+            auto canon_parent = fs::weakly_canonical(parent, pec);
+            if (!pec && !canon_parent.empty()) {
+                canon_target = canon_parent / target.filename();
+                ec.clear();
+            }
+        }
+        // If even parent retry failed, fall back to lexically_normal of the
+        // absolute path (no symlink resolution, but at least consistent).
+        if (ec) {
+            std::error_code aec;
+            auto abs = fs::absolute(target, aec);
+            if (!aec) {
+                canon_target = abs.lexically_normal();
+                ec.clear();
+            } else {
+                return false;   // can't even get absolute; deny
+            }
+        }
     }
     auto canon_root = workspace_root();   // already canonicalised on set
     // Component-wise prefix check. Plain string startsWith would let
@@ -360,15 +414,12 @@ bool is_within_workspace(const fs::path& target) {
 namespace {
 
 // Canonicalised roots the READ gate also accepts (skill directories
-// under ~/.agentty/skills etc.). Guarded by its own mutex — reads come
-// from tool threads, registration from the skills scanner.
-struct ReadRoots {
-    std::mutex mu;
-    std::vector<fs::path> roots;
-};
-
-[[nodiscard]] ReadRoots& read_roots() {
-    static ReadRoots r;
+// under ~/.agentty/skills etc.). Reads come from tool threads, registration
+// from the skills scanner. A snapshot: a handful of roots, read on every
+// gate check, appended rarely — no lock, so the gate needs no capability.
+using Roots = std::vector<std::string>;
+[[nodiscard]] maya::snapshot<Roots>& read_roots() {
+    static maya::snapshot<Roots> r;
     return r;
 }
 
@@ -385,25 +436,75 @@ struct ReadRoots {
 
 } // namespace
 
-void allow_read_root(const fs::path& root) {
+void allow_read_root(Io, const fs::path& root) {
     std::error_code ec;
     auto canon = fs::weakly_canonical(root, ec);
-    if (ec || canon.empty()) return;
-    auto& rr = read_roots();
-    std::lock_guard lk{rr.mu};
-    if (std::find(rr.roots.begin(), rr.roots.end(), canon) == rr.roots.end())
-        rr.roots.push_back(std::move(canon));
+    // On Windows, weakly_canonical can fail on junctions. If it fails,
+    // fall back to lexically_normal(absolute(root)). This provides a
+    // stable cache key even if we can't resolve symlinks.
+    if (ec) {
+        std::error_code aec;
+        auto abs = fs::absolute(root, aec);
+        if (aec) return;   // can't even get absolute; bail
+        canon = abs.lexically_normal();
+    }
+    if (canon.empty()) return;
+    read_roots().update(
+        [](const Roots& roots, const std::string& c) {
+            if (std::find(roots.begin(), roots.end(), c) != roots.end()) return roots;
+            Roots next = roots;
+            next.push_back(c);
+            return next;
+        },
+        canon.string());
+}
+
+std::vector<fs::path> read_roots_now() {
+    const auto roots = read_roots().load();
+    std::vector<fs::path> out;
+    out.reserve(roots->size());
+    for (const auto& r : *roots) out.emplace_back(r);
+    return out;
+}
+
+void allow_fork_transcripts(Io io, const fs::path& threads_dir,
+                            const std::vector<std::string>& paths) {
+    std::error_code ec;
+    const auto dir = fs::weakly_canonical(threads_dir, ec);
+    if (ec || dir.empty()) return;
+    constexpr std::string_view kSuffix = ".transcript.md";
+    for (const auto& raw : paths) {
+        if (raw.empty()) continue;
+        std::error_code fec;
+        const auto file = fs::weakly_canonical(fs::path{raw}, fec);
+        if (fec || !fs::is_regular_file(file, fec)) continue;
+        // One level down in the threads dir, and only a transcript. A note
+        // edited to point anywhere else opens nothing.
+        if (file.parent_path() != dir) continue;
+        const auto name = file.filename().string();
+        if (name.size() <= kSuffix.size()
+            || name.compare(name.size() - kSuffix.size(), kSuffix.size(), kSuffix) != 0)
+            continue;
+        allow_read_root(io, file);
+    }
 }
 
 bool is_read_allowlisted(const fs::path& target) {
     if (target.empty()) return false;
     std::error_code ec;
     auto canon = fs::weakly_canonical(target, ec);
-    if (ec) return false;   // reads need the file to exist; no parent retry
-    auto& rr = read_roots();
-    std::lock_guard lk{rr.mu};
-    for (const auto& r : rr.roots)
-        if (under_root(canon, r)) return true;
+    if (ec) {
+        // weakly_canonical failed (bad junction, etc.). Fall back to
+        // lexically_normal(absolute()). Reads need the file to exist at
+        // comparison time, so no parent retry like is_within_workspace.
+        std::error_code aec;
+        auto abs = fs::absolute(target, aec);
+        if (aec) return false;   // can't canonicalise; deny
+        canon = abs.lexically_normal();
+    }
+    const auto roots = read_roots().load();
+    for (const auto& r : *roots)
+        if (under_root(canon, fs::path{r})) return true;
     return false;
 }
 
@@ -472,8 +573,16 @@ bool should_skip_dir(std::string_view name) noexcept {
         ".cache", "vendor", "dist", "out", ".next", ".venv",
         "cmake-build-debug", "cmake-build-release", ".idea", ".vscode",
         "_deps", "third_party", "thirdparty", "3rdparty", "external",
+        ".mypy_cache", ".pytest_cache", ".tox", ".gradle", "Pods",
+        "bazel-bin", "bazel-out", "DerivedData", ".terraform",
     };
     for (auto s : skip) if (name == s) return true;
+    // Prefix families: out-of-source CMake build trees (build/, build-*,
+    // cmake-build-*) are full of generated + fetched (_deps) files that
+    // would otherwise flood the @-file picker / symbol index. Kept in sync
+    // with mcp-cpp's should_skip_dir.
+    if (name.starts_with("build-") || name.starts_with("cmake-build"))
+        return true;
     return false;
 }
 
@@ -496,27 +605,43 @@ bool is_binary_file(const fs::path& p) {
 // ── File snapshot cache ────────────────────────────────────────────────────
 namespace {
 
-struct FileCache {
-    std::mutex mu;
-    std::unordered_map<std::string, FileSnapshot> by_path;
+// The snapshot each tool last saw, by canonical path. FileSnapshot holds a
+// file_time_type, which jaal can't see inside, so the cache keeps the ticks
+// and rebuilds the snapshot on the way out.
+struct SeenFile {
+    // The clock's own tick type, not int64_t: libstdc++ uses a 64-bit rep,
+    // libc++ (clang on macOS) uses __int128 -- narrowing that into int64_t
+    // in a brace-init is a hard error there.
+    fs::file_time_type::rep mtime = 0;
+    std::uintmax_t size = 0;
+    std::uint64_t  content_hash = 0;
 };
-
-[[nodiscard]] FileCache& file_cache() {
-    static FileCache c;
+// A snapshot: one entry per file the agent touched this session (hundreds at
+// most), written once per read/write tool call and read by the staleness
+// gate. Copy-on-write is cheap at that size and keeps these noexcept helpers
+// lock-free, so no capability reaches the tool shells that call them.
+using SeenMap = std::unordered_map<std::string, SeenFile>;
+[[nodiscard]] maya::snapshot<SeenMap>& file_cache() {
+    static maya::snapshot<SeenMap> c;
     return c;
 }
 
 // Canonicalise without requiring the file to exist (write target might
 // not exist yet at the moment we record). Falls back to the lexically-
 // normal absolute form when weakly_canonical errors out — we still get
-// a stable key per file across calls, just not symlink-aware.
+// a stable key per file across calls, just not symlink-aware. On Windows,
+// weakly_canonical can fail on junctions/reparse points; degrading to
+// lexically_normal(absolute()) is safer than returning empty or crashing.
 [[nodiscard]] std::string canon_key(const fs::path& p) noexcept {
     std::error_code ec;
     auto canon = fs::weakly_canonical(p, ec);
     if (!ec) return canon.string();
+    // Fallback 1: if p is already absolute, use its lexically normal form
     if (p.is_absolute()) return p.lexically_normal().string();
+    // Fallback 2: make it absolute, then lexically normal
     auto abs = fs::absolute(p, ec);
     if (!ec) return abs.lexically_normal().string();
+    // Fallback 3: return as-is (shouldn't happen, but defensive)
     return p.string();
 }
 
@@ -528,31 +653,39 @@ void record_file_seen(const fs::path& path,
                       std::uint64_t content_hash) noexcept {
     auto key = canon_key(path);
     if (key.empty()) return;
-    auto& c = file_cache();
-    std::lock_guard lk{c.mu};
-    c.by_path[std::move(key)] = FileSnapshot{mtime, size, content_hash};
+    try {
+        file_cache().update(
+            [](const SeenMap& m, const std::string& k, const SeenFile& v) {
+                SeenMap next = m; next[k] = v; return next;
+            },
+            std::move(key), SeenFile{mtime.time_since_epoch().count(), size, content_hash});
+    } catch (...) { /* best-effort bookkeeping; noexcept contract */ }
 }
 
 std::optional<FileSnapshot> last_seen_file(const fs::path& path) noexcept {
     auto key = canon_key(path);
     if (key.empty()) return std::nullopt;
-    auto& c = file_cache();
-    std::lock_guard lk{c.mu};
-    auto it = c.by_path.find(key);
-    if (it == c.by_path.end()) return std::nullopt;
-    return it->second;
+    const auto m = file_cache().load();
+    auto it = m->find(key);
+    if (it == m->end()) return std::nullopt;
+    const SeenFile& seen = it->second;
+    return FileSnapshot{fs::file_time_type{fs::file_time_type::duration{seen.mtime}},
+                        seen.size, seen.content_hash};
 }
 
 StaleVerdict staleness_of(const fs::path& path) noexcept {
     auto snap = last_seen_file(path);
     if (!snap) return StaleVerdict::Unknown;
     std::error_code ec;
+    // On Windows, last_write_time/file_size can fail on junctions/reparse
+    // points. If we can't stat the current file, we can't compare; return
+    // Unknown (treat as potentially stale to be safe).
     auto cur_mtime = fs::last_write_time(path, ec);
     if (ec) return StaleVerdict::Unknown;
     auto cur_size  = fs::file_size(path, ec);
-    if (ec) cur_size = 0;
-    // mtime granularity is filesystem-dependent (HFS+ 1 s, ext4 ns, FAT
-    // 2 s). Compare strictly: any difference — forward OR backward —
+    if (ec) cur_size = 0;   // default to 0 on error; still compare with snap
+    // mtime granularity is filesystem-dependent (HFS+ 1 s, ext4 ns, FAT
+    // 2 s). Compare strictly: any difference — forward OR backward —
     // counts as stale. Size mismatch is also a stale signal even when
     // mtime didn't change (some tools touch-without-updating-mtime).
     if (snap->mtime == cur_mtime && snap->size == cur_size)

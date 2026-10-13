@@ -22,13 +22,13 @@
 // (frameA_rows - term_h) is a committed-scrollback rewrite = the
 // duplication bug.
 
-#include <cstdio>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include <fcntl.h>
 #include <unistd.h>
+
+#include "wire_pipe.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -40,19 +40,23 @@
 #include <maya/terminal/writer.hpp>
 #include <maya/widget/app_layout.hpp>
 
+#include "agtest.hpp"
+
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
-#include "agentty/runtime/picker.hpp"
+#include "agentty/runtime/panel/common.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
 #include "agentty/runtime/view/composer.hpp"
-#include "agentty/runtime/view/pickers.hpp"
+#include "agentty/runtime/view/panels.hpp"
 #include "agentty/runtime/view/status_bar/status_bar.hpp"
 #include "agentty/runtime/view/thread/conversation.hpp"
 #include "agentty/runtime/view/thread/thread.hpp"
 #include "agentty/runtime/view/view.hpp"
+
+namespace pn = agentty::ui::panel;
 
 using agentty::Model;
 using agentty::Message;
@@ -66,37 +70,13 @@ using std::chrono::milliseconds;
 using namespace maya;
 using namespace maya::inline_frame;
 
-static int g_failures = 0;
 static int g_checks   = 0;
 
-#define CHECK(cond, msg)                                                   \
-    do {                                                                   \
-        ++g_checks;                                                        \
-        if (!(cond)) {                                                     \
-            ++g_failures;                                                  \
-            std::fprintf(stderr, "  FAIL [%s:%d] %s\n",                    \
-                         __FILE__, __LINE__, (msg));                       \
-        }                                                                  \
-    } while (0)
 
 // ── Non-blocking pipe writer; the read end is drained per frame so we
 //    capture exactly the bytes each compose emitted.
-static std::pair<Writer, int> make_pipe_writer() {
-    int fds[2];
-    if (pipe(fds) != 0) { std::perror("pipe"); std::abort(); }
-    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL, 0) | O_NONBLOCK);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
-    return {Writer{static_cast<platform::NativeHandle>(fds[1])}, fds[0]};
-}
-
-static std::string drain(int rfd) {
-    std::string out;
-    char buf[8192];
-    ssize_t n;
-    while ((n = read(rfd, buf, sizeof(buf))) > 0)
-        out.append(buf, static_cast<std::size_t>(n));
-    return out;
-}
+static std::pair<Writer, int> make_pipe_writer() { return wire_pipe::make_writer(); }
+static std::string drain(int rfd) { return wire_pipe::drain(rfd); }
 
 // Build the conversation Element tree for the current model state.
 static maya::Element build_root(const Model& m) {
@@ -115,7 +95,7 @@ static Canvas paint(const maya::Element& root, int width, StylePool& pool) {
     Canvas c(width, 4000, &pool);
     c.clear();
     std::vector<layout::LayoutNode> nodes;
-    maya::render_tree(root, c, pool, maya::theme::dark, nodes, /*auto_height=*/true);
+    maya::render_tree(root, c, pool, maya::theme::native, nodes, /*auto_height=*/true);
     return c;
 }
 
@@ -169,7 +149,7 @@ static ToolUse settled_read(const std::string& tag, int n_lines,
 // Invariant per frame: the shadow stays valid (verify() succeeds), the
 // frame stays Synced (no recovery repaint), and no row that already
 // overflowed the viewport top on a PRIOR frame is rewritten.
-static void test_growing_live_run_no_committed_rewrite() {
+TEST_CASE("growing live run no committed rewrite") {
     constexpr int kWidth = 100;
     constexpr int kTermH = 30;
 
@@ -212,9 +192,9 @@ static void test_growing_live_run_no_committed_rewrite() {
     // Seed the first frame fresh, then carry Synced state across appends.
     std::optional<InlineFrame<Synced>> synced;
     const char* files[] = {
-        "maya/src/render/serialize.cpp", "maya/src/render/renderer.cpp",
-        "maya/include/maya/app/app.hpp", "src/runtime/app/update/frozen.cpp",
-        "src/runtime/app/update/stream.cpp", "maya/examples/agent_session.cpp",
+        "third_party/maya/src/render/serialize.cpp", "third_party/maya/src/render/renderer.cpp",
+        "third_party/maya/include/maya/app/app.hpp", "src/runtime/app/update/frozen.cpp",
+        "src/runtime/app/update/stream.cpp", "third_party/maya/examples/agent_session.cpp",
     };
     constexpr int kCards = 6;
     bool ok_all = true;
@@ -335,10 +315,10 @@ static ToolUse settled_grep(const std::string& tag, const std::string& path,
 // stale cells (the screenshot corruption). We drive the REAL component
 // cache (paint() shares the thread-local cache across frames) so a stale
 // blit would actually surface.
-static void test_grep_read_highlight_no_stale_blit() {
+TEST_CASE("grep read highlight no stale blit") {
     constexpr int kWidth = 100;
     constexpr int kTermH = 30;
-    const std::string path = "maya/src/render/serialize.cpp";
+    const std::string path = "third_party/maya/src/render/serialize.cpp";
 
     Model m;
     m.d.current.id = agentty::ThreadId{"wirehl"};
@@ -503,7 +483,7 @@ static void test_grep_read_highlight_no_stale_blit() {
 // viewport, frozen at the (idle) turn boundary. Drive maya's real inline
 // compose across the freeze and assert no committed scrollback row is
 // rewritten.
-static void test_write_freeze_no_rewrite() {
+TEST_CASE("write freeze no rewrite") {
     constexpr int kWidth = 100;
     constexpr int kTermH = 30;
 
@@ -621,7 +601,7 @@ static void test_write_freeze_no_rewrite() {
 // settle-time freeze takes the WHOLE run at once (agent_session's
 // MessageStop analog). Same wire invariant: the freeze must not rewrite
 // a committed scrollback row.
-static void test_write_midrun_active_freeze_no_rewrite() {
+TEST_CASE("write midrun active freeze no rewrite") {
     constexpr int kWidth = 100;
     constexpr int kTermH = 30;
 
@@ -736,7 +716,7 @@ static void test_write_midrun_active_freeze_no_rewrite() {
 // graduates. Every committed scrollback row must survive both the
 // settle expansion AND the freeze. This is the closest model to the
 // real screenshot sequence.
-static void test_write_streaming_settle_freeze() {
+TEST_CASE("write streaming settle freeze") {
     constexpr int kWidth = 100;
     constexpr int kTermH = 30;
 
@@ -895,7 +875,7 @@ static void test_write_streaming_settle_freeze() {
 // dropped), the frame SHRINKS while overflowed -> maya's shrink-guard
 // commits overflow + demote_to_stale -> case-(B) repaint that can strand
 // a duplicate. This is the exact screenshot scenario.
-static void test_write_idle_finalize_freeze() {
+TEST_CASE("write idle finalize freeze") {
     constexpr int kWidth = 100;
     constexpr int kTermH = 30;
 
@@ -1007,7 +987,7 @@ static void test_write_idle_finalize_freeze() {
 // shrink-guard fires commit(overflow)+demote_to_stale -> case-(B)
 // repaint that strands a duplicate. This is "it doubles when a turn
 // finishes" — a TEXT reply, not a tool card.
-static void test_text_turn_finish_shrink() {
+TEST_CASE("text turn finish shrink") {
     constexpr int kWidth = 80;
     constexpr int kTermH = 24;
 
@@ -1166,7 +1146,7 @@ static void test_text_turn_finish_shrink() {
 // Drive a real carried Synced state across the shrink and assert: (a)
 // the prefix-match predicate returns true for a pure bottom shrink, and
 // (b) the verified diff path stays Synced and rewrites no committed row.
-static void test_overflowed_shrink_stays_synced() {
+TEST_CASE("overflowed shrink stays synced") {
     constexpr int kWidth = 80;
     constexpr int kTermH = 24;
 
@@ -1348,7 +1328,7 @@ static void test_overflowed_shrink_stays_synced() {
 // AND the commit count was not clamped (no under-commit).
 static ToolUse settled_bash(const std::string& tag, int n_lines) {
     ToolUse t;
-    t.id = ToolCallId{"bash_" + tag}; t.name = ToolName{"bash"};
+    t.id = ToolCallId{"bash_" + tag}; t.name = ToolName{"shell"};
     t.args = {{"command", "grep -rn x src # " + tag}};
     std::string out;
     for (int i = 0; i < n_lines; ++i)
@@ -1359,7 +1339,7 @@ static ToolUse settled_bash(const std::string& tag, int n_lines) {
     return t;
 }
 
-static void test_midrun_trim_output_heavy_no_rewrite() {
+TEST_CASE("midrun trim output heavy no rewrite") {
     constexpr int kWidth = 100;
     constexpr int kTermH = 30;
 
@@ -1416,8 +1396,7 @@ static void test_midrun_trim_output_heavy_no_rewrite() {
     //    strand a duplicate) — the host must commit the dropped rows
     //    against the still-valid old frame BEFORE the next render.
     auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
-    using Cmd = maya::Cmd<agentty::Msg>;
-    const auto* commit = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    const auto* commit = std::get_if<maya::CommitScrollback>(&cmd.inner);
     CHECK(commit != nullptr,
           "trim must return commit_scrollback(N) for the top-deletion; "
           "none() leaves maya unable to reconcile and strands a duplicate.");
@@ -1426,8 +1405,8 @@ static void test_midrun_trim_output_heavy_no_rewrite() {
     // by N before rendering the shorter tree. commit_inline_prefix's
     // internal clamp = min(N, prev_rows - term_h); since the dropped
     // entries overflowed, N never exceeds that bound.
-    if (commit && commit->rows > 0) {
-        const int safe = std::min(commit->rows, std::max(0, sa.rows() - kTermH));
+    if (commit && commit->debt.rows() > 0) {
+        const int safe = std::min(commit->debt.rows(), std::max(0, sa.rows() - kTermH));
         if (safe > 0)
             sa = std::move(sa).commit(sa.scrollback_marker(safe));
     }
@@ -1496,7 +1475,7 @@ static void test_midrun_trim_output_heavy_no_rewrite() {
     close(rfd);
 }
 
-static void test_midrun_trim_full_body_writes_no_rewrite() {
+TEST_CASE("midrun trim full body writes no rewrite") {
     // THE screenshot scenario, end to end at the wire: repeated FULL-body
     // writes during an active run, each overflowing the viewport, with the
     // mid-run trim firing. Full bodies mean frozen_rows[] is now maya's
@@ -1553,8 +1532,7 @@ static void test_midrun_trim_full_body_writes_no_rewrite() {
           "full-body trim setup: prefix must overflow the viewport");
 
     auto cmd = agentty::app::detail::trim_frozen_if_oversized(m);
-    using Cmd = maya::Cmd<agentty::Msg>;
-    const auto* commit = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    const auto* commit = std::get_if<maya::CommitScrollback>(&cmd.inner);
     CHECK(commit != nullptr,
           "full-body trim must return commit_scrollback(N) for the "
           "top-deletion; none() leaves maya unable to reconcile and "
@@ -1562,8 +1540,8 @@ static void test_midrun_trim_full_body_writes_no_rewrite() {
     // Apply the commit exactly as the production Cmd interpreter does:
     // advance the prior (old-content) Synced frame's prev_rows/prev_cells
     // by N before rendering the shorter tree.
-    if (commit && commit->rows > 0) {
-        const int safe = std::min(commit->rows, std::max(0, sa.rows() - kTermH));
+    if (commit && commit->debt.rows() > 0) {
+        const int safe = std::min(commit->debt.rows(), std::max(0, sa.rows() - kTermH));
         if (safe > 0)
             sa = std::move(sa).commit(sa.scrollback_marker(safe));
     }
@@ -1634,16 +1612,17 @@ static maya::Element view_root(const Model& m) {
     return agentty::ui::view(m);
 }
 
-static void test_model_picker_open_close_no_scrollback_growth() {
+TEST_CASE("model picker open close no scrollback growth") {
     using namespace agentty;
     constexpr int kWidth = 100;
     // SHORT viewport so welcome+overlay overflows — the production trigger.
     constexpr int kTermH = 20;
 
-    // deps stub: ModelPickerSelect persists settings via deps().
+    // deps stub: ModelsSelect persists settings via deps().
     app::install_deps(app::Deps{
-        .stream        = [](provider::Request, provider::EventSink) {},
+        .stream        = [](const maya::unlocked&, provider::Request, provider::EventSink) {},
         .save_thread   = [](const agentty::Thread&) {},
+        .delete_thread = [](const agentty::ThreadId&) {},
         .load_threads  = [] { return std::vector<agentty::Thread>{}; },
         .load_thread   = [](const ThreadId&) { return std::optional<agentty::Thread>{}; },
         .load_settings = [] { return store::Settings{}; },
@@ -1773,9 +1752,9 @@ static void test_model_picker_open_close_no_scrollback_growth() {
     {
         Canvas closed_c = paint(view_root(m), kWidth, pool);
         const int closed_rows = closed_c.max_content_row();
-        m.ui.model_picker = ui::pick::OpenAt{0};
+        m.ui.panel.descend(pn::Models{{0, ""}});
         Canvas open_c = paint(view_root(m), kWidth, pool);
-        m.ui.model_picker = ui::pick::Closed{};
+        m.ui.panel.close<pn::Models>();
         const int open_rows = open_c.max_content_row();
         if (open_rows > closed_rows) {
             std::fprintf(stderr,
@@ -1791,13 +1770,12 @@ static void test_model_picker_open_close_no_scrollback_growth() {
     // Render multiple animation frames per state so the welcome
     // wordmark's per-frame bob and the picker animation advance.
     for (int cycle = 0; cycle < 4; ++cycle) {
-        m.ui.model_picker = ui::pick::OpenAt{0};   // open
+        m.ui.panel.descend(pn::Models{{0, ""}});   // open
         for (int f = 0; f < 5; ++f) {
             render_state(m);
             std::this_thread::sleep_for(std::chrono::milliseconds{8});
         }
-        auto [m2, cmd] = app::detail::model_picker_update(
-            std::move(m), msg::ModelPickerMsg{ModelPickerSelect{}});  // close
+        auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::models_update, std::move(m), msg::ModelsMsg{ModelsSelect{}});  // close
         m = std::move(m2);
         (void)cmd;
         for (int f = 0; f < 5; ++f) {
@@ -1811,21 +1789,3 @@ static void test_model_picker_open_close_no_scrollback_growth() {
     close(rfd);
 }
 
-int main() {
-    std::printf("midrun_wire_test\n");
-    test_model_picker_open_close_no_scrollback_growth();
-    test_growing_live_run_no_committed_rewrite();
-    test_grep_read_highlight_no_stale_blit();
-    test_write_freeze_no_rewrite();
-    test_write_midrun_active_freeze_no_rewrite();
-    test_write_streaming_settle_freeze();
-    test_write_idle_finalize_freeze();
-    test_text_turn_finish_shrink();
-    test_overflowed_shrink_stays_synced();
-    test_midrun_trim_output_heavy_no_rewrite();
-    test_midrun_trim_full_body_writes_no_rewrite();
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    if (g_failures) { std::printf("FAILED\n"); return 1; }
-    std::printf("PASSED\n");
-    return 0;
-}

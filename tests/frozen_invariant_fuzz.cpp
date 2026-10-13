@@ -68,6 +68,7 @@ using agentty::ToolUse;
 using std::chrono::milliseconds;
 using std::chrono::steady_clock;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static int g_failures = 0;
 static int g_checks   = 0;
 
@@ -124,7 +125,7 @@ static ToolUse settled_write(const std::string& tag, int lines) {
 static ToolUse settled_bash(const std::string& tag, int out_lines) {
     ToolUse t;
     t.id   = ToolCallId{"bash_" + tag};
-    t.name = ToolName{"bash"};
+    t.name = ToolName{"shell"};
     t.args = {{"command", "grep -rn pattern src # " + tag}};
     std::string output;
     for (int i = 0; i < out_lines; ++i)
@@ -152,7 +153,7 @@ static void fail(const char* inv, const char* detail) {
 
 // ── The invariant battery ────────────────────────────────────────────────
 static void check_invariants(const Model& m, bool stream_active,
-                             const maya::Cmd<agentty::Msg>* trim_cmd,
+                             const agentty::Cmd* trim_cmd,
                              std::size_t expected_dropped_rows) {
     const auto& f = m.ui;
 
@@ -199,11 +200,10 @@ static void check_invariants(const Model& m, bool stream_active,
     // CommitScrollbackOverflow is never valid (it advances prev_rows past
     // whatever maya thinks overflowed, which over-commits).
     if (trim_cmd) {
-        using Cmd = maya::Cmd<agentty::Msg>;
         const bool is_none =
-            std::holds_alternative<Cmd::None>(trim_cmd->inner);
+            std::holds_alternative<agentty::Cmd::None>(trim_cmd->inner);
         const auto* commit =
-            std::get_if<Cmd::CommitScrollback>(&trim_cmd->inner);
+            std::get_if<maya::CommitScrollback>(&trim_cmd->inner);
         INV(is_none || commit != nullptr, "I6",
             "trim returned an unexpected Cmd type — must be none() or a "
             "conservative commit_scrollback(N) (never CommitScrollbackOverflow).");
@@ -211,7 +211,7 @@ static void check_invariants(const Model& m, bool stream_active,
             // Never OVER-commit: committing more rows than the trim dropped
             // strands a duplicate of the visible tail. Under-commit is safe
             // (maya reconciles it), so the bound is <=, not ==.
-            INV(static_cast<std::size_t>(std::max(0, commit->rows))
+            INV(static_cast<std::size_t>(std::max(0, commit->debt.rows()))
                     <= expected_dropped_rows,
                 "I6",
                 "trim's commit_scrollback row count > rows actually "
@@ -219,7 +219,7 @@ static void check_invariants(const Model& m, bool stream_active,
             // And it must commit SOMETHING when it dropped rows (a positive
             // lower bound), so a real top-deletion is never left wholly
             // uncommitted-via-overflow-misread.
-            INV(commit->rows >= 1, "I6",
+            INV(commit->debt.rows() >= 1, "I6",
                 "trim dropped rows but committed 0 — expected a positive "
                 "conservative count.");
         } else {
@@ -249,7 +249,7 @@ static void render_smoke(const Model& m, int width) {
     maya::StylePool pool;
     maya::Canvas canvas(width, 600, &pool);
     canvas.clear();
-    maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
 }
 
 // ── One random walk ───────────────────────────────────────────────────────
@@ -328,8 +328,8 @@ static void run_walk(std::uint64_t seed, int width) {
         }
 
         // ── Pick a frozen-subsystem op ──
-        maya::Cmd<agentty::Msg> trim_cmd = maya::Cmd<agentty::Msg>::none();
-        const maya::Cmd<agentty::Msg>* trim_ptr = nullptr;
+        agentty::Cmd trim_cmd = agentty::Cmd::none();
+        const agentty::Cmd* trim_ptr = nullptr;
         std::size_t dropped_rows = 0;
 
         const int op = rng.below(7);
@@ -409,6 +409,8 @@ static void run_walk(std::uint64_t seed, int width) {
         if (g_failures) return;  // stop on first failure for a clean trace
     }
 }
+
+}  // namespace (fold)
 
 int main() {
     std::printf("frozen_invariant_fuzz\n");

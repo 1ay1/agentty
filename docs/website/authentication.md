@@ -1,0 +1,60 @@
+---
+title: Authentication
+description: OAuth, API keys, and the credential override order.
+nav_section: Getting Started
+nav_order: 40
+slug: authentication
+---
+
+agentty is **bring-your-own-model**: point it at any provider with an API key — Anthropic, OpenAI, DeepSeek, Google Gemini, xAI Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks — or a fully local Ollama model that needs no key at all. It also supports signing in with an existing subscription: Claude Pro/Max, ChatGPT Plus/Pro, GitHub Copilot, or **Kimi** — no API key needed. Pick whichever fits; they all flow through the same login path.
+
+## API key (recommended, zero ambiguity)
+
+Paste an `sk-ant-…` (or any provider's) key into the modal, or set the matching environment variable. Pay-as-you-go, unquestionably within each provider's terms, and the same key works headless/over SSH. Saved to `~/.agentty/credentials/credentials.json` at mode `0600` (move the folder with `AGENTTY_CREDENTIALS_DIR`). For a fully local, no-account setup, use [Ollama](/docs/providers) — no key, no network, nothing to authorize.
+
+## OAuth (Claude Pro/Max)
+
+If you'd rather use the Pro/Max plan you already pay for, agentty completes the **same OAuth flow and `CLAUDE_CODE_OAUTH_TOKEN` mechanism Claude Code uses**. On first launch the auth modal opens your browser; the callback writes the token to the same credentials file. No extra billing, same account. (It's a third-party client on subscription auth — see the [FAQ](/docs/faq) for the honest footing; if you want zero ambiguity, use an API key or Ollama above.)
+
+## OAuth (ChatGPT Plus/Pro)
+
+Choose **Sign in with ChatGPT** to use a ChatGPT subscription through agentty's native Codex provider. On a local terminal, the browser returns through `http://localhost:1455`. In an SSH session, agentty automatically uses OpenAI's device-code flow instead: open the displayed `auth.openai.com/codex/device` link on any device and enter the one-time code. No browser or callback port is required on the server.
+
+Device login must be enabled in your personal ChatGPT security settings or by your workspace administrator. To force device auth in an unusual headless terminal, set `AGENTTY_CHATGPT_DEVICE_AUTH=1`; set it to `0` to retain loopback login (for example when using `ssh -L 1455:localhost:1455`).
+
+## OAuth (GitHub Copilot)
+
+Choose **Sign in with GitHub Copilot** to use your Copilot subscription's models with no API key. It's GitHub's device flow: `agentty login` → GitHub Copilot shows a one-time code and opens `github.com/login/device`. agentty routes to the correct inference host for your plan (Individual / Business / Enterprise) automatically and refreshes the token mid-session.
+
+## OAuth (Kimi)
+
+Have a [Kimi](https://www.kimi.com) plan? Sign in with it and run agentty on Kimi's K2 models with **no API key**. It's the OAuth **device flow** (RFC 8628): `agentty login` → Kimi shows a one-time code and opens the Kimi authorization page. Over SSH, press [[c]] to copy the code (OSC 52 → your local clipboard) and paste it in any browser; agentty polls and switches on approval. The token is stored encrypted and refreshed automatically mid-session, and you can hold multiple Kimi accounts and switch in-app. Full walkthrough on [Providers & Models](/docs/providers#sign-in-with-kimi).
+
+## Override order
+
+Highest priority first:
+
+1. `-k <key>` / `--key <key>` — single-session, never written to disk.
+2. `ANTHROPIC_API_KEY` environment variable.
+3. `CLAUDE_CODE_OAUTH_TOKEN` environment variable.
+4. The on-disk credentials from the modal.
+
+## Other providers
+
+When you run with `--provider`, agentty reads that backend's key from its environment variable (e.g. `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`), falling back to `OPENAI_API_KEY`, or an explicit `-k` for the session. Ollama needs no key. A key entered in-app is saved per-provider so you only paste it once. See [Providers & Models](/docs/providers).
+
+## Non-interactive auth (over SSH)
+
+```bash
+agentty login     # ChatGPT / Copilot / Kimi print a device URL + one-time code
+agentty logout    # clear stored credentials
+agentty status    # show which auth source will be used
+```
+
+:::warn
+Every credential store is **sealed at rest** with AES-256-GCM bound to the machine, written atomically (temp + fsync + rename) at mode `0600`: `credentials.json` (the active token), `accounts.json` (every signed-in account), and `provider-keys.json` (one API key per provider and custom host).
+
+Provider keys used to rest in plaintext inside `settings.json` — a file people paste into bug reports and sync to dotfiles repos. As of 0.9.1 they live in the sealed vault instead, and an upgraded install migrates them on first load with no action from you.
+
+Sealing is machine-bound, so it protects a stolen file, not a compromised account: anything running as your user can still ask agentty to unseal. For a secret that survives that, add a passphrase (`AGENTTY_ENCRYPT_PASSPHRASE=1`) or the OS keystore (`AGENTTY_USE_KEYSTORE=1`).
+:::

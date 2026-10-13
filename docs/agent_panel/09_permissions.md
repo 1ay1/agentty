@@ -17,7 +17,7 @@ References:
   card render path) and `crates/agent_settings/...` for the
   always-allow store.
 - maya: `maya::widget::Permission` in
-  `maya/include/maya/widget/permission.hpp` — the bordered
+  `third_party/maya/include/maya/widget/permission.hpp` — the bordered
   amber-card primitive. Already implemented; this doc tells you how
   to embed it correctly.
 

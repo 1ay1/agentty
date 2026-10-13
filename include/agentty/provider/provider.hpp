@@ -9,6 +9,7 @@
 
 #include <concepts>
 #include <functional>
+#include <string_view>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,12 +70,11 @@ struct Request {
     http::CancelTokenPtr cancel;
 
     // 0-based count of prior failed attempts for THIS turn (the source
-    // ctx's transient_retries). Surfaced on the wire as
-    // x-stainless-retry-count, exactly like the Anthropic SDK / Zed
-    // increment it on each retry. Anthropic's edge reads it for routing
-    // and to avoid penalising retried traffic; a hard-coded "0" makes
-    // every retry look like a fresh first attempt and can land us on the
-    // same overloaded pop. Cheap to set correctly.
+    // ctx's transient_retries). Historically surfaced on the wire as
+    // x-stainless-retry-count — that header (part of the Anthropic JS SDK
+    // fingerprint) is NO LONGER sent, since agentty identifies as itself
+    // rather than impersonating the SDK/CLI. Retained for internal retry
+    // bookkeeping and available to any provider that wants it.
     int retry_count = 0;
 
     // Weak-model JSON-protocol mode (agent-zero style). Set by launch_stream
@@ -90,14 +90,95 @@ struct Request {
     // effort_wire_for). The Anthropic transport, when this is non-empty,
     // additionally enables adaptive thinking. Other transports ignore it.
     std::string effort;
+
+    // Whether the user wants the model's reasoning/thinking SHOWN (the global
+    // Settings.show_reasoning, ^R in the model picker). When true the Anthropic
+    // transport requests VISIBLE thinking (adds the interleaved-thinking beta,
+    // WITHOUT redact-thinking) so its thinking deltas reach the wire instead of
+    // being redacted. Other transports already stream their reasoning text
+    // unconditionally; this flag doesn't change their request — it only gates
+    // the DISPLAY, which the view handles. Off by default (dead-air-free wire).
+    bool show_reasoning = false;
+
+    // Stable host-conversation identity. Providers with native server-side
+    // threads (notably Codex app-server) use this to retain the provider
+    // thread instead of serialising the entire transcript into every prompt.
+    // Empty means the caller has no durable conversation identity.
+    std::string session_key;
 };
 
 using EventSink = std::function<void(Msg)>;
 
-// ── The contract every provider satisfies ──────────────────────────────────
+// ── Uniform request lowering ─────────────────────────────────────────────
+//
+// `provider::Request` is the SUPERSET request every adapter receives. Each
+// HTTP transport still has its own local `Request` (anthropic::Request,
+// openai::Request) carrying just the fields its wire needs. Historically each
+// adapter lowered provider::Request into its local one by hand, field by
+// field — and that is exactly how fields got silently dropped (openai copied
+// context_window; anthropic forgot session_key).
+//
+// `lower_shared` copies the fields EVERY transport shares, in one place, by
+// (member-of-dst = member-of-src) pairs guarded so a typo can't compile. An
+// adapter becomes: `lower_shared(treq, req);` then set the 1-2 fields unique
+// to that wire (endpoint, json_protocol). Add a shared field here once and
+// every transport inherits it — no adapter can forget it.
+//
+// `effort` is shared too: it's the model-agnostic reasoning tier (already
+// gated to "" by effort_wire_for when the model can't reason). Each wire
+// merely ENCODES it differently (Anthropic thinking.budget_tokens, OpenAI-Chat
+// reasoning_effort, Responses reasoning.effort) — the VALUE is single-source.
+// (The Responses transport reads req.effort straight off the abstract Request
+// and never calls lower_shared, so it isn't listed as a consumer here.)
+//
+// Templated on the destination so it works for any transport Request that
+// exposes the same-named members; the requires-clause makes a missing member a
+// crisp error at the call site instead of deep in instantiation.
+template <class TReq>
+    requires requires(TReq t, Request r) {
+        t.model = std::move(r.model);
+        t.system_prompt = std::move(r.system_prompt);
+        t.messages = std::move(r.messages);
+        t.tools = std::move(r.tools);
+        t.max_tokens = r.max_tokens;
+        t.auth = std::move(r.auth);
+        t.retry_count = r.retry_count;
+        t.effort = std::move(r.effort);
+    }
+void lower_shared(TReq& dst, Request& src) {
+    dst.model         = std::move(src.model);
+    dst.system_prompt = std::move(src.system_prompt);
+    dst.messages      = std::move(src.messages);
+    dst.tools         = std::move(src.tools);
+    dst.max_tokens    = src.max_tokens;
+    dst.auth          = std::move(src.auth);
+    dst.retry_count   = src.retry_count;
+    dst.effort        = std::move(src.effort);
+    // Optional field: only the Anthropic transport needs show_reasoning (to
+    // request VISIBLE thinking); other transports stream reasoning text
+    // unconditionally and don't declare it. Copy iff the destination has it,
+    // so this stays the ONE lowering site without forcing every wire's local
+    // Request to grow a field it ignores.
+    if constexpr (requires { dst.show_reasoning = src.show_reasoning; })
+        dst.show_reasoning = src.show_reasoning;
+}
+
+// How a streamed turn ended, as a value (defined in stream_epilogue.hpp, which
+// every transport already includes to end its turn). Forward-declared here so
+// the concept can name it without this header pulling the epilogue in.
+struct StreamResult;
+
+// ── The contract every provider satisfies ────────────────────────────
+// `stream` drives one turn: it pushes streamed Msgs through `sink` AND returns
+// a StreamResult naming how the turn ended. The two never disagree — the
+// terminal Msg is derived from the same classification as the return value.
+//
+// A turn runs on a worker that holds no lock, and it blocks (network,
+// subprocess, token refresh), so it is handed that worker's `unlocked`. The
+// type is what proves no caller streams from inside a lock body.
 template <class P>
-concept Provider = requires(P& p, Request req, EventSink sink) {
-    { p.stream(std::move(req), std::move(sink)) } -> std::same_as<void>;
+concept Provider = requires(P& p, const maya::unlocked& cap, Request req, EventSink sink) {
+    { p.stream(cap, std::move(req), std::move(sink)) } -> std::same_as<StreamResult>;
 };
 
 } // namespace agentty::provider

@@ -4,21 +4,35 @@
 // update.hpp. Lives under include/ rather than a private src/ header so the
 // three update/*.cpp files and update.cpp can all see the same declarations.
 
+#include <concepts>
 #include <cstddef>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include <maya/maya.hpp>
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>  // only json declarations here; full type lives in the .cpp
 
+#include "agentty/runtime/cmd.hpp"
 #include "agentty/runtime/model.hpp"
+#include "agentty/domain/entitlement.hpp"
 #include "agentty/runtime/msg.hpp"
 
 namespace agentty::app {
 
-using Step = std::pair<Model, maya::Cmd<Msg>>;
-inline Step done(Model m) { return {std::move(m), maya::Cmd<Msg>::none()}; }
+// A reducer step: the next model, and what should happen.
+//
+// This is still the OLD shape (return the model by value). jaal's is
+// `Cmd update(Model&, Leaf)` — mutate in place, return only the effect —
+// which deletes the 172 `return {std::move(m), ...}` sites and with them a
+// real hazard: `return {std::move(m), f(m)}` has unspecified evaluation
+// order and there is at least one of those in the tree today.
+//
+// Converting the signature is its own step (4 in docs/design/jaal-rewrite.md)
+// so a mechanical 23-file change never lands mixed with a behaviour change.
+// For now only the Cmd type moves to jaal's.
+using Step = std::pair<Model, Cmd>;
+inline Step done(Model m) { return {std::move(m), Cmd::none()}; }
 
 namespace detail {
 
@@ -59,9 +73,10 @@ inline constexpr int kSliceChunk = 8;
 
 // ── update_stream.cpp ────────────────────────────────────────────────────
 void update_stream_preview(ToolUse& tc);
-bool guard_truncated_tool_args(ToolUse& tc);
+bool guard_truncated_tool_args(ToolUse& tc,
+                               std::chrono::steady_clock::time_point now);
 nlohmann::json salvage_args(const ToolUse& tc);
-maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason = StopReason::Unspecified);
+Cmd finalize_turn(Model& m, StopReason stop_reason = StopReason::Unspecified);
 
 // Sync the persistent plan state (m.ui.todo.items) from a `todo` tool
 // call's args["todos"] array. Called live during arg streaming AND at
@@ -70,9 +85,54 @@ maya::Cmd<Msg> finalize_turn(Model& m, StopReason stop_reason = StopReason::Unsp
 // carries no todos array (partial early stream).
 void sync_todo_state_from_args(Model& m, const nlohmann::json& args);
 
-// ── update/modal.cpp helpers ─────────────────────────────────────────────
-Step           submit_message(Model m);
-void           persist_settings(const Model& m);
+// ── Saving settings ───────────────────────────────────────────────────────
+//
+// THE rule: `m.d.persisted` is the record. Saving is handing it over.
+//
+// agentty used to save settings two different ways, and they fought:
+//
+//   A. load-modify-save — `auto s = deps().load_settings(); s.x = ...;
+//      deps().save_settings(s);` — which wrote the store but left
+//      `m.d.persisted` stale.
+//   B. persist_settings(m), which seeds FROM `m.d.persisted`.
+//
+// Every A-style write was therefore live ammunition pointed at the next B:
+// toggle the changes strip (A), then change a theme or switch a model or
+// quit (B), and B wrote its stale record straight over A's change. That is
+// the "settings don't persist" bug — the write lands, then an unrelated
+// save silently reverts it.
+//
+// The fix is to delete the A shape rather than to ask ~20 call sites to
+// remember to also patch the record. Edit the field on `m.d.persisted`,
+// then call this:
+//
+//     m.d.persisted.show_changes_strip = m.d.show_changes_strip;
+//     save_record(m);
+//
+// so there is exactly one snapshot in play and nothing to keep in sync.
+// Still write-behind at the seam, so a reducer never stalls a frame on disk.
+//
+// (This is the shape jaal wants the reducer to have. Once `update` returns
+// `Cmd` instead of a pair, the body becomes
+// `return Cmd::fx<save_settings>({m.d.persisted})` and the seam goes away
+// entirely — see docs/design/jaal-rewrite.md. Routing every writer through
+// one function now is what makes that a mechanical change later, instead of
+// 20 separate ones.)
+[[nodiscard]] Cmd save_record(Model& m);
+
+// `provider_keys` is also written by the credential layer on the host
+// (AccountOp: add_key, account activate/remove, clear_active). Every such
+// effect is batched with LoadAuthView, whose reply (AuthViewLoaded) copies
+// the vault's keys back into m.d.persisted, so the record never goes stale
+// and a whole-record save can't drop a key.
+
+// ── update/submit.cpp helpers ─────────────────────────────────────────────
+Cmd            submit_message(Model& m);
+// Sync the settings fields that still live as SEPARATE Domain members
+// (model_id, effort, profile, smart, the active provider) into
+// `m.d.persisted`, then save the record. Use this when one of THOSE changed;
+// use save_record() when you edited `m.d.persisted` directly.
+[[nodiscard]] Cmd persist_settings(Model& m);
 
 // Clear ALL transient composer draft state (text, cursor, attachments,
 // undo/redo, history walk, queued messages, queue-peek/draft snapshots).
@@ -87,14 +147,72 @@ void           reset_composer_draft(ComposerState& c);
 // Canonical id of the currently-active provider ("anthropic" for the
 // Claude path, else the OpenAI endpoint label — "openai" / "ollama" / …).
 // Used to key per-provider model recall in Settings::provider_models.
-std::string    active_provider_id();
+// The active provider's catalog id — the key every recents / fused-catalog /
+// capability row is filed under: Anthropic's default id, else the
+// OpenAI-family endpoint label, else the ACP agent id.
+//
+// A function of the MODEL's selection. It used to read the process global
+// (provider::active()), so a reducer asking "which provider" got whatever
+// the global said — which, mid-switch, could be the provider being left.
+std::string    active_provider_id(const Model& m);
+
+// ── Entitlement (ACCOUNT-scoped facts) ──────────────────────────────────
+//
+// The ONE place (provider, account) is resolved for an entitlement lookup,
+// so no call site re-derives it and none can accidentally key by provider
+// alone — which is precisely what the legacy account-blind
+// `context_1m_blocked` bool did. See include/agentty/domain/entitlement.hpp
+// for why this layer exists at all.
+//
+// `is_blocked` reads the keyed store for the CURRENTLY ACTIVE account of
+// `provider` (pass active_provider_id(m) for the active one). `record_blocked`
+// learns a rejection and persists it; it returns true when the fact was
+// new, so callers can skip a redundant settings write.
+[[nodiscard]] bool entitlement_blocked(const store::Settings& s,
+                                       const auth::AuthView& accounts,
+                                       domain::entitlement::Fact f,
+                                       std::string_view provider,
+                                       std::string_view model_id = {});
+bool entitlement_record_blocked(store::Settings& s,
+                                const auth::AuthView& accounts,
+                                domain::entitlement::Fact f,
+                                std::string_view provider,
+                                std::string_view model_id = {});
 
 // Pick the model to make active when switching TO provider `spec`. Prefers
 // the model last used on that provider (Settings::provider_models), else a
 // sane built-in default for the provider kind. Returns empty when no recall
 // exists and the provider has no hardcoded default (the model list refetch
 // will then auto-select the first available model).
-std::string    model_for_provider(std::string_view spec);
+// Takes the settings RECORD rather than reading the store: the Model
+// already holds it, and a reducer that re-reads the seam is how the two
+// copies drifted apart. See save_record above.
+std::string    model_for_provider(const store::Settings& s,
+                                  std::string_view spec);
+
+// Commit a live provider switch — the ONE place the full sequence lives, so
+// the three entry points (provider picker, custom-host modal, api-key modal)
+// can never drift. Given the already-resolved destination `spec` and the
+// already-resolved `new_auth` for it, this:
+//   1. files the OUTGOING model under its canonical provider id (recall),
+//   2. installs + persists the new Selection (provider + effort + keys via
+//      persist_settings, so effort is never dropped on a hop),
+//   3. makes a valid model active for the new backend (recall → built-in
+//      default → empty for auto-select), updating context_max + subagent,
+//   4. RE-CLAMPS Model::effort to the new model's capabilities so a stale
+//      Xhigh/high tier can't ride onto a model that doesn't support it,
+//   5. swaps the Deps auth, clears the stale model list, and returns the
+//      Cmd batch (status toast + model refetch) for the caller to return.
+// `label` is the human name for the confirmation toast.
+// `desired_model` (optional): when non-empty, the exact wire model id to make
+// active on the new provider, taking priority over the per-provider recall —
+// this is what the fused cross-provider picker passes so an Enter is an ATOMIC
+// provider+model switch. Empty (every existing caller) keeps the recall path.
+[[nodiscard]] Cmd
+commit_provider_switch(Model& m, std::string_view spec,
+                       std::string_view label,
+                       std::string_view desired_model = {},
+                       bool open_panel = true);
 
 // ── Frozen-scrollback prefix helpers (frozen.cpp) ────────────────────────
 //
@@ -134,11 +252,52 @@ void rehydrate_frozen(Model& m);
 // For NewThread before a fresh-start submit.
 void clear_frozen(Model& m);
 
+// restyle_sealed_turns: re-publish the theme, drop built colours, and
+// rebuild the frozen prefix so EVERYTHING ON SCREEN carries the new
+// scheme. Runs on every arrow key in the theme browser, which is what
+// makes its cost load-bearing — the frozen ledger is bounded to ~3
+// viewports (frozen_row_budget), so it is O(visible rows), not
+// O(transcript). External linkage so theme_preview_cost_probe can time
+// it as a regression test.
+void restyle_sealed_turns(Model& m);
+
+// The two row budgets, and why they are two numbers.
+//
+// frozen_row_budget  the LIVE canvas: what stays in m.ui.frozen for
+//                    re-rendering. Every resize and Ctrl-L walks it top
+//                    to bottom and the user watches that paint, so it is
+//                    bounded to ~3 viewports.
+// rehydrate_row_budget  what a RESUME paints, ~10 viewports. The excess
+//                    over the live budget is not wasted: the post-paint
+//                    trim commits it to the terminal's native scrollback
+//                    (drop_front accrues ScrollbackDebt, harvest() mints
+//                    the commit token), which is what makes a resumed
+//                    thread's history scrollable at all.
+//
+// These were one number. On a thread switch that left the user with one
+// turn of context and nothing above it: nothing had overflowed live, so
+// nothing was in native scrollback, and reset_inline()'s \x1b[3J had just
+// wiped whatever was. Exported so rehydrate_scrollback_test can pin the
+// relationship at a fixed row count.
+// The Model overloads read the terminal size the host last reported
+// (Model::ui.term_rows); the int ones take it explicitly, for tests.
+[[nodiscard]] std::size_t frozen_row_budget(int term_rows);
+[[nodiscard]] std::size_t frozen_row_budget(const Model& m);
+[[nodiscard]] std::size_t rehydrate_row_budget(int term_rows);
+[[nodiscard]] std::size_t rehydrate_row_budget(const Model& m);
+
 // Settle one Assistant message's StreamingMarkdown widget: feed the
 // final bytes, finish() (flush tail → prefix, flip live_ off), apply the
 // same auto-fold preset cached_markdown_for uses, and stamp the cache
 // sizes so the per-frame settled fast-path engages. Defined in stream.cpp.
 void settle_message_md(Model& m, const Message& msg);
+
+// Remote-session detection and the end-of-turn reveal-glide policy are
+// LAUNCH FACTS, captured once by init() into Model::env
+// (runtime/app/env.cpp): read m.env.remote and m.env.reveal_end_glide().
+// They were free functions here, getenv calls behind function-local
+// statics, which made every reducer that asked a function of the process
+// rather than of the Model.
 
 // live_tail_reveal_settled: true iff EVERY Assistant message in the live
 // tail [frozen_through..end) has fully drained its reveal animation — the
@@ -165,9 +324,9 @@ bool live_tail_reveal_settled(const Model& m);
 
 // trim_frozen_if_oversized: when frozen exceeds a soft cap, drop the
 // oldest N blocks to keep maya's prev_cells working set bounded.
-// Returns Cmd::commit_scrollback(ScrollbackDebt) minted by the ledger
+// Returns cmd::commit_scrollback(ScrollbackDebt) minted by the ledger
 // from maya's own paint-recorded heights. No-op if under the cap.
-maya::Cmd<Msg> trim_frozen_if_oversized(Model& m);
+Cmd trim_frozen_if_oversized(Model& m);
 
 // Set a transient status toast that auto-clears after `ttl`. Returns a
 // Cmd that schedules the ClearStatus sentinel (stamp-matched so a newer
@@ -175,16 +334,38 @@ maya::Cmd<Msg> trim_frozen_if_oversized(Model& m);
 // "no pending changes" / "nothing to copy" — anywhere the alternative
 // is silent failure that leaves the user wondering if their keystroke
 // even registered.
-maya::Cmd<Msg> set_status_toast(Model& m, std::string text,
+Cmd set_status_toast(Model& m, std::string text,
                                 std::chrono::seconds ttl = std::chrono::seconds{3});
 
 // ── update/stream.cpp helpers ────────────────────────────────────────────
 // (declared at module scope above — `update_stream_preview`, `salvage_args`,
 // `finalize_turn`. The stream_update reducer below uses them.)
 
+// The resolved context window for the model this Model is pointed at.
+//
+// ONE place that assembles the three inputs resolve_context_window layers
+// (user override, advertised window, id inference). Four call sites used to
+// open-code "context_max_for_model, then scan available_models and overwrite
+// if a probe reported something" — which had no override step at all, and
+// would have needed the same fix four times.
+[[nodiscard]] int resolved_context_max(const Model& m,
+                                       std::string_view provider_id);
+
+// Rebuild the open Ctrl+O snapshot from current live tool state. Called by
+// both argument-stream and execution reducers; no-op while the viewer is closed.
+void resync_live_tool_viewer(Model& m);
+// Snapshot every finished/streaming tool call into viewer entries — used by
+// the panel's Open arm (update/tool_output.cpp) and by resync above.
+// Defined in tool.cpp beside the execution state it reads.
+[[nodiscard]] std::vector<tool_output::Entry> collect_viewer_entries(const Model& m);
+
 // ── update/tool.cpp helpers ──────────────────────────────────────────────
 void apply_tool_output(Model& m, const ToolCallId& id,
-                       std::expected<std::string, tools::ToolError>&& result);
+                       std::expected<std::string, tools::ToolError>&& result,
+                       std::optional<FileChange>&& change = std::nullopt,
+                       std::vector<FileChange>&& changes = {},
+                       std::vector<ImageContent>&& images = {},
+                       std::uint64_t exec_seq = 0);
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason);
 
@@ -193,8 +374,8 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
 // `m.ui.frozen` is an append-only vector of fully-built Element
 // snapshots; their `hash_id` is stamped at freeze time and never
 // recomputed, so any post-freeze mutation of the underlying ToolUse
-// is invisible until thread switch / rehydrate. The five mutation
-// sites that locate a tool by ToolCallId (ToggleToolExpanded,
+// is invisible until thread switch / rehydrate. The mutation
+// sites that locate a tool by ToolCallId (
 // ToolExecOutput / apply_tool_output, ToolExecProgress, ToolTimeoutCheck,
 // PermissionReject / mark_tool_rejected) must therefore refuse to touch
 // any tool whose enclosing message has index < frozen_through.
@@ -204,18 +385,72 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
 // mutation ran. A stale id (tool whose turn was already frozen) returns
 // false — caller treats it as a no-op, matching the existing
 // "idempotent on terminal" behaviour of apply_tool_output.
+//
+// Duplicate ids: a ToolCallId is supposed to be unique, but providers
+// break that (see the `uniquify` guard in update/stream.cpp) and the
+// live tail routinely holds SEVERAL assistant messages within one turn
+// — kick_pending_tools appends a fresh placeholder per sub-turn. When
+// two calls share an id, matching the first one found routes the second
+// tool's result onto the first tool's already-terminal card, where
+// apply_tool_output drops it as a late duplicate: the tool really ran,
+// its output vanished, and the card stayed Running until the 330 s
+// wedge net failed it. So prefer the first NON-terminal match and only
+// fall back to a terminal one when no live call carries the id. Every
+// caller wants this: the four exec/permission sites bail on terminal
+// anyway, so the first NON-terminal match is always the better guess.
+// The callback is invoked as `f(ToolUse&)`. `ToolMutator` pins that shape so a
+// wrong-signature lambda is a clean concept error at the call site, not a
+// template-depth error inside the loop.
 template <class F>
+concept ToolMutator = std::invocable<F&, ToolUse&>;
+
+template <ToolMutator F>
 bool with_live_tool(Model& m, const ToolCallId& id, F&& f) {
+    ToolUse* settled = nullptr;   // first terminal match — fallback only
     for (std::size_t i = m.ui.frozen_through;
          i < m.d.current.messages.size(); ++i) {
         for (auto& tc : m.d.current.messages[i].tool_calls) {
-            if (tc.id == id) {
+            if (tc.id != id) continue;
+            if (!tc.is_terminal()) {
                 std::forward<F>(f)(tc);
                 return true;
             }
+            if (!settled) settled = &tc;
         }
     }
+    if (settled) {
+        std::forward<F>(f)(*settled);
+        return true;
+    }
     return false;
+}
+
+// Route a worker's message to the exact execution that sent it. `seq` is
+// the Running::exec_seq the worker was started with. A tagged message
+// whose execution is no longer Running came from a worker whose call was
+// cancelled or settled; the id may since belong to a NEW call (ids are not
+// unique across turns), so it is dropped whole. Returns false when dropped.
+// seq 0 = untagged: falls back to id routing (with_live_tool).
+template <ToolMutator F>
+bool with_exec_tool(Model& m, const ToolCallId& id, std::uint64_t seq,
+                    F&& f) {
+    if (seq == 0) return with_live_tool(m, id, std::forward<F>(f));
+    for (std::size_t i = m.ui.frozen_through;
+         i < m.d.current.messages.size(); ++i)
+        for (auto& tc : m.d.current.messages[i].tool_calls)
+            if (tc.id == id)
+                if (auto* r = std::get_if<ToolUse::Running>(&tc.status);
+                    r && r->exec_seq == seq) {
+                    std::forward<F>(f)(tc);
+                    return true;
+                }
+    return false;
+}
+
+[[nodiscard]] inline bool tool_exec_is_current(Model& m,
+                                               const ToolCallId& id,
+                                               std::uint64_t seq) {
+    return with_exec_tool(m, id, seq, [](ToolUse&) {});
 }
 
 // ── Per-domain reducers ──────────────────────────────────────────────────
@@ -224,20 +459,126 @@ bool with_live_tool(Model& m, const ToolCallId& id, F&& f) {
 // its domain variant, instantiated in its own TU. Adding a leaf to one
 // domain only recompiles that domain's TU plus msg.hpp's downstream
 // includers — not the other nine reducers.
-Step composer_update      (Model m, msg::ComposerMsg       cm);
-Step stream_update        (Model m, msg::StreamMsg         sm);
-Step tool_update          (Model m, msg::ToolMsg           tm);
-Step model_picker_update  (Model m, msg::ModelPickerMsg    pm);
-Step provider_picker_update(Model m, msg::ProviderPickerMsg pm);
-Step thread_list_update   (Model m, msg::ThreadListMsg     tm);
-Step palette_update       (Model m, msg::CommandPaletteMsg pm);
-Step mention_update       (Model m, msg::MentionPaletteMsg mm);
-Step symbol_update        (Model m, msg::SymbolPaletteMsg  sm);
-Step codeblock_update     (Model m, msg::CodeBlockMsg      cm);
-Step todo_update          (Model m, msg::TodoMsg           tm);
-Step login_update         (Model m, msg::LoginMsg          lm);
-Step diff_review_update   (Model m, msg::DiffReviewMsg     dm);
-Step meta_update          (Model m, msg::MetaMsg           mm);
+//
+// TWO SHAPES, during the conversion:
+//
+//   Cmd  f(Model& m, DomainMsg)   ← jaal's, what everything is becoming
+//   Step f(Model  m, DomainMsg)   ← the old pair-returning one
+//
+// update.cpp dispatches to either (it detects the shape), so a domain can
+// move on its own without a 286-site flag day. The pair form is what keeps
+// `deps()` alive: a reducer that returns its model can't also describe its
+// effects as values, so it reaches for the seam instead. Converting a
+// domain is what makes its effects expressible — see docs/design/jaal-rewrite.md.
+//
+// Converted so far: all 23.
+//
+// TEST SHIM. Tests reach past `update(Model, Msg)` and call a domain reducer
+// directly, usually chaining `.first` into the next call. Rewriting ~35 such
+// sites to the in-place form would be churn that tests nothing, so `step()`
+// adapts a converted reducer back to a pair:
+//
+//     auto s = step(detail::tool_update, std::move(m), msg);
+//     //   s.first  == the new model
+//     //   s.second == the Cmd
+//
+// It is the same adapter update.cpp uses, pointed the other way. Nothing in
+// src/ calls it.
+template <class R, class... A>
+[[nodiscard]] inline std::pair<Model, Cmd> step(R reducer, Model m, A&&... a) {
+    Cmd cmd = reducer(m, std::forward<A>(a)...);
+    return {std::move(m), std::move(cmd)};
+}
+
+Cmd  composer_update      (Model& m, msg::ComposerMsg       cm);
+Cmd  stream_update        (Model& m, msg::StreamMsg         sm);
+Cmd  tool_update          (Model& m, msg::ToolMsg           tm);
+Cmd  tool_output_update   (Model& m, msg::ToolOutputMsg     tm);
+Cmd  providers_update(Model& m, msg::ProvidersMsg pm);
+Cmd  models_update  (Model& m, msg::ModelsMsg     pm);
+// Shared fused-row builder (SSOT for reducer + view): enumerates authed
+// providers into catalogs (+ un-authed sign-in offers), applies the current
+// fused_picker query, and returns the ordered/sectioned FusedRow list. The
+// view renders it and derives the visual cursor; the reducer selects from it.
+[[nodiscard]] std::vector<FusedRow> fused_rows_for_model(const Model& m);
+Cmd  thread_list_update   (Model& m, msg::ThreadListMsg     tm);
+Cmd  palette_update       (Model& m, msg::PaletteMsg pm);
+Cmd  mention_update       (Model& m, msg::MentionMsg mm);
+Cmd  symbol_update        (Model& m, msg::SymbolMsg  sm);
+Cmd  codeblock_update     (Model& m, msg::CodeBlockMsg      cm);
+Cmd  checkpoint_update    (Model& m, msg::CheckpointMsg     cm);
+Cmd  rag_settings_update  (Model& m, msg::RagMsg    rm);
+Cmd  stats_update         (Model& m, msg::StatsMsg  sm);
+Cmd  settings_list_update (Model& m, msg::SettingsListMsg   sm);
+Cmd  fork_update          (Model& m, msg::ForkMsg           fm);
+Cmd  todo_update          (Model& m, msg::TodoMsg           tm);
+Cmd  login_update         (Model& m, msg::LoginMsg          lm);
+Cmd  diff_review_update   (Model& m, msg::DiffReviewMsg     dm);
+Cmd  smart_mode_update    (Model& m, msg::SmartModeMsg      sm);
+Cmd  web_search_update    (Model& m, msg::WebSearchMsg      wm);
+Cmd  plugin_edit_update   (Model& m, msg::PluginEditMsg     pm);
+// The edit pane's half of a PluginEdited reply (its writes are cmd::
+// edit_plugin effects). settings_list owns the leaf and routes EditPane
+// replies here. Defined in plugin_edit.cpp.
+Cmd  plugin_edit_result   (Model& m, PluginEdited e);
+Cmd  appearance_update    (Model& m, msg::AppearanceMsg     am);
+Cmd  sandbox_update       (Model& m, msg::SandboxMsg        sm);
+Cmd  meta_update          (Model& m, msg::MetaMsg           mm);
+
+// ── Esc: back one level ───────────────────────────────────────────────
+//
+// Restore the panel this one was opened over (its FULL state — query,
+// cursor, nested parent), then REVALIDATE it against the live model: the
+// model may have changed while the child was open, so a restored cursor
+// can point past the end of a now-shorter filtered list. Closes outright
+// when there is no parent (opened over the thread).
+//
+// ONE function because per-pane copies is how this drifted before: each
+// close handler hardcoded a destination that was right for one entry
+// point and wrong for the others. Navigation is a STACK, not a trapdoor —
+// Esc walks back the way you came in.
+void ascend(Model& m);
+
+// Build the Smart Mode pane from the live model + catalogue (meta.cpp).
+// Shared with picker.cpp, which reopens the pane after a slot assignment —
+// one builder means the reopened pane cannot differ from the original.
+[[nodiscard]] form::Form build_smart_form(const Model& m, bool advanced = false);
+
+// ── THE Smart Mode config entry point ───────────────────────────────
+//
+// Install `cfg` everywhere Smart Mode is read. There are THREE holders, and
+// this is the only place that knows all of them:
+//
+//   1. store::Settings   — persistence, so it survives restart
+//   2. Model::Domain     — the UI thread; the classifier reads it per turn
+//   3. tools::subagent   — a worker-thread copy, because `task` runs with no
+//                          access to the Model at all
+//
+// That fan-out is what made this feature hard. It used to be open-coded at
+// each call site, and every bug in the series was a site that did one or two
+// of the three: saved but never applied (took effect only after restart),
+// applied but never pushed to subagents (workers routed on stale policy).
+// A caller cannot forget a step it does not perform.
+//
+// Persists as a side effect: "change the config" and "write it down" are the
+// same intent, and splitting them is another pair of steps to get wrong.
+// Returns the save so the caller can batch it — the write is an effect now,
+// not something that happens inside the reducer.
+[[nodiscard]] Cmd apply_smart(Model& m, smart::RoleConfig cfg);
+
+// ── Row estimation (frozen.cpp) ──────────────────────────────────────────
+//
+// Predicted RENDERED height of a message, in terminal rows, at `cols`.
+// Feeds rehydrate_frozen's keep-loop, which walks newest-first summing
+// these until it has covered a row budget. The estimate must never exceed
+// the real rendered height: an over-count makes the loop believe it has
+// covered the budget early and stop, keeping LESS history than intended,
+// and for tools whose renderer elides output the gap can be arbitrarily
+// large (a 500-line diff drawn as 7 rows). Under-counting is safe.
+//
+// Exported solely so tests can pin that estimate-vs-render contract per
+// tool; nothing outside frozen.cpp calls it in production.
+std::size_t estimate_msg_rows(const Message& mm, int cols);
 
 } // namespace detail
 } // namespace agentty::app

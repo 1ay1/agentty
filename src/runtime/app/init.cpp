@@ -1,26 +1,69 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/env.hpp"
+#include "agentty/mcp/client.hpp"   // mcp_config_present()
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/auth/auth.hpp"
+#include "agentty/domain/catalog.hpp"
+#include "agentty/domain/bundled_catalog.hpp"
 #include "agentty/provider/selection.hpp"
+#include "agentty/provider/auth_state.hpp"
+#include "agentty/provider/chatgpt/responses.hpp"
+#include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/provider/kimi/kimi_oauth.hpp"
+#include "agentty/provider/openai/transport.hpp"
+#include "agentty/workspace/files.hpp"
+#include "agentty/workspace/checkpoint.hpp"
+#include "agentty/tool/registry.hpp"   // tools::registry (warm at startup)
+#include "agentty/workspace/symbols.hpp"
+#include "agentty/io/blob_gc.hpp"
+#include "agentty/util/modelsdev.hpp"
+#include "agentty/util/dbglog.hpp"
+#include "agentty/util/logx.hpp"
+#include "agentty/tool/mcp_tools_backends.hpp"   // rag_embed_status: warm retriever off-thread
+#include "agentty/tool/subagent.hpp"   // set_smart: push pins to the task router
 
+#include <cstdlib>
 #include <vector>
 
 namespace agentty::app {
 
 namespace {
 std::vector<ModelInfo> seed_models() {
-    return {
-        {ModelId{"claude-opus-4-5"},   "Claude Opus 4.5",   "anthropic", 200000, true},
-        {ModelId{"claude-sonnet-4-5"}, "Claude Sonnet 4.5", "anthropic", 200000, true},
-        {ModelId{"claude-haiku-4-5"},  "Claude Haiku 4.5",  "anthropic", 200000, false},
-    };
+    // The launch floor is the single bundled catalog (base rows + their `[1m]`
+    // companions), so the picker is full IMMEDIATELY on launch — not only
+    // after the first /models fetch (which the live catalog supersedes
+    // anyway). One source shared with the transport fallback, so seed and
+    // live catalog can't drift. Entitlement self-heals downstream
+    // (context_1m_blocked strips the [1m] rows if the account can't stream 1M).
+    return catalog::bundled("anthropic");
 }
 } // namespace
 
-std::pair<Model, maya::Cmd<Msg>> init() {
+std::pair<Model, Cmd> init() {
     Model m;
+    // The launch environment, captured once. Every reducer reads m.env;
+    // none calls getenv (enforced by the elm_purity lint).
+    // init() is the host's one launch read: env, settings, credentials.
+    const Io io = IoAccess::grant();
+    m.env = read_launch_env(io);
+    // Anchor the calendar to the steady clock, once. Every fold derives its
+    // wall time (Model::wall_now) from this pair and the step time jaal
+    // hands it, so no reducer reads system_clock. init() runs before the
+    // first fold, and is itself the one place allowed to read clocks: it is
+    // the program's input from the outside world, the same as reading env.
+    m.steady_epoch = std::chrono::steady_clock::now();
+    m.wall_epoch   = std::chrono::system_clock::now();
+    m.now          = m.steady_epoch;
+    // A custom --provider spec main() parked for persist-on-success. Read once
+    // here; from now on the Model owns it.
+    m.ui.unproven_spec = provider::take_unproven_spec_at_launch(io);
+    // The active provider. main() parsed the launch spec and installed it in
+    // the process global before handing the program to jaal; this is the one
+    // read of that global the Model makes. From here on the Model owns it and
+    // the seam publishes it back (update.cpp, publish_derived).
+    m.d.selection = provider::active();
     // Seed the composer idle-blink clock at launch so the 15 s
     // blink-stop countdown starts now, not on the first keystroke. A
     // freshly-opened, never-touched agentty is exactly the idle-CPU case
@@ -36,7 +79,73 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     m.s.threads_loading  = true;
     m.d.available_models = seed_models();
 
-    auto settings = deps().load_settings();
+    auto settings = deps(io).load_settings();
+    // Credential state outside the record (token files, env, accounts),
+    // read once here like the launch env; later changes arrive as
+    // AuthViewLoaded.
+    m.d.auth = provider::load_auth_view(io, settings);
+
+    // Bake the seeded rows through the SAME ladder the refresh path uses.
+    //
+    // seed_models() returns the bundled catalog's raw figures, and it runs
+    // before settings exist — so a user who pinned a context window for a
+    // model got their pin ignored on every row until the first provider
+    // refresh. Until then the picker's ctx column and the status bar
+    // disagreed about the same model, which is exactly the contradiction
+    // bake_context_window() was introduced to end (PR #39). The refresh
+    // path bakes; the seed path did not, so the invariant held everywhere
+    // except the state you actually start in.
+    //
+    // Cheap: a handful of bundled rows, once, at startup.
+    for (auto& mi : m.d.available_models)
+        ui::bake_context_window(mi, detail::active_provider_id(m), settings,
+                                m.env.max_context_tokens);
+    // ONE-TIME MIGRATION: the legacy account-blind `context_1m_blocked`
+    // bool becomes a keyed fact for the CURRENTLY ACTIVE account. That is
+    // the best available attribution — the bool never recorded whose block
+    // it was, and the active account is who it was last observed under.
+    // Attributing it (rather than dropping it) preserves the user's learned
+    // state across the upgrade; the next save drops the bool for good.
+    bool migrated_1m = false;
+    if (settings.context_1m_blocked) {
+        settings.context_1m_blocked = false;
+        migrated_1m = detail::entitlement_record_blocked(
+                settings, m.d.auth, domain::entitlement::Fact::Context1M, "anthropic",
+                wire_model_id(settings.model_id.value));
+    }
+    // DISCOVERED entitlement: this account 400'd on the context-1m beta in a
+    // prior session. Strip the seeded `[1m]` rows up front so the picker
+    // doesn't briefly offer them before the first live ModelsLoaded fetch
+    // (which also filters) — selecting one would just re-trigger the fallback.
+    if (!m.d.available_models.empty()) {
+        std::erase_if(m.d.available_models, [&](const ModelInfo& mi) {
+            return mi.id.value.find("[1m]") != std::string::npos
+                && detail::entitlement_blocked(settings, m.d.auth,
+                                       domain::entitlement::Fact::Context1M,
+                                       detail::active_provider_id(m),
+                                       wire_model_id(mi.id.value));
+        });
+    }
+    // DISCOVERED entitlement: this account 400'd on the context-1m beta in a
+    // prior session. A persisted `[1m]` model id would re-send the beta on
+    // the very first turn and dead-end again — strip the marker up front.
+    if (settings.model_id.value.find("[1m]") != std::string::npos
+        && detail::entitlement_blocked(settings, m.d.auth,
+                               domain::entitlement::Fact::Context1M,
+                               detail::active_provider_id(m),
+                               wire_model_id(settings.model_id.value)))
+        settings.model_id = ModelId{wire_model_id(settings.model_id.value)};
+
+    // Seat the WHOLE record, after the two fixups above have corrected it
+    // (the 1M-entitlement clear and the [1m] marker strip) and before the
+    // code below derives the scattered members from it.
+    //
+    // `m.d.persisted` is the source of truth a reducer hands to the save
+    // effect. Anything init() reads out of `settings` but never copies into
+    // the Model would be silently dropped by the next save, so the record
+    // is assigned ONCE, whole, rather than field by field: a preference
+    // nobody has migrated yet still round-trips.
+    m.d.persisted = settings;
     if (!settings.model_id.empty()) {
         // Guard against a cross-provider model id collision. A persisted
         // model id belongs to whatever provider was active when it was
@@ -49,7 +158,7 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         // self-corrects via the eager fetch_models() round trip below,
         // so it keeps the saved id and lets ModelsLoaded validate it.
         const bool anthropic_active =
-            provider::active().kind == provider::Kind::Anthropic;
+            m.d.selection.kind == provider::Kind::Anthropic;
         bool honour = true;
         if (anthropic_active) {
             // Honour the saved id if it's a known seeded model OR any
@@ -87,19 +196,116 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // the user's first message lands.
     m.s.context_max = ui::context_max_for_model(m.d.model_id.value);
     m.d.profile = settings.profile;
+    // Appearance needs no line here: `m.d.ui()` IS `m.d.persisted.ui`, seated
+    // with the whole record above. The view resolves it against
+    // m.env.terminal every frame.
     m.d.effort  = effort_from_wire(settings.effort);
-    m.d.review_enabled = settings.review_enabled;
+    // Publish the user's per-model reasoning-effort overrides into the catalog
+    // registry so resolved_caps() (and thus supports_effort / the picker /
+    // the wire) honor them from frame 1. Mirrors set_custom_auth_header.
+    set_reasoning_overrides(settings.reasoning_effort_overrides);
+    // Hydrate the LEARNED effort sets (exact per-model reasoning_effort
+    // contracts discovered from provider rejections in past sessions) so the
+    // ladder / clamps / wire are correct from frame 1 — the reject→learn→
+    // retry loop only ever pays its one-time cost once per model, ever.
+    set_learned_effort_sets(settings.learned_effort_sets);
+    // Same for optional body fields a host 400'd (#93): a strict host pays
+    // the reject→learn→retry round-trip once, ever, not once per launch.
+    set_rejected_fields(settings.rejected_fields);
+
+    // Smart Mode: the persisted config IS the runtime config — one type, no
+    // mapping. Everything the old rehydration did by hand (three slots × three
+    // fields, then the numeric policy, then a push to the subagent router) is
+    // either already in the struct or done by apply_smart's fan-out.
+    m.d.smart = settings.smart;
+    // Session pin: AGENTTY_SMART_MODE overrides the persisted master switch
+    // for THIS process (scripted runs, benchmarks, bisecting).
+    // persist_settings skips the field while pinned, so the user's saved
+    // preference survives the session untouched.
+    if (m.env.settings.smart_enabled)
+        m.d.smart.enabled = *m.env.settings.smart_enabled;
+    // `agentty --model X` binds every role interactively too: without this,
+    // compaction routed away from the model the user named (#70).
+    m.d.smart.pinned_model = smart::tuning::model_pinned();
+    // Env overrides for the numeric policy, resolved once here so the
+    // classifier reads a plain int rather than calling getenv() per turn.
+    settings::registry::apply_env(m.d.smart, m.env.settings);
+
+    // Push the rehydrated config down to the subagent router NOW.
+    //
+    // `task` runs on a worker thread with no access to this Model, so the
+    // router keeps its own process-global snapshot (tools::subagent::Config::
+    // smart). main() installs that config before settings are read, with a
+    // DEFAULT-CONSTRUCTED RoleConfig — enabled=false, no slots. Until
+    // something pushes the real one down, every delegation resolves as if
+    // Smart Mode were off, silently ignoring the user's pins.
+    //
+    // Unconditional here: the paths that used to do it were both conditional,
+    // so a user with pins from a previous session whose catalog fetch failed
+    // delegated on the auto-router's pick instead.
+    tools::subagent::set_smart(io, m.d.smart);
+    // The provider those pins are scoped to. Without it a pin rehydrated from
+    // settings would be honoured under whatever provider happens to be active
+    // at launch, which is exactly the cross-provider dispatch the scoping is
+    // there to prevent.
+    tools::subagent::set_provider(io, detail::active_provider_id(m));
+    // Same reasoning for the candidate pool the auto-router ranks over: it is
+    // otherwise only ever set from the ModelsLoaded arm, so a failed fetch
+    // left workers ranking over an EMPTY list. Seed it with what we have now
+    // (the bundled/seeded catalog); ModelsLoaded refreshes it on success.
+    tools::subagent::set_candidates(io, m.d.available_models);
+    // …and the PARENT model, for the same reason. main() installs whatever
+    // settings.json held, but the cross-provider guard above can REJECT that
+    // id (a leftover "qwen2.5-coder:7b" relaunched on Anthropic) and fall back
+    // to the seed default. Without this the snapshot keeps the rejected id, so
+    // a write-role worker — which inherits the parent model — dispatches the
+    // exact id the UI just refused to use. init() is the single source of
+    // truth for the resolved model; make the router agree with it.
+    tools::subagent::set_model(io, m.d.model_id.value);
+    // Review UI: whether the persistent changes strip renders after edits.
+    m.d.show_changes_strip = settings.show_changes_strip;
+    m.d.show_reasoning     = settings.show_reasoning;
     // Rehydrate persisted "always allow" tool grants (Zed's always_allow
     // rules). PermissionApproveAlways appends to this list; loading it here
     // means a grant given last week still suppresses the prompt today.
-    for (const auto& g : settings.always_allow_tools)
-        m.d.session_grants.insert(g);
+    //
+    // Entries are "name@<hex>" -- the definition the user approved, so a
+    // grant does not silently transfer to a tool that has since been
+    // redefined under the same name. A bare "name" (written by an older
+    // build, or hand-edited) loads as hash 0, which means unchecked: the
+    // behaviour it already had.
+    for (const auto& g : settings.always_allow_tools) {
+        const auto at = g.rfind('@');
+        std::string name = (at == std::string::npos) ? g : g.substr(0, at);
+        if (name.empty()) continue;
+        std::uint64_t hash = 0;
+        if (at != std::string::npos) {
+            const std::string hex = g.substr(at + 1);
+            // Only a full 16-hex-digit suffix is a hash. Anything else is
+            // part of a tool name that happens to contain '@'.
+            if (hex.size() == 16
+                && hex.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos) {
+                hash = std::stoull(hex, nullptr, 16);
+            } else {
+                name = g;   // not a hash suffix after all
+            }
+        }
+        m.d.session_grants.insert(name);
+        if (hash != 0) m.d.grant_def_hash[name] = hash;
+    }
     for (auto& mi : m.d.available_models)
         for (const auto& fav : settings.favorite_models)
             if (mi.id == fav) mi.favorite = true;
 
-    m.d.current.id  = deps().new_thread_id();
+    m.d.current.id  = deps(io).new_thread_id();
     m.s.status = "ready";
+
+    // Deferred startup Cmds (declared early: the first-run branch below may
+    // queue an OpenProviders dispatch).
+    std::vector<Cmd> cmds;
+    // The 1M-entitlement migration above changed the record; save it as an
+    // effect like every other settings write.
+    if (migrated_1m) cmds.push_back(Cmd(SaveSettings{m.d.persisted}));
 
     // No credentials installed yet → main() invoked install() with an
     // empty header. Open the login modal so the user can authenticate
@@ -113,12 +319,72 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // header there means "no key in env" — popping the Anthropic OAuth
     // modal would be nonsensical. Those users get a stream error naming
     // the missing key on first send instead.
-    if (auth::is_empty(deps().auth)
-        && provider::active().kind == provider::Kind::Anthropic)
-        m.ui.login = ui::login::Picking{};
+    //
+    // FIRST-RUN CREDENTIAL DETECTION: before defaulting to the Anthropic
+    // modal, scan the registry for a provider that ALREADY has a credential
+    // (a pasted key from a previous run, or an env var like GROQ_API_KEY
+    // exported in the shell). If one exists, open the PROVIDER PICKER
+    // instead — its rows badge exactly where each credential came from
+    // ("● key from GROQ_API_KEY"), so the user's literally-first
+    // interaction is "oh, it found my key → Enter", not an Anthropic
+    // sign-in they never wanted. Plain first-runs (no creds anywhere)
+    // keep the classic Anthropic modal — the majority path is unchanged.
+    if (auth::is_empty(live_auth())
+        && m.d.selection.kind == provider::Kind::Anthropic) {
+        bool cred_elsewhere = false;
+        for (const auto& p : provider::providers()) {
+            // Skip the provider we already know is unauthed (the active one).
+            if (p.id == provider::default_provider_id()) continue;
+            const auto src = provider::auth_source(p, settings, m.d.auth);
+            if (src == provider::AuthSource::Saved
+                || src == provider::AuthSource::Env) {
+                cred_elsewhere = true;
+                break;
+            }
+        }
+        if (cred_elsewhere)
+            cmds.push_back(Cmd::after(
+                std::chrono::milliseconds{0}, Msg{OpenProviders{}}));
+        else
+            m.ui.login = ui::login::Picking{};
+    }
 
-    std::vector<maya::Cmd<Msg>> cmds;
+    // Codex (ChatGPT) is a first-class provider too: if it's the active
+    // backend and no ChatGPT credential is saved, land the user directly on
+    // the sign-in modal — exactly like Anthropic — rather than failing on the
+    // first send. The modal's option 3 runs the native loopback OAuth.
+    {
+        const auto& sel = m.d.selection;
+        const bool codex_active = sel.is_chatgpt();
+        if (codex_active && !provider::chatgpt::responses_available())
+            m.ui.login = ui::login::Picking{};
+        // Same courtesy for GitHub Copilot: launched with --provider copilot
+        // but no GitHub credential yet → open the sign-in modal instead of
+        // failing on the first send.
+        if (sel.is_copilot() && !provider::copilot::signed_in())
+            m.ui.login = ui::login::Picking{.provider = "copilot"};
+        if (sel.is_kimi() && !provider::kimi::signed_in())
+            m.ui.login = ui::login::Picking{.provider = "kimi"};
+    }
+
     cmds.push_back(cmd::load_threads_async());
+    // Skills, commands and hooks on disk, for the reducers that look them up.
+    cmds.push_back(cmd::load_library());
+    // Connect MCP servers (plugins) at startup on a worker, exactly like
+    // threads. This warms the tool surface for the first turn AND lands the
+    // snapshot in m.ui.plugins so the Plugins panel is populated the instant
+    // it opens — the connection is loop-driven, never a lazy side effect.
+    if (mcp::mcp_config_present())
+        cmds.push_back(cmd::load_plugins_async(/*reconnect=*/true));
+    else
+        // No MCP servers to connect, but the FIRST access to tools::registry()
+        // still builds the whole native-tool wire snapshot cold — and on the
+        // first turn that build lands on launch_stream's worker, in the TTFB
+        // window before the model's reply streams. Warm it here so the first
+        // turn finds the snapshot already built. (When MCP config IS present,
+        // load_plugins_async above already touches registry() and warms it.)
+        cmds.push_back(Cmd::task_isolated(
+            [](maya::Sink<Msg>, std::stop_token) { (void)tools::registry(); }));
 
     // OpenAI-family backends (Ollama, llama.cpp, groq, …) have no fixed
     // built-in model list — seed_models() only knows Claude ids. A saved
@@ -130,9 +396,9 @@ std::pair<Model, maya::Cmd<Msg>> init() {
     // BEFORE the user sends anything — the same validation the model
     // picker does, just not gated on the user opening it. Anthropic has
     // a trustworthy built-in seed list, so it skips this round trip.
-    if (provider::active().kind == provider::Kind::OpenAI) {
+    if (m.d.selection.kind == provider::Kind::OpenAI) {
         m.s.models_loading = true;
-        cmds.push_back(cmd::fetch_models());
+        cmds.push_back(cmd::fetch_models(m));
     }
 
     // Background OAuth refresh handoff. `auth::resolve()` parked a
@@ -149,7 +415,135 @@ std::pair<Model, maya::Cmd<Msg>> init() {
         cmds.push_back(cmd::refresh_oauth(std::move(*refresh)));
     }
 
-    return {std::move(m), maya::Cmd<Msg>::batch(std::move(cmds))};
+    // Hosts proven self-hosted in an earlier session. Pushed into the
+    // transport before any model fetch, so a refresh probes them without
+    // the user re-adding the host.
+    if (!settings.probe_hosts.empty())
+        provider::openai::install_probe_hosts(settings.probe_hosts);
+
+    // Background release check — 24h-cached (the fast path is one small
+    // file read on a worker), so this is effectively free on most
+    // launches; when a newer release exists, the status bar grows an
+    // unobtrusive "⬆ vX.Y.Z" chip and the palette gains "Update agentty".
+    // AGENTTY_NO_UPDATE_CHECK=1 (or airgap mode) disables it entirely.
+    if (!m.env.no_update_check)
+        cmds.push_back(cmd::check_for_update());
+
+    // models.dev capability snapshot: parse the cached copy on a BACKGROUND
+    // thread, then refresh over the network (24h-cached fetch of
+    // https://models.dev/api.json). The cache is ~4.4 MB of JSON (~7.5k
+    // models); parsing it inline here cost the first frame tens of
+    // milliseconds of main-thread time — measured as the single largest
+    // pre-paint block. The capability registries are mutex-guarded and
+    // epoch-versioned (caps_epoch), and every consumer (ladder, badges,
+    // wire clamp) re-resolves per frame/request, so facts landing a few
+    // frames after first paint are picked up automatically — the same
+    // contract the background refresh below has always relied on.
+    // Ordering: load_cached FIRST, then refresh — sequenced inside one
+    // task so the network copy can never lose to the disk copy.
+    // Community-maintained metadata absorbs provider drift between
+    // releases; the learned-from-rejection registry still outranks it.
+    // Same opt-outs as the release check (airgap installs must not dial
+    // out).
+    const bool no_net = m.env.no_update_check;
+    agentty::modelsdev::start_background_refresh(no_net);
+
+    // Prewarm the composer's `@` (files) and `#` (symbols) indices so that by
+    // the time the user types either trigger the picker opens instantly
+    // instead of blocking the UI thread on a multi-thousand-path walk / a
+    // multi-second regex scan.
+    //
+    // Through the Cmd seam, like every other background job in this function.
+    // These used to call prewarm_workspace_*() directly, which hand-rolled a
+    // private std::thread apiece — two lines below a modelsdev refresh that
+    // was already going through Cmd::task_isolated. Two mechanisms for one
+    // job is how the git-refresh sibling ended up with a BARE detached thread
+    // and no single-flight at all: new code copies whichever neighbour it
+    // sees first.
+    //
+    // task_isolated (not task) because a filesystem walk is exactly the
+    // hang-prone work its docs describe — a dead NFS/FUSE mount would wedge
+    // a shared-pool slot forever and starve every later tool call. A wedged
+    // isolated task leaks one thread instead.
+    cmds.push_back(Cmd::task_isolated(
+        [](maya::Sink<Msg>, std::stop_token st) { prewarm_workspace_files(st); }));
+
+    // Warm the RAG retriever OFF the reducer thread. The first call to
+    // shared_retriever() runs its function-local static ctor, which
+    // apply_config()s and re-probes the embedder — a network dial with a
+    // multi-second timeout. That first call otherwise happens INSIDE
+    // submit_message() on the very first turn (the proactive gate used to
+    // call into shared_retriever() for every send, even a 2-char "hi";
+    // it reads the Model now), so a slow/unreachable embed endpoint stalled the reducer
+    // ~1.2 s between Enter and the stream launch — the real first-Enter hang
+    // (measured: submit.stage pre_launch_stream ms=1202 next to a
+    // rag.embed:unavailable on the SAME thread). Forcing the static init
+    // here moves that probe to a background thread; by the first turn the
+    // retriever is warm (or has already cached its Unavailable verdict) and
+    // the gate is a cheap snapshot read.
+    cmds.push_back(cmd::io_task_isolated(
+        [](Io io, maya::Sink<Msg>, std::stop_token) { (void)tools::rag_embed_status(io); }));
+    cmds.push_back(Cmd::task_isolated(
+        [](const maya::unlocked& cap, maya::Sink<Msg>, std::stop_token st) { prewarm_workspace_symbols(cap, st); }));
+
+    // Is the workspace a git repo? Two `git rev-parse` spawns, so off the
+    // reducer; the answer comes back as RepoProbed and lives on the Model.
+    cmds.push_back(cmd::io_task_isolated(
+        [](Io io, maya::Sink<Msg> out, std::stop_token st) {
+            workspace::prewarm_repo_info(st);
+            if (auto r = workspace::in_git_repo_if_ready(io))
+                out.send(Msg{RepoProbed{*r}});
+        }));
+
+    // Open the TCP + TLS + HTTP/2 connection to api.anthropic.com NOW, while
+    // the user is still reading the screen / typing their first message, so
+    // the first real request reuses a warm pooled connection instead of
+    // paying DNS + TCP + TLS handshake + h2 settings on the turn's critical
+    // path. On Windows that cold handshake is ~1 s — the single biggest
+    // chunk of first-Enter latency once the git/skill/tool prewarms above
+    // have moved their cost off the reducer thread. prewarm_anthropic()
+    // single-flights internally and the dial is a tracked background thread
+    // (join_prewarm at shutdown), so this is safe to fire unconditionally;
+    // gate it on Anthropic being the active provider so we don't dial a host
+    // the session will never talk to.
+    if (m.d.selection.kind == provider::Kind::Anthropic)
+        cmds.push_back(Cmd::task_isolated(
+            [](maya::Sink<Msg>, std::stop_token) { auth::prewarm_anthropic(); }));
+
+    // Copilot's first turn is the "weirdly hangs for a second" case: the
+    // reducer thread blocks on fresh_token() (ghu_ -> proxy-token exchange,
+    // a cold TLS round-trip to api.github.com) and then auto_session()
+    // (another cold round-trip to /models/session) before the first token
+    // streams. Both cache their result, so priming them here — off the
+    // reducer thread, while the user is still typing — means the first real
+    // submit finds a warm proxy token + Auto session instead of paying two
+    // serial handshakes on the turn's critical path. Guarded to the copilot
+    // provider; fresh_token()/auto_session() single-flight internally.
+    if (m.d.selection.is_copilot())
+        cmds.push_back(Cmd::task_isolated(
+            [](const maya::unlocked& cap, maya::Sink<Msg>, std::stop_token) {
+                const auto t0 = std::chrono::steady_clock::now();
+                auto ms = [&]{ return std::chrono::duration<double,std::milli>(
+                    std::chrono::steady_clock::now() - t0).count(); };
+                AGT_LOG(Perf, Debug, "prewarm.copilot", "fire=1");
+                if (!provider::copilot::signed_in()) {
+                    AGT_LOG(Perf, Debug, "prewarm.copilot", "skip=not_signed_in");
+                    return;
+                }
+                (void)provider::copilot::fresh_token(cap);
+                AGT_LOG(Perf, Debug, "prewarm.copilot", "stage=token_done ms={:.1f}", ms());
+                (void)provider::copilot::auto_session(cap);
+                AGT_LOG(Perf, Debug, "prewarm.copilot", "stage=session_done ms={:.1f}", ms());
+            }));
+
+    // Reclaim blobs no thread references any more (deleted threads,
+    // replaced outputs). Once a day at most, 24 h grace so a save in
+    // flight in this or another instance never loses a payload. Its own
+    // joinable thread (started after a delay), NOT a detached task: a walk
+    // still running at exit touched freed statics and crashed Windows CI.
+    blobs::start_background_gc();
+
+    return {std::move(m), Cmd::batch(std::move(cmds))};
 }
 
 } // namespace agentty::app

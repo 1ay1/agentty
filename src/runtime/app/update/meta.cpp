@@ -5,35 +5,126 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/domain/smart_mode.hpp"   // kSmartModeRows
 
 #include <algorithm>
 #include <chrono>
 #include <utility>
 
 #include <maya/core/overload.hpp>
-#include <maya/app/app.hpp>   // maya::request_animation_frame
+#include <maya/core/motion.hpp>   // anim::keep_animating — frame requests
 
 #include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/util/update.hpp"   // self_update_possible
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/provider/selection.hpp"   // provider::active (stall watchdog)
+#include "agentty/provider/ollama/transport.hpp"  // effective_num_ctx
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mem.hpp"
-#include "agentty/runtime/picker.hpp"
+#include "agentty/runtime/panel/settings/items.hpp"      // ascend(): revalidate a restored list
+#include "agentty/runtime/settings_registry.hpp"   // tuning row write-back
+#include "agentty/runtime/view/helpers.hpp"   // ui::profile_label
+#include "agentty/runtime/view/palette.hpp"   // ui::palette_context
 #include "agentty/store/store.hpp"
+#include "agentty/tool/subagent.hpp"   // set_smart: the task router's own copy
 #include "agentty/workspace/checkpoint.hpp"
+#include "agentty/runtime/panel/smart_form.hpp"
+#include "agentty/runtime/app/settings_cache.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+
+namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
 
 using maya::overload;
-using maya::Cmd;
 
-Step meta_update(Model m, msg::MetaMsg mm) {
+// Resolve the three role slots for DISPLAY and build the pane.
+//
+// Resolution is provider-scoped like the wire path, so a pin made under
+// another provider shows the auto-fill that will really serve the turn rather
+// than a model this endpoint cannot stream. That lookup needs the catalogue,
+// which is why it lives here and not in smart_form.cpp — that file stays pure.
+//
+// Shared with picker.cpp, which reopens the pane after a slot assignment: one
+// builder means the reopened pane cannot differ from the original.
+form::Form build_smart_form(const Model& m, bool advanced) {
+    const auto& sm = m.d.smart;
+    const std::string parent = m.d.model_id.value;
+
+    auto slot = [&](smart::ModelRole role) {
+        auto rp = smart::resolve_role(role, parent, m.d.effort,
+                                      m.d.available_models, sm,
+                                      active_provider_id(m));
+        std::string label = ui::pretty_model_label(rp.model);
+        smart_form::SlotView v;
+        v.label  = label.empty() ? rp.model : label;
+        v.pinned = sm.enabled && sm.slot(role).set;
+        return v;
+    };
+
+    smart_form::Inputs in;
+    in.enabled = sm.enabled;
+    // An env pin is a LOCK, not a late refusal: the row renders read-only and
+    // names the variable, instead of looking live and toasting on Enter.
+    if (m.env.settings.smart_enabled)
+        in.enabled_lock = "env: AGENTTY_SMART_MODE";
+    in.strategic      = slot(smart::ModelRole::Strategic);
+    in.implementation = slot(smart::ModelRole::Implementation);
+    in.utility        = slot(smart::ModelRole::Utility);
+
+    // The advanced rows are projected straight from the persisted config by
+    // the settings registry — value, range, label, help, env lock and
+    // provenance all come from the row. Nothing to mirror here.
+    in.advanced = advanced;
+    in.smart = m.d.smart;
+    in.env = m.env.settings;
+    return smart_form::build_form(in);
+}
+
+int resolved_context_max(const Model& m, std::string_view provider_id) {
+    // The window the provider advertised for THIS model, if the catalog
+    // carries one. 0 means nothing was reported — a probe never ran, or the
+    // gateway's /v1/models row said nothing about size.
+    int advertised = 0;
+    for (const auto& mi : m.d.available_models) {
+        if (mi.id == m.d.model_id) { advertised = mi.context_window; break; }
+    }
+    const int resolved =
+        ui::resolve_context_window(provider_id, m.d.model_id.value,
+                                   advertised, m.d.persisted,
+                                   m.env.max_context_tokens);
+
+    // Ollama does not serve what the weights claim. It allocates a KV cache
+    // to match, so agentty clamps num_ctx to a ceiling that will actually
+    // load on a laptop instead of OOMing the server mid-request.
+    //
+    // The GAUGE has to agree with that clamp. It did not: the wire sent
+    // num_ctx=32768 while this returned the model's unclamped 131072, so
+    // the context bar read a quarter of true usage and auto-compaction
+    // waited for four times the thread it should have. The model silently
+    // truncated its own prompt long before agentty thought to compact —
+    // "local models forget everything", invisible from inside because
+    // every layer was individually correct.
+    //
+    // One function answers it for both.
+    if (provider_id == "ollama")
+        return provider::ollama::effective_num_ctx(resolved);
+    return resolved;
+}
+
+Cmd meta_update(Model& m, msg::MetaMsg mm) {
     return std::visit(overload{
-        [&](CompactContext) -> Step {
+        [&](CompactContext) -> Cmd {
             // Refuse if a turn is already in flight or compaction is
             // already running — the next CompactContext lands cleanly
             // on Idle. Refuse on an empty thread (nothing to compact).
-            if (!m.s.is_idle() || m.s.compacting) return done(std::move(m));
-            if (m.d.current.messages.empty()) return done(std::move(m));
+            // Toast in both cases: a manual compaction that silently does
+            // nothing reads as a broken keybind.
+            if (!m.s.is_idle() || m.s.compacting)
+                return set_status_toast(m,
+                            "cannot compact while the agent is working");
+            if (m.d.current.messages.empty())
+                return set_status_toast(m, "nothing to compact yet");
 
             // Compaction is wire-only: we never mutate the transcript.
             // The summarisation prompt is built and trimmed on the fly
@@ -54,7 +145,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.s.compaction_target_index = m.d.current.messages.size();
             m.s.compaction_buffer.clear();
 
-            auto now = std::chrono::steady_clock::now();
+            auto now = m.now;
             phase::Active ctx;
             ctx.started       = now;
             ctx.last_event_at = now;
@@ -62,21 +153,54 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.s.compacting = true;
             m.s.status      = "compacting context\xe2\x80\xa6";   // …
             m.s.status_until = {};   // sticky until compaction completes
-            return {std::move(m), cmd::launch_stream(m)};
+            return cmd::launch_stream(m);
         },
 
-        [&](CycleProfile) -> Step {
+        [&](ToggleChangesStrip) -> Cmd {
+            m.d.show_changes_strip = !m.d.show_changes_strip;
+            // Persist so it survives restarts.
+            m.d.persisted.show_changes_strip = m.d.show_changes_strip;
+            auto save = save_record(m);
+            auto cmd = set_status_toast(m, m.d.show_changes_strip
+                ? "changes strip: shown" : "changes strip: hidden (Ctrl+R still reviews)");
+            return Cmd::batch(std::move(save), std::move(cmd));
+        },
+
+        [&](CycleProfile) -> Cmd {
             m.d.profile = m.d.profile == Profile::Write   ? Profile::Ask
                       : m.d.profile == Profile::Ask     ? Profile::Minimal
                                                        : Profile::Write;
             // A profile switch re-establishes the trust baseline; drop
             // session "always allow" grants so tightening to Minimal
-            // actually re-arms the prompts the user expects.
+            // actually re-arms the prompts the user expects. Clear the
+            // PERSISTED grants too — otherwise they resurrect at next
+            // launch (init re-seeds session_grants from settings) and the
+            // re-arm silently un-does itself. This is also the ONLY
+            // user-facing way to revoke a stale always-allow.
+            const bool had_grants = !m.d.session_grants.empty();
             m.d.session_grants.clear();
-            persist_settings(m);
-            return done(std::move(m));
+            m.d.grant_def_hash.clear();   // the hashes belong to those grants
+            m.d.persisted.always_allow_tools.clear();
+            // One save, not two: persist_settings writes the whole record,
+            // so clearing the grants on it above is enough. Saving them
+            // separately first (as this did) only created a window for the
+            // save below to write a record that still had them.
+            auto profile_save = persist_settings(m);
+            // Confirm the switch — a profile change is invisible otherwise
+            // (the composer chip updates, but a keyboard-driven cycle needs a
+            // beat of feedback naming the new mode + what it does).
+            const char* gist =
+                  m.d.profile == Profile::Write   ? "auto-approves every tool"
+                : m.d.profile == Profile::Ask     ? "asks before writes & commands"
+                                                  : "asks before every tool";
+            auto toast = set_status_toast(
+                m, "profile: " + std::string{ui::profile_label(m.d.profile)}
+                     + " \xc2\xb7 " + gist
+                     + (had_grants ? " \xc2\xb7 always-allow grants reset" : ""),
+                std::chrono::seconds{4});
+            return toast;
         },
-        [&](RestoreCheckpoint& e) -> Step {
+        [&](RestoreCheckpoint& e) -> Cmd {
             // Rewind = destructive double restore: worktree files AND the
             // transcript both return to the instant before the checkpointed
             // user turn was submitted (Zed's "restore checkpoint"). Only
@@ -84,8 +208,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // files; racing them against checkout-index would interleave
             // snapshot bytes with fresh tool output.
             if (!m.s.is_idle() || m.s.compacting || m.s.thread_loading)
-                return {std::move(m),
-                        set_status_toast(m, "cannot rewind while the agent is working")};
+                return set_status_toast(m, "cannot rewind while the agent is working");
             // The checkpointed message must still exist (compaction never
             // deletes messages, so this only fails on a stale id).
             const auto& msgs = m.d.current.messages;
@@ -94,8 +217,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     return msg.checkpoint_id && *msg.checkpoint_id == e.id;
                 });
             if (!found)
-                return {std::move(m),
-                        set_status_toast(m, "checkpoint not found in this thread")};
+                return set_status_toast(m, "checkpoint not found in this thread");
             // thread_loading doubles as the "transcript is about to be
             // rewritten" guard: submit_message queues instead of firing,
             // so no message can land between the index computed at
@@ -105,23 +227,23 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             m.s.status_until   = {};
             // Isolated worker: git checkout-index on a large snapshot can
             // block for seconds; never on the shared BG pool.
-            auto cmd = Cmd<Msg>::task_isolated(
-                [id = e.id](std::function<void(Msg)> dispatch) {
+            auto cmd = Cmd::task_isolated(
+                [](const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token, CheckpointId id) {
                     CheckpointRestored done;
                     done.id = id;
                     std::string err;
-                    done.ok = workspace::restore_checkpoint(id.value, &err);
+                    done.ok = workspace::restore_checkpoint(cap, id.value, &err);
                     if (!done.ok) done.error = err.empty() ? "restore failed" : err;
-                    dispatch(Msg{std::move(done)});
-                });
-            return {std::move(m), std::move(cmd)};
+                    out.send(Msg{std::move(done)});
+                },
+                e.id);
+            return cmd;
         },
-        [&](CheckpointRestored& e) -> Step {
+        [&](CheckpointRestored& e) -> Cmd {
             m.s.thread_loading = false;
             if (!e.ok) {
-                return {std::move(m),
-                        set_status_toast(m, "rewind failed: " + e.error,
-                                         std::chrono::seconds{6})};
+                return set_status_toast(m, "rewind failed: " + e.error,
+                                         std::chrono::seconds{6});
             }
             // Files are already byte-identical to the snapshot; now cut the
             // transcript back to just before the checkpointed user turn and
@@ -134,8 +256,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             if (it == msgs.end()) {
                 // Restored the files but the message vanished (shouldn't
                 // happen — dispatch is gated on Idle + thread_loading).
-                return {std::move(m),
-                        set_status_toast(m, "files rewound (turn already gone)")};
+                return set_status_toast(m, "files rewound (turn already gone)");
             }
             // Composer refill: plain-text render of the old prompt — chip
             // placeholders become their visible labels. Raw placeholders
@@ -167,24 +288,10 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                           [&](const Thread::CompactionRecord& r) {
                               return r.up_to_index > cut;
                           });
-            m.d.current.updated_at = std::chrono::system_clock::now();
-            deps().save_thread(m.d.current);
-
-            // The worktree was just rewritten wholesale — every pending
-            // FileChange describes before/after states that no longer
-            // exist on disk. Reviewing (or worse, "rejecting" → writing
-            // stale bytes back) against them would corrupt the restored
-            // files. Drop the set; the changes strip resets with it.
-            m.d.pending_changes.clear();
-            m.ui.diff_review = ui::pick::Closed{};
-
-            // Queued messages (typed while a turn streamed, preserved by
-            // CancelStream) are the user's words — they survive the
-            // rewind. reset_composer_draft would wipe them; stash first.
-            auto queued_keep = std::move(m.ui.composer.queued);
+            m.d.current.updated_at = m.wall_now();
+            Cmd save_restored = Cmd(SaveThread{m.d.current});
 
             reset_composer_draft(m.ui.composer);
-            m.ui.composer.queued = std::move(queued_keep);
             m.ui.composer.text   = std::move(refill);
             m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
             if (m.ui.composer.text.find('\n') != std::string::npos)
@@ -195,67 +302,125 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // prefix and reset the inline region (the truncated turns'
             // rows live in native scrollback and only reset_inline can
             // clear them; the user explicitly asked for the rewind).
+            //
+            // Drop the whole render cache too: the truncated tail's
+            // messages are gone (their entries would never freeze again
+            // — the only per-entry drop), and the surviving prefix is
+            // about to be rebuilt into the frozen ledger. Both repopulate
+            // lazily on the next render.
+            m.ui.view_cache.clear();
             rehydrate_frozen(m);
             m.ui.needs_warmup_render = !m.ui.frozen.empty();
             release_to_kernel();
             auto toast = set_status_toast(
                 m, "rewound \xc2\xb7 files restored, prompt back in composer",
                 std::chrono::seconds{5});
-            return {std::move(m),
-                    Cmd<Msg>::batch(Cmd<Msg>::reset_inline(), std::move(toast))};
+            return Cmd::batch(std::move(save_restored), cmd::reset_inline(),
+                              std::move(toast));
         },
-        [&](ScrollThread& e) -> Step {
-            m.ui.thread_scroll = std::max(0, m.ui.thread_scroll + e.delta);
-            return done(std::move(m));
+        [&](TerminalFocus& e) -> Cmd {
+            m.ui.terminal_focused = e.focused;
+            return Cmd::none();
         },
-        [&](ToggleToolExpanded& e) -> Step {
-            // Frozen-prefix gate: a tool whose enclosing message has
-            // already settled into m.ui.frozen has its expanded
-            // state baked into the snapshotted Element — flipping
-            // tc.expanded on a frozen Message would change model
-            // state without ever reaching the canvas (the Element's
-            // hash_id is stamped at freeze time and never
-            // recomputed). with_live_tool refuses the mutation; the
-            // expand key simply no-ops on scrollback turns, which
-            // matches the user's reasonable expectation that
-            // "scrollback is archaeology".
-            with_live_tool(m, e.id, [](ToolUse& tc) {
-                tc.expanded = !tc.expanded;
-            });
-            return done(std::move(m));
+        [&](TerminalResized& e) -> Cmd {
+            // A transient 0 from a detached tty keeps the last good value.
+            if (e.cols > 0) m.ui.term_cols = e.cols;
+            if (e.rows > 0) m.ui.term_rows = e.rows;
+            return Cmd::none();
         },
-        [&](Tick) -> Step {
-            auto now = std::chrono::steady_clock::now();
-            // Wall-clock gap since the previous Tick. This is the ONE true dt
-            // for everything the TICK subscription drives (the spinner, the
-            // tok/s smoothing spring): those advance once per Tick, so their
-            // per-step delta is exactly the inter-Tick interval.
-            //
-            // Do NOT route this through maya::anim::default_clock().dt(): that
-            // clock is the VIEW-loop frame clock, and its `last_` is bumped by
-            // every view() read (the reveal pulse, every Motion). During an
-            // active turn view() reads it at ~60fps, so by the time the Tick
-            // reducer reads dt() the "frame" gap has already been consumed —
-            // the reducer sees a few stray ms instead of the real 33-100ms
-            // Tick interval, and the spinner crawls / advances unevenly. That
-            // coupling is exactly what made tools "feel slower". The Tick gap
-            // is self-contained and correct; keep the two clocks separate.
+        [&](ToggleRetrievedExpanded& e) -> Cmd {
+            // Flip the addressed retrieved-context card between its compact
+            // snippet form and full-passage expansion. Frozen-prefix gate,
+            // same frozen-prefix gate as every id-addressed mutation: a card
+            // into m.ui.frozen has its expanded state baked into the
+            // snapshotted Element (hash_id stamped at freeze, never
+            // recomputed), so mutating proactive_expanded there would change
+            // model state without reaching the canvas. Only toggle a LIVE
+            // (not-yet-frozen) card; on scrollback it no-ops, matching
+            // "scrollback is archaeology". The full-passage viewer for a
+            // frozen card is the Ctrl+O overlay, which never touches the
+            // canvas.
+            auto& msgs = m.d.current.messages;
+            for (std::size_t i = m.ui.frozen_through; i < msgs.size(); ++i) {
+                if (msgs[i].id == e.id && msgs[i].proactive) {
+                    msgs[i].proactive->expanded = !msgs[i].proactive->expanded;
+                    break;
+                }
+            }
+            return Cmd::none();
+        },
+        [&](Tick) -> Cmd {
+            auto now = m.now;
+            // Wall-clock gap since the previous Tick — kept for the
+            // suspend-recovery rebase below (last_event_at += tick_gap).
+            // NOTE: no animation dt is derived here any more. Every
+            // Tick-era animation (spinner, tok/s smoothing) is now
+            // clock-driven inside maya's animation framework: the spinner
+            // reads its frame off the shared animation clock, and the
+            // disp_rate Motion self-ticks on the view-loop frame clock.
+            // The old hand-fed dt — and the subtle bug class where the
+            // two clocks disagreed ("spinner crawls when view() consumed
+            // the frame gap first") — is gone with it.
             if (m.s.last_tick.time_since_epoch().count() == 0) m.s.last_tick = now;
             const auto tick_gap = now - m.s.last_tick;
             m.s.last_tick = now;
 
-            // dt for Tick-driven animations: the real inter-Tick interval,
-            // clamped so a slow-frame / stall recovery can't teleport the
-            // spinner or spring on the first Tick back.
-            float dt = std::chrono::duration<float>(tick_gap).count();
-            if (dt < 0.0f)  dt = 0.0f;
-            if (dt > 0.25f) dt = 0.25f;   // dropped-frame clamp (250ms)
-            if (m.s.active()) m.s.spinner.advance(dt);
+            // ── Periodic release check ────────────────────────
+            // The check used to run ONCE, at startup. A session that stays
+            // open for a day — the normal case here — therefore never
+            // learned about a release cut while it was running, and there
+            // was no in-app way to ask: the "Update agentty" palette entry
+            // is gated on a check having already succeeded, so a launch
+            // with no network left you with no path at all short of
+            // quitting and running `agentty update`.
+            //
+            // Hourly, like Zed. The check itself is 24h-cached on disk, so
+            // the overwhelming majority of these are one small file read on
+            // a worker thread and dispatch nothing.
+            constexpr auto kUpdatePollInterval = std::chrono::hours{1};
+            if (!m.s.update_in_flight
+                && m.s.update_pending_restart.empty()
+                && m.s.update_latest.empty()
+                && !m.env.no_update_check) {
+                if (m.s.last_update_poll.time_since_epoch().count() == 0)
+                    m.s.last_update_poll = now;   // startup check just ran
+                else if (now - m.s.last_update_poll >= kUpdatePollInterval) {
+                    m.s.last_update_poll = now;
+                    return cmd::check_for_update();
+                }
+            }
 
-            // Glide the BIG tok/s readout. Retarget the smoothing spring at
-            // the same raw instantaneous rate the status bar would show, then
-            // advance it by dt. The view reads disp_rate_spring.value() so the
-            // number eases between samples instead of strobing frame-to-frame.
+            // ── LOOP resume ───────────────────────────────────────
+            // A failed iteration parked the loop behind a backoff deadline.
+            // finalize_turn is the normal re-send site, but it only runs when
+            // a turn ENDS — a sleeping loop has no turn to end, so the Tick
+            // (kept armed by animation_demand while a wait is pending) is what
+            // brings it back. Fire the moment the deadline passes and the
+            // session is genuinely idle.
+            if (m.ui.composer.loop_wait_until_ms > 0 && m.s.is_idle()) {
+                const auto now_ms = maya::anim::default_clock().now_ms();
+                if (m.ui.composer.loop_ready(now_ms)) {
+                    m.ui.composer.loop_note_success();   // clears the deadline
+                    ++m.ui.composer.loop_iterations;
+                    m.ui.composer.text        = m.ui.composer.loop_text;
+                    m.ui.composer.attachments = m.ui.composer.loop_attachments;
+                    m.ui.composer.cursor =
+                        static_cast<int>(m.ui.composer.text.size());
+                    auto sub_cmd = detail::submit_message(m);
+                    // Keep the prompt on screen (the box is read-only while
+                    // looping) — same restore finalize_turn does.
+                    auto& sc = m.ui.composer;
+                    sc.text        = sc.loop_text;
+                    sc.attachments = sc.loop_attachments;
+                    sc.cursor      = static_cast<int>(sc.text.size());
+                    return sub_cmd;
+                }
+            }
+
+            // Glide the BIG tok/s readout. Retarget the smoothing Motion at
+            // the same raw instantaneous rate the status bar would show. The
+            // VIEW reads disp_rate.get(), which self-ticks on the shared
+            // frame clock and keeps frames armed while gliding — no dt here.
             // When nothing is in flight, pull it to rest at 0.
             {
                 double raw_target = 0.0;
@@ -268,11 +433,11 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                         double sec = std::max(0.001, static_cast<double>(ms) / 1000.0);
                         raw_target = (static_cast<double>(ra->live_delta_bytes) / 4.0) / sec;
                     } else {
-                        raw_target = m.s.disp_rate_spring.target();  // hold during warm-up
+                        raw_target = m.s.disp_rate.target();  // hold during warm-up
                     }
                 }
-                m.s.disp_rate_spring.set_target(raw_target);
-                m.s.disp_rate_spring.tick(dt);
+                if (raw_target != m.s.disp_rate.target())
+                    m.s.disp_rate.spring_to(raw_target);
             }
 
             // Post-freeze settling window countdown. Keeps the tick
@@ -281,6 +446,30 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // reconciles the live-tail→frozen collapse before the clock
             // stops. Decrement here so each rendered frame burns one.
             if (m.ui.settle_cooldown_ticks > 0) --m.ui.settle_cooldown_ticks;
+
+            // ── Deferred post-rehydrate trim ──────────────────────
+            // Armed by ThreadLoaded. The rehydrate budget walk ran on
+            // ESTIMATED heights; once the first paint has stamped every
+            // sealed block's REAL laid-out height (record_paint), re-run
+            // the trim so the frozen window is bounded by ground truth,
+            // not by estimate drift (tool-heavy threads under-estimate
+            // several-fold). Fires once; waits until every block has a
+            // recorded height so the drop provability gate in drop_front
+            // can actually release rows.
+            Cmd rehydrate_trim = Cmd::none();
+            if (m.ui.pending_rehydrate_trim) {
+                bool all_recorded = !m.ui.frozen.empty();
+                for (std::size_t k = 0; k < m.ui.frozen.size(); ++k)
+                    if (!m.ui.frozen.recorded_at(k)) { all_recorded = false; break; }
+                if (all_recorded) {
+                    m.ui.pending_rehydrate_trim = false;
+                    rehydrate_trim = trim_frozen_if_oversized(m);
+                } else if (m.ui.frozen.empty()) {
+                    m.ui.pending_rehydrate_trim = false;   // nothing to trim
+                }
+                // Else: not painted yet — the Tick subscription stays armed
+                // on pending_rehydrate_trim (subscribe.cpp) until it is.
+            }
 
             // ── Deferred settle-freeze (post-stream redraw fix) ──────
             // finalize_turn settled the just-finished assistant message
@@ -317,7 +506,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // and arm an animation frame so the typewriter keeps gliding
             // and the gate is re-checked next frame — it never looks
             // stuck and the freeze never fires early.
-            maya::Cmd<Msg> settle_freeze_trim = maya::Cmd<Msg>::none();
+            Cmd settle_freeze_trim = Cmd::none();
             if (m.ui.pending_settle_freeze && m.s.is_idle()) {
                 if (live_tail_reveal_settled(m)) {
                     m.ui.pending_settle_freeze = false;
@@ -360,12 +549,12 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     // completes at fps=0, mirroring agent_session's
                     // always-on clock.
                     m.ui.settle_cooldown_ticks = 6;
-                    ::maya::request_animation_frame();
+                    ::maya::anim::keep_animating();
                 } else {
                     // Reveal still draining — keep the frame armed so the
                     // typewriter animates and we re-test the gate next
                     // tick. Never freeze a still-animating turn.
-                    ::maya::request_animation_frame();
+                    ::maya::anim::keep_animating();
                 }
             } else if (m.ui.pending_settle_freeze) {
                 // Armed to freeze, but the FSM is not yet Idle (a trailing
@@ -382,7 +571,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 // duplicated / late-committed turn). Self-perpetuate a frame
                 // as long as the flag is pending so the gate is always
                 // re-tested on a real frame once is_idle() flips true.
-                ::maya::request_animation_frame();
+                ::maya::anim::keep_animating();
             }
 
             // ── pending_stream → streaming_text ──────────────────────
@@ -418,7 +607,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // mid-stream carves were the ones invalidating that cache.
             // agent_session never carves mid-stream and shows zero
             // corruption / zero slowdown on long runs.
-            maya::Cmd<Msg> midrun_trim = maya::Cmd<Msg>::none();
+            Cmd midrun_trim = Cmd::none();
 
             // ── Stream-stall watchdog ──────────────────────────────────
             // 120 s of total silence is overwhelmingly likely to be a
@@ -433,11 +622,24 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 a->last_event_at += tick_gap;
             }
             constexpr auto kStallSecs = std::chrono::seconds(120);
+            // LOCAL providers process the prompt in silence — no SSE bytes,
+            // no keepalives — and a 20-30B model on consumer hardware can
+            // grind for minutes on a long prompt before its first token.
+            // 120 s would cut it mid-processing and the retry would start
+            // the same grind over (another face of the local dead loop).
+            // Match the transport's local idle allowance; Esc still cancels.
+            const bool local_provider = [&] {
+                const auto& sel = m.d.selection;
+                return sel.kind == provider::Kind::OpenAI
+                    && !sel.openai_endpoint.use_tls;
+            }();
+            const auto stall_after =
+                local_provider ? std::chrono::seconds(600) : kStallSecs;
             if (auto* a = active_ctx(m.s.phase);
                 a && m.s.is_streaming()
                 && std::holds_alternative<retry::Fresh>(a->retry)
                 && a->last_event_at.time_since_epoch().count() != 0
-                && now - a->last_event_at >= kStallSecs) {
+                && now - a->last_event_at >= stall_after) {
                 a->retry = retry::StallFired{};
                 if (a->cancel) a->cancel->cancel();
                 auto since = std::chrono::duration_cast<std::chrono::seconds>(
@@ -446,9 +648,9 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                                 + std::to_string(since) + "s";
                 StreamError err{std::move(msg)};
                 err.from_stall = true;   // carry stall intent on the message
-                return {std::move(m), Cmd<Msg>::after(
+                return Cmd::after(
                     std::chrono::milliseconds(0),
-                    Msg{std::move(err)})};
+                    Msg{std::move(err)});
             }
 
             // ── ExecutingTool wedge watchdog ───────────────────────────
@@ -498,17 +700,54 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     if (!tc.is_running()) continue;
                     any_running = true;
                     auto started = tc.started_at();
+                    // Liveness reference: the LATER of EXECUTION START and
+                    // the most recent progress snapshot — ToolUse::Running
+                    // owns that rule as liveness_origin(), so display time
+                    // and liveness time cannot drift apart again.
+                    //
+                    // Execution start, not card birth: a tool awaiting the
+                    // user's approval is not running, and billing the human's
+                    // think-time against the tool's budget meant approving
+                    // after a long pause failed the command instantly, before
+                    // it had executed a single instruction (issue #40).
+                    //
+                    // A healthy long-runner (a subagent working through tool
+                    // calls, a streaming build) keeps bumping
+                    // last_progress_at, so the wedge cap resets with every
+                    // sign of life and never guillotines it at a flat 330 s.
+                    // A tool truly hung on a blocking syscall emits no
+                    // progress, so the origin stays put and the net trips
+                    // exactly as before.
+                    auto liveness = started;
+                    if (const auto* r = std::get_if<ToolUse::Running>(&tc.status))
+                        liveness = r->liveness_origin();
                     if (started.time_since_epoch().count() != 0
-                        && now - started >= kToolWedge) {
+                        && now - liveness >= kToolWedge) {
+                        // Report the time SPENT EXECUTING. Reporting card age
+                        // here is how the old message came to claim a tool
+                        // "ran 400s" when it had been waiting on a human for
+                        // most of that.
+                        auto exec_from = liveness;
+                        if (const auto* r = std::get_if<ToolUse::Running>(&tc.status);
+                            r && r->executing_since.time_since_epoch().count() != 0)
+                            exec_from = r->executing_since;
                         auto secs = std::chrono::duration_cast<std::chrono::seconds>(
-                                        now - started).count();
-                        tc.status = ToolUse::Failed{started, now,
-                            "tool ran " + std::to_string(secs) + "s with no "
-                            "result — worker likely hung on a blocking "
+                                        now - exec_from).count();
+                        auto quiet = std::chrono::duration_cast<std::chrono::seconds>(
+                                        now - liveness).count();
+                        // The MESSAGE may use exec_from, which falls back to
+                        // liveness for a stamp-less Running -- a display needs
+                        // some number. The STORED window must not: that is an
+                        // accounting fact, and settle_failed records only a
+                        // real dispatch stamp (see ToolUse::settle_failed).
+                        tc.settle_failed(now,
+                            "tool ran " + std::to_string(secs) + "s ("
+                            + std::to_string(quiet) + "s with no progress) "
+                            "\xe2\x80\x94 worker likely hung on a blocking "
                             "syscall; failing it so the turn can recover. "
                             "The worker thread may continue in the "
                             "background; its result is discarded if it "
-                            "ever returns."};
+                            "ever returns.");
                         wedged = true;
                     }
                 }
@@ -521,7 +760,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 }
                 if (wedged) {
                     auto kick = cmd::kick_pending_tools(m);
-                    return {std::move(m), std::move(kick)};
+                    return kick;
                 }
             }
 
@@ -552,21 +791,90 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                     a->rate_last_sample_bytes = a->live_delta_bytes;
                 }
             }
-            if (!midrun_trim.is_none() && !settle_freeze_trim.is_none())
-                return {std::move(m), Cmd<Msg>::batch(std::vector<Cmd<Msg>>{
-                    std::move(midrun_trim), std::move(settle_freeze_trim)})};
-            if (!midrun_trim.is_none())
-                return {std::move(m), std::move(midrun_trim)};
-            if (!settle_freeze_trim.is_none())
-                return {std::move(m), std::move(settle_freeze_trim)};
-            return done(std::move(m));
+            {
+                std::vector<Cmd> trims;
+                if (!rehydrate_trim.is_none())
+                    trims.push_back(std::move(rehydrate_trim));
+                if (!midrun_trim.is_none())
+                    trims.push_back(std::move(midrun_trim));
+                if (!settle_freeze_trim.is_none())
+                    trims.push_back(std::move(settle_freeze_trim));
+                if (trims.size() == 1)
+                    return std::move(trims.front());
+                if (!trims.empty())
+                    return Cmd::batch(std::move(trims));
+            }
+
+            // ── Idle cache-lapse pre-compaction ───────────────────────────
+            // Deep-ride (95 %) is cheap only while the prompt cache holds the
+            // prefix. If we've sat idle long enough that the cache is about
+            // to lapse AND the prefix is large, the user's NEXT message would
+            // re-price the whole thing at full input rate. Pre-empt it: fire
+            // a compaction NOW while the prefix is still a warm cache hit, so
+            // they come back to a small warm context. This is the ONLY
+            // proactive early-compaction path; it is bounded to genuinely
+            // large + near-TTL-idle states so ordinary pauses never trip it.
+            if (m.s.is_idle()
+                && !m.s.compacting
+                && !m.s.autocompact_disabled
+                && !m.d.current.messages.empty()) {
+                const int est = static_cast<int>(
+                    cmd::estimate_wire_tokens(m.d.current) * m.s.est_calibration);
+                if (m.s.should_compact_on_idle(now, est)) {
+                    // Clear last_wire_at so we don't re-fire every Tick while
+                    // the compaction request is being dispatched; StreamStarted
+                    // re-stamps it when the summary request actually goes out.
+                    m.s.last_wire_at = {};
+                    auto compact_cmd = Cmd::task(
+                        [](maya::Sink<Msg> out, std::stop_token) {
+                            out.send(Msg{CompactContext{}});
+                        });
+                    return compact_cmd;
+                }
+            }
+            return Cmd::none();
         },
-        [&](Quit) -> Step {
-            if (!m.d.current.messages.empty()) deps().save_thread(m.d.current);
-            return {std::move(m), Cmd<Msg>::quit()};
+        [&](Quit) -> Cmd {
+            // Trip the active turn's cancel token FIRST. If a stream (or a tool)
+            // is in flight — exactly when the spinner/typewriter is animating —
+            // its worker is blocked in the HTTP poll/SSL_read. Nothing else
+            // signals it on Quit, so without this the loop exits but
+            // ~BackgroundQueue's join waits for that worker to notice
+            // cancellation the slow way (the next server byte or the idle
+            // timeout) — the 4–10 s "^C doesn't quit during an animation" hang.
+            // Esc/CancelStream already does this; Quit must too. The token is
+            // atomic and the worker's poll loop checks it every ~200 ms, so the
+            // join returns promptly.
+            if (auto* a = active_ctx(m.s.phase); a && a->cancel) a->cancel->cancel();
+
+            Cmd save = m.d.current.messages.empty()
+                         ? Cmd::none() : Cmd(SaveThread{m.d.current});
+            // Always file the model the user is CURRENTLY on under the active
+            // provider before exit, so a relaunch (or a later switch back to
+            // this backend) restores exactly this model instead of the
+            // built-in default. Without this, a session where the user never
+            // opened the model picker nor switched provider recorded no
+            // per-provider recall at all — the "it forgets the model I was
+            // using" complaint. persist_settings is load-modify-save, so it
+            // preserves every other backend's recall + keys.
+            auto quit_save = persist_settings(m);
+            // ORDER, and it is load-bearing twice over.
+            //
+            // 1. The settings save is an EFFECT now, so it reaches the store
+            //    when the host runs the Cmd — after this reducer returns.
+            //    Draining the write-behind queue here would drain it BEFORE
+            //    the save was queued. So the drain moves to the host side:
+            //    main() calls settings_cache::flush() during teardown, after
+            //    the loop has run this Cmd.
+            // 2. Within the Cmd, the save must come BEFORE quit — the
+            //    interpreter stops dispatching the moment it sees a quit
+            //    (kernel.hpp `if (exit_) return`), so anything batched after
+            //    it is silently dropped.
+            return Cmd::batch(std::move(quit_save), std::move(save),
+                              Cmd::quit());
         },
-        [&](NoOp) -> Step { return done(std::move(m)); },
-        [&](RedrawScreen) -> Step {
+        [&](NoOp) -> Cmd { return Cmd::none(); },
+        [&](RedrawScreen) -> Cmd {
             // Ctrl-L → viewport-only soft redraw.
             //
             // Drops maya's renderer cell cache (force_redraw zeroes
@@ -588,7 +896,7 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             // repainted by an inline-mode application without also
             // overwriting any non-agentty content above the frame.
             // The hard contract lives at
-            // maya/src/render/serialize.cpp’s case-(B) emit — see
+            // third_party/maya/src/render/serialize.cpp’s case-(B) emit — see
             // the SCOPE CONTRACT comment there for the full rationale.
             //
             // If the user's scrollback is mangled (a stray subprocess
@@ -610,9 +918,9 @@ Step meta_update(Model m, msg::MetaMsg mm) {
             //     resize stays soft (case-(B), no scrollback wipe).
             //     Either way it's a passive consequence of the
             //     resize event, not bound to a keystroke.
-            return {std::move(m), Cmd<Msg>::force_redraw()};
+            return cmd::force_redraw();
         },
-        [&](ClearStatus& e) -> Step {
+        [&](ClearStatus& e) -> Cmd {
             // No-op if the user (or another handler) wrote a newer
             // status since this cleaner was scheduled — stamps won't
             // match, so the current banner stays.
@@ -620,9 +928,170 @@ Step meta_update(Model m, msg::MetaMsg mm) {
                 m.s.status.clear();
                 m.s.status_until = {};
             }
-            return done(std::move(m));
+            return Cmd::none();
+        },
+        [&](UpdateCheckDone& e) -> Cmd {
+            // Background release check landed.
+            if (e.update_available && !e.latest.empty()) {
+                m.s.update_latest = std::move(e.latest);
+                m.s.update_url    = std::move(e.url);
+
+                // START THE DOWNLOAD — don't wait to be asked.
+                //
+                // This used to stop at the chip: the user had to notice it,
+                // open the palette and run "Update agentty". Most never did,
+                // so people ran old binaries for weeks and reported bugs
+                // that were already fixed. Zed's model is better and it is
+                // the one users already expect — an update is something that
+                // happens TO you, and by the time you're told, the only step
+                // left is the restart.
+                //
+                // Gated on m.env.self_update_ok, answered once at launch by
+                // self_update_possible(), which refuses the cases where
+                // replacing the binary is not ours to do: package-manager
+                // installs under /usr, nix, Windows. There the chip stays
+                // exactly as before — a signal to go run pacman/apt/brew —
+                // and nothing is touched.
+                //
+                // AGENTTY_NO_AUTO_UPDATE=1 keeps the old behaviour (notify
+                // only, install on request). Replacing someone's binary
+                // without asking needs an off switch that does not also
+                // turn off the notice — AGENTTY_NO_UPDATE_CHECK is the
+                // bigger hammer that disables checking entirely.
+                if (!m.s.update_in_flight
+                    && m.s.update_pending_restart.empty()
+                    && !m.env.no_auto_update
+                    && m.env.self_update_ok) {
+                    m.s.update_in_flight = true;
+                    std::string v = m.s.update_latest;
+                    // Quiet: the download is incidental to whatever the user
+                    // is actually doing. The status line reports progress
+                    // (see UpdateProgress) and the chip reports the outcome;
+                    // neither steals focus.
+                    return cmd::perform_self_update(std::move(v));
+                }
+            }
+            return Cmd::none();
+        },
+        [&](UpdateProgress& e) -> Cmd {
+            // A stale progress line after the download finished would be
+            // worse than none — ignore anything arriving once we are no
+            // longer updating.
+            if (!m.s.update_in_flight) return Cmd::none();
+            const auto mib = [](std::size_t b) {
+                char buf[32];
+                std::snprintf(buf, sizeof buf, "%.1f", double(b) / (1024.0 * 1024.0));
+                return std::string{buf};
+            };
+            if (e.total > 0) {
+                const int pct = int((e.got * 100) / e.total);
+                m.s.status = "\xe2\xac\x86 downloading agentty "
+                           + mib(e.got) + " / " + mib(e.total) + " MiB ("
+                           + std::to_string(pct) + "%)";
+            } else {
+                // No Content-Length: show what we have rather than a
+                // percentage we would have to invent.
+                m.s.status = "\xe2\xac\x86 downloading agentty "
+                           + mib(e.got) + " MiB";
+            }
+            m.s.status_until = {};
+            return Cmd::none();
+        },
+        [&](UpdateApplied& e) -> Cmd {
+            m.s.update_in_flight = false;
+            if (e.ok) {
+                // Updated on disk; the running process is the old image.
+                // The chip switches from "⬆ available" to "↺ restart" — a
+                // persistent marker, because the status line below scrolls
+                // away and the restart is the one step still outstanding.
+                m.s.update_latest.clear();
+                m.s.update_pending_restart = e.detail;
+                m.s.status = "✓ updated to v" + e.detail +
+                             " — restart agentty to use it";
+                m.s.status_until = {};       // sticky until overwritten
+                return Cmd::none();
+            }
+            auto toast = set_status_toast(
+                m, "update failed: " + e.detail +
+                   " — try `agentty update` from a shell",
+                std::chrono::seconds{8});
+            return toast;
+        },
+
+        [&](GitSignalsRefreshed) -> Cmd {
+            // The background `git status` finished. Clearing the latch is the
+            // whole arm — the refreshed map itself lives in the workspace
+            // cache the `@` picker reads directly, so there is nothing to
+            // copy into the Model.
+            //
+            // This is the half that makes the refresh single-flight: while
+            // the flag is set, the composer's `@` handler emits no further
+            // refresh Cmd, so holding the key coalesces instead of spawning
+            // a thread per keystroke.
+            m.ui.git_refresh_inflight = false;
+            return Cmd::none();
         },
     }, mm);
+}
+
+void ascend(Model& m) {
+    if (!m.ui.panel.ascend()) {   // no parent → opened over the thread
+        m.ui.panel.close_all();
+        return;
+    }
+    // Revalidate: the restored snapshot is as old as the descent, and the
+    // model may have moved. Only state that indexes a LIVE list needs work —
+    // free text (queries) cannot go stale.
+    if (auto* p = m.ui.panel.get<pn::Palette>()) {
+        // The filtered list is model-dependent (gated rows appear/vanish);
+        // clamp the cursor into today's list rather than yesterday's.
+        const int sz = static_cast<int>(
+            filtered_commands(p->query, ui::palette_context(m)).size());
+        p->index = sz <= 0 ? 0 : std::clamp(p->index, 0, sz - 1);
+    } else if (auto* s = m.ui.panel.get<pn::SettingsList>()) {
+        // Rows derive from live model state (a plugin may have connected or
+        // been removed while the child pane was open); clamp the restored
+        // cursor into today's list. Same policy as the old reopen path,
+        // which also carried a bare index.
+        const int rows = static_cast<int>(
+            settings::items_for(m, s->concern).size());
+        s->index = rows <= 0 ? 0 : std::clamp(s->index, 0, rows - 1);
+    } else if (auto* sm = m.ui.panel.get<pn::SmartMode>()) {
+        // The form snapshot may predate a config change made in the child
+        // (a fused-picker slot assignment writes smart config). Rebuild from
+        // the live model — the same builder every (re)open uses — keeping
+        // only view state: the cursor and the advanced toggle.
+        const int cur = sm->form.cursor;
+        auto f = build_smart_form(m, sm->advanced);
+        f.cursor = std::clamp(cur, 0,
+                              static_cast<int>(f.fields.size()) - 1);
+        sm->form = std::move(f);
+    }
+}
+
+[[nodiscard]] Cmd apply_smart(Model& m, smart::RoleConfig cfg) {
+    // Env overrides win over anything a pane or a config file can say, and
+    // they win HERE so every holder below sees the same resolved value —
+    // rather than each one re-reading the environment and possibly disagreeing.
+    settings::registry::apply_env(cfg, m.env.settings);
+
+    // 1. The UI thread's copy — what the classifier and the effort scaler
+    //    read on the next turn.
+    m.d.smart = std::move(cfg);
+
+    // 2. Persist. Onto the RECORD, not a fresh load-modify-save: the old
+    //    comment here claimed load-modify-save avoided clobbering, but it is
+    //    what CAUSED clobbering. It wrote the store while leaving
+    //    `m.d.persisted` stale, so the next whole-record save put the old
+    //    smart config straight back.
+    m.d.persisted.smart = m.d.smart;
+    auto smart_save = save_record(m);
+
+    // 3. The subagent router's copy. `task` runs on a worker with no Model, so
+    //    it needs its own snapshot — but no reducer pushes it any more. The
+    //    dispatch seam (update.cpp, publish_derived) sees m.d.smart change
+    //    and publishes it after this fold.
+    return smart_save;
 }
 
 } // namespace agentty::app::detail

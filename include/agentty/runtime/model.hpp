@@ -16,20 +16,27 @@
 #include <maya/render/scrollback_ledger.hpp>
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/smart_mode.hpp"
+#include "agentty/provider/selection.hpp"   // Domain::selection
 #include "agentty/domain/conversation.hpp"
 #include "agentty/diff/diff.hpp"
 #include "agentty/domain/id.hpp"
 #include "agentty/domain/profile.hpp"
+#include "agentty/domain/ui_prefs.hpp"
+#include "agentty/domain/ui_theme.hpp"   // ui_prefs::Detected
+#include "agentty/runtime/settings_registry.hpp"   // registry::EnvSnapshot
 #include "agentty/domain/session.hpp"
 #include "agentty/domain/todo.hpp"
-#include "agentty/runtime/command_palette.hpp"
-#include "agentty/runtime/code_block_picker.hpp"
+#include "agentty/runtime/panel/slot.hpp"   // ui::panel::State (the exclusive slot)
+#include "agentty/mcp/plugin_model.hpp"    // mcp::PluginModel (owned in the Model)
 #include "agentty/runtime/composer_attachment.hpp"
-#include "agentty/runtime/mention_palette.hpp"
-#include "agentty/runtime/symbol_palette.hpp"
 #include "agentty/runtime/login.hpp"
-#include "agentty/runtime/picker.hpp"
+#include "agentty/runtime/panel/common.hpp"
 #include "agentty/runtime/view/cache.hpp"
+#include "agentty/store/store.hpp"          // store::Settings (the persisted record)
+#include "agentty/domain/auth_view.hpp"     // auth::AuthView
+#include "agentty/runtime/library.hpp"      // Library: what is installed on disk
+#include "agentty/rag/embed_backend.hpp"    // Env::embed_defaults
 
 namespace agentty {
 
@@ -73,23 +80,43 @@ struct ComposerState {
     };
     std::vector<Snapshot> undo_stack;
     std::vector<Snapshot> redo_stack;
+    /// True while a run of consecutive self-inserting keystrokes is
+    /// being coalesced into ONE undo unit (see push_undo). Any
+    /// non-typing op (paste, delete, cursor move, chip insert, submit,
+    /// undo/redo) sets this false so the next typing run starts a
+    /// fresh snapshot — Ctrl+Z then rewinds word-runs, not characters.
+    bool undo_coalescing = false;
 
-    /// History walking over previous USER messages in the current
-    /// thread.
-    ///   history_idx == -1 → live draft (composer is what the user is
-    ///                        currently typing).
-    ///   history_idx >=  0 → walking history; the value is the index
-    ///                        into the reverse-chronological list of
-    ///                        prior user messages. Press ↑ to walk
-    ///                        further into the past, ↓ to walk back
-    ///                        toward the live draft. The first ↑
-    ///                        snapshots the live text into draft_save
-    ///                        so the round-trip is non-destructive.
-    /// Any text-mutating op (CharInput / Backspace / Paste / Kill /
-    /// chip insertion) resets history_idx to -1 and discards
-    /// draft_save — at that point the user is editing what they pulled
-    /// from history, treating it as their new draft.
-    int                        history_idx = -1;
+    /// What the composer is currently SHOWING. Exactly one of three
+    /// things, so it is spelled as a variant rather than as two integers
+    /// that have to be kept mutually exclusive by hand:
+    ///
+    ///   Live        the user's own draft — the normal state.
+    ///   History{i}  walking past USER messages (↑/↓). `i` indexes the
+    ///               reverse-chronological list of prior user messages.
+    ///   QueuePeek{i} editing pending queued item `i` in place (Alt+↑/↓).
+    ///
+    /// This was `int history_idx = -1` plus `int queue_peek_idx = -1`,
+    /// with a comment on the second one stating the invariant in prose:
+    /// "Mutually exclusive with history_idx — you're either walking past
+    /// USER messages or editing a pending QUEUED one, never both." Two
+    /// independent ints cannot express that: `history_idx >= 0 &&
+    /// queue_peek_idx >= 0` was a perfectly constructible state that every
+    /// reader had to avoid producing, and -1 had to be remembered as "none"
+    /// at each of the ~20 sites that touched them. A variant states the
+    /// exclusion in the type, so the illegal combination has no spelling.
+    ///
+    /// The first ↑ (or Alt+↑) snapshots the live text/attachments into
+    /// draft_save so the round-trip is non-destructive. Any text-mutating
+    /// op (CharInput / Backspace / Paste / Kill / chip insertion) drops
+    /// back to Live and discards the snapshot — at that point the user is
+    /// editing what they pulled up, treating it as their new draft.
+    struct Live {};
+    struct History   { int index = 0; };   // into prior user messages
+    struct QueuePeek { int index = 0; };   // into `queued`
+    using Browsing = std::variant<Live, History, QueuePeek>;
+    Browsing                   browsing{Live{}};
+
     std::optional<std::string> draft_save;
     /// Companion to `draft_save`: the live draft's attachments[]
     /// captured at the same moment so a queue-peek round-trip
@@ -101,22 +128,125 @@ struct ComposerState {
     /// previous schemas). Cleared together with `draft_save`.
     std::vector<Attachment>    draft_save_attachments;
 
-    /// Per-item queue peek (Alt+↑ / Alt+↓). Mutually exclusive with
-    /// history_idx — you're either walking past USER messages or
-    /// editing a pending QUEUED one, never both.
-    ///   queue_peek_idx == -1 → not peeking; composer holds the live
-    ///                           draft (or history pick).
-    ///   queue_peek_idx >=  0 → composer is showing
-    ///                           m.ui.composer.queued[queue_peek_idx]
-    ///                           for in-place editing. Submit removes
-    ///                           that index from the queue and re-
-    ///                           queues the edited bytes at the tail;
-    ///                           Esc / Alt+↓ past the end restores the
-    ///                           live draft from draft_save.
-    /// Any text-mutating op while peeking is normal editing of the
-    /// peeked item — only the queue slot is treated as the new
-    /// pending content on submit.
-    int                        queue_peek_idx = -1;
+    /// ── Loop mode (^B) ───────────────────────────────────────────
+    /// When armed, the message that armed it is RE-SENT automatically
+    /// every time the agent finishes a turn, until the user toggles it
+    /// off (^B again, or Esc). This is the "keep hammering on this
+    /// prompt" workflow — iterate on a refactor, re-run a failing test,
+    /// poll until something converges — without retyping or holding
+    /// Enter.
+    ///
+    /// `loop_text` / `loop_attachments` snapshot the payload at ARM time
+    /// rather than re-reading the live composer, so the user can keep
+    /// typing a follow-up while the loop runs its own fixed prompt: the
+    /// thing that repeats is the thing you armed, which is the only
+    /// reading that stays true once the composer has moved on.
+    ///
+    /// `loop_iterations` counts completed auto-sends (the first, manual
+    /// send is 0) purely so the UI can show ⟳ ×N — an unbounded loop
+    /// with no visible progress is indistinguishable from a hang.
+    ///
+    /// LOOP IS A REPEAT-ON-SUCCESS CONSTRUCT WITH ADAPTIVE BACKOFF.
+    /// It re-sends after a turn that ended normally — immediately, since
+    /// a completed turn already took real wall-clock time. When a turn
+    /// FAILS the loop does not die (the user asked it to keep going) but
+    /// it must not re-fire instantly either: a 429 answered by an instant
+    /// re-send is how a rate limit deepens into a ban. So a failure arms
+    /// `loop_wait_until_ms` and the next send waits.
+    ///
+    /// The delay is chosen by the provider's own signal where one exists:
+    /// a `Retry-After` header is obeyed verbatim (the server told us when
+    /// to come back — guessing anything else is strictly worse). Absent
+    /// that, `loop_failures` escalates a per-class schedule and resets to
+    /// 0 on the next success, so a transient blip costs seconds while a
+    /// sustained outage decays to minutes instead of spinning.
+    ///
+    /// Only Cancelled stops the loop outright: Esc means stop.
+    bool                    loop_armed = false;
+    std::string             loop_text;
+    std::vector<Attachment> loop_attachments;
+    int                     loop_iterations = 0;
+    /// Consecutive failed iterations; drives the backoff schedule and
+    /// resets to 0 on any success.
+    int                     loop_failures = 0;
+    /// Wall-clock ms before which the loop must not re-send. 0 = ready now.
+    std::int64_t            loop_wait_until_ms = 0;
+
+    [[nodiscard]] bool looping() const noexcept {
+        return loop_armed && !loop_text.empty();
+    }
+
+    /// Stop the loop and forget what it was repeating. Called on cancel
+    /// and by the ^B toggle. Idempotent.
+    void disarm_loop() noexcept {
+        loop_armed = false;
+        loop_text.clear();
+        loop_attachments.clear();
+        loop_iterations = 0;
+        loop_failures = 0;
+        loop_wait_until_ms = 0;
+    }
+
+    /// A turn ended normally: clear the failure streak so the next hiccup
+    /// starts from the bottom of the schedule again.
+    void loop_note_success() noexcept {
+        loop_failures = 0;
+        loop_wait_until_ms = 0;
+    }
+
+    /// May the loop send right now? False while a backoff is pending.
+    [[nodiscard]] bool loop_ready(std::int64_t now_ms) const noexcept {
+        return looping() && now_ms >= loop_wait_until_ms;
+    }
+
+    /// Seconds still to wait, for the UI countdown (0 when ready).
+    [[nodiscard]] int loop_wait_secs(std::int64_t now_ms) const noexcept {
+        if (loop_wait_until_ms <= now_ms) return 0;
+        return static_cast<int>((loop_wait_until_ms - now_ms + 999) / 1000);
+    }
+
+    /// Record a failed iteration and arm the next delay.
+    ///
+    /// `retry_after` (the provider's own Retry-After) wins outright when
+    /// present: the server stated when to return, and any guess we make
+    /// is either rude or needlessly slow. Otherwise escalate by class —
+    /// rate limits get a much longer floor than a transient blip, because
+    /// retrying a 429 early is what turns it into a longer one. Capped so
+    /// a long outage settles at a slow poll instead of growing unbounded.
+    void loop_backoff(int error_class_rank, int retry_after_secs,
+                      std::int64_t now_ms) noexcept {
+        ++loop_failures;
+        int secs;
+        if (retry_after_secs > 0) {
+            secs = retry_after_secs;
+        } else {
+            // rank: 0 = transient/other, 1 = rate-limit/auth (slower).
+            const int base = error_class_rank >= 1 ? 30 : 5;
+            const int cap  = error_class_rank >= 1 ? 600 : 120;
+            // Double per consecutive failure: 5,10,20,40… / 30,60,120…
+            secs = base;
+            for (int i = 1; i < loop_failures && secs < cap; ++i) secs *= 2;
+            if (secs > cap) secs = cap;
+        }
+        loop_wait_until_ms = now_ms + static_cast<std::int64_t>(secs) * 1000;
+    }
+
+    // ── Browsing queries ─────────────────────────────────────────
+    // Small readers so call sites ask a question instead of unpacking a
+    // variant inline. Each returns the index only when that alternative is
+    // actually active, so "which mode" and "which item" cannot be answered
+    // separately — the pairing that -1 sentinels kept splitting apart.
+    [[nodiscard]] bool is_live() const noexcept {
+        return std::holds_alternative<Live>(browsing);
+    }
+    [[nodiscard]] std::optional<int> history_index() const noexcept {
+        if (auto* h = std::get_if<History>(&browsing)) return h->index;
+        return std::nullopt;
+    }
+    [[nodiscard]] std::optional<int> queue_peek_index() const noexcept {
+        if (auto* q = std::get_if<QueuePeek>(&browsing)) return q->index;
+        return std::nullopt;
+    }
 
     /// Wall-clock ms (maya anim clock) of the user's last composer
     /// interaction (any keystroke / edit / cursor move). Drives the
@@ -147,52 +277,239 @@ struct TodoState {
 
 struct Model {
     struct Domain {
+        // THE persisted record, held whole.
+        //
+        // init() used to unpack this field-by-field into the members below,
+        // which meant a reducer that changed one preference could not
+        // produce a Settings to save — it had to read the last one back
+        // through the Deps seam and patch it (the read-modify-write in
+        // update/appearance.cpp). That read is why reducers were impure.
+        //
+        // Holding the record makes saving a pure derivation: edit the field
+        // here, hand `persisted` to the save effect, done. Fields are
+        // migrating into it one at a time (each move is its own commit, so
+        // a regression has one suspect); the members below are what has not
+        // moved yet.
+        //
+        // NOT in here: provider_keys. Those are sealed to a separate
+        // keystore and never reach settings.json; the host's save handler
+        // merges them back. That is a host concern — it owns the keystore.
+        store::Settings     persisted;
+
         Thread              current;
         std::vector<Thread> threads;
         Profile             profile = Profile::Write;
 
+        // How agentty LOOKS. The storage is `persisted.ui`; this is the
+        // name 34 call sites already use. Domain, not Model::ui, because it
+        // is persisted state the user chose — `Model::ui` is this session's
+        // transient panels and cursors, which these outlive.
+        //
+        // Deliberately an accessor and not a reference member: a reference
+        // would delete Domain's copy-assignment, and the Model is copied and
+        // moved on every reducer step.
+        [[nodiscard]] ::agentty::ui_prefs::Prefs&       ui()       noexcept { return persisted.ui; }
+        [[nodiscard]] const ::agentty::ui_prefs::Prefs& ui() const noexcept { return persisted.ui; }
+
         std::vector<ModelInfo> available_models;
         ModelId                model_id{std::string{"claude-opus-4-5"}};
+        // The active provider — WHICH backend this session talks to (Anthropic,
+        // an OpenAI-family endpoint, an ACP agent). The source of truth.
+        //
+        // This used to live only in a process global (provider::select /
+        // provider::active()), written from inside the switch reducer. The
+        // global stays, as the published copy that code OFF the loop reads —
+        // the stream worker, the ACP server, main — but it is now derived:
+        // the dispatch seam publishes this field to it after the fold that
+        // changed it (update.cpp, publish_derived). Reducers and the Cmd
+        // builders they call read the Model.
+        //
+        // Initialised by init() from what main() selected at launch.
+        provider::Selection    selection;
 
+        // Credentials outside the settings record: which stores hold a
+        // token, which env vars are set, the accounts registry. Loaded by the
+        // host (LoadAuthView → AuthViewLoaded) at launch and after every
+        // credential effect, so reducers and views never read them from disk.
+        auth::AuthView         auth;
+
+        // Fused cross-provider model picker (docs/design/unified-model-picker.md).
+        // `provider_catalogs` is the MERGED, multi-provider catalog view built
+        // lazily when the fused picker opens (one entry per authed provider);
+        // it sits BESIDE available_models (which stays the active provider's
+        // catalog the wire path + context math read). `recent_models` is the
+        // MRU (provider,model) the user toggles between, newest first, capped;
+        // it drives the RECENT section and ^Tab quick-swap and persists to
+        // Settings.recent_models.
+        std::vector<ProviderCatalog> provider_catalogs;
+        std::vector<ModelRef>        recent_models;
+        // Cached fused-picker row list, rebuilt by the reducer ONLY when its
+        // inputs change (open / filter / catalog-loaded / favorite) so the
+        // view and cursor math read a ready vector every frame instead of
+        // re-enumerating providers + re-reading settings.json + re-scoring
+        // every model per keystroke. Empty while the picker is closed.
+        std::vector<FusedRow>        fused_rows;
+        // Sign-in offers (un-authed providers) computed ONCE when the fused
+        // picker opens, so per-keystroke row rebuilds never re-derive auth
+        // from disk. Paired with provider_catalogs as the picker's sources.
+        std::vector<SigninOffer>     fused_offers;
         // Reasoning effort tier, selected live in the model picker (←/→).
         // None = the default no-thinking wire; any other level makes the
         // Claude provider send adaptive thinking + output_config.effort.
         // Persisted in Settings; gated per-model at request-build time.
         Effort                 effort = Effort::None;
 
+        // Smart Mode: role-based execution routing (docs/design/smart-mode.md).
+        // `enabled` off by default — the whole feature is opt-in and a no-op
+        // when off (internal utility calls keep their existing cheapest-model
+        // default). Persisted in Settings.
+        smart::RoleConfig      smart;
+
         std::vector<FileChange>          pending_changes;
-        // Diff-review workflow toggle (mirrors Settings::review_enabled;
-        // persisted through deps().save_settings on flip). When false the
-        // fold into pending_changes is skipped entirely — edits are
-        // auto-accepted, the changes strip stays empty, and OpenDiffReview
-        // toasts a pointer at the palette toggle instead of opening.
-        bool                             review_enabled = true;
+        // Two-press guard state for X/^X "reject all" when the review pane is
+        // CLOSED: the first bare X arms (toast asks for a second), the second
+        // executes, ANY other diff-review message disarms. Inside the pane the
+        // guard lives on the panel cell (confirm_reject_all) instead.
+        bool                             reject_all_armed = false;
+        // Whether the persistent "N changes" review strip renders after edits.
+        // Loaded from Settings at startup; toggled live via the palette. OFF by
+        // default — edits still queue in pending_changes (Ctrl+R opens the
+        // pane), just without the always-on banner.
+        bool                             show_changes_strip = false;
+        // Show the model's reasoning/thinking block in the transcript AND ask
+        // Anthropic for visible thinking (interleaved-thinking beta). Loaded
+        // from Settings at startup; toggled live via the palette (Ctrl+K →
+        // "Reasoning"). Off by default. Provider-agnostic.
+        bool                             show_reasoning = false;
         std::optional<PendingPermission> pending_permission;
+        // Shell detours in a row (analyze_detour().substitutable()). Drives
+        // the drift reminder in update/tool.cpp; reset by any other call.
+        int                              shell_detour_streak = 0;
 
         // Session-scoped "always allow" grants, keyed by tool name
-        // (e.g. "bash", "write"). Set by PermissionApproveAlways;
-        // consulted in kick_pending_tools BEFORE prompting. NOT
-        // persisted — a grant lives for the lifetime of the process
-        // run, mirroring Zed's per-session allow-list. Cleared on
+        // (e.g. "shell", "write"). Set by PermissionApproveAlways;
+        // consulted in kick_pending_tools BEFORE prompting. Cleared on
         // profile change so tightening the profile re-arms prompts.
+        // Seeded at startup from persisted always_allow_tools.
         std::set<std::string>            session_grants;
+
+        // The DEFINITION each grant was given for, by tool name.
+        //
+        // A grant on a bare name is a standing permission for whatever that
+        // name resolves to later, and for an MCP tool the server owns the
+        // name. So the grant carries the fingerprint of what was approved,
+        // and a call riding that grant is dispatched against that hash --
+        // execute_approved refuses if the tool has since been redefined.
+        //
+        // Missing entry (or 0) = unchecked: a grant persisted by an older
+        // build has no hash, and refusing those would break every saved
+        // grant on upgrade.
+        std::map<std::string, std::uint64_t> grant_def_hash;
+
+        // Is ANY provider catalog still being fetched?
+        //
+        // THE predicate for "the fused picker's list is still filling in".
+        // Distinct from Session::models_loading, which covers only the
+        // ACTIVE provider's fetch (provider switch / startup) — the picker
+        // fans out to every authed provider and tracks each one's state
+        // here. Using the wrong one is how the picker's "loading …" spinner
+        // ended up gated on a flag the picker never sets: it advanced during
+        // provider switches and stayed frozen in the one place it exists for.
+        [[nodiscard]] bool any_catalog_loading() const noexcept {
+            for (const auto& c : provider_catalogs)
+                if (c.state == ProviderCatalog::State::Loading) return true;
+            return false;
+        }
     };
 
     struct UI {
         ComposerState       composer;
-        ui::pick::OneAxis   model_picker;     // Closed | OpenAt{index}
-        ui::pick::OneAxis   provider_picker;  // Closed | OpenAt{index}
-        ui::pick::OneAxis   thread_list;      // Closed | OpenAt{index}
-        CommandPaletteState command_palette;
-        MentionPaletteState mention_palette;  // Closed | Open{query, index, files}
-        SymbolPaletteState  symbol_palette;   // Closed | Open{query, index, entries}
-        CodeBlockPickerState code_blocks;      // Closed | Open{blocks, index}
-        ui::pick::TwoAxis   diff_review;      // Closed | OpenAtCell{file_index,hunk_index}
+        // ── THE exclusive panel slot ─────────────────────────────
+        // Every modal overlay (pickers, palettes, viewers, diff review)
+        // lives in this ONE variant: opening is assignment, which
+        // structurally closes whatever was open — "two overlays open" is
+        // unrepresentable, and the ~17 rival-closing writes the old 16
+        // separate fields required are gone. See overlay_state.hpp for
+        // the alternatives and the deliberate non-members (login,
+        // permission, todo — they coexist with the slot by design;
+        // panel::top() composes all four into the priority answer).
+        ui::panel::State  panel;
+        // Escape-based clipboard read bookkeeping: bumped when a query is
+        // emitted; a successful paste stamps done = seq. The delayed
+        // ClipboardQueryTimeout{seq} only fires its diagnosis when seq still
+        // matches and done hasn't caught up — so a reply always cancels the
+        // timeout, and rapid re-triggers can't fire stale toasts.
+        std::uint64_t       clipboard_query_seq  = 0;
+        std::uint64_t       clipboard_query_done = 0;
+        // maya::clipboard_rx_bytes() sampled when the query was armed. The
+        // timeout compares against it to tell a silent terminal from one
+        // whose (large, image) reply is still streaming in.
+        std::uint64_t       clipboard_rx_mark    = 0;
+        // maya::clipboard_read_refused() sampled when the query was armed.
+        // Movement means the terminal answered with EPERM/ENOSYS rather than
+        // staying silent — a different fault with a different fix, which the
+        // user cannot distinguish from the symptom alone.
+        std::uint64_t       clipboard_refused_mark = 0;
+        // True when the in-flight query was raised by an IMAGE-paste intent
+        // (Ctrl+V / Alt+V on a clipboard we could not read locally), as
+        // opposed to an ordinary text paste. Set alongside the seq bump.
+        //
+        // Why it matters: over SSH+tmux agentty asks for BOTH dialects — OSC
+        // 5522 (kitty only; carries image bytes) and OSC 52 (text only,
+        // widely supported). A non-kitty terminal ignores the first and
+        // answers the second, so the user who wanted to paste a screenshot
+        // silently receives TEXT. The reply cancels the no-reply timeout, so
+        // without this flag there is no moment at which anything can explain
+        // what happened — the failure is invisible.
+        bool                clipboard_wanted_image = false;
+        // Text stashed by the ComposerPaste arm when wanted_image is true and
+        // the paste was text (the tmux race: OSC 52 text reply arrives before
+        // the OSC 5522 image reply). The timeout path uses it as a fallback
+        // instead of diagnosing "no answer" while the text is sitting here.
+        std::string         clipboard_text_fallback;
+        // (Smart-Mode slot-assign state used to be parked HERE as three
+        // fields — slot, advanced, from — because the hand-off destroyed the
+        // SmartMode overlay. It now rides ON the assign-mode Models panel
+        // (pn::Models::assign_slot) with the whole SmartMode pane in its
+        // `from` snapshot: abandoning the picker abandons the mode
+        // structurally, and ascend() restores the pane. Nothing to park.)
+
+        // Effort tier changed via ←/→ in the model picker but not yet
+        // flushed to disk. Persisting per keystroke is a synchronous
+        // load+fsync+rename on the UI thread; instead the CycleEffort arm
+        // sets this and CloseModels/Select flush once.
+        bool                effort_dirty = false;
+        // Plugins/MCP connection snapshot — OWNED BY THE MODEL, not read from
+        // the global pool at render time. This is the architectural fix for
+        // the recurring "stuck on connecting… / laggy panel" bugs: the view
+        // and visual_hash are contractually pure functions of the Model, so
+        // any UI truth living OUTSIDE the Model (as plugin_model() used to,
+        // reaching into a process-global pool) is invisible to the render
+        // gate and undriveable by the update loop. The connection itself
+        // still lives in the mcp:: ConnectionPool (it owns sockets/child
+        // procs), but its UI-facing VALUE snapshot is mirrored here via the
+        // PluginsUpdated message (Cmd→Msg, exactly like ThreadsLoaded). The
+        // view renders THIS; nothing in the view path calls plugin_model().
+        mcp::PluginModel    plugins;
+        bool                plugins_loading = false;  // a connect/reload Cmd is in flight
+        // Tail-follow toggle for the tool viewer's LIVE row (row 0). True =
+        // the body auto-scrolls to the newest streamed output (tail -f);
+        // scrolling up disengages it, End / scrolling back to the bottom
+        // re-engages. Only consulted while viewing a live entry.
+        bool                tool_viewer_tail = true;
         TodoState           todo;
         ui::login::State    login;            // Closed | Picking | OAuthCode | OAuthExchanging | ApiKeyInput | Failed
-        int                 thread_scroll = 0;
+        // Terminal window focus (?1004). Starts true — the terminal
+        // that launched agentty has focus. Gates the hardware caret:
+        // unfocused ⇒ park + hide (no blinking bar in inactive panes).
+        bool                terminal_focused = true;
+        // Terminal geometry as the host last reported it (TerminalResized).
+        // 80x40 until the first report, the same fallback the old direct
+        // tty query used for a piped or detached stdout.
+        int                 term_cols = 80;
+        int                 term_rows = 40;
 
-        // ── Sealed scrollback prefix (maya ScrollbackLedger) ───────
+        // ── Sealed scrollback prefix (maya ScrollbackLedger) ───
         //
         // Append-only ledger of fully-built Element blocks that
         // represent the settled portion of the transcript. The view
@@ -275,6 +592,18 @@ struct Model {
         // subscription stays armed while > 0.
         int                 settle_cooldown_ticks = 0;
 
+        // One-shot: re-run trim_frozen_if_oversized on the first Tick
+        // after a thread rehydrate. The rehydrate budget walk works on
+        // ESTIMATED heights; the first paint stamps every sealed block's
+        // REAL laid-out height into the ledger (record_paint), and on
+        // tool-heavy threads the real total can exceed the estimate
+        // several-fold (per-panel chrome the estimate's flat caps miss).
+        // The deferred trim closes the loop against ground truth — same
+        // provable drop_front + harvest + commit_scrollback path the
+        // settle-freeze trim uses. Set by ThreadLoaded (which also arms
+        // the Tick via settle_cooldown_ticks); consumed by the Tick arm.
+        bool                pending_rehydrate_trim = false;
+
         // One-shot hint to maya's run loop: "the next view() result
         // contains a heavy frozen scrollback that hasn't been painted
         // yet on this thread; please pre-warm the component cache
@@ -290,6 +619,40 @@ struct Model {
         // render hits the cell-blit fast path: converts 80–660 ms cold
         // paint to <1 ms warm paint on tool-heavy thread resume.
         bool                needs_warmup_render = false;
+
+        // Is a background `git status` refresh (the `@` picker's working-set
+        // ranking) in flight?
+        //
+        // THE single-flight latch for that job, and it lives HERE — on the
+        // Model — on purpose. The reducer emits the refresh Cmd only when
+        // this is false, and GitSignalsRefreshed clears it. So "don't run two
+        // at once" is a property a test can set up and assert on, rather than
+        // a static atomic buried in the workspace layer where the reducer
+        // cannot see it.
+        //
+        // Before this existed, the `@` handler spawned a bare detached thread
+        // per keystroke with no guard at all: holding `@` meant N threads and
+        // 2N `git` subprocesses (8 s timeout each) racing to publish into one
+        // map, with the winner decided arbitrarily.
+        //
+        // Deliberately NOT part of the visual hash — it changes no pixels.
+        bool                git_refresh_inflight = false;
+
+        // A custom --provider spec (and its -m recall) that becomes sticky
+        // the first time its host answers a model fetch. Set once by init
+        // from main's launch args; ModelsLoaded takes it.
+        std::optional<std::pair<std::string, std::string>> unproven_spec;
+
+        // What is installed on disk: skills, their approvals, slash
+        // commands, the hooks file. Loaded by an effect (LibraryLoaded) at
+        // startup and after each turn, since a turn can add or edit any of
+        // them. Reducers and panels read this instead of the disk.
+        Library library;
+
+        // Is the workspace a git repo? nullopt until the startup probe
+        // answers (RepoProbed). Checkpoints read this; asking git directly
+        // would spawn it on the reducer thread.
+        std::optional<bool> git_repo;
 
         // Cross-frame widget state cache. The only consumers now are:
         //   • StreamingMarkdown — keeps a per-Message widget instance
@@ -323,8 +686,8 @@ struct Model {
         // the filter query changes the match set).
         //
         // auto_dispatch = false: these pickers are selection-driven. The
-        // reducer owns the cursor (ModelPickerMove / ThreadListMove /
-        // CommandPaletteMove / …) and the Picker widget auto-scrolls the
+        // reducer owns the cursor (ModelsMove / ThreadListMove /
+        // PaletteMove / …) and the Picker widget auto-scrolls the
         // viewport to keep the selected row visible every build. Leaving
         // auto_dispatch on (the default) would ALSO feed every ↑/↓/PageUp
         // arrow straight into ScrollState::handle, bumping scroll.y in
@@ -334,19 +697,240 @@ struct Model {
         // times before it registers once"). Scroll position here is a
         // pure function of the selected index, so the raw-key dispatch
         // is interference, not input.
-        mutable maya::ScrollState model_picker_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState provider_picker_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState thread_list_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState command_palette_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState mention_palette_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState symbol_palette_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState code_blocks_scroll{.auto_dispatch = false};
-        mutable maya::ScrollState todo_scroll{.auto_dispatch = false};
+        //
+        // NB: maya's ScrollState gained a user-declared destructor (the
+        // UAF fix that unregisters it from the live-state registry), so
+        // it is no longer an aggregate and `{.auto_dispatch = false}`
+        // designated init no longer compiles. routed_scroll() builds one
+        // with auto_dispatch cleared without touching aggregate-ness.
+        static maya::ScrollState routed_scroll() noexcept {
+            maya::ScrollState s;
+            s.auto_dispatch = false;
+            return s;
+        }
+        mutable maya::ScrollState fused_picker_scroll     = routed_scroll();
+        mutable maya::ScrollState provider_picker_scroll  = routed_scroll();
+        mutable maya::ScrollState thread_list_scroll      = routed_scroll();
+        mutable maya::ScrollState command_palette_scroll  = routed_scroll();
+        mutable maya::ScrollState mention_palette_scroll  = routed_scroll();
+        mutable maya::ScrollState symbol_palette_scroll   = routed_scroll();
+        mutable maya::ScrollState code_blocks_scroll      = routed_scroll();
+        mutable maya::ScrollState checkpoints_scroll      = routed_scroll();
+        mutable maya::ScrollState rag_settings_scroll     = routed_scroll();
+        // NB: the stats viewer's offset is NOT here. It lives on
+        // pn::Stats, which is what makes the frame gate see it (the slot
+        // walk covers panel members; this bag is reachable only by a
+        // hand-written mix() in program.hpp) and what ties its lifetime to
+        // the panel instead of to the session. Prefer that shape for new
+        // panels; this list is the older one.
+        mutable maya::ScrollState smart_mode_scroll       = routed_scroll();
+        mutable maya::ScrollState plugin_edit_scroll      = routed_scroll();
+        mutable maya::ScrollState appearance_scroll       = routed_scroll();
+        mutable maya::ScrollState sandbox_scroll          = routed_scroll();
+        mutable maya::ScrollState fork_scroll              = routed_scroll();
+        mutable maya::ScrollState todo_scroll             = routed_scroll();
+        mutable maya::ScrollState tool_viewer_scroll      = routed_scroll();
+        mutable maya::ScrollState account_list_scroll     = routed_scroll();
+        // The Ctrl+K settings list (Plugins/Commands/Agents/Hooks). The
+        // Plugins pane can exceed any viewport (125 advertised tools ⇒ 135+
+        // rows), so it scrolls like every other picker.
+        mutable maya::ScrollState settings_list_scroll    = routed_scroll();
     };
 
     Domain      d;
     StreamState s;
     UI          ui;
+
+    // The time of the message being folded. NOT a clock.
+    //
+    // jaal hands update() the step time as an argument (AgenttyApp declares
+    // a Clock — jaal core/program.hpp, "time, as an argument"). That argument
+    // is the contract, and it is what makes a recorded run replay to the same
+    // model. This field is how it reaches the ~300 helper calls below the
+    // dispatch seam without a `now` parameter on each: the seam writes it as
+    // the FIRST thing every fold does, from jaal's argument, so inside a fold
+    // it always holds the current step's time.
+    //
+    // Rules, and how each is enforced rather than hoped for:
+    //   * written ONLY by the dispatch seam (program.hpp AGENTTY_FWD_UPDATE,
+    //     and the test entry update(Model, Msg, now)). Nothing else stamps it.
+    //   * read only by reducers. view() and subscribe() see a const Model
+    //     whose `now` is the LAST fold's time, which is stale by definition;
+    //     the elm_purity lint rejects a read of it outside update/.
+    //   * reducers never read a clock instead — the lint's `clock` category.
+    //
+    // steady_clock, matching jaal's: a wall clock can run backwards.
+    std::chrono::steady_clock::time_point now{};
+
+    // The fold's CALENDAR time, for the few things that must be real dates:
+    // a thread's created_at/updated_at (persisted, and the picker sorts by
+    // them) and an OAuth expiry (compared against the provider's clock).
+    //
+    // A steady clock has no relation to the calendar, so this is a second
+    // input rather than a conversion of `now`. It is derived at the SAME seam
+    // from the same step: the wall clock is read once when the kernel starts
+    // (Model::wall_epoch / steady_epoch, set by init) and every fold places
+    // its steady `now` on that timeline. So one fold sees one instant in both
+    // clocks, and a recorded run replays to the same dates — a direct
+    // system_clock read per call site gave each call its own instant and made
+    // updated_at differ from the message time it was written beside.
+    [[nodiscard]] std::chrono::system_clock::time_point wall_now() const noexcept {
+        return wall_at(now);
+    }
+    // Any steady instant on that same calendar timeline. A view passes the
+    // FRAME's time (maya::anim_now()) to get "now" as a date without reading
+    // the system clock itself; before init() set the epochs it falls back to
+    // the real wall clock.
+    [[nodiscard]] std::chrono::system_clock::time_point wall_at(
+            std::chrono::steady_clock::time_point t) const noexcept {
+        if (steady_epoch == std::chrono::steady_clock::time_point{})
+            return std::chrono::system_clock::now();
+        return wall_epoch + std::chrono::duration_cast<
+                   std::chrono::system_clock::duration>(t - steady_epoch);
+    }
+    // The pair of readings wall_now() is anchored to. Set once, by init().
+    std::chrono::system_clock::time_point wall_epoch{};
+    std::chrono::steady_clock::time_point steady_epoch{};
+
+    // The subagent router's view of this Model, as LAST PUBLISHED to the
+    // runtime's subagent registry (tool/subagent.cpp).
+    //
+    // The subagent loop runs on worker threads and reads its config from a
+    // registry, not the Model, so the registry has to track four Model
+    // fields. Reducers used to push each one with tools::subagent::set_*()
+    // — eleven calls across four files, written from inside update, and
+    // correct only as long as every reducer that changed one of those fields
+    // remembered to make the matching call.
+    //
+    // Now no reducer publishes. The dispatch seam (update.cpp,
+    // publish_subagent_if_changed) derives the view from the Model after
+    // every fold, compares it with this snapshot, and returns
+    // cmd::publish_subagent only when it moved. Forgetting is impossible
+    // because syncing is not a step anyone performs.
+    struct SubagentView {
+        std::string             model;
+        std::string             provider;
+        smart::RoleConfig       smart;
+        std::vector<ModelInfo>  candidates;
+        [[nodiscard]] bool operator==(const SubagentView&) const = default;
+    };
+    SubagentView published_subagent;
+
+    // The active provider as LAST PUBLISHED to the process global
+    // (provider::select). Same rule as published_subagent: the seam compares
+    // the Model's selection with this and returns a publish effect only on
+    // change. Kept on the Model, not read back from the global, so the
+    // comparison is against Model state and replays.
+    provider::Selection published_selection;
+
+    // The web_search policy as LAST PUBLISHED to the tool layer. Same rule as
+    // published_selection. Starts as nullopt so the FIRST fold always
+    // publishes: until then the tool layer runs on its own lazy read of
+    // settings.json, which can disagree with what init() loaded.
+    std::optional<web_search_cfg::Config> published_web_search;
+
+    // The process's launch environment, read ONCE by init() and never again.
+    //
+    // Elm has no getenv: a reducer that reads the environment is a function
+    // of state the Model doesn't hold, so replay and a test that sets one var
+    // and expects one behaviour both lie. These facts can't change while we
+    // run (env vars are fixed at exec), so capturing them is not a snapshot
+    // that goes stale — it is the whole truth, stated where update can see
+    // it. They were six getenv calls and two function-local statics spread
+    // across update/; the predicates below are their single definition.
+    struct Env {
+        // A remote session (SSH / mosh / Eternal Terminal, or forced). Frames
+        // land >=80 ms apart, so streaming and reveal cadence throttle down.
+        bool remote               = false;
+        // A plain SSH session specifically (mosh/ET excluded): the composer's
+        // clipboard paths differ, because OSC 52 rides the SSH pty.
+        bool ssh                  = false;
+        // AGENTTY_NO_REVEAL_GLIDE: force the immediate end-of-turn finish.
+        bool no_reveal_glide      = false;
+        // The terminal supports synchronized output (DECSET 2026).
+        bool synchronized_output  = false;
+        // AGENTTY_FROZEN_COLLAPSE: stub off-screen bodies instead of
+        // re-rendering them.
+        bool frozen_collapse      = false;
+        // AGENTTY_NO_UPDATE_CHECK / AGENTTY_NO_AUTO_UPDATE.
+        bool no_update_check      = false;
+        bool no_auto_update       = false;
+        // AGENTTY_MAX_CONTEXT_TOKENS, parsed (0 = unset): the context
+        // ladder's last rung before the default.
+        int  max_context_tokens   = 0;
+        // AGENTTY_REVEAL / _TYPEWRITER / _DECORATE (unset = on).
+        bool reveal               = true;
+        bool reveal_typewriter    = true;
+        bool reveal_decorate      = true;
+        // AGENTTY_PAINTED_CARET: always paint the composer caret.
+        bool painted_caret        = false;
+        // Running under a cooperating editor host (AGENTTY_HOST=emacs or
+        // INSIDE_EMACS with vterm): emit file-event OSCs.
+        bool host_integration     = false;
+        // Colour tier and background polarity the terminal reports (TERM,
+        // COLORTERM, COLORFGBG, NO_COLOR). "auto" appearance resolves here.
+        ui_prefs::Detected terminal;
+        // Env overrides for settings rows, and the AGENTTY_SMART_MODE pin.
+        settings::registry::EnvSnapshot settings;
+        // Can this binary replace itself? Answered once at launch: resolving
+        // our own path and probing its directory for write access (it creates
+        // and deletes a file there). The reducer used to call that inline
+        // every time an auto-update was considered — a filesystem WRITE from
+        // inside update, invisible to a name-based lint because it sat in a
+        // util/ helper. Neither answer can change while we run.
+        bool        self_update_ok     = false;
+        std::string self_update_reason;   // why not, when !self_update_ok
+        // The embedder config the AGENTTY_EMBED_* / AGENTTY_OLLAMA_HOST vars
+        // describe, layered on the defaults. The RAG pane starts from this.
+        rag::embed::EmbedConfig embed_defaults;
+        // agentty's per-user root (~/.agentty, or $AGENTTY_HOME), resolved
+        // once. Paths the reducers name (the user mcp.json) derive from it.
+        std::string user_root;
+        // AGENTTY_RAG_PROACTIVE, if set: forces proactive injection on/off
+        // for one run, over the saved RAG setting.
+        std::optional<bool> rag_proactive_override;
+
+        // Where paths are shown relative to: the launch cwd ("src/x.cpp")
+        // and the home dir ("~/notes"). Captured once so a tool card names a
+        // path the same way every frame without asking the OS.
+        std::string cwd;
+        std::string home;
+
+        // The end-of-turn reveal glide (the design contract: end-of-turn is
+        // a visible catch-up, never a paste) needs a DENSE frame cadence to
+        // hold the live height steady mid-ramp, so it requires both signals
+        // streaming_tick_period() derives its cadence from:
+        //   - not remote: remote frames land >=80 ms apart, with wire jitter
+        //     on top;
+        //   - synchronized output: without it the tick is 100 ms, so a 200 ms
+        //     ramp is ~2 frames, the same sparse-frame height-drift geometry
+        //     (the stranded-duplicate bug) as SSH.
+        // Everywhere sparse, the immediate finish is used.
+        // AGENTTY_NO_REVEAL_GLIDE=1 forces the immediate finish everywhere.
+        [[nodiscard]] bool reveal_end_glide() const noexcept {
+            return !no_reveal_glide && !remote && synchronized_output;
+        }
+    } env;
+
+    // Is a LOADING SPINNER currently on screen?
+    //
+    // THE gate for the picker's catalog-fetch animation — and the reason it
+    // is a Model-level predicate rather than a Domain one: a spinner is only
+    // worth a 33 ms tick when the surface that draws it is VISIBLE. Keying
+    // on catalog state alone kept the whole event loop waking at frame rate
+    // after the picker closed, which is both wasted work and, worse, latency:
+    // an idle loop that is already inside a timed poll answers the next
+    // keystroke a frame late. (Measured: arrow-key p90 12.7 ms / max 55 ms
+    // during navigation, against a p50 of 0.1 ms.)
+    //
+    // Pairs with Session::active() at every call site — see the THREE gates
+    // that must agree: subscribe.cpp (is a Tick delivered), update/meta.cpp
+    // (does the spinner advance) and app/program.hpp (does the frame change
+    // the visual hash).
+    [[nodiscard]] bool loading_spinner_visible() const noexcept {
+        return ui.panel.is<ui::panel::Models>()
+            && d.any_catalog_loading();
+    }
 };
 
 } // namespace agentty

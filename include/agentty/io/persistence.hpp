@@ -8,15 +8,31 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include <nlohmann/json_fwd.hpp>
+
 #include "agentty/domain/conversation.hpp"
 #include "agentty/store/store.hpp"
+#include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 namespace agentty::persistence {
+
+// Lock order (agentty/util/lock_levels.hpp). Functions that take a lock say
+// which, as a capability parameter:
+//
+//   below_file_lane   enters a shared-file lane (the thread index, the
+//                     settings file): call it holding nothing ranked at or
+//                     above persistence.file_lane
+//   below<leaf>       takes only leaves (the async writer's state)
+//   unlocked          blocks on other threads (the flush joins the writer)
+//
+// A call from inside a lock ranked too high does not compile.
 
 // ── Typed deserialization errors ─────────────────────────────────────────
 // The JSON ↔ value-type boundary returns `expected<T, DeserializeError>`
@@ -41,6 +57,15 @@ struct DeserializeError {
 [[nodiscard]] std::filesystem::path data_dir();
 [[nodiscard]] std::filesystem::path threads_dir();
 
+// Write a CLEAN, human/LLM-readable transcript of `t` (role + text, tool
+// calls collapsed to a one-line marker — none of the raw JSON noise of the
+// on-disk <id>.json). Returns the absolute path written, or empty on
+// failure. Used by fork: the new thread starts EMPTY (zero context) and
+// the model reads THIS file on demand for earlier context, instead of the
+// whole transcript being carried forward.
+[[nodiscard]] std::filesystem::path
+write_thread_transcript_md(Io, const Thread& t);
+
 // Directory-walking loader: returns every thread we could deserialize,
 // **metadata only** (id, title, created_at, updated_at — `messages` is
 // empty). The thread picker only needs the metadata; full message bodies
@@ -52,25 +77,67 @@ struct DeserializeError {
 // stderr and skipped — the per-file failure type is `DeserializeError`,
 // preserved internally; a caller that wants strict semantics can use
 // `load_thread_file` below.
-[[nodiscard]] std::vector<Thread> load_all_threads();
+[[nodiscard]] std::vector<Thread> load_all_threads(Io, const lock_levels::below_file_lane&);
 
 // Strict per-file loader. Returns the typed error so callers can react
 // to specific kinds (e.g. surface MissingField as "schema upgrade needed",
 // JsonParse as "corrupt file, restore from backup").
 [[nodiscard]] std::expected<Thread, DeserializeError>
-load_thread_file(const std::filesystem::path& p);
+load_thread_file(Io, const std::filesystem::path& p);
 
-void save_thread(const Thread& t);
+void save_thread(Io, const maya::below<maya::leaf>&, const Thread& t);
 // Block until every queued background save has hit disk. Call at
 // shutdown after the last reducer step (Quit handler issues a final
-// save_thread) so we don't lose the most-recent transcript on exit.
-void flush_pending_saves();
-void delete_thread(const ThreadId& id);
+// save_thread) so we don't lose the most-recent transcript on exit. It
+// joins the writer, so it needs `unlocked`.
+void flush_pending_saves(Io, const maya::unlocked&);
+void delete_thread(Io, const lock_levels::below_file_lane&, const ThreadId& id);
 
-[[nodiscard]] store::Settings load_settings();
-void save_settings(const store::Settings& s);
+// Thread retention. Deletes threads with no activity (file mtime) in the
+// last `keep_days` days, skipping `keep` (the open one). keep_days <= 0
+// does nothing. Their blobs are left for blob gc. Returns what it deleted
+// (or would, with dry_run).
+struct ExpireStats { std::size_t threads = 0; std::uintmax_t bytes = 0; };
+ExpireStats expire_threads(Io, const lock_levels::below_file_lane&, int keep_days,
+                           const ThreadId& keep, bool dry_run = false);
+
+// $AGENTTY_THREADS_KEEP_DAYS, or 0 (keep everything) when unset or invalid.
+[[nodiscard]] int thread_keep_days(Io);
+
+// The per-message fingerprint the incremental save path uses to find what
+// changed. Exposed ONLY so the save bench can price that pass separately
+// from the rest of a save; nothing in the app should call it.
+[[nodiscard]] std::uint64_t debug_message_fingerprint(const Message& m);
+
+[[nodiscard]] store::Settings load_settings(Io);
+// Write settings.json, then tell the settings cache (on_settings_written) so
+// it drops its copy. The cache's reaction drains its queue -- a wait -- so
+// this needs `unlocked`.
+void save_settings(Io, const maya::unlocked&, const store::Settings& s);
+// The same write WITHOUT telling the cache: for the cache itself, whose own
+// write must not invalidate it. Takes only the settings lane.
+void save_settings_quiet(Io, const lock_levels::below_file_lane&, const store::Settings& s);
+
+// Called after every save_settings() that goes DIRECTLY to disk.
+//
+// The TUI reads settings through a write-behind cache
+// (runtime/app/settings_cache.hpp) that assumes it is the only writer. It
+// isn't: the credential helpers (credentials::add_key, vault::key_clear,
+// account_switch, the --model/--provider CLI paths) call save_settings here
+// directly, because they also run on paths where no Deps exists. A cache
+// holding a copy from before such a write will publish it back on the next
+// save and silently undo it.
+//
+// So the cache registers itself here and drops its copy. This lives at the
+// io layer rather than in each writer because the writers span provider/,
+// io/ and main() — and a new one would otherwise have to KNOW to invalidate,
+// which is exactly the kind of rule that gets forgotten. The observer is
+// handed the writer's `unlocked`: it may wait (drain), and the type says so.
+void on_settings_written(std::function<void(const maya::unlocked&)> observer);
 
 [[nodiscard]] ThreadId new_id();
+// 64 random bits as 16 hex digits; backs new_id() and new_message_id().
+[[nodiscard]] std::string random_hex_id();
 [[nodiscard]] std::string title_from_first_message(std::string_view text);
 
 // Atomic + durable write of `content` to `target`: writes to <target>.tmp,
@@ -79,32 +146,108 @@ void save_settings(const store::Settings& s);
 // I/O failure (the temp file is cleaned up). Use this for every JSON sidecar
 // the runtime persists — e.g. the ACP session index — so they share the same
 // crash-safety guarantee as threads/settings.
-bool write_json_atomic(const std::filesystem::path& target,
+bool write_json_atomic(Io, const std::filesystem::path& target,
                        const std::string& content);
+
+// ── Per-message codec ────────────────────────────────────────────────
+//
+// The single definition of "a Message on disk". Exposed because the
+// thread LOG (io/thread_log.hpp) stores one of these per line and must
+// produce byte-identical output to the whole-document writer — two
+// codecs would drift, and the drift would only show up as silently
+// mangled history in whichever format was written less often.
+//
+// Both sides carry real behaviour worth not duplicating: the writer
+// scrubs to valid UTF-8 (arbitrary tool output can hold Latin-1 or
+// Shift-JIS bytes that nlohmann refuses to dump) and lifts large
+// payloads into the blob store; the reader accepts every historical
+// shape, including inline payloads written before blobs existed.
+[[nodiscard]] nlohmann::json message_to_json(const Message& m);
+[[nodiscard]] std::expected<Message, DeserializeError>
+message_from_json(const nlohmann::json& j);
+
+// The same, for everything a Thread carries EXCEPT its messages: title,
+// fork provenance, RAG override, timestamps, compaction records.
+//
+// Split out because the two halves have different lifetimes on disk. The
+// messages are append-only; the metadata is mutable and rewritten whole.
+// The thread log stores them in separate files for exactly that reason,
+// and reuses these so there is still ONE definition of each field's
+// on-disk form.
+//
+// `thread_meta_to_json` never emits a "messages" key;
+// `thread_meta_from_json` ignores one if present, so it can also be
+// pointed at a legacy whole-thread document to read just the header.
+[[nodiscard]] nlohmann::json thread_meta_to_json(const Thread& t);
+[[nodiscard]] std::expected<Thread, DeserializeError>
+thread_meta_from_json(const nlohmann::json& j);
+
+// Drop compaction records whose boundary lies past the end of
+// `t.messages`. `thread_meta_from_json` cannot do this itself — in the
+// log format the metadata is read before any message is — so the caller
+// applies it once the transcript is attached. A stale record survives
+// only an interrupted save, and would otherwise make the wire summarise
+// a prefix that no longer exists.
+void clamp_compactions(Thread& t);
+
+// Load one thread by id, preferring the LOG format and falling back to
+// the legacy whole-document `<id>.json`.
+//
+// This is the seam where the new format becomes load-bearing. Both
+// formats are read forever: a user's history predates the log, and
+// nothing is rewritten until that thread is next saved.
+[[nodiscard]] std::optional<Thread> load_thread_by_id(Io, const ThreadId& id);
+
+// Subagent runs kept for an editor to open (threads/subagents/<id>.json).
+// Not in the thread list; the blob GC reads them.
+bool save_subagent_thread(Io, const Thread& t);
+[[nodiscard]] std::optional<Thread> load_subagent_thread(Io, const ThreadId& id);
 
 } // namespace agentty::persistence
 
 namespace agentty::io {
 
-// Filesystem-backed store satisfying agentty::store::Store.
+// Filesystem-backed store satisfying agentty::store::Store. Reached only
+// through app::deps(Io), so it holds the Io the host gave it.
+//
+// Lock order: the store::Store concept has no capability in its signatures,
+// because the store is an EFFECT seam -- it is only ever called by the
+// effect host (app::Host) and by deps(), which the host and init reach,
+// both on the loop thread between steps, where nothing is held. That is the
+// same promise its Io makes ("I am an effect entry point"); each call here
+// re-states it as a capability root, one place, reviewed (lint: io_roots +
+// cap_roots list this file).
 class FsStore {
 public:
+    explicit FsStore(Io io) : io_(io) {}
     [[nodiscard]] std::vector<Thread> load_threads() {
-        return persistence::load_all_threads();
+        return maya::thread_root(
+            [&](const maya::unlocked& c) { return persistence::load_all_threads(io_, c); });
     }
     [[nodiscard]] std::optional<Thread> load_thread(const ThreadId& id) {
-        auto p = persistence::threads_dir() / (id.value + ".json");
-        auto loaded = persistence::load_thread_file(p);
-        if (!loaded) return std::nullopt;
-        return std::move(*loaded);
+        return persistence::load_thread_by_id(io_, id);
     }
-    void save_thread(const Thread& t)            { persistence::save_thread(t); }
-    [[nodiscard]] store::Settings load_settings()          { return persistence::load_settings(); }
-    void save_settings(const store::Settings& s) { persistence::save_settings(s); }
+    void save_thread(const Thread& t) {
+        maya::thread_root([&](const maya::unlocked& c) { persistence::save_thread(io_, c, t); });
+    }
+    void delete_thread(const ThreadId& id) {
+        maya::thread_root([&](const maya::unlocked& c) { persistence::delete_thread(io_, c, id); });
+    }
+    [[nodiscard]] store::Settings load_settings()          { return persistence::load_settings(io_); }
+    void save_settings(const store::Settings& s) {
+        maya::thread_root([&](const maya::unlocked& c) { persistence::save_settings(io_, c, s); });
+    }
+    // The settings cache's own disk write: doesn't notify the cache.
+    void save_settings_quiet(const maya::unlocked& c, const store::Settings& s) {
+        persistence::save_settings_quiet(io_, c, s);
+    }
     [[nodiscard]] ThreadId new_id()              { return persistence::new_id(); }
     [[nodiscard]] std::string title_from(std::string_view text) {
         return persistence::title_from_first_message(text);
     }
+
+private:
+    Io io_;
 };
 
 static_assert(store::Store<FsStore>);

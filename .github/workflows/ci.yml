@@ -1,17 +1,25 @@
 name: ci
 
-# Single build + test gate matching the LOCAL toolchain (GCC on Linux,
-# Release). No cross-compiler matrix, no sanitizer legs, no macOS/Windows
-# runners — those churn and fail on toolchains nobody builds with here.
-# One job: does it compile with the same compiler used locally, and do the
-# smoke tests pass. Fast and deterministic.
+# Two gates:
+#   1. build-test (linux gcc) — the primary gate matching the LOCAL
+#      toolchain (GCC, Release): does it compile with the same compiler
+#      used locally, and do the smoke tests pass. Fast + deterministic.
+#   2. windows-compile (msvc) — a COMPILE-ONLY gate that mirrors the
+#      release workflow's Windows configure (vcpkg static + MSVC) but
+#      stops at the build; no MSI, no signing, no upload. It exists
+#      because MSVC-only breakage (POSIX-only headers like <unistd.h> /
+#      <ext/stdio_filebuf.h> compiled into mcp-cpp's tests/examples, which
+#      agentty's standalone build pulls in) is invisible to the Linux gate
+#      and used to surface only at release time (C1083). Catch it per-push.
 #
 # NOTE: if GitHub still shows phantom failing checks named linux-clang19,
-# sanitizers (...), macos-gcc, windows-msvc, or "fuzz harness smoke", those
-# are REQUIRED STATUS CHECKS configured by NAME in the repo's branch-
-# protection rules (Settings → Branches → master). No workflow in this repo
-# produces them, so they hang forever. Remove those names from the required-
-# checks list there — this workflow only emits the single job below.
+# sanitizers (...), macos-gcc, or "fuzz harness smoke", those are REQUIRED
+# STATUS CHECKS configured by NAME in the repo's branch-protection rules
+# (Settings → Branches → master). No workflow in this repo produces them,
+# so they hang forever. Remove those names from the required-checks list
+# there — this workflow only emits the two jobs below (the windows check is
+# named "windows compile (msvc)", so a required "windows-msvc" name still
+# won't match; use the exact job name or drop it).
 
 on:
   push:
@@ -28,6 +36,90 @@ permissions:
   contents: read
 
 jobs:
+  # ── Reclaim the cache budget ───────────────────────────────────────────
+  # GitHub allows 10 GB of Actions cache PER REPO and evicts LRU across every
+  # key once that's exceeded. hendrikmuhs/ccache-action writes a NEW entry per
+  # run (key + timestamp) and never removes the one it just superseded, so the
+  # release ccache alone had four ~1.76 GiB copies and the ASan one four more
+  # — 9.70 GiB of a 10 GB budget, nearly all of it dead.
+  #
+  # That is self-defeating: the pressure evicts the vcpkg cache (8 minutes to
+  # rebuild) and the msys2 packages, so caches that WOULD have saved time get
+  # thrown out to store copies nothing will ever restore. Only the newest
+  # entry per prefix is ever a restore candidate.
+  #
+  # Runs first, non-blocking (continue-on-error), so a hiccup in the API
+  # never fails CI.
+  prune-caches:
+    name: prune superseded caches
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    continue-on-error: true
+    steps:
+      - name: Keep the newest entry per key prefix
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Sort NEWEST-FIRST explicitly. The API does not return caches in
+          # date order (verified: a 13:57 entry came back after a 12:59 one),
+          # so trusting its order would keep an old entry and delete the one
+          # the next run actually wants — the exact opposite of the goal.
+          #
+          # Then keep the first sighting of each prefix and delete the rest.
+          # TWO suffix shapes get stripped, because two different mechanisms
+          # write per-run keys:
+          #
+          #   -<ISO timestamp>   hendrikmuhs/ccache-action (the linux lanes)
+          #   -<40-hex SHA>      actions/cache keyed on github.sha (mingw)
+          #
+          # Only the first was handled before, so the mingw lane's ~2 GB
+          # entry accumulated one dead copy per run and nothing ever removed
+          # them. Measured 2026-09: 10.63 GiB used against a 10 GB cap, with
+          # ZERO surviving mingw ccache entries because the dead copies and
+          # the two oversized linux ccaches had evicted the live one.
+          #
+          # Keys with neither suffix (vcpkg, msys2 package sets, binfmt) are
+          # content-addressed — a new one means the CONTENT changed, and the
+          # old one is still a valid restore target for an older branch — so
+          # they are still never touched.
+          #
+          # sccache is the exception, and it needed its own rule. Its GHA
+          # backend writes ONE CACHE ENTRY PER OBJECT FILE
+          # (`sccache/<a>/<b>/<c>/<64-hex>`), so the msvc lane alone produced
+          # 198 entries — which is how the linux sanitizer ccache and the
+          # mingw ccache both vanished while the total sat at 3 GiB of a
+          # 10 GB budget. GitHub's cap is not the only limit that matters;
+          # thousands of small entries starve the few big ones that actually
+          # save time. Keep the newest 40 and drop the rest: a partial
+          # sccache still hits on most objects, and it regrows every run.
+          gh api --paginate "repos/$REPO/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key|startswith("sccache/")) | "\(.created_at)\t\(.id)\t\(.key)"' \
+            | sort -r | tail -n +41 \
+            | while IFS="$(printf '\t')" read -r created id key; do
+                echo "delete surplus sccache: $key"
+                gh api -X DELETE "repos/$REPO/actions/caches/$id" >/dev/null || true
+              done
+          gh api --paginate "repos/$REPO/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | "\(.created_at)\t\(.id)\t\(.key)"' \
+            | sort -r \
+            | while IFS="$(printf '\t')" read -r created id key; do
+                prefix=$(printf '%s' "$key" \
+                  | sed -E 's/-20[0-9]{2}-[0-9]{2}-[0-9]{2}T.*$//; s/-[0-9a-f]{40}$//')
+                [ "$prefix" = "$key" ] && continue     # no per-run suffix: not ours to prune
+                if grep -qxF "$prefix" /tmp/seen 2>/dev/null; then
+                  echo "delete superseded: $key"
+                  gh api -X DELETE "repos/$REPO/actions/caches/$id" >/dev/null || true
+                else
+                  echo "keep newest:      $key"
+                  echo "$prefix" >> /tmp/seen
+                fi
+              done
+          echo "--- budget after prune ---"
+          gh api "repos/$REPO/actions/cache/usage" \
+            --jq '"\(.active_caches_count) caches, \(.active_caches_size_in_bytes/1073741824*100|floor/100) GiB"'
+
   build-test:
     name: build + test (linux gcc)
     runs-on: ubuntu-latest
@@ -55,27 +147,674 @@ jobs:
           git submodule update --init --recursive --force
 
       - name: Install deps
-        # GCC 14 for C++26 (std::expected / std::format). Mirrors the local
-        # GCC toolchain; ubuntu-latest's default g++ can lag. Shared libs are
-        # fine — this isn't a distributable build.
+        # GCC 16 for C++26. maya vendors jaal, which needs structured binding
+        # packs (P1061) to see inside a struct for its Sendable checks —
+        # jaal/meta/fields.hpp is a hard #error without them. P1061 landed in
+        # GCC 16, so gcc-14 can no longer build this tree. g++-16 is not in
+        # the runner image; ubuntu-toolchain-r/test carries it.
         run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            g++-14 cmake ninja-build pkg-config \
+            g++-16 cmake ninja-build pkg-config ripgrep \
             libssl-dev libnghttp2-dev zlib1g-dev
 
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: linux-gcc16-release
+          # 2G was SMALLER THAN ONE BUILD's output. The post-job report read
+          # "2.0 / 2.0 GB (99.96%), Cleanups: 60" — ccache evicted itself 60
+          # times while compiling, so objects written early were gone before
+          # the next run could use them. Hit rate sat at 26% and the build
+          # took 36m33s of a 38m49s job.
+          #
+          # 6G, not more, because the ceiling that actually binds is
+          # GITHUB'S: 10 GB of Actions cache PER REPO, evicted LRU across
+          # every key. This repo sat at 9.70 GiB — four stale copies of this
+          # same ccache plus four of the ASan one — so a bigger entry would
+          # have pushed out the vcpkg cache (8 min to rebuild) and the msys2
+          # packages, making CI slower overall. A 30G ccache cannot even be
+          # stored: the entry is dropped when it exceeds the budget, so the
+          # next run starts cold every time.
+          #
+          # The sum of every max-size must fit in 10 GB even at worst case.
+          # Measured, 2026-09: this entry 2.28 GiB, the sanitizer one 2.76
+          # GiB, msys2 packages 4 x 150 MiB, vcpkg 45 MiB, binfmt 3 x 31 MiB
+          # = 10.63 GiB. OVER BUDGET, and the eviction was not hitting the
+          # thing you would guess: the msys2 ccache (key
+          # windows-mingw-ucrt64-ccache-*) had ZERO surviving entries, so the
+          # mingw lane had been configured for ccache and running stone cold
+          # for weeks — 30 minutes a run, every run.
+          #
+          # The two linux ccaches are the whole budget, so they get a real
+          # ceiling instead of a generous one: 3G here (vs 2.6 GB used at a
+          # 58% hit rate) and 3G for the sanitizer lane. That leaves ~3.5 GB
+          # for mingw's ccache, msys2 packages and vcpkg, which is what makes
+          # those lanes cacheable at all. Raising either number takes it
+          # straight back out of the Windows lanes.
+          #
+          # 3G is not tight for the sanitizer lane any more even though it
+          # measured 3.0/3.0 (100.3%, self-evicting): that reading was from
+          # when sanitizer_tests still pulled agentty_tests and compiled 467
+          # TUs. It compiles 109 now, so the working set is roughly a quarter
+          # of what filled that cache. If the hit rate does not climb well
+          # past the old 54%, check the TU count before raising the ceiling.
+          max-size: 3G
+
+      - name: ccache tuning
+        # LTO emits GIMPLE bytecode whose cache key is sensitive to absolute
+        # paths and __TIME__/__DATE__; without these, warm-cache hit rate on a
+        # fresh checkout dir craters. BASEDIR makes paths relative; the sloppy
+        # flags let time-macro TUs still hit.
+        run: |
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "CCACHE_SLOPPINESS=locale,time_macros,include_file_ctime,include_file_mtime" >> "$GITHUB_ENV"
+          echo "CCACHE_NOHASHDIR=1" >> "$GITHUB_ENV"
       - name: Configure
         env:
-          CC: gcc-14
-          CXX: g++-14
+          CC: gcc-16
+          CXX: g++-16
+        # Stays Release + LTO so CI exercises the SAME optimized codegen the
+        # shipped binary uses (an -O3/LTO-only miscompile must fail here, not
+        # in release.yml). Speed comes from ccache: on a warm cache only the
+        # changed TUs recompile, so the 39-min cold build collapses to the
+        # edited delta + the final LTO link.
         run: |
           cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DAGENTTY_AUTO_PULL_MAYA=OFF \
             -DAGENTTY_USE_MIMALLOC=OFF \
+            -DMAYA_NATIVE_TUNING=OFF \
             -DAGENTTY_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build build -j"$(nproc)" --target all tests
+        # tests_gating = the correctness set (agentty_tests + every standalone
+        # test) MINUS the perf probes/benches, which never gate — see the
+        # derived aggregate in cmake/AgenttyTestRegistry.cmake.
+        run: cmake --build build -j"$(nproc)" --target all tests_gating
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        # -LE perf skips the perf-labelled ctest entries (e.g. long_session_bench)
+        # that tests_gating deliberately didn't build.
+        run: ctest --test-dir build --output-on-failure -j"$(nproc)" -LE perf
+
+      - name: Perf regression gate
+        # The long_session_bench is labelled `perf` (excluded from the gating
+        # suite because timing on a shared runner is noisy). Build + run it
+        # here in BENCH_ASSERT mode: it prints the numbers AND fails the job if
+        # any scenario blows a generous ceiling (~6× the observed values). This
+        # catches an order-of-magnitude regression — e.g. an O(n) accidentally
+        # reintroduced into the per-frame path, or a lost render cache — while
+        # tolerating the runner's timing jitter. Not a hard microbenchmark.
+        run: |
+          cmake --build build -j"$(nproc)" --target agentty_standalone_tests
+          BENCH_ASSERT=1 ./build/agentty_standalone_tests long_session_bench
+
+  # macOS. Not a courtesy leg: a Mac is a first-class sandbox platform
+  # (seatbelt via claybin), and with no mac job every one of these shipped
+  # silently -- tool commands running UNSANDBOXED, a hang on exit
+  # (TCSAFLUSH), lost exit codes, grep blind on one file without ripgrep,
+  # glibc-only calls that didn't build. The suite has to run here.
+  #
+  # GCC, not Apple clang: i18n.cpp uses std::atomic<std::shared_ptr<T>>,
+  # which libc++ doesn't implement. And jaal needs P1061 (GCC 16).
+  macos:
+    name: build + test (macos gcc)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Init submodules (HTTPS, race-tolerant)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
+
+      - name: Install deps
+        run: brew install gcc@16 ninja ccache ripgrep || true
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: macos-gcc16
+          max-size: 1G
+
+      - name: Configure
+        # GCC can't parse every SDK's headers (xpc.h on newer ones), so pick
+        # the newest SDK GCC accepts rather than the runner default: try each
+        # from newest down until a trivial Foundation-free TU compiles.
+        run: |
+          GXX="$(brew --prefix gcc@16)/bin/g++-16"
+          GCC="$(brew --prefix gcc@16)/bin/gcc-16"
+          SDK=""
+          for s in $(ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX[0-9]*.sdk \
+                            /Applications/Xcode*.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX[0-9]*.sdk \
+                            2>/dev/null | sort -rV); do
+            if printf '#include <xpc/xpc.h>\nint main(){}\n' | "$GXX" -isysroot "$s" -x c++ -fsyntax-only - 2>/dev/null; then
+              SDK="$s"; break
+            fi
+          done
+          echo "SDK: ${SDK:-<runner default>}"
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$GCC" -DCMAKE_CXX_COMPILER="$GXX" \
+            ${SDK:+-DCMAKE_OSX_SYSROOT="$SDK"} \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DAGENTTY_AUTO_PULL_MAYA=OFF \
+            -DMAYA_NATIVE_TUNING=OFF \
+            -DAGENTTY_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)" --target all tests_gating
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j"$(sysctl -n hw.ncpu)" -LE perf
+
+  # Rust-grade memory-safety gate. Builds agentty's OWN-logic test set under
+  # -fsanitize=address,undefined and runs it: proves those paths are free of
+  # use-after-free / buffer overflow / leaks / UB at RUNTIME, complementing the
+  # compile-time static_assert proofs. Scoped to the `sanitizer`-labelled
+  # tests (crypto/creds, FSM, tool-arg repair, skills, fuzzy match, and the
+  # concurrency primitives) because they don't link maya's prebuilt,
+  # un-instrumented renderer (which would ODR-clash). LTO is off for speed +
+  # readable traces; the constexpr catalog proofs auto-skip under
+  # AGENTTY_SANITIZER_BUILD (they already ran green in the build-test job).
+  sanitizers:
+    name: sanitizers (asan+ubsan, tsan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Init submodules (HTTPS, race-tolerant)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then
+              echo "submodules ready (attempt $attempt)"
+              break
+            fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
+      - name: Install deps
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-16 cmake ninja-build pkg-config ripgrep \
+            libssl-dev libnghttp2-dev zlib1g-dev
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: linux-gcc16-asan-ubsan
+          # 600M held LESS THAN ONE BUILD: "0.6 / 0.6 GB (97.97%), Cleanups:
+          # 321" with a 5.47% hit rate — the cache evicted itself 321 times
+          # and then missed on 415 of 439 compiles. It was pure overhead:
+          # paying upload/download for something that never hit.
+          #
+          # Sanitizer objects are bigger than release ones (instrumentation
+          # + full debug info), which is exactly why 600M never stood a
+          # chance. 3G covers a full ASan build and the TSan tree that
+          # follows it in the same job, and fits the 10 GB repo budget
+          # alongside the release cache now that prune-caches drops
+          # superseded copies.
+          max-size: 3G
+      - name: Configure (ASan + UBSan)
+        env:
+          CC: gcc-16
+          CXX: g++-16
+        run: |
+          cmake -S . -B build-san -GNinja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DAGENTTY_AUTO_PULL_MAYA=OFF \
+            -DAGENTTY_USE_MIMALLOC=OFF \
+            -DMAYA_NATIVE_TUNING=OFF \
+            -DAGENTTY_BUILD_TESTS=ON \
+            -DAGENTTY_SANITIZE_ALL=address,undefined
+      - name: Build sanitizer test set
+        run: cmake --build build-san -j"$(nproc)" --target sanitizer_tests
+      - name: Run under ASan + UBSan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build-san -L sanitizer --output-on-failure -j"$(nproc)"
+
+      # ── ThreadSanitizer ────────────────────────────────────────────────
+      # A SEPARATE tree because TSan cannot be combined with ASan in one
+      # binary. Scoped to the `race`-labelled tests, which are written to
+      # drive the shared seams from many threads at once so TSan has
+      # interleavings to find.
+      #
+      # This lane exists because asan+ubsan above cannot see a data race, and
+      # every concurrency bug this project has shipped was a race or a
+      # lifetime error between threads: a shared_ptr cycle that made a worker
+      # destroy its own queue and join itself, a worker left joinable in a
+      # function-local static (terminate at exit), and N threads racing to
+      # publish into one map. All three passed the ASan lane.
+      - name: Configure TSan tree
+        # Same compiler as the ASan tree above. Without this the step falls
+        # back to the runner's DEFAULT gcc (13), which does not implement
+        # deducing `this` (P0847) — so maya's type-state Terminal fails to
+        # parse and the whole lane dies at third_party/maya/src/app/app.cpp with
+        # "expected identifier before 'this'". The ASan configure has always
+        # set this; the TSan one was missed, so the lane only ever built
+        # when the runner image happened to default to a new enough gcc.
+        env:
+          CC: gcc-16
+          CXX: g++-16
+        run: |
+          cmake -S . -B build-tsan -GNinja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DAGENTTY_AUTO_PULL_MAYA=OFF \
+            -DAGENTTY_USE_MIMALLOC=OFF \
+            -DMAYA_NATIVE_TUNING=OFF \
+            -DAGENTTY_BUILD_TESTS=ON \
+            -DAGENTTY_SANITIZE_ALL=thread
+      - name: Build race test set
+        # Narrow targets, ~4-11 TUs each. This lane used to also build
+        # agentty_standalone_tests (375 TUs, every provider + the ACP server
+        # + the RAG adapter + all of maya) because persistence_race_test
+        # lived inside it and carried the `race` label. TSan roughly doubles
+        # compile time, so that one test was the most expensive thing in CI.
+        # It now has a narrow target of its own; coverage is unchanged.
+        #
+        # This list must contain EVERY target carrying the `race` label, or
+        # the ctest step below fails with "Unable to find executable" — the
+        # label selects it, the build never produced it. That is what happened
+        # to sandbox_config_race_test: added with the label, never added here,
+        # and this lane went red the moment it landed. Grep the label when
+        # adding one:
+        #
+        #   grep -n 'LABELS race' cmake/AgenttyTests.cmake
+        run: |
+          cmake --build build-tsan -j"$(nproc)" --target race_harness_test
+          cmake --build build-tsan -j"$(nproc)" --target real_subsystem_race_test
+          cmake --build build-tsan -j"$(nproc)" --target persistence_race_test_narrow
+          cmake --build build-tsan -j"$(nproc)" --target sandbox_config_race_test
+          cmake --build build-tsan -j"$(nproc)" --target exec_session_race_test
+      - name: Run under TSan
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build-tsan -L race --output-on-failure -j"$(nproc)"
+
+  # Compile-only Windows gate. Mirrors release.yml's build-windows configure
+  # (vcpkg static openssl+nghttp2, MSVC, Release) but stops at the build:
+  # no MSI, no signing, no upload. Purpose is narrow but important — prove
+  # the tree still COMPILES under MSVC so a POSIX-only header or API sneaking
+  # into a TU that Windows builds (notably mcp-cpp's tests/examples, which
+  # agentty's standalone build pulls in) is caught here on every push instead
+  # of blowing up the Windows release leg with C1083 ~19 min into a release.
+  windows-compile:
+    name: windows compile (msvc)
+    runs-on: windows-latest
+    # sccache's GHA backend writes through the Actions cache API, which the
+    # workflow-wide `contents: read` does not cover. Scoped to this job rather
+    # than widened at the top so nothing else gains write access.
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Init submodules (HTTPS, race-tolerant)
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            echo "submodule update failed (attempt $attempt) — full-fetching and retrying"
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\AppData\Local\vcpkg\archives
+          key: vcpkg-x64-windows-static-openssl-nghttp2-v1
+          restore-keys: vcpkg-x64-windows-static-
+      - name: Install deps (vcpkg static)
+        shell: pwsh
+        env:
+          # Reuse cached .zip package archives; only rebuild on a cache miss.
+          VCPKG_BINARY_SOURCES: "clear;files,C:\\Users\\runneradmin\\AppData\\Local\\vcpkg\\archives,readwrite"
+        run: |
+          git -C "$env:VCPKG_INSTALLATION_ROOT" fetch --depth 1 origin master
+          git -C "$env:VCPKG_INSTALLATION_ROOT" reset --hard FETCH_HEAD
+          & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat"
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl nghttp2 --triplet x64-windows-static
+      # Compiler cache. The vcpkg archives above cache the DEPENDENCIES; this
+      # caches agentty's own ~200 TUs, which is where the 39 minutes went —
+      # every one of them recompiled from scratch on every run, while the
+      # linux and mingw lanes had had ccache all along.
+      #
+      # sccache rather than ccache: ccache does not support MSVC's cl.exe.
+      # /Z7 (Embedded) rather than the default /Zi: sccache cannot cache a
+      # compile that writes debug info to a shared .pdb. Same binary, the
+      # symbols just live in the objects, and this lane links nothing that
+      # reads a .pdb anyway.
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.11
+      # Ninja invokes cl.exe directly, so it needs the MSVC environment that
+      # the Visual Studio generator would otherwise set up for itself.
+      # Ninja itself is preinstalled on windows-latest.
+      - name: MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+      - name: Configure + build (compile only)
+        shell: pwsh
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+        run: |
+          # NINJA, not the default Visual Studio generator. Three reasons,
+          # and the first one makes the other two moot if you get it wrong:
+          #
+          #   1. CMAKE_<LANG>_COMPILER_LAUNCHER is IGNORED by the Visual
+          #      Studio generator — it is only honoured by Ninja and
+          #      Makefiles. Under MSBuild the sccache flags below are a
+          #      silent no-op: the build still works, still takes 39
+          #      minutes, and nothing warns you.
+          #   2. `cmake --build -j` with MSBuild parallelises across
+          #      PROJECTS, not translation units. agentty is a handful of
+          #      object libraries, so most of the build is one project at a
+          #      time — a runner mostly idle. Ninja schedules every
+          #      independent TU.
+          #   3. MSBuild is a multi-config generator, so CMAKE_BUILD_TYPE is
+          #      ignored on configure and the type has to be repeated as
+          #      --config on build. It was passed both ways here, which
+          #      happened to work but only because the two agreed.
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded `
+            -DCMAKE_POLICY_DEFAULT_CMP0141=NEW
+          cmake --build build
+          # $LASTEXITCODE, explicitly, because pwsh does NOT fail a step when a
+          # NATIVE command fails mid-script -- the step's exit code is the LAST
+          # command's, and `sccache --show-stats` below always succeeds. So a
+          # broken MSVC build reported this gate GREEN: v0.9.16 and v0.9.17
+          # both shipped with no Windows binary while the required check passed
+          # (the release lane failed on C2385 that this lane had already hit,
+          # 350 objects in, and hid behind the stats call).
+          #
+          # `set -e` has no pwsh equivalent for native exit codes, and
+          # $ErrorActionPreference does not cover them either, so the check has
+          # to be written out.
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "::error::MSVC build failed (exit $LASTEXITCODE)"
+            sccache --show-stats
+            exit $LASTEXITCODE
+          }
+          sccache --show-stats
+
+  # MinGW / MSYS2 ucrt64 gate. This is the toolchain real Windows users build
+  # under, and CRUCIALLY it is the ONLY Windows path that actually COMPILES the
+  # rag-cpp retrieval engine and the acp-cpp FdTransport (both are gated OFF on
+  # MSVC). A POSIX-ism leaking into those — e.g. rag-cpp's store fsync/kill, or
+  # acp-cpp's stdio writev — is invisible to the MSVC gate above and only shows
+  # up here. Compile-only; the CPU retrieval path is exercised, no GPU backend.
+  windows-mingw:
+    name: windows compile (msys2 ucrt64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Init submodules (HTTPS, race-tolerant)
+        shell: bash
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            git submodule sync --recursive
+            git submodule foreach --recursive 'git fetch --prune origin || true'
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-ccache
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-nghttp2
+            git
+      - name: ccache dir (restore)
+        # RESTORE ONLY, with an explicit save step after the build.
+        #
+        # actions/cache's combined form saves in a post step, and a post step
+        # is SKIPPED when the job is cancelled. This lane takes ~31 min cold
+        # and `cancel-in-progress: true` kills it whenever a newer commit
+        # lands, so the post step almost never ran: measured 2026-09, ZERO
+        # surviving windows-mingw-ucrt64-ccache-* entries.
+        #
+        # That is a self-sustaining loop, and it is what actually kept this
+        # lane cold -- not LRU eviction, which is what the previous comment
+        # here blamed. The cache total was 3.09 GiB against a 10 GB cap with
+        # no mingw entry in sight, so nothing was being evicted; the entry
+        # was never written. Never saved -> always cold -> always slow ->
+        # always cancelled -> never saved.
+        #
+        # Splitting restore from save with `if: always()` breaks it: a
+        # cancelled build still banks the objects it managed to compile, so
+        # the next run starts warmer, finishes sooner, and eventually stops
+        # being cancelled at all.
+        uses: actions/cache/restore@v4
+        with:
+          path: D:\a\_temp\msys64\home\runneradmin\.ccache
+          key: windows-mingw-ucrt64-ccache-${{ github.sha }}
+          restore-keys: windows-mingw-ucrt64-ccache-
+      - name: Configure + build (compile only)
+        run: |
+          export CCACHE_MAXSIZE=2G
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DAGENTTY_STANDALONE=ON -DAGENTTY_AUTO_PULL_MAYA=OFF
+          cmake --build build -j
+          ccache -s
+
+      # Save whatever got compiled, even if the build was cancelled or
+      # failed. This is the half that breaks the never-warms loop described
+      # on the restore step: with `if: always()` a killed 31-minute build
+      # still banks its objects, so the next run starts from them.
+      #
+      # Keyed on the SHA, so this only writes when that exact key is absent
+      # (a re-run of the same commit is a no-op, not an error).
+      - name: ccache dir (save)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: D:\a\_temp\msys64\home\runneradmin\.ccache
+          key: windows-mingw-ucrt64-ccache-${{ github.sha }}
+
+      # Runtime smoke test. Compile-only cannot catch MSYS2/mintty's runtime
+      # path: mintty gives a native executable PIPE-backed stdio handles, not
+      # Win32 console handles. Exercise that exact HANDLE type with cmd.exe's
+      # `type NUL | agentty.exe`: unlike MSYS bash's /dev/null (a NUL character
+      # device, NOT a pipe) and its unreliable PE exit-status bookkeeping, cmd
+      # creates an anonymous pipe and reports the native process exit code.
+      - name: Runtime smoke test (native pipe, mintty-like)
+        timeout-minutes: 2
+        shell: pwsh
+        env:
+          # setup-msys2 installs the UCRT runtime below RUNNER_TEMP. A pwsh
+          # step needs it explicitly for libstdc++/libgcc/nghttp2 DLL lookup.
+          UCRT64_BIN: ${{ runner.temp }}\msys64\ucrt64\bin
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:Path = "$env:UCRT64_BIN;$env:Path"
+          $env:COLUMNS = '80'
+          $env:LINES = '24'
+          $bin = (Resolve-Path 'build/agentty.exe').Path
+          Write-Host "binary: $bin"
+          & $bin --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "--version failed with exit $LASTEXITCODE"
+          }
+
+          # `type NUL` writes zero bytes then closes its pipe end. agentty must
+          # select its pipe-terminal implementation, observe EOF/hangup, and
+          # exit normally — no hidden console, MSYS shell shim, or NUL device.
+          #
+          # Run it several times. This has failed INTERMITTENTLY with
+          # 0xC0000005 (access violation) on byte-identical code — run
+          # 36416000161 passed and 36545165818 crashed with only a version
+          # bump between them — so a single attempt cannot tell "works" from
+          # "happened to win the race this time". A startup/teardown race on
+          # the pipe path is the live hypothesis; N attempts make it show up
+          # on the run that introduces it rather than three merges later.
+          $cmd = 'type NUL | "' + $bin + '"'
+          $attempts = 5
+          $failures = @()
+          for ($i = 1; $i -le $attempts; $i++) {
+            & cmd.exe /d /s /c $cmd 1>smoke.out 2>smoke.err
+            $rc = $LASTEXITCODE
+            # Windows reports a crash as a negative NTSTATUS. Name the common
+            # ones: an exit code alone sends you reading kernel docs.
+            $why = switch ($rc) {
+              0           { 'ok' }
+              -1073741819 { 'CRASH 0xC0000005 access violation' }
+              -1073741571 { 'CRASH 0xC00000FD stack overflow' }
+              -1073740791 { 'CRASH 0xC0000409 stack buffer overrun' }
+              -1073741510 { 'CRASH 0xC000013A interrupted (ctrl-c)' }
+              default     { "exit $rc" }
+            }
+            Write-Host "attempt ${i}/${attempts}: $why"
+            if ($rc -ne 0) {
+              $failures += "attempt ${i}: $why"
+              Write-Host '----- stdout (head) -----'
+              if (Test-Path smoke.out) { Get-Content smoke.out -TotalCount 50 }
+              Write-Host '----- stderr -----'
+              if (Test-Path smoke.err) { Get-Content smoke.err }
+            }
+          }
+          if ($failures.Count -gt 0) {
+            Write-Error ("agentty failed $($failures.Count)/$attempts pipe-stdin launches:`n" +
+                         ($failures -join "`n"))
+            exit 1
+          }
+          Write-Host "smoke test passed: $attempts/$attempts clean launches under a native pipe"
+
+  # Bounded fuzz smoke of the mcp-cpp harnesses (fuzz/). libFuzzer needs Clang,
+  # which ubuntu-latest doesn't ship by default; the harnesses double as a
+  # deterministic GCC + ASan/UBSan driver (fuzz_<name>_driver.cpp), so we run
+  # that here — same crash coverage on the reachable-from-a-tool locators
+  # (edit/apply_patch fuzzy match) without a Clang toolchain. Fast: a few k
+  # iterations + the hand-picked edge cases, seconds of runtime. Satisfies the
+  # "fuzz harness smoke" required status check.
+  fuzz-smoke:
+    name: fuzz harness smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Init submodules (HTTPS, race-tolerant)
+        run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          for attempt in 1 2 3 4 5; do
+            if git submodule update --init --recursive --force; then break; fi
+            sleep $((attempt * 10))
+          done
+          git submodule update --init --recursive --force
+      - name: Install deps
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++-16 cmake ninja-build
+      - name: Configure fuzz harnesses (GCC asan+ubsan driver)
+        env:
+          CC: gcc-16
+          CXX: g++-16
+        run: |
+          cmake -S third_party/mcp-cpp -B fuzzbuild -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DMCP_BUILD_FUZZERS=ON \
+            -DMCP_BUILD_TESTS=OFF \
+            -DMCP_BUILD_EXAMPLES=OFF
+      - name: Build fuzz harnesses
+        run: cmake --build fuzzbuild -j"$(nproc)"
+      - name: Run bounded fuzz smoke
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          # Edge cases + a bounded random burst per harness; a crash/UB aborts
+          # the job non-zero.
+          ./fuzzbuild/fuzz/fuzz_fuzzy_match 5000
+          ./fuzzbuild/fuzz/fuzz_apply_patch 20000
+
+  # ── AUR source package: does agentty-git still CONFIGURE? ────────────────
+  #
+  # packaging/arch/agentty-git/PKGBUILD wires each submodule to a local clone
+  # by hand, so it does not track .gitmodules. When claybin became a REQUIRED
+  # submodule, nothing added it there -- and AgenttySubmodules.cmake raises
+  # FATAL_ERROR on an empty third_party/claybin, so the package stopped
+  # configuring entirely. Nobody could install it, and no workflow referenced
+  # the file, so it stayed broken silently until someone tried by hand.
+  #
+  # This gate runs makepkg --nobuild: fetch the sources, wire the submodules,
+  # run prepare(), and configure. That is the step that breaks when a new
+  # submodule lands, and it costs ~1 minute instead of the ~25 a full compile
+  # would. The real compile is already covered by build-test on the same code.
+  aur-source-package:
+    name: AUR agentty-git configures
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v5
+      - name: Deps
+        run: pacman -Sy --noconfirm --needed git cmake ninja openssl libnghttp2
+      - name: makepkg --nobuild (fetch + prepare + configure)
+        run: |
+          # makepkg refuses to run as root.
+          useradd -m build
+          cp packaging/arch/agentty-git/PKGBUILD /home/build/
+          chown -R build /home/build
+          # --nobuild stops after prepare(); --nodeps because the container
+          # already has what we need and we are not producing a package.
+          su build -c 'cd ~ && makepkg --nobuild --nodeps --noconfirm' 2>&1 | tail -40
+          # Prove every submodule the build system REQUIRES actually landed,
+          # rather than trusting that prepare() exited 0.
+          src=/home/build/src/agentty
+          for m in maya acp-cpp mcp-cpp rag-cpp claybin; do
+            if [ ! -f "$src/third_party/$m/CMakeLists.txt" ]; then
+              echo "::error::third_party/$m is empty in the agentty-git build -- wire it in packaging/arch/agentty-git/PKGBUILD"
+              exit 1
+            fi
+            echo "ok: third_party/$m"
+          done
+          # maya carries jaal as its own submodule; a non-recursive update
+          # builds nothing, so check the nested one too.
+          test -f "$src/third_party/maya/third_party/jaal/CMakeLists.txt" \
+            || { echo "::error::nested jaal submodule missing"; exit 1; }
+          echo "ok: third_party/maya/third_party/jaal"
+

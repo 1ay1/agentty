@@ -1,63 +1,44 @@
-// Diff-review pane — the multi-file hunk review overlay (Ctrl+R).
-//
-// Layout (all heights clamped so the pane NEVER exceeds the terminal
-// viewport — same stranding discipline as pickers.cpp: an overlay taller
-// than the base box grows the frame and strands rows in native
-// scrollback on close):
-//
-//   ┌─ Review Changes ── 4/9 decided ─┐
-//   │ ~ src/foo.cpp   +12 -7   file 2/3│   header: kind icon + path + stats
-//   │ ── files ───────────────────────│
-//   │   + src/new.cpp        +45 -0 ✓ │   file strip (status per file)
-//   │ ▸ ~ src/foo.cpp        +12 -7 ◐ │
-//   │ ─────────────────────────────── │
-//   │   @@ -3,4 +3,5      ✓ accepted  │   prior hunks: header line only
-//   │ ▸ @@ -42,8 +43,9    · pending   │   focused hunk: header + body
-//   │   │ 42  ctx line                │
-//   │   │     -old line               │
-//   │   │ 43  +new line               │
-//   │   … 12 more lines (PgDn)        │
-//   │ ─────────────────────────────── │
-//   │ ↑↓ hunk  ←→ file  y/n decide …  │   footer hints
-//   └─────────────────────────────────┘
-//
-// Interaction model (reducer: update/diff.cpp): y/n decide + auto-advance
-// to the next pending hunk anywhere in the set; u undoes; f/d decide the
-// whole file; Enter finishes (pending⇒accepted, materialise, close);
-// Esc parks (decided files apply, undecided stay for later).
-
 #include "agentty/runtime/view/diff_review.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <format>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include <maya/platform/io.hpp>
+#include <maya/widget/markdown/highlight.hpp>
+#include <maya/widget/tab_strip.hpp>
 
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/hints.hpp"
+
+namespace pn = agentty::ui::panel;
 
 namespace agentty::ui {
 
 using namespace maya;
 using namespace maya::dsl;
+namespace syntax = maya::syntax;
 
 namespace {
 
-// ── Status vocabulary ────────────────────────────────────────────────
-
-const char* hunk_status_word(Hunk::Status s) {
-    switch (s) {
-        case Hunk::Status::Accepted: return "\u2713 accepted";
-        case Hunk::Status::Rejected: return "\u2717 rejected";
-        case Hunk::Status::Pending:  return "\u00b7 pending";
-    }
-    return "";
+// ── Language from a file path's extension ────────────────────────────────
+[[nodiscard]] syntax::Lang lang_of(std::string_view path) {
+    auto dot = path.rfind('.');
+    if (dot == std::string_view::npos) return syntax::Lang::Generic;
+    return syntax::lang_from_tag(path.substr(dot + 1));
 }
 
-maya::Color hunk_status_color(Hunk::Status s) {
+// ── Status glyphs ────────────────────────────────────────────────────────
+[[nodiscard]] const char* status_dot(Hunk::Status s) {
+    switch (s) {
+        case Hunk::Status::Accepted: return "\xe2\x97\x8f";  // ● filled
+        case Hunk::Status::Rejected: return "\xe2\x9c\x97";  // ✗
+        case Hunk::Status::Pending:  return "\xe2\x97\x8b";  // ○ hollow
+    }
+    return " ";
+}
+[[nodiscard]] Color status_color(Hunk::Status s) {
     switch (s) {
         case Hunk::Status::Accepted: return success;
         case Hunk::Status::Rejected: return danger;
@@ -66,280 +47,309 @@ maya::Color hunk_status_color(Hunk::Status s) {
     return muted;
 }
 
-// File kind icon: + created, - deleted, ~ modified.
-struct FileKind { const char* icon; maya::Color color; };
-FileKind file_kind(const FileChange& fc) {
-    if (fc.original_contents.empty()) return {"+", success};
-    if (fc.new_contents.empty())      return {"-", danger};
-    return {"~", info};
-}
+// A parsed diff line: its sign, the code text (sign stripped), and the new-side
+// line number (0 = none, e.g. a removed line).
+struct DiffLine { char sign; std::string code; int lineno; };
 
-// Per-file decision summary: all accepted ✓ / all rejected ✗ / mixed
-// decided ◆ / partially decided ◐ / untouched · .
-struct FileSummary { const char* glyph; maya::Color color; };
-FileSummary file_summary(const FileChange& fc) {
-    int acc = 0, rej = 0, pen = 0;
-    for (const auto& h : fc.hunks) {
-        switch (h.status) {
-            case Hunk::Status::Accepted: ++acc; break;
-            case Hunk::Status::Rejected: ++rej; break;
-            case Hunk::Status::Pending:  ++pen; break;
-        }
-    }
-    if (pen == 0 && rej == 0 && acc > 0) return {"\u2713", success};
-    if (pen == 0 && acc == 0 && rej > 0) return {"\u2717", danger};
-    if (pen == 0)                        return {"\u25c6", info};      // mixed, decided
-    if (acc + rej > 0)                   return {"\u25d0", warn};      // partial
-    return {"\u00b7", muted};
-}
-
-// ── Viewport budget ──────────────────────────────────────────────────
-//
-// Same resolution strategy as pickers.cpp::picker_viewport_h: real ioctl
-// wins; LINES env only when there is no tty (tests, pipes). The pane's
-// TOTAL height (rows incl. border) must fit under the terminal height
-// minus a safety margin, and under the base box cap (~24 rows, see
-// view.cpp phase 2) so the overlay never extends the painted frame.
-int pane_budget_rows() {
-    const auto sz = maya::platform::query_terminal_size(
-        maya::platform::stdout_handle());
-    int term_rows = sz.height.value;
-    if (!maya::platform::is_tty(maya::platform::stdout_handle())) {
-        if (const char* e = std::getenv("LINES"))
-            if (const int n = std::atoi(e); n > 0) term_rows = n;
-    }
-    if (term_rows <= 0) term_rows = 24;
-    // -3: bottom inset (2, view.cpp compose_overlay) + 1 breathing row.
-    return std::clamp(term_rows - 3, 10, 21);
-}
-
-// ── Diff body (windowed) ─────────────────────────────────────────────
-//
-// Hand-rolled instead of maya::DiffView because the focused hunk needs a
-// WINDOW over its patch (body_scroll + fixed height) — DiffView always
-// renders the whole patch, which would blow the height budget on a
-// 300-line hunk. Line numbers follow the DiffView convention: new-file
-// numbers on context/+ lines, blank gutter on - lines.
-struct PatchLine { char tag; std::string_view body; int new_no; };
-
-std::vector<PatchLine> parse_patch(const Hunk& hk) {
-    std::vector<PatchLine> out;
-    int new_no = hk.new_start;
-    std::string_view sv = hk.patch;
-    while (!sv.empty()) {
-        auto nl = sv.find('\n');
-        auto line = (nl == std::string_view::npos) ? sv : sv.substr(0, nl);
-        sv = (nl == std::string_view::npos) ? std::string_view{}
-                                            : sv.substr(nl + 1);
+[[nodiscard]] std::vector<DiffLine> parse_hunk(std::string_view patch) {
+    std::vector<DiffLine> out;
+    int newno = 0;
+    std::size_t i = 0;
+    while (i < patch.size()) {
+        std::size_t nl = patch.find('\n', i);
+        std::string_view line = patch.substr(i, (nl == std::string_view::npos ? patch.size() : nl) - i);
+        i = (nl == std::string_view::npos) ? patch.size() : nl + 1;
         if (line.empty()) continue;
-        const char tag = line[0];
-        const auto body = line.substr(1);
-        if (tag == '-') {
-            out.push_back({tag, body, 0});
-        } else {
-            out.push_back({tag, body, new_no});
-            ++new_no;
+        if (line.starts_with("@@")) {
+            // Seed the new-side counter from "+start".
+            auto p = line.find('+');
+            if (p != std::string_view::npos) {
+                newno = 0;
+                for (std::size_t k = p + 1; k < line.size() && line[k] >= '0' && line[k] <= '9'; ++k)
+                    newno = newno * 10 + (line[k] - '0');
+            }
+            continue;   // the @@ header itself isn't rendered as a code line
         }
+        char sign = line[0];
+        std::string code{line.substr(1)};
+        int ln = 0;
+        if (sign == '+' || sign == ' ') ln = newno++;
+        out.push_back({sign, std::move(code), ln});
     }
     return out;
 }
 
-Element render_patch_line(const PatchLine& pl) {
-    // Gutter: "│ 123 " — rail + 4-col new-file line number (blank for -).
-    std::string gutter;
-    if (pl.new_no > 0) {
-        auto num = std::to_string(pl.new_no);
-        while (num.size() < 4) num.insert(num.begin(), ' ');
-        gutter = num;
-    } else {
-        gutter = "    ";
+// Syntax-highlight one code line into styled runs, tinted for its diff sign.
+// Added/removed lines keep syntax colours but carry a faint add/remove wash via
+// the gutter + sign; context lines are dimmed so the eye tracks the changes.
+[[nodiscard]] Element diff_code_line(const DiffLine& dl, syntax::Lang lang,
+                                     int gutter_w) {
+    const bool add = dl.sign == '+', del = dl.sign == '-';
+    Color sign_c = add ? success : del ? danger : muted;
+
+    // Build the WHOLE line as one string + per-byte-range StyledRuns, so it
+    // renders as a SINGLE text element that clips its tail cleanly at the pane
+    // width — an hstack of per-span text cells would instead squeeze every span
+    // when the line overflows (mangled). This is how maya's DiffView stays
+    // clean, applied with our syntax highlighting.
+    std::string content;
+    std::vector<StyledRun> runs;
+
+    // Gutter (right-aligned line number) + sign marker.
+    std::string gut = dl.lineno > 0 ? std::to_string(dl.lineno) : "";
+    gut.insert(gut.begin(), static_cast<std::size_t>(std::max(0, gutter_w - (int)gut.size())), ' ');
+    gut += " ";
+    runs.push_back({content.size(), gut.size(), Style{}.with_fg(muted).with_dim()});
+    content += gut;
+    std::string sign_s = add ? "+ " : del ? "- " : "  ";
+    runs.push_back({content.size(), sign_s.size(), Style{}.with_fg(sign_c)});
+    content += sign_s;
+
+    // Syntax-highlighted code. Removed + context lines render dimmed so the
+    // eye tracks the additions.
+    const std::size_t code_off = content.size();
+    content += dl.code;
+    auto spans = syntax::highlight(dl.code, lang);
+    const auto& theme = syntax::themes::terminal;
+    auto push = [&](std::size_t from, std::size_t to, syntax::Capture cap) {
+        if (to <= from) return;
+        Style st = theme.style_for(cap);
+        if (del || dl.sign == ' ') st = st.with_dim();
+        runs.push_back({code_off + from, to - from, st});
+    };
+    std::size_t pos = 0;
+    for (const auto& sp : spans) {
+        if (sp.start > pos) push(pos, sp.start, syntax::Capture::None);
+        push(sp.start, std::min<std::size_t>(sp.start + sp.len, dl.code.size()),
+             sp.cap);
+        pos = sp.start + sp.len;
     }
-    Style body_style;
-    std::string lead;
-    switch (pl.tag) {
-        case '+': body_style = fg_of(success); lead = "+"; break;
-        case '-': body_style = fg_of(danger);  lead = "-"; break;
-        default:  body_style = fg_dim(text_secondary); lead = " "; break;
-    }
-    return h(
-        text("  \u2502 ", fg_dim(muted)),
-        text(std::move(gutter) + " ", fg_dim(muted)),
-        (text(lead + std::string(pl.body), body_style) | clip)
-    ).build();
+    if (pos < dl.code.size()) push(pos, dl.code.size(), syntax::Capture::None);
+
+    return Element{TextElement{.content = std::move(content),
+                               .wrap = TextWrap::TruncateEnd,
+                               .runs = std::move(runs)}};
 }
 
 } // namespace
 
 Element diff_review(const Model& m) {
-    auto* cursor = pick::opened(m.ui.diff_review);
+    auto rule = [](Color c) {
+        return component([c](int w, int) -> Element {
+            std::string s; s.reserve(static_cast<std::size_t>(std::max(0, w)) * 3);
+            for (int i = 0; i < w; ++i) s += "\xe2\x94\x80";   // ─
+            return text(std::move(s), fg_dim(c));
+        });
+    };
+    auto* cursor = m.ui.panel.get<pn::DiffReview>();
     if (!cursor || m.d.pending_changes.empty()) return nothing();
+    const int fidx = std::min<int>(cursor->file_index,
+                                   static_cast<int>(m.d.pending_changes.size()) - 1);
+    const auto& fc = m.d.pending_changes[static_cast<std::size_t>(fidx)];
 
-    const int n_files = static_cast<int>(m.d.pending_changes.size());
-    const int fi = std::clamp(cursor->file_index, 0, n_files - 1);
-    const auto& fc = m.d.pending_changes[static_cast<std::size_t>(fi)];
-    const int n_hunks = static_cast<int>(fc.hunks.size());
-    const int hi = n_hunks > 0 ? std::clamp(cursor->hunk_index, 0, n_hunks - 1)
-                               : 0;
-
-    // Global review progress for the title.
-    int total = 0, decided = 0;
-    for (const auto& c : m.d.pending_changes)
-        for (const auto& h_ : c.hunks) {
-            ++total;
-            if (h_.status != Hunk::Status::Pending) ++decided;
+    // ── Overall progress across every file's hunks ──
+    int total_hunks = 0, decided = 0, accepted = 0;
+    for (const auto& f : m.d.pending_changes)
+        for (const auto& hk : f.hunks) {
+            ++total_hunks;
+            if (hk.status != Hunk::Status::Pending) ++decided;
+            if (hk.status == Hunk::Status::Accepted) ++accepted;
         }
-
-    // ── Height budget ──────────────────────────────────────────────
-    // Fixed chrome: border(2) + header(1) + hunk-strip sep(1) +
-    // footer sep(1) + footer(1) = 6. File strip (only when 2+ files):
-    // sep(1) + min(n_files,4) rows. Everything left goes to hunks.
-    const int budget = pane_budget_rows();
-    const bool show_files = n_files > 1;
-    const int file_rows = show_files ? std::min(n_files, 4) : 0;
-    const int chrome = 6 + (show_files ? file_rows + 1 : 0);
-    const int hunk_area = std::max(4, budget - chrome);
+    // NOTE: the pane can never sit at decided == total with work still
+    // pending — the reducer commits and closes itself the moment the last
+    // pending hunk is decided (auto-commit on final y/n), and the *All
+    // handlers clear the queue wholesale. all_done is therefore transient at
+    // worst, and the progress bar / border colour below read it only for the
+    // one frame before the close lands.
+    const bool all_done = (decided == total_hunks && total_hunks > 0);
 
     std::vector<Element> rows;
 
-    // ── Header: kind + path + stats + file position ────────────────
-    const auto kind = file_kind(fc);
-    rows.push_back(h(
-        text(std::string(kind.icon) + " ", fg_bold(kind.color)),
-        (text(fc.path, fg_bold(code_path)) | clip),
-        text("  "),
-        text(std::format("+{}", fc.added), fg_of(success)),
-        text(" "),
-        text(std::format("-{}", fc.removed), fg_of(danger)),
-        spacer(),
-        text(std::format("file {}/{}", fi + 1, n_files), fg_dim(muted))
-    ).build());
-
-    // ── File strip (2+ files): windowed around the focused file ────
-    if (show_files) {
-        rows.push_back(sep);
-        int first = std::clamp(fi - file_rows / 2, 0, n_files - file_rows);
-        for (int i = first; i < first + file_rows; ++i) {
-            const auto& f = m.d.pending_changes[static_cast<std::size_t>(i)];
-            const bool sel = i == fi;
-            const auto k = file_kind(f);
-            const auto sum = file_summary(f);
-            rows.push_back(h(
-                sel ? text("\u25b8 ", fg_bold(accent)) : text("  "),
-                text(std::string(k.icon) + " ", fg_of(k.color)),
-                (text(f.path, sel ? fg_bold(fg) : fg_of(muted)) | clip),
-                spacer(),
-                text(std::format("+{} ", f.added), fg_dim(success)),
-                text(std::format("-{} ", f.removed), fg_dim(danger)),
-                text(sum.glyph, fg_of(sum.color))
-            ).build());
+    // ── File rail: every file, its net status + diffstat, current one lit ──
+    // Shows the WHOLE changeset at a glance (SOTA: you never lose the forest).
+    //
+    // maya::TabStrip owns the hard part: when the changeset is wider than the
+    // pane the strip slides so the CURRENT file stays visible, and what it
+    // scrolled past collapses into a leading "…". That used to be ~60 lines
+    // of chunk-measuring and window-sliding here — the same logic the stats
+    // viewer's tabs need, so it moved into the widget rather than being
+    // written a second time. The per-file status dot and the +/- diffstat are
+    // first-class fields on a tab precisely BECAUSE they must participate in
+    // that width arithmetic; a host appending them itself would scroll by the
+    // wrong amount and push the current file off the edge.
+    {
+        TabStrip rail;
+        // Editor, not Dot: every tab already carries a status dot of its own
+        // (pending / rejected / accepted), so Dot's leading ◆ selection
+        // glyph put two dots on the same tab and the eye could not tell
+        // which one meant "current". Editor separates the files with │ and
+        // marks the live one with a FILLED CHIP in the accent, leaving the
+        // per-file dot to mean status alone. A fill rather than weight
+        // because the neighbours here are real filenames the user still
+        // has to read — dimming them to make one look bright makes the
+        // rest look disabled, when they are simply not the current file.
+        // Both marks are single-row, so the pane's line budget is unchanged.
+        rail.marker(TabMark::Editor);
+        // Fill on every theme. TabStrip takes colours rather than a Style,
+        // so it cannot use reverse video — keep inverse_text where the theme
+        // owns a canvas, and fall back to the terminal's own background as
+        // ink where it does not (native's background IS the honest inverse
+        // of its foreground).
+        rail.theme.active_bg = accent;
+        rail.theme.active    = ui::theme_owns_canvas()
+                                   ? maya::Color{ui::text_inverse}
+                                   : maya::Color::slot(maya::ThemeSlot::Background);
+        rail.theme.idle      = fg;
+        rail.theme.accent    = accent;
+        for (const auto& f : m.d.pending_changes) {
+            bool anyrej = false, anypend = false;
+            for (const auto& hk : f.hunks) {
+                if (hk.status == Hunk::Status::Rejected) anyrej = true;
+                if (hk.status == Hunk::Status::Pending)  anypend = true;
+            }
+            const Hunk::Status roll = anypend ? Hunk::Status::Pending
+                                    : anyrej  ? Hunk::Status::Rejected
+                                              : Hunk::Status::Accepted;
+            std::string name = f.path;
+            if (auto sl = name.rfind('/'); sl != std::string::npos)
+                name = name.substr(sl + 1);
+            rail.tab(std::move(name))
+                .dot(status_color(roll), std::string(status_dot(roll)))
+                .detail(std::format("+{} -{}", f.added, f.removed), success);
         }
+        rail.active(fidx);
+        rows.push_back(rail.build());
     }
-    rows.push_back(sep);
 
-    // ── Hunk area ──────────────────────────────────────────────────
-    if (n_hunks == 0) {
-        rows.push_back(text("  (no hunks)", fg_italic(muted)));
+    // ── Progress bar + counts ──
+    {
+        constexpr int kBarW = 18;
+        int filled = total_hunks == 0 ? 0
+                   : (decided * kBarW + total_hunks / 2) / total_hunks;
+        std::string bar;
+        for (int i = 0; i < kBarW; ++i) bar += (i < filled) ? "\xe2\x96\x88" : "\xe2\x96\x91";
+        rows.push_back(h(
+            text("  "),
+            text(bar, all_done ? fg_of(success) : fg_of(accent)),
+            text("  "),
+            text(std::format("{}/{} reviewed", decided, total_hunks), fg_dim(muted)),
+            spacer(),
+            text("  "),
+            text(std::format("{} to accept", accepted), fg_dim(muted)),
+            text("  ")
+        ).build());
+    }
+    rows.push_back(rule(muted));
+
+    // ── The current file's hunks, syntax-highlighted ──
+    const syntax::Lang lang = lang_of(fc.path);
+    // Gutter width from the largest new-side line number in this file.
+    int max_ln = 1;
+    for (const auto& hk : fc.hunks)
+        max_ln = std::max(max_ln, hk.new_start + hk.new_len);
+    const int gut_w = std::max(2, static_cast<int>(std::to_string(max_ln).size()));
+
+    // Set inside the hunk loop when the FOCUSED hunk overflows its window —
+    // gates the ^D/^U footer hint so it only appears when scrolling exists.
+    bool focused_overflows = false;
+
+    for (int hi = 0; hi < static_cast<int>(fc.hunks.size()); ++hi) {
+        const auto& hk = fc.hunks[static_cast<std::size_t>(hi)];
+        const bool sel = hi == cursor->hunk_index;
+
+        // Per-hunk diffstat for the collapsed summary.
+        int hadd = 0, hrem = 0;
+        for (const auto& dl : parse_hunk(hk.patch)) {
+            if (dl.sign == '+') ++hadd; else if (dl.sign == '-') ++hrem;
+        }
+
+        // Hunk header: "▸ hunk N/M  ● status   +A −R". The caret marks the
+        // focused hunk; collapsed hunks show only this one line so a huge
+        // changeset stays navigable instead of a 200-row wall.
+        rows.push_back(h(
+            text("  "),
+            text(sel ? "\xe2\x96\xb8 " : "  ", sel ? fg_bold(accent) : fg_of(muted)),
+            text(std::format("hunk {}/{}  ", hi + 1, fc.hunks.size()),
+                 sel ? fg_bold(fg) : fg_dim(muted)),
+            text(status_dot(hk.status), fg_of(status_color(hk.status))),
+            text(" "),
+            text(hk.status == Hunk::Status::Accepted ? "accepted"
+               : hk.status == Hunk::Status::Rejected ? "rejected" : "pending",
+                 fg_of(status_color(hk.status))),
+            text(std::format("   +{} ", hadd), fg_dim(success)),
+            text(std::format("-{}", hrem), fg_dim(danger))
+        ).build());
+
+        // Only the FOCUSED hunk expands. Others stay collapsed to the header
+        // above — the SOTA large-review model (GitHub/Zed): one hunk in view,
+        // j/k walks the list.
+        if (!sel) continue;
+
+        // Cap a single huge hunk's height so it can't blow past the viewport.
+        // The window slides by the cursor's body_scroll (^D/^U, PgDn/PgUp);
+        // "↑ N lines above" / "… N more" bracket it so nothing is silently
+        // hidden and the user knows both directions exist.
+        constexpr int kMaxHunkRows = 24;
+        auto lines = parse_hunk(hk.patch);
+        const int nlines = static_cast<int>(lines.size());
+        // Clamp the offset precisely against the parsed rows (the reducer
+        // clamps loosely against the raw patch's newline count).
+        const int max_off = std::max(0, nlines - kMaxHunkRows);
+        const int off = std::clamp(cursor->body_scroll, 0, max_off);
+        focused_overflows = nlines > kMaxHunkRows;
+        if (off > 0)
+            rows.push_back(text(std::format(
+                "      \xe2\x86\x91 {} lines above (^U)", off), fg_dim(muted)));
+        int shown = 0;
+        for (int li = off; li < nlines && shown < kMaxHunkRows; ++li, ++shown)
+            rows.push_back((diff_code_line(lines[static_cast<std::size_t>(li)],
+                                           lang, gut_w)
+                            | padding(0, 0, 0, 4)).build());
+        if (off + shown < nlines)
+            rows.push_back(text(std::format(
+                "      \xe2\x80\xa6 {} more lines in this hunk (^D)",
+                nlines - off - shown), fg_dim(muted)));
+        rows.push_back(text(""));
+    }
+    rows.push_back(rule(muted));
+
+    // ── Footer: phone-friendly keys, destructive actions tinted ──
+    // ARMED ^X: replace the whole hint strip with an unmissable warning — the
+    // next ^X reverts everything; any other key cancels.
+    if (cursor->confirm_reject_all) {
+        rows.push_back(h(
+            text("  \xe2\x9a\xa0 ", fg_bold(danger)),
+            text("^X again reverts ALL changes on disk ", fg_bold(danger)),
+            text("\xc2\xb7 any other key cancels", fg_dim(muted))
+        ).build());
     } else {
-        // Every hunk gets a 1-row header; the focused hunk additionally
-        // shows a body window. Budget: headers first, body gets the rest.
-        const int max_headers = std::max(1, std::min(n_hunks, hunk_area / 2));
-        int first_h = std::clamp(hi - max_headers / 2, 0,
-                                 std::max(0, n_hunks - max_headers));
-        const int shown_headers =
-            std::min(max_headers, n_hunks - first_h);
-        const bool more_above = first_h > 0;
-        const bool more_below = first_h + shown_headers < n_hunks;
-        int body_h = hunk_area - shown_headers
-                   - (more_above ? 1 : 0) - (more_below ? 1 : 0);
-
-        if (more_above)
-            rows.push_back(text(
-                std::format("  \u2026 {} more hunk{} above", first_h,
-                            first_h == 1 ? "" : "s"),
-                fg_dim(muted)));
-
-        for (int i = first_h; i < first_h + shown_headers; ++i) {
-            const auto& hk = fc.hunks[static_cast<std::size_t>(i)];
-            const bool sel = i == hi;
-            rows.push_back(h(
-                sel ? text("\u25b8 ", fg_bold(accent)) : text("  "),
-                text(std::format("@@ -{},{} +{},{}", hk.old_start, hk.old_len,
-                                 hk.new_start, hk.new_len),
-                     sel ? fg_of(fg) : fg_dim(muted)),
-                text("  "),
-                text(hunk_status_word(hk.status),
-                     fg_of(hunk_status_color(hk.status))),
-                spacer(),
-                text(sel ? std::format("hunk {}/{}", i + 1, n_hunks)
-                         : std::string{},
-                     fg_dim(muted))
-            ).build());
-
-            if (!sel || body_h <= 1) continue;
-
-            // Focused hunk body — windowed by body_scroll.
-            const auto lines = parse_patch(hk);
-            const int n_lines = static_cast<int>(lines.size());
-            const int max_scroll = std::max(0, n_lines - (body_h - 1));
-            const int off = std::clamp(cursor->body_scroll, 0, max_scroll);
-            const bool clipped_below = off + body_h - 1 < n_lines;
-            const int visible = std::min(n_lines - off,
-                                         body_h - (clipped_below ? 1 : 0));
-            if (off > 0) {
-                // Replace the first visible row with an above-marker
-                // only when scrolled; keeps the window height stable.
-                rows.push_back(text(
-                    std::format("  \u2502 \u2026 {} line{} above", off,
-                                off == 1 ? "" : "s"),
-                    fg_dim(muted)));
-            }
-            const int body_start = off + (off > 0 ? 1 : 0);
-            for (int l = body_start; l < off + visible; ++l)
-                rows.push_back(render_patch_line(
-                    lines[static_cast<std::size_t>(l)]));
-            if (clipped_below) {
-                const int rest = n_lines - (off + visible);
-                rows.push_back(text(
-                    std::format("  \u2502 \u2026 {} more line{}  PgDn",
-                                rest, rest == 1 ? "" : "s"),
-                    fg_dim(muted)));
-            }
-        }
-
-        if (more_below) {
-            const int rest = n_hunks - (first_h + shown_headers);
-            rows.push_back(text(
-                std::format("  \u2026 {} more hunk{} below", rest,
-                            rest == 1 ? "" : "s"),
-                fg_dim(muted)));
-        }
+        std::vector<Hint> hints = {
+            {"↑↓", "hunk", 6},
+            {"←→", "file", 5, m.d.pending_changes.size() > 1 ? fg : muted},
+            {"y", "accept", 7, success},
+            {"n", "reject", 7, danger},
+            {"^A", "all",  4, success},
+            {"^X", "none", 3, danger},
+        };
+        if (focused_overflows)
+            hints.push_back({"^D/^U", "scroll", 2});
+        // Esc COMMITS: undecided hunks are kept (already live on disk), not
+        // discarded. "keep rest" says that; a bare "close" reads like cancel.
+        // There is deliberately no "all reviewed" case: the pane closes ITSELF
+        // when the last pending hunk is decided, so Esc never has to mean two
+        // opposed things (apply-at-end vs keep-the-rest mid-review) — the old
+        // final-Esc affordance trained exactly that contradiction.
+        hints.push_back({"Esc",
+                         decided == 0 ? "keep all" : "keep rest",
+                         8, fg});
+        rows.push_back(key_hints(std::move(hints)));
     }
 
-    // ── Footer: key hints ─────────────────────────────────────────
-    rows.push_back(sep);
-    rows.push_back(h(
-        text("↑↓", fg_of(fg)), text(" hunk  ", fg_dim(muted)),
-        text("←→", fg_of(fg)), text(" file  ", fg_dim(muted)),
-        text("y", fg_of(success)), text("/", fg_dim(muted)),
-        text("n", fg_of(danger)), text(" decide  ", fg_dim(muted)),
-        text("u", fg_of(fg)), text(" undo  ", fg_dim(muted)),
-        text("f", fg_of(success)), text("/", fg_dim(muted)),
-        text("d", fg_of(danger)), text(" file  ", fg_dim(muted)),
-        text("a", fg_of(success)), text("/", fg_dim(muted)),
-        text("x", fg_of(danger)), text(" all  ", fg_dim(muted)),
-        text("⏎", fg_of(fg)), text(" finish  ", fg_dim(muted)),
-        text("Esc", fg_of(fg)), text(" later", fg_dim(muted))
-    ).build());
-
-    // Title carries the global progress so it's visible at a glance.
-    const std::string title = total > 0
-        ? std::format(" Review Changes \u00b7 {}/{} decided ", decided, total)
-        : " Review Changes ";
-    const auto content = v(std::move(rows)) | padding(0, 1, 0, 1);
+    auto content = (v(std::move(rows)) | padding(1, 2));
     return (v(content.build())
             | border(BorderStyle::Round)
-            | bcolor(decided == total && total > 0 ? success : accent)
-            | btext(title, BorderTextPos::Top, BorderTextAlign::Center)
+            | bcolor(all_done ? success : muted)
+            | btext(" Review Changes ", BorderTextPos::Top, BorderTextAlign::Center)
             ).build();
 }
 

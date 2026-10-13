@@ -32,4 +32,19 @@ namespace agentty::tools::util {
 // without triggering its UTF-8 type_error.316.
 [[nodiscard]] std::size_t safe_utf8_cut(std::string_view s, std::size_t max_bytes) noexcept;
 
+// Apply terminal line-discipline to captured subprocess output so raw
+// control bytes can never reach a UI cell grid or the model:
+//   • ESC sequences are consumed whole — CSI through its final byte
+//     (0x40–0x7E), OSC/DCS/SOS/PM/APC through BEL or ST, two-byte ESC+X
+//     pairs. A sequence left INCOMPLETE at the end of the buffer (a
+//     progress snapshot can cut mid-CSI) is dropped, not passed through
+//     as literal parameter bytes.
+//   • lone \r applies OVERWRITE semantics (progress bars collapse to
+//     their final state); \r\n normalises to \n.
+//   • \b erases the previous codepoint on the current line.
+//   • every other C0 byte and DEL is dropped; \n and \t are kept.
+// Byte-transparent outside control sequences; pair with to_valid_utf8
+// for the encoding guarantee. Mirrors mcp-cpp's implementation.
+[[nodiscard]] std::string strip_terminal_controls(std::string_view in);
+
 } // namespace agentty::tools::util

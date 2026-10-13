@@ -4,16 +4,20 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
-#include <mutex>
+#include <utility>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
+#include <openssl/sha.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
+
+#include <maya/runtime.hpp>
 
 #if defined(__APPLE__)
 #  include <Security/Security.h>
@@ -57,18 +61,67 @@ constexpr unsigned char kAlpn[] = {
 // Without both halves, every dial pays a full handshake — resumption never
 // fires. We keep one most-recent SSL_SESSION per SNI host in a tiny
 // process-wide map; a single-endpoint client (api.anthropic.com) only ever
-// has a couple of distinct hosts, so a flat map under a mutex is ample.
+// has a couple of distinct hosts, so a flat guarded map is ample.
 //
 // Resumption to api.anthropic.com is a 1-RTT (TLS 1.3) abbreviated handshake
 // instead of the full 2-RTT exchange — ~30-150 ms saved on every fresh dial
 // after the connection-pool idle TTL evicts the live socket.
 // --------------------------------------------------------------------------
-std::mutex&                                          sess_mu() {
-    static std::mutex m; return m;
-}
-std::unordered_map<std::string, SSL_SESSION*>&       sess_map() {
-    static auto* m = new std::unordered_map<std::string, SSL_SESSION*>{};
-    return *m;
+// One owned reference to an SSL_SESSION. Move-only; frees its ref on drop.
+class Ticket {
+public:
+    Ticket() = default;
+    explicit Ticket(SSL_SESSION* s) noexcept : s_(s) {}
+    Ticket(Ticket&& o) noexcept : s_(std::exchange(o.s_, nullptr)) {}
+    Ticket& operator=(Ticket&& o) noexcept {
+        if (this != &o) { reset(); s_ = std::exchange(o.s_, nullptr); }
+        return *this;
+    }
+    // Copy = a second owned reference (OpenSSL session refcounts are
+    // atomic), so the ticket map can be copied for a snapshot update.
+    Ticket(const Ticket& o) noexcept : s_(o.s_) { if (s_) SSL_SESSION_up_ref(s_); }
+    Ticket& operator=(const Ticket& o) noexcept {
+        if (this != &o) { Ticket t{o}; *this = std::move(t); }
+        return *this;
+    }
+    ~Ticket() { reset(); }
+
+    // A second owned reference to the same session.
+    [[nodiscard]] Ticket share() const noexcept {
+        if (s_) SSL_SESSION_up_ref(s_);
+        return Ticket{s_};
+    }
+    [[nodiscard]] SSL_SESSION* get() const noexcept { return s_; }
+
+private:
+    void reset() noexcept { if (s_) SSL_SESSION_free(s_); s_ = nullptr; }
+    SSL_SESSION* s_ = nullptr;
+};
+} // namespace
+} // namespace agentty::tls
+
+// A Ticket owns its own reference (OpenSSL session refcounts are atomic), so
+// it can move between threads.
+MAYA_SENDABLE(agentty::tls::Ticket);
+// Frozen: an established SSL_SESSION is never mutated by us after capture;
+// OpenSSL documents sessions as shareable across SSL objects/threads once
+// handed out, and every holder only reads it (SSL_set_session up-refs).
+MAYA_FROZEN(agentty::tls::Ticket);
+
+namespace agentty::tls {
+namespace {
+using Tickets = std::unordered_map<std::string, Ticket>;
+// Leaked on purpose: freeing sessions at exit can race OpenSSL's own teardown.
+//
+// A maya::snapshot, not a lock: wrap_client / new_session_cb run inside
+// network code that is itself reached from ranked lock bodies (e.g. the
+// auth_refresh lane refreshes a token over HTTPS), so a lock here would need
+// a capability threaded through every http call. The map is a handful of
+// hosts and changes once per handshake: readers do one atomic load, writers
+// copy-and-publish (CAS retry). Nothing is held, so nothing can deadlock.
+maya::snapshot<Tickets>& tickets() {
+    static auto* t = new maya::snapshot<Tickets>;
+    return *t;
 }
 
 // ex_data slot carrying the SNI host string pointer through to new_session_cb
@@ -85,11 +138,12 @@ int new_session_cb(SSL* ssl, SSL_SESSION* sess) {
     const auto* host = static_cast<const std::string*>(
         SSL_get_ex_data(ssl, sni_ex_index()));
     if (!host) return 0;   // not ours to keep — let OpenSSL free it
-    std::lock_guard<std::mutex> lk(sess_mu());
-    auto& m = sess_map();
-    auto it = m.find(*host);
-    if (it != m.end() && it->second) SSL_SESSION_free(it->second);
-    m[*host] = sess;       // we now own one ref (cb gives us a ref to keep)
+    // We now own one ref (the cb hands us a ref to keep); the old one drops.
+    (void)tickets().update([](const Tickets& old, const std::string& h, const Ticket& t) {
+        Tickets m = old;
+        m[h] = t;
+        return m;
+    }, *host, Ticket{sess});
     return 1;
 }
 
@@ -195,6 +249,93 @@ bool load_system_roots(SSL_CTX* ctx) {
 #endif
 
 // --------------------------------------------------------------------------
+// Opt-in SPKI public-key pinning (SECURITY_AUDIT).
+//
+// Standard chain + hostname verification already defends against a random
+// bad cert. Pinning additionally defends against a mis-issued-but-validly-
+// chained cert (a compromised or coerced CA) for the API host. We do NOT pin
+// by default — a silent server-side key rotation would brick every client
+// that couldn't update in time. Instead pinning is OPT-IN via env:
+//
+//   AGENTTY_TLS_PINS="base64sha256spki[,base64sha256spki...]"
+//
+// Each pin is base64(SHA-256(DER SubjectPublicKeyInfo)) — the same value as
+// an HPKP "pin-sha256" / the `openssl ... | openssl dgst -sha256 -binary |
+// openssl enc -base64` recipe. If ANY configured pin matches the leaf cert's
+// SPKI, the connection proceeds; if none match, the handshake is refused even
+// when the chain is otherwise valid. Set includes a backup pin.
+// --------------------------------------------------------------------------
+const std::vector<std::string>& configured_pins() {
+    static const std::vector<std::string> pins = [] {
+        std::vector<std::string> out;
+        const char* raw = std::getenv("AGENTTY_TLS_PINS");
+        if (!raw || !*raw) return out;
+        std::string s{raw};
+        size_t start = 0;
+        while (start <= s.size()) {
+            size_t comma = s.find(',', start);
+            std::string tok = s.substr(start,
+                comma == std::string::npos ? std::string::npos : comma - start);
+            // trim ASCII whitespace
+            size_t a = tok.find_first_not_of(" \t\r\n");
+            size_t b = tok.find_last_not_of(" \t\r\n");
+            if (a != std::string::npos) out.push_back(tok.substr(a, b - a + 1));
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+        return out;
+    }();
+    return pins;
+}
+
+bool pinning_enabled() { return !configured_pins().empty(); }
+
+// base64(SHA-256(DER SubjectPublicKeyInfo)) of a leaf cert, matching the HPKP
+// pin format. Returns empty on any encoding error.
+std::string spki_pin_of(X509* leaf) {
+    if (!leaf) return {};
+    unsigned char* der = nullptr;
+    int len = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(leaf), &der);
+    if (len <= 0 || !der) return {};
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(der, static_cast<size_t>(len), digest);
+    OPENSSL_free(der);
+
+    // base64-encode the 32-byte digest via OpenSSL's EVP encoder.
+    int enc_len = 4 * ((SHA256_DIGEST_LENGTH + 2) / 3);
+    std::string b64(static_cast<size_t>(enc_len), '\0');
+    int n = EVP_EncodeBlock(reinterpret_cast<unsigned char*>(b64.data()),
+                            digest, SHA256_DIGEST_LENGTH);
+    if (n <= 0) return {};
+    b64.resize(static_cast<size_t>(n));
+    return b64;
+}
+
+// OpenSSL verify callback: runs for every cert in the chain. We let the
+// library's own chain/hostname decision stand (preverify_ok), then, only
+// when pinning is configured, ALSO require the leaf (depth 0) to match a pin.
+// A pin miss flips an otherwise-OK verify to a hard failure.
+int pin_verify_cb(int preverify_ok, X509_STORE_CTX* store_ctx) {
+    if (!preverify_ok) return 0;                 // chain already rejected it
+    if (!pinning_enabled()) return preverify_ok; // pinning off — nothing to add
+    if (X509_STORE_CTX_get_error_depth(store_ctx) != 0)
+        return preverify_ok;                     // only pin the leaf
+
+    X509* leaf = X509_STORE_CTX_get_current_cert(store_ctx);
+    std::string got = spki_pin_of(leaf);
+    if (got.empty()) {
+        X509_STORE_CTX_set_error(store_ctx, X509_V_ERR_APPLICATION_VERIFICATION);
+        return 0;
+    }
+    for (const auto& want : configured_pins())
+        if (got == want) return 1;               // pin matched — accept
+
+    // No configured pin matched the presented leaf key.
+    X509_STORE_CTX_set_error(store_ctx, X509_V_ERR_APPLICATION_VERIFICATION);
+    return 0;
+}
+
+// --------------------------------------------------------------------------
 // One-time SSL_CTX build. Two contexts: one with peer verification, one
 // insecure (for AGENTTY_INSECURE=1 / --insecure).  Lazy-initialized under a
 // mutex; the first caller pays the setup cost, the rest see the cached ptr.
@@ -255,7 +396,9 @@ SSL_CTX* build_ctx(bool insecure) {
     if (insecure) {
         SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
     } else {
-        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+        // Chain + hostname verification, plus opt-in SPKI pinning layered in
+        // via the callback (a no-op unless AGENTTY_TLS_PINS is set).
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, pin_verify_cb);
         load_system_roots(ctx);
     }
     return ctx;
@@ -370,11 +513,14 @@ SSL* wrap_client(int fd, std::string_view sni_host) {
     // is freed in free_ssl on the happy path, or by ~Building on failure.
     building.host = new std::string{host};
     SSL_set_ex_data(ssl, sni_ex_index(), building.host);
+    // A shared ref, so a concurrent replace can't free it mid-attach.
+    // SSL_set_session takes its own ref; ours drops at scope end.
+    // The loaded snapshot keeps the map (and its sessions) alive for the
+    // duration; SSL_set_session takes its own ref.
     {
-        std::lock_guard<std::mutex> lk(sess_mu());
-        auto& m = sess_map();
-        if (auto it = m.find(host); it != m.end() && it->second)
-            SSL_set_session(ssl, it->second);
+        const auto snap = tickets().load();
+        if (auto it = snap->find(std::string{host}); it != snap->end() && it->second.get())
+            SSL_set_session(ssl, it->second.get());
     }
 
     if (SSL_set_fd(ssl, fd) != 1) {

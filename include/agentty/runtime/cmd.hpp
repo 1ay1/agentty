@@ -1,0 +1,255 @@
+#pragma once
+// agentty::Cmd — the effect row, declared once.
+//
+// jaal puts a program's effects IN ITS TYPE (D2): `Cmd<Msg, a, b, c>` says
+// which effects this program may return, and a host must handle every one
+// of them or the program won't compile against it. That is the property
+// that makes the ACP host tractable — the compiler lists what it still owes
+// instead of us finding out at runtime.
+//
+// So the row lives here, in one place, and everything else says `Cmd`.
+//
+// Three groups:
+//
+//   jaal core     quit, send, after, task, now, random — always available,
+//                 no need to name them (D6: the core row is always in).
+//   maya terminal set_title, commit_scrollback, write_clipboard, suspend,
+//                 ... — things only a TERMINAL can do. A non-terminal host
+//                 (ACP) will not serve these, which is exactly why they are
+//                 listed: the compiler will say so.
+//   agentty's own save_settings, save_thread, ... — things only THIS app
+//                 does. Added as the Deps seam is dismantled (step 7 in
+//                 docs/design/jaal-rewrite.md).
+
+#include <maya/runtime.hpp>
+#include <maya/host/effects.hpp>
+#include <maya/host/sources.hpp>   // maya::on_key / on_paste / on_resize
+
+#include <string>
+#include <string_view>
+
+#include "agentty/domain/conversation.hpp"   // ImageContent
+#include "agentty/domain/id.hpp"
+#include "agentty/util/sendable.hpp"       // Id<Tag>, fs::path, EffectSet
+#include "agentty/util/io.hpp"
+#include "agentty/io/http.hpp"               // http::CancelTokenPtr
+#include "agentty/provider/selection.hpp"    // provider::Selection
+#include "agentty/runtime/msg.hpp"
+#include "agentty/runtime/store_fx.hpp"   // save_thread, write_file, …
+
+// ── agentty's value types, as jaal sees them ──────────────────────────────
+// Id<Tag>, fs::path and EffectSet are opted in by util/sendable.hpp, which
+// any guarded value can include. The ones below need heavier headers, so
+// they live with the Msg tree that carries them.
+
+// LazyBytes and ImageContent are opted in next to ImageContent
+// (domain/conversation.hpp), so the io layer can queue them too.
+
+
+// http::CancelTokenPtr is opted in next to the type (io/http.hpp).
+
+// provider::Selection is opted in next to its definition (selection.hpp).
+
+// ── the message tree, as jaal routes it ───────────────────────────────
+// Msg is a variant of 23 DOMAIN variants, not 231 leaves — agentty grouped
+// them because a flat Msg pinned sizeof(Msg) to the heaviest leaf and cost
+// ~19 s to rebuild after touching one. jaal's D36 is that shape, measured on
+// this app: one domain TU rebuilds in 1.19 s, the loop TU went 6.9 s -> 1.77 s.
+//
+// jaal descends the tree on its own, so by default it wants an update() for
+// every LEAF and says so, one diagnostic per missing case with the path it
+// took (Msg -> AppearanceMsg -> AppearanceThemeCommit). We don't want that:
+// each domain has ONE reducer that takes the whole domain variant and visits
+// it itself, in its own TU. That is what handled_as_group declares.
+//
+// It opts in BY NAME rather than being inferred, and D36 explains why: a
+// catch-all `template <class M> update(Model&, M)` matches a group type as
+// happily as a leaf, so inferring it would let a catch-all silently claim
+// every domain and switch off the exhaustiveness check underneath. Naming
+// each one keeps the check on for every leaf we HAVEN'T grouped.
+#define AGENTTY_MSG_GROUP(T) \
+    template <> inline constexpr bool maya::handled_as_group<::agentty::msg::T> = true;
+
+AGENTTY_MSG_GROUP(ComposerMsg)
+AGENTTY_MSG_GROUP(StreamMsg)
+AGENTTY_MSG_GROUP(ToolMsg)
+AGENTTY_MSG_GROUP(ToolOutputMsg)
+AGENTTY_MSG_GROUP(ProvidersMsg)
+AGENTTY_MSG_GROUP(ModelsMsg)
+AGENTTY_MSG_GROUP(ThreadListMsg)
+AGENTTY_MSG_GROUP(PaletteMsg)
+AGENTTY_MSG_GROUP(MentionMsg)
+AGENTTY_MSG_GROUP(SymbolMsg)
+AGENTTY_MSG_GROUP(CodeBlockMsg)
+AGENTTY_MSG_GROUP(CheckpointMsg)
+AGENTTY_MSG_GROUP(RagMsg)
+AGENTTY_MSG_GROUP(StatsMsg)
+AGENTTY_MSG_GROUP(SettingsListMsg)
+AGENTTY_MSG_GROUP(ForkMsg)
+AGENTTY_MSG_GROUP(TodoMsg)
+AGENTTY_MSG_GROUP(LoginMsg)
+AGENTTY_MSG_GROUP(DiffReviewMsg)
+AGENTTY_MSG_GROUP(SmartModeMsg)
+AGENTTY_MSG_GROUP(WebSearchMsg)
+AGENTTY_MSG_GROUP(PluginEditMsg)
+AGENTTY_MSG_GROUP(AppearanceMsg)
+AGENTTY_MSG_GROUP(MetaMsg)
+
+#undef AGENTTY_MSG_GROUP
+
+namespace agentty {
+
+/// Every effect an agentty reducer may return.
+///
+/// Add to this row when you add an effect; the host that can't run it stops
+/// compiling, with `require_host_for` naming the effect and the program.
+using Cmd = maya::Cmd<Msg,
+    // ── maya's terminal effects ──────────────────────────────────
+    maya::commit_scrollback,   // hand inline rows to the terminal's scrollback
+    maya::write_clipboard,     // OSC 52 write
+    maya::query_clipboard,     // OSC 52 read; reply arrives as a paste
+    maya::emit_host_sequence,  // a formed control sequence (editor hooks)
+    maya::reset_inline,        // drop the inline frame, start fresh below it
+    maya::force_redraw,        // repaint from scratch
+    maya::set_mouse,           // mouse reporting on/off
+    maya::suspend,             // hand the tty to a child (editor, pager)
+    // ── agentty's own: persistence ───────────────────────────────
+    // These were calls through the Deps seam, which made every reducer that
+    // saved impure. As effects they are values the reducer returns and the
+    // host runs — see runtime/store_fx.hpp.
+    save_thread,
+    delete_thread,
+    write_file,
+    save_settings,
+    // ── agentty's own: publishing Model-derived state to worker threads ──
+    // Returned by the dispatch seam, never by a reducer — see Model::
+    // published_subagent for why syncing isn't a step a reducer performs.
+    publish_subagent,
+    publish_selection,
+    publish_web_search_policy,
+    // ── agentty's own: credentials ───────────────────────────────
+    install_auth,
+    save_credentials,
+    save_codex_credentials,
+    load_auth_view,
+    account_op
+>;
+
+/// Every event source an agentty subscription may name.
+///
+/// The mirror of the Cmd row, for the input side (jaal D2): a program says
+/// which sources it listens to, and a host that can't produce one won't
+/// compile against it. jaal's core sources — `every` and `stream` — are
+/// always in and need no naming; these are maya's, the things only a
+/// TERMINAL reports.
+///
+// agentty names four. The omission that matters is on_mouse: there is no
+// mouse handler anywhere in the runtime and main.cpp never sets
+// Options::mouse, so it stays out. That isn't cosmetic — the row is the
+// difference between "this program needs a mouse" and "this program would
+// run on a host that has none".
+using Sub = maya::Sub<Msg,
+    maya::on_key,      // the composer and every panel's keymap
+    maya::on_paste,    // bracketed paste, and the OSC 52 clipboard reply
+    maya::on_focus,    // ?1004; gates the hardware caret when unfocused
+    maya::on_resize    // relayout; the inline frame's width changed
+>;
+
+// ── spelling the terminal effects ──────────────────────────────────────
+// jaal builds an effect by handing its PAYLOAD to the Cmd: `Cmd(SetTitle{s})`.
+// That reads fine at one call site and poorly at forty, and the old runtime
+// spelled these as named factories (`Cmd<Msg>::write_clipboard(s)`), so keep
+// the names. They're free — each is one constructor call.
+//
+// These live in agentty::app::cmd, the same namespace as the app's own effect
+// factories (runtime/app/cmd_factory.hpp): a reducer says `cmd::run_tool(...)`
+// and `cmd::write_clipboard(...)` without caring which side of the seam an
+// effect comes from. That is the point of a row — the program lists what it
+// needs and the host's and the app's own effects sit together.
+namespace app::cmd {
+
+[[nodiscard]] inline Cmd write_clipboard(std::string text) {
+    return Cmd(maya::WriteClipboard{std::move(text)});
+}
+[[nodiscard]] inline Cmd query_clipboard() {
+    return Cmd(maya::QueryClipboard{});
+}
+[[nodiscard]] inline Cmd emit_osc(int code, std::string_view payload) {
+    return Cmd(maya::osc(code, payload));
+}
+[[nodiscard]] inline Cmd emit_host_sequence(std::string seq) {
+    return Cmd(maya::EmitHostSequence{std::move(seq)});
+}
+[[nodiscard]] inline Cmd reset_inline() {
+    return Cmd(maya::ResetInline{});
+}
+[[nodiscard]] inline Cmd force_redraw() {
+    return Cmd(maya::ForceRedraw{});
+}
+[[nodiscard]] inline Cmd set_mouse(bool on) {
+    return Cmd(maya::SetMouse{on});
+}
+
+/// Commit a harvested scrollback debt; nothing to do when it's empty.
+/// The typed ScrollbackDebt is the point — only maya's ledger can mint one,
+/// so a reducer can't commit a row count that drifts from the wire.
+[[nodiscard]] inline Cmd commit_scrollback(maya::ScrollbackDebt debt) {
+    return maya::commit_from<Cmd>(debt);
+}
+
+// ── effects that do IO ──────────────────────────────────────────────────────────
+// A task whose body gets an Io: body(Io, Sink<Msg>, stop_token, args...),
+// or, when it takes locks, body(Io, const maya::unlocked&, Sink<Msg>,
+// stop_token, args...). Same rules as Cmd::task (captureless, Sendable
+// args). This is how a reducer asks for IO: it returns the task, and the
+// worker gets the Io -- and, because a worker thread starts holding no lock,
+// the `unlocked` capability that lets it take locks in rank order. The
+// reducer itself never gets either.
+namespace io_detail {
+template <class Body, class... Args>
+concept IoCapBody =
+    std::is_convertible_v<Body, void (*)(Io, const maya::unlocked&, maya::Sink<Msg>,
+                                         std::stop_token, Args...)>;
+template <class Body, class... Args>
+concept IoPlainBody =
+    std::is_convertible_v<Body, void (*)(Io, maya::Sink<Msg>, std::stop_token, Args...)>;
+
+// The task body jaal runs: a captureless lambda (so it converts to a function
+// pointer, which is jaal's task contract), taking the fresh worker thread's
+// `unlocked` first (core/fx.hpp). It adds the Io, and forwards the capability
+// to bodies that take locks.
+template <class Body, class... Args>
+inline constexpr auto run_io = [](const maya::unlocked& cap, maya::Sink<Msg> out,
+                                  std::stop_token st, Args... args) {
+    if constexpr (IoCapBody<Body, Args...>)
+        Body{}(IoAccess::grant(), cap, std::move(out), std::move(st), std::move(args)...);
+    else
+        Body{}(IoAccess::grant(), std::move(out), std::move(st), std::move(args)...);
+};
+template <class Body, class... Args>
+concept IoBody = IoCapBody<Body, Args...> || IoPlainBody<Body, Args...>;
+}  // namespace io_detail
+
+template <class Body, class... Args>
+    requires io_detail::IoBody<Body, Args...>
+[[nodiscard]] Cmd io_task(Body, Args... args) {
+    return Cmd::task(io_detail::run_io<Body, Args...>, std::move(args)...);
+}
+
+/// io_task on a thread of its own, for work that may never return.
+template <class Body, class... Args>
+    requires io_detail::IoBody<Body, Args...>
+[[nodiscard]] Cmd io_task_isolated(Body, Args... args) {
+    return Cmd::task_isolated(io_detail::run_io<Body, Args...>, std::move(args)...);
+}
+
+/// A Sub::stream whose body gets an Io: body(Io, Sink<Msg>, stop_token, args...).
+template <class Body, class... Args>
+    requires io_detail::IoBody<Body, Args...>
+[[nodiscard]] Sub io_stream(std::string key, Body, Args... args) {
+    return Sub::stream(std::move(key), io_detail::run_io<Body, Args...>, std::move(args)...);
+}
+
+}  // namespace app::cmd
+
+}  // namespace agentty

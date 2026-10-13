@@ -1,559 +1,43 @@
-cmake_minimum_required(VERSION 3.28)
-project(agentty VERSION 0.2.6 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.28...3.31)
+project(agentty
+    VERSION     0.9.19
+    DESCRIPTION "A fast terminal coding agent (TUI) in modern C++"
+    LANGUAGES   CXX)
 
-# CMake (as of 4.2) has no /std:c++26 mapping for MSVC yet. Ask for C++23
-# there and opt into /std:c++latest so MSVC 14.50+ exposes available C++26
-# library bits (std::expected, std::format, etc). Other compilers get C++26.
-if(MSVC)
-    set(CMAKE_CXX_STANDARD 23)
-else()
-    set(CMAKE_CXX_STANDARD 26)
-endif()
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# Project CMake modules (test registry, and — as the redesign lands — the
+# extracted toolchain/standalone/hardening includes) live under cmake/.
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
-endif()
-
-# ── MSVC Release: strip default /Ob2 so our /Ob3 doesn't trigger D9025 ──
-#    CMake's default MSVC Release flags are "/MD /O2 /Ob2 /DNDEBUG". We
-#    want our per-target /Ob3 (aggressive inlining) instead. We also want
-#    to handle /O2 ourselves so the per-target Release flags below are
-#    authoritative. /MD vs /MT is handled via CMAKE_MSVC_RUNTIME_LIBRARY
-#    at the top of this file — see below.
-if(MSVC)
-    foreach(flag_var
-            CMAKE_CXX_FLAGS_RELEASE
-            CMAKE_CXX_FLAGS_RELWITHDEBINFO
-            CMAKE_CXX_FLAGS_MINSIZEREL
-            CMAKE_C_FLAGS_RELEASE
-            CMAKE_C_FLAGS_RELWITHDEBINFO
-            CMAKE_C_FLAGS_MINSIZEREL)
-        string(REGEX REPLACE "/O2" "" ${flag_var} "${${flag_var}}")
-        string(REGEX REPLACE "/Ob[0-3]" "" ${flag_var} "${${flag_var}}")
-    endforeach()
+# GNU ld on MinGW loads every object's full symbol table into memory; the
+# test binaries link the whole tree, and four at once exhausted a 63 GB box
+# ("could not read symbols: memory exhausted"). Compiles stay fully
+# parallel; links take turns. Override with -DAGENTTY_LINK_JOBS=N.
+if(MINGW AND CMAKE_GENERATOR MATCHES "Ninja")
+    set(AGENTTY_LINK_JOBS 1 CACHE STRING "Concurrent link jobs (Ninja pool)")
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS agentty_link=${AGENTTY_LINK_JOBS})
+    set(CMAKE_JOB_POOL_LINK agentty_link)
 endif()
 
-# ── Standalone binary plumbing ─────────────────────────────────────────
-# AGENTTY_STANDALONE=ON produces a binary with no third-party shared-library
-# dependencies — drop it on any compatible machine (matching libc
-# version) and it runs. On every platform it forces the right static-
-# linking knobs:
-#
-#   Linux      OpenSSL + nghttp2 statically linked. libstdc++ and libgcc
-#              folded in via -static-libstdc++ / -static-libgcc. libc
-#              stays dynamic (fully-static glibc breaks the NSS resolver
-#              and DNS lookups; if you need a 100% static binary, build
-#              against musl with -DAGENTTY_FULLY_STATIC=ON).
-#   macOS      OpenSSL + nghttp2 statically linked. libSystem stays
-#              dynamic (the only ABI Apple supports for distribution).
-#   Windows    Forces AGENTTY_STATIC_RUNTIME=ON (/MT) so the MSVC CRT is
-#              statically embedded; nghttp2 + OpenSSL come from the
-#              x64-windows-static vcpkg triplet.
-#
-# Build with `cmake -B build-rel -DCMAKE_BUILD_TYPE=Release -DAGENTTY_STANDALONE=ON`.
-option(AGENTTY_STATIC_RUNTIME "Link the MSVC runtime statically (/MT)" OFF)
-option(AGENTTY_STANDALONE     "Produce a standalone binary with no third-party shared-library deps" OFF)
-option(AGENTTY_FULLY_STATIC   "Fully static link (Linux only, requires musl toolchain)" OFF)
+# No C++ modules anywhere in the tree. With scanning on, every target gets
+# ninja dyndep files, and ninja 1.13 can assert on those mid-build
+# (RefreshDyndepDependents). Off globally so no target is missed.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
-# mimalloc override — Microsoft's fast allocator. MSVCRT's malloc is notably
-# slow on the small-string churn pattern (std::string everywhere in RenderOp,
-# SSE parsing, JSON). Linking mimalloc-static and including mimalloc-new-delete
-# in main.cpp routes global operator new/delete through mimalloc; measured
-# 15–25% wins on allocator-heavy Windows workloads. Default ON when the
-# package is installed; harmless on POSIX (mimalloc works there too but the
-# delta vs. glibc/jemalloc is smaller).
-option(AGENTTY_USE_MIMALLOC   "Route operator new/delete through mimalloc (big Win32 win)" ON)
+# Toolchain: compiler cache, C++ standard + fallback, default build type,
+# MSVC Release flag normalization. See cmake/AgenttyToolchain.cmake.
+include(AgenttyToolchain)
 
-# CPU ISA baseline. Default avx2 (Haswell+/Zen1+, ~2013), which covers ~every
-# desktop/laptop in use. Drop to "avx" for Sandy/Ivy Bridge (2011–2012) or
-# older VM hosts, "sse2" for truly ancient, "native" to let the compiler pick
-# based on the build machine. MSVC only exposes a handful of /arch values;
-# GCC/Clang understand -march= directly.
-set(AGENTTY_ARCH "avx2" CACHE STRING
-    "CPU baseline: native, avx2 (default), avx, or sse2.")
-set_property(CACHE AGENTTY_ARCH PROPERTY STRINGS native avx2 avx sse2)
+# Pre-submodule setup: standalone/static knobs, ISA baseline, LTO/IPO gating,
+# mimalloc + maya toggles, platform aliases. See cmake/AgenttyStandalone.cmake.
+include(AgenttyStandalone)
 
-if(AGENTTY_STANDALONE AND MSVC)
-    # On Windows, standalone implies static MSVC runtime — there's no
-    # other way to ship a "drop it on any machine" .exe.
-    set(AGENTTY_STATIC_RUNTIME ON CACHE BOOL "" FORCE)
-endif()
-if(AGENTTY_STATIC_RUNTIME AND MSVC)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-endif()
+# Dependency acquisition: submodule auto-pull, FetchContent, add_subdirectory
+# for acp/mcp/rag, nghttp2 discovery. See cmake/AgenttySubmodules.cmake.
+include(AgenttySubmodules)
 
-# Tell find_package(OpenSSL) to prefer .a over .so/.dylib when standalone
-# is requested. We try static first (QUIET so a missing .a doesn't error
-# out); if that fails we silently fall back to the dynamic variant later
-# and warn the user that one runtime dep slipped through. Most distros
-# (Arch, Debian default, Fedora) only package OpenSSL as .so; users on
-# Alpine, vcpkg-static, or who installed openssl-static get the full
-# standalone build.
-set(AGENTTY_STANDALONE_OPENSSL_FALLBACK FALSE)
-if(AGENTTY_STANDALONE)
-    set(OPENSSL_USE_STATIC_LIBS TRUE)
-endif()
-
-# Link-time optimization — enabled by default in Release/RelWithDebInfo, off
-# in Debug (would drag build times without shipping value). Supported by
-# GCC, Clang, MSVC, and AppleClang; CMake picks the right flag per toolchain.
-# Set before the maya/acp-cpp/mcp-cpp subdirectories so the whole tree LTO-
-# links as one unit on the platforms where it pays off.
-include(CheckIPOSupported)
-check_ipo_supported(RESULT AGENTTY_HAS_IPO OUTPUT AGENTTY_IPO_ERR)
-
-# macOS + GCC is the one toolchain where LTO is all cost and no benefit.
-# Apple's ld can't consume GCC's LTO bytecode, so `-flto` does NOT optimize
-# across modules — the fat objects' per-TU -O3 code is what actually links —
-# yet the GIMPLE IR rides along as a dead __GNU_LTO LOAD segment (tens of MB)
-# that `strip`/`strip -x` cannot remove (it's a load command, not symbols).
-# check_ipo_supported() passes (its probe link "works"), so without this
-# guard the macOS release ships ~3x its real size with zero speed gain.
-# Disable IPO for this combo only: the binary drops to its true code size and
-# is byte-for-byte as optimized. Linux GCC/Clang (where the shipping static
-# binaries are built — full LTO + maya's heavy flag set) and MSVC (/GL+/LTCG)
-# are unaffected. macOS's real ceiling is AppleClang+ThinLTO, which can't
-# build this tree yet (no cxx_std_26 advertised), so -O3 is the macOS max.
-set(AGENTTY_IPO_OK ${AGENTTY_HAS_IPO})
-if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set(AGENTTY_IPO_OK FALSE)
-    message(STATUS "agentty: LTO disabled on macOS+GCC "
-                   "(Apple ld can't consume GCC LTO IR — would only bloat the binary)")
-endif()
-if(AGENTTY_IPO_OK AND (CMAKE_BUILD_TYPE STREQUAL "Release"
-                     OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo"
-                     OR CMAKE_BUILD_TYPE STREQUAL "MinSizeRel"))
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-endif()
-
-include(FetchContent)
-
-set(MAYA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(MAYA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-
-# STANDALONE builds must be portable across every chip of the target arch.
-# Maya's default `-march=native -mtune=native` would otherwise bake the
-# producing host's microarchitecture into libmaya.a (most visible on
-# aarch64 — a Graviton3-built binary SIGILLs on a Cortex-A72). Force the
-# native-tuning gate off so maya falls back to the compiler's default
-# baseline (`-march=x86-64` / `armv8-a`).
-if(AGENTTY_STANDALONE)
-    set(MAYA_NATIVE_TUNING OFF CACHE BOOL "" FORCE)
-endif()
-
-# macOS SDK + GCC, catch-all: the macOS 26 SDK's <mach/*.h> arm64
-# size-assert macros expand to `_Static_assert(...)`, a C keyword g++
-# rejects in C++ mode (only clang accepts it as an extension). ANY TU
-# pulling in mach headers (subprocess.cpp via <spawn.h>, tls.cpp, etc.)
-# trips it. Alias it directory-wide HERE — before every add_subdirectory
-# below (maya, acp-cpp, mcp-cpp) and before the agentty / test targets —
-# so all of them, including future submodules, inherit it from one place
-# instead of each re-discovering the breakage. AppleClang doesn't need it
-# (and can't build this tree — it doesn't advertise cxx_std_26).
-if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    add_compile_definitions(_Static_assert=static_assert)
-endif()
-
-# ── Submodule auto-pull ────────────────────────────────────────────────────
-# When AGENTTY_AUTO_PULL_SUBMODULES is ON (default), every in-tree submodule
-# is synced to the tip of its tracking branch on each build before its library
-# target compiles. SAFE: the pull is skipped for any submodule that has
-# uncommitted changes, so local edits are never clobbered. Skipped entirely
-# if the parent isn't a git checkout (release tarballs / FetchContent paths).
-#
-# Call AFTER add_subdirectory(<sub>) so the library target exists to depend on.
-#   agentty_pull_submodule_latest(<dir> <branch> <library-target>)
-option(AGENTTY_AUTO_PULL_SUBMODULES
-       "Sync every in-tree submodule to its tracking branch on every build" ON)
-# Back-compat: the old maya-only switch still disables maya's pull when OFF.
-option(AGENTTY_AUTO_PULL_MAYA "(deprecated alias) pull maya on every build" ON)
-
-function(agentty_pull_submodule_latest sub branch lib)
-    if(NOT AGENTTY_AUTO_PULL_SUBMODULES)
-        return()
-    endif()
-    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
-        return()
-    endif()
-    find_package(Git QUIET)
-    if(NOT GIT_FOUND)
-        return()
-    endif()
-    set(_sd "${CMAKE_CURRENT_SOURCE_DIR}/${sub}")
-    add_custom_target(${sub}_pull_latest ALL
-        COMMAND ${CMAKE_COMMAND} -E echo "[${sub}] checking origin/${branch}…"
-        COMMAND ${GIT_EXECUTABLE} -C ${_sd} diff --quiet HEAD
-            && ${GIT_EXECUTABLE} -C ${_sd} fetch --quiet origin ${branch}
-            && ${GIT_EXECUTABLE} -C ${_sd} reset --hard --quiet origin/${branch}
-            || ${CMAKE_COMMAND} -E echo
-               "[${sub}] local changes present — skipping auto-pull"
-        COMMENT "Syncing ${sub}/ to origin/${branch} (safe: skips if local changes)"
-        VERBATIM
-        USES_TERMINAL
-    )
-    # Build the pull BEFORE the library compiles so any changed sources are
-    # picked up in the same build. Ordering only; actual recompile depends on
-    # whether the git reset touched file timestamps.
-    if(TARGET ${lib})
-        add_dependencies(${lib} ${sub}_pull_latest)
-    endif()
-endfunction()
-
-# Prefer the in-tree submodule when present; only fall back to fetch.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/maya/CMakeLists.txt")
-    add_subdirectory(maya)
-    if(AGENTTY_AUTO_PULL_MAYA)
-        agentty_pull_submodule_latest(maya master maya)
-    endif()
-else()
-    FetchContent_Declare(
-        maya
-        GIT_REPOSITORY https://github.com/1ay1/maya.git
-        GIT_TAG        master
-        GIT_SHALLOW    TRUE
-    )
-    FetchContent_MakeAvailable(maya)
-endif()
-
-set(JSON_BuildTests OFF CACHE INTERNAL "")
-FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG        v3.11.3
-    GIT_SHALLOW    TRUE
-)
-
-# simdjson — used on the SSE hot path (content_block_delta) where we parse
-# hundreds of small JSON docs per second during streaming. nlohmann is fine
-# for config + cold events; simdjson's ondemand API is 3–5× faster for the
-# "open doc, read two fields, throw away" pattern that dominates here.
-set(SIMDJSON_DEVELOPER_MODE   OFF CACHE INTERNAL "")
-FetchContent_Declare(
-    simdjson
-    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
-    GIT_TAG        v3.10.1
-    GIT_SHALLOW    TRUE
-)
-
-FetchContent_MakeAvailable(nlohmann_json simdjson)
-
-# Mark third-party headers SYSTEM so their warnings don't pollute our build.
-# nlohmann_json v3.11.3's binary_writer.hpp uses std::is_trivial which GCC 15
-# deprecates under C++26 — the upstream fix is on master but unreleased, and we
-# don't want every TU that includes <nlohmann/json.hpp> to re-emit the warning.
-if(TARGET nlohmann_json)
-    get_target_property(_nj_iface nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
-    if(_nj_iface)
-        set_target_properties(nlohmann_json PROPERTIES
-            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_nj_iface}")
-    endif()
-endif()
-if(TARGET simdjson)
-    get_target_property(_sj_iface simdjson INTERFACE_INCLUDE_DIRECTORIES)
-    if(_sj_iface)
-        set_target_properties(simdjson PROPERTIES
-            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_sj_iface}")
-    endif()
-endif()
-
-# acp-cpp — header-only Agent Client Protocol library (submodule). Provides
-# the wire algebra + JSON-RPC engine + stdio transport for `agentty acp`.
-# Tests/examples off; it reuses the nlohmann_json target already populated
-# above (its own FetchContent_MakeAvailable is a no-op when already present).
-set(ACP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(ACP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(acp-cpp)
-agentty_pull_submodule_latest(acp-cpp main acp)
-if(TARGET acp)
-    set_target_properties(acp PROPERTIES SYSTEM TRUE)
-endif()
-
-# mcp-cpp — the Model Context Protocol library (submodule), and now the SOLE
-# source of agentty's local tool implementations. agentty's entire tool set
-# (read/write/edit/list_dir, bash, grep/glob/find_definition, diagnostics,
-# git_*, web_*, plus the host-coupled remember/forget/wipe/todo/skill/
-# search_docs/task SHELLS) is served by mcp-cpp's batteries-included toolset
-# and re-wrapped through src/tool/mcp_tools_bridge.cpp. It is therefore a HARD
-# build requirement — there is no native tool path to fall back to.
-option(AGENTTY_MCP "Build MCP integration (REQUIRED — agentty's tools live in mcp-cpp)" ON)
-if(NOT AGENTTY_MCP)
-    message(FATAL_ERROR
-        "agentty: AGENTTY_MCP=OFF is no longer supported — the tool set is "
-        "served exclusively by the mcp-cpp toolset. Configure with "
-        "-DAGENTTY_MCP=ON (the default).")
-endif()
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/CMakeLists.txt")
-    message(FATAL_ERROR
-        "agentty: the mcp-cpp submodule is missing but it now provides the "
-        "entire tool set. Run `git submodule update --init --recursive`.")
-endif()
-set(MCP_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
-set(MCP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-add_subdirectory(mcp-cpp)
-agentty_pull_submodule_latest(mcp-cpp master mcp)
-if(TARGET mcp)
-    set_target_properties(mcp PROPERTIES SYSTEM TRUE)
-endif()
-
-if(NOT TARGET maya::maya)
-    add_library(maya::maya ALIAS maya)
-endif()
-
-# Treat maya's headers as system so its warnings don't surface in agentty builds.
-set_target_properties(maya PROPERTIES SYSTEM TRUE)
-
-# Same treatment for simdjson's headers — upstream's `operator "" _padded`
-# trips -Wdeprecated-literal-operator under C++23, and it isn't our bug to
-# fix. SYSTEM suppresses diagnostics from the included headers.
-if(TARGET simdjson)
-    set_target_properties(simdjson PROPERTIES SYSTEM TRUE)
-endif()
-if(TARGET simdjson_static)
-    set_target_properties(simdjson_static PROPERTIES SYSTEM TRUE)
-endif()
-
-find_package(Threads REQUIRED)
-
-# OpenSSL: if AGENTTY_STANDALONE asked for static and the static archive is
-# missing, retry with shared libs and flag the fallback so the user sees
-# a clear note at the end of configure.
-if(AGENTTY_STANDALONE)
-    find_package(OpenSSL QUIET)
-    if(NOT OpenSSL_FOUND)
-        unset(OPENSSL_USE_STATIC_LIBS)
-        unset(OPENSSL_LIBRARIES CACHE)
-        unset(OPENSSL_CRYPTO_LIBRARY CACHE)
-        unset(OPENSSL_SSL_LIBRARY CACHE)
-        find_package(OpenSSL REQUIRED)
-        set(AGENTTY_STANDALONE_OPENSSL_FALLBACK TRUE)
-    endif()
-else()
-    find_package(OpenSSL REQUIRED)
-endif()
-
-# nghttp2 — HTTP/2 protocol engine for the in-house http client. Prefer the
-# upstream CMake config (vcpkg / Homebrew / nghttp2's own export); fall back
-# to pkg-config (Linux distros), then a manual find_path/find_library scan.
-find_package(nghttp2 CONFIG QUIET)
-# Skip pkg-config for fully-static builds: pkg-config returns the dynamic
-# library path by default (libnghttp2.so), which the `-static` link below
-# can't accept ("attempted static link of dynamic object").  The manual
-# find_library path further down (gated on AGENTTY_STANDALONE) explicitly
-# prefers libnghttp2.a, so let it take over.
-if(NOT TARGET nghttp2::nghttp2 AND NOT AGENTTY_FULLY_STATIC)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(NGHTTP2 IMPORTED_TARGET libnghttp2)
-        if(TARGET PkgConfig::NGHTTP2)
-            add_library(nghttp2::nghttp2 ALIAS PkgConfig::NGHTTP2)
-        endif()
-    endif()
-endif()
-# mimalloc — optional, but default-on when available. find_package(mimalloc)
-# comes from the upstream CMake export (vcpkg / brew / apt). If missing, we
-# silently continue without it rather than failing — it's a perf knob, not a
-# correctness requirement.
-set(AGENTTY_HAS_MIMALLOC FALSE)
-if(AGENTTY_USE_MIMALLOC)
-    find_package(mimalloc CONFIG QUIET)
-    if(TARGET mimalloc-static OR TARGET mimalloc)
-        set(AGENTTY_HAS_MIMALLOC TRUE)
-    else()
-        # WARNING (not STATUS) on purpose: this is the difference between
-        # a process that returns memory to the kernel promptly (mimalloc)
-        # and one that hoards a long session's freed arenas in glibc's
-        # free-list until exit (system allocator). On a long-running
-        # interactive session that's hundreds of MiB of unreclaimed RSS.
-        # The user should see the message during configure, not have it
-        # buried in a quiet STATUS line.
-        message(WARNING "agentty: AGENTTY_USE_MIMALLOC=ON but mimalloc not found "
-                       "— building against the system allocator. On "
-                       "Linux/glibc this means freed memory is not returned "
-                       "to the kernel until process exit; long sessions will "
-                       "look bloated in RSS. Install via `apt install "
-                       "libmimalloc-dev` / `pacman -S mimalloc` / `brew "
-                       "install mimalloc` / vcpkg `mimalloc` and "
-                       "reconfigure to enable it.")
-    endif()
-endif()
-
-if(NOT TARGET nghttp2::nghttp2)
-    find_path(NGHTTP2_INCLUDE_DIR nghttp2/nghttp2.h)
-    # Standalone builds prefer the static archive (libnghttp2.a /
-    # nghttp2_static.lib); regular builds prefer the shared library so
-    # devs don't need a static archive installed.
-    if(AGENTTY_STANDALONE)
-        if(MSVC)
-            find_library(NGHTTP2_LIBRARY NAMES nghttp2_static nghttp2)
-        else()
-            find_library(NGHTTP2_LIBRARY NAMES libnghttp2.a nghttp2_static nghttp2)
-        endif()
-    else()
-        find_library(NGHTTP2_LIBRARY NAMES nghttp2 nghttp2_static)
-    endif()
-    if(NGHTTP2_INCLUDE_DIR AND NGHTTP2_LIBRARY)
-        add_library(nghttp2::nghttp2 UNKNOWN IMPORTED)
-        set_target_properties(nghttp2::nghttp2 PROPERTIES
-            IMPORTED_LOCATION "${NGHTTP2_LIBRARY}"
-            INTERFACE_INCLUDE_DIRECTORIES "${NGHTTP2_INCLUDE_DIR}")
-    else()
-        message(FATAL_ERROR
-            "nghttp2 not found — install libnghttp2-dev (Debian/Ubuntu), "
-            "nghttp2 (Homebrew/Arch), or vcpkg install nghttp2.")
-    endif()
-endif()
-
-# ── Source groups, by domain ──────────────────────────────────────────────
-# The header tree under include/agentty/ mirrors this grouping one-for-one:
-#   domain/    — pure value types (no I/O, no UI). Headers only.
-#   io/        — sockets, TLS, HTTP/2, OAuth, on-disk persistence, OS
-#                clipboard. Anything that talks to the kernel or the
-#                wire and isn't tied to a specific provider.
-#   provider/  — wire-format adapters for upstream LLM APIs.
-#   diff/      — unified-diff parser used by the edit tool & review modal.
-#   tool/      — the agent's capability surface: registry + per-tool impls.
-#   workspace/ — pure-I/O scanners over the active workspace root (file
-#                enumeration for @mention, symbol enumeration for #).
-#                Consumed by the runtime's pickers but separate from the
-#                UI state they feed.
-#   airgap/    — the `agentty airgap` CLI subcommand (exec's into ssh,
-#                never returns).  Not part of the maya runtime.
-#   runtime/   — the Elm-style app: model, update, subscriptions, view tree.
-
-set(AGENTTY_IO_SOURCES
-    src/io/http.cpp
-    src/io/tls.cpp
-    src/io/auth.cpp
-    src/io/cred_crypt.cpp
-    src/io/persistence.cpp
-    src/io/clipboard.cpp
-    src/util/base64.cpp
-    src/util/dbglog.cpp
-)
-
-set(AGENTTY_WORKSPACE_SOURCES
-    src/workspace/files.cpp
-    src/workspace/symbols.cpp
-    src/workspace/checkpoint.cpp
-)
-
-set(AGENTTY_AIRGAP_SOURCES
-    src/airgap/airgap.cpp
-)
-
-set(AGENTTY_PROVIDER_SOURCES
-    src/provider/anthropic/transport.cpp
-    src/provider/openai/transport.cpp
-    src/provider/ollama/transport.cpp
-    src/provider/selection.cpp
-)
-
-# ACP (Agent Client Protocol) — lets agentty run as a headless agent
-# subprocess that Zed (or any ACP client) drives over JSON-RPC on stdio.
-# The wire protocol/engine/transport live in the acp-cpp submodule (linked
-# as acp::acp); server.cpp is the agentty-specific glue (turn loop + tools).
-set(AGENTTY_ACP_SOURCES
-    src/acp/server.cpp
-)
-
-# MCP (Model Context Protocol) client glue — spawns external MCP servers and
-# exposes their tools as agentty ToolDefs. The heavy mcp-cpp templates are
-# confined to these TUs (linked as mcp::mcp). Only compiled when AGENTTY_MCP.
-set(AGENTTY_MCP_SOURCES
-    src/mcp/bridge.cpp
-    src/mcp/http_server.cpp
-    src/mcp/serve.cpp
-    src/tool/mcp_tools_bridge.cpp
-    src/tool/mcp_tools_backends.cpp
-)
-
-set(AGENTTY_DIFF_SOURCES
-    src/diff/diff.cpp
-)
-
-set(AGENTTY_RAG_SOURCES
-    src/rag/bm25.cpp
-    src/rag/corpus.cpp
-    src/rag/hnsw.cpp
-    src/rag/rerank.cpp
-    src/rag/expand.cpp
-    src/rag/knowledge.cpp
-    src/rag/stemmer.cpp
-    src/rag/simd.cpp
-)
-
-set(AGENTTY_TOOL_SOURCES
-    src/tool/registry.cpp
-    src/tool/util/utf8.cpp
-    src/tool/util/fs_helpers.cpp
-    src/tool/util/subprocess.cpp
-    src/tool/util/sandbox.cpp
-    src/tool/util/arg_reader.cpp
-    src/tool/util/partial_json.cpp
-    src/tool/util/fuzzy_match.cpp
-    src/tool/subagent.cpp
-    src/tool/skills.cpp
-    src/tool/memory_store.cpp
-)
-
-# Everything except the entry point — so tests can link the same runtime
-# without fighting main().
-set(AGENTTY_RUNTIME_NOMAIN_SOURCES
-    src/runtime/composer_attachment.cpp
-    src/runtime/app/deps.cpp
-    src/runtime/app/init.cpp
-    src/runtime/app/cmd_factory.cpp
-    src/runtime/app/update.cpp
-    src/runtime/app/update/composer.cpp
-    src/runtime/app/update/stream.cpp
-    src/runtime/app/update/stream_preview.cpp
-    src/runtime/app/update/modal.cpp
-    src/runtime/app/update/frozen.cpp
-    src/runtime/app/update/tool.cpp
-    src/runtime/app/update/login.cpp
-    src/runtime/app/update/picker.cpp
-    src/runtime/app/update/palette.cpp
-    src/runtime/app/update/mention.cpp
-    src/runtime/app/update/symbol.cpp
-    src/runtime/app/update/codeblock.cpp
-    src/runtime/app/update/diff.cpp
-    src/runtime/app/update/meta.cpp
-    src/runtime/app/subscribe.cpp
-
-    src/runtime/view/cache.cpp
-    src/runtime/view/helpers.cpp
-    src/runtime/view/thread/turn/agent_timeline/tool_args.cpp
-    src/runtime/view/thread/turn/agent_timeline/tool_helpers.cpp
-    src/runtime/view/thread/turn/agent_timeline/tool_body_preview.cpp
-    src/runtime/view/thread/turn/agent_timeline/agent_timeline.cpp
-    src/runtime/view/thread/turn/permission.cpp
-    src/runtime/view/thread/turn/turn.cpp
-    src/runtime/view/thread/welcome_screen.cpp
-    src/runtime/view/thread/activity_indicator.cpp
-    src/runtime/view/thread/conversation.cpp
-    src/runtime/view/thread/thread.cpp
-    src/runtime/view/composer.cpp
-    src/runtime/view/status_bar/title_chip.cpp
-    src/runtime/view/status_bar/phase_chip.cpp
-    src/runtime/view/status_bar/token_stream_sparkline.cpp
-    src/runtime/view/status_bar/context_gauge.cpp
-    src/runtime/view/status_bar/status_banner.cpp
-    src/runtime/view/status_bar/model_badge.cpp
-    src/runtime/view/status_bar/status_bar.cpp
-    src/runtime/view/changes_strip.cpp
-    src/runtime/view/pickers.cpp
-    src/runtime/view/diff_review.cpp
-    src/runtime/view/login.cpp
-    src/runtime/view/view.cpp
-)
-
-set(AGENTTY_RUNTIME_SOURCES
-    src/runtime/main.cpp
-    ${AGENTTY_RUNTIME_NOMAIN_SOURCES}
-)
+# Per-domain source group lists (AGENTTY_*_SOURCES). See cmake/AgenttySources.cmake.
+include(AgenttySources)
+include(CheckCXXSourceCompiles)
 
 # ── Shared compile flags ────────────────────────────────────────────────
 # All agentty TUs (the main binary, the shared OBJECT libraries below, and
@@ -630,6 +114,12 @@ else()
         target_compile_options(${tgt} PRIVATE -Wno-maybe-uninitialized)
     endif()
 
+    # NOTE: -ffunction-sections/-fdata-sections + --gc-sections were measured
+    # here and gave ZERO size win — the whole-program LTO link (default on)
+    # already performs cross-module dead-code elimination before a section GC
+    # would ever run, so the section split is pure redundant compile cost.
+    # Left out deliberately; if LTO is ever disabled, revisit.
+
     # macOS SDK + GCC: <mach/port.h> uses `_Static_assert` (C keyword) in
     # arm64 macros that fire from any TU pulling in mach headers (e.g.
     # subprocess.cpp via <spawn.h>). Alias the C spelling to its C++
@@ -640,6 +130,45 @@ else()
     endif()
 endif()
 endfunction()
+
+# ── Directory-wide sanitizer (instruments EVERYTHING, incl. tests) ─────────
+# The target-scoped AGENTTY_SANITIZE below only instruments the `agentty`
+# exe. But the memory-safety bugs a Rust advocate points at (use-after-free,
+# buffer overrun, UB) are exercised by the TEST SUITE, which links the shared
+# OBJECT libraries — not the exe. To catch them we need the sanitizer on the
+# object libs and the test binaries too. AGENTTY_SANITIZE_ALL does that by
+# injecting the flags DIRECTORY-WIDE, here, BEFORE any target is defined, so
+# every agentty TU (objlibs + exe + tests) and their links carry it.
+#
+#   cmake -B build-asan -DAGENTTY_SANITIZE_ALL=address,undefined \
+#         -DAGENTTY_BUILD_TESTS=ON && cmake --build build-asan --target tests \
+#         && ctest --test-dir build-asan
+#
+# This is agentty's Rust-grade memory-safety GATE: the borrow checker proves
+# absence of these bugs at compile time; we prove it by running the whole
+# suite under ASan+UBSan. Different mechanism, same guarantee for the paths
+# the tests cover.
+set(AGENTTY_SANITIZE_ALL "" CACHE STRING
+    "Comma-separated sanitizers applied to ALL agentty TUs incl. tests (e.g. address,undefined). Empty to disable.")
+if(AGENTTY_SANITIZE_ALL AND NOT MSVC)
+    message(STATUS "agentty: WHOLE-TREE sanitizer -fsanitize=${AGENTTY_SANITIZE_ALL} "
+                   "(objlibs + exe + tests)")
+    add_compile_options(-fsanitize=${AGENTTY_SANITIZE_ALL}
+                        -fno-omit-frame-pointer -g -O1 -fno-lto)
+    add_link_options(-fsanitize=${AGENTTY_SANITIZE_ALL} -fno-lto)
+    # GCC's sanitizers instrument the module-level `constexpr std::array`
+    # catalogs (spec.hpp kCatalog, etc.), and that instrumentation leaks
+    # poisoned pointer arithmetic into the `consteval` evaluation of the
+    # static_assert PROOFS that walk them — they then fail to compile with
+    # "not a constant expression". This is a GCC limitation, not a proof bug:
+    # the SAME proofs compile and pass in every normal (non-sanitizer) build,
+    # which is the primary gate. So we define AGENTTY_SANITIZER_BUILD and let
+    # the few catalog-walking proof blocks skip themselves ONLY in the
+    # sanitizer build — the sanitizer's job is to check RUNTIME memory safety
+    # (UAF / overflow / UB), not to re-run compile-time proofs that already
+    # ran green elsewhere.
+    add_compile_definitions(AGENTTY_SANITIZER_BUILD=1)
+endif()
 
 # ── Shared OBJECT libraries ─────────────────────────────────────────────
 # Compile every shared TU EXACTLY ONCE into an OBJECT library, then reuse
@@ -656,10 +185,155 @@ endfunction()
 # during compilation (OBJECT libs don't link, but they DO need the
 # headers). maya/json/simdjson/nghttp2/openssl all expose their include
 # dirs through their imported targets.
+# Precompiled header. IMPLEMENTED + benchmarked, DEFAULT OFF: on the primary
+# dev target (8-core Apple Silicon, Apple clang) a shared PCH MEASURED NET-
+# NEGATIVE — cold objlib compile 89 s → 96-98 s. The libc++ prefix expands to a
+# ~19 MB PCH whose per-TU load cost + the serial anchor-compile + lost
+# parallelism exceed the parse savings, and even single-TU incremental rebuild
+# showed no win (1.70 s → 1.77 s). Kept as an opt-in: CI runners with fewer
+# cores / cold I/O, or a different toolchain, may still benefit — flip on with
+# -DAGENTTY_PCH=ON and re-measure. The REUSE_FROM wiring in agentty_objlib is
+# correct either way. See cmake/BEST_PRACTICES.md §2 (Gap D).
+option(AGENTTY_PCH "Share a precompiled STL/maya-core header prefix across the object libraries. Measured net-negative on 8-core Apple clang (see comment); opt-in for other toolchains/CI." OFF)
+
+# Unity (jumbo) build. This tree is INSTANTIATION-bound (std::variant/std::visit
+# over maya's wide Element tree — see cmake/BEST_PRACTICES.md §8): the same
+# template machinery is re-instantiated in every TU. Unity batches TUs so those
+# instantiations are shared within a batch — MEASURED 3.2x cold on the largest
+# objlib (runtime_obj 50.5s→15.6s). DEFAULT OFF because it PENALISES incremental
+# rebuilds (editing one file rebuilds its whole batch), so it's for COLD/CI/
+# fresh-clone builds, never the dev edit-loop (use the `dev` preset for that).
+# Batch size 8 balances instantiation sharing against incremental cost.
+option(AGENTTY_UNITY_BUILD "Unity/jumbo build of the object libraries (big COLD-build win on this instantiation-bound tree; hurts incremental — for CI/cold only)." OFF)
+set(AGENTTY_UNITY_BATCH 8 CACHE STRING "TUs per unity batch when AGENTTY_UNITY_BUILD=ON")
+
+# ── Fast debug builds ───────────────────────────────────────────
+#
+# The edit-build loop was 36s for a ONE-FILE change. Measured on this tree
+# (GCC 16, 12 cores), that splits as:
+#
+#   compile one TU (meta.cpp)   ~10s   of which ~11s is -g on the biggest TUs
+#   link agentty                ~26s   an 827 MB binary through ld.bfd
+#
+# So the loop is LINK-bound, and the link is huge because full DWARF from
+# every objlib lands in it. Two changes, both Debug-only:
+#
+#   -g1  — line tables + function boundaries, no local-variable DWARF.
+#          Measured 23.7s -> 17.9s on the largest TU (-g0 is 12.8s, so ~half
+#          the remaining debug cost is the part that gives backtraces, which
+#          is the part worth keeping). Backtraces, file:line, and breakpoints
+#          all still work; `print localvar` in gdb does not. That is the right
+#          trade for a loop whose debugging is overwhelmingly "where did it
+#          crash" — and `--preset debug-full` exists for the other days.
+#
+# NOTE on fast linkers: they only work here because Debug now has LTO OFF (see
+# cmake/AgenttyStandalone.cmake). While debug objects were GCC SLIM LTO
+# bytecode ("__gnu_lto_slim", no real symbol table — only GNU ld reads those,
+# via the GCC plugin), lld failed with a wall of bogus "undefined symbol"
+# errors for functions that were demonstrably present. That was the symptom;
+# the LTO-on-a-debug-build was the disease.
+#
+# Release is untouched: it keeps full -O3 + LTO + strip.
+option(AGENTTY_FAST_DEBUG
+       "Debug builds: lighter debug info (-g1) + a fast linker. Big edit-loop win; costs local-variable inspection in gdb."
+       ON)
+
+if(AGENTTY_FAST_DEBUG AND NOT MSVC AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    # -g1 REPLACES the -g that CMAKE_CXX_FLAGS_DEBUG hardcodes; appending would
+    # leave both on the command line and the last one wins non-obviously.
+    string(REGEX REPLACE "(^| )-g( |$)" "\\1-g1\\2"
+           CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+    string(REGEX REPLACE "(^| )-g( |$)" "\\1-g1\\2"
+           CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+
+    # Split DWARF: debug info goes to per-object .dwo files instead of into
+    # the objects, so the LINKER never reads it.
+    #
+    # This is the biggest single edit-loop win left on this tree, because the
+    # debug loop here is link-bound, not compile-bound. Measured, GCC 16 /
+    # 12 cores / mold, one-file change with reconfigure excluded:
+    #
+    #   -g1                 compile 22ms  link 10.5s   binary 801 MB
+    #   -g1 -gsplit-dwarf   compile 22ms  link  ~4s    binary 428 MB
+    #
+    # The compile is already 22ms thanks to ccache; every remaining second
+    # was mold walking 801 MB of DWARF that the executable does not need at
+    # link time. Halving the image halves the link.
+    #
+    # Costs, both small: ~370 .dwo files alongside the objects (they live in
+    # the build tree and die with it), and gdb needs the .dwo present to show
+    # source lines -- which it is, since nobody ships or moves a debug build.
+    # `-DAGENTTY_FAST_DEBUG=OFF` (the `debug-full` preset) still gives plain
+    # -g with everything inline for anyone who wants a self-contained image.
+    #
+    # Probed rather than assumed: -gsplit-dwarf is GCC/Clang-only, and a
+    # toolchain that takes the flag but cannot emit .dwo would silently
+    # produce a debug build with no debug info.
+    include(CheckCXXCompilerFlag)
+    set(CMAKE_REQUIRED_FLAGS -gsplit-dwarf)
+    check_cxx_compiler_flag("" AGENTTY_HAS_SPLIT_DWARF)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(AGENTTY_HAS_SPLIT_DWARF)
+        string(APPEND CMAKE_CXX_FLAGS_DEBUG " -gsplit-dwarf")
+        string(APPEND CMAKE_C_FLAGS_DEBUG   " -gsplit-dwarf")
+        message(STATUS "agentty: split DWARF on (debug info in .dwo; halves the link).")
+    endif()
+
+    # A faster linker, if one is installed. mold beats lld beats ld.bfd, and
+    # both are drop-in for ELF. Probed by ACTUALLY LINKING rather than by
+    # looking for the binary: a present-but-unusable linker would otherwise
+    # fail the whole build, and this block exists to make builds faster, not
+    # more fragile.
+    include(CheckCXXSourceCompiles)
+    foreach(_ld mold lld)
+        set(CMAKE_REQUIRED_LINK_OPTIONS -fuse-ld=${_ld})
+        check_cxx_source_compiles("int main(){return 0;}" AGENTTY_HAS_LD_${_ld})
+        unset(CMAKE_REQUIRED_LINK_OPTIONS)
+        if(AGENTTY_HAS_LD_${_ld})
+            add_link_options(-fuse-ld=${_ld})
+            set(_agentty_fast_ld ${_ld})
+            break()
+        endif()
+    endforeach()
+    message(STATUS "agentty: fast debug — -g1, no LTO, "
+                   "${_agentty_fast_ld} linker")
+endif()
+
 function(agentty_objlib name)
     add_library(${name} OBJECT ${ARGN})
     target_include_directories(${name} PRIVATE include)
     target_compile_definitions(${name} PRIVATE AGENTTY_VERSION="${PROJECT_VERSION}")
+    # No C++20 module scanning. This tree uses headers, not modules, so the
+    # scan finds nothing -- but CMake still passes `-fmodule-mapper=<...>.modmap`
+    # to every compile, and ccache classifies that as an UNSUPPORTED COMPILER
+    # OPTION and refuses to cache the TU. Measured: 100% uncacheable calls with
+    # scanning on, so `ccache` was installed and doing nothing.
+    #
+    # maya already does this for the same reason (see third_party/maya/CMakeLists.txt,
+    # which also hit a scan-vs-archive ordering bug). Turning it off here makes
+    # the object libraries cacheable and is otherwise a no-op.
+    set_target_properties(${name} PROPERTIES CXX_SCAN_FOR_MODULES OFF)
+    if(AGENTTY_UNITY_BUILD)
+        set_target_properties(${name} PROPERTIES
+            UNITY_BUILD ON
+            UNITY_BUILD_BATCH_SIZE ${AGENTTY_UNITY_BATCH})
+    endif()
+    # Precompiled header (opt-out via -DAGENTTY_PCH=OFF). The prefix
+    # (cmake/agentty_pch.hpp) is the ~26 ubiquitous, stable STL/maya-core
+    # headers included by 30-60% of TUs. Compiled ONCE on the first objlib and
+    # REUSE_FROM'd by the rest, so the whole shared object set shares one PCH.
+    # Biggest compile-time lever for this header/template-heavy tree.
+    if(AGENTTY_PCH)
+        if(NOT DEFINED AGENTTY_PCH_ANCHOR)
+            # First objlib owns the actual PCH compilation; set a global anchor.
+            set(AGENTTY_PCH_ANCHOR ${name} PARENT_SCOPE)
+            set(AGENTTY_PCH_ANCHOR ${name})   # local, for the reuse branch below
+            target_precompile_headers(${name} PRIVATE
+                ${CMAKE_SOURCE_DIR}/cmake/agentty_pch.hpp)
+        else()
+            target_precompile_headers(${name} REUSE_FROM ${AGENTTY_PCH_ANCHOR})
+        endif()
+    endif()
     # MCP integration is compile-gated. When ON, every objlib sees the macro
     # (registry.cpp branches on it) and the mcp-cpp INTERFACE include dir (so
     # the agentty-facing header chain resolves); only agentty_mcp_obj actually
@@ -673,15 +347,38 @@ function(agentty_objlib name)
         # agentty_tool_obj) now mirrors the workspace root into mcp's util
         # layer, so every objlib needs mcp::tools' include dir resolvable.
         if(TARGET mcp::tools)
-            target_link_libraries(${name} PRIVATE mcp::tools)
+            target_link_libraries(${name} PRIVATE mcp::tools mcp::tools_native_files)
         endif()
     else()
         target_compile_definitions(${name} PRIVATE AGENTTY_MCP=0)
     endif()
     agentty_apply_compile_flags(${name})
+    # mem.hpp includes <mimalloc.h> when the allocator is enabled. OBJECT libs
+    # need the include path and compile definition even though final linking is
+    # performed by the executable target.
+    if(AGENTTY_HAS_MIMALLOC)
+        target_link_libraries(${name} PRIVATE mimalloc-static)
+        target_compile_definitions(${name} PRIVATE AGENTTY_USE_MIMALLOC=1)
+    endif()
+    # The RAG adapter (agentty_rag_obj) includes <rag/rag.hpp>; other objlibs
+    # only need the header path resolvable for transitive includes. Linking
+    # the target as an INTERFACE dep gives every objlib ragcpp's include dir.
+    if(AGENTTY_HAS_RAGCPP)
+        target_link_libraries(${name} PRIVATE ragcpp::ragcpp)
+        target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=1)
+    else()
+        target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=0)
+    endif()
+    # The claybin sandbox backend. A required submodule, so it links
+    # unconditionally and there is no define to get half-applied -- which is
+    # what the old AGENTTY_HAVE_CLAYBIN guard risked: sandbox.hpp's Backend
+    # enum and sandbox.cpp's dispatch were both gated on it, so a define that
+    # reached some objlibs and not others gave two TUs different ideas about
+    # the enum. An ODR violation, and not a compile error.
+    target_link_libraries(${name} PRIVATE claybin)
     # Header-only access to the linked libs (no actual linking for OBJECT).
     target_link_libraries(${name} PRIVATE
-        maya::maya
+        maya::app
         nlohmann_json::nlohmann_json
         simdjson::simdjson
         nghttp2::nghttp2
@@ -703,6 +400,14 @@ agentty_objlib(agentty_runtime_obj   ${AGENTTY_RUNTIME_NOMAIN_SOURCES})
 # needs the acp::acp include dir (acp/acp.hpp) on top of the standard set.
 agentty_objlib(agentty_acp_obj       ${AGENTTY_ACP_SOURCES})
 target_link_libraries(agentty_acp_obj PRIVATE acp::acp)
+# src/acp/server.cpp opens `namespace agentty::acp` (the ACP SERVER). Batched
+# into a unity TU with its siblings (which use the GLOBAL `::acp` via bare
+# `acp::`), that name would rebind to agentty::acp and break. Keep this one
+# file out of unity batching — the rest of the objlib still batches.
+if(AGENTTY_UNITY_BUILD)
+    set_source_files_properties(src/acp/server.cpp PROPERTIES
+        SKIP_UNITY_BUILD_INCLUSION ON)
+endif()
 
 # MCP glue — only built when AGENTTY_MCP is on. Confines the heavy mcp-cpp
 # template instantiation to these two TUs; everything else just sees the
@@ -736,11 +441,16 @@ endif()
 
 add_executable(agentty
     src/runtime/main.cpp
+    src/runtime/run_cli.cpp
     ${AGENTTY_SHARED_OBJECTS}
     $<TARGET_OBJECTS:agentty_acp_obj>
 )
 
 target_include_directories(agentty PRIVATE include)
+# Same reason as agentty_objlib(): the module scan makes every compile
+# uncacheable by ccache. main.cpp is compiled straight into this target, so it
+# needs the property too.
+set_target_properties(agentty PROPERTIES CXX_SCAN_FOR_MODULES OFF)
 # Bake the project version into the binary so `agentty --version` /
 # the User-Agent string don't drift from CMakeLists.txt's
 # `project(agentty VERSION X.Y.Z)`. Single source of truth — bumping
@@ -755,7 +465,7 @@ else()
     target_compile_definitions(agentty PRIVATE AGENTTY_MCP=0)
 endif()
 target_link_libraries(agentty PRIVATE
-    maya::maya
+    maya::app
     acp::acp
     nlohmann_json::nlohmann_json
     simdjson::simdjson
@@ -768,44 +478,21 @@ if(AGENTTY_MCP AND TARGET mcp::mcp)
     target_link_libraries(agentty PRIVATE mcp::mcp)
 endif()
 if(AGENTTY_MCP AND TARGET mcp::tools)
-    target_link_libraries(agentty PRIVATE mcp::tools)
+    target_link_libraries(agentty PRIVATE mcp::tools mcp::tools_native_files)
 endif()
+target_link_libraries(agentty PRIVATE claybin)
 if(AGENTTY_HAS_MIMALLOC)
-    # Prefer the static target so operator new/delete routing is linked
-    # into the exe without an accompanying DLL / dylib. BUT: some distros
-    # (Arch's `mimalloc` package as of 2024) ship a stub libmimalloc.a
-    # that exports no symbols — the real allocator lives in the shared
-    # object. Linking against the stub produces hundreds of `undefined
-    # reference to mi_*` errors at LTO link time. Probe the archive size
-    # and fall back to the shared target when it's clearly a stub.
-    set(_agentty_mimalloc_target "")
-    if(TARGET mimalloc-static)
-        get_target_property(_mi_static_loc mimalloc-static IMPORTED_LOCATION_RELEASE)
-        if(NOT _mi_static_loc)
-            get_target_property(_mi_static_loc mimalloc-static IMPORTED_LOCATION)
-        endif()
-        if(_mi_static_loc AND EXISTS "${_mi_static_loc}")
-            file(SIZE "${_mi_static_loc}" _mi_static_size)
-            # A real mimalloc static archive is ~300 KB+; Arch's stub is
-            # under 32 KB. Use 64 KB as the cutoff.
-            if(_mi_static_size GREATER 65536)
-                set(_agentty_mimalloc_target mimalloc-static)
-            else()
-                message(STATUS "agentty: mimalloc-static archive at ${_mi_static_loc} "
-                              "is a stub (${_mi_static_size} bytes) — using shared mimalloc instead.")
-            endif()
-        endif()
-    endif()
-    if(NOT _agentty_mimalloc_target AND TARGET mimalloc)
-        set(_agentty_mimalloc_target mimalloc)
-    endif()
-    if(_agentty_mimalloc_target)
-        target_link_libraries(agentty PRIVATE ${_agentty_mimalloc_target})
-        target_compile_definitions(agentty PRIVATE AGENTTY_USE_MIMALLOC=1)
-        message(STATUS "agentty: mimalloc allocator override enabled (${_agentty_mimalloc_target}).")
-    else()
-        message(WARNING "agentty: mimalloc package found but no usable target — skipping.")
-    endif()
+    # The static target contains both C allocation and global C++ new/delete
+    # overrides when MI_OVERRIDE is enabled.
+    target_link_libraries(agentty PRIVATE mimalloc-static)
+    target_compile_definitions(agentty PRIVATE AGENTTY_USE_MIMALLOC=1)
+    message(STATUS "agentty: mimalloc allocator override enabled.")
+endif()
+if(AGENTTY_HAS_RAGCPP)
+    # The RAG engine. The adapter TU (in agentty_rag_obj) is already in the
+    # shared object set; the exe links the library so its symbols resolve.
+    target_link_libraries(agentty PRIVATE ragcpp::ragcpp)
+    message(STATUS "agentty: rag-cpp retrieval engine enabled (vendored).")
 endif()
 if(WIN32)
     # ws2_32   — Winsock2 (sockets, WSAPoll)
@@ -817,14 +504,36 @@ if(WIN32)
     # gdi32    — DIB / BITMAPFILEHEADER consumers used in the same path
     # gdiplus  — DIB → PNG re-encoding for clipboard images
     # shlwapi  — SHCreateMemStream backing GDI+'s decode / encode
+    # advapi32 — CredWriteW/CredReadW/CredDeleteW (keystore.cpp) +
+    #            SetNamedSecurityInfoW/SetEntriesInAclW/OpenProcessToken
+    #            (owner-only DACL on the credentials file, auth.cpp)
     target_link_libraries(agentty PRIVATE
         ws2_32 crypt32 shell32 winmm
-        user32 gdi32 gdiplus shlwapi)
+        user32 gdi32 gdiplus shlwapi advapi32)
     # Static OpenSSL on Windows additionally pulls in these system libs
     # (used by libcrypto's CSP / certificate APIs). Innocuous in dynamic
     # builds — the linker dedupes — but required when AGENTTY_STANDALONE=ON.
     if(AGENTTY_STANDALONE)
         target_link_libraries(agentty PRIVATE bcrypt secur32 advapi32 user32)
+    endif()
+    # CRITICAL (MinGW/UCRT64): fold libstdc++, libgcc and the winpthread
+    # runtime INTO the exe. Windows has no ELF-style symbol interposition,
+    # so a dynamically-linked libstdc++-6.dll can keep its own allocator
+    # bindings. With mimalloc overriding the exe, a std::string or filesystem
+    # buffer crossing that DLL boundary could otherwise mismatch allocators
+    # and corrupt the heap. Static runtimes collapse the process to one
+    # allocator and remove the runtime DLL dependency.
+    if(NOT MSVC)
+        target_link_options(agentty PRIVATE
+            -static-libstdc++ -static-libgcc
+            -Wl,-Bstatic,--whole-archive -lwinpthread
+            -Wl,--no-whole-archive -Wl,-Bdynamic
+            # MinGW's static libstdc++.a ships cow-stdexcept.o defining the
+            # legacy-ABI logic_error/runtime_error copy ctors, which collide
+            # with the inline SSO-ABI copies the TUs already emitted. The
+            # duplicates are ABI-compatible; let the linker keep the first.
+            # This is the documented -static-libstdc++ workaround on MinGW.
+            -Wl,--allow-multiple-definition)
     endif()
 endif()
 if(APPLE)
@@ -845,7 +554,42 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
         target_link_options(agentty PRIVATE
             -static-libstdc++ -static-libgcc)
         if(AGENTTY_FULLY_STATIC)
-            target_link_options(agentty PRIVATE -static)
+            # HOW WE LINK A BINARY THAT RUNS EVERYWHERE (and the graveyard of
+            # approaches that don't, all confirmed on Alpine 3.21 / GCC 14.2):
+            #
+            #   * `-static-pie` (alone, or + compile flag): Alpine's
+            #     default-PIE musl GCC does NOT pull libc from the archive.
+            #     The output is ET_DYN with `NEEDED libc.musl-*.so` and no
+            #     PT_INTERP -> runs on the Alpine build image, SIGSEGVs on
+            #     glibc/Debian. THIS IS THE v0.2.7 CRASH. (Confirmed twice in
+            #     CI: readelf -d shows NEEDED libc.musl-{x86_64,aarch64}.so.)
+            #   * `-static-pie -static`: link error - `-static` drags in the
+            #     NON-pie CRT (crtbeginT.o) whose R_X86_64_32 reloc "can not
+            #     be used when making a PIE object" (collect2: ld returned 1).
+            #   * `-Wl,-Bstatic --no-dynamic-linker`: driver re-emits
+            #     -Bdynamic for its implicit -lc; NEEDED survives.
+            #
+            # What DOES work, bulletproof: plain `-static -no-pie`. It links
+            # libc from the static archive and emits a classic ET_EXEC with
+            # NO NEEDED and NO PT_INTERP - a true standalone binary that runs
+            # on every Linux userland (glibc Debian/Ubuntu/Fedora, musl
+            # Alpine, 64-bit Raspberry Pi OS). The only thing it does NOT run
+            # on is Android/Bionic (Termux), which refuses ET_EXEC and needs
+            # a PIE - a niche the honest default trades away so `curl | sh`
+            # WORKS for the 99% on normal Linux. Opt into the PIE variant
+            # with -DAGENTTY_STATIC_PIE=ON when you specifically target Termux
+            # AND have a musl toolchain whose -static-pie truly links libc
+            # statically (the POST_BUILD guard enforces it either way).
+            if(AGENTTY_STATIC_PIE)
+                target_compile_options(agentty PRIVATE -static-pie)
+                target_link_options(agentty PRIVATE -static-pie)
+            else()
+                # -no-pie must reach BOTH compile and link so the driver
+                # selects the non-PIE static CRT consistently and emits
+                # ET_EXEC (not a half-PIE that keeps a NEEDED).
+                target_compile_options(agentty PRIVATE -no-pie)
+                target_link_options(agentty PRIVATE -static -no-pie)
+            endif()
             # musl's default new-thread stack is 128 KiB, vs glibc's 8 MiB.
             # OpenSSL's SSL_connect (cert-chain verification) plus
             # nghttp2 session init plus the local autos in dial_tcp
@@ -873,6 +617,35 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
         # OPENSSL_USE_STATIC_LIBS already handled OpenSSL above. Nothing
         # else to add here — the resulting binary depends only on
         # /usr/lib/libSystem.B.dylib which is on every macOS.
+    endif()
+endif()
+
+# Build-time ELF-shape guard for the fully-static Linux binary. This is the
+# LAST line of defence against the v0.2.7 disaster, and unlike the CI readelf
+# checks it runs on EVERY build path that produces the shipping binary:
+# the release workflow, a local `AGENTTY_FULLY_STATIC=ON` build, AND the
+# installer's `--build` / auto-fallback source build. A correct static-PIE is
+# ET_DYN with a PT_PHDR, no PT_INTERP, and no NEEDED dynamic library. If the
+# musl/Alpine driver silently downgraded the link to a dynamic-PIE (the
+# exact v0.2.7 x86_64 failure: NEEDED libc.musl-*.so + no INTERP → SIGSEGV on
+# glibc), fail the BUILD here — a broken artifact can never reach a release
+# again, no matter which pipeline built it.
+if(AGENTTY_STANDALONE AND AGENTTY_FULLY_STATIC
+        AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT MSVC)
+    find_program(READELF_EXE NAMES readelf llvm-readelf)
+    if(READELF_EXE)
+        add_custom_command(TARGET agentty POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                -DBIN=$<TARGET_FILE:agentty>
+                -DREADELF=${READELF_EXE}
+                -P ${CMAKE_SOURCE_DIR}/cmake/assert_static_pie.cmake
+            VERBATIM
+            COMMENT "Verifying static-PIE ELF shape (no NEEDED / no INTERP)")
+    else()
+        message(WARNING
+            "agentty: readelf not found — cannot verify the static-PIE ELF "
+            "shape at build time. Install binutils so a downgraded "
+            "dynamic-PIE link (the v0.2.7 crash) fails the build.")
     endif()
 endif()
 
@@ -942,21 +715,55 @@ endif()
 # MSVC (has its own /GS /DYNAMICBASE /NXCOMPAT defaults). RELRO/noexecstack are
 # ELF-only; the linker no-ops them elsewhere, but gate to be explicit.
 if(NOT MSVC AND NOT AGENTTY_SANITIZE)
-    target_compile_options(agentty PRIVATE
-        -fstack-protector-strong
-        -fPIE)
+    target_compile_options(agentty PRIVATE -fstack-protector-strong)
+    # -fPIE only for builds that actually produce a PIE. The default
+    # fully-static build is -static -no-pie (ET_EXEC), where -fPIE would
+    # fight -no-pie; skip it there. Every other build (dynamic, or the
+    # opt-in AGENTTY_STATIC_PIE Termux variant) gets -fPIE for full ASLR.
+    if(NOT (AGENTTY_FULLY_STATIC AND NOT AGENTTY_STATIC_PIE))
+        target_compile_options(agentty PRIVATE -fPIE)
+    endif()
     # _FORTIFY_SOURCE requires -O1+; only define it for optimizing configs so
     # a Debug build doesn't emit the "requires optimization" warning per TU.
-    target_compile_definitions(agentty PRIVATE
-        $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=2>)
+    #
+    # A hardening toolchain spec or distro packager flags (e.g. Arch makepkg's
+    # `-D_FORTIFY_SOURCE=3` injected via CFLAGS, or a hardened GCC spec file
+    # that predefines it with no -D at all) can already define the macro.
+    # Adding our own -D after it trips GCC's "`_FORTIFY_SOURCE' redefined"
+    # warning. Detect a predefinition at configure time (a compile probe, not
+    # a flag-string scan — spec-file hardening injects no visible flag) and
+    # yield: the toolchain's value is the packager's hardening choice.
+    # (PR #33, sail3r.)
+    set(_agt_req_quiet_save ${CMAKE_REQUIRED_QUIET})
+    set(CMAKE_REQUIRED_QUIET YES)
+    check_cxx_source_compiles("
+        #ifndef _FORTIFY_SOURCE
+        #error _FORTIFY_SOURCE is not predefined by the toolchain
+        #endif
+        int main() { return 0; }
+    " AGENTTY_FORTIFY_PREDEFINED)
+    set(CMAKE_REQUIRED_QUIET ${_agt_req_quiet_save})
+    unset(_agt_req_quiet_save)
+    if(NOT AGENTTY_FORTIFY_PREDEFINED)
+        target_compile_definitions(agentty PRIVATE
+            $<$<NOT:$<CONFIG:Debug>>:_FORTIFY_SOURCE=2>)
+    endif()
+    # A fully-static build already carries its own PIE decision (-static-pie
+    # or -no-pie); adding a bare -pie here would fight it. Only add -pie for
+    # the non-static path.
     if(UNIX AND NOT APPLE)
         # RELRO + BIND_NOW + non-exec stack are GNU-ld / lld (ELF) features.
         # Apple ld64 rejects -z; MSVC handled above.
+        if(NOT AGENTTY_FULLY_STATIC)
+            target_link_options(agentty PRIVATE -pie)
+        endif()
         target_link_options(agentty PRIVATE
-            -pie
             -Wl,-z,relro,-z,now
             -Wl,-z,noexecstack)
-    else()
+    elseif(NOT APPLE AND NOT AGENTTY_FULLY_STATIC)
+        # Non-ELF, non-Apple UNIX. On Apple, PIE is the linker default and a
+        # bare -pie only trips clang's "argument unused during compilation"
+        # warning, so skip it there.
         target_link_options(agentty PRIVATE -pie)
     endif()
 endif()
@@ -974,49 +781,8 @@ if(NOT MSVC AND NOT APPLE AND NOT AGENTTY_SANITIZE
     target_link_options(agentty PRIVATE -Wl,--strip-all)
 endif()
 
-# ── Profile-guided optimization (opt-in, two phases) ────────────────────
-# Phase 1: `cmake -B build-pgogen -DAGENTTY_PGO=generate` → build + run the
-#          app through a realistic workload (a couple of chat turns + tool
-#          calls is enough; the counters are written on exit).
-# Phase 2: `cmake -B build-pgouse -DAGENTTY_PGO=use` → rebuild using the
-#          counters — typical gain on streaming + layout hot paths is
-#          8–12% wall-clock, 3–6% binary size on MSVC/GCC/Clang.
-# The profile data directory is kept out of build/ so switching generators
-# or blowing away build/ doesn't lose your collected profile.
-set(AGENTTY_PGO "" CACHE STRING
-    "Profile-guided optimization: 'generate', 'use', or empty.")
-set(AGENTTY_PGO_DIR "${CMAKE_SOURCE_DIR}/pgo-data" CACHE PATH
-    "Directory where PGO profile counters live across generate/use phases.")
-if(AGENTTY_PGO)
-    file(MAKE_DIRECTORY "${AGENTTY_PGO_DIR}")
-    if(MSVC)
-        if(AGENTTY_PGO STREQUAL "generate")
-            target_link_options(agentty PRIVATE "/GENPROFILE:PGD=${AGENTTY_PGO_DIR}/agentty.pgd")
-        elseif(AGENTTY_PGO STREQUAL "use")
-            target_link_options(agentty PRIVATE "/USEPROFILE:PGD=${AGENTTY_PGO_DIR}/agentty.pgd")
-        endif()
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        if(AGENTTY_PGO STREQUAL "generate")
-            target_compile_options(agentty PRIVATE -fprofile-instr-generate)
-            target_link_options(agentty PRIVATE -fprofile-instr-generate)
-        elseif(AGENTTY_PGO STREQUAL "use")
-            # Expect `llvm-profdata merge -output=agentty.profdata ${AGENTTY_PGO_DIR}/*.profraw`
-            # to be run between the two builds.
-            target_compile_options(agentty PRIVATE "-fprofile-instr-use=${AGENTTY_PGO_DIR}/agentty.profdata")
-            target_link_options(agentty PRIVATE "-fprofile-instr-use=${AGENTTY_PGO_DIR}/agentty.profdata")
-        endif()
-    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        if(AGENTTY_PGO STREQUAL "generate")
-            target_compile_options(agentty PRIVATE "-fprofile-generate=${AGENTTY_PGO_DIR}")
-            target_link_options(agentty PRIVATE "-fprofile-generate=${AGENTTY_PGO_DIR}")
-        elseif(AGENTTY_PGO STREQUAL "use")
-            target_compile_options(agentty PRIVATE
-                "-fprofile-use=${AGENTTY_PGO_DIR}" -fprofile-correction)
-            target_link_options(agentty PRIVATE "-fprofile-use=${AGENTTY_PGO_DIR}")
-        endif()
-    endif()
-    message(STATUS "agentty: PGO phase = ${AGENTTY_PGO} (data dir: ${AGENTTY_PGO_DIR})")
-endif()
+# Opt-in profile-guided optimization (-DAGENTTY_PGO=generate|use).
+include(AgenttyPGO)
 
 # ─────────────────────────────────────────────────────────────────────
 # Tests / benchmarks (opt-in via -DAGENTTY_BUILD_TESTS=ON, default OFF)
@@ -1044,531 +810,21 @@ if(AGENTTY_BUILD_TESTS)
         add_compile_definitions(_Static_assert=static_assert)
     endif()
 
-    # ── Full-runtime test helper ────────────────────────────────────────
-    # agentty_add_full_test(<name> [EXTRA_SRCS...] [EXTRA_LIBS...])
-    # Builds a test executable that REUSES the precompiled shared OBJECT
-    # libraries (no recompilation of the provider/tool/runtime stack) plus
-    # its own .cpp (tests/<name>.cpp) and any EXTRA_SRCS. Links the
-    # standard lib set + EXTRA_LIBS, applies the platform link blocks, and
-    # registers the ctest entry. Replaces ~40 lines of boilerplate per
-    # test with one call. Pass extra source files after the name; pass
-    # extra link libs after the keyword LIBS.
-    function(agentty_add_full_test name)
-        set(_extra_srcs "")
-        set(_extra_libs "")
-        set(_no_test FALSE)
-        set(_mode SRCS)
-        foreach(arg IN LISTS ARGN)
-            if(arg STREQUAL "LIBS")
-                set(_mode LIBS)
-            elseif(arg STREQUAL "NO_TEST")
-                set(_no_test TRUE)
-            elseif(_mode STREQUAL "LIBS")
-                list(APPEND _extra_libs ${arg})
-            else()
-                list(APPEND _extra_srcs ${arg})
-            endif()
-        endforeach()
-        add_executable(${name} EXCLUDE_FROM_ALL
-            tests/${name}.cpp
-            ${_extra_srcs}
-            ${AGENTTY_SHARED_OBJECTS}
-        )
-        target_include_directories(${name} PRIVATE include)
-        target_compile_definitions(${name} PRIVATE
-            AGENTTY_VERSION="${PROJECT_VERSION}"
-            AGENTTY_MCP=1)
-        target_link_libraries(${name} PRIVATE
-            maya::maya
-            nlohmann_json::nlohmann_json
-            simdjson::simdjson
-            nghttp2::nghttp2
-            OpenSSL::SSL
-            OpenSSL::Crypto
-            Threads::Threads
-            ${_extra_libs}
-        )
-        # The shared object set bundles agentty_mcp_obj (registry.cpp now
-        # routes the whole tool set through the mcp-cpp bridge), so every
-        # full test must link mcp::mcp + mcp::tools to resolve make_provider /
-        # effects_for_builtin / the progress sink.
-        if(TARGET mcp::mcp)
-            target_link_libraries(${name} PRIVATE mcp::mcp)
-        endif()
-        if(TARGET mcp::tools)
-            target_link_libraries(${name} PRIVATE mcp::tools)
-        endif()
-        if(WIN32)
-            target_link_libraries(${name} PRIVATE
-                ws2_32 crypt32 shell32 winmm
-                user32 gdi32 gdiplus shlwapi)
-        endif()
-        if(APPLE)
-            target_link_libraries(${name} PRIVATE
-                "-framework Security"
-                "-framework CoreFoundation")
-        endif()
-        if(NOT _no_test)
-            add_test(NAME ${name} COMMAND ${name})
-        endif()
-    endfunction()
+    # ── The test suite lives in cmake/AgenttyTests.cmake ────────────────────
+    # One agentty_test() declaration per test; the tests / tests_gating /
+    # sanitizer_tests aggregates are DERIVED from the registry (no hand-listed
+    # parallel lists). See cmake/AgenttyTestRegistry.cmake + cmake/DESIGN.md.
+    include(AgenttyTests)
 
-    # long_session_bench — perf stress for the resume/render hot paths
-    # exercised by the seven pins in docs/INLINE_SCROLLBACK.md. Builds
-    # synthetic tool-heavy Threads of varying shape and times every
-    # phase from Thread construction through warm render.
-    agentty_add_full_test(long_session_bench)
-    # CTest entry — runs the bench with default scenarios. Exits non-zero
-    # if any scenario throws; perf regressions are reported via stdout,
-    # not via a CTest fail, because absolute timings vary by machine.
-    set_tests_properties(long_session_bench PROPERTIES TIMEOUT 600)
-
-    # o1_probe — measures steady-state per-frame warm render AFTER the
-    # live-session freeze+trim flow. Build-only probe (not a ctest entry).
-    agentty_add_full_test(o1_probe NO_TEST)
-
-    # realthread_probe — loads a real on-disk thread JSON and times the
-    # resume hot path (rehydrate_frozen + cold/warm render). Build-only.
-    agentty_add_full_test(realthread_probe NO_TEST)
-
-    # tallcard_probe — isolates the tall-card live-tail cache-miss
-    # regime (canvas-height vs card-height). Build-only.
-    agentty_add_full_test(tallcard_probe NO_TEST)
-
-    # stream_cpu_probe — TRUE end-to-end per-frame streaming cost. Drives
-    # the REAL maya Runtime::render (inline compose path) under a PTY with
-    # the REAL agentty view + freeze/trim, builds a deep frozen backdrop,
-    # then streams a long assistant turn frame-by-frame at 60 fps and
-    # prints render() ms as the reply grows. Answers "30% CPU on long
-    # turns": if per-frame render() stays flat as the reply grows, the
-    # streaming pipeline is O(viewport). Build-only (not a ctest entry).
-    agentty_add_full_test(stream_cpu_probe NO_TEST)
-    if(UNIX AND NOT APPLE)
-        target_link_libraries(stream_cpu_probe PRIVATE util)
-    endif()
-
-    # composer_flicker_probe — reproduces "list rows hidden then appear +
-    # composer flickers" through the REAL view + Runtime::render under a
-    # PTY with a viewport ANSI emulator. Reports composer border moves /
-    # in-place rewrites and hidden→reappear content rows. Build-only.
-    agentty_add_full_test(composer_flicker_probe NO_TEST)
-    if(UNIX AND NOT APPLE)
-        target_link_libraries(composer_flicker_probe PRIVATE util)
-    endif()
-
-    # edit_turn_cpu_probe — host-side view() build cost for a turn with
-    # several SETTLED edit tools while ONE tool still runs (panel has no
-    # hash_id → rebuilt every frame). Isolates the per-settled-edit body
-    # Config copy that maya's component cache can't amortise while live.
-    agentty_add_full_test(edit_turn_cpu_probe NO_TEST)
-
-    # fuzzy_match_smoke — small correctness smoke for the line-DP
-    # fuzzy matcher used by the edit tool. Standalone (no maya / no
-    # runtime), so it compiles against just the fuzzy_match TU.
-    add_executable(fuzzy_match_smoke EXCLUDE_FROM_ALL
-        tests/fuzzy_match_smoke.cpp
-        src/tool/util/fuzzy_match.cpp
-    )
-    target_include_directories(fuzzy_match_smoke PRIVATE include)
-    target_link_libraries(fuzzy_match_smoke PRIVATE
-        nlohmann_json::nlohmann_json)
-    add_test(NAME fuzzy_match_smoke COMMAND fuzzy_match_smoke)
-
-    # param_tag_repair_test — regression for the XML-in-JSON tool-call
-    # recovery (model leaks `<parameter name="…">` into the JSON tool
-    # input). Header-only logic, so it links against just nlohmann + the
-    # header-only tool spec catalog.
-    add_executable(param_tag_repair_test EXCLUDE_FROM_ALL
-        tests/param_tag_repair_test.cpp
-    )
-    target_include_directories(param_tag_repair_test PRIVATE include)
-    target_link_libraries(param_tag_repair_test PRIVATE
-        nlohmann_json::nlohmann_json)
-    add_test(NAME param_tag_repair_test COMMAND param_tag_repair_test)
-
-    # model_caps_test — ModelCapabilities weak-model inference (header-only).
-    add_executable(model_caps_test EXCLUDE_FROM_ALL
-        tests/model_caps_test.cpp
-    )
-    target_include_directories(model_caps_test PRIVATE include)
-    target_link_libraries(model_caps_test PRIVATE
-        nlohmann_json::nlohmann_json)
-    add_test(NAME model_caps_test COMMAND model_caps_test)
-
-    # fsm_test — generic typestate machinery (include/agentty/io/fsm.hpp):
-    # compile-time edge legality from in-class `fsm_to` successor lists,
-    # the assert_legal_edge guard, and move-only RAII cleanup-exactly-once.
-    # Pure header, zero deps — the same machinery that drives the HTTP/2
-    # connection lifecycle's Dialing→TcpConnected→TlsUp→H2Ready pipeline.
-    add_executable(fsm_test EXCLUDE_FROM_ALL tests/fsm_test.cpp)
-    target_include_directories(fsm_test PRIVATE include)
-    add_test(NAME fsm_test COMMAND fsm_test)
-
-    # model_label_test — pretty_model_label() turn-header normalization
-    # across every provider id shape (Ollama :tag, OpenAI, OpenRouter
-    # namespaced, Gemini/xAI, the agentty [1m] marker). Reuses the shared
-    # runtime OBJECT lib so helpers.cpp isn't recompiled.
-    agentty_add_full_test(model_label_test)
-
-    # skills_engine_test — Agent Skills (agentskills.io) engine: discovery
-    # across native + interop roots (.agentty/.agents/.claude, project +
-    # user), shadowing precedence, lenient frontmatter, tier-3 resource
-    # enumeration, activation payload/dedup/reset, and the read-allowlist
-    # gate. Standalone: links just the skills + fs_helpers TUs.
-    add_executable(skills_engine_test EXCLUDE_FROM_ALL
-        tests/skills_engine_test.cpp
-        src/tool/skills.cpp
-        src/tool/util/fs_helpers.cpp
-    )
-    target_include_directories(skills_engine_test PRIVATE include)
-    target_link_libraries(skills_engine_test PRIVATE
-        maya::maya
-        nlohmann_json::nlohmann_json)
-    # fs_helpers.cpp mirrors the workspace root into mcp-cpp's util layer.
-    if(TARGET mcp::tools)
-        target_link_libraries(skills_engine_test PRIVATE mcp::tools)
-    endif()
-    add_test(NAME skills_engine_test COMMAND skills_engine_test)
-
-    # midrun_freeze_test — correctness for freeze_settled_subturns: the
-    # mid-run split (frozen prefix + live continuation tail) must be
-    # visually seamless (one header, all content present, no elision).
-    agentty_add_full_test(midrun_freeze_test)
-
-    # midrun_seam_test — scrollback-duplication regression: across the
-    # incremental mid-run freeze cadence, the committed row PREFIX must
-    # stay byte-stable (a rewritten committed row = a duplicated turn in
-    # native scrollback).
-    agentty_add_full_test(midrun_seam_test)
-
-    # midrun_wire_test — WIRE-LEVEL scrollback-duplication regression.
-    # Drives maya's REAL inline compose across the live->freeze handoff
-    # and asserts no committed scrollback row is rewritten (the stranded
-    # duplicate the seam test's render_tree comparison can't catch).
-    agentty_add_full_test(midrun_wire_test)
-
-    # stream_liveness_test — UX-critical caret-liveness regression. The
-    # live-edge typewriter caret must stay armed (request_animation_frame
-    # every build) for the WHOLE time phase==Streaming — even across a
-    # 10 s inter-delta gap — and must disarm after settle + finalize
-    # ramp. Locks the phase-authoritative RAF gate in turn.cpp
-    # (commit a9760e7); a fixed byte-recency timeout would fail it.
-    # stream_liveness_test
-    agentty_add_full_test(stream_liveness_test)
-    set_tests_properties(stream_liveness_test PROPERTIES TIMEOUT 30)
-
-    # stream_md_lag_test — long-turn markdown LAG regression. Drives maya's
-    # StreamingMarkdown exactly as turn.cpp::cached_markdown_for does
-    # (reveal_fx ON, live ON, full content resent + build() every frame) and
-    # asserts the per-frame build() cost does NOT scale with total turn
-    # length: the committed prefix must make progress while live so only a
-    # small tail is reprocessed each frame. A deferred-commit O(N)-per-frame
-    # renderer (the bug the user feels as streaming stutter on a big reply)
-    # fails both the timing-ratio gate and the committed-progress assertion.
-    # Standalone against maya only — no agentty sources needed.
-    add_executable(stream_md_lag_test EXCLUDE_FROM_ALL tests/stream_md_lag_test.cpp)
-    target_link_libraries(stream_md_lag_test PRIVATE maya::maya)
-    add_test(NAME stream_md_lag_test COMMAND stream_md_lag_test)
-    set_tests_properties(stream_md_lag_test PROPERTIES TIMEOUT 60)
-
-    # reveal_lag_probe — dev probe (NOT a ctest entry). Traces the reveal
-    # cursor on a long turn ending in a big eager (code) block at agentty's
-    # production pacing to reproduce the "first char sticks, then bursts on
-    # the next tool use" stall. maya-only.
-    add_executable(reveal_lag_probe EXCLUDE_FROM_ALL tests/reveal_lag_probe.cpp)
-    target_link_libraries(reveal_lag_probe PRIVATE maya::maya)
-
-    # composer_edit_test — reducer-level coverage for the composer's
-    # word-wise delete keys (Ctrl+W unix-word-rubout / Alt+D kill-word),
-    # including the chip-aware boundary that drops a whole attachment
-    # token in one stroke and undo integration. Drives
-    # detail::composer_update directly (no maya / no I/O).
-    agentty_add_full_test(composer_edit_test)
-
-    # scheduler_path_test — path-aware parallel tool scheduling. Pins the
-    # refinement of the effect-only gate: disjoint-path writers / a read
-    # alongside an unrelated write run concurrently, while overlapping /
-    # exec / blind-writer cases serialise. Pure planner
-    # (cmd::schedule_parallel_batch) — no maya / no phase machinery.
-    agentty_add_full_test(scheduler_path_test)
-
-    # table_render_test — pins maya's GFM table classification: a
-    # well-formed table (header line starts at '|', blank line before)
-    # is a Table block; a malformed one with lead-in prose on the header
-    # line is a Paragraph (the wall-of-pipes a model produced). Standalone
-    # against maya only — no agentty sources needed.
-    add_executable(table_render_test EXCLUDE_FROM_ALL tests/table_render_test.cpp)
-    target_link_libraries(table_render_test PRIVATE maya::maya)
-    add_test(NAME table_render_test COMMAND table_render_test)
-
-    # reveal_pacing_test — guards the streaming-reveal CONSTANT-GLIDE
-    # invariant against the long-turn BURST regression. Drives
-    # maya::anim::RateCursor directly and asserts the auto-tuned cruise speed
-    # is clamped to a readable ceiling (no sprint to thousands of cp/s when a
-    # fast model outpaces the cruise), that a slow feed still tracks the wire,
-    # and that the finalize ramp still bypasses the cap to flush the tail.
-    # Header-only against maya — no agentty sources needed.
-    add_executable(reveal_pacing_test EXCLUDE_FROM_ALL tests/reveal_pacing_test.cpp)
-    target_link_libraries(reveal_pacing_test PRIVATE maya::maya)
-    add_test(NAME reveal_pacing_test COMMAND reveal_pacing_test)
-    set_tests_properties(reveal_pacing_test PROPERTIES TIMEOUT 60)
-
-    # stream_async_freeze_test — reproduces the long-turn "md streaming
-    # stops partway, fine again next turn" freeze and pins the fix. Drives
-    # StreamingMarkdown directly at the cached_markdown_for seam: a >=16 KB
-    # divergent-prefix set_content_async DOES enter is_parsing() and returns
-    # stale content (the bug), while the same change via set_content (the
-    # live !settled path now) never parses async and is live in the same
-    # call (the fix). Header-driven against maya only.
-    add_executable(stream_async_freeze_test EXCLUDE_FROM_ALL
-        tests/stream_async_freeze_test.cpp)
-    target_link_libraries(stream_async_freeze_test PRIVATE maya::maya)
-    add_test(NAME stream_async_freeze_test COMMAND stream_async_freeze_test)
-    set_tests_properties(stream_async_freeze_test PROPERTIES TIMEOUT 60)
-
-    # reveal_smoothness_probe — per-BLOCK-TYPE reveal-uniformity gate.
-    # Streams a mixed markdown doc (prose / heading / code fence / table /
-    # list / blockquote) through the production StreamingMarkdown config
-    # (reveal_fx on, 90 cps / 0.3 s pacing) on the virtual anim clock,
-    # renders every frame to a Canvas and counts newly-visible CONTENT
-    # cells per frame per section. FAILS on (1) any height shrink, or
-    # (2) any single frame revealing >60 content cells — the pre-gate
-    # regression (block commits outrunning the reveal cursor) popped
-    # whole blocks at +100..+196 cells/frame while prose glided at ~2.
-    add_executable(reveal_smoothness_probe EXCLUDE_FROM_ALL
-        tests/reveal_smoothness_probe.cpp)
-    target_link_libraries(reveal_smoothness_probe PRIVATE maya::maya)
-    add_test(NAME reveal_smoothness_probe COMMAND reveal_smoothness_probe)
-    set_tests_properties(reveal_smoothness_probe PROPERTIES TIMEOUT 120)
-
-    # md_shape_sweep — streams a corpus of tricky markdown shapes at several
-    # chunk sizes and fails on ANY frame where rendered height SHRINKS while
-    # live (the "composer bounces during md streaming" flicker class).
-    add_executable(md_shape_sweep EXCLUDE_FROM_ALL
-        tests/md_shape_sweep.cpp)
-    target_link_libraries(md_shape_sweep PRIVATE maya::maya)
-    add_test(NAME md_shape_sweep COMMAND md_shape_sweep)
-    set_tests_properties(md_shape_sweep PROPERTIES TIMEOUT 120)
-
-    # md_cache_probe — long-stream cache-efficiency regression. Streams long
-    # shapes (400-item loose/tight lists, 300-row table, 300-line quoted
-    # fence, 200 paragraphs, 200 link-refs) and fails when the per-frame
-    # build+render cost GROWS with stream progress (last-quartile mean > 1ms
-    # AND >3x the first quartile) — i.e. some O(N) path escaped the memo
-    # layers and the turn gets slower the longer it runs.
-    add_executable(md_cache_probe EXCLUDE_FROM_ALL
-        tests/md_cache_probe.cpp)
-    target_link_libraries(md_cache_probe PRIVATE maya::maya)
-    add_test(NAME md_cache_probe COMMAND md_cache_probe)
-    set_tests_properties(md_cache_probe PROPERTIES TIMEOUT 120)
-
-    # tool_boundary_burst_probe — dev probe (NOT a ctest entry). RECREATES
-    # the "long turn: md reveal sticks, then BURSTS when a tool use lands"
-    # bug headlessly: streams a long body through the production pacing
-    # (90 cps / 0.15 s), fires the pre-emptive end-of-text drain
-    # (request_finalize(160)) exactly as turn.cpp does, then executes the
-    # mandatory snap trio at the tool card and measures the cells pasted
-    # in that single frame across wire-speed x close->tool-gap scenarios.
-    add_executable(tool_boundary_burst_probe EXCLUDE_FROM_ALL
-        tests/tool_boundary_burst_probe.cpp)
-    target_link_libraries(tool_boundary_burst_probe PRIVATE maya::maya)
-
-    # openai_transport_test — verifies the OpenAI-compatible provider's pure
-    # translation layer with NO network: build_tools / build_messages JSON
-    # shaping, and a scripted-SSE → agentty-Msg parse (text deltas, streamed
-    # tool-call assembly, finish_reason→StopReason, usage, error frames,
-    # endpoint presets).
-    agentty_add_full_test(openai_transport_test)
-
-    # ollama_transport_test — verifies the DEDICATED Ollama /api/chat
-    # transport: native build_messages (object-form tool args + role:tool
-    # results + images), NDJSON parse (structured tool_calls, plain text,
-    # NO content-salvage, error frames), and the local system prompt shape.
-    # Reuses the shared OBJECT libs (no full-stack recompile) like the
-    # sibling openai_transport_test.
-    agentty_add_full_test(ollama_transport_test)
-
-    # rag_test — document/knowledge RAG unit tests (chunker, BM25 ranking,
-    # RRF fusion, cosine, Corpus BM25-only search). No network: the embed
-    # path is exercised only with an empty model so no Ollama server is
-    # needed. Links the full shared stack (rag + io objs included).
-    agentty_add_full_test(rag_test)
-    agentty_add_full_test(rag_hnsw_test)
-    agentty_add_full_test(rag_rerank_test)
-    agentty_add_full_test(rag_expand_test)
-    agentty_add_full_test(rag_advanced_test)
-    agentty_add_full_test(knowledge_test)
-
-    # reveal_freeze_gate_probe — PROVES symptom-2 ("reveal freezes, then
-    # everything appears at once") was a visual_hash gate hole, and that
-    # the fix (keying the 16 ms reveal bucket on !live_tail_reveal_settled)
-    # closes it without an idle-CPU regression. Drives the REAL
-    # AgenttyApp::visual_hash + a REAL StreamingMarkdown parked mid-glide.
-    agentty_add_full_test(reveal_freeze_gate_probe)
-    set_tests_properties(reveal_freeze_gate_probe PROPERTIES TIMEOUT 30)
-
-    # visual_hash_coverage_test — proves the render gate
-    # (Program::visual_hash) can't silently drop a visible change. Two
-    # declarative tables: every view-affecting model axis must advance
-    # the hash; every non-visual axis (tick clock, token counters) must
-    # not. Catches the "forgot to mix() a new field" footgun at CI time
-    # instead of as a silent dead region in production.
-    agentty_add_full_test(visual_hash_coverage_test)
-
-    # tool_result_budget_test — wire-only byte-budget cap on tool
-    # results. Drives the real messages_json_string serializer and
-    # asserts oversized outputs are bounded (head+tail kept, marker
-    # spliced, UTF-8 boundary respected) while small outputs ship verbatim.
-    agentty_add_full_test(tool_result_budget_test)
-
-    # salvage_dedup_test — re-leaked salvaged-tool-call dedup. Unit-tests
-    # dedup_releaked_salvage_calls (cmd_factory.cpp): a weak local model that
-    # re-leaks a tool call it already ran this turn must not run it twice.
-    agentty_add_full_test(salvage_dedup_test)
-
-    # doom_loop_test — agent_loop_should_break (cmd_factory.cpp): the
-    # circuit breaker that stops a non-converging weak-model tool loop
-    # (same failing call repeated, or a runaway tool-step count) before it
-    # spins until the user hits Esc.
-    agentty_add_full_test(doom_loop_test)
-
-    # acp_integration_test — end-to-end ACP agent exercise. Drives a real
-    # agentty::acp::AgentServer (on the acp-cpp library) through
-    # initialize → session/new → session/prompt over an in-memory transport
-    # with a scripted provider. Adds the ACP glue objects + acp::acp on
-    # top of the shared stack.
-    agentty_add_full_test(acp_integration_test
-        $<TARGET_OBJECTS:agentty_acp_obj>
-        LIBS acp::acp)
-    set_tests_properties(acp_integration_test PROPERTIES TIMEOUT 60)
-
-    # mcp_bridge_test — e2e for the agentty↔mcp-cpp capability bridge. Spawns
-    # the mcp-cpp example server and drives mcp::mcp_tools() end to end. The
-    # test SKIPS (exit 0) when the example server isn't built. Only registered
-    # when MCP is compiled in.
-    if(AGENTTY_MCP)
-        agentty_add_full_test(mcp_bridge_test LIBS mcp::mcp)
-        set_tests_properties(mcp_bridge_test PROPERTIES TIMEOUT 60)
-        # Point the e2e at the mcp-cpp example server when it's been built, so
-        # ctest exercises the real spawn+handshake path instead of skipping.
-        # The test still SKIPs gracefully if the binary isn't there.
-        set_tests_properties(mcp_bridge_test PROPERTIES
-            ENVIRONMENT "AGENTTY_MCP_E2E_SERVER=${CMAKE_CURRENT_SOURCE_DIR}/mcp-cpp/build/examples/mcp_server_example")
-
-        # mcp_http_test — e2e for the Streamable HTTP transport. Stands up a
-        # tiny in-process HTTP/1.1 MCP server and drives make_http_provider()
-        # over http://127.0.0.1:PORT/mcp. No external binary needed; SKIPs on
-        # Windows (POSIX sockets).
-        agentty_add_full_test(mcp_http_test LIBS mcp::mcp)
-        set_tests_properties(mcp_http_test PROPERTIES TIMEOUT 60)
-    endif()
-
-    # frozen_invariant_fuzz — randomized property test for the frozen-
-    # scrollback subsystem. Drives arbitrary sequences of conversation
-    # growth + freeze/trim/rehydrate ops and asserts the structural
-    # invariants after EVERY op. A failure prints SEED=<n> for repro.
-    agentty_add_full_test(frozen_invariant_fuzz)
-
-    # scrollback_wire_fuzz — randomized WIRE-LEVEL anti-corruption fuzz.
-    # Drives arbitrary interleavings of streaming / tool cards / settle
-    # freeze+trim / picker open-close through the REAL ui::view + maya's
-    # REAL inline compose, asserting W1-W5 after EVERY frame. A failure
-    # prints SEED + op trace.
-    agentty_add_full_test(scrollback_wire_fuzz)
-    set_tests_properties(scrollback_wire_fuzz PROPERTIES TIMEOUT 120)
-
-    # reveal_scrollback_test — streaming scrollback DUPLICATION repro with
-    # reveal_fx ON. Streams a long body that overflows a small viewport,
-    # keeps rendering frames (advancing wall-clock), and asserts no
-    # already-committed scrollback row is ever rewritten (R1/R5) across
-    # four terminal shapes x five streaming scenarios.
-    agentty_add_full_test(reveal_scrollback_test)
-    if(UNIX AND NOT APPLE)
-        # openpty() lives in libutil on glibc.
-        target_link_libraries(reveal_scrollback_test PRIVATE util)
-    endif()
-    # Frames advance maya's ANIMATION clock via
-    # maya::testing::advance_anim_clock_ms (no real sleeps — identical
-    # widget dynamics at zero wall cost): ~24 s locally for 10970 checks.
-    # 180 s cap = generous headroom for slow CI runners.
-    set_tests_properties(reveal_scrollback_test PROPERTIES TIMEOUT 180)
-
-    # scrollback_oracle_test — the APPEND-ONLY SCROLLBACK ORACLE. Drives
-    # the REAL maya Runtime::render through a PTY with the REAL agentty
-    # view + freeze/trim + tool-card lifecycle and enforces, at EVERY
-    # frame, that the emulator's committed scrollback is a prefix-
-    # extension of the previous frame's (any rewrite / reorder /
-    # duplication / shrink of a committed row = FAIL, no scenario
-    # enumeration needed). Hostile coverage: wrapping prose straddling
-    # the seam, tool cards growing past 2× the viewport while live
-    # (chrome commits mid-flight), parallel tool batches where one tool
-    # settles while another's committed chrome is off-viewport, burst
-    # frames (3 mutations per render), post-tool continuation sub-turn
-    # messages, and the frozen front-trim across 4 terminal shapes.
-    # Caught (fail-before) both field corruption classes: mid-reveal
-    # prose rewrites above tool cards, and the live ACTIONS panel's
-    # title counter / title_end / spinner / border-color mutating a
-    # committed row.
-    agentty_add_full_test(scrollback_oracle_test)
-    if(UNIX AND NOT APPLE)
-        target_link_libraries(scrollback_oracle_test PRIVATE util)
-    endif()
-    set_tests_properties(scrollback_oracle_test PROPERTIES TIMEOUT 600)
-
-    # anthropic_md_stream — dev tool, NOT a ctest entry. Captures a real
-    # Anthropic SSE markdown stream to a .jsonl fixture (network +
-    # credentials required), or replays a captured fixture through
-    # maya's StreamingMarkdown reveal-fx path.
-    agentty_add_full_test(anthropic_md_stream NO_TEST)
-    # Aggregate target so CI can build every ctest-registered binary in one
-    # shot. The individual test targets are EXCLUDE_FROM_ALL (kept out of the
-    # default `cmake --build` so a plain build stays lean), which means
-    # `ctest` would otherwise find nothing built. `cmake --build build
-    # --target tests` forces them all.
-    add_custom_target(tests DEPENDS
-        long_session_bench
-        fuzzy_match_smoke
-        param_tag_repair_test
-        model_caps_test
-        fsm_test
-        model_label_test
-        skills_engine_test
-        midrun_freeze_test
-        midrun_seam_test
-        midrun_wire_test
-        stream_liveness_test
-        stream_md_lag_test
-        reveal_pacing_test
-        stream_async_freeze_test
-        reveal_smoothness_probe
-        md_shape_sweep
-        md_cache_probe
-        composer_edit_test
-        scheduler_path_test
-        table_render_test
-        openai_transport_test
-        ollama_transport_test
-        rag_test
-        rag_hnsw_test
-        rag_rerank_test
-        rag_expand_test
-        rag_advanced_test
-        knowledge_test
-        reveal_freeze_gate_probe
-        visual_hash_coverage_test
-        tool_result_budget_test
-        salvage_dedup_test
-        doom_loop_test
-        acp_integration_test
-        frozen_invariant_fuzz
-        scrollback_wire_fuzz
-        reveal_scrollback_test
-        scrollback_oracle_test)
-    # mcp_bridge_test / mcp_http_test are only registered as ctest entries
-    # when MCP is compiled in (AGENTTY_MCP), so they must be added to the
-    # aggregate under the same gate — otherwise `cmake --build --target
-    # tests` never builds them and ctest reports them "Not Run".
-    if(AGENTTY_MCP)
-        add_dependencies(tests mcp_bridge_test mcp_http_test)
+    # The test suite is written against POSIX setenv/unsetenv (it sandboxes
+    # HOME and the workspace per test). UCRT lacks them, so on Windows every
+    # source under tests/ force-includes one shim. A source property, so it
+    # reaches every test target however it is defined (consolidated, standalone
+    # or raw) and never the product.
+    if(WIN32)
+        file(GLOB_RECURSE _agentty_test_srcs CONFIGURE_DEPENDS
+             ${CMAKE_SOURCE_DIR}/tests/*.cpp)
+        set_source_files_properties(${_agentty_test_srcs} PROPERTIES
+            COMPILE_OPTIONS "-include;${CMAKE_SOURCE_DIR}/tests/win_posix_compat.hpp")
     endif()
 endif()

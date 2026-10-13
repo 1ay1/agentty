@@ -11,11 +11,20 @@
 // from main(); `active()` is read wherever the out-of-band routing is needed.
 
 #include <cstdint>
+#include <algorithm>
+#include <map>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "agentty/auth/auth.hpp"
-#include "agentty/provider/openai/transport.hpp"
+#include "agentty/domain/catalog.hpp"   // ModelInfo
+#include "agentty/provider/openai/endpoint.hpp"
 #include "agentty/provider/registry.hpp"
+
+#include <maya/runtime.hpp>
+#include "agentty/util/io.hpp"
 
 namespace agentty::provider {
 
@@ -28,6 +37,59 @@ namespace agentty::provider {
 struct Selection {
     Kind             kind = Kind::Anthropic;
     openai::Endpoint openai_endpoint;   // meaningful only when kind == OpenAI
+    // The external ACP agent's spec id ("claude-agent-acp", "codex-acp", or a
+    // config-defined id). Meaningful only when kind == ExternalAcp; the runtime
+    // hands it to stream_external_acp() to spawn/drive the right subprocess.
+    std::string      acp_agent_id;
+
+    // The provider row this selection names, resolved ONCE by parse_selection.
+    //
+    // Identity and endpoint are ORTHOGONAL, and collapsing them is what broke
+    // the custom-host flow. Identity used to be re-derived on every query by
+    // comparing `openai_endpoint.label` against a literal — but pointing a
+    // provider at a custom base URL OVERWRITES that label, so the identity was
+    // destroyed and a Copilot-backed custom host silently degraded to the
+    // generic OpenAI path (empty model list, no error).
+    //
+    // Carrying the row makes identity a value, not a derivation. Points into
+    // the constexpr kProviders table (static storage, never dangles); null
+    // only for a genuinely unknown custom host, which correctly has no
+    // registry identity.
+    const ProviderPreset* row = nullptr;
+
+    // This selection's provider id ("copilot", "kimi", …), or "" for an
+    // unrecognised custom host. THE identity accessor — prefer it to any
+    // is_X() predicate at new call sites.
+    [[nodiscard]] std::string_view provider_id() const noexcept {
+        return row ? row->id : std::string_view{};
+    }
+
+    // Rides a dedicated long-lived transport with its own OAuth store
+    // (ChatGPT/Codex, Copilot, Kimi) rather than the generic key-authed
+    // OpenAI path. A new such provider becomes true by setting one row flag.
+    [[nodiscard]] bool is_oauth_native() const noexcept {
+        return row && row->oauth_native;
+    }
+
+    // Identity by registry id — the row's immutable primary key. NOT the
+    // display label, which the custom-host flow overwrites.
+    [[nodiscard]] bool is_copilot() const noexcept { return provider_id() == "copilot"; }
+    [[nodiscard]] bool is_kimi()    const noexcept { return provider_id() == "kimi"; }
+    [[nodiscard]] bool is_chatgpt() const noexcept { return provider_id() == "chatgpt"; }
+
+    // Structural equality. `row` compares by POINTER, which is exact: it
+    // always points into the static kProviders table, so two selections of
+    // the same registry row hold the same address. The dispatch seam uses
+    // this to publish the Model's selection to the process-global copy only
+    // when it actually changed.
+    [[nodiscard]] bool operator==(const Selection&) const = default;
+
+    // The catalog id this selection is filed under — the key every recents,
+    // fused-catalog and capability row uses: the OpenAI-family endpoint label,
+    // the ACP agent id, else the default (Anthropic) id. ONE definition: the
+    // reducers and the provider picker both ask it, so they cannot disagree
+    // about which row is "active".
+    [[nodiscard]] std::string catalog_id() const;
 };
 
 // Parse a provider spec into a Selection. Accepts:
@@ -38,9 +100,68 @@ struct Selection {
 //   "host[:port]" → OpenAI-compatible against a custom base URL
 [[nodiscard]] Selection parse_selection(std::string_view spec);
 
+// CANONICALISE a user-typed provider spec before it becomes an IDENTITY.
+// The raw string is used as (1) the wire spec, (2) the settings key for
+// provider_keys / provider_models, (3) the picker row identity, and (4) the
+// display label — so two spellings of the same endpoint ("http://h:8080" vs
+// "http://h:8080/") would otherwise split keys, models, and rows. This was
+// the root cause behind the whole custom-host PR series (#8/#10/#11/#17/#19
+// each patched one downstream site): normalisation must happen ONCE, at
+// every entry point (CLI --provider, the TUI custom-host modal), before the
+// spec is persisted or compared. Rules: trim whitespace; strip trailing
+// '/' (but never the scheme's "//"); presets and ACP ids pass through
+// untouched. The "#name" account fragment is PRESERVED — it is part of the
+// identity by design.
+[[nodiscard]] inline std::string canonical_spec(std::string_view spec) {
+    std::size_t b = 0, e = spec.size();
+    while (b < e && (spec[b] == ' ' || spec[b] == '\t')) ++b;
+    while (e > b && (spec[e - 1] == ' ' || spec[e - 1] == '\t'
+                     || spec[e - 1] == '\r' || spec[e - 1] == '\n')) --e;
+    std::string s{spec.substr(b, e - b)};
+    while (s.size() > 1 && s.back() == '/' && s[s.size() - 2] != '/')
+        s.pop_back();
+
+    // CASE-FOLD THE HOST (and the scheme), never the path or the #name.
+    // DNS is case-insensitive, so "YOLO-AUTO.COM" and "yolo-auto.com" are the
+    // same server and MUST collapse to one identity here — otherwise they
+    // become two saved hosts, two provider_keys entries, and two picker rows
+    // for one endpoint, and the user pastes a key into one spelling then
+    // wonders why the other says "no key". Paths stay untouched because a
+    // path CAN be case-sensitive (`/V1` is not guaranteed to equal `/v1` on
+    // an arbitrary gateway), and the "#name" account tag is user-chosen text.
+    const auto scheme_end = s.find("//");
+    std::size_t host_begin = (scheme_end == std::string::npos) ? 0 : scheme_end + 2;
+    std::size_t host_end   = s.find('/', host_begin);
+    if (host_end == std::string::npos) host_end = s.find('#', host_begin);
+    if (host_end == std::string::npos) host_end = s.size();
+    for (std::size_t i = 0; i < host_end; ++i)
+        if (s[i] >= 'A' && s[i] <= 'Z') s[i] = static_cast<char>(s[i] - 'A' + 'a');
+    return s;
+}
+
+// ── Persist-on-success for CLI custom hosts ───────────────────────
+// A custom --provider spec is raw INTENT until the host answers something;
+// persisting it at parse time let a typo poison settings.json for every
+// future bare launch. main.cpp registers the spec (and the -m recall to
+// file with it) here instead of writing settings. init() takes it into the
+// Model once; the ModelsLoaded reducer persists it when a NON-EMPTY catalog
+// lands for that provider — proof-gated stickiness. Known presets never
+// register (they persist at parse, as always).
+void set_unproven_spec(Io, std::string spec, std::string model_recall);
+// The registered (spec, model_recall), clearing it. Called once, by init().
+[[nodiscard]] std::optional<std::pair<std::string, std::string>> take_unproven_spec_at_launch(Io);
+
+// Session-wide custom auth header NAME (--auth-header) for OpenAI-family
+// backends whose gateway doesn't accept `Authorization: Bearer` (e.g.
+// `X-API-Key`). Stored process-globally so every parse_selection — startup
+// AND live provider switches from the picker — stamps it onto the resulting
+// Endpoint. Empty (the default) keeps the standard bearer header.
+void set_custom_auth_header(Io, std::string name);
+[[nodiscard]] std::string custom_auth_header();
+
 // Install the active selection (process-global). Called at startup and by
 // the provider-picker reducer for live switches (UI thread).
-void select(Selection s);
+void select(Io, Selection s);
 
 // Read the active selection. Defaults to Anthropic before select() runs.
 // Returns a BY-VALUE snapshot taken under the selection mutex: the stream
@@ -55,6 +176,38 @@ void select(Selection s);
 // "Ollama", "OpenAI", or the raw endpoint label for a custom host with
 // no preset row. Used by the status bar provider badge.
 [[nodiscard]] std::string provider_display_name(const Selection& s);
+
+// The host to warm before the first turn, fully derived from a Selection.
+// `host` empty ⇒ nothing to warm (local backend / ACP subprocess / port-0
+// sentinel). `override_host`/`override_port` carry the AGENTTY_API_HOST dial
+// (Anthropic only) so the warm connection targets the real upstream. This is
+// a PURE function of (Selection, registry, endpoint) — no globals, no I/O —
+// so the prewarm routing table is unit-testable; prewarm_active_provider() is
+// then just "resolve target, open socket".
+struct PrewarmTarget {
+    std::string   host;             // "" ⇒ skip prewarm
+    std::uint16_t port = 443;
+    std::string   override_host;    // AGENTTY_API_HOST host (Anthropic), else ""
+    std::uint16_t override_port = 0;
+
+    [[nodiscard]] bool should_warm() const noexcept { return !host.empty(); }
+};
+
+// Resolve the prewarm target for a selection. Registry-driven: a preset row's
+// `prewarm_host` (Anthropic → api.anthropic.com, ChatGPT → chatgpt.com) wins;
+// otherwise the OpenAI-compat Endpoint's own host is used, skipped for local /
+// no-TLS / port-0 endpoints. Passed a Selection explicitly so tests can drive
+// it; prewarm_active_provider() calls it on active().
+[[nodiscard]] PrewarmTarget prewarm_target(const Selection& sel);
+
+// Open a TCP+TLS connection to the ACTIVE provider's host on a detached
+// background thread, parking it in the http client's pool so the first real
+// request skips the cold handshake. Uniform across native backends — Anthropic
+// and ChatGPT/Codex (and any hosted OpenAI-family endpoint) get the same head
+// start. Locals (Ollama / llama.cpp) and ACP subprocesses are no-ops.
+// Idempotent per (host,port); safe to call fire-and-forget from any thread.
+// A thin wrapper over prewarm_target(active()) — the routing lives there.
+void prewarm_active_provider(Io);
 
 // Resolve the AuthHeader for a provider spec, registry-driven.
 //   • Anthropic   → derived from `anthropic_creds` (OAuth / x-api-key from
@@ -71,4 +224,63 @@ void select(Selection s);
     std::string_view cli_key = {},
     std::string_view saved_key = {});
 
+// Fetch the model catalog for a selection — the ONE model-list router.
+// Replaces the `is_chatgpt → OpenAI → Anthropic` ladder that fetch_models()
+// hand-wrote: it dispatches on the same axes as the stream path (the Wire
+// dialect + the oauth_native flag), so the picker and the transport can never
+// disagree about which backend a selection names. ExternalAcp returns empty
+// (an ACP agent picks its own model and exposes no catalog). `auth` is the
+// active credential (used by the Anthropic / OpenAI-compat catalog endpoints;
+// ChatGPT reads its own in-process OAuth creds and ignores it). It fetches
+// over the network (and refreshes OAuth tokens): `unlocked`.
+[[nodiscard]] std::vector<ModelInfo> list_models_for(Io io, const maya::unlocked& cap,
+    const Selection& sel, const auth::AuthHeader& auth);
+
+// ── Provider-picker search filter (shared by the reducer + the view) ────────
+// Returns the indices into `providers()` whose id/label/blurb match `query`
+// (empty query = all, in registry order). Fuzzy-scored and ranked so "kimi"
+// or "ds" floats the right row up. Used by BOTH picker.cpp (index ↔ preset
+// resolution on select/move) and pickers.cpp (row rendering) so the filtered
+// list can never disagree between them. Defined in selection.cpp.
+[[nodiscard]] std::vector<int> filter_provider_indices(std::string_view query);
+
+// The user's saved custom OpenAI-compatible hosts, sorted. These are the
+// Settings.provider_keys entries that do not resolve onto a built-in preset
+// row — a raw "host:port", an Ollama/llama.cpp endpoint, a private gateway.
+// Both the provider-picker VIEW and its reducer build this list, and the
+// fused picker's catalog refresh consumes it; keeping it here guarantees
+// they render and index the SAME rows in the SAME order (a drift here would
+// map a selection to the wrong host).
+//
+// ADOPTION is why the test is on the RESOLVED id, not the raw spec.
+// parse_selection() folds a spec that names a known backend onto that
+// backend's row: "api.githubcopilot.com" resolves to provider_id "copilot",
+// which is what makes the Copilot endpoint/auth apply instead of the generic
+// /v1/models path (see provider_identity_test). But `preset_for(spec)` asks a
+// DIFFERENT question — "is this string a preset id?" — and answers nullptr
+// for that host, so it used to come back as a "custom" host as well as being
+// a preset. Every consumer then listed it twice: the provider picker showed
+// two "GitHub Copilot" rows, and once the fused picker gained custom-host
+// catalogs it grew a duplicate catalog and duplicate models with it.
+//
+// Ask the question that matters: does this spec RESOLVE to a preset row? If
+// so it is already covered by the preset enumeration and must not be listed
+// again here.
+[[nodiscard]] inline std::vector<std::string> saved_custom_hosts(
+    const std::map<std::string, std::string>& provider_keys) {
+    std::vector<std::string> hosts;
+    for (const auto& [spec, key] : provider_keys) {
+        if (preset_for(spec)) continue;                     // literally a preset id
+        if (preset_for(parse_selection(spec).provider_id()))
+            continue;                                       // adopted onto a preset row
+        hosts.push_back(spec);
+    }
+    std::sort(hosts.begin(), hosts.end());
+    return hosts;
+}
+
 } // namespace agentty::provider
+
+// Selection is plain data plus `row`, which only ever points into the
+// constexpr kProviders table (static, immutable). Safe to copy across threads.
+MAYA_SENDABLE(agentty::provider::Selection);

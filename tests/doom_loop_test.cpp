@@ -13,11 +13,12 @@
 // Asserts the breaker FIRES on a genuine doom loop and STAYS QUIET on healthy
 // progress, on success, and across a User-turn boundary (each run is fresh).
 
-#include <cstdio>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"
@@ -32,13 +33,8 @@ using nlohmann::json;
 
 namespace {
 
-int g_fails = 0;
-void check(bool ok, const char* what) {
-    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++g_fails; }
-    else     { std::fprintf(stderr, "ok:   %s\n", what); }
-}
 
-enum class Term { Done, Failed };
+enum class Term { Done, Failed, Rejected };
 
 ToolUse call(const std::string& name, json args, Term t) {
     static int seq = 0;
@@ -47,7 +43,8 @@ ToolUse call(const std::string& name, json args, Term t) {
     tc.name = ToolName{name};
     tc.args = std::move(args);
     if (t == Term::Done) tc.status = ToolUse::Done{{}, {}, "ok"};
-    else                 tc.status = ToolUse::Failed{{}, {}, "no such file"};
+    else if (t == Term::Failed) tc.status = ToolUse::Failed{{}, {}, "no such file"};
+    else tc.status = ToolUse::Rejected{};
     return tc;
 }
 
@@ -72,8 +69,10 @@ Message user(std::string s = "go") {
     return m;
 }
 
-// ── 1. REPEAT: same failing call 3x → break ─────────────────────────────────
-void test_repeat_failing_call_breaks() {
+}  // namespace (helpers)
+
+// ── 1. REPEAT: same failing call 3x → break ─────────────────────────
+TEST_CASE("repeat failing call breaks") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "https://x.com/jokes"}};
@@ -88,7 +87,7 @@ void test_repeat_failing_call_breaks() {
 }
 
 // ── 2. Two failures is below the limit → no break (give it a chance) ─────────
-void test_two_failures_no_break() {
+TEST_CASE("two failures no break") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "x"}};
@@ -99,18 +98,57 @@ void test_two_failures_no_break() {
 }
 
 // ── 3. Same call but SUCCEEDING → never break (legit re-read) ────────────────
-void test_repeat_succeeding_no_break() {
+TEST_CASE("repeat succeeding tolerated below the limit") {
+    // A repeat that WORKS is weak evidence of a stuck model: re-reading a
+    // file after editing it, or re-running a test, is ordinary. So the
+    // threshold sits above the failure one and five is still fine.
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "log.txt"}};
     for (int i = 0; i < 5; ++i)
         msgs.push_back(asst_call("read", a, Term::Done));
     check(!agent_loop_should_break(msgs).has_value(),
-          "repeated SUCCEEDING call never breaks");
+          "five identical successful calls are still legitimate");
+}
+
+TEST_CASE("repeat succeeding breaks at the limit") {
+    // The gap this closes. The failure breaker only counted FAILING calls,
+    // and the step cap that used to back it up was gated on a model-id
+    // heuristic (and has since been removed entirely). A model behind a
+    // private gateway (`igpu/laguna-xs-2.1`) is unrecognised by
+    // construction, so an identical-call loop that SUCCEEDED every time had
+    // no cap at all: measured at 80 repeats before the turn budget ran out,
+    // which on a 22GB resident is minutes of GPU time going nowhere.
+    //
+    // Applies to EVERY model — and now that the step cap is gone, this IS
+    // the backstop for a loop that keeps succeeding. It keys on the call
+    // being IDENTICAL, which is evidence of being stuck rather than evidence
+    // of working hard.
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"path", "log.txt"}};
+    for (int i = 0; i < 6; ++i)
+        msgs.push_back(asst_call("read", a, Term::Done));
+    auto brk = agent_loop_should_break(msgs);
+    check(brk.has_value(), "six identical successful calls break the loop");
+    if (brk) check(brk->reason.find("read") != std::string::npos,
+                   "the break names the offending tool");
+}
+
+TEST_CASE("succeeding repeats with different args never break") {
+    // The discriminator: it is the IDENTICAL call that is evidence of a
+    // loop, not the tool. A model walking a directory reads many files.
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    for (int i = 0; i < 12; ++i)
+        msgs.push_back(asst_call("read",
+            json{{"path", "f" + std::to_string(i) + ".txt"}}, Term::Done));
+    check(!agent_loop_should_break(msgs).has_value(),
+          "distinct successful reads are a legitimate traversal");
 }
 
 // ── 4. Different args each time → not the same dead call ─────────────────────
-void test_distinct_failing_calls_no_break() {
+TEST_CASE("distinct failing calls no break") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     // 3 failing reads but each a DIFFERENT path — exploring, not stuck.
@@ -121,68 +159,104 @@ void test_distinct_failing_calls_no_break() {
           "distinct failing args do NOT trip the repeat cap");
 }
 
-// ── 5. RUNAWAY: 25 healthy tool turns → break on step cap ────────────────────
-void test_runaway_step_cap_breaks() {
+// ── 5. NO STEP CAP: a long run of DISTINCT work is never cut off ─────────────
+//
+// There used to be a 25-turn cap here, gated on a model-id heuristic. Both are
+// gone: a raw count of tool turns is not evidence of anything. A real
+// search → read → edit → verify pass over a large codebase legitimately spends
+// dozens of distinct, productive steps, and stopping it at an arbitrary number
+// truncates working output with no finding to point at. The gate made it worse
+// by being inconsistent — the SAME transcript stopped on a local model and ran
+// fine on Claude.
+//
+// What still bounds a runaway is repetition, which is tested in 5c/5d below.
+// This case locks in that volume alone never trips anything.
+TEST_CASE("no step cap: distinct work runs as long as it needs") {
     std::vector<Message> msgs;
     msgs.push_back(user());
-    for (int i = 0; i < 25; ++i)
-        msgs.push_back(asst_call("bash", json{{"command", "echo " + std::to_string(i)}},
+    for (int i = 0; i < 200; ++i)
+        msgs.push_back(asst_call("shell", json{{"command", "echo " + std::to_string(i)}},
                                  Term::Done));
-    auto brk = agent_loop_should_break(msgs);
-    check(brk.has_value(), "25 tool turns → runaway break");
-    check(brk && brk->reason.find("steps") != std::string::npos,
-          "runaway reason mentions step count");
+    check(!agent_loop_should_break(msgs).has_value(),
+          "200 distinct successful tool turns do NOT break");
 }
 
-// ── 5b. CAPABLE model (enforce_step_cap=false): 25 healthy turns do NOT break.
-//       Matches Claude Code (max_turns unlimited) / aider (no step cap). A
-//       long, legitimate run on Claude must never be cut off by the count.
-void test_runaway_step_cap_skipped_for_capable() {
+// ── 5b. ...and that holds regardless of WHICH model is driving.
+//       The old cap was enforced only when an id heuristic failed to
+//       recognise the model, so an unfamiliar local name got stopped where
+//       `claude-opus-4` did not, on byte-identical history. There is no flag
+//       left to pass, which is the point: one transcript, one answer.
+TEST_CASE("no step cap: the answer does not depend on the model id") {
     std::vector<Message> msgs;
     msgs.push_back(user());
-    for (int i = 0; i < 40; ++i)
-        msgs.push_back(asst_call("bash", json{{"command", "echo " + std::to_string(i)}},
+    for (int i = 0; i < 60; ++i)
+        msgs.push_back(asst_call("read", json{{"path", "f" + std::to_string(i) + ".cpp"}},
                                  Term::Done));
-    check(!agent_loop_should_break(msgs, /*enforce_step_cap=*/false).has_value(),
-          "40 healthy turns with step cap OFF (Claude) does NOT break");
-    // Same history WITH the cap on (weak model) still breaks — proves the only
-    // difference is the flag, not the history.
-    check(agent_loop_should_break(msgs, /*enforce_step_cap=*/true).has_value(),
-          "same history with step cap ON (weak model) breaks");
+    check(!agent_loop_should_break(msgs).has_value(),
+          "60 distinct reads never break, whoever is driving");
 }
 
-// ── 5c. REPEAT-FAILURE is UNIVERSAL: fires even when the step cap is OFF.
-//       aider/MindStudio apply the repeated-dead-call cap to every model;
-//       a capable model stuck re-trying an identical failing call still stops.
-void test_repeat_failure_breaks_even_for_capable() {
+// ── 5c. REPEAT-FAILURE is UNIVERSAL — and with the step cap gone it is one
+//       of only two things that can stop a run at all. aider/MindStudio apply
+//       the repeated-dead-call cap to every model; a capable model stuck
+//       re-trying an identical failing call still stops.
+TEST_CASE("repeat failure breaks even for capable") {
     std::vector<Message> msgs;
     msgs.push_back(user());
     json a = {{"path", "/nope"}};
     msgs.push_back(asst_call("read", a, Term::Failed));
     msgs.push_back(asst_call("read", a, Term::Failed));
     msgs.push_back(asst_call("read", a, Term::Failed));
-    auto brk = agent_loop_should_break(msgs, /*enforce_step_cap=*/false);
+    auto brk = agent_loop_should_break(msgs);
     check(brk.has_value(),
-          "3x identical failing call breaks even with step cap OFF (Claude)");
+          "3x identical failing call breaks on every model");
     check(brk && brk->reason.find("read") != std::string::npos,
           "repeat-failure reason names the tool");
 }
 
-// ── 6. A modest healthy multi-step task does NOT break ───────────────────────
-void test_healthy_progress_no_break() {
+// ── 5d. Only the CURRENT consecutive streak counts. Earlier failures that
+//       were followed by success are recovery history, not a doom loop.
+TEST_CASE("success resets failure streak") {
     std::vector<Message> msgs;
     msgs.push_back(user());
-    msgs.push_back(asst_call("bash",  json{{"command", "ls"}}, Term::Done));
+    json a = {{"path", "flaky.txt"}};
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    msgs.push_back(asst_call("read", a, Term::Done));
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    msgs.push_back(asst_call("read", a, Term::Failed));
+    check(!agent_loop_should_break(msgs).has_value(),
+          "success resets identical-call failure streak");
+}
+
+// Rejections are terminal failures for loop purposes: repeatedly refusing the
+// same permission cannot make progress and should receive the same breaker.
+TEST_CASE("rejection streak breaks") {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"command", "dangerous"}};
+    msgs.push_back(asst_call("shell", a, Term::Rejected));
+    msgs.push_back(asst_call("shell", a, Term::Rejected));
+    msgs.push_back(asst_call("shell", a, Term::Rejected));
+    check(agent_loop_should_break(msgs).has_value(),
+          "3x identical rejection streak breaks");
+}
+
+// ── 6. A modest healthy multi-step task does NOT break ───────────────────────
+TEST_CASE("healthy progress no break") {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    msgs.push_back(asst_call("shell",  json{{"command", "ls"}}, Term::Done));
     msgs.push_back(asst_call("read",  json{{"path", "a.cpp"}}, Term::Done));
     msgs.push_back(asst_call("edit",  json{{"path", "a.cpp"}}, Term::Done));
-    msgs.push_back(asst_call("bash",  json{{"command", "make"}}, Term::Done));
+    msgs.push_back(asst_call("shell",  json{{"command", "make"}}, Term::Done));
     check(!agent_loop_should_break(msgs).has_value(),
           "4-step search→read→edit→verify does NOT break");
 }
 
 // ── 7. User boundary resets the run: a prior doom loop in an EARLIER turn
 //      doesn't count against the current one. ──────────────────────────────
-void test_user_boundary_resets_run() {
+TEST_CASE("user boundary resets run") {
     std::vector<Message> msgs;
     // Earlier turn: a doom loop (3 failing reads).
     msgs.push_back(user("first"));
@@ -192,13 +266,13 @@ void test_user_boundary_resets_run() {
     msgs.push_back(asst_call("read", a, Term::Failed));
     // New user turn starts a FRESH run with one healthy call.
     msgs.push_back(user("second"));
-    msgs.push_back(asst_call("bash", json{{"command", "pwd"}}, Term::Done));
+    msgs.push_back(asst_call("shell", json{{"command", "pwd"}}, Term::Done));
     check(!agent_loop_should_break(msgs).has_value(),
           "doom loop in a PRIOR run doesn't break the current fresh run");
 }
 
 // ── 8. Empty / no-tool history is safe ───────────────────────────────────────
-void test_empty_and_text_only_no_break() {
+TEST_CASE("empty and text only no break") {
     check(!agent_loop_should_break({}).has_value(), "empty history no break");
     std::vector<Message> msgs;
     msgs.push_back(user());
@@ -206,24 +280,3 @@ void test_empty_and_text_only_no_break() {
     check(!agent_loop_should_break(msgs).has_value(), "text-only turn no break");
 }
 
-} // namespace
-
-int main() {
-    test_repeat_failing_call_breaks();
-    test_two_failures_no_break();
-    test_repeat_succeeding_no_break();
-    test_distinct_failing_calls_no_break();
-    test_runaway_step_cap_breaks();
-    test_runaway_step_cap_skipped_for_capable();
-    test_repeat_failure_breaks_even_for_capable();
-    test_healthy_progress_no_break();
-    test_user_boundary_resets_run();
-    test_empty_and_text_only_no_break();
-
-    if (g_fails == 0) {
-        std::printf("doom_loop_test: all checks passed\n");
-        return 0;
-    }
-    std::fprintf(stderr, "doom_loop_test: %d check(s) failed\n", g_fails);
-    return 1;
-}

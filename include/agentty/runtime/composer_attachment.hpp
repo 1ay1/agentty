@@ -25,6 +25,8 @@
 // the whole token is `\x01ATT:0\x01` minimum (8 bytes), variable
 // length thereafter.
 
+#include "agentty/domain/lazy_bytes.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -54,7 +56,16 @@ struct Attachment {
     /// what reaches the model (but capped at a few hundred KiB).
     /// For Image it's the raw image bytes (NOT base64 — encoding is
     /// the transport's job so the in-memory chip stays compact).
-    std::string body;
+    ///
+    /// LazyBytes, not std::string: a persisted body can be a 2 MB build
+    /// log (an Output attachment), and NOTHING on the render path reads
+    /// it — attachment::chip_label draws from `name`, `path`,
+    /// `byte_count` and `line_count`. The bytes are needed once, by
+    /// attachment::expand() at request-build time. Reading them eagerly
+    /// on every thread load was 4.2 MB of base64 decoded across a real
+    /// store to produce nothing anyone looked at. Call `.bytes()` to
+    /// materialise; see LazyBytes in domain/conversation.hpp.
+    LazyBytes body;
     /// Workspace-relative path for FileRef / Image / Symbol. Empty for Paste.
     std::string path;
     /// MIME type for Image attachments (e.g. "image/png", "image/jpeg").

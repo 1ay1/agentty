@@ -200,7 +200,7 @@ gives ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) — never a literal emoji.
 ### `.hover(...)` — terminals have no hover
 
 Translation: **focus**, not hover. Use the focus model in
-`maya/include/maya/core/focus.hpp`. When an element gains focus (via
+`third_party/maya/include/maya/core/focus.hpp`. When an element gains focus (via
 Tab navigation or explicit click in mouse-enabled terminals), apply the
 "hover" style.
 

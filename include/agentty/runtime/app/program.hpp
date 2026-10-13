@@ -13,33 +13,132 @@
 #include "agentty/runtime/app/subscribe.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/update/internal.hpp"  // detail::live_tail_reveal_settled
+#include "agentty/runtime/view/composer.hpp"        // composer_uses_hardware_caret
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
+#include "agentty/runtime/panel/visual_parts.hpp"   // the structural hash walk
+#include "agentty/runtime/visual.hpp"
 #include "agentty/runtime/view/view.hpp"
 
 namespace agentty::app {
 
-[[nodiscard]] std::pair<Model, maya::Cmd<Msg>> init();
+namespace pn = agentty::ui::panel;   // the exclusive overlay slot's alternatives
+
+[[nodiscard]] std::pair<Model, Cmd> init();
+
+// Log any loop step (an update arm, view, subscribe) that took longer than a
+// frame. Free when fast: one clock read and a compare. Lands in agentty.log
+// as `ui loop.slow: <what> <ms>`, so a user's "it lags when I open X"
+// becomes a line naming the arm instead of a guess.
+void note_slow(const char* what, std::chrono::steady_clock::time_point t0) noexcept;
 
 struct AgenttyApp {
     using Model = ::agentty::Model;
     using Msg   = ::agentty::Msg;
+    // jaal reads the effect and source ROWS off the program (D2): P::Cmd says
+    // what this program may return, P::Sub what it may listen to, and a host
+    // must serve every entry or the program won't compile against it.
+    using Cmd   = ::agentty::Cmd;
+    using Sub   = ::agentty::Sub;
 
-    static std::pair<Model, maya::Cmd<Msg>> init() { return ::agentty::app::init(); }
+    // The clock update() is handed. Declaring it makes jaal pass the step
+    // time as every update's third argument (jaal core/program.hpp, "time,
+    // as an argument"), so a reducer never reads std::chrono itself and a
+    // recorded run replays to the same model. The seam below copies it into
+    // Model::now, which is how it reaches the helpers.
+    using Clock = maya::platform::steady_clock;
 
-    static auto update(Model m, Msg msg) -> std::pair<Model, maya::Cmd<Msg>> {
-        return ::agentty::app::update(std::move(m), std::move(msg));
+    // jaal's init is `Cmd init(Model&)` — it fills the model IN PLACE and
+    // returns only the first Cmd (core/program.hpp, `has_init`).
+    //
+    // This used to be `static std::pair<Model, Cmd> init()`, the old runtime's
+    // shape. That is not an error anyone reports: `has_init` is a `requires`
+    // test, so a signature jaal can't call simply reads as "this program has
+    // no init", and the kernel value-initialises the Model instead. Everything
+    // init() loads — settings, the thread list, the active provider — was
+    // built and then dropped on the floor, which presents as agentty
+    // remembering nothing across restarts and showing the first-run card on
+    // every launch.
+    //
+    // The free function still returns a pair (init.cpp builds a Model and its
+    // Cmd together, and the tests call it that way), so this adapts.
+    static Cmd init(Model& m) {
+        auto [built, cmd] = ::agentty::app::init();
+        m = std::move(built);
+        return std::move(cmd);
     }
+
+    // jaal calls P::update(Model&, T) for whatever it lands on as it walks the
+    // Msg tree, so the 23 domain reducers are static members here. Each
+    // forwards to the free function of the same name in its own TU, which is
+    // what keeps a one-leaf edit to a ~1.2 s rebuild.
+    //
+    // The domains are declared groups (handled_as_group in runtime/cmd.hpp),
+    // and these are the handlers that declaration CLAIMS exist — jaal only
+    // honours a group when it finds one, so without these it correctly keeps
+    // descending and asks for all 231 leaves instead.
+#define AGENTTY_FWD_UPDATE(DomainMsg)                                    \
+    static Cmd update(Model& m, msg::DomainMsg d, Clock::time_point now) { \
+        m.now = now;   /* the fold's time: see Model::now */             \
+        const auto t0 = std::chrono::steady_clock::now();                \
+        auto c = ::agentty::app::update(m, std::move(d));                \
+        auto out = ::agentty::app::publish_derived(m, std::move(c));      \
+        ::agentty::app::note_slow(#DomainMsg, t0);                       \
+        return out;                                                       \
+    }
+
+    AGENTTY_FWD_UPDATE(ComposerMsg)
+    AGENTTY_FWD_UPDATE(StreamMsg)
+    AGENTTY_FWD_UPDATE(ToolMsg)
+    AGENTTY_FWD_UPDATE(ToolOutputMsg)
+    AGENTTY_FWD_UPDATE(ProvidersMsg)
+    AGENTTY_FWD_UPDATE(ModelsMsg)
+    AGENTTY_FWD_UPDATE(ThreadListMsg)
+    AGENTTY_FWD_UPDATE(PaletteMsg)
+    AGENTTY_FWD_UPDATE(MentionMsg)
+    AGENTTY_FWD_UPDATE(SymbolMsg)
+    AGENTTY_FWD_UPDATE(CodeBlockMsg)
+    AGENTTY_FWD_UPDATE(CheckpointMsg)
+    AGENTTY_FWD_UPDATE(RagMsg)
+    AGENTTY_FWD_UPDATE(StatsMsg)
+    AGENTTY_FWD_UPDATE(SettingsListMsg)
+    AGENTTY_FWD_UPDATE(ForkMsg)
+    AGENTTY_FWD_UPDATE(TodoMsg)
+    AGENTTY_FWD_UPDATE(LoginMsg)
+    AGENTTY_FWD_UPDATE(DiffReviewMsg)
+    AGENTTY_FWD_UPDATE(SmartModeMsg)
+    AGENTTY_FWD_UPDATE(WebSearchMsg)
+    AGENTTY_FWD_UPDATE(PluginEditMsg)
+    AGENTTY_FWD_UPDATE(AppearanceMsg)
+    AGENTTY_FWD_UPDATE(SandboxMsg)
+    AGENTTY_FWD_UPDATE(MetaMsg)
+
+#undef AGENTTY_FWD_UPDATE
 
     static maya::Element view(const Model& m) {
-        return ::agentty::ui::view(m);
+        const auto t0 = std::chrono::steady_clock::now();
+        auto e = ::agentty::ui::view(m);
+        ::agentty::app::note_slow("view", t0);
+        return e;
     }
 
-    static auto subscribe(const Model& m) -> maya::Sub<Msg> {
-        return ::agentty::app::subscribe(m);
+    static auto subscribe(const Model& m) -> Sub {
+        const auto t0 = std::chrono::steady_clock::now();
+        auto s = ::agentty::app::subscribe(m);
+        ::agentty::app::note_slow("subscribe", t0);
+        return s;
     }
 
-    // Optional Program hook (see maya/app/app.hpp — detail::HasVisualHash).
+    // Optional Program hook (jaal core/program.hpp — HasSubsKey). jaal
+    // re-runs subscribe() only when this value changes; without it the
+    // subscription tree is rebuilt and re-diffed after EVERY message.
+    // The value and the rule it has to obey live with subscribe() itself,
+    // in app/subscribe.hpp — they only stay correct if they change together.
+    static auto subs_key(const Model& m) noexcept {
+        return ::agentty::app::subs_key(m);
+    }
+
+    // Optional Program hook (see maya/device.hpp — detail::HasVisualHash).
     // The runtime calls this just before view(); when the hash is
     // unchanged from the previous render, view() + render() are skipped
     // entirely. Captures the axes that affect what the user can see;
@@ -97,28 +196,68 @@ struct AgenttyApp {
             mix(m.d.current.messages[i].compute_render_key());
         }
         mix(static_cast<std::uint64_t>(m.d.profile));
+        // Reasoning effort is rendered in the model badge (status bar), so a
+        // tier change (←/→ in the picker) must move the hash or the gate would
+        // skip the repaint. Also affects the picker's reasoning line.
+        mix(static_cast<std::uint64_t>(m.d.effort));
         mix_str(m.d.model_id.value);
         mix(m.d.pending_permission ? 1ULL : 0ULL);
-        // Pending change set — feeds the changes strip AND the diff-review
-        // pane. Per-hunk decision flips (AcceptHunk/RejectHunk) mutate ONLY
-        // a Hunk::Status deep inside this vector; without mixing it the
-        // render gate eats the repaint and "y" appears dead until the next
-        // caret blink. Bounded: one entry per touched file, a handful of
-        // hunks each.
-        mix(m.d.pending_changes.size());
-        for (const auto& fc : m.d.pending_changes) {
-            mix_str(fc.path);
-            mix(static_cast<std::uint64_t>(fc.added));
-            mix(static_cast<std::uint64_t>(fc.removed));
-            mix(fc.hunks.size());
-            for (const auto& hk : fc.hunks)
-                mix(static_cast<std::uint64_t>(hk.status));
-        }
-        mix(m.d.review_enabled ? 1ULL : 0ULL);
+
+        // ── Appearance.
+        //
+        // EVERY appearance pref, because every one of them changes pixels
+        // and this gate skips view() entirely when the hash doesn't move.
+        // Omitting them is the reason picking a theme appeared to do
+        // nothing: the reducer updated the model and persisted the choice,
+        // the resolver picked the right Theme — and then the frame was
+        // never rebuilt, so the screen kept the old palette until some
+        // unrelated event (a keystroke, a tick) happened to move the hash.
+        //
+        // "Changes apply immediately" is the promise this panel makes in
+        // its own footer; this is the line that keeps it.
+        //
+        // FULLY hashed, not sampled. mix_str() looks at length + first +
+        // last + middle byte, which is right for a 50 KB tool output and
+        // wrong for a scheme name: 76 of the 615 built-in names collide
+        // with another under that sample, and because the sample keys on
+        // the ENDS, the collisions land between alphabetical neighbours --
+        // which is exactly what arrowing through the browser visits.
+        //
+        //   Acid Lime            -> Adventure
+        //   Black Metal (Marduk) -> Black Metal (Mayhem)
+        //   Nachtschicht         -> Nebula Drift
+        //   Rose Pine Dawn       -> Rose Pine Moon
+        //
+        // Arrow onto one of those and the model changed, the theme was
+        // published, and the gate still said "nothing visual moved" -- so
+        // no repaint. Press Enter (which moves `picking`) and it appears.
+        // That is the "doesn't register until you hit it again" report.
+        //
+        // A scheme name is ~15 bytes and this runs once per frame, so
+        // there is nothing to save by sampling it.
+        for (unsigned char c : m.d.ui().theme) mix(c);
+        mix(m.d.ui().theme.size());
+        mix(static_cast<std::uint64_t>(m.d.ui().tier));
+        mix(static_cast<std::uint64_t>(m.d.ui().polarity));
+        mix(static_cast<std::uint64_t>(m.d.ui().density));
+        mix(static_cast<std::uint64_t>(m.d.ui().motion));
+        mix(static_cast<std::uint64_t>(m.d.ui().tool_output));
+        mix(static_cast<std::uint64_t>(m.d.ui().thinking));
+        mix(static_cast<std::uint64_t>(m.d.ui().timestamps));
+        mix(static_cast<std::uint64_t>(m.d.ui().prose_width));
+        mix(m.d.ui().syntax ? 1ULL : 0ULL);
+        mix(m.d.ui().compact_turns ? 1ULL : 0ULL);
 
         // ── Session / phase.
         mix(static_cast<std::uint64_t>(m.s.phase.index()));
         mix_str(m.s.status);
+        // Compaction summary streams into an off-transcript buffer; the
+        // activity tape narrates its bytes live (conversation.cpp →
+        // Config::stream). Size is the right term: every delta grows it,
+        // and the tape's visible window is a pure function of the bytes.
+        // Without this the tape freezes between unrelated repaints — the
+        // same "changed but not hashed" class the walk work closed.
+        mix(m.s.compaction_buffer.size());
         // Status expiry: bucket at 100 ms so the gauge’s rolling
         // counter doesn't force a render every microsecond.
         if (m.s.status_until.time_since_epoch().count() != 0) {
@@ -130,7 +269,14 @@ struct AgenttyApp {
         // Spinner frame bucketed at 10 (its cycle length). Same bucket
         // size the turn-level AgentTimeline cache uses, so a hash
         // advance here corresponds to a new visual.
-        if (m.s.active()) {
+        //
+        // The condition MUST match the advance gate in update/meta.cpp's
+        // Tick arm: a frame that advances but isn't hashed animates
+        // invisibly (no repaint), and one hashed but not advanced burns
+        // renders for an unchanged glyph. Both cases are live: streaming
+        // turns AND the fused picker waiting on provider catalogs.
+        if (m.s.active() || m.s.models_loading
+            || m.loading_spinner_visible()) {
             mix(static_cast<std::uint64_t>(m.s.spinner.frame_index() % 10));
         }
 
@@ -147,44 +293,65 @@ struct AgenttyApp {
         // cursor/query must feed the hash. These pickers are
         // selection-driven — pressing ↑/↓ only mutates an index (or a
         // query string) inside the variant; nothing else in the model
-        // moves. If that index isn't hashed, ModelPickerMove produces a
+        // moves. If that index isn't hashed, ModelsMove produces a
         // model the gate considers visually identical, skip_render fires,
         // and the cursor doesn't repaint until some OTHER hashed axis
         // (caret-blink parity, status text) happens to flip ~265 ms later.
         // Symptom: "press 4-5 times, registers once."
         //
-        // variant::index() captures Closed-vs-Open (and login's six
+        // variant::index() captures Closed-vs-Open (and login's
         // sub-states); the OpenAt index / palette query+index capture the
         // cursor movement within an open picker.
-        mix(static_cast<std::uint64_t>(m.ui.model_picker.index()));
-        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.model_picker)));
-        mix(static_cast<std::uint64_t>(m.ui.provider_picker.index()));
-        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.provider_picker)));
-        mix(static_cast<std::uint64_t>(m.ui.thread_list.index()));
-        mix(static_cast<std::uint64_t>(ui::pick::index_or(m.ui.thread_list)));
-        mix(static_cast<std::uint64_t>(m.ui.diff_review.index()));
-        if (auto* c = ui::pick::opened(m.ui.diff_review)) {
-            mix(static_cast<std::uint64_t>(c->file_index));
-            mix(static_cast<std::uint64_t>(c->hunk_index));
-            mix(static_cast<std::uint64_t>(c->body_scroll));
+        // The exclusive overlay slot: its variant index captures WHICH
+        // overlay is open (None-vs-any and picker-vs-picker); the per-
+        // alternative blocks below add cursor/query movement INSIDE the
+        // open overlay.
+        mix(static_cast<std::uint64_t>(m.ui.panel.raw().index()));
+        visual::mix_any(mix, m.ui.panel.raw());
+
+        // Panel-adjacent state OUTSIDE the slot value that the panel views
+        // read — walked with the same machinery (their types carry
+        // visual_parts where a member is derived cache or a clock):
+        //   • fused catalogs + row cache — ONLY while the models panel is
+        //     open (they are its async data; the catalogs persist after
+        //     close as a warm cache, and walking 8×60 models per idle tick
+        //     for a closed panel is pure waste — measured ~5µs vs ~540ns
+        //     for the whole slot).
+        if (m.ui.panel.is<pn::Models>()) {
+            visual::mix_any(mix, m.d.provider_catalogs);
+            visual::mix_any(mix, m.d.fused_rows);
         }
-        mix(static_cast<std::uint64_t>(m.ui.command_palette.index()));
-        if (auto* o = opened(m.ui.command_palette)) {
-            mix_str(o->query);
-            mix(static_cast<std::uint64_t>(o->index));
+        //   • the todo modal: open/closed AND the items — the agent
+        //     rewrites items mid-stream while the modal is open, which was
+        //     hash-invisible (the exact forgotten-facet class, found by
+        //     this migration).
+        visual::mix_any(mix, m.ui.todo);
+        //   • the plugins snapshot the settings list projects
+        mix(m.ui.plugins_loading ? 1ULL : 0ULL);
+        visual::mix_any(mix, m.ui.plugins);
+        //   • body-scroll ScrollStates: walked via their parts list (x/y
+        //     visible, render plumbing exempt). Gated to the panel that
+        //     reads each, like the catalogs above.
+        if (m.ui.panel.is<pn::ToolOutput>()) {
+            visual::mix_any(mix, m.ui.tool_viewer_scroll);
+            mix(m.ui.tool_viewer_tail ? 1ULL : 0ULL);   // loose Model bool
         }
-        mix(static_cast<std::uint64_t>(m.ui.mention_palette.index()));
-        if (auto* o = mention_opened(m.ui.mention_palette)) {
-            mix_str(o->query);
-            mix(static_cast<std::uint64_t>(o->index));
-        }
-        mix(static_cast<std::uint64_t>(m.ui.symbol_palette.index()));
-        if (auto* o = symbol_palette_opened(m.ui.symbol_palette)) {
-            mix_str(o->query);
-            mix(static_cast<std::uint64_t>(o->index));
-        }
-        mix(static_cast<std::uint64_t>(m.ui.todo.open.index()));
-        mix(static_cast<std::uint64_t>(m.ui.login.index()));
+        if (m.ui.panel.is<pn::CodeBlockResult>())
+            visual::mix_any(mix, m.ui.code_blocks_scroll);
+        // NOTE: the stats viewer is deliberately NOT in this list. Its
+        // scroll offset lives ON pn::Stats, so the slot walk above already
+        // covers it and parts_cover_all proves the coverage at the type.
+        //
+        // It used to be here — or rather it used to be MISSING from here,
+        // which is the same bug this whole block exists to work around:
+        // state the view reads, reachable by the gate only through a line
+        // someone has to remember to write. Two entries above are still in
+        // that shape. Moving a scroll into the panel that owns it is the
+        // fix that generalises; see panel/stats.hpp for the argument.
+
+        // Login: its own variant outside the slot; same walk, same
+        // guarantees (secret buffers digest length-only via parts lists).
+        visual::mix_any(mix, m.ui.login);
 
         // Time-driven animation buckets. Each bucket flip forces a
         // render via hash advance. The bucket size is the FLOOR on
@@ -238,21 +405,74 @@ struct AgenttyApp {
         //   (c) nothing animating at all (no caret — e.g. a modal owns
         //       focus): no time bucket, so a settled screen does ZERO
         //       idle renders until an event arrives.
-        const auto now_ms =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
+        // Read the ANIMATION clock, not steady_clock directly.
+        //
+        // Every time-driven phase in this app reads maya::anim_now_ms() — it
+        // is documented as the only clock they may use — because it carries
+        // the test seams: advance_anim_clock_ms() to move time on purpose,
+        // and a FREEZE that pins it so a synchronous render sequence is a
+        // pure function of the model.
+        //
+        // Reading steady_clock here bypassed both. The buckets below then
+        // sampled real wall time, so two visual_hash() calls on an
+        // unchanged model could straddle a bucket boundary and disagree —
+        // an invariant test asserting "an idle picker does NOT animate"
+        // fails whenever the scheduler puts a bucket edge between its two
+        // calls. That is why those cases only flaked under `ctest -j12`:
+        // load widens the gap between the calls, it does not change the
+        // logic. Same class of bug as the reveal-timing one already fixed
+        // in turn.cpp; this was the last direct clock read in the render
+        // path.
+        const auto now_ms = maya::anim_now_ms();
+
+        // The WELCOME screen paces ITSELF, so we add no time term for it.
+        //
+        // welcome_screen.hpp is RAF-driven: it runs its cascade at 60 fps,
+        // then calls request_animation_frame_after(110) to step the bob at
+        // ~9 fps. maya's run loop already guarantees those frames render —
+        // its RAF override bypasses this hash precisely so a widget can
+        // never be stranded by a host's bucket coverage gap.
+        //
+        // So a bucket here is not just redundant, it is harmful: it is a
+        // SECOND clock for one visual. This used to bucket at the streaming
+        // tick (80 ms over ssh) against the widget's 110 ms — 42 hash
+        // values per 30 requested frames, with the extra renders landing
+        // part-way through an animation step. That is what made an idle
+        // welcome screen flicker instead of bobbing.
+        //
+        // maya::animation_pending() reports whether a widget already asked
+        // for the next frame. When it has, the loop is scheduled on ITS
+        // cadence and will render regardless of what we return — so we stay
+        // out of the way. Asking maya beats hard-coding its interval: the
+        // widget can change its pacing and this stays correct.
+        const bool widget_paced = maya::animation_pending();
+
         const bool fine_anim_live =
             m.s.active()                              // spinner / streaming caret
-            || m.d.current.messages.empty()           // welcome wordmark bob
             || !m.ui.composer.queued.empty();         // queued-chip pulse
-        // The composer caret blinks (maya composer.hpp, U+2588 toggled
-        // via style every 265 ms) whenever the composer is idle. maya's
-        // own gate is simply `!active`, so match it exactly — if a modal
-        // happens to cover the composer the extra ~4 renders/sec are
-        // harmless, whereas UNDER-animating would reintroduce the
-        // freeze-until-keypress bug. Bias toward animating.
+        // The composer caret: ask, don't re-derive.
+        //
+        // This used to be `caret_blinking = !m.s.active()`, with a comment
+        // claiming "maya's own gate is simply !active, so match it
+        // exactly". That was wrong, and it is the last instance of the bug
+        // that ran through this whole file: a host restating a condition
+        // that belongs to a widget.
+        //
+        // maya's real gate is `!active && !hardware_caret` — with the
+        // HARDWARE caret the terminal owns the blink, so maya paints
+        // nothing, schedules nothing, and there is no visible step for the
+        // hash to track. Mixing a 265 ms parity anyway meant the hash
+        // flipped ~4x/sec on a screen where nothing moved. The run loop
+        // dutifully repainted each time, redrawing the composer under a
+        // caret the terminal was blinking on its own schedule — the two
+        // clocks beat, and the caret visibly flickered.
+        //
+        // The composer config already carries the resolved answer (it is
+        // what we hand maya), so read it instead of guessing: blink only
+        // when maya will actually PAINT a blinking caret.
         constexpr std::int64_t kBlinkHalfMs = 265;
-        const bool caret_blinking = !m.s.active();
+        const bool caret_blinking =
+            !m.s.active() && !ui::composer_uses_hardware_caret(m);
         // Fine-animation bucket period. PHASE-LOCKED to the Tick
         // subscription by construction: it is the SAME value
         // streaming_tick_period() hands subscribe.cpp for the
@@ -261,7 +481,7 @@ struct AgenttyApp {
         // ≥ 80 ms SSH). Sharing the one function eliminates the old
         // hand-maintained duplicate heuristic here — which silently
         // omitted the SSH floor and could beat against the real tick.
-        const std::int64_t kFineAnimMs = streaming_tick_period().count();
+        const std::int64_t kFineAnimMs = streaming_tick_period(m.env).count();
 
         // Streaming-text render bucket. While an assistant message is
         // actively streaming, the live edge runs maya's reveal_fx
@@ -277,13 +497,64 @@ struct AgenttyApp {
         // spinner-only case (tool running, no streaming_text) keeps the
         // calmer tick-period bucket so non-sync terminals don't tear the
         // chrome at 60 fps.
-        const bool revealing_text =
-            m.s.active()
-            && !m.d.current.messages.empty()
-            && m.d.current.messages.back().role == Role::Assistant
-            && (!m.d.current.messages.back().streaming_text.empty()
-                || !m.d.current.messages.back().pending_stream.empty());
-        const std::int64_t kRevealBucketMs = 16;   // == kAnimationFrameInterval
+        // Reveal-frame demand: ask the shared predicate, don't re-derive.
+        // This block used to restate the whole condition inline (active +
+        // tail role + streaming_text/pending_stream + the reasoning-channel
+        // term), and the reasoning term was BORN from that restatement
+        // drifting: it was added here after "Thinking gets stuck" shipped,
+        // while subscribe.cpp's copy still lacked it. One definition —
+        // reveal_needs_frames in subscribe.hpp — now serves both.
+        const bool revealing_text = reveal_needs_frames(m);
+        // Reveal render cadence.
+        //
+        // On a SYNC-output terminal (DEC mode 2026: kitty / ghostty /
+        // wezterm / foot / VTE 0.62+ / Windows Terminal / Konsole 22.04+)
+        // each multi-row frame swaps atomically, so 16 ms / 60 fps gives a
+        // smooth tear-free typewriter — keep it.
+        //
+        // On a NON-SYNC terminal (Apple Terminal, plain xterm, tmux w/o
+        // sync passthrough, and — the reported repro — the default Termux /
+        // Android terminal) every multi-row repaint paints progressively,
+        // so the live edge ALREADY tears on each render regardless of rate:
+        // 60 fps buys ZERO extra smoothness there, it only floods a slow
+        // emulator with ~6x the ANSI diff bytes it can composite. On a
+        // constrained device (slow ARM + a heavyweight terminal app) that
+        // flood is exactly the "streaming gets stuck" symptom — the display
+        // falls seconds behind the model because the paint/wire pipe can't
+        // drain 60 fps of frames. The Tick subscription already wakes at
+        // only 100 ms on these terminals, and the RAF override forces a
+        // render on the intervening 16 ms wakes for no visible gain.
+        //
+        // So match the reveal bucket to that paint period: the hash advances
+        // ONCE per tick: exactly one render per wake, the
+        // freshly arrived bytes still show on that very next tick, and the
+        // redundant torn repaints stop. The reveal SPEED is unchanged (the
+        // pacer is bytes/second, not bytes/frame), so prose fills at the same
+        // wall-clock rate, just in fewer frames. Sharing the period keeps
+        // this phase-locked to the Tick by construction — the same guarantee
+        // kFineAnimMs relies on.
+        //
+        // It is the TERMINAL's period, not streaming_tick_period(), and the
+        // difference shows up over ssh. That function answers two questions
+        // at once: "can this terminal composite a frame atomically" (33 vs
+        // 100 ms) AND "is there a slow wire to spare" (a >=80 ms floor when
+        // remote). The first is about painting and belongs here; the second
+        // is about BANDWIDTH — and raising the reveal bucket for it makes
+        // the typewriter chunky for a reason that has nothing to do with
+        // what the eye can see. At 100 ms with the 120 cps floor that is 12
+        // characters appearing at once, 10x a second: the reported "slow and
+        // bursty" reasoning. The byte-delivery cadence the old comment
+        // leaned on ("the tick period is the byte-delivery cadence anyway")
+        // is true locally and false over ssh, where bytes keep arriving
+        // continuously while the tick is held back for the link.
+        //
+        // The Tick subscription still throttles for the wire; only the
+        // reveal bucket is decoupled, so a remote session renders the
+        // typewriter smoothly without changing how often it wakes.
+        const std::int64_t kRevealBucketMs =
+            maya::ansi::env_supports_synchronized_output()
+                ? 16    // sync: 60 fps, atomic swap
+                : 100;  // non-sync: progressive paint, 1 render / 100 ms
 
         // POST-STREAM SETTLE bucket. After StreamFinished the phase goes
         // Idle and streaming_text drains into `text`, so BOTH m.s.active()
@@ -295,7 +566,7 @@ struct AgenttyApp {
         // maya's subsequent live-tail→frozen shrink reconciliation — advance
         // ONLY inside frames that actually render, and the run loop's
         // visual_hash gate skips any frame whose hash didn't move
-        // (maya/app/app.hpp). Without a fast time term here the hash falls
+        // (maya/device.hpp). Without a fast time term here the hash falls
         // to the caret-blink PARITY bucket (one flip / 265 ms): the freeze
         // Tick and the post-freeze reconciliation frames get gated away,
         // the collapse never finishes, and a duplicate turn is stranded in
@@ -309,7 +580,7 @@ struct AgenttyApp {
         // where maya reconciles the live-tail→frozen collapse (its
         // detect→commit→demote→repaint shrink chain). request_animation_
         // frame() alone CANNOT drive them: the run loop's visual_hash gate
-        // skips any frame whose hash didn't move (maya/app/app.hpp), so
+        // skips any frame whose hash didn't move (maya/device.hpp), so
         // without advancing the hash here those frames are gated away and
         // the collapse never finishes reconciling — leaving a stranded
         // duplicate turn in scrollback. Advancing the hash while the
@@ -335,12 +606,20 @@ struct AgenttyApp {
         // sources armed guarantees each of those frames actually renders,
         // so the reveal glides continuously to the edge over SSH / any
         // link where the wire goes quiet mid-reveal.
-        const bool draining_reveal =
-            m.ui.pending_settle_freeze || m.ui.settle_cooldown_ticks > 0
-            || !detail::live_tail_reveal_settled(m);
+        // Keying the fast bucket on the exact predicate that keeps the
+        // frame sources armed guarantees each of those frames actually
+        // renders — reveal_draining (subscribe.hpp) is that predicate, the
+        // SAME one the Tick subscription arms on via animation_demand, so
+        // the two gates cannot drift: a frame source the subscription
+        // keeps alive is a frame this hash lets through.
+        const bool draining_reveal = reveal_draining(m);
 
         if (revealing_text || draining_reveal) {
             mix(static_cast<std::uint64_t>(now_ms / kRevealBucketMs));
+        } else if (widget_paced) {
+            // A widget owns the next frame. maya will render it on that
+            // widget's schedule regardless of this hash, so contribute NO
+            // time term — a second clock here is what produces the beat.
         } else if (fine_anim_live) {
             mix(static_cast<std::uint64_t>(now_ms / kFineAnimMs));
         } else if (caret_blinking) {
@@ -354,7 +633,7 @@ struct AgenttyApp {
         return k;
     }
 
-    // Optional Program hook (see maya/app/app.hpp — detail::HasNeedsWarmup).
+    // Optional Program hook (see maya/device.hpp — detail::HasNeedsWarmup).
     // Returns true when the next view() result contains a freshly
     // rehydrated frozen scrollback whose cells haven't been captured
     // into maya's component cache yet. The runtime fires a one-shot

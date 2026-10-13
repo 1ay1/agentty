@@ -7,10 +7,14 @@
 #include <utility>
 #include <vector>
 
+#include <maya/runtime.hpp>
+
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
+#include <maya/core/render_context.hpp>   // available_height (tail-spinner gate)
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"
+#include "agentty/domain/ui_live.hpp"   // tool_output: how much body to show
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 
 namespace agentty::ui {
@@ -82,7 +86,23 @@ private:
     std::list<std::string>                 lru_;
 };
 
-thread_local BodyConfigCache g_body_cache;
+// The three caches below are LOOP-ONLY, and now say so in their types.
+//
+// They used to be `thread_local`, which documents the intent and enforces
+// nothing: a worker that ever called into this file would silently get its
+// own empty cache and render from it. That is a wrong answer, which is worse
+// than a crash — a missing panel or a stale body, with no trace of why.
+//
+// loop_bound<T> makes the rule checkable. Reaching the value needs proof of
+// being on the kernel's loop thread, and the only way to get that proof is
+// to actually be there; off the loop the access aborts with a message naming
+// the rule instead of quietly handing back a second copy. view() runs on the
+// loop (the kernel arms its identity for its whole lifetime, which covers
+// the between-steps window where a host paints), so the on-loop path is
+// unchanged and still lock-free.
+//
+// See jaal/kernel/loop.hpp and jaal/docs/concurrency.md §1.2 P1.
+maya::loop_bound<BodyConfigCache> g_body_cache;
 
 // ── Settled-panel ELEMENT cache ───────────────────────────────────────
 //
@@ -111,14 +131,24 @@ public:
     // 160→320 knee in the o1_probe scaling table.
     static constexpr std::size_t kCap = 512;
 
-    const maya::Element* get(const std::string& key) {
+    // Returns the cached shared Element handle, or nullptr on miss.
+    // Stored as shared_ptr<const Element> so a cache hit is a refcount
+    // bump handed to maya's shared_ptr Element ctor (a ComponentElement
+    // with a control-block-keyed hash_id) instead of a DEEP COPY of the
+    // whole panel subtree. The panel is a BoxElement whose children are
+    // vector<Element> (per-event rows, each with its own body rows), so
+    // copying it by value clones the entire tree every frame for every
+    // settled sub-turn in a long in-flight run — O(Σ panel nodes)/frame.
+    // Sharing collapses that to O(1) per settled panel: maya blits the
+    // wrapped subtree's cells from its cross-frame component cache.
+    const std::shared_ptr<const maya::Element>* get(const std::string& key) {
         auto it = map_.find(key);
         if (it == map_.end()) return nullptr;
         lru_.splice(lru_.begin(), lru_, it->second.lru_it);
         return &it->second.el;
     }
 
-    void put(const std::string& key, maya::Element el) {
+    void put(const std::string& key, std::shared_ptr<const maya::Element> el) {
         auto it = map_.find(key);
         if (it != map_.end()) {
             it->second.el = std::move(el);
@@ -135,14 +165,109 @@ public:
 
 private:
     struct Entry {
-        maya::Element                    el;
-        std::list<std::string>::iterator lru_it;
+        std::shared_ptr<const maya::Element> el;
+        std::list<std::string>::iterator     lru_it;
     };
     std::unordered_map<std::string, Entry> map_;
     std::list<std::string>                 lru_;
 };
 
-thread_local PanelElementCache g_panel_cache;
+// Loop-only, same as g_body_cache above — see the note there.
+maya::loop_bound<PanelElementCache> g_panel_cache;
+
+// ── Per-message panel render memo (fast primary key) ──
+//
+// g_panel_cache above is content-addressed: hitting it still costs an
+// O(tools) key-string build (std::to_string per tool) before the map
+// lookup. In a long in-flight autopilot run every SETTLED sub-turn is
+// re-emitted every frame (the whole run stays in the live tail until
+// settle), so that key-build runs O(run-length) times per frame — the
+// residual per-frame cost that still crept up with turn depth.
+//
+// This memo removes it. It is keyed on the sub-turn's stable MessageId
+// and stores (render_key, handle): a single-uint64 compare decides the
+// hit, no string built. render_key is Message::compute_render_key(),
+// which changes iff the panel's rendered output would (it folds every
+// tool's status/output/render key). A still-running tool advances the
+// key every frame → natural miss → rebuild (spinner animates); once
+// the sub-turn settles, the key freezes and every later frame is a
+// pure uint64-compare hit returning the shared handle.
+//
+// Why this lives HERE and not in ViewCache: entries are lightweight
+// Element HANDLES (the cells live once in maya's component cache,
+// keyed by the panel's per-event hash_ids), NOT the heavy markdown
+// trees ViewCache holds. So this map can be sized generously to cover
+// a very deep run without the >1 GiB retention risk that pins the
+// ViewCache cap at 32 — decoupling "how deep a run stays flat" from
+// "how much markdown RAM we retain".
+class PanelRenderMemo {
+public:
+    // Sized to cover a very deep single autopilot turn (each entry is
+    // ~a control block + small ComponentElement). Comfortably above
+    // any realistic sub-turn count; a longer run degrades gracefully
+    // to the g_panel_cache path (which is itself still an O(1) hit,
+    // just with the key-build tax back).
+    static constexpr std::size_t kCap = 4096;
+
+    // Returns the stored handle iff a memo entry exists for `mid` AND
+    // its render_key matches — else nullptr (caller rebuilds).
+    // Heterogeneous lookup (string_view key against a std::string map)
+    // so the hot HIT path allocates nothing — no temporary std::string
+    // per sub-turn per frame.
+    const std::shared_ptr<const maya::Element>*
+    get(std::string_view mid, std::uint64_t render_key) {
+        auto it = map_.find(mid);
+        if (it == map_.end() || it->second.render_key != render_key)
+            return nullptr;
+        lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+        return &it->second.el;
+    }
+
+    void put(std::string_view mid, std::uint64_t render_key,
+             std::shared_ptr<const maya::Element> el) {
+        if (auto it = map_.find(mid); it != map_.end()) {
+            it->second.render_key = render_key;
+            it->second.el         = std::move(el);
+            lru_.splice(lru_.begin(), lru_, it->second.lru_it);
+            return;
+        }
+        // Miss is rare (once per sub-turn settle), so the one string
+        // materialization here is off the hot path.
+        lru_.emplace_front(mid);
+        map_.emplace(std::string{mid},
+                     Entry{render_key, std::move(el), lru_.begin()});
+        while (map_.size() > kCap) {
+            map_.erase(lru_.back());
+            lru_.pop_back();
+        }
+    }
+
+private:
+    struct Entry {
+        std::uint64_t                        render_key;
+        std::shared_ptr<const maya::Element> el;
+        std::list<std::string>::iterator     lru_it;
+    };
+    // Transparent hash/eq so find(string_view) doesn't build a
+    // temporary std::string key.
+    struct SvHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view s) const noexcept {
+            return std::hash<std::string_view>{}(s);
+        }
+    };
+    struct SvEq {
+        using is_transparent = void;
+        bool operator()(std::string_view a, std::string_view b) const noexcept {
+            return a == b;
+        }
+    };
+    std::unordered_map<std::string, Entry, SvHash, SvEq> map_;
+    std::list<std::string>                               lru_;
+};
+
+// Loop-only, same as g_body_cache above — see the note there.
+maya::loop_bound<PanelRenderMemo> g_panel_render_memo;
 
 } // namespace
 
@@ -276,8 +401,40 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
         // into a cheap copy per settled card. Emitted bytes are identical
         // to a fresh build, so the freeze handoff stays a pure maya hit.
         maya::ToolBodyPreview::Config body;
+        // For a terminal tool we keep the body behind a shared_ptr (the
+        // same immutable object the body-config cache stores) and hand it
+        // to maya via body_shared — no per-frame deep copy of the body
+        // text here OR inside append_event's terminal closure. For a
+        // non-terminal tool the body is still built fresh and moved into
+        // `.body` by value (it mutates every frame, so there's nothing to
+        // share).
+        std::shared_ptr<const maya::ToolBodyPreview::Config> body_sp;
         std::string body_key;
         const bool cacheable = tc.is_terminal();
+        // How much of a tool's output to show. The pref is part of the
+        // cache KEY, not applied after the lookup — a cached body built
+        // under "preview" must not be handed back once the user asks for
+        // "full", which is exactly the bug an after-the-fact tweak would
+        // introduce (and only on the second render, which is worse).
+        const auto tool_out = agentty::ui_prefs::current().tool_output;
+        const auto apply_tool_output =
+            [tool_out](maya::ToolBodyPreview::Config c) {
+                switch (tool_out) {
+                    case agentty::ui_prefs::ToolOutput::Collapsed:
+                        // Header only. The card still says WHAT ran and
+                        // whether it failed; the body is what goes.
+                        c.code_head = c.code_tail = 0;
+                        c.bash_tail = c.read_head = 0;
+                        c.show_all  = false;
+                        break;
+                    case agentty::ui_prefs::ToolOutput::Preview:
+                        break;   // the tuned defaults ARE the preview
+                    case agentty::ui_prefs::ToolOutput::Full:
+                        c.show_all = true;
+                        break;
+                }
+                return c;
+            };
         if (cacheable) {
             body_key.reserve(tc.id.value.size() + grep_sig.size() + 48);
             body_key += "t:";
@@ -287,18 +444,25 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
             body_key.push_back('|');
             body_key += std::to_string(tc.output().size());
             body_key.push_back('|');
+            body_key += std::to_string(static_cast<int>(tool_out));
+            body_key.push_back('|');
             body_key += grep_sig;
-            if (auto hit = g_body_cache.get(body_key)) {
-                body = *hit;  // copy the cached (immutable) build
+            if (auto hit = g_body_cache.with(
+                    [&](BodyConfigCache& c) { return c.get(body_key); })) {
+                body_sp = hit;  // SHARE the cached (immutable) build
             } else {
-                body = tool_body_preview_config(tc, &grep_hits);
-                g_body_cache.put(
-                    body_key,
-                    std::make_shared<const maya::ToolBodyPreview::Config>(body));
+                body_sp = std::make_shared<const maya::ToolBodyPreview::Config>(
+                    apply_tool_output(tool_body_preview_config(tc, &grep_hits)));
+                g_body_cache.with(
+                    [&](BodyConfigCache& c) { c.put(body_key, body_sp); });
             }
         } else {
-            body = tool_body_preview_config(tc, &grep_hits);
+            body = apply_tool_output(tool_body_preview_config(tc, &grep_hits));
         }
+
+        // Event-hash / height inputs read from whichever body we have.
+        const maya::ToolBodyPreview::Config& body_ref =
+            body_sp ? *body_sp : body;
 
         // Key: tool-call id + status + output size + body-height inputs
         // that aren't implied by output().size() (highlight_lines).
@@ -312,8 +476,8 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
               .add(std::string_view{tc.id.value})
               .add(static_cast<std::uint64_t>(tc.status.index()))
               .add(static_cast<std::uint64_t>(tc.output().size()))
-              .add(static_cast<std::uint64_t>(body.highlight_lines.size()));
-            for (int hl : body.highlight_lines)
+              .add(static_cast<std::uint64_t>(body_ref.highlight_lines.size()));
+            for (int hl : body_ref.highlight_lines)
                 kb.add(static_cast<std::uint64_t>(hl));
             event_hash_id = kb.build();
         }
@@ -321,16 +485,28 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
         cfg.events.push_back({
             .name            = tool_display_name(tc.name.value),
             .detail          = std::move(detail),
-            // Live elapsed for running/pending too — keeps the row's
-            // right-edge duration cell present from the moment the
-            // event renders, so the row doesn't horizontally snap
-            // when the tool flips to terminal. tool_elapsed() uses
-            // steady_clock::now() when finished_at is unset, which
-            // is exactly the live counter we want.
-            .elapsed_seconds = tool_elapsed(tc),
+            // Elapsed on the event's HEADER row. For a TERMINAL tool this is
+            // final and immutable (finished_at is set) — safe on a committed
+            // row. For a NON-TERMINAL tool tool_elapsed() reads
+            // steady_clock::now(), so it TICKS every wall-second — and the
+            // running tool's header row sits ABOVE its growing progress body,
+            // so once that row crosses into native scrollback the ticking
+            // seconds rewrite a committed row → maya's gate HardResets
+            // (scrollback_oracle t*-r*-run* recoveries). Same seam-immutability
+            // rule as the title/border/spinner just below: a live panel's
+            // header rows must be byte-stable. Emit 0 (no duration cell) while
+            // non-terminal; the live duration lives in the FOOTER's
+            // total_elapsed, which is a bottom append below the seam. The row
+            // doesn't horizontally snap on the terminal flip because the
+            // footer already carried the running total.
+            .elapsed_seconds = tc.is_terminal() ? tool_elapsed(tc) : 0.0f,
             .category_color  = tool_category_color(tc.name.value),
             .status          = tool_event_status(tc),
+            // Terminal tools: body lives in body_shared (maya's terminal
+            // closure captures it by ref-bump, no copy). Non-terminal:
+            // move the fresh build into `.body` (it re-renders anyway).
             .body            = std::move(body),
+            .body_shared     = std::move(body_sp),
             .hash_id         = event_hash_id,
         });
     }
@@ -467,7 +643,33 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
     // must be byte-stable — but a frozen braille frame (`⠋` forever) reads
     // as "stuck". A solid ● is equally immutable and reads as intentional.
     // The moving spinner lives in the FOOTER glyph (seam-safe, see above).
-    if (!all_terminal_title) cfg.frame = -1;
+    //
+    // EXCEPTION — the TAIL-RUNNING case (the overwhelmingly common
+    // sequential flow): when the ONLY non-terminal event is the LAST one,
+    // its header row is bounded to within a few rows of the transcript
+    // bottom (its own live body is elision-capped, and only the footer +
+    // border render below it), so it cannot have crossed the viewport top
+    // — animating its glyph is exactly as seam-safe as the ●→✓ rewrite
+    // that already lands on that row at completion. Pass the real frame so
+    // the in-flight action visibly spins; every terminal event's ✓/✗ is
+    // frame-independent, so nothing else animates. Any OTHER shape (a
+    // non-terminal event with events after it — parallel batches) keeps
+    // the static ●: those headers can genuinely sit above the seam.
+    // Gated on a roomy viewport: on very short terminals (oracle tests
+    // run 60x18) the bounded distance can still exceed the viewport, so
+    // keep the conservative static glyph there.
+    if (!all_terminal_title) {
+        const bool tail_running =
+            !tool_calls.empty()
+            && !tool_calls.back().is_terminal()
+            && [&] {
+                   for (std::size_t i = 0; i + 1 < tool_calls.size(); ++i)
+                       if (!tool_calls[i].is_terminal()) return false;
+                   return true;
+               }();
+        if (!(tail_running && maya::available_height() >= 20))
+            cfg.frame = -1;
+    }
 
     // Panel-level cache key for an ALL-TERMINAL batch. Settled tool bytes
     // are immutable and no chrome animates (every elapsed is final, no
@@ -487,9 +689,14 @@ maya::AgentTimeline::Config agent_timeline_config(std::span<const ToolUse> tool_
             kb.add(std::string_view{"agentty.tool_panel"})
               .add(static_cast<std::uint64_t>(tool_calls.size()))
               .add(static_cast<std::uint64_t>(rail_color.kind()))
-              .add(static_cast<std::uint64_t>(rail_color.r()))
-              .add(static_cast<std::uint64_t>(rail_color.g()))
-              .add(static_cast<std::uint64_t>(rail_color.b()));
+              .add(static_cast<std::uint64_t>(rail_color.raw_r()))
+              .add(static_cast<std::uint64_t>(rail_color.raw_g()))
+              .add(static_cast<std::uint64_t>(rail_color.raw_b()))
+              // The tool-output pref changes the body's HEIGHT, so it has
+              // to key every layer that memoizes a built card — otherwise
+              // flipping it repaints nothing until the next status change.
+              .add(static_cast<std::uint64_t>(
+                  agentty::ui_prefs::current().tool_output));
             for (const auto& tc : tool_calls) {
                 kb.add(std::string_view{tc.id.value})
                   .add(static_cast<std::uint64_t>(tc.status.index()))
@@ -531,11 +738,11 @@ maya::Element agent_timeline_element(std::span<const ToolUse> tool_calls,
     key += "p|";
     key += std::to_string(static_cast<unsigned>(rail_color.kind()));
     key.push_back('.');
-    key += std::to_string(rail_color.r());
+    key += std::to_string(rail_color.raw_r());
     key.push_back('.');
-    key += std::to_string(rail_color.g());
+    key += std::to_string(rail_color.raw_g());
     key.push_back('.');
-    key += std::to_string(rail_color.b());
+    key += std::to_string(rail_color.raw_b());
     key.push_back('|');
     key += std::to_string(tool_calls.size());
     for (const auto& tc : tool_calls) {
@@ -548,14 +755,72 @@ maya::Element agent_timeline_element(std::span<const ToolUse> tool_calls,
         key.push_back(':');
         key += std::to_string(tc.compute_render_key());
     }
+    key.push_back('#');
+    key += std::to_string(
+        static_cast<int>(agentty::ui_prefs::current().tool_output));
 
-    if (const maya::Element* hit = g_panel_cache.get(key))
-        return *hit;   // copy the prebuilt, byte-stable panel Element
+    // The cache returns an OWNING handle, not a pointer into itself: an
+    // evicting LRU can drop the entry at the next put(), and a `const
+    // shared_ptr<...>*` into the map would dangle right there. Copying the
+    // shared_ptr out is one refcount bump and still no tree copy.
+    // loop_bound<T>::with refuses the pointer-returning shape outright.
+    if (auto hit = g_panel_cache.with([&](PanelElementCache& c) {
+            const std::shared_ptr<const maya::Element>* p = c.get(key);
+            return p ? *p : std::shared_ptr<const maya::Element>{};
+        }))
+        return maya::Element{hit};   // shared handle: refcount bump, no tree copy
 
-    maya::Element el = maya::AgentTimeline{
-        agent_timeline_config(tool_calls, spinner_frame, rail_color)}.build();
-    g_panel_cache.put(key, el);
-    return el;
+    auto el = std::make_shared<const maya::Element>(
+        maya::AgentTimeline{
+            agent_timeline_config(tool_calls, spinner_frame, rail_color)}.build());
+    g_panel_cache.with([&](PanelElementCache& c) { c.put(key, el); });
+    return maya::Element{el};
+}
+
+maya::Element agent_timeline_element_memoized(std::string_view msg_id,
+                                              std::uint64_t render_key,
+                                              std::span<const ToolUse> tool_calls,
+                                              int spinner_frame,
+                                              maya::Color rail_color) {
+    // Only SETTLED (all-terminal) batches are memoizable: a running /
+    // pending tool animates a spinner + live elapsed, so its render_key
+    // (and hence its output) changes every frame — the memo would just
+    // miss-and-store churn. Detect that up front and fall straight to
+    // the per-frame build, exactly as the base function does.
+    bool all_terminal = !tool_calls.empty();
+    for (const auto& tc : tool_calls) {
+        if (!tc.is_terminal()) { all_terminal = false; break; }
+    }
+    if (!all_terminal) {
+        return maya::AgentTimeline{
+            agent_timeline_config(tool_calls, spinner_frame, rail_color)}.build();
+    }
+
+    // Fast primary key: MessageId + render_key. A settled sub-turn's
+    // render_key is frozen, so this is a permanent hit after the first
+    // frame — one uint64 compare, NO content-key string built and (via
+    // heterogeneous lookup) NO temporary string allocated. That is the
+    // whole point: it removes the O(tools) std::to_string key-build
+    // that even a g_panel_cache hit pays, which is what still scaled
+    // with run depth (O(run-length) key-builds per frame).
+    // Owning handle out, for the same reason as g_panel_cache above.
+    if (auto hit = g_panel_render_memo.with([&](PanelRenderMemo& c) {
+            const std::shared_ptr<const maya::Element>* p = c.get(msg_id, render_key);
+            return p ? *p : std::shared_ptr<const maya::Element>{};
+        }))
+        return maya::Element{hit};   // shared handle: refcount bump
+
+    // Miss: build via the content-addressed path (which itself hits
+    // g_panel_cache across sub-turns with identical batch bytes, e.g.
+    // repeated identical edits), then record the resulting handle under
+    // the fast key so every later frame skips the key-build. Storing
+    // the SAME shared handle g_panel_cache returned keeps one stable
+    // control block — maya blits its cells cross-frame.
+    auto el = std::make_shared<const maya::Element>(
+        agent_timeline_element(tool_calls, spinner_frame, rail_color));
+    g_panel_render_memo.with(
+        [&](PanelRenderMemo& c) { c.put(msg_id, render_key, el); });
+    return maya::Element{el};
 }
 
 } // namespace agentty::ui

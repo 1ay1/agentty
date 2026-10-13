@@ -23,15 +23,31 @@
 //     std::future::get() with a timeout — no coroutine runtime, no event loop
 //     grafted onto the render/stream loop.
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
+#include "agentty/mcp/plugin_model.hpp"   // PluginModel value snapshot
 #include "agentty/tool/registry.hpp"   // ToolDef
 
 namespace agentty::mcp {
+
+// ── PluginModel: the single source of truth for plugin/tool state ─────────
+// A value snapshot (plugin_model()) any UI can hold without racing the live
+// pool. The value types now live in a standalone header so the TEA Model can
+// own a snapshot without an include cycle through tools::ToolDef.
+// See docs/design/plugin-model.md.
+
+// The current model as a value snapshot — safe to hold across the pool
+// swapping under a concurrent reload. Cheap: reads the live pool + config
+// once. The authoritative view the settings picker renders.
+[[nodiscard]] PluginModel plugin_model();
 
 // Opaque, reference-counted handle keeping all connected MCP servers alive
 // for the lifetime of the process. The ToolDef execute() closures returned by
@@ -73,6 +89,22 @@ using PoolHandle = std::shared_ptr<ConnectionPool>;
 // the registry decide whether to even attempt mcp_tools(). Pure I/O probe.
 [[nodiscard]] bool mcp_config_present();
 
+struct ServerLaunch {
+    enum class Transport : std::uint8_t { Stdio, Http, Sse };
+    std::string name;
+    Transport transport = Transport::Stdio;
+    std::string command;
+    std::vector<std::string> args;
+    std::vector<std::pair<std::string, std::string>> env;
+    std::string url;
+    std::vector<std::pair<std::string, std::string>> headers;
+};
+
+// Return trusted configured servers in a protocol-neutral shape suitable for
+// ACP session/new.mcpServers. Workspace-local configs obey the same explicit
+// AGENTTY_MCP_ALLOW_PROJECT gate as direct MCP consumption.
+[[nodiscard]] std::vector<ServerLaunch> configured_servers_for_delegation();
+
 // ── Dynamic tool surface (tools/list_changed) ────────────────────────────
 // MCP servers may emit `notifications/tools/list_changed` at any time. The
 // connection pool keeps a LIVE snapshot of the synthesized ToolDefs, rebuilt
@@ -85,6 +117,49 @@ using PoolHandle = std::shared_ptr<ConnectionPool>;
 // are O(1) and lock-guarded — safe to poll from the render/turn loop.
 [[nodiscard]] std::vector<tools::ToolDef> mcp_tools_live();
 [[nodiscard]] unsigned long mcp_generation() noexcept;
+
+// Bump the generation WITHOUT touching the connection pool. Signals the
+// registry's wire cache to re-project the tool surface on next access
+// (which re-reads the live tools.exclude in project_tools) — the cheap,
+// re-spawn-free path behind a per-tool enable/disable toggle.
+void mcp_bump_generation() noexcept;
+
+// Promptly tear down all connected MCP servers (close stdin + terminate the
+// child processes) instead of leaving it to static destruction after main().
+// Called on quit so a well-behaved server exits instantly and a wedged one is
+// bounded, rather than making shutdown look like a hang.
+void release_servers() noexcept;
+
+// Every tool a CONNECTED server advertises, as bare names (no mcp__ prefix,
+// no exclude filtering). The single authoritative source for the settings
+// picker's per-plugin tool list: enabled-vs-disabled is then derived purely
+// from the config's tools.exclude, so a tool can never fall between a
+// "live catalog" and a "config" view (the vanishing-row bug). Empty if the
+// server isn't connected.
+[[nodiscard]] std::vector<std::string> mcp_server_tools(const std::string& server);
+
+// Live reload: re-read the MCP config from disk and rebuild the process-
+// wide connection pool (spawning newly-added servers, dropping removed
+// ones). Used by the TUI's `agentty plugin add` flow so a plugin becomes
+// usable in the CURRENT session without a restart. Bumps mcp_generation()
+// so the registry's wire-cache re-projects the tool surface on next
+// access. The OLD pool's providers stay alive as long as a retained tool
+// snapshot references them (safe against an in-flight tool call). Returns
+// the number of servers connected after the reload. Blocking (same
+// connect handshake + deadline as startup); call off the UI thread.
+[[nodiscard]] std::size_t mcp_reload();
+
+// MCP servers an ACP client (Zed, JetBrains) sent with session/new, in
+// mcp.json shape: {"name": {"command": ..., "args": [...], "env": {...}}} or
+// {"name": {"type": "http", "url": ..., "headers": {...}}}. They join the
+// pool alongside mcp.json and win on a name clash. Merged across sessions
+// (one editor, one list); reconnects only when something changed.
+void set_client_servers(const nlohmann::json& servers);
+[[nodiscard]] std::vector<std::string> configured_server_names_from_client();
+
+// The editor can open URL-mode elicitations: advertise them to MCP servers
+// (connections made after this) and report each finished one to `done`.
+void set_url_elicitation(std::function<void(const std::string& elicitation_id)> done);
 
 // ── Resources (MCP resources/*) ──────────────────────────────────────────
 // A resource the agent can read by URI (file, db row, API doc, …).

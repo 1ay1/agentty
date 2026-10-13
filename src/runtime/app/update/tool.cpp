@@ -6,26 +6,68 @@
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
+#include "agentty/io/clipboard.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <utility>
 
 #include <maya/core/overload.hpp>
-#include <maya/app/app.hpp>   // maya::request_animation_frame
+#include <maya/core/motion.hpp>   // anim::keep_animating — frame requests
 #include <nlohmann/json.hpp>
 
 #include "agentty/runtime/app/cmd_factory.hpp"
 #include "agentty/runtime/app/deps.hpp"
-#include "agentty/diff/diff.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
+#include "agentty/runtime/view/host_escape.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/tool/spec.hpp"
+#include "agentty/tool/util/utf8.hpp"
+#include "agentty/util/logx.hpp"
+
+#if AGENTTY_MCP
+#include <mcp/tools/util/bash_validate.hpp>
+#endif
+
+namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
+
+// After this many shell detours in a row the tip gets a plain reminder on
+// top. 3: one detour is noise, two can be a one-off, three is the habit.
+inline constexpr int kDetourReminderAt = 3;
 
 using json = nlohmann::json;
 
 namespace {
+
+// Private OSC number for host (editor) integration escapes — see
+// ui::host::file_event_osc. 5379 is unclaimed by mainstream terminals; the
+// "agentty;" payload tag lets a host match ours and ignore other OSCs.
+constexpr int kHostOsc = 5379;
+
+// Build the host follow-along OSC payload for a finished FILE tool, or nullopt
+// for non-file tools / inactive integration. Only tools that name a concrete
+// path qualify (read/edit/write/move/list_dir); the path comes from the same
+// streaming-aware reader the timeline header uses, and read's 1-based offset
+// becomes the follow-along line.
+[[nodiscard]] std::optional<std::string> file_event_osc_for(const ToolUse& tc) {
+    const std::string& n = tc.name.value;
+    const bool is_file_tool =
+        n == "read" || n == "edit" || n == "write" || n == "move"
+        || n == "list_dir";
+    if (!is_file_tool) return std::nullopt;
+    std::string path = ui::tool_path_arg(tc);
+    if (n == "move" && path.empty())
+        path = ui::safe_arg(tc.args, "destination");
+    if (path.empty()) return std::nullopt;
+    std::optional<int> line;
+    if (n == "read") {
+        if (int off = ui::safe_int_arg(tc.args, "offset", 0); off > 0) line = off;
+    }
+    return ui::host::file_event_osc(n, path, line);
+}
 
 // Per-tool-output ceiling carried in the conversation. Tool runners
 // already cap their own captures (read = 1 MiB, grep = 8 MiB, bash =
@@ -40,13 +82,24 @@ constexpr std::size_t kStoredOutputCap = 256u * 1024u; // 256 KiB
 std::string clamp_output(std::string s) {
     if (s.size() <= kStoredOutputCap) return s;
     constexpr std::size_t half = kStoredOutputCap / 2;
+    // Both cut points MUST land on UTF-8 code-point boundaries: the
+    // clamped string is what goes onto the wire as the tool_result, and
+    // nlohmann::json::dump() throws type_error.316 on a split multi-byte
+    // sequence — which would kill serialization of the whole request.
+    // Head: largest boundary ≤ half. Tail: walk the start FORWARD past
+    // any continuation bytes so the kept suffix begins on a lead byte.
+    const std::size_t head_end = tools::util::safe_utf8_cut(s, half);
+    std::size_t tail_start = s.size() - half;
+    while (tail_start < s.size()
+           && (static_cast<unsigned char>(s[tail_start]) & 0xC0) == 0x80)
+        ++tail_start;
     std::string out;
     out.reserve(kStoredOutputCap + 64);
-    out.append(s, 0, half);
+    out.append(s, 0, head_end);
     out.append("\n\n… (");
-    out.append(std::to_string((s.size() - kStoredOutputCap) / 1024));
+    out.append(std::to_string((s.size() - head_end - (s.size() - tail_start)) / 1024));
     out.append(" KiB elided to keep memory bounded) …\n\n");
-    out.append(s, s.size() - half, half);
+    out.append(s, tail_start, s.size() - tail_start);
     return out;
 }
 
@@ -74,48 +127,178 @@ void arm_reconcile_cooldown(Model& m) {
     constexpr int kReconcileTicks = 6;
     if (m.ui.settle_cooldown_ticks < kReconcileTicks)
         m.ui.settle_cooldown_ticks = kReconcileTicks;
-    ::maya::request_animation_frame();
+    ::maya::anim::keep_animating();
 }
 
-// Fold a completed tool's FileChange into m.d.pending_changes so the
-// changes strip + diff-review pane track the agent's cumulative session
-// edits. Coalesced PER PATH: a second edit to the same file replaces the
-// entry but keeps the ORIGINAL original_contents (the review baseline is
-// "since the user last looked", not "since the last tool call") and
-// recomputes hunks across the whole before→after span. Hunk-status
-// choices the user already made on the stale entry are dropped by design
-// — they were made against hunks that no longer exist.
-void fold_pending_change(Model& m, FileChange&& ch) {
-    if (ch.path.empty()) return;
-    auto it = std::find_if(m.d.pending_changes.begin(),
-                           m.d.pending_changes.end(),
-                           [&](const FileChange& fc) {
-                               return fc.path == ch.path;
-                           });
-    if (it == m.d.pending_changes.end()) {
-        m.d.pending_changes.push_back(std::move(ch));
-        return;
-    }
-    // Chain: keep the existing baseline, adopt the new after-state, and
-    // recompute the structured hunks over the full span. If the file has
-    // returned to its baseline content exactly (agent undid itself), the
-    // change is no longer pending — drop the entry.
-    if (it->original_contents == ch.new_contents) {
-        m.d.pending_changes.erase(it);
-        return;
-    }
-    FileChange merged = diff::compute(ch.path, it->original_contents,
-                                      ch.new_contents);
-    merged.original_contents = std::move(it->original_contents);
-    merged.new_contents      = std::move(ch.new_contents);
-    *it = std::move(merged);
-}
 
 } // namespace
 
+// Build the tool-output-viewer entry list: every settled tool call in the
+// current thread with a non-empty stored output, NEWEST FIRST (the one the
+// user just watched scroll past is entry 0). Bounded by kMaxEntries /
+// kSnapshotBudget so a marathon session can't balloon the overlay open.
+// Snapshotting (copying the output bytes) makes the overlay immune to the
+// transcript mutating underneath it — each stored output is already
+// clamped to 256 KiB upstream, so the copies are cheap and bounded.
+[[nodiscard]] std::vector<tool_output::Entry> collect_viewer_entries(const Model& m) {
+    std::vector<tool_output::Entry> out;
+    std::size_t budget = tool_output::kSnapshotBudget;
+
+    // Row 0 is the LIVE tool, if one is active right now: this includes
+    // argument streaming / permission (Pending or Approved) as well as local
+    // execution (Running). Restricting this to Running made Ctrl+O say
+    // "nothing to inspect yet" during the entire model→tool-input phase —
+    // exactly when edit/write previews are most useful.
+    for (auto mit = m.d.current.messages.rbegin();
+         mit != m.d.current.messages.rend(); ++mit) {
+        bool found = false;
+        for (auto tit = mit->tool_calls.rbegin();
+             tit != mit->tool_calls.rend(); ++tit) {
+            const auto* run = std::get_if<ToolUse::Running>(&tit->status);
+            if (!run && !tit->is_pending() && !tit->is_approved()) continue;
+            tool_output::Entry e;
+            e.is_live  = true;
+            e.name     = tit->name.value;
+            e.title    = ui::tool_display_name(tit->name.value);
+            e.detail   = ui::tool_timeline_detail(*tit);
+            e.output   = run ? run->progress_text : std::string{};
+            e.call     = *tit;
+            e.failed   = false;
+            char buf[32];
+            const char* phase = run ? "running"
+                : (tit->is_approved() ? "approved" : "streaming input");
+            std::snprintf(buf, sizeof buf, "%s \xc2\xb7 %.1fs",
+                          phase, ui::tool_elapsed(*tit));
+            e.trailing = buf;
+            if (!e.output.empty())
+                e.trailing += (e.output.size() >= 1024)
+                    ? " \xc2\xb7 " + std::to_string(e.output.size() / 1024) + " KB"
+                    : " \xc2\xb7 " + std::to_string(e.output.size()) + " B";
+            budget -= std::min(budget, e.output.size());
+            out.push_back(std::move(e));
+            found = true;
+            break;
+        }
+        if (found) break;
+    }
+    for (auto mit = m.d.current.messages.rbegin();
+         mit != m.d.current.messages.rend(); ++mit) {
+        // Retrieved-context cards surface here too, so the FULL passages the
+        // model was grounded on are readable in the Ctrl+O overlay — including
+        // after the card has scrolled into the (immutable) frozen prefix,
+        // where the in-place Ctrl+U expand can't reach. Rendered through the
+        // viewer's plain-text (line-numbered) body path: the default-
+        // constructed ToolUse `call` has no structured kind, so the body
+        // stage falls through to the raw-text branch automatically.
+        if (mit->is_proactive_context() && !mit->text.empty()) {
+            // Strip the <retrieved-context> … </retrieved-context> fence and
+            // the lead-in preamble so the body is just the passages.
+            std::string body = mit->text;
+            if (auto open = body.find('>'); open != std::string::npos
+                && body.compare(0, 18, "<retrieved-context") == 0) {
+                std::size_t start = body.find('\n', open);
+                start = (start == std::string::npos) ? open + 1 : start + 1;
+                std::size_t end = body.rfind("</retrieved-context>");
+                if (end == std::string::npos || end < start) end = body.size();
+                body = body.substr(start, end - start);
+            }
+            while (!body.empty() && (body.back() == '\n' || body.back() == ' '
+                                  || body.back() == '\t' || body.back() == '\r'))
+                body.pop_back();
+            if (!body.empty() && out.size() < tool_output::kMaxEntries
+                && body.size() <= budget) {
+                budget -= body.size();
+                tool_output::Entry e;
+                e.name   = "retrieved_context";
+                e.title  = "Retrieved context";
+                e.output = std::move(body);
+                e.failed = false;
+                // Detail: passage count (each source block starts with "[").
+                std::size_t passages = 0;
+                for (std::size_t p = 0; (p = e.output.find("[", p)) != std::string::npos; ++p)
+                    if (p == 0 || e.output[p - 1] == '\n') ++passages;
+                e.detail = passages == 0 ? std::string{}
+                    : std::to_string(passages)
+                        + (passages == 1 ? " passage" : " passages");
+                e.trailing = (e.output.size() >= 1024)
+                    ? std::to_string(e.output.size() / 1024) + " KB"
+                    : std::to_string(e.output.size()) + " B";
+                out.push_back(std::move(e));
+            }
+            continue;
+        }
+        for (auto tit = mit->tool_calls.rbegin();
+             tit != mit->tool_calls.rend(); ++tit) {
+            const auto& tc = *tit;
+            if (!tc.is_terminal()) continue;
+            const auto& body = tc.output();
+            if (body.empty()) continue;
+            if (out.size() >= tool_output::kMaxEntries) return out;
+            if (body.size() > budget) continue;   // skip, keep older smaller ones
+            budget -= body.size();
+
+            tool_output::Entry e;
+            e.failed = tc.is_failed();
+            e.output = body;
+            // Raw name drives the category colour badge; display name +
+            // detail reuse the timeline's helpers so the list reads
+            // exactly like the transcript cards being re-inspected.
+            e.name   = tc.name.value;
+            e.title  = ui::tool_display_name(tc.name.value);
+            e.detail = ui::tool_timeline_detail(tc);
+            e.call   = tc;   // snapshot for the rich body render (diff/gutter)
+            // Trailing: ok/failed · duration · size.
+            e.trailing = e.failed ? "failed" : "ok";
+            if (float secs = ui::tool_elapsed(tc); secs >= 0.05f) {
+                char buf[32];
+                std::snprintf(buf, sizeof buf, " \xc2\xb7 %.1fs", secs);
+                e.trailing += buf;
+            }
+            e.trailing += (body.size() >= 1024)
+                ? " \xc2\xb7 " + std::to_string(body.size() / 1024) + " KB"
+                : " \xc2\xb7 " + std::to_string(body.size()) + " B";
+            out.push_back(std::move(e));
+        }
+    }
+    return out;
+}
+
+// Keep the Ctrl+O snapshot synchronized from both stream.cpp (tool-input
+// deltas/snapshots) and this TU (execution progress/results).
+void resync_live_tool_viewer(Model& m) {
+    auto* o = m.ui.panel.get<pn::ToolOutput>();
+    if (!o) return;
+    // Anchor: remember which entry the user is on by identity, not index —
+    // prepending/removing the live row shifts indices under them.
+    const bool was_live_selected =
+        o->index >= 0 && o->index < static_cast<int>(o->entries.size())
+        && o->entries[static_cast<std::size_t>(o->index)].is_live;
+    auto fresh = collect_viewer_entries(m);
+    const bool has_live = !fresh.empty() && fresh.front().is_live;
+    if (fresh.empty()) { return; }   // keep the last snapshot rather than blank
+    // If the user was reading the live row, keep them pinned to row 0 (it
+    // either still lives there or has just settled into the newest entry).
+    if (was_live_selected) {
+        o->index = 0;
+    } else {
+        // Non-live selection: the live row's presence shifts everything by
+        // one. Adjust the index by the delta in live-row count so the same
+        // finished entry stays under the cursor.
+        const bool had_live = !o->entries.empty() && o->entries.front().is_live;
+        o->index += (has_live ? 1 : 0) - (had_live ? 1 : 0);
+    }
+    o->entries = std::move(fresh);
+    o->index = std::clamp(o->index, 0,
+                          std::max(0, static_cast<int>(o->entries.size()) - 1));
+}
+
 void apply_tool_output(Model& m, const ToolCallId& id,
-                       std::expected<std::string, tools::ToolError>&& result) {
-    with_live_tool(m, id, [&](ToolUse& tc) {
+                       std::expected<std::string, tools::ToolError>&& result,
+                       std::optional<FileChange>&& change,
+                       std::vector<FileChange>&& changes,
+                       std::vector<ImageContent>&& images,
+                       std::uint64_t exec_seq) {
+    const bool landed = with_exec_tool(m, id, exec_seq, [&](ToolUse& tc) {
         // Idempotent: a tool already in a terminal state
         // (Done / Failed / Rejected) keeps that state. Realistic
         // ways a late ToolExecOutput can land here:
@@ -139,23 +322,69 @@ void apply_tool_output(Model& m, const ToolCallId& id,
         // Element in m.ui.frozen is immutable — visible as a
         // permanently-Running spinner in scrollback.
         if (tc.is_terminal()) return;
-        auto now = std::chrono::steady_clock::now();
-        auto started = tc.started_at();
+        auto now = m.now;
         if (result) {
-            tc.status = ToolUse::Done{started, now,
-                clamp_output(std::move(*result))};
+            // Drift reminder. Shell begets shell: after a shell inspection
+            // the next one is shell 81% of the time (22% after a native
+            // one). The per-call tip is easy to skim past once the habit has
+            // set in, so when detours chain, say so plainly at the point of
+            // decision (event-driven reminder, cf. OpenDev 2603.05344
+            // §2.3.4). Counted with substitutable(), the same gate the tip
+            // uses. Any other call resets the streak.
+            bool detour = false;
+#if AGENTTY_MCP
+            if (tc.name.value == "shell" && tc.args.is_object())
+                if (auto it = tc.args.find("command"); it != tc.args.end() && it->is_string())
+                    detour = ::mcp::tools::util::analyze_detour(it->get<std::string>()).substitutable();
+#endif
+            if (detour) {
+                if (++m.d.shell_detour_streak >= kDetourReminderAt)
+                    *result = "[reminder] shell detour #"
+                        + std::to_string(m.d.shell_detour_streak)
+                        + " in a row. the tip below names the exact native "
+                          "call; make that call next. native calls run in "
+                          "parallel and each gets its own card.\n"
+                        + std::move(*result);
+            } else {
+                m.d.shell_detour_streak = 0;
+            }
+            tc.settle_done(now, clamp_output(std::move(*result)),
+                           std::move(images));
         } else {
             // Render typed error as "[kind] detail" so the category
             // is visible in tool-card / history without losing the
             // human-readable detail. The model needs only the
             // string back; the kind is preserved structurally for
             // the future, when the view branches on category.
-            tc.status = ToolUse::Failed{started, now,
-                clamp_output(result.error().render())};
+            tc.settle_failed(now, clamp_output(result.error().render()));
         }
         release_streaming_buffers(tc);
     });
-    // A tool reaching a terminal state SWAPS its card body from the
+    // A stale worker (its call was cancelled) must not queue diffs for
+    // review either: the user already walked away from that call.
+    if (exec_seq != 0 && !landed) return;
+    // Queue the structured change(s) (edit / write / apply_patch / replace)
+    // for diff-review. Multi-file tools (replace) fill `changes`; single-file
+    // tools fill `change`. DEDUP per file: successive edits to the SAME path
+    // collapse into one review entry showing net original→latest, so the pane
+    // reads as "here's what changed in login.cpp", not a stack of overlapping
+    // diffs. Only queue on success — a failed tool wrote nothing.
+    if (result) {
+        auto queue_one = [&](FileChange&& ch) {
+            auto& q = m.d.pending_changes;
+            auto it = std::ranges::find(q, ch.path, &FileChange::path);
+            if (it != q.end()) {
+                std::string original = it->original_contents;
+                *it = diff::compute(ch.path, original, ch.new_contents);
+            } else {
+                q.push_back(std::move(ch));
+            }
+        };
+        if (!changes.empty())
+            for (auto& ch : changes) queue_one(std::move(ch));
+        else if (change)
+            queue_one(std::move(*change));
+    }
     // running spinner into the full output/error body — the card's
     // rendered height changes at this instant (a Failed card in
     // particular grows by its error rows). If that height change shifts
@@ -175,12 +404,17 @@ void apply_tool_output(Model& m, const ToolCallId& id,
 void mark_tool_rejected(Model& m, const ToolCallId& id,
                         std::string_view reason) {
     with_live_tool(m, id, [&](ToolUse& tc) {
-        auto now = std::chrono::steady_clock::now();
+        auto now = m.now;
         if (reason.empty()) {
             tc.status = ToolUse::Rejected{now};
         } else {
-            tc.status = ToolUse::Failed{tc.started_at(), now,
-                clamp_output(std::string{reason})};
+            // A reason means a policy/failure rejection. settle_failed keeps a
+            // real exec window if the tool had dispatched, and records NONE if
+            // it hadn't -- which for "User rejected this tool call" is always:
+            // the tool was sitting at the permission prompt. Copying with
+            // executing_since() here used to bake card birth in as a fake
+            // dispatch stamp and bill the whole prompt wait as tool time.
+            tc.settle_failed(now, clamp_output(std::string{reason}));
         }
         release_streaming_buffers(tc);
     });
@@ -198,9 +432,8 @@ void mark_tool_rejected(Model& m, const ToolCallId& id,
 // prompt is always *about* a specific pending tool call and the resolution
 // feeds back into the tool state machine — no clean split.
 
-Step tool_update(Model m, msg::ToolMsg tm) {
+Cmd tool_update(Model& m, msg::ToolMsg tm) {
     using maya::overload;
-    using maya::Cmd;
 
     return std::visit(overload{
         // ── Live tool progress (streaming subprocess output) ────────────
@@ -209,12 +442,22 @@ Step tool_update(Model m, msg::ToolMsg tm) {
         // and rely on the existing Tick subscription (active during
         // ExecutingTool) to re-render. Ignore if the tool has already
         // finalised (a late snapshot racing the terminal ToolExecOutput).
-        [&](ToolExecProgress& e) -> Step {
+        [&](ToolExecProgress& e) -> Cmd {
             // Frozen prefix is immutable — a late progress snapshot
             // for a turn that's already settled into m.ui.frozen
             // silently no-ops here.
-            with_live_tool(m, e.id, [&](ToolUse& tc) {
+            with_exec_tool(m, e.id, e.exec_seq, [&](ToolUse& tc) {
                 if (auto* r = std::get_if<ToolUse::Running>(&tc.status)) {
+                    // Belt-and-braces terminal line-discipline. The in-tree
+                    // subprocess runners already clean at the capture
+                    // boundary, but snapshots can also arrive from paths
+                    // that don't ride them (external MCP servers streaming
+                    // progress, subagent feeds echoing tool output). A raw
+                    // ESC/CR/BS byte reaching the card body paints control
+                    // bytes as cells and commits them to scrollback — the
+                    // stray-glyph corruption class. Cheap: O(n) scan, and
+                    // the common (already-clean) case only copies.
+                    e.snapshot = tools::util::strip_terminal_controls(e.snapshot);
                     // Cap the stored snapshot: the body preview shows
                     // the trailing window only, but `tc.progress_text`
                     // gets COPIED into a ToolBodyPreview Config every
@@ -226,22 +469,38 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                     constexpr std::size_t kProgressKeep = 16 * 1024;
                     if (e.snapshot.size() > kProgressKeep) {
                         // Keep the tail — newest bytes are the most
-                        // useful confirmation of progress.
-                        e.snapshot.erase(
-                            0, e.snapshot.size() - kProgressKeep);
+                        // useful confirmation of progress. Advance the
+                        // cut past any UTF-8 continuation bytes so the
+                        // kept suffix starts on a code-point boundary
+                        // (a split sequence renders as mojibake in the
+                        // card body).
+                        std::size_t cut = e.snapshot.size() - kProgressKeep;
+                        while (cut < e.snapshot.size()
+                               && (static_cast<unsigned char>(
+                                       e.snapshot[cut]) & 0xC0) == 0x80)
+                            ++cut;
+                        e.snapshot.erase(0, cut);
                     }
                     r->progress_text = std::move(e.snapshot);
+                    // Reset the liveness clock: this tool is demonstrably
+                    // making progress, so the wedge net's cap restarts from
+                    // here rather than from the (possibly many-minutes-ago)
+                    // launch time.
+                    r->last_progress_at = m.now;
                 }
             });
-            return done(std::move(m));
+            // If the user is watching the Ctrl+O viewer, keep its Live row
+            // (row 0) tailing this fresh output in place.
+            resync_live_tool_viewer(m);
+            return Cmd::none();
         },
 
         // ── Per-tool wall-clock watchdog ──────────────────────────────────
-        [&](ToolTimeoutCheck& e) -> Step {
+        [&](ToolTimeoutCheck& e) -> Cmd {
             bool flipped = false;
             with_live_tool(m, e.id, [&](ToolUse& tc) {
                 if (tc.is_terminal()) return;
-                auto now = std::chrono::steady_clock::now();
+                auto now = m.now;
                 const auto* sp = tools::spec::lookup(tc.name.value);
                 auto secs = sp ? sp->max_seconds : std::chrono::seconds{0};
                 std::string reason;
@@ -260,37 +519,67 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                         "thread may continue in the background; its "
                         "result will be discarded if it ever returns.";
                 }
-                tc.status = ToolUse::Failed{
-                    tc.started_at(), now, std::move(reason)};
+                tc.settle_failed(now, std::move(reason));
                 flipped = true;
             });
-            if (!flipped) return done(std::move(m));
+            if (!flipped) return Cmd::none();
             auto cmd = cmd::kick_pending_tools(m);
-            return {std::move(m), std::move(cmd)};
+            return cmd;
         },
 
         // ── Tool execution result ───────────────────────────────────────
-        [&](ToolExecOutput& e) -> Step {
+        [&](ToolExecOutput& e) -> Cmd {
+            // A worker whose call was cancelled or settled; its id may now
+            // belong to a different call. Drop it whole.
+            if (!tool_exec_is_current(m, e.id, e.exec_seq)) {
+                AGT_LOG(Tool, Info, "tool.stale_result",
+                        "id={} seq={} dropped", e.id.value, e.exec_seq);
+                return Cmd::none();
+            }
             // todo's side effect on the UI's plan state — runs only
             // when the call actually succeeded; failures don't synthesise
             // a plan. The final exact state lands here even if the live
             // streaming sync (stream.cpp) raced a partial array.
             if (e.result) {
-                for (const auto& msg_ : m.d.current.messages)
-                    for (const auto& tc : msg_.tool_calls)
-                        if (tc.id == e.id && tc.name == "todo")
-                            sync_todo_state_from_args(m, tc.args);
+                // Newest-first and stop at the match: the call is in the
+                // current turn, so this is O(1) in practice instead of a
+                // walk over every tool call in the thread per result.
+                bool found = false;
+                for (auto mit = m.d.current.messages.rbegin();
+                     !found && mit != m.d.current.messages.rend(); ++mit)
+                    for (const auto& tc : mit->tool_calls)
+                        if (tc.id == e.id) {
+                            if (tc.name == "todo") sync_todo_state_from_args(m, tc.args);
+                            found = true;
+                            break;
+                        }
             }
-            // Structured file edit → session change set (feeds the
-            // changes strip + diff-review). Only successful runs carry
-            // a change; per-path coalescing keeps one entry per file.
-            // With review disabled the edit is auto-accepted: the tool
-            // already wrote the new bytes, so simply not tracking it IS
-            // acceptance — no strip, no review pane, no revert baseline.
-            if (e.result && e.change && m.d.review_enabled) {
-                fold_pending_change(m, std::move(*e.change));
+            apply_tool_output(m, e.id, std::move(e.result), std::move(e.change),
+                              std::move(e.changes), std::move(e.images),
+                              e.exec_seq);
+            // If the Ctrl+O viewer is open, refresh it so the Live row settles
+            // into a finished entry the instant this tool completes.
+            resync_live_tool_viewer(m);
+
+            // Cooperating-host follow-along: when running on an editor PTY
+            // (Emacs/vterm) that watches for our OSC, tell it which file the
+            // agent just touched so it can open / reveal / diff it natively.
+            // Frame-safe (maya cmd::emit_osc, out-of-band), and a complete
+            // no-op on a normal terminal (m.env.host_integration is false).
+            Cmd host_cmd = Cmd::none();
+            if (m.env.host_integration) {
+                for (const auto& msg_ : m.d.current.messages) {
+                    bool done_scan = false;
+                    for (const auto& tc : msg_.tool_calls) {
+                        if (tc.id != e.id || !tc.is_done()) continue;
+                        if (auto osc = file_event_osc_for(tc))
+                            host_cmd = cmd::emit_osc(kHostOsc, *osc);
+                        done_scan = true; break;
+                    }
+                    if (done_scan) break;
+                }
             }
-            apply_tool_output(m, e.id, std::move(e.result));
+
             // No mid-run freeze or trim here. The single freeze site is
             // finalize_turn (the agent_session MessageStop analog) — the
             // whole agent turn is wrapped into one Turn Element and
@@ -305,19 +594,34 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // agent_session never carves mid-stream and shows zero
             // corruption / zero slowdown on long runs (proven by the
             // long_session bench); we now do the same.
+            // A SPECULATIVE read-only tool (launched mid-stream at
+            // StreamToolUseEnd) can finish while the wire is still
+            // streaming this turn. Do NOT run kick_pending_tools then:
+            // it would pull the Active ctx out of phase::Streaming (or
+            // worse, see zero pending work and launch the continuation
+            // stream against a wire that is still delivering). Just land
+            // the output; StreamFinished → finalize_turn runs the normal
+            // kick and finds this tool already terminal.
+            if (m.s.is_streaming()) {
+                if (host_cmd.is_none()) return Cmd::none();
+                return host_cmd;
+            }
             auto kick = cmd::kick_pending_tools(m);
-            return {std::move(m), std::move(kick)};
+            if (host_cmd.is_none())
+                return kick;
+            return Cmd::batch(
+                std::move(kick), std::move(host_cmd));
         },
 
-        // ── Permission ──────────────────────────────────────────────────
-        [&](PermissionApprove) -> Step {
-            if (!m.d.pending_permission) return done(std::move(m));
+        // ── Permission ──────────────────────────────────────────────
+        [&](PermissionApprove) -> Cmd {
+            if (!m.d.pending_permission) return Cmd::none();
             auto id = m.d.pending_permission->id;
             // Permission only ever fires against a tool in the live
             // tail — a frozen turn is by definition past every pending
             // permission. with_live_tool's frozen-prefix gate is the
             // structural guarantee of that invariant.
-            with_live_tool(m, id, [&](ToolUse& tc) {
+            with_live_tool(m, id, [&, shown = m.d.pending_permission->def_hash](ToolUse& tc) {
                 // Mark approval as type state: Pending → Approved.
                 // kick_pending_tools then treats Approved as
                 // "permission already granted" and routes through
@@ -326,20 +630,24 @@ Step tool_update(Model m, msg::ToolMsg tm) {
                 // freshly approved Write/Bash waits for it instead
                 // of racing.
                 tc.status = ToolUse::Approved{tc.started_at()};
+                // What the user actually saw. If the catalog is rebuilt
+                // between here and the launch, execute_approved refuses
+                // rather than running a different tool under this name.
+                tc.approved_def_hash = shown;
             });
             m.d.pending_permission.reset();
-            return {std::move(m), cmd::kick_pending_tools(m)};
+            return cmd::kick_pending_tools(m);
         },
-        [&](PermissionReject) -> Step {
-            if (!m.d.pending_permission) return done(std::move(m));
+        [&](PermissionReject) -> Cmd {
+            if (!m.d.pending_permission) return Cmd::none();
             auto id = m.d.pending_permission->id;
             mark_tool_rejected(m, id, "User rejected this tool call.");
             m.d.pending_permission.reset();
             auto cmd = cmd::kick_pending_tools(m);
-            return {std::move(m), std::move(cmd)};
+            return cmd;
         },
-        [&](PermissionApproveAlways) -> Step {
-            if (!m.d.pending_permission) return done(std::move(m));
+        [&](PermissionApproveAlways) -> Cmd {
+            if (!m.d.pending_permission) return Cmd::none();
             auto id   = m.d.pending_permission->id;
             auto name = m.d.pending_permission->tool_name;
             // Record a session-scoped grant for this tool NAME so every
@@ -351,25 +659,51 @@ Step tool_update(Model m, msg::ToolMsg tm) {
             // re-prompt. Mirrors Zed's per-session allow-list with live
             // sibling propagation.
             m.d.session_grants.insert(name.value);
+            // And WHAT was approved, not just its name. A standing grant on a
+            // bare name covers whatever that name resolves to later, which
+            // for an MCP tool is the server's choice -- so the grant carries
+            // the fingerprint of the definition the user saw, and
+            // execute_approved refuses if it changes.
+            const auto granted_hash = m.d.pending_permission->def_hash;
+            if (granted_hash != 0) m.d.grant_def_hash[name.value] = granted_hash;
             // Persist the grant (Zed's always_allow rules): reload-proof.
-            // Load-modify-save so we never clobber provider keys etc.
+            // Onto the record, so the next whole-record save carries it
+            // instead of writing a copy that predates it.
+            //
+            // Stored as "name@<hex>" so the definition survives a restart
+            // too. A bare name (an older build's entry, or a hand-edited
+            // settings.json) still loads and means "any definition".
+            Cmd grant_save = Cmd::none();
             {
-                auto s = deps().load_settings();
-                if (std::find(s.always_allow_tools.begin(),
-                              s.always_allow_tools.end(), name.value)
-                        == s.always_allow_tools.end()) {
-                    s.always_allow_tools.push_back(name.value);
-                    deps().save_settings(s);
+                auto& allow = m.d.persisted.always_allow_tools;
+                std::string entry = name.value;
+                if (granted_hash != 0)
+                    entry += "@" + std::format("{:016x}", granted_hash);
+                const auto same_tool = [&](const std::string& e) {
+                    const auto at = e.rfind('@');
+                    return (at == std::string::npos ? e : e.substr(0, at))
+                           == name.value;
+                };
+                auto it = std::find_if(allow.begin(), allow.end(), same_tool);
+                if (it == allow.end()) {
+                    allow.push_back(std::move(entry));
+                    grant_save = save_record(m);
+                } else if (*it != entry) {
+                    *it = std::move(entry);   // re-granted for a new definition
+                    grant_save = save_record(m);
                 }
             }
-            m.s.status = name.value + ": always allowed";
-            m.s.status_until = std::chrono::steady_clock::now()
-                             + std::chrono::seconds{3};
-            with_live_tool(m, id, [&](ToolUse& tc) {
+            m.s.status = name.value + ": always allowed (persists \xc2\xb7 "
+                         "Shift+Tab profile cycle resets)";
+            m.s.status_until = m.now
+                             + std::chrono::seconds{4};
+            with_live_tool(m, id, [&, shown = m.d.pending_permission->def_hash](ToolUse& tc) {
                 tc.status = ToolUse::Approved{tc.started_at()};
+                tc.approved_def_hash = shown;   // see PermissionApprove
             });
             m.d.pending_permission.reset();
-            return {std::move(m), cmd::kick_pending_tools(m)};
+            return Cmd::batch(std::move(grant_save),
+                              cmd::kick_pending_tools(m));
         },
     }, tm);
 }

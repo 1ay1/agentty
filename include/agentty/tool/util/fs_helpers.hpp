@@ -3,6 +3,29 @@
 // binary detection, and a predictable "which directories to skip during
 // traversal" list — centralised here so the rules are consistent across
 // grep / glob / list_dir / find_definition.
+//
+// ── WHICH `util` IS THIS? ──────────────────────────────────────────
+// There are two, and the split is deliberate even though the name collides:
+//
+//   agentty::tools::util   (include/agentty/tool/util/, src/tool/util/)
+//       The TOOL BOUNDARY. Everything here exists because a MODEL asked for
+//       something and we have to be careful about it: workspace clamping,
+//       path normalisation, subprocess spawning, the sandbox, the trust
+//       handoff gate, argument reading, partial-JSON salvage. The unifying
+//       property is UNTRUSTED INPUT — these are the walls and the parsers
+//       that stand between a model's request and the machine.
+//
+//   agentty::util          (include/agentty/util/, src/util/)
+//       APP-WIDE PLUMBING, with no notion of a tool call: logging (logx),
+//       home/root resolution, base64, teardown ordering, the self-updater,
+//       the models.dev cache. Callable from anywhere, including from
+//       tools::util itself (fs_helpers uses util::home_dir), which is why
+//       the dependency runs one way only: tools::util may use util, never
+//       the reverse.
+//
+// Rule of thumb when adding something: does it only make sense because a
+// model is on the other end of it? Then it belongs here. Otherwise it is
+// agentty::util.
 
 #include <expected>
 #include <filesystem>
@@ -11,6 +34,7 @@
 #include <string_view>
 
 #include "agentty/tool/registry.hpp"   // ToolError + factories
+#include "agentty/util/io.hpp"
 
 namespace agentty::tools::util {
 
@@ -71,9 +95,19 @@ struct NormalizedPath {
 // fast path of "model casually `read`s ~/.ssh/id_rsa or `write`s to
 // /etc/hosts". Pair with bash gating + a future OS-native sandbox
 // (sandbox-exec / bwrap / firejail) for a defense-in-depth story.
-void set_workspace_root(fs::path root);
+void set_workspace_root(Io, fs::path root);
 
 [[nodiscard]] const fs::path& workspace_root();
+
+// The ACTIVE PROJECT directory: the process cwd (the dir agentty was
+// launched in), clamped inside the access boundary. Distinct from
+// workspace_root(), the widenable ACCESS BOUNDARY (`--workspace /`).
+// Relative tool paths and repo-scoped defaults resolve from HERE so that
+// `read src/foo.cpp` under `--workspace /` lands in the launched project,
+// not at `/src/foo.cpp`. By default project_root() == workspace_root().
+// Mirrors mcp-cpp's util::project_root(); the two stay in sync via the
+// shared set_workspace_root() plumbing.
+[[nodiscard]] fs::path project_root();
 
 // True if `target` is at-or-under the workspace root after canonicalising
 // both sides. Symlink escape is blocked: a link inside the workspace that
@@ -146,11 +180,21 @@ make_workspace_path_checked(std::string_view raw, std::string_view tool_name);
 //
 // Registered by the skills scanner at discovery time. Idempotent;
 // bounded by the skill cap (≤ 64×2 roots per scope).
-void allow_read_root(const fs::path& root);
+void allow_read_root(Io, const fs::path& root);
 
 // True when `target` sits under a registered read-allowlist root
 // (post-canonicalisation, symlink-escape checked like the workspace).
 [[nodiscard]] bool is_read_allowlisted(const fs::path& target);
+
+// The read roots registered so far (canonical).
+[[nodiscard]] std::vector<fs::path> read_roots_now();
+
+// A forked thread points at its parent's transcript under the threads dir,
+// outside the workspace. Make exactly those files readable (not the dir),
+// so the fork still works when it is reopened in a later session. Only
+// files that exist directly in `threads_dir` and end in .transcript.md.
+void allow_fork_transcripts(Io, const fs::path& threads_dir,
+                            const std::vector<std::string>& paths);
 
 // Read-gate factory: passes when the path is within the workspace OR
 // under a read-allowlist root. Use ONLY in read-side tools (`read`).

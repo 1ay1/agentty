@@ -15,7 +15,13 @@
 #include <variant>
 
 #include <maya/core/animation.hpp>
+#include <maya/core/motion.hpp>   // anim::Motion (self-ticking disp_rate)
 #include <maya/widget/spinner.hpp>
+
+#include "agentty/domain/compaction_style.hpp"
+#include "agentty/domain/complexity.hpp"
+#include "agentty/domain/id.hpp"
+#include "agentty/domain/smart_mode.hpp"
 
 namespace agentty::http { class CancelToken; }
 
@@ -74,6 +80,11 @@ struct Active {
     std::chrono::steady_clock::time_point started{};
     std::chrono::steady_clock::time_point last_event_at{};
 
+    // Set when the socket/TLS layer is alive but no model/SSE frame has
+    // necessarily escaped an intermediary. This marks failures as mid-stream
+    // without treating proxy PING traffic as semantic model progress.
+    bool transport_activity = false;
+
     // Per-turn retry counters. truncation_retries: silent re-launches
     // when the stream EOFs mid-tool-args. transient_retries: 5xx /
     // network / overloaded / 429. Independent budgets.
@@ -109,6 +120,19 @@ struct Active {
     // one. Stops a multi-hour session from accumulating unrelated
     // brown-out failures into a permanent budget exhaustion.
     std::chrono::steady_clock::time_point last_failure_at{};
+
+    // HARD upper bound on retries with ZERO model progress. The decay
+    // window above has a blind spot: the retry BACKOFF WAIT itself counts
+    // toward the 90 s window, so a server that accepts the connect but
+    // fails every request (local llama.cpp with a bad path/model) can
+    // alternate failure → long backoff → decay-reset → failure forever —
+    // the reported "dead loop". This counter increments on EVERY scheduled
+    // retry and is reset ONLY by real model output (a non-empty content
+    // delta or a structured tool call) — never by heartbeats, never by the
+    // decay window. When it crosses kMaxNoProgressFailures the failure is
+    // treated as terminal regardless of class: N straight attempts without
+    // a single content byte is a broken endpoint, not a brown-out.
+    int no_progress_failures = 0;
 
     // Live tok/s speedometer — bytes of text/json delta, not the rare
     // usage field. first_delta_at excludes TTFT from the rate divisor.
@@ -190,6 +214,27 @@ using Phase = std::variant<phase::Idle, phase::Streaming,
         if constexpr (std::same_as<T, phase::Idle>) return std::nullopt;
         else                                        return std::move(v.ctx);
     }, std::move(p));
+}
+
+// ── Reschedule combinator ───────────────────────────────────
+// The retry sites all perform the same dance: pull the ctx out of the
+// phase, bump its retry bookkeeping, and re-enter Streaming with the
+// Scheduled sentinel. Hand-rolled, that dance needs a `.value()` on the
+// take — a proof obligation ("phase IS active here") carried in a comment;
+// get it wrong (a late error after cancel dropped to Idle) and the reducer
+// throws bad_optional_access → std::terminate. This combinator makes the
+// operation TOTAL: the Idle case returns false (phase restored to Idle)
+// instead of aborting, and the caller branches on the bool. The mutator
+// runs exactly once, on a real ctx, before the phase is re-seated.
+template <class F>
+    requires std::invocable<F&, phase::Active&>
+[[nodiscard]] inline bool reschedule_streaming(Phase& p, F&& mutate) noexcept(
+    std::is_nothrow_invocable_v<F&, phase::Active&>) {
+    auto ctx = take_active_ctx(std::move(p));
+    if (!ctx) { p = phase::Idle{}; return false; }
+    mutate(*ctx);
+    p = phase::Streaming{std::move(*ctx)};
+    return true;
 }
 
 [[nodiscard]] constexpr std::string_view to_string(const Phase& p) noexcept {
@@ -401,9 +446,141 @@ static_assert( is_legal_transition(PhaseKind::ExecutingTool,      PhaseKind::Idl
 struct StreamState {
     Phase phase = phase::Idle{};
     std::chrono::steady_clock::time_point last_tick{};
+    // Wall-clock (steady) of the most recent request we sent to the model —
+    // stamped when a stream starts. Drives the idle cache-lapse compaction
+    // trigger (see should_compact_on_idle): the prompt cache that makes a
+    // deep prefix cheap only survives ~kCacheTtl of idle, so once we've been
+    // idle nearly that long AND the prefix is large, we compact NOW (while
+    // the summary is still a cheap cache hit) rather than let the next user
+    // message re-price the whole prefix at fresh input rate after the cache
+    // has lapsed. Zero until the first request of the session.
+    std::chrono::steady_clock::time_point last_wire_at{};
+    // When the composer last asked for a provider prewarm, and last probed
+    // whether the OAuth token needs a proactive refresh. Throttles, so
+    // key-repeat can't spam dials or the token endpoint. They lived in
+    // function-local statics inside update until the Elm cleanup: state the
+    // reducer reads and writes belongs to the Model, or replay and a second
+    // app instance in one process (tests) silently share it.
+    std::chrono::steady_clock::time_point last_prewarm_at{};
+    std::chrono::steady_clock::time_point last_refresh_probe_at{};
     int tokens_in   = 0;
     int tokens_out  = 0;
+    // Reasoning/thinking tokens the model spent on THIS turn's reply, as
+    // reported by the provider (OpenAI completion_tokens_details /
+    // output_tokens_details.reasoning_tokens). Already INCLUDED in
+    // tokens_out — kept separately only to surface the breakdown in the
+    // status bar. 0 when the wire doesn't report it (Anthropic, Ollama,
+    // non-reasoning models). Replaced (not accumulated) each turn like
+    // tokens_out; the wire value is the per-request total.
+    int reasoning_tokens = 0;
+    // Prompt-cache telemetry for the LAST completed pricing (per turn).
+    // cache_hit_ratio = cache_read / (input + cache_read + cache_creation)
+    // — 1.0 means the whole prefix was served from cache (cheap + fast
+    // TTFT), ~0 means the prefix was re-priced cold (10-20x TTFT for a
+    // large context). A LOW ratio on an interior turn of a session is a
+    // bug signal: something (tool-catalog reorder, MCP reload, prompt
+    // nondeterminism) mutated the cached prefix and torched the cache.
+    // Surfaced on the `perf` channel (AGENTTY_LOG=perf=debug); -1 = no data yet.
+    double cache_hit_ratio = -1.0;
+    int    cache_read_tokens     = 0;
+    int    cache_creation_tokens = 0;
     int context_max = 200000;
+    // Self-calibrating correction for the local byte-based token estimate.
+    //
+    // estimate_wire_tokens() is a crude bytes/3.5 guess used by the
+    // proactive auto-compaction trigger. On tool-heavy transcripts it
+    // OVERSHOOTS badly (JSON envelopes + tool output tokenize far denser
+    // than 3.5 bytes/token), which used to fire compaction with tens of
+    // thousands of tokens of headroom still free — the estimate said
+    // "183k" while the model reported the real prefix was only ~120k.
+    //
+    // After every real turn we know BOTH the ground-truth prefix size
+    // (`tokens_in` from StreamUsage) and what the estimator would have
+    // said for that same wire view. Their ratio (true / estimated) is a
+    // live correction factor: the trigger multiplies the raw estimate by
+    // it so the proactive check tracks the actual tokenizer instead of a
+    // fixed constant. Seeded at 1.0 (raw estimate) and EMA-smoothed each
+    // turn so a single anomalous turn can't swing it. Clamped to a sane
+    // band so a corrupt reading can't disable the safety trigger.
+    double est_calibration = 1.0;
+
+    // Fraction of the window we fill before auto-compaction fires. We ride
+    // DEEP — 95 % — to keep as much raw context live as possible and only
+    // summarise when genuinely near the ceiling: a 200 k window fires at
+    // 190 k, a 1 M window at 950 k.
+    //
+    // Why deep is ALSO cheap (the counter-intuitive part): the repeated
+    // prefix is served from the prompt cache, not re-priced at full input
+    // rate. On Anthropic the stable 1-hour anchor breakpoint
+    // (wire_body.cpp, advances once per ~20 messages) and on OpenAI the
+    // pinned prompt_cache_key hold the conversation prefix as a CACHE HIT
+    // across turns — cache-read is ~10 % of fresh input. So a big live
+    // prefix costs little per turn. The genuinely expensive event is a
+    // COMPACTION (it moves the anchor → the next turn is a full cache miss
+    // AND it runs a summary request), so firing LESS OFTEN is what keeps
+    // total token burn low. Riding to 95 % instead of, say, 25 % of a 1 M
+    // window means ~4× fewer of those expensive cache-reset+summarise
+    // events. Deep trigger + bounded summary slice
+    // (wire_messages_for_compaction) = maximum context AND minimum burn.
+    static constexpr int kSoftFillPct = 95;
+    // Absolute floor of output headroom, in tokens, that MUST stay free
+    // regardless of the percentage so the next turn's reply always has room.
+    // On a small window 95 % could leave too little for a full answer; on a
+    // 1 M window 5 % is already 50 k — far more than any single reply needs —
+    // so the effective threshold is min(95 % of window, window - floor).
+    static constexpr int kMinOutputHeadroom = 20000;
+
+    // The token count at which background auto-compaction should fire:
+    // min(kSoftFillPct% of context_max, context_max - kMinOutputHeadroom),
+    // so we ride deep but always leave room for the reply. 0 = window
+    // unknown → never fire.
+    [[nodiscard]] int compaction_threshold() const noexcept {
+        if (context_max <= 0) return 0;
+        const long soft =
+            static_cast<long>(context_max) * kSoftFillPct / 100;
+        const long reserve_cap =
+            static_cast<long>(context_max) - kMinOutputHeadroom;
+        long thr = soft < reserve_cap ? soft : reserve_cap;
+        if (thr < 0) thr = 0;
+        return static_cast<int>(thr);
+    }
+
+    // ── Idle cache-lapse pre-compaction ──────────────────────────────────
+    // The one case where riding deep (95 %) WOULD spike the price: the
+    // prompt cache that makes a large live prefix cheap only survives a
+    // bounded idle window (Anthropic's extended TTL is 1 hour; OpenAI's
+    // prompt-cache reuse similarly decays). Ride to 950 k, walk away past
+    // the TTL, and your next message re-prices all 950 k at FULL input rate
+    // — exactly the "price went up" the user never wants.
+    //
+    // Fix: while idle, if the prefix is large enough that a cold re-price
+    // would hurt AND we're approaching the cache TTL, compact PRE-EMPTIVELY.
+    // The summary request runs now, while the prefix is STILL a warm cache
+    // hit (cheap), and the user returns to a small warm context instead of a
+    // huge cold one. Net: the expensive cold re-price never happens.
+    //
+    // Bounded so it never fires early during ACTIVE work (that path is the
+    // 95 % threshold): it needs both a genuinely large prefix
+    // (kIdleCompactMinTokens) and a near-TTL idle gap.
+    static constexpr int kIdleCompactMinTokens = 200000;
+    static constexpr std::chrono::seconds kCacheTtl{3600};       // 1 h
+    // Fire at 80 % of the TTL so the summary request completes and re-warms
+    // the (now small) prefix before the old cache would have lapsed.
+    static constexpr std::chrono::seconds kIdleCompactAfter{2880}; // 48 min
+
+    // Should we pre-emptively compact because we've gone idle long enough
+    // that the prefix cache is about to lapse and a cold re-price looms?
+    // `est_prefix_tokens` is the calibrated wire estimate of the current
+    // transcript. Returns false when idle-timing is unknown (no request yet)
+    // or the prefix is small (a cold re-price of < 200 k is not worth a
+    // summary round).
+    [[nodiscard]] bool should_compact_on_idle(
+        std::chrono::steady_clock::time_point now,
+        int est_prefix_tokens) const noexcept {
+        if (last_wire_at.time_since_epoch().count() == 0) return false;
+        if (est_prefix_tokens < kIdleCompactMinTokens) return false;
+        return (now - last_wire_at) >= kIdleCompactAfter;
+    }
     // True while a compaction round is in flight: the request that
     // includes the synthesised "summarise per spec" prompt has been
     // dispatched and the assistant is streaming its summary into the
@@ -416,6 +593,33 @@ struct StreamState {
     // only ever true when phase != Idle (the transition is paired
     // with the launch of the compaction stream).
     bool compacting = false;
+    // Smart Mode CASCADE feedback (session-scoped, not persisted). The
+    // complexity heuristic sets each turn's effort FLOOR upfront; this signed
+    // bias, in effort-steps, is the loop's correction on top of it — the
+    // cascade the routing research prefers over pure upfront routing. It's
+    // adjusted at finalize_turn from the orchestrator's ACTUAL behaviour:
+    // heavy delegation on a turn the heuristic under-rated bumps it up; a
+    // trivial no-delegation reply on an over-rated turn nudges it down. It
+    // DECAYS toward 0 each turn so a single anomaly never sticks. Clamped to
+    // [-2, +2] (symmetric: sustained clean turns can relax effort as far as
+    // sustained hard turns raise it). Read by build_smart_routing_card /
+    // launch_stream.
+    int smart_effort_bias = 0;
+    // The complexity the classifier assigned to the IN-FLIGHT turn, stashed at
+    // launch so finalize_turn can compare it against what the model actually
+    // did (delegation count) and update smart_effort_bias.
+    smart::Complexity smart_turn_complexity = smart::Complexity::Standard;
+    // The model + role the IN-FLIGHT turn was actually dispatched on. Written
+    // by launch_stream once the role is resolved, read when the assistant
+    // message settles so the turn header can name its true author (see
+    // Message::served_model). Empty when Smart Mode is off — the turn ran on
+    // the plain selection and the header falls back to it.
+    ModelId                         smart_turn_model;
+    std::optional<smart::ModelRole> smart_turn_role;
+    // Which summary shape the in-flight compaction is producing. Set at
+    // CompactContext / fork kickoff, read by the wire builder to choose the
+    // summarisation prompt. Defaults to Recoverable (the original behaviour).
+    CompactionStyle compaction_style = CompactionStyle::Recoverable;
     // Snapshot of `messages.size()` taken at CompactContext kickoff.
     // The compaction-finalize handler stamps this onto the new
     // Thread::CompactionRecord as `up_to_index` so wire payloads for
@@ -437,6 +641,13 @@ struct StreamState {
     // at StreamFinished (on success: parsed into the new
     // CompactionRecord) or StreamError (on failure: discarded).
     std::string compaction_buffer;
+    // Adaptive shrink ceiling for the compaction slice, in TOKENS. 0 = use
+    // the default (min(65% of context_max, kCompactionSliceCap)). When a
+    // compaction request comes back "prompt is too long: X > Y", the
+    // StreamError handler sets this BELOW Y and retries — so a fork or
+    // /compact of a transcript far larger than the window keeps trimming
+    // (247k → fits) instead of failing. Reset to 0 when compaction ends.
+    int compaction_ceiling = 0;
     // Rapid-refill breaker. When auto-compaction fires within
     // `kRapidRefillTurns` assistant turns of the previous one,
     // `recent_compacts` increments; on a quieter cycle it resets.
@@ -467,7 +678,7 @@ struct StreamState {
     // queue multiple loads behind each other.
     bool thread_loading = false;
     // True while a background model-list fetch is in flight (kicked off
-    // by init(), OpenModelPicker, a provider switch, or a login). The
+    // by init(), OpenModels, a provider switch, or a login). The
     // model picker view consults this to render "Loading models…" vs.
     // "No models available" — without it, a fetch that throws or
     // returns an empty list would leave the picker stuck on the
@@ -475,6 +686,35 @@ struct StreamState {
     // cleared by the `ModelsLoaded` handler, which fetch_models()
     // dispatches on BOTH success and failure.
     bool models_loading = false;
+
+    // ── Self-update signal ──────────────────────────────────
+    // Filled by UpdateCheckDone (background release check). Non-empty
+    // update_latest ⇒ the status bar shows an unobtrusive "⬆ vX.Y.Z" chip
+    // and the palette surfaces "Update agentty". update_in_flight gates
+    // double-launch from the palette while a download runs.
+    std::string update_latest;    // "" = up to date / not checked
+    std::string update_url;       // release page for the toast
+    bool        update_in_flight = false;
+    // Set once a self-update has been WRITTEN TO DISK. The running process
+    // is still the old image — classic Unix: the new binary is at the same
+    // path, this process keeps the inode it started with — so the user must
+    // restart to get it.
+    //
+    // That used to be said once, in the status line, which a long-running
+    // session scrolls past in seconds. Then the "⬆ vX.Y.Z" chip cleared
+    // too, so the only evidence an update had happened at all was a message
+    // that had already gone. People kept running the old binary for days
+    // and reported bugs that were already fixed.
+    //
+    // Keeping the version here lets the status bar show a persistent
+    // "↺ restart for vX.Y.Z" chip instead: the signal survives until the
+    // thing it is asking for actually happens.
+    std::string update_pending_restart;   // "" = nothing staged
+    // When the last release check ran. Zero = the startup check owns the
+    // first interval. Drives the hourly re-poll in the Tick reducer, so a
+    // long-lived session notices a release without being restarted.
+    std::chrono::steady_clock::time_point last_update_poll{};
+
     std::string status;
     // Optional expiry for `status`. When set, the status bar hides the
     // banner once now() passes this point and the reducer treats the
@@ -508,11 +748,13 @@ struct StreamState {
 
     // Spring-smoothed version of the BIG displayed tok/s readout. The raw
     // instantaneous rate (live_delta_bytes/4 ÷ elapsed) is recomputed every
-    // frame and jitters hard — the number visibly flickers. We retarget this
-    // spring at the raw value each frame and display its settled value, so
-    // the readout glides instead of strobing. Ticked in the Tick handler
-    // alongside the spinner; reset to 0 when no stream is in flight.
-    maya::anim::Spring<double> disp_rate_spring{0.0, maya::anim::spring_presets::gentle};
+    // frame and jitters hard — the number visibly flickers. The Tick reducer
+    // retargets this Motion at the raw value; the VIEW reads .get(), which
+    // self-ticks against the shared frame clock and re-requests frames while
+    // gliding — no hand-fed dt, and the glide advances at render cadence
+    // (where smoothing belongs), not at the coarser Tick cadence.
+    maya::anim::Motion<double> disp_rate =
+        maya::anim::Motion<double>::spring(0.0, maya::anim::spring_presets::gentle);
 
     // ── Phase predicates ─────────────────────────────────────────────
     [[nodiscard]] bool is_idle()                const noexcept { return std::holds_alternative<phase::Idle>(phase); }

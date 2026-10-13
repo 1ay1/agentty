@@ -1,30 +1,276 @@
 #pragma once
 // agentty catalog — describes an LLM the user can select.
 
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <atomic>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include <maya/runtime.hpp>
+
 #include "agentty/domain/id.hpp"
+#include "agentty/domain/capkey.hpp"   // canonical capability-key discipline
 
 namespace agentty {
+
+// Should a model with this declared capability be sent tool definitions?
+//
+// The free form, for call sites that hold the optional rather than the whole
+// ModelInfo (the wire builder looks the capability up by id). Same rule, one
+// implementation: only an explicit `false` withholds.
+[[nodiscard]] inline bool tools_allowed(std::optional<bool> supports) noexcept {
+    return !supports.has_value() || *supports;
+}
 
 struct ModelInfo {
     ModelId     id;
     std::string display_name;
     std::string provider;
-    int  context_window = 200000;
+    // The model's context window in TOKENS, as reported by the provider.
+    //
+    // 0 = UNKNOWN, and that distinction is load-bearing. This used to
+    // default to 200000, which made "the gateway told us 200k" and "nobody
+    // said anything" the same value — so a LiteLLM/vLLM/OpenRouter model
+    // serving a 1M window was silently clamped to 200k with no way to tell
+    // that a default had been substituted. Callers now resolve an unknown
+    // window explicitly (see ui::context_max_for_model), and can prefer a
+    // user override or a probed value over a guess.
+    int  context_window = 0;
     bool favorite       = false;
-    // Ollama-specific: the model reports "tools" in its capabilities list.
-    // When false (or unset), agentty skips advertising tools entirely —
-    // the model can only be used for plain chat. Set by list_models() via
-    // Ollama's /api/show probe. std::optional so unknown = std::nullopt.
+    // Does this model accept tool definitions on the wire?
+    //
+    // TRI-STATE, and the third state is load-bearing:
+    //   true    — the provider declared tool support.
+    //   false   — the provider declared NO tool support. Tools are withheld;
+    //             the model can only be used for plain chat.
+    //   nullopt — UNKNOWN (not probed, not listed, slug rewritten by the
+    //             server, provider reports no capability block). Tools ARE
+    //             advertised.
+    //
+    // Unknown must mean SEND, and that asymmetry is deliberate. Wrongly
+    // sending tools to a model that cannot use them produces a loud, local
+    // error on the first turn. Wrongly WITHHOLDING them produces no error at
+    // all: the turn succeeds, the model simply never sees a tool and says it
+    // cannot read files — which users report as "tools are broken with this
+    // provider" and which no test notices, because nothing failed.
+    //
+    // Read it through tools_allowed() below rather than testing the optional
+    // by hand; the old comment here said "false (or unset)" withholds, which
+    // is the opposite of what the code did, and a caller that believed the
+    // comment would have silently disabled tools for every unprobed model.
     std::optional<bool> supports_tools;
+
+    // Should this model be sent tool definitions? The ONE place the tri-state
+    // is collapsed to a decision, so no caller can get the unknown case
+    // backwards. See supports_tools for why unknown sends.
+    [[nodiscard]] bool tools_allowed() const noexcept {
+        return agentty::tools_allowed(supports_tools);
+    }
+
+    // Does this model accept image parts? Same tri-state, same reasoning,
+    // OPPOSITE default — and the asymmetry is the whole point.
+    //
+    //   nullopt  nobody said → SEND. Withholding on silence would strip
+    //            images from every model no catalog describes, and a
+    //            vision model that silently never sees the screenshot is
+    //            indistinguishable from a model that saw it and was
+    //            unhelpful. Exactly the failure supports_tools documents.
+    //   true     declared vision → send.
+    //   false    DECLARED text-only → withhold. This is the one case we
+    //            actually know, and sending is a hard 400 on most wires
+    //            ("image input is not supported for this model") or, on
+    //            Ollama, an image the model quietly ignores.
+    //
+    // Unset by every path today — nothing populates it yet, so behaviour
+    // is unchanged. It exists so the decision has ONE home before two call
+    // sites grow their own, which is how the reasoning toggle ended up
+    // honoured by three transports of four.
+    std::optional<bool> supports_vision;
+
+    [[nodiscard]] bool vision_allowed() const noexcept {
+        // Mirrors tools_allowed(): only an explicit `false` withholds.
+        return supports_vision.value_or(true);
+    }
+
+    // Value equality (used to detect when the active provider's fused catalog
+    // has drifted from available_models and needs a re-seed).
+    [[nodiscard]] bool operator==(const ModelInfo&) const = default;
 };
+
+// A (provider, model) pair — the identity a cross-provider switch targets and
+// the MRU/recents unit. Small, value-typed, and comparable so it can key the
+// fused picker's selection and dedup the recents list.
+struct ModelRef {
+    std::string provider_id;   // "anthropic", "openai", "kimi", a host spec…
+    std::string model_id;      // ModelId::value on the wire
+
+    [[nodiscard]] bool operator==(const ModelRef& o) const noexcept {
+        return provider_id == o.provider_id && model_id == o.model_id;
+    }
+    [[nodiscard]] bool empty() const noexcept {
+        return provider_id.empty() && model_id.empty();
+    }
+};
+
+// One authenticated provider's model catalog, held in the fused picker's
+// merged view. `state` drives the per-provider group header (loading… /
+// ready / failed); `models` is the list_models_for() result (which is
+// non-empty even without auth thanks to the bundled seed, so a freshly
+// added provider still shows rows immediately).
+struct ProviderCatalog {
+    std::string provider_id;
+    std::string label;                    // provider display name
+    enum class State : std::uint8_t { Idle, Loading, Ready, Failed };
+    State state = State::Idle;
+    std::vector<ModelInfo> models;
+    std::string account_label;            // active account on this provider
+    // Steady-clock ms when this catalog's LIVE fetch last completed (0 = never
+    // fetched live; still showing the bundled seed). Drives the on-open
+    // freshness check: a catalog older than the TTL (or Failed) is refetched
+    // so the fused list stays current instead of freezing after its first load.
+    std::int64_t loaded_at_ms = 0;
+    // Derived per-model fuzzy haystacks, already lowercased, one per entry in
+    // `models` (same order). Rebuilt once when `models` changes (size guard in
+    // rebuild_fused_rows), so the per-KEYSTROKE filter never re-allocates or
+    // re-lowercases a haystack for every model. Empty ⇒ not yet built (the
+    // build falls back to composing the haystack inline).
+    std::vector<std::string> search_keys;
+    // Derived per-model FOLDED ROW IDENTITY (capkey::norm_row_id), same order
+    // as `models`. The fused build's alias-dedup used to call norm_row_id on
+    // every (candidate × seen) pair — O(n²) with two string allocations per
+    // probe, ~200k allocs per keystroke on a 450-model aggregator list.
+    // Folding each id ONCE per catalog change turns dedup into a hash-set
+    // probe. Rebuilt alongside search_keys (same size guard).
+    std::vector<std::string> row_keys;
+    // Derived canonical display labels (ui::model_display_label), same order
+    // as `models` — label_fn normalises and allocates, and browse mode (empty
+    // query) materialises a label for EVERY model on every rebuild. Cached
+    // with the same size-guard invalidation as search_keys.
+    std::vector<std::string> display_labels;
+    // Derived per-model "has an effort ladder" flags (same order as `models`),
+    // memoising effort_capable(resolved_caps(id, provider)) — 3 registry map
+    // lookups behind a shared_mutex per call, far too hot for the
+    // per-keystroke row build over a 300-model catalog. Rebuilt alongside
+    // search_keys whenever `models` changes; also invalidated when the
+    // capability registries change (models.dev refresh / learned rejection /
+    // ^E override) via the caps_epoch stamp below. Empty ⇒ not built (the
+    // row build falls back to the live resolve).
+    std::vector<bool> reason_flags;
+    // Value of caps_epoch() when reason_flags was built; a mismatch means a
+    // capability registry changed underneath us → rebuild the flags.
+    std::uint64_t reason_epoch = 0;
+
+    // Drop every derived cache. Call this at EVERY site that replaces
+    // `models` — there are three, and they each used to hand-clear the
+    // caches they happened to remember, which is how a cache added later
+    // silently kept serving stale rows after a same-SIZE model swap (the
+    // size guard in rebuild_fused_rows only catches length changes).
+    // One method, so adding a cache updates every invalidation site at once.
+    void invalidate_derived() noexcept {
+        search_keys.clear();
+        row_keys.clear();
+        display_labels.clear();
+        reason_flags.clear();
+        reason_epoch = 0;
+    }
+};
+
+// A provider the user is NOT signed into — rendered as a single "sign in to
+// <label>" offer at the bottom of the fused list. Stored on the Model so the
+// per-keystroke rebuild never re-derives auth from disk.
+struct SigninOffer {
+    std::string provider_id;
+    std::string label;
+};
+
+// A single rendered row in the FUSED cross-provider picker: a concrete
+// (provider, model) the user can switch to atomically, OR — when
+// `model.id` is empty and `authed` is false — a "sign in to <provider>"
+// offer that routes into the login flow. Pure value type: the reducer
+// builds a vector of these and the view renders it; selection is keyed by
+// (provider_id, model.id) identity so async catalog merges never move the
+// cursor's logical target.
+struct FusedRow {
+    std::string provider_id;
+    std::string label;                    // provider display name
+    // The canonical, provider-uniform MODEL label the view renders and
+    // highlights — the SAME string match_positions index into. Computed
+    // in build_fused_rows via FusedInputs::label_fn (ui::model_display_
+    // label), so the fused picker reads identically to the per-provider
+    // one. Empty for sign-in offer rows (no model). Falls back to the
+    // raw display_name/id when no label_fn is injected (unit tests that
+    // call build_fused_rows directly).
+    std::string model_label;
+    ModelInfo   model;                    // empty id ⇒ "sign in" offer
+    bool        authed = true;
+    bool        active = false;           // == current provider + model
+    bool        recent = false;           // belongs in the RECENT section
+    bool        reasons = false;          // model can reason (precomputed at
+                                          // build so the view never decodes
+    // Capability tier, precomputed alongside `reasons` for the same reason:
+    // ModelCapabilities::tier_for tokenises the id and runs several substring
+    // scans, and the view touches every visible row EVERY FRAME. 0..3 maps to
+    // Tier::Weak..Flagship.
+    std::uint8_t tier = 0;
+                                          // caps per row per frame)
+    // FALSE only when the provider positively reported that this model cannot
+    // call tools (Ollama's /api/show probe). Such a model cannot drive the
+    // agent at all — it can only chat — so the picker must say so BEFORE the
+    // pick, not leave the user wondering why nothing happens. Unknown (the
+    // common case: hosted providers don't advertise this) stays true.
+    //
+    // Deliberately NOT here: the account. A model is identified by
+    // (provider, model) — the account is which credential that provider is
+    // currently using, orthogonal to model choice and switchable underneath
+    // a fixed selection. Putting it on a model row would imply picking a
+    // model picks an account (it does not: switch_to_model_ref resolves the
+    // provider's ACTIVE credential) and would repeat one provider-level fact
+    // on every one of its rows. Account lives on the provider/account picker
+    // and the status bar, where it is actionable.
+    bool tool_capable = true;
+    // Fuzzy-match byte offsets into the model NAME (display_name, else id) for
+    // the current query — the chars the view highlights (fzf-style) so a big
+    // filtered list shows WHY each row matched. Empty when no query / matched
+    // only on the provider name. Computed once per keystroke in build.
+    std::vector<int> match_positions;
+
+    [[nodiscard]] bool is_signin_offer() const noexcept {
+        return !authed && model.id.value.empty();
+    }
+    [[nodiscard]] ModelRef ref() const {
+        return ModelRef{provider_id, model.id.value};
+    }
+};
+
+// Canonical wire id: strip agentty's internal extended-context markers
+// (`[1m]` / `[2m]`) so the raw provider id goes on the wire. The suffix is a
+// PICKER-ONLY marker (it selects the 1M/2M window + the context beta); the
+// upstream API has never heard of it and 404s on `claude-sonnet-5[1m]`. This
+// mirrors Claude Code's `Yu()` (which strips /\[(1|2)m\]/gi). Every transport
+// MUST route req.model through this before putting it in the request body.
+[[nodiscard]] inline std::string wire_model_id(std::string_view id) {
+    std::string out;
+    out.reserve(id.size());
+    for (std::size_t i = 0; i < id.size();) {
+        if (id[i] == '[' && i + 3 < id.size() && id[i + 2] == 'm'
+            && id[i + 3] == ']'
+            && (id[i + 1] == '1' || id[i + 1] == '2')) {
+            i += 4;   // skip "[1m]" / "[2m]"
+            continue;
+        }
+        out.push_back(id[i]);
+        ++i;
+    }
+    return out;
+}
 
 // ============================================================================
 // ModelCapabilities — typed knowledge about a model derived from its id.
@@ -57,7 +303,7 @@ struct ModelCapabilities {
     // Fable / Mythos are the 2026 flagship lane (Fable 5 = general-access,
     // Mythos 5 = restricted; same underlying model). They sit ABOVE Opus in
     // the hierarchy and share Opus-class specs (1M ctx, 128k output, effort).
-    enum class Family : std::uint8_t { Unknown, Haiku, Sonnet, Opus, Fable, Mythos };
+    enum class Family : std::uint8_t { Unknown, Haiku, Sonnet, Opus, Fable, Mythos, Gpt };
 
     Family family = Family::Unknown;
     // Generation extracted as an int. 0 = unknown / pre-4. Use the
@@ -85,11 +331,60 @@ struct ModelCapabilities {
     // Inference lives entirely in from_id (no network probe exists).
     bool weak_tool_use = false;
 
+    // Parameter count in BILLIONS parsed from the id's size tag
+    // (qwen3-coder:480b -> 480, qwen3:8b -> 8), 0 when the id carries none
+    // (every hosted Claude/GPT id, and local ids that name a version like
+    // `glm-4.6`). Set by from_id; the only capability signal a custom host
+    // reliably gives us, and what lets tier() grade an unknown family
+    // instead of calling everything Mid.
+    int params_b = 0;
+
+    // This is an OpenAI-Chat-wire model that exposes configurable reasoning
+    // via the top-level `reasoning_effort` enum (low|medium|high) — it is NOT
+    // in the Claude/GPT `Family` ladder but still supports effort control.
+    // Covers Mistral (Small 4 / Medium 3.5 — adjustable reasoning),
+    // DeepSeek-Reasoner/R1, xAI Grok reasoning, and Gemini `*-thinking`.
+    // Decoded in from_id; consulted by supports_effort(). (Mistral's Magistral
+    // reasons natively and REJECTS reasoning_effort, so it is NOT included.)
+    // Kept ORTHOGONAL to `family` so tier/context/output ceilings (which key
+    // off family+generation) are completely unaffected — only the effort
+    // gates read this flag. These models take low/medium/high only (no
+    // `max`/`xhigh`, which are Claude/GPT extensions), so the ladder gates
+    // below deliberately do NOT open for reasoning_compat.
+    bool reasoning_compat = false;
+
+    // The model's effort enum is BINARY: it accepts only {none, high} and
+    // 400s on low/medium (and every Claude/GPT extension). This is Mistral's
+    // platform-wide contract — probing api.mistral.ai shows every reasoning
+    // model there (mistral-medium 3.5+, mistral-small 4, magistral) rejects
+    // low|medium|minimal|xhigh|max with "supported values: [high, none]".
+    // Decoded from the id's "stral" house naming (mistral/magistral/devstral/
+    // ministral/leanstral …) so the picker ladder collapses to off→high and
+    // clamp/wire promote any stale low/medium pick to high instead of 400ing.
+    // Orthogonal to reasoning_compat: this only shapes WHICH levels exist,
+    // reasoning_compat (+ catalog/overrides) decides IF effort exists.
+    bool effort_high_only = false;
+
+    // ── Exact effort-value SET (the models.dev / learned-caps shape) ─────
+    // When effort_set_known, `effort_set` is the EXACT set of ON levels this
+    // model's API accepts, one bit per Effort (see effort_bit). 0 + known =
+    // the model rejects reasoning_effort entirely. This is the ground-truth
+    // representation every other effort field approximates: family gates,
+    // reasoning_compat and effort_high_only are all just DERIVATIONS used
+    // when no exact set is known. Populated by resolved_caps() from (in
+    // precedence order) the learned-from-rejection registry (the provider
+    // TOLD us via a 400 what it accepts) and the models.dev snapshot.
+    // Never set by the constexpr from_id — static inference only guesses.
+    std::uint8_t effort_set       = 0;
+    bool         effort_set_known = false;
+
     [[nodiscard]] constexpr bool is_haiku()  const noexcept { return family == Family::Haiku; }
     [[nodiscard]] constexpr bool is_sonnet() const noexcept { return family == Family::Sonnet; }
     [[nodiscard]] constexpr bool is_opus()   const noexcept { return family == Family::Opus; }
     [[nodiscard]] constexpr bool is_fable()  const noexcept { return family == Family::Fable; }
     [[nodiscard]] constexpr bool is_mythos() const noexcept { return family == Family::Mythos; }
+    // OpenAI gpt-5.x (ChatGPT/Codex Responses line: gpt-5.6-sol, gpt-5.4, …).
+    [[nodiscard]] constexpr bool is_gpt()    const noexcept { return family == Family::Gpt; }
     // Fable/Mythos share Opus-class capabilities; group them for the gates
     // below so a single check covers the whole flagship lane.
     [[nodiscard]] constexpr bool is_flagship() const noexcept {
@@ -119,22 +414,234 @@ struct ModelCapabilities {
             return generation > 4 || (generation == 4 && revision >= 5);
         if (family == Family::Sonnet)
             return generation > 4 || (generation == 4 && revision >= 6);
+        // OpenAI gpt-5.x (ChatGPT/Codex): the whole line is effort-driven
+        // (reasoning.effort low..ultra; medium is the account default). The
+        // Responses backend expects an effort on every turn, so expose it.
+        if (family == Family::Gpt)
+            return generation >= 5;
+        // OpenAI-Chat-wire reasoning models (Mistral Small/Medium, DeepSeek-
+        // Reasoner, Grok reasoning, Gemini thinking): top-level `reasoning_
+        // effort` low|medium|high. Not in the family ladder, gated purely by
+        // the decoded flag (or a user override) — see reasoning_compat above.
+        if (reasoning_compat)
+            return true;
         return false;
     }
     [[nodiscard]] constexpr bool supports_effort_max() const noexcept {
         if (!supports_effort()) return false;
+        // Compat reasoning models expose a 3-level enum (low|medium|high) only;
+        // `max`/`xhigh` are Claude/GPT-lane extensions. Cap here so a stale Max
+        // pick degrades to `high` in effort_wire_for rather than being sent.
+        if (reasoning_compat) return false;
         if (family == Family::Fable || family == Family::Mythos)
             return true;  // flagship lane takes every level incl. max
         if (family == Family::Opus)
             return generation > 4 || (generation == 4 && revision >= 6);
+        // gpt-5.6 flagship line (sol/terra/luna) accepts `max`; earlier
+        // gpt-5.x (5.5/5.4) top out at xhigh.
+        if (family == Family::Gpt)
+            return generation > 5 || (generation == 5 && revision >= 6);
         return true;  // any effort-capable Sonnet (4.6+) also takes `max`
     }
     [[nodiscard]] constexpr bool supports_effort_xhigh() const noexcept {
         if (!supports_effort()) return false;
+        if (reasoning_compat) return false;  // 3-level enum only — see above
         if (family == Family::Fable || family == Family::Mythos)
             return true;  // flagship lane exposes the full ladder
+        // Every current gpt-5.x model supports xhigh.
+        if (family == Family::Gpt) return true;
         return family == Family::Opus
             && (generation > 4 || (generation == 4 && revision >= 7));
+    }
+
+    // Anthropic thinking-mode selection (the interface changed at the 4.6
+    // boundary). TRUE => send thinking:{type:"adaptive"} + output_config.effort;
+    // FALSE => send the legacy thinking:{type:"enabled", budget_tokens:N}.
+    //
+    //   • Opus/Sonnet 4.5 and earlier: ONLY "enabled" — "adaptive" 400s
+    //     ("adaptive thinking is not supported on this model").
+    //   • Opus 4.6: both accepted; we prefer adaptive (the forward path).
+    //   • Opus 4.7 / 4.8, Sonnet 4.6+, and the flagship 5+ lane: ONLY
+    //     "adaptive" ("enabled"/budget_tokens 400s).
+    // Unknown ids default to adaptive (every current flagship is 4.6+; a
+    // stale-guess 400 self-heals — but see transport.cpp for the exact wire).
+    [[nodiscard]] constexpr bool uses_adaptive_thinking() const noexcept {
+        if (family == Family::Fable || family == Family::Mythos)
+            return generation >= 5;
+        if (family == Family::Opus || family == Family::Sonnet)
+            return generation > 4 || (generation == 4 && revision >= 6);
+        // Non-Claude families don't use this interface at all; the caller
+        // only consults this on the Anthropic wire.
+        return generation >= 5;
+    }
+
+    // ── Context-window detection (the 1M-window question) ────────────────
+    // Verified against the Claude Code binary's model catalog (each entry
+    // carries `context: {window:200000, supports_1m_beta, supports_1m_suffix}`).
+    // Claude Code does NOT auto-detect 1M from the account tier: the base
+    // window is ALWAYS 200k, and 1M is an explicit picker VARIANT the user
+    // selects — an id ending in `[1m]` (its `Yu()` strips /\[(1|2)m\]/gi, so
+    // a future `[2m]` is anticipated too). The variant is only offered when
+    // the model's catalog entry has `supports_1m_suffix:true` AND the account
+    // holds `context_1m_entitlement`. agentty mirrors this exactly: the
+    // `[1m]` suffix sets extended_context_1m (below, in from_id) which both
+    // sends the context-1m beta and widens context_window() to 1M.
+    //
+    // supports_1m_suffix(): may this model be offered a `[1m]` variant? Per
+    // Claude Code's catalog the Sonnet-4 line, Opus-4 line, and Haiku 4.5 all
+    // carry supports_1m_suffix:true; older (gen<=3) models do not. The
+    // flagship next-gen lane (Fable/Mythos 5+) is treated as 1M-capable too.
+    [[nodiscard]] constexpr bool supports_1m_suffix() const noexcept {
+        if (family == Family::Sonnet) return generation >= 4;
+        if (family == Family::Opus)   return generation >= 4;
+        if (family == Family::Haiku)  return generation >= 4;
+        if (family == Family::Fable || family == Family::Mythos)
+            return generation >= 5;
+        return false;
+    }
+
+    // The model's context window in TOKENS — the ctx-% and auto-compaction
+    // denominator.
+    //
+    // This rung speaks ONLY for the Claude families, where 200k is the
+    // published base for every generation and `[1m]` is the one documented
+    // widening. That is knowledge, not a guess.
+    //
+    // It used to answer 200k for ANY known family, which swept in
+    // Family::Gpt — and GPT windows are not 200k. gpt-5.4 is 400k, gpt-4.1
+    // is 1M, and neither is inferable from the id. So a Copilot session
+    // whose catalog had not loaded yet got a 200k denominator on a 400k
+    // model: the gauge read double the real usage and auto-compaction fired
+    // at roughly half the thread it should have, silently throwing away
+    // context the model could still see.
+    //
+    // Returning 0 is the honest answer for a family whose window we do not
+    // know. 0 means UNKNOWN, and the resolver's later rungs — models.dev,
+    // the env escape hatch, the conservative default — are built for
+    // exactly that. A confident wrong number outranks all of them; an
+    // honest zero lets the ladder do its job.
+    //
+    // Note the asymmetry that makes this safe either way: an over-estimate
+    // fails the turn on the wire, an under-estimate only compacts sooner
+    // than it had to.
+    [[nodiscard]] constexpr int context_window() const noexcept {
+        if (extended_context_1m) return 1'000'000;   // explicit [1m] variant
+        switch (family) {
+            case Family::Haiku:
+            case Family::Sonnet:
+            case Family::Opus:
+            case Family::Fable:
+            case Family::Mythos:
+                return 200'000;      // published Claude base, every generation
+            case Family::Gpt:
+            case Family::Unknown:
+                break;               // not inferable from the id — say so
+        }
+        return 0;   // unknown: caller falls back to a catalog or probe
+    }
+
+    // ── Capability tier: a provider-RELATIVE strength ordinal ────────────
+    //
+    // No provider ships a "power" number; /v1/models returns ids, not a
+    // strength metric. So we derive a coarse tier from the fields already
+    // decoded from the id — the vendor's OWN naming is the ordering (Haiku <
+    // Sonnet < Opus <= Fable/Mythos; gpt-5-mini < gpt-5 < gpt-5.6; local models
+    // by parameter count). Meaningful for comparing models WITHIN one provider
+    // (the model router picks the cheapest capable model the active provider
+    // offers); NOT an absolute cross-vendor score.
+    //
+    //   0  weak / tiny / unreliable at tools     — never route work here
+    //   1  small-but-capable "cheap lane"         — Haiku, *-mini/nano, 7–13B
+    //   2  mid / workhorse                        — Sonnet, plain gpt-5.x, 14–69B
+    //   3  flagship                               — Opus/Fable/Mythos, gpt-5.6+, 70B+
+    enum class Tier : std::uint8_t { Weak = 0, Cheap = 1, Mid = 2, Flagship = 3 };
+
+    [[nodiscard]] constexpr Tier tier() const noexcept {
+        if (weak_tool_use) return Tier::Weak;
+        // Flagship lane: Opus/Fable/Mythos, or a gpt-5.x that takes `max`.
+        if (is_flagship()) return Tier::Flagship;
+        if (is_gpt() && supports_effort_max()) return Tier::Flagship;
+        // Cheap lane: Haiku is the canonical small hosted Claude.
+        if (is_haiku()) return Tier::Cheap;
+        // Mid lane: Sonnet and the plain gpt-5.x workhorse line.
+        if (is_sonnet() || is_gpt()) return Tier::Mid;
+        // Unknown family (local Ollama / OpenAI-compat / any custom host).
+        //
+        // Use the params-in-B tag the id carries. This is the difference
+        // between Smart Mode working and Smart Mode being a no-op on a
+        // custom host: EVERY unknown model used to return Tier::Mid, so a
+        // 480B and a 4B were the same tier. The consequences, all reported
+        // in the field:
+        //
+        //   • Utility asks cheapest_capable_model for something strictly
+        //     BELOW the parent's tier. With everything Mid, nothing is
+        //     below Mid, so it fell back to the parent — the flagship ran
+        //     every trivial turn.
+        //   • Implementation asks for the strongest MID model. With
+        //     everything Mid that is a free-for-all over the whole
+        //     catalog, so it could pick a model BIGGER than the parent
+        //     (measured: parent qwen3-coder:480b -> deepseek-v3.1:671b).
+        //   • De-escalation from Strategic could therefore never happen,
+        //     no matter how the env knobs were tuned.
+        //
+        // Thresholds follow the sizes the local ecosystem actually ships,
+        // and are deliberately coarse — this is a cost-routing hint, not a
+        // benchmark. 70B+ is the flagship lane (llama-70b, qwen3-coder:480b,
+        // kimi-k2:1t, deepseek 671b); 14-69B is the mid workhorse lane
+        // (qwen3:32b, mistral-small:24b); anything smaller that survived
+        // the weak check is the cheap lane (qwen3:8b, 4b).
+        const int pb = params_b;
+        if (pb >= 70) return Tier::Flagship;
+        if (pb >= 14) return Tier::Mid;
+        if (pb >  0)  return Tier::Cheap;
+        // No size tag at all (`glm-4.6`, `minimax-m2`, a bare custom name).
+        // Assume mid-capable: it is the safe middle — it never silently
+        // promotes an unknown to flagship, and never demotes a capable
+        // model into the cheap lane where it would run trivial turns only.
+        return Tier::Mid;
+    }
+
+    // Same tier, but also honouring the `mini`/`nano`/`small`/`lite` id hints
+    // that mark a provider's explicitly-cheaper variant (gpt-5-mini,
+    // gpt-4o-mini, *-nano). Those decode into the same family as their full
+    // sibling, so the id string is the only distinguishing signal; a router
+    // holding the id passes it here to demote them to the Cheap lane.
+    [[nodiscard]] static constexpr Tier tier_for(std::string_view id) noexcept {
+        const Tier base = from_id(id).tier();
+        if (base == Tier::Weak) return base;
+        auto has = [&](std::string_view n) {
+            if (n.size() > id.size()) return false;
+            for (std::size_t i = 0; i + n.size() <= id.size(); ++i) {
+                bool eq = true;
+                for (std::size_t j = 0; j < n.size(); ++j) {
+                    char a = id[i + j], b = n[j];
+                    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                    if (a != b) { eq = false; break; }
+                }
+                if (eq) return true;
+            }
+            return false;
+        };
+        const bool cheap_hint =
+            has("mini") || has("nano") || has("small") || has("lite")
+            || has("flash") || has("turbo");
+        // OpenAI o-series reasoning models (o1/o3/o4): the base o* variant is a
+        // pricey, slow reasoning model — NOT a cheap workhorse — so it must
+        // never be picked as a "cheaper Mid". Only the -mini/-nano o-series
+        // variants are genuinely cheap. Detect an `o<digit>` token so `o1`,
+        // `o3-pro` rank Flagship while `o1-mini`, `o3-mini` fall to Cheap.
+        auto is_o_series = [&]() {
+            for (std::size_t i = 0; i + 1 < id.size(); ++i) {
+                const bool at_start = (i == 0) || id[i - 1] == '-' || id[i - 1] == '/';
+                if (at_start && (id[i] == 'o' || id[i] == 'O')
+                    && id[i + 1] >= '1' && id[i + 1] <= '9')
+                    return true;
+            }
+            return false;
+        };
+        if (is_o_series()) return cheap_hint ? Tier::Cheap : Tier::Flagship;
+        if (cheap_hint) return Tier::Cheap;
+        return base;
     }
 
     // Decode an id string. Pure / noexcept / branchless on the hot path.
@@ -171,6 +678,10 @@ struct ModelCapabilities {
                 else if (tok == "opus")   caps.family = Family::Opus;
                 else if (tok == "fable")  caps.family = Family::Fable;
                 else if (tok == "mythos") caps.family = Family::Mythos;
+                // NOTE: `gpt` is NOT matched here. gpt-4o / gpt-4.1 / gpt-3.5
+                // must stay Family::Unknown (generic OpenAI-compat: 16k cap,
+                // no effort). Only the gpt-5.x Responses line gets Family::Gpt,
+                // set below once the version token confirms generation >= 5.
                 else if (was_expecting_revision) {
                     // Revision token — same 1-/2-digit plausibility check as
                     // the generation parse so a date can't slip through.
@@ -182,33 +693,111 @@ struct ModelCapabilities {
                     }
                     if (ok) caps.revision = r;
                 }
+                else if (prev == "gpt") {
+                    // OpenAI schema packs the version into ONE dotted token
+                    // after `gpt` (`gpt-5.6-sol` → "5.6"; `gpt-5` → "5").
+                    // Parse the integer part as the generation and the
+                    // fractional part as the revision so the effort gates can
+                    // tell gpt-5.6 (accepts `max`) from gpt-5.4 (xhigh top).
+                    // Only the gpt-5+ Responses line becomes Family::Gpt;
+                    // gpt-4o / gpt-4.1 / gpt-3.5 stay Unknown (generic compat).
+                    int g = 0, r = 0;
+                    bool ok = !tok.empty(), frac = false, any_frac = false;
+                    int gd = 0, rd = 0;   // digit counts, per part
+                    for (char c : tok) {
+                        if (c == '.') {
+                            if (frac || gd == 0) { ok = false; break; }
+                            frac = true;
+                            continue;
+                        }
+                        if (c < '0' || c > '9') { ok = false; break; }
+                        if (frac) { r = r * 10 + (c - '0'); ++rd; any_frac = true; }
+                        else      { g = g * 10 + (c - '0'); ++gd; }
+                    }
+                    // Bounded exactly like the Claude branch: a version part
+                    // is 1-2 digits. Without the digit-count cap a token like
+                    // `gpt-20250514` would parse as generation 20250514 and
+                    // pass `g <= 99` only by accident of the upper bound.
+                    if (ok && gd >= 1 && gd <= 2 && rd <= 2 && g >= 5 && g <= 99) {
+                        caps.family = Family::Gpt;
+                        caps.generation = g;
+                        caps.generation_4_or_later = true;
+                        if (any_frac) caps.revision = r;
+                    }
+                }
                 else if (prev == "haiku" || prev == "sonnet" || prev == "opus"
                          || prev == "fable" || prev == "mythos") {
-                    // Generation token — parse as int (no allocations). Only
-                    // the NEW id schema puts the generation right after the
-                    // family (`claude-sonnet-4-5-...`). The LEGACY schema
-                    // (`claude-3-5-sonnet-20241022`) puts a date there
-                    // instead; an 8-digit date must NOT be read as
-                    // generation 20241022 (which would falsely look like a
-                    // 4-or-later model). Reject any token that isn't a
-                    // plausible 1- or 2-digit generation.
-                    int g = 0;
-                    bool ok = !tok.empty() && tok.size() <= 2;
+                    // Version token — parse as int (no allocations). TWO
+                    // spellings reach this branch and both are live:
+                    //
+                    //   DASHED  `claude-opus-4-7`   gen in this token, the
+                    //                               revision in the NEXT one.
+                    //   DOTTED  `claude-opus-4.7`   gen AND revision packed
+                    //                               into this one token.
+                    //
+                    // The dotted form is what GitHub Copilot's /models
+                    // returns (`claude-opus-4.7`, `claude-sonnet-5.5`,
+                    // `claude-fable-5.1`) and it used to be REJECTED here by
+                    // a `size() <= 2` length check — '4', '.', '7' is three
+                    // chars — so every dotted Copilot id decoded to
+                    // generation 0 / revision 0 while keeping its family.
+                    // That is the worst failure mode available: `is_opus()`
+                    // stayed true, so nothing looked unknown, but every gate
+                    // that reads the NUMBER silently answered "old model" —
+                    // effort `max`/`xhigh` withheld from Opus 4.7+, the
+                    // 1M-context rung skipped, and the label rendered as a
+                    // bare "Opus" so `claude-opus-4.7` and `claude-opus-4.8`
+                    // folded to ONE picker row (the duplicate-looking rows in
+                    // #68 are the same bug seen from the other side).
+                    //
+                    // Parse both shapes here, exactly like the `gpt` branch
+                    // already does. The date guard that motivated the length
+                    // check is preserved and made explicit: the LEGACY schema
+                    // (`claude-3-5-sonnet-20241022`) puts an 8-digit date
+                    // after the family, and reading that as generation
+                    // 20241022 would falsely pass every `>= 4` gate. A
+                    // generation is 1-2 digits and a revision is 1-2 digits;
+                    // anything longer is not a version.
+                    int g = 0, r = 0;
+                    bool ok = !tok.empty(), frac = false, any_frac = false;
+                    int gd = 0, rd = 0;   // digit counts, per part
                     for (char c : tok) {
+                        if (c == '.') {
+                            // One dot only, and it must separate two digit
+                            // runs — `4.`, `.7` and `4.7.1` are not versions.
+                            if (frac || gd == 0) { ok = false; break; }
+                            frac = true;
+                            continue;
+                        }
                         if (c < '0' || c > '9') { ok = false; break; }
-                        g = g * 10 + (c - '0');
+                        if (frac) { r = r * 10 + (c - '0'); ++rd; any_frac = true; }
+                        else      { g = g * 10 + (c - '0'); ++gd; }
                     }
-                    if (ok) {
+                    // Same plausibility window for both parts — this is what
+                    // keeps `20241022` (8 digits) out, dotted or not.
+                    if (ok && gd >= 1 && gd <= 2 && rd <= 2 && (!frac || any_frac)) {
                         caps.generation = g;
                         caps.generation_4_or_later = (g >= 4);
-                        expect_revision = true;  // next int token is the revision
+                        if (any_frac) {
+                            // Dotted: the revision came with the generation,
+                            // so the NEXT token is a variant word
+                            // (`-latest`, `-thinking`), never a revision.
+                            caps.revision = r;
+                        } else {
+                            expect_revision = true;  // dashed: revision is next
+                        }
                     }
                 }
                 prev = tok;
             }
             start = i + 1;
         }
-        caps.weak_tool_use = infer_weak_tool_use(id, caps);
+        // Parse the size tag BEFORE the weak inference — both read it, and
+        // tier() reads it later off the stored field.
+        caps.params_b          = params_b_from_id(id);
+        caps.weak_tool_use     = infer_weak_tool_use(id, caps);
+        caps.reasoning_compat  = infer_reasoning_compat(id, caps);
+        caps.effort_high_only  = infer_effort_high_only(id);
         return caps;
     }
 
@@ -220,7 +809,7 @@ private:
     //   - Local families with native/trained tool-calling: qwen3, llama3.1,
     //     llama3.3, mistral / mixtral / ministral, command-r, hermes,
     //     firefunction, functionary, devstral, codestral, gpt-oss, granite,
-    //     glm-4, deepseek (v3/r1).
+    //     glm-4, deepseek (v3/v4/r1/reasoner/chat), grok, gemini, magistral.
     //   - Any model >= ~14B parameters (large enough to follow tool schemas).
     //
     // Weak (treat with guards):
@@ -229,36 +818,29 @@ private:
     //     codellama, deepseek-coder, phi, gemma <= 9b, starcoder, stable-code).
     //   - Unknown ids default to NOT weak (assume capable) UNLESS the id
     //     carries a small-parameter tag.
-    [[nodiscard]] static constexpr bool infer_weak_tool_use(
-            std::string_view id, const ModelCapabilities& caps) noexcept {
-        // Known Claude family → always strong.
-        if (caps.is_known_family()) return false;
-
-        auto contains = [](std::string_view hay, std::string_view needle) {
-            if (needle.size() > hay.size()) return false;
-            for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
-                bool eq = true;
-                for (std::size_t j = 0; j < needle.size(); ++j) {
-                    char a = hay[i + j], b = needle[j];
-                    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
-                    if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
-                    if (a != b) { eq = false; break; }
-                }
-                if (eq) return true;
-            }
-            return false;
-        };
-
-        // Parameter size in billions, parsed from a `<N>[.<M>]b` token (e.g.
-        // qwen2.5-coder:7b, llama3.1:70b, mistral-small:24b, phi3:3.8b). The
-        // integer part is used (floor) — 1.7b counts as 1, 6.7b as 6. 0 =
-        // unknown. We scan for 'b'/'B' preceded by a numeric run (with an
-        // optional single '.' fraction) that starts at a separator.
+    //
+    // Parameter size in billions, parsed from a `<N>[.<M>]b` token in the id
+    // (qwen2.5-coder:7b, llama3.1:70b, qwen3-coder:480b, phi3:3.8b). The
+    // integer part is used (floor) — 1.7b counts as 1, 6.7b as 6. Returns 0
+    // when the id carries no size tag (every hosted Claude/GPT id, and local
+    // ids like `glm-4.6` that name a version rather than a size).
+    //
+    // Hoisted out of infer_weak_tool_use so the TIER can use it too. It used
+    // to be a local in that one function, which is why size only ever
+    // produced a binary weak/not-weak answer and never a tier gradient — the
+    // bug that made every Ollama model land in Tier::Mid.
+    [[nodiscard]] static constexpr int params_b_from_id(
+            std::string_view id) noexcept {
         int params_b = 0;
         for (std::size_t i = 0; i < id.size(); ++i) {
             const char c = id[i];
+            // 'b' = billions, 't' = TRILLIONS. The frontier open-weight
+            // models tag themselves in T (kimi-k2:1t), and without this they
+            // parsed as 0 == "no size tag" and fell to the Mid default — the
+            // largest models in the ecosystem landing in the middle lane.
             const bool is_b = (c == 'b' || c == 'B');
-            if (!is_b || i == 0) continue;
+            const bool is_t = (c == 't' || c == 'T');
+            if ((!is_b && !is_t) || i == 0) continue;
             // char after 'b' must not be a letter (so "bf16" etc. is skipped)
             if (i + 1 < id.size()) {
                 char n = id[i + 1];
@@ -286,8 +868,35 @@ private:
                 if (id[k] == '.') break;
                 v = v * 10 + (id[k] - '0');
             }
+            if (is_t) v *= 1000;                  // 1t == 1000b
             if (v > params_b) params_b = v;       // take the largest match
         }
+        return params_b;
+    }
+
+    [[nodiscard]] static constexpr bool infer_weak_tool_use(
+            std::string_view id, const ModelCapabilities& caps) noexcept {
+        // Known Claude family → always strong.
+        if (caps.is_known_family()) return false;
+
+        auto contains = [](std::string_view hay, std::string_view needle) {
+            if (needle.size() > hay.size()) return false;
+            for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+                bool eq = true;
+                for (std::size_t j = 0; j < needle.size(); ++j) {
+                    char a = hay[i + j], b = needle[j];
+                    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                    if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                    if (a != b) { eq = false; break; }
+                }
+                if (eq) return true;
+            }
+            return false;
+        };
+
+        // Parameter size in billions (0 = the id carries no size tag).
+        // Already parsed by from_id before this runs.
+        const int params_b = caps.params_b;
 
         // Tool-trained / instruction-strong local families → strong even at
         // smaller sizes.
@@ -301,7 +910,10 @@ private:
             contains(id, "devstral")     || contains(id, "codestral")  ||
             contains(id, "gpt-oss")      || contains(id, "granite")    ||
             contains(id, "glm-4")        || contains(id, "deepseek-v3")||
-            contains(id, "deepseek-r1");
+            contains(id, "deepseek-v4")  || contains(id, "deepseek-r1")||
+            contains(id, "deepseek-reasoner") || contains(id, "deepseek-chat") ||
+            contains(id, "grok")         || contains(id, "gemini")      ||
+            contains(id, "magistral");
         // A strong family at >= ~7B is reliable; only flag it weak if it's
         // explicitly tiny (<= 3B), where even good families struggle.
         if (strong_family) return params_b != 0 && params_b <= 3;
@@ -325,12 +937,939 @@ private:
         if (params_b != 0 && params_b <= 8) return true;
         return false;
     }
+
+    // Decide whether an OpenAI-Chat-wire model exposes configurable reasoning
+    // via the top-level `reasoning_effort` enum (low|medium|high), so the
+    // effort chip and `reasoning_effort` payload should light up for it.
+    //
+    // This is deliberately id-string inference (no network probe), mirroring
+    // infer_weak_tool_use. Claude/GPT are handled by the `family` ladder and
+    // must NOT set this flag (their effort is family-gated). We recognise the
+    // hosted reasoning lines that accept the top-level `reasoning_effort`:
+    //   • Mistral — the ADJUSTABLE-reasoning models take reasoning_effort:
+    //       - "mistral-medium" (Medium 3.5, i.e. mistral-medium-latest /
+    //         mistral-medium-3-5 …)
+    //       - "mistral-small"  (Small 4, i.e. mistral-small-latest /
+    //         mistral-small-3-* …)
+    //     Mistral's "magistral-*" models reason NATIVELY and REJECT the
+    //     parameter with HTTP 422 — so they are explicitly EXCLUDED below.
+    //     (Verified against Mistral's reasoning docs, issue #20.)
+    //   • DeepSeek "deepseek-reasoner" / "deepseek-r1" (r1 distills too).
+    //   • xAI Grok reasoning lines: "grok-4*", "grok-3-mini" (grok-3-mini
+    //     reasons; grok-code-fast is a non-reasoning coder → excluded).
+    //   • Google Gemini "*-thinking" via the OpenAI compat shim.
+    //   • OpenAI o-series proxied over the Chat wire ("o1", "o3", "o4-mini").
+    //
+    // A user override (AGENTTY_FORCE_EFFORT, read at runtime) is applied
+    // separately by effort_capable() at the effort chokepoints — it is
+    // intentionally NOT consulted here so from_id() stays a pure constexpr
+    // decode (no getenv on the hot path, usable in constant expressions).
+    [[nodiscard]] static constexpr bool infer_reasoning_compat(
+            std::string_view id, const ModelCapabilities& caps) noexcept {
+        // Claude/GPT are family-gated; never route them through this flag.
+        if (caps.is_known_family() || caps.family == Family::Gpt) return false;
+
+        auto contains = [](std::string_view hay, std::string_view needle) {
+            if (needle.size() > hay.size()) return false;
+            for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+                bool eq = true;
+                for (std::size_t j = 0; j < needle.size(); ++j) {
+                    char a = hay[i + j], b = needle[j];
+                    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                    if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                    if (a != b) { eq = false; break; }
+                }
+                if (eq) return true;
+            }
+            return false;
+        };
+
+        // Exclusions FIRST — non-reasoning coder lines and native-reasoning
+        // models that share a prefix with a reasoning family. These must lose
+        // to nothing below, so return early.
+        //   • grok-code-fast: a non-reasoning coder (shares "grok").
+        //   • magistral-*: reasons NATIVELY and REJECTS reasoning_effort (422),
+        //     even though it shares the "mistral"… no — "magistral" is a
+        //     distinct token, but guard explicitly so a future substring match
+        //     can't grab it.
+        if (contains(id, "grok-code")) return false;
+        if (contains(id, "magistral")) return false;
+
+        return contains(id, "mistral-small")     // Mistral Small 4 (adjustable)
+            || contains(id, "mistral-medium")    // Mistral Medium 3.5 (adjustable)
+            || contains(id, "deepseek-reasoner")
+            || contains(id, "deepseek-r1")
+            || contains(id, "grok-4")
+            || contains(id, "grok-3-mini")
+            || contains(id, "gpt-oss")           // OpenAI open-weight reasoner
+            || contains(id, "-thinking")
+            || contains(id, "o1")
+            || contains(id, "o3")
+            || contains(id, "o4-mini");
+    }
+
+    // Mistral-platform models: the reasoning_effort enum is BINARY. Probing
+    // api.mistral.ai (Nov 2026): every model that takes the parameter accepts
+    // ONLY {none, high} and 400s on low/medium/minimal/xhigh/max with
+    // "supported values: [high, none]". Recognised by the house "-stral"
+    // naming (mistral / magistral / ministral / devstral / codestral /
+    // voxtral / leanstral) — non-reasoning lines in that family have effort
+    // OFF anyway, so an over-match here is harmless (the flag only shapes the
+    // ladder when effort is on). Pure id decode: correct from frame 1, before
+    // any catalog fetch lands.
+    [[nodiscard]] static constexpr bool infer_effort_high_only(
+            std::string_view id) noexcept {
+        auto contains = [](std::string_view hay, std::string_view needle) {
+            if (needle.size() > hay.size()) return false;
+            for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+                bool eq = true;
+                for (std::size_t j = 0; j < needle.size(); ++j) {
+                    char a = hay[i + j], b = needle[j];
+                    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                    if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + 32);
+                    if (a != b) { eq = false; break; }
+                }
+                if (eq) return true;
+            }
+            return false;
+        };
+        return contains(id, "stral");
+    }
 };
+
+// ── Provider scope for capability keys ───────────────────────────────
+// The SAME bare model id can live on several providers with DIFFERENT
+// contracts (gpt-oss-120b on Groq vs Cerebras vs local Ollama). Capability
+// facts are therefore recorded under a scoped key "provider/model" and
+// looked up scoped-first, bare-second. The provider layer pushes the active
+// provider id here on every switch (provider::select), so resolved_caps —
+// which only receives a model id — can consult the scoped fact without the
+// domain layer depending on provider state.
+namespace caps_scope_detail {
+inline maya::snapshot<std::string>& val() { static maya::snapshot<std::string> s; return s; }
+} // namespace caps_scope_detail
+
+inline void set_caps_provider_scope(std::string provider_id) {
+    caps_scope_detail::val().store(std::move(provider_id));
+}
+[[nodiscard]] inline std::string caps_provider_scope() {
+    return caps_scope_detail::val().get();
+}
+// "provider/model" when a scope is set; "" when not (callers then use bare).
+// The one-arg form uses the ACTIVE provider scope; pass `scope` explicitly
+// when resolving for a row that belongs to a DIFFERENT provider (the fused
+// picker renders every authed provider's models at once).
+// The model component is canonicalised (capkey::norm_model) so "3.5" vs
+// "3-5" vs case variants are one key — the registries' writers normalise
+// identically, making spelling-based misses structurally impossible.
+[[nodiscard]] inline std::string scoped_caps_key(std::string_view model_id,
+                                                 std::string_view scope) {
+    if (scope.empty()) return {};
+    return capkey::scoped(scope, model_id);
+}
+[[nodiscard]] inline std::string scoped_caps_key(std::string_view model_id) {
+    return scoped_caps_key(model_id, caps_provider_scope());
+}
+
+// ── Live-catalog reasoning registry ──────────────────────────────────────────
+// Some providers DECLARE per-model reasoning support in their /v1/models
+// payload (Mistral: capabilities.reasoning true|false). That live flag beats
+// id inference — it tracks the provider's actual dispatch table, which drifts
+// under our static heuristics in BOTH directions (magistral-* now ACCEPTS
+// reasoning_effort though from_id excludes it; dated mistral-medium-2505/2508
+// REJECT it though the substring matches). list_models() records the flag
+// here; resolved_caps() folds it in UNDER the user's explicit override but
+// OVER the from_id guess. Same lock discipline as the override registry
+// (atomic emptiness probe → shared lock), since this too sits on the render
+// path.
+// ── Capability epoch ──────────────────────────────────────────────────────
+// Monotonic counter bumped by EVERY capability-registry write (catalog
+// reasoning declarations, declared/learned effort sets, user overrides).
+// Callers that memoise resolved_caps-derived values (the fused picker's
+// per-model reason_flags) stamp the epoch at build time and rebuild when it
+// moves — so a models.dev refresh landing mid-session invalidates exactly
+// the caches that depend on it, and nothing polls.
+namespace caps_epoch_detail {
+inline std::atomic<std::uint64_t>& counter() {
+    static std::atomic<std::uint64_t> c{1};
+    return c;
+}
+} // namespace caps_epoch_detail
+[[nodiscard]] inline std::uint64_t caps_epoch() noexcept {
+    return caps_epoch_detail::counter().load(std::memory_order_relaxed);
+}
+inline void bump_caps_epoch() noexcept {
+    caps_epoch_detail::counter().fetch_add(1, std::memory_order_relaxed);
+}
+
+
+// Normalise a registry key in place: the model component (after the last
+// '/', or the whole string when bare) goes through capkey::norm_model so
+// writers and readers agree byte-for-byte regardless of source spelling.
+[[nodiscard]] inline std::string norm_caps_key(std::string_view key) {
+    if (auto slash = key.rfind('/'); slash != std::string_view::npos) {
+        std::string out{key.substr(0, slash + 1)};
+        out += capkey::norm_model(key.substr(slash + 1));
+        return out;
+    }
+    return capkey::norm_model(key);
+}
+
+// The shape every registry below shares: a map of facts and the keys
+// poisoned by disagreeing sources, held in a jaal::snapshot.
+//
+// These are read on the per-frame render path and from every streaming turn
+// (resolved_caps) and written a handful of times a session (a catalog
+// refresh, a settings hydrate, a user override). That is a snapshot's shape
+// exactly: readers take one atomic load and never a lock, writers build a
+// new map and swap it in. With no lock there is no rank and no capability,
+// so a view, a reducer and a lock body can all read caps freely, and none of
+// them can be half of a deadlock.
+template <class V>
+struct Facts {
+    std::map<std::string, V> map;
+    std::set<std::string>    poisoned;
+};
+template <class V>
+struct Registry {
+    maya::snapshot<Facts<V>> facts;
+
+    // Record a fact for an exact key.
+    void set(std::string key, V v) {
+        (void)facts.update([](const Facts<V>& f, const std::string& k, const V& val) {
+            Facts<V> out = f;
+            out.map[k] = val;
+            return out;
+        }, std::move(key), v);
+    }
+    // Agree-or-poison merge for a key shared across sources.
+    void merge(std::string key, V v) {
+        (void)facts.update([](const Facts<V>& f, const std::string& k, const V& val) {
+            if (f.poisoned.count(k)) return f;
+            Facts<V> out = f;
+            if (auto it = out.map.find(k); it != out.map.end()) {
+                if (it->second != val) { out.map.erase(it); out.poisoned.insert(k); }
+                return out;
+            }
+            out.map[k] = val;
+            return out;
+        }, std::move(key), v);
+    }
+    // Drop one key. Returns whether anything is left.
+    bool erase(std::string key) {
+        return !facts.update([](const Facts<V>& f, const std::string& k) {
+            Facts<V> out = f;
+            out.map.erase(k);
+            return out;
+        }, std::move(key))->map.empty();
+    }
+    // Scoped-first, bare-tail fallback.
+    [[nodiscard]] std::optional<V> find(std::string_view scoped, std::string_view bare) const {
+        const auto f = facts.load();
+        if (f->map.empty()) return std::nullopt;
+        if (!scoped.empty())
+            if (auto it = f->map.find(std::string(scoped)); it != f->map.end()) return it->second;
+        if (auto it = f->map.find(std::string(bare)); it != f->map.end()) return it->second;
+        return std::nullopt;
+    }
+    // Replace everything (settings hydrate).
+    void replace(std::map<std::string, V> all) {
+        facts.store(Facts<V>{std::move(all), {}});
+    }
+    [[nodiscard]] std::map<std::string, V> snapshot() const { return facts.load()->map; }
+    [[nodiscard]] bool any() const { return !facts.load()->map.empty(); }
+};
+
+namespace catalog_reasoning_detail {
+inline Registry<bool>& reg() { static Registry<bool> r; return r; }
+// Keys whose recorded reasoning fact CONFLICTED across sources (one source
+// said reasons, another said not) are poisoned. Cross-provider aggregators
+// disagree about the SAME bare id (e.g. one lists `mistral-large-2402` as
+// reasoning, another as not) — and a flat bare namespace would otherwise be
+// last-writer-wins, silently lighting a reasoning chip on an instruct model.
+// A poisoned key is treated as "no info" so resolution falls through to the
+// scoped fact or id-inference instead of trusting a coin-flip.
+} // namespace catalog_reasoning_detail
+
+inline void set_catalog_reasoning(std::string model_id, bool reasons) {
+    bump_caps_epoch();
+    catalog_reasoning_detail::reg().set(norm_caps_key(model_id), reasons);
+}
+
+// Merge a fact that may share a key with a DIFFERENT source (the bare-tail
+// path in modelsdev). First writer records; a later writer that AGREES is a
+// no-op; a later writer that DISAGREES poisons the key so it reads as "no
+// info". Scoped keys never collide across providers, so they use the plain
+// setter above; only the ambiguous bare tail goes through here.
+inline void merge_catalog_reasoning(const std::string& raw_id, bool reasons) {
+    catalog_reasoning_detail::reg().merge(norm_caps_key(raw_id), reasons);
+}
+// Tri-state: 1 (catalog says reasons), 0 (catalog says not), -1 (no info).
+// Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
+[[nodiscard]] inline int catalog_reasoning_for(std::string_view model_id,
+                                               std::string_view scope = {}) {
+    if (!catalog_reasoning_detail::reg().any()) return -1;
+    auto scoped = scope.empty() ? scoped_caps_key(model_id)
+                                : scoped_caps_key(model_id, scope);
+    const auto v = catalog_reasoning_detail::reg().find(
+        std::move(scoped), std::string{capkey::norm_tail(model_id)});
+    return v ? (*v ? 1 : 0) : -1;
+}
+
+// DECLARED effort-value sets: a metadata source (models.dev snapshot, or a
+// provider that publishes its effort enum) names the exact ON levels a model
+// accepts. Sits BELOW the learned-from-rejection registry (ground truth from
+// the provider's own 400 beats third-party metadata) and below user
+// overrides, but ABOVE from_id derivation. Same keying and lock discipline
+// as the reasoning declarations above.
+namespace catalog_effort_detail {
+inline Registry<std::uint8_t>& reg() { static Registry<std::uint8_t> r; return r; }
+} // namespace catalog_effort_detail
+
+inline void set_catalog_effort_set(std::string model_id, std::uint8_t set) {
+    bump_caps_epoch();
+    catalog_effort_detail::reg().set(norm_caps_key(model_id), set);
+}
+
+// Bare-tail merge for the effort-set registry — same cross-provider collision
+// semantics as merge_catalog_reasoning: agree → keep, disagree → poison to
+// "no declaration" so resolution falls back to the scoped fact / id-inference.
+inline void merge_catalog_effort_set(const std::string& raw_id,
+                                     std::uint8_t set) {
+    catalog_effort_detail::reg().merge(norm_caps_key(raw_id), set);
+}
+// ── models.dev context-window declarations ──────────────────────────────
+//
+// The rung that gives every non-Claude model a real window.
+//
+// ModelCapabilities::from_id() reports 200k for a known family and 0 for
+// everything else — a Claude-shaped answer, because that is the family it
+// decodes. Measured against the live snapshot, that leaves 2698 models whose
+// real window is 1M or more reading as the 200k default: gemini-2.5-pro (1M),
+// gpt-4.1 (1M), qwen3-coder-plus (1M), llama-4-scout (10M). A model whose
+// window is understated by 5x compacts five times sooner than it needs to,
+// and the user is told a number nobody declared.
+//
+// Same shape as the reasoning and effort registries above, and the same
+// collision rule, because the hazard is identical: the SAME bare id is served
+// at different sizes by different hosts (qwen3-coder-plus is 256k on iflowcn
+// and 1M on alibaba-coding-plan-cn). So a scoped record is authoritative and
+// the shared bare key is merge-or-poison — two sources that disagree make the
+// key read as "no declaration" rather than letting one host's figure bleed
+// onto another's.
+//
+// This is the SECOND-TO-LAST rung deliberately (see resolve_context_window):
+// a live advertisement from the endpoint outranks it, because only the
+// gateway knows how IT serves the model and only the gateway can 400 on
+// overflow. Static metadata is the best guess available when nothing was
+// advertised — which, for the custom-host case, is most of the time.
+namespace catalog_context_detail {
+inline Registry<int>& reg() { static Registry<int> r; return r; }
+} // namespace catalog_context_detail
+
+inline void set_catalog_context_window(std::string model_id, int tokens) {
+    if (tokens <= 0) return;
+    bump_caps_epoch();
+    catalog_context_detail::reg().set(norm_caps_key(model_id), tokens);
+}
+
+// Bare-tail merge — same agree-or-poison semantics as the siblings.
+//
+// NOTE the key: norm_TAIL, not norm_caps_key. The bare namespace is keyed by
+// the tail precisely so a vendor-prefixed id and its bare form COLLIDE and
+// can poison each other; writing the prefixed key here would mean
+// "elsewhere/model" and "model" never meet, so disagreement could never be
+// detected and the reader (which looks up the tail) would miss every
+// prefixed write. That asymmetry is a real bug in a sibling registry; do not
+// copy it here.
+inline void merge_catalog_context_window(const std::string& raw_id, int tokens) {
+    if (tokens <= 0) return;
+    std::string key{capkey::norm_tail(raw_id)};
+    if (key.empty()) return;
+    catalog_context_detail::reg().merge(std::move(key), tokens);
+}
+
+// ── Endpoint-keyed declarations (custom-host / localhost seam) ──────────
+// The provider-scoped map above is keyed by agentty's PROVIDER id — which
+// for a custom host is the endpoint spec the user typed ("localhost:11434",
+// "https://api.my-gw.com/v1"), a string models.dev knows nothing about. Its
+// scoped entries can never reach such a session, and the bare-tail merge
+// poisons the moment two providers disagree on a shared model id. But a
+// custom host's identity IS its URL, and models.dev declares one too — so
+// declarations are ALSO indexed by endpoint ORIGIN (canonical host + port,
+// scheme/path dropped) and claimed per model when a session's own catalog
+// loads.
+//
+// Keying by origin+PORT first, host-only as the second tier: the port is a
+// user definition, not identity — LM Studio listens on whatever you set,
+// but models.dev has exactly ONE lmstudio entry — while on "127.0.0.1" the
+// same host carries several dev entries (atomic-chat:1337, lmstudio:1234,
+// lynkr:8081) that MUST NOT merge. The second qualifier between them is
+// the MODEL ID itself: claims are applied per model, so a session row only
+// ever adopts an entry that actually declares it; an entry on a DIFFERENT
+// port than the session's never applies (see claim_context_windows_for_endpoint
+// in src/util/modelsdev.cpp).
+namespace catalog_endpoint_detail {
+struct Entry {
+    int tokens = 0;
+    int port   = 0;   // 0 when the declaring api URL used the scheme default
+};
+// host → (model → entry)
+using Hosts = std::map<std::string, std::map<std::string, Entry>>;
+inline maya::snapshot<Hosts>& hosts() { static maya::snapshot<Hosts> h; return h; }
+} // namespace catalog_endpoint_detail
+
+// Parse the ORIGIN out of an api URL / endpoint spec: canonical host
+// (lowercased; every localhost spelling — "localhost", "127.0.0.1",
+// "0.0.0.0", "::1" — folds to "127.0.0.1") plus the explicit port, 0 when
+// the URL used the scheme default. "" when no host can be recovered.
+[[nodiscard]] inline std::string
+context_endpoint_origin(std::string_view url, std::uint16_t& port_out) {
+    port_out = 0;
+    auto s = url;
+    if (auto p = s.find("://"); p != std::string_view::npos) {
+        const auto scheme = s.substr(0, p);
+        std::string sch;
+        for (char c : scheme) sch.push_back(
+            static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        if (sch == "http")  port_out = 80;
+        if (sch == "https") port_out = 443;
+        s.remove_prefix(p + 3);
+    }
+    if (auto p = s.find('/'); p != std::string_view::npos)
+        s = s.substr(0, p);
+    if (auto p = s.find('@'); p != std::string_view::npos)
+        s = s.substr(p + 1);                       // strip userinfo
+    std::string hostport{s};
+    while (!hostport.empty() && (hostport.back() == ':')) hostport.pop_back();
+    std::string host = hostport;
+    if (auto colon = hostport.rfind(':'); colon != std::string::npos) {
+        const std::string ps = hostport.substr(colon + 1);
+        if (!ps.empty()
+            && std::all_of(ps.begin(), ps.end(),
+                           [](char c){ return c >= '0' && c <= '9'; })) {
+            const long v = std::strtol(ps.c_str(), nullptr, 10);
+            port_out     = static_cast<std::uint16_t>(v);
+            host         = hostport.substr(0, colon);
+        }
+    }
+    // Canonicalize: lowercase, fold every loopback spelling onto
+    // "127.0.0.1" so a session pointed at "localhost:1234" meets the
+    // models.dev entry whose api says "127.0.0.1:1234".
+    std::string canon;
+    canon.reserve(host.size());
+    for (char c : host)
+        canon.push_back(
+            static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (canon == "localhost" || canon == "0.0.0.0" || canon == "[::1]"
+        || canon == "::1")
+        canon = "127.0.0.1";
+    if (canon.empty()) return {};
+    return canon;
+}
+
+// Index one model's declared window under its endpoint's origin. Every
+// declaration lands under (canonical host, ORIGINAL port from the api URL —
+// 0 when the URL used the scheme default); whether a session on another
+// port may claim it is the reader's call (endpoint_context_window_for),
+// which knows both the session's port and the model id being resolved.
+// Same-origin rewrites overwrite (a refreshed snapshot is newer facts), so
+// this never poisons — unlike the bare-tail merge, a wrong-port entry
+// simply fails to match instead of erasing information.
+inline void merge_endpoint_context_window(std::string_view api_url,
+                                          const std::string& raw_id,
+                                          int tokens) {
+    if (tokens <= 0) return;
+    std::uint16_t port = 0;
+    const std::string host = context_endpoint_origin(api_url, port);
+    if (host.empty()) return;
+    const std::string model_id = norm_caps_key(raw_id);
+    if (model_id.empty()) return;
+    bump_caps_epoch();
+    (void)catalog_endpoint_detail::hosts().update(
+        [](const catalog_endpoint_detail::Hosts& hs, const std::string& h, const std::string& m,
+           const catalog_endpoint_detail::Entry& e) {
+            auto out = hs;
+            out[h][m] = e;
+            return out;
+        },
+        host, model_id, catalog_endpoint_detail::Entry{tokens, port});
+}
+
+// 0 = no declaration; else the window a models.dev entry serving this
+// ENDPOINT declares for the model. Tiers, strongest first:
+//   1. exact origin (host + the session's own port) — an entry pinned to
+//      the very listener you pointed at;
+//   2. host-tier (the entry's api URL carried no explicit port);
+//   3. HOST-LEVEL adoption: the port is a USER definition (LM Studio
+//      listens on whatever you set; there is only one lmstudio entry), so
+//      a same-host entry on a DIFFERENT port still applies — but only when
+//      the second qualifier says it's unambiguous: the model id must
+//      actually be declared there, and if several same-host entries declare
+//      the same model at different windows, host-level adoption is refused
+//      (0) rather than letting atomic-chat's figure bleed onto lmstudio.
+// `host` is the CANONICAL origin host (context_endpoint_origin form).
+[[nodiscard]] inline int endpoint_context_window_for(
+    std::string_view model_id, std::string_view host, std::uint16_t port) {
+    const auto all = catalog_endpoint_detail::hosts().load();
+    if (all->empty()) return 0;
+    const std::string mid = norm_caps_key(model_id);
+    if (mid.empty()) return 0;
+    const auto hit = all->find(std::string(host));
+    if (hit == all->end() || hit->second.empty()) return 0;
+    const auto& entries = hit->second;
+    int host_tier = 0, adopted = 0; bool ambiguous = false;
+    for (const auto& [mid_key, e] : entries) {
+        if (mid_key != mid) continue;
+        if (e.port == port) return e.tokens;              // (1) exact origin
+        if (e.port == 0)   { host_tier = e.tokens; continue; }  // (2)
+        if (port == 0)     { host_tier = e.tokens; continue; }  // session
+            // had no port either — any same-host declaration is the best
+            // evidence there is (a portless session can't disambiguate
+            // further; the model-id qualifier above still applied).
+        if (adopted == 0)  adopted = e.tokens;            // (3) host-level
+        else if (adopted != e.tokens) ambiguous = true;   // two entries,
+            // same model, different windows on the same host → no claim.
+    }
+    if (host_tier > 0) return host_tier;
+    return ambiguous ? 0 : adopted;
+}
+
+// 0 = no declaration. Scoped-first, bare fallback.
+[[nodiscard]] inline int catalog_context_window_for(std::string_view model_id,
+                                                    std::string_view scope = {}) {
+    if (!catalog_context_detail::reg().any()) return 0;
+    auto scoped = scope.empty() ? scoped_caps_key(model_id)
+                                : scoped_caps_key(model_id, scope);
+    return catalog_context_detail::reg()
+        .find(scoped, capkey::norm_tail(model_id))
+        .value_or(0);
+}
+
+// -1 = no declaration; else the bitmask of declared ON levels.
+// Scoped-first ("provider/model"), bare fallback — see scoped_caps_key.
+[[nodiscard]] inline int catalog_effort_set_for(std::string_view model_id,
+                                                std::string_view scope = {}) {
+    if (!catalog_effort_detail::reg().any()) return -1;
+    auto scoped = scope.empty() ? scoped_caps_key(model_id)
+                                : scoped_caps_key(model_id, scope);
+    const auto v = catalog_effort_detail::reg().find(scoped, capkey::norm_tail(model_id));
+    return v ? static_cast<int>(*v) : -1;
+}
+
+// ── Per-model reasoning-effort override registry ─────────────────────────
+// The "configure it myself" seam (issue #20). The constexpr from_id() decode
+// only INFERS whether a compat model reasons; users can override that per
+// model — persisted in Settings.reasoning_effort_overrides and pushed here at
+// startup (and on every in-app toggle), mirroring provider::set_custom_auth
+// _header. Resolution precedence, applied by resolved_caps():
+//     per-model override  >  AGENTTY_FORCE_EFFORT env  >  from_id inference.
+// Claude/GPT stay family-gated — an override only opens/closes the COMPAT
+// lane (low|medium|high); it never fabricates the max/xhigh ladder.
+namespace reasoning_override_detail {
+// The override map is empty for the vast majority of users (nobody set a ^E
+// override), yet reasoning_override_for is called on the PER-FRAME UI render
+// path; a snapshot read is one atomic load.
+inline Registry<bool>& reg() { static Registry<bool> r; return r; }
+inline void erase(std::string key) { (void)reg().erase(std::move(key)); }
+} // namespace reasoning_override_detail
+
+// Set/clear a single model's override (true = force effort on, false = off).
+inline void set_reasoning_override(std::string model_id, bool on) {
+    bump_caps_epoch();
+    reasoning_override_detail::reg().set(norm_caps_key(model_id), on);
+}
+inline void clear_reasoning_override(const std::string& model_id) {
+    bump_caps_epoch();
+    reasoning_override_detail::erase(model_id);
+}
+inline void clear_reasoning_overrides() {
+    bump_caps_epoch();
+    reasoning_override_detail::reg().replace({});
+}
+inline void set_reasoning_overrides(std::map<std::string, bool> all) {
+    bump_caps_epoch();
+    // Normalise each key: these maps hydrate from persisted settings, which
+    // may predate the capkey discipline or carry a different spelling than
+    // today's lookups. Raw installation would silently orphan those facts.
+    std::map<std::string, bool> normed;
+    for (auto& [k, v] : all) normed[norm_caps_key(k)] = v;
+    reasoning_override_detail::reg().replace(std::move(normed));
+}
+// Tri-state lookup: 1 (force on), 0 (force off), -1 (no override for this id).
+// Lock-free when no overrides exist (the common case). Otherwise a SHARED lock
+// — concurrent per-frame readers never block each other; only the rare write
+// (init / ^E toggle) is exclusive.
+[[nodiscard]] inline int reasoning_override_for(std::string_view model_id) {
+    const auto v = reasoning_override_detail::reg().find(
+        std::string{}, std::string{capkey::norm_tail(model_id)});
+    return v ? (*v ? 1 : 0) : -1;
+}
+
+// AGENTTY_FORCE_EFFORT, set once in main(). Lives beside the per-model
+// overrides above, in the same registry resolved_caps reads; the domain does
+// not read the environment. 1 force on, 0 force off, -1 unset.
+namespace effort_force_detail {
+inline std::atomic<int>& cell() noexcept { static std::atomic<int> v{-1}; return v; }
+}
+inline void set_effort_force(int v) noexcept {
+    effort_force_detail::cell().store(v, std::memory_order_relaxed);
+    bump_caps_epoch();
+}
+// Parse AGENTTY_FORCE_EFFORT's value: "1"/true/yes/on → 1, "0" → 0, else -1.
+[[nodiscard]] inline int parse_effort_force(const char* e) noexcept {
+    if (!e || !*e) return -1;
+    if (e[0] == '0' && e[1] == '\0') return 0;
+    const char c = (e[0] >= 'A' && e[0] <= 'Z') ? static_cast<char>(e[0] + 32) : e[0];
+    if (e[0] == '1' || c == 't' || c == 'y' || c == 'o') return 1;
+    return -1;
+}
+[[nodiscard]] inline int effort_force_override() noexcept {
+    return effort_force_detail::cell().load(std::memory_order_relaxed);
+}
+
+// ── Learned rejected-field registry (per HOST) ──────────────────────────────
+// Optional request-body fields a host has told us it does not accept
+// (provider::OptionalField bits), learned from its own 400 (#93). Keyed by
+// HOST ("api.groq.com", "llm.corp:8443"), not model: body-schema validation
+// is the gateway's, identical for every model behind it. The transport
+// consults this before adding an optional field, so after ONE rejection the
+// host never sees the field again — persisted in Settings, so not even on
+// the next launch. Same lock discipline as the other registries.
+namespace rejected_fields_detail {
+inline Registry<std::uint8_t>& reg() { static Registry<std::uint8_t> r; return r; }
+} // namespace rejected_fields_detail
+
+[[nodiscard]] inline std::string host_key(std::string_view host, std::uint16_t port) {
+    std::string k{host};
+    for (char& c : k) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+    if (port != 0 && port != 443) k += ":" + std::to_string(port);
+    return k;
+}
+inline void add_rejected_field(const std::string& host, std::uint8_t bit) {
+    // OR in one snapshot update so two concurrent learns can't drop a bit.
+    (void)rejected_fields_detail::reg().facts.update(
+        [](const Facts<std::uint8_t>& f, const std::string& k, std::uint8_t b) {
+            Facts<std::uint8_t> out = f;
+            out.map[k] = static_cast<std::uint8_t>(out.map[k] | b);
+            return out;
+        }, host, bit);
+}
+inline void set_rejected_fields(std::map<std::string, std::uint8_t> all) {
+    rejected_fields_detail::reg().replace(std::move(all));
+}
+[[nodiscard]] inline std::uint8_t rejected_fields_for(const std::string& host) {
+    return rejected_fields_detail::reg().find("", host).value_or(0);
+}
+[[nodiscard]] inline std::map<std::string, std::uint8_t> rejected_fields_snapshot() {
+    return rejected_fields_detail::reg().snapshot();
+}
+
+// ── Learned effort-set registry (feature DETECTION, not enumeration) ──────
+// When a provider rejects a reasoning_effort value it usually names the
+// contract in the error body — Mistral: "supported values: [high, none]";
+// generic OpenAI-compat: "reasoning_effort is not enabled for this model".
+// The stream reducer parses that (provider::parse_effort_rejection), records
+// the EXACT accepted set here, persists it (Settings.learned_effort_sets),
+// and silently retries with the clamped value. From then on the ladder, the
+// clamps and the wire are all correct for that model — across restarts,
+// without a release, for providers no database has ever heard of. Same lock
+// discipline as the other registries (render-path readers).
+namespace learned_effort_detail {
+// model id → effort_set bitmask (0 = rejects the parameter entirely).
+inline Registry<std::uint8_t>& reg() { static Registry<std::uint8_t> r; return r; }
+} // namespace learned_effort_detail
+
+inline void set_learned_effort_set(std::string model_id, std::uint8_t set) {
+    bump_caps_epoch();
+    learned_effort_detail::reg().set(norm_caps_key(model_id), set);
+}
+inline void set_learned_effort_sets(std::map<std::string, std::uint8_t> all) {
+    bump_caps_epoch();
+    // Normalise each key — same persisted-spelling hazard as
+    // set_reasoning_overrides above.
+    std::map<std::string, std::uint8_t> normed;
+    for (auto& [k, v] : all) normed[norm_caps_key(k)] = v;
+    learned_effort_detail::reg().replace(std::move(normed));
+}
+[[nodiscard]] inline std::map<std::string, std::uint8_t>
+learned_effort_sets_snapshot() {
+    return learned_effort_detail::reg().snapshot();
+}
+// -1 = nothing learned for this id; else the bitmask (may be 0 = param off).
+// Scoped-first lookup: a fact learned while Groq was active is keyed
+// "groq/gpt-oss-120b" and does NOT leak to the same id on Cerebras; a bare
+// entry (legacy, or explicitly unscoped) still matches everywhere.
+[[nodiscard]] inline int learned_effort_set_for(std::string_view model_id,
+                                                std::string_view scope = {}) {
+    if (!learned_effort_detail::reg().any()) return -1;
+    auto scoped = scope.empty() ? scoped_caps_key(model_id)
+                                : scoped_caps_key(model_id, scope);
+    const auto v = learned_effort_detail::reg().find(
+        std::move(scoped), std::string{capkey::norm_tail(model_id)});
+    return v ? static_cast<int>(*v) : -1;
+}
+
+// Decode a model id AND fold in the runtime reasoning-effort override (per
+// model, then AGENTTY_FORCE_EFFORT env). This is the id-aware sibling of the
+// pure constexpr from_id(): effort call sites use THIS so a user's override
+// reaches supports_effort()/effort_wire_for()/the picker uniformly — every
+// consumer already funnels through the returned caps.
+//
+// `scope`: the provider whose contract to resolve against. Empty = the
+// ACTIVE provider (right for the wire path). Pass the
+// row's own provider_id when rendering CROSS-provider surfaces (the fused
+// picker shows every authed provider's rows at once — resolving a Groq row
+// under the active Mistral scope would read the wrong host's facts).
+[[nodiscard]] inline ModelCapabilities resolved_caps(std::string_view model_id,
+                                                     std::string_view scope = {}) {
+    ModelCapabilities caps = ModelCapabilities::from_id(model_id);
+    // The LEARNED set applies to every lane — even Claude/GPT — because it is
+    // ground truth straight from the provider's own rejection. (In practice
+    // Claude/GPT never land here; the guard exists for aggregator hosts that
+    // serve claude-* ids over the OpenAI wire with different contracts.)
+    if (const int learned = learned_effort_set_for(model_id, scope);
+        learned >= 0) {
+        caps.effort_set       = static_cast<std::uint8_t>(learned);
+        caps.effort_set_known = true;
+    }
+    // Claude/GPT are family-gated; overrides only touch the compat lane so we
+    // never fabricate their max/xhigh ladder or disturb tier/context logic.
+    if (caps.is_known_family() || caps.family == ModelCapabilities::Family::Gpt)
+        return caps;
+    // Declared (models.dev / publishing provider) effort enums — compat lane
+    // only: family ladders are already exact, and third-party metadata for
+    // Claude/GPT expresses different wire semantics (adaptive thinking).
+    if (!caps.effort_set_known)
+        if (const int declared = catalog_effort_set_for(model_id, scope);
+            declared >= 0) {
+            caps.effort_set       = static_cast<std::uint8_t>(declared);
+            caps.effort_set_known = true;
+        }
+    // Precedence: explicit per-model override > global env > the provider's
+    // OWN catalog declaration (capabilities.reasoning, recorded by
+    // list_models) > from_id inference. The catalog layer is what absorbs
+    // provider drift — e.g. Mistral flipping magistral to accept
+    // reasoning_effort, or a dated mistral-medium revision that rejects it —
+    // without a code change.
+    const int per_model = reasoning_override_for(model_id);
+    if (per_model >= 0) {
+        caps.reasoning_compat = (per_model == 1);
+        // An explicit user override beats even the learned set: force-on
+        // reopens the derived ladder, force-off kills it.
+        if (caps.effort_set_known) {
+            if (per_model == 0) { caps.effort_set = 0; }
+            else if (caps.effort_set == 0) { caps.effort_set_known = false; }
+        }
+    } else if (const int env = effort_force_override(); env >= 0) {
+        caps.reasoning_compat = (env == 1);
+        if (env == 0 && caps.effort_set_known) caps.effort_set = 0;
+    } else if (const int live = catalog_reasoning_for(model_id, scope);
+               live >= 0) {
+        caps.reasoning_compat = (live == 1);
+    }
+    return caps;
+}
 
 // Convenience: infer weak-tool-use straight from a model id string.
 // Used by the provider/runtime paths that only hold the id, not the caps.
 [[nodiscard]] inline bool is_weak_model(std::string_view model_id) noexcept {
     return ModelCapabilities::from_id(model_id).is_weak_tool_user();
+}
+
+// Does this model BEGIN its output in reasoning with NO opening think-tag?
+// vLLM calls this reason-by-default; the families that do it are Magistral
+// (Mistral's reasoning line — emits thoughts, then [/THINK], then the
+// answer) and DeepSeek-R1 / deepseek-reasoner (prepends <think> only
+// sometimes). For these, leading content before the FIRST close tag is
+// implicit reasoning and must be routed to the thinking block. Any other
+// model must NEVER have leading text treated as reasoning — a stray
+// "</think>" in ordinary answer prose stays verbatim.
+//
+// A MODEL fact, not a transport fact: it describes how the model was
+// trained to emit tokens, identically on every host that serves it. Lives
+// here (with is_weak_model / infer_reasoning_compat) so every transport
+// reads one authority — the openai-compat transport used to sniff this
+// inline, which is exactly how a second transport would have drifted.
+[[nodiscard]] constexpr bool reasons_by_default(std::string_view model_id) noexcept {
+    // constexpr-friendly case-insensitive substring scan (mirrors the
+    // contains() helpers used by from_id's inference blocks).
+    constexpr auto has = [](std::string_view id, std::string_view n) {
+        if (n.size() > id.size()) return false;
+        for (std::size_t i = 0; i + n.size() <= id.size(); ++i) {
+            bool eq = true;
+            for (std::size_t j = 0; j < n.size(); ++j) {
+                char a = id[i + j], b = n[j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+                if (a != b) { eq = false; break; }
+            }
+            if (eq) return true;
+        }
+        return false;
+    };
+    return has(model_id, "magistral")
+        || has(model_id, "deepseek-r1")
+        || has(model_id, "deepseek-reasoner");
+}
+static_assert(reasons_by_default("Magistral-Small-2506"));
+static_assert(reasons_by_default("deepseek-r1:70b"));
+static_assert(!reasons_by_default("mistral-small-latest"));
+static_assert(!reasons_by_default("qwen3:32b"));   // explicit-tag family
+
+
+// Is this id a chat/completions model an agent can actually DRIVE (stream text
+// + call tools), as opposed to an embedding / image / audio / moderation /
+// realtime endpoint that a raw provider `/v1/models` dump also lists?
+//
+// The subagent router picks the cheapest CAPABLE candidate; without this gate
+// it would happily pick `text-embedding-3-small` or `dall-e-3` as "cheapest
+// Mid" and route a whole subagent to a model that can't chat — breaking the
+// task outright. OpenAI's /v1/models is the worst offender (it returns every
+// asset the key can touch); Anthropic/ChatGPT/Ollama lists are chat-only, so
+// this is a no-op there. Deny-list by well-known non-chat id fragments — a
+// deny-list (not an allow-list) so a new chat model is never wrongly excluded.
+[[nodiscard]] inline bool is_dispatchable_model(std::string_view id) noexcept {
+    auto has = [&](std::string_view n) {
+        if (n.size() > id.size()) return false;
+        for (std::size_t i = 0; i + n.size() <= id.size(); ++i) {
+            bool eq = true;
+            for (std::size_t j = 0; j < n.size(); ++j) {
+                char a = id[i + j], b = n[j];
+                if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + 32);
+                if (a != b) { eq = false; break; }
+            }
+            if (eq) return true;
+        }
+        return false;
+    };
+    // Non-chat asset families that appear in a raw /v1/models listing.
+    if (has("embedding") || has("embed")     ||   // text-embedding-3-*, *-embed
+        has("dall-e")    || has("dalle")     ||   // image generation
+        has("whisper")                       ||   // speech-to-text
+        has("tts")                           ||   // text-to-speech
+        has("audio")     || has("realtime")  ||   // audio / realtime sockets
+        has("moderation")                    ||   // omni-moderation-*
+        has("image")                         ||   // *-image-* generation
+        has("transcribe")                    ||   // gpt-4o-transcribe
+        has("search")                        ||   // *-search-preview retrieval
+        has("rerank")    || has("reranker")  ||   // rerankers (cohere/voyage)
+        has("guard"))                             // llama-guard safety filters
+        return false;
+    return true;
+}
+
+// ── Model router: pick the cheapest capable model for a delegated role ──────
+//
+// Read-only subagent roles (explorer/reviewer) do grunt work — read, grep,
+// map, summarise — that a small model handles as well as a flagship at a
+// fraction of the cost. Routing them to a cheaper model is the single biggest
+// subagent economy lever, but it must NEVER silently downgrade quality on a
+// provider that has nothing cheaper, and must stay within the SAME provider
+// (cross-vendor auth/caching don't transfer).
+//
+// Strategy (all signals are already-decoded, no network):
+//   • Only consider models the active provider actually offers (`candidates`,
+//     i.e. m.d.available_models — already provider-scoped).
+//   • Rank by ModelCapabilities::tier_for(id): reject Weak (tier 0, unreliable
+//     at tools) and anything a probe marked no-tools.
+//   • Pick the LOWEST tier that is still >= `min_tier` (the capability floor
+//     for the role) — that's the cheapest capable model on this provider.
+//   • Never route UP: if the cheapest capable candidate isn't cheaper than the
+//     parent, keep the parent model (return it unchanged). So a user on only
+//     Opus, or only one model, sees no change and no regression.
+//
+// `parent_model` is what the main turn uses; `candidates` is the provider's
+// model list. Returns the id to run the role on.
+[[nodiscard]] inline std::string cheapest_capable_model(
+        std::string_view parent_model,
+        const std::vector<ModelInfo>& candidates,
+        ModelCapabilities::Tier min_tier = ModelCapabilities::Tier::Cheap) {
+    using Tier = ModelCapabilities::Tier;
+    const Tier parent_tier = ModelCapabilities::tier_for(parent_model);
+
+    std::string best;
+    Tier best_tier = Tier::Flagship;
+    int  best_ctx  = -1;
+    for (const auto& mi : candidates) {
+        const std::string_view id = mi.id.value;
+        // A probe that reported no tool support disqualifies the model — a
+        // subagent's whole job is tool use.
+        if (!mi.tools_allowed()) continue;
+        // Never route to a non-chat asset (embedding/image/audio/moderation)
+        // that a raw /v1/models dump also lists — it can't run an agent turn.
+        if (!is_dispatchable_model(id)) continue;
+        const Tier t = ModelCapabilities::tier_for(id);
+        if (t == Tier::Weak) continue;              // unreliable at tools, ever
+        if (t < min_tier) continue;                 // below the role's floor
+        if (t >= parent_tier) continue;             // not cheaper than parent
+        // Prefer the cheapest tier; within a tier prefer the LARGER context
+        // window (a real chat model over a 4k stub / preview variant).
+        const int ctx = mi.context_window;
+        const bool better = best.empty() || t < best_tier
+                          || (t == best_tier && ctx > best_ctx);
+        if (better) {
+            best = mi.id.value;
+            best_tier = t;
+            best_ctx  = ctx;
+        }
+    }
+    // Whichever id we route to, DROP the `[1m]`/`[2m]` extended-context
+    // picker marker. That marker is a parent-chat-only signal: it widens the
+    // window AND makes the transport send the `context-1m` beta header. A
+    // subagent never needs it — read-only roles run on a tight output budget
+    // with age-faded tool results and never approach even a 200K window, let
+    // alone 1M. Worse, sending `context-1m` on a subscription that isn't
+    // entitled to the long-context beta 400s the whole subagent request
+    // ("long context beta is not yet available for this subscription"),
+    // which is exactly the failure this strip prevents. When nothing is
+    // strictly cheaper we still fall through here, so a parent that picked a
+    // `[1m]` variant hands its subagents the plain, always-accepted id.
+    return wire_model_id(best.empty() ? parent_model : std::string_view{best});
+}
+
+// ── Model picker ordering: strength first, never a fixed family bucket ──────
+//
+// An id's FAMILY NAME must never dictate its position in the picker — an
+// earlier design bucketed "Opus, Sonnet, Haiku, Fable, Mythos" in that fixed
+// order, which sank Fable/Mythos to the very bottom even though they're the
+// NEWEST flagship-tier lane (same strength class as Opus, just a different
+// codename that happens to sort last alphabetically/positionally). Instead,
+// order by actual capability: tier() descending (Flagship models — Opus AND
+// Fable/Mythos — always lead), then newest generation.revision within a
+// tier, then a small family tie-break so same-generation peers still group
+// predictably instead of interleaving on id string alone.
+[[nodiscard]] inline bool model_picker_less(const ModelInfo& a,
+                                            const ModelInfo& b) noexcept {
+    const auto ca = ModelCapabilities::from_id(a.id.value);
+    const auto cb = ModelCapabilities::from_id(b.id.value);
+    const auto ta = ModelCapabilities::tier_for(a.id.value);
+    const auto tb = ModelCapabilities::tier_for(b.id.value);
+    if (ta != tb) return ta > tb;                       // higher tier first
+    // Same tier: for unknown families the id's size tag is the only strength
+    // signal we have, and it must beat the alphabetical tie-break below.
+    // Without this `qwen3:4b` sorted before `qwen3:8b` ("4" < "8"), so
+    // "strongest below the parent" picked the SMALLER model — and
+    // Implementation could end up weaker than Utility.
+    if (ca.params_b != cb.params_b && (ca.params_b || cb.params_b))
+        return ca.params_b > cb.params_b;               // bigger first
+    if (ca.generation != cb.generation)
+        return ca.generation > cb.generation;           // newest gen first
+    if (ca.revision != cb.revision)
+        return ca.revision > cb.revision;                // newest revision first
+    auto family_name_rank = [](ModelCapabilities::Family f) -> int {
+        switch (f) {
+            case ModelCapabilities::Family::Opus:   return 0;
+            case ModelCapabilities::Family::Fable:  return 1;
+            case ModelCapabilities::Family::Mythos: return 2;
+            case ModelCapabilities::Family::Sonnet: return 3;
+            case ModelCapabilities::Family::Haiku:  return 4;
+            default:                                return 5;
+        }
+    };
+    const int fa = family_name_rank(ca.family);
+    const int fb = family_name_rank(cb.family);
+    if (fa != fb) return fa < fb;
+    return a.id.value < b.id.value;   // final stable tie-break
 }
 
 // ============================================================================
@@ -339,57 +1878,272 @@ private:
 // `None` sends nothing — preserving the default no-thinking, replay-safe
 // wire. Any other level makes the Claude provider send adaptive thinking +
 // the matching `output_config.effort`. Selectable live from the model picker.
-enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
+// Ordered LOWEST→HIGHEST reasoning intent. `Minimal` is OpenAI's gpt-5
+// bottom tier (reasoning_effort="minimal" — fastest, least reasoning); it
+// sits BELOW Low in the ladder. NB the enum ORDINAL order is the ladder
+// order, but the persisted bitmask (effort_bit) is INDEPENDENT of it —
+// Minimal takes a fresh high bit so existing learned_effort_sets masks
+// (which encoded low..max as bits 0..4) survive untouched.
+//
+// `Auto` is NOT a rung. It is the absence of a choice, and it sits after Max
+// so every existing ordinal — and the one ordinal comparison in smart_mode's
+// cascade clamp — is untouched.
+//
+// WHY IT EXISTS. `None` was doing two jobs: "the user asked for no reasoning"
+// AND "the user never said". That conflation broke Smart Mode's whole premise.
+// effort_for_complexity treats the user's effort as the MIDPOINT of a ladder —
+// Standard keeps it, Complex steps +1, Simple steps −1 — but None is rung 0,
+// the floor. From there a turn classified Complex could only reach `minimal`,
+// one rung, while the same turn from a `medium` base reaches `high`. So at the
+// default the classifier's verdict was nearly inert: it could score a prompt
+// Complex all it liked and the dial had nowhere to go.
+//
+// This is the same bug that was already fixed once on the ROLE axis (see
+// resolve_turn_routing — the role was hardcoded Strategic, so "the
+// classifier's verdict only ever moved the EFFORT dial"). The mirror image
+// survived on the effort axis.
+//
+// With Auto as its own state, "never configured" anchors at the ladder's
+// MIDPOINT for whatever model is active (auto_base_effort below), so all four
+// complexity tiers map to genuinely different operating points — while an
+// explicit None still means exactly what it always meant and still sends "".
+enum class Effort : std::uint8_t { None, Minimal, Low, Medium, High, Xhigh, Max, Auto };
 
 // Wire value for output_config.effort. None → "" (the field is omitted).
+//
+// Auto must NEVER reach here: it is resolved to a real rung by
+// resolve_auto_effort() before any wire/step/clamp call. Returning "" is the
+// safe fallback (identical to off) rather than inventing a level the provider
+// would reject, but a debug build asserts instead — an Auto on the wire means
+// a resolution site was missed.
 [[nodiscard]] constexpr std::string_view effort_wire(Effort e) noexcept {
     switch (e) {
-        case Effort::None:   return "";
-        case Effort::Low:    return "low";
-        case Effort::Medium: return "medium";
-        case Effort::High:   return "high";
-        case Effort::Xhigh:  return "xhigh";
-        case Effort::Max:    return "max";
+        case Effort::None:    return "";
+        case Effort::Minimal: return "minimal";
+        case Effort::Low:     return "low";
+        case Effort::Medium:  return "medium";
+        case Effort::High:    return "high";
+        case Effort::Xhigh:   return "xhigh";
+        case Effort::Max:     return "max";
+        case Effort::Auto:    return "";   // unresolved; see note above
     }
     return "";
 }
 
-// Short label for the picker UI (None renders as "off").
+// Short label for the picker UI (None renders as "off", Auto as "auto").
 [[nodiscard]] constexpr std::string_view effort_label(Effort e) noexcept {
-    return e == Effort::None ? std::string_view{"off"} : effort_wire(e);
+    if (e == Effort::None) return std::string_view{"off"};
+    if (e == Effort::Auto) return std::string_view{"auto"};
+    return effort_wire(e);
 }
 
-// Parse a persisted wire value back to Effort. Unknown / "" → None.
+// Parse a persisted wire value back to Effort.
+//
+// The two sentinels are deliberately different, and this is the whole
+// migration story:
+//
+//   "auto"  → Auto   (written by anyone who has since touched the setting)
+//   ""      → Auto   (NEVER CONFIGURED — the field has been empty-by-default
+//                     since the setting existed, so an empty value cannot
+//                     distinguish "old default" from "chose off". Treating it
+//                     as Auto is what gives existing users the fix without a
+//                     migration pass; anyone who genuinely wants silence picks
+//                     `off`, which now persists as "none" and round-trips.)
+//   "none"  → None   (EXPLICIT off — written only by a deliberate choice)
+//   unknown → Auto   (a level this build doesn't know; auto is the safe
+//                     anchor, and the per-model clamp handles the rest)
 [[nodiscard]] constexpr Effort effort_from_wire(std::string_view s) noexcept {
+    if (s == "minimal") return Effort::Minimal;
     if (s == "low")    return Effort::Low;
     if (s == "medium") return Effort::Medium;
     if (s == "high")   return Effort::High;
     if (s == "xhigh")  return Effort::Xhigh;
     if (s == "max")    return Effort::Max;
-    return Effort::None;
+    if (s == "none" || s == "off") return Effort::None;
+    return Effort::Auto;
+}
+
+// Persisted form. The inverse of effort_from_wire for the two sentinels:
+// explicit off round-trips as "none" (so it is distinguishable from an
+// untouched ""), and Auto as "auto".
+[[nodiscard]] constexpr std::string_view effort_to_wire_setting(Effort e) noexcept {
+    if (e == Effort::None) return "none";
+    if (e == Effort::Auto) return "auto";
+    return effort_wire(e);
+}
+
+// AGENTTY_FORCE_EFFORT override is defined earlier (before resolved_caps),
+// which folds it into the per-model resolution. See effort_force_override().
+
+// Bit for an ON effort level in ModelCapabilities::effort_set. None has no
+// bit — "off" (omit the field) is always available and never learned away.
+[[nodiscard]] constexpr std::uint8_t effort_bit(Effort e) noexcept {
+    switch (e) {
+        case Effort::Low:     return 1u << 0;
+        case Effort::Medium:  return 1u << 1;
+        case Effort::High:    return 1u << 2;
+        case Effort::Xhigh:   return 1u << 3;
+        case Effort::Max:     return 1u << 4;
+        case Effort::Auto:    return 0;   // not a rung: no bit, never learned
+        // Minimal takes a fresh bit ABOVE the historical low..max range so a
+        // persisted mask written before this tier existed still decodes
+        // identically (no migration). Ladder position is set by the enum
+        // ordinal + the explicit ladders below, not by this bit value.
+        case Effort::Minimal: return 1u << 5;
+        case Effort::None:    return 0;
+    }
+    return 0;
+}
+
+// The model's ON-level set as a bitmask, from the best information we have:
+// the exact set when known (learned/models.dev), else DERIVED from the
+// family/compat gates. This is THE single source every ladder/clamp/wire
+// helper below reads — heterogeneity is data, not code paths.
+[[nodiscard]] constexpr std::uint8_t effort_set_of(
+        const ModelCapabilities& caps) noexcept {
+    if (caps.effort_set_known) return caps.effort_set;
+    if (!caps.supports_effort()) return 0;
+    if (caps.effort_high_only) return effort_bit(Effort::High);
+    std::uint8_t s = static_cast<std::uint8_t>(
+        effort_bit(Effort::Low) | effort_bit(Effort::Medium)
+        | effort_bit(Effort::High));
+    // `minimal` is OpenAI's gpt-5+ bottom tier (reasoning_effort="minimal").
+    // It is NOT a Claude/compat level, so gate it to the GPT family from
+    // gen 5 up. When the exact set is known (learned/models.dev) that wins
+    // above; this only seeds the DERIVED default so the picker offers it.
+    if (caps.family == ModelCapabilities::Family::Gpt && caps.generation >= 5)
+        s |= effort_bit(Effort::Minimal);
+    if (caps.supports_effort_xhigh()) s |= effort_bit(Effort::Xhigh);
+    if (caps.supports_effort_max())   s |= effort_bit(Effort::Max);
+    return s;
+}
+
+// True when the model should expose effort control. `caps` is expected to be
+// the RESOLVED caps (from resolved_caps(id)), which has already folded in the
+// per-model + env override; this is a thin, readable alias for supports_effort
+// used by the picker view and the effort free functions below.
+[[nodiscard]] inline bool effort_capable(const ModelCapabilities& caps) noexcept {
+    return effort_set_of(caps) != 0;
+}
+
+// The anchor for Effort::Auto on THIS model: the midpoint of its ON ladder.
+//
+// Smart Mode reads the user's effort as a MIDPOINT and steps ±1 from it by
+// complexity. For that to mean anything the anchor needs headroom in both
+// directions, which is exactly what `None` (rung 0, the floor) does not have.
+//
+// A fixed level would be the wrong fix — "medium" is meaningless on a model
+// whose only ON rung is `high`, and insulting on one that goes to `max`. So
+// this is a POSITION, not a level: walk the rungs the model actually accepts
+// and take the middle one. Heterogeneity as data, the same rule effort_step
+// follows by walking effort_set_of() instead of hardcoding levels.
+//
+//   gpt-5  {minimal,low,medium,high}  → index 1 of 4 → low
+//   claude {low,medium,high,max}      → index 1 of 4 → medium
+//   mistral{high}                     → index 0 of 1 → high
+//   non-reasoning {}                  → None (nothing to anchor)
+//
+// The ON rungs only — `off` is deliberately NOT in this ladder. Including it
+// would drag the midpoint down toward the floor and reintroduce the very
+// asymmetry this exists to remove; a user who wants off picks off.
+//
+// Lower-middle rather than upper-middle ((n-1)/2, not n/2): Complex steps +1
+// from here, so the common heavy case lands mid-to-upper without Auto itself
+// ever being the expensive choice on a Standard turn.
+[[nodiscard]] constexpr Effort auto_base_effort(
+        const ModelCapabilities& caps) noexcept {
+    const std::uint8_t set = effort_set_of(caps);
+    if (set == 0) return Effort::None;          // no ladder: nothing to anchor
+    constexpr Effort ladder[] = {Effort::Minimal, Effort::Low, Effort::Medium,
+                                 Effort::High, Effort::Xhigh, Effort::Max};
+    Effort on[6]{};
+    int n = 0;
+    for (Effort lv : ladder) if (set & effort_bit(lv)) on[n++] = lv;
+    if (n == 0) return Effort::None;
+    return on[(n - 1) / 2];
+}
+
+// Resolve Auto to a real rung; every other value passes through untouched.
+//
+// Call this at the EDGE — wherever the user's stored effort first meets a
+// concrete model — so no stepper, clamp, or wire helper below ever has to
+// know Auto exists. That keeps Auto a pure UI/persistence concept and leaves
+// the arithmetic in effort_step/effort_for_complexity exactly as it was.
+[[nodiscard]] constexpr Effort resolve_auto_effort(
+        Effort e, const ModelCapabilities& caps) noexcept {
+    return e == Effort::Auto ? auto_base_effort(caps) : e;
+}
+
+// Nearest supported ON level to a requested one: prefer the closest level AT
+// OR BELOW the request (don't think harder than asked), else the lowest level
+// above it. The "map intent to nearest wire value" primitive — with a binary
+// {high} set, every request maps to high; with {low,high}, medium maps low.
+[[nodiscard]] constexpr Effort nearest_effort(
+        Effort e, std::uint8_t set) noexcept {
+    // Auto is not a rung and must survive a clamp: it means "no choice yet",
+    // and a clamp is not a choice. Collapsing it here would silently destroy
+    // the state every time the user switched models (switch_to_model_ref
+    // clamps on every hop), which is the subtle way this feature would have
+    // died — anchored correctly on first run, degraded to a rung forever after.
+    if (e == Effort::Auto) return Effort::Auto;
+    if (set == 0 || e == Effort::None) return Effort::None;
+    constexpr Effort ladder[] = {Effort::Minimal, Effort::Low, Effort::Medium,
+                                 Effort::High, Effort::Xhigh, Effort::Max};
+    constexpr int kN = 6;
+    int want = 0;
+    for (int i = 0; i < kN; ++i) if (ladder[i] == e) { want = i; break; }
+    for (int i = want; i >= 0; --i)          // at-or-below first
+        if (set & effort_bit(ladder[i])) return ladder[i];
+    for (int i = want + 1; i < kN; ++i)      // else lowest above
+        if (set & effort_bit(ladder[i])) return ladder[i];
+    return Effort::None;   // unreachable while set != 0
 }
 
 // Clamp an Effort to what a model actually supports and return its wire
 // value. "" when the model can't take effort at all (or e == None). The
-// provider calls this so a stale high pick (e.g. Xhigh chosen, then a swap
-// to a model without xhigh) silently degrades to `high` instead of 400ing.
+// provider calls this so a stale pick (e.g. Xhigh chosen, then a swap to a
+// model without xhigh; or medium on a binary-enum Mistral model) silently
+// degrades to the nearest supported level instead of 400ing.
 [[nodiscard]] inline std::string_view effort_wire_for(
         Effort e, const ModelCapabilities& caps) noexcept {
-    if (e == Effort::None || !caps.supports_effort()) return "";
-    if (e == Effort::Max   && !caps.supports_effort_max())   e = Effort::High;
-    if (e == Effort::Xhigh && !caps.supports_effort_xhigh()) e = Effort::High;
-    return effort_wire(e);
+    // THE wire edge. Auto is a UI/persistence state, never a wire value, so it
+    // resolves to its per-model anchor here — which is why nothing downstream
+    // (the steppers, the budget table in the Anthropic transport) needs to
+    // know Auto exists.
+    return effort_wire(nearest_effort(resolve_auto_effort(e, caps),
+                                      effort_set_of(caps)));
 }
 
-// Ordered efforts the user may cycle for a given model: always
-// {None, Low, Medium, High}, plus Xhigh / Max where supported. The picker
-// cycles within this so the user never lands on a level the model 400s on.
+// Typed sibling of effort_wire_for: degrade a stored Effort to what `caps`
+// actually supports and return the Effort itself (not the wire string). Used
+// when SWITCHING MODEL/PROVIDER to fix up Model::effort so the picker chip and
+// the request path agree — a stale Xhigh carried onto a model without xhigh
+// becomes High here, and effort on a non-reasoning model collapses to None.
+[[nodiscard]] inline Effort clamp_effort(
+        Effort e, const ModelCapabilities& caps) noexcept {
+    return nearest_effort(e, effort_set_of(caps));
+}
+
+// Ordered efforts the user may cycle for a given model: auto + off + exactly
+// the ON levels the model's API accepts, in ladder order. The picker renders
+// THIS, so the user can never land on a level that would 400 — a binary-enum
+// model shows auto·off·high, a full-ladder flagship shows
+// auto·off·low·medium·high·xhigh·max.
+//
+// Auto leads because it is the default and the recommended position: the
+// first ← from it is `off`, so turning reasoning off outright is still one
+// keystroke, and the → walk through real levels is unchanged.
+//
+// On a model with no ladder there is nothing to choose, so the list stays
+// {off} — offering "auto" where auto resolves to off would be a lie.
 [[nodiscard]] inline std::vector<Effort> available_efforts(
         const ModelCapabilities& caps) {
-    std::vector<Effort> out{Effort::None, Effort::Low,
-                            Effort::Medium, Effort::High};
-    if (caps.supports_effort_xhigh()) out.push_back(Effort::Xhigh);
-    if (caps.supports_effort_max())   out.push_back(Effort::Max);
+    const std::uint8_t set = effort_set_of(caps);
+    if (set == 0) return std::vector<Effort>{Effort::None};
+    std::vector<Effort> out{Effort::Auto, Effort::None};
+    for (Effort e : {Effort::Minimal, Effort::Low, Effort::Medium, Effort::High,
+                     Effort::Xhigh, Effort::Max})
+        if (set & effort_bit(e)) out.push_back(e);
     return out;
 }
 
@@ -397,7 +2151,7 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 // Returns None when the model doesn't support effort at all.
 [[nodiscard]] inline Effort cycle_effort(
         Effort cur, int delta, const ModelCapabilities& caps) {
-    if (!caps.supports_effort()) return Effort::None;
+    if (!effort_capable(caps)) return Effort::None;
     const auto list = available_efforts(caps);
     const int n = static_cast<int>(list.size());
     int idx = 0;
@@ -432,14 +2186,24 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
 // (Anthropic 400s a max_tokens above the model ceiling).
 //
 // OVERRIDE: AGENTTY_MAX_OUTPUT_TOKENS (mirrors Claude Code's env knob). A
-// positive integer wins for every model — the escape hatch for a user on a
-// model/endpoint we don't have hard-coded, or who wants 128k beta output.
+// positive integer wins for every model. main() reads it once and calls
+// set_max_output_override(); the domain does not read the environment.
+namespace max_output_detail {
+inline std::atomic<int>& cell() noexcept { static std::atomic<int> v{0}; return v; }
+}
+inline void set_max_output_override(int v) noexcept {
+    max_output_detail::cell().store(v > 0 ? v : 0, std::memory_order_relaxed);
+}
+// Digits only; anything else reads as unset.
+[[nodiscard]] inline int parse_max_output(const char* e) noexcept {
+    if (!e) return 0;
+    int v = 0;
+    for (const char* p = e; *p >= '0' && *p <= '9'; ++p) v = v * 10 + (*p - '0');
+    return v;
+}
 [[nodiscard]] inline int max_output_tokens_for(std::string_view model_id) noexcept {
-    if (const char* env = std::getenv("AGENTTY_MAX_OUTPUT_TOKENS")) {
-        int v = 0;
-        for (const char* p = env; *p >= '0' && *p <= '9'; ++p) v = v * 10 + (*p - '0');
-        if (v > 0) return v;
-    }
+    if (const int v = max_output_detail::cell().load(std::memory_order_relaxed); v > 0)
+        return v;
 
     const auto caps = ModelCapabilities::from_id(model_id);
     if (caps.is_known_family()) {
@@ -452,6 +2216,11 @@ enum class Effort : std::uint8_t { None, Low, Medium, High, Xhigh, Max };
         //   <= 3.x           -> 8192  (older models 400 above this)
         //   unknown gen      -> 16384 (roomy but universally accepted)
         if (caps.is_haiku()) return 8192;
+        // OpenAI gpt-5.x (ChatGPT/Codex Responses): large-output capable
+        // (272k context); 64k is a safe, universally-accepted ceiling that
+        // matches the flagship Claude lane. Explicit so intent is clear and a
+        // future gpt generation doesn't silently fall through.
+        if (caps.is_gpt()) return 64000;
         // Flagship lane (Fable/Mythos) and any Claude 4-or-later Sonnet/Opus.
         if (caps.is_fable() || caps.is_mythos()) return 64000;
         if (caps.generation >= 4) return 64000;

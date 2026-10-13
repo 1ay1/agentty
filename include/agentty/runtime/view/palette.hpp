@@ -1,11 +1,18 @@
 #pragma once
-// agentty::ui — terminal palette using only named ANSI colors.
+// agentty::ui — the semantic palette, resolved against the live theme.
 //
-// Named-ANSI-only is a deliberate constraint: the user's terminal theme
-// always wins.  We pick semantic names; the terminal decides the hue.
+// Every colour in agentty comes from here, and every token here is a read
+// of the theme the user chose in Settings → Appearance. The default theme
+// is `native`, which states only terminal-default and the sixteen named
+// ANSI colours — so out of the box the old constraint still holds exactly:
+// we pick semantic names, the user's terminal decides the hue.
 
 #include <maya/style/color.hpp>
 #include <maya/style/style.hpp>
+
+#include "agentty/domain/ui_theme.hpp"        // ui_prefs::theme()
+#include "agentty/runtime/panel/palette.hpp"   // PaletteContext, Command
+#include "agentty/runtime/model.hpp"            // Model
 
 namespace agentty::ui {
 
@@ -21,43 +28,239 @@ namespace agentty::ui {
 // run of inspect-class tools reads as a calm gray list, with magenta
 // edits and cyan bashes standing out as the meaningful actions.
 //
-// `fg` is the primary body-text color. ANSI 7 ("white") renders as a mid-
-// gray in most modern terminal themes (Catppuccin, Solarized, One Dark,
-// Gruvbox) — readable, but not the brightest the terminal offers. Prose
-// that the user is actually *reading* (their own typed message, the
-// assistant's reply paragraphs) maps to ANSI 15 ("bright_white") so it
-// pops against the theme's background at maximum contrast. Chrome and
+// ── Why these are functions, not constants ───────────────────────────────
+//
+// They were `inline constexpr` ANSI literals, and that made the entire
+// Appearance theme picker a lie: you could browse 57 schemes, watch the
+// name change, and the UI never moved, because every colour in the app was
+// baked at compile time. Choosing Dracula repainted nothing.
+//
+// A theme is judged by LOOKING at it, so the tokens have to be reads of the
+// theme in force rather than literals. `ui_prefs::theme()` is one relaxed
+// atomic load of a pointer into a constexpr table — cheap enough to sit on
+// the hot path of every styled span, and re-seated once per frame by view().
+//
+// The NAMES and the call sites stay EXACTLY as they were — `fg_of(muted)`
+// still reads `fg_of(muted)`. Each token is a tiny proxy that converts to a
+// Color by reading the live theme, so ~493 use sites needed no edit at all.
+// That matters beyond churn: several tokens (`info`, `success`, `fg`) share
+// a name with ordinary locals in these files, so a mechanical rename would
+// have been a silent-breakage machine.
+//
+// The axis discipline below (text tiers / status / code / role) is
+// unchanged — each token still means one thing, it just sources its hue
+// from the active scheme instead of from a literal.
+//
+// `native` maps every slot back to the terminal's OWN sixteen colours, so
+// the default behaviour after this change is exactly the behaviour before
+// it: the user's palette, not ours.
+
+namespace detail {
+
+// A named slot in the live theme. Converts to a colour on use, which is what
+// makes it substitutable for the constant it replaced.
+//
+// TWO conversions, and the difference between them is the whole invariant:
+//
+//   • operator Color — hands back the SYMBOLIC slot. Nothing is resolved.
+//     maya resolves it at PAINT time in Style::to_sgr(), against whatever
+//     theme is live THEN. This is the conversion that matters: Style::fg is
+//     an optional<Color>, so a widget built today paints under the theme
+//     that is live when it is painted, not the one that was live when it was
+//     built. An Element can therefore be stored for the rest of the session
+//     and still follow a theme switch.
+//
+//   • operator LitColor — resolves against the live theme NOW. Needed where
+//     a caller wants CHANNELS (a blend, a contrast check) or must assign
+//     into a Theme field, which holds LitColor by definition. This is
+//     EARLY BINDING: whatever you put the result into is pinned to today's
+//     palette and has to be rebuilt on a theme change.
+//
+// Early binding is what made live theme switching look intermittent. A
+// committed markdown block is a stored, already-rendered Element; when its
+// colours were resolved at build time it kept the palette of the moment it
+// was built, and no later switch could reach it — the bytes never change, so
+// nothing goes dirty and every cache tier replays the same Element. Anything
+// rebuilt per frame (composer, spinner, welcome screen) followed the new
+// theme correctly, which is exactly what made the failure look random.
+//
+// So: prefer the Color conversion. Reach for LitColor only when you need
+// channels, and then only for something short-lived.
+//
+// The cost is that a bare `ui::fg == c` is ambiguous — two user-defined
+// conversions, neither better. Spell it `ui::fg() == c` to name the read;
+// that is the only place callers notice, and it reads better anyway.
+struct Slot {
+    // The symbolic identity. This is the slot itself, not a colour.
+    maya::ThemeSlot slot;
+    // Resolve-now escape hatch, kept as a function pointer so the token
+    // stays a structural-NTTP-friendly literal type.
+    maya::LitColor (*read)() noexcept;
+
+    [[nodiscard]] operator maya::LitColor() const noexcept { return read(); }  // NOLINT(google-explicit-constructor)
+    // LATE-BOUND on purpose — see above. Do not "simplify" this to read().
+    [[nodiscard]] operator maya::Color() const noexcept {  // NOLINT(google-explicit-constructor)
+        return maya::Color::slot(slot);
+    }
+    [[nodiscard]] maya::LitColor operator()() const noexcept { return read(); }
+    // The symbolic form, spelled explicitly for call sites that want to be
+    // unambiguous about which binding they are asking for.
+    [[nodiscard]] maya::Color symbolic() const noexcept {
+        return maya::Color::slot(slot);
+    }
+};
+
+[[nodiscard]] inline const maya::Theme& thm() noexcept { return ui_prefs::theme(); }
+
+// field → ThemeSlot, generated from maya's OWN table.
+//
+// AGENTTY_THEME_SLOT(x) is spelled with a Theme FIELD name (`thm().x`), but a
+// symbolic colour needs the matching ThemeSlot ENUMERATOR. Deriving one
+// constant per field from MAYA_THEME_SLOTS means the two halves of a token —
+// what it resolves to now, and what it names symbolically — are guaranteed to
+// be the same slot. Naming a field maya does not have is a compile error
+// here, not a colour that silently paints wrong somewhere downstream.
+#define X(f, E) inline constexpr maya::ThemeSlot slot_of_field_##f = maya::ThemeSlot::E;
+MAYA_THEME_SLOTS(X)
+#undef X
+
+}  // namespace detail
+
+// The invariant, pinned where it can be read.
+//
+// A token's Color conversion is what widget Config defaults and
+// Style::with_fg() pick up, so it is the one that ends up inside stored
+// Elements (committed markdown blocks, the frozen scrollback ledger). If it
+// ever resolves, every widget built today freezes today's palette and a live
+// theme switch stops reaching settled content — the exact bug this shape
+// exists to prevent. The LitColor conversion stays early-bound on purpose
+// and is only for blending / Theme-field assignment, which need channels.
+static_assert(
+    std::is_same_v<decltype(static_cast<maya::Color>(std::declval<detail::Slot>())),
+                   maya::Color>,
+    "ui::Slot must convert to a SYMBOLIC maya::Color");
+static_assert(maya::binding::no_early_binding_v<maya::Color>,
+              "and that Color must itself be late-bound — see "
+              "maya/style/binding.hpp");
+
+}  // namespace agentty::ui
+
+// ui::Slot is a theme TOKEN, not a literal: every read goes back to the
+// live Theme, so it tracks a theme switch and can never pin a colour.
+// maya::Themed rejects anything shaped like a literal (that is the palette
+// bug it exists to prevent), and Slot converts via LitColor, so it has to
+// say what it is. The specialisation names a TYPE, so no literal can
+// sneak through it.
+template <>
+struct maya::is_theme_token<::agentty::ui::detail::Slot> : std::true_type {};
+
+namespace agentty::ui {
+
+// Define a token from a Theme FIELD name. The matching ThemeSlot enumerator
+// is looked up from maya's own field↔enumerator table (MAYA_THEME_SLOTS), so
+// the symbolic identity and the resolve-now path can never name different
+// slots — there is one list, in maya, and both halves read it.
+#define AGENTTY_THEME_SLOT(field) \
+    ::agentty::ui::detail::Slot{ ::agentty::ui::detail::slot_of_field_##field, \
+        []() noexcept { \
+            return ::agentty::ui::detail::thm().field; } }
+
+// Prose that the user is actually READING maps to the theme's `text` slot,
+// which native resolves to the terminal's default foreground — maximum
+// contrast against whatever background they actually have, rather than a
+// literal bright_white that is invisible on a light terminal. Chrome and
 // metadata still use `muted` / `with_dim()` to recede.
-inline constexpr auto fg          = maya::Color::bright_white();
-inline constexpr auto muted       = maya::Color::bright_black();
-inline constexpr auto accent      = maya::Color::magenta();   // brand / Write profile
-inline constexpr auto info        = maya::Color::blue();      // Ask profile / threads
-inline constexpr auto success     = maya::Color::green();     // accepted / running OK
-inline constexpr auto warn        = maya::Color::yellow();    // pending / amber
-inline constexpr auto danger      = maya::Color::red();       // errors / rejected
-inline constexpr auto highlight   = maya::Color::cyan();      // command palette / mentions
+inline constexpr auto fg        = AGENTTY_THEME_SLOT(text);
+inline constexpr auto muted     = AGENTTY_THEME_SLOT(muted);
+inline constexpr auto accent    = AGENTTY_THEME_SLOT(accent);   // brand / Write profile
+inline constexpr auto info      = AGENTTY_THEME_SLOT(info);     // Ask profile / threads
+inline constexpr auto success   = AGENTTY_THEME_SLOT(success);  // accepted / running OK
+inline constexpr auto warn      = AGENTTY_THEME_SLOT(warning);  // pending / amber
+inline constexpr auto danger    = AGENTTY_THEME_SLOT(error);    // errors / rejected
+inline constexpr auto highlight = AGENTTY_THEME_SLOT(primary);  // command palette / mentions
 
 // ── Token layer (axis-disciplined). Prefer these in new code. ────────────
 
 // Text hierarchy — three tiers from primary prose down to chrome.
-inline constexpr auto text_primary   = maya::Color::bright_white();  // prose, headlines
-inline constexpr auto text_secondary = maya::Color::white();         // mid-tone metadata (inspect tools, neutral chrome)
-inline constexpr auto text_tertiary  = maya::Color::bright_black();  // footers, hints, blanks
+inline constexpr auto text_primary   = AGENTTY_THEME_SLOT(text);       // prose, headlines
+inline constexpr auto text_secondary = AGENTTY_THEME_SLOT(secondary);  // mid-tone metadata
+inline constexpr auto text_tertiary  = AGENTTY_THEME_SLOT(muted);      // footers, hints, blanks
+// Ink for text sitting ON a filled badge — the theme's own answer to
+// "what reads against my accent colours", rather than a literal black that
+// disappears the moment a scheme's badge hue is dark.
+//
+// ONLY VALID WHEN THE THEME OWNS A CANVAS. Ask theme_owns_canvas() first.
+// Under theme::native inverse_text is Default — the SAME colour as ordinary
+// text — because native paints no background of its own and so has no
+// second canvas to invert against. Putting it on a filled chip there gives
+// you the terminal's normal foreground on a bright band: light-on-light,
+// washed out, which is what the Opus badge looked like on Ghostty.
+inline constexpr auto text_inverse   = AGENTTY_THEME_SLOT(inverse_text);
+
+// Does the live theme paint its own background?
+//
+// Every scheme does. theme::native deliberately does NOT — it states
+// Default for background/surface so the user's own terminal colours reach
+// the screen, which is the entire point of it.
+//
+// That single fact decides whether a FILLED element is a good idea. A band
+// or a chip needs a canvas to sit on and ink that contrasts with it; with
+// no canvas there is no meaningful "inverse", so the honest fallback is
+// coloured TEXT on the user's own background — exactly how status lines and
+// diffs have always read on a plain terminal.
+[[nodiscard]] inline bool theme_owns_canvas() noexcept {
+    return detail::thm().background.kind() != maya::ColorKind::Default;
+}
+
+// A chip: the theme's own text colour, on a tint of `hue`.
+//
+// Two cases, because only one of them is measurable.
+//
+// RGB hue (every named scheme). Keep the theme's `text` as the ink and
+// move the HUE until that text reads on it. That is the right way round
+// for a label: ink that changes per chip is a second thing for the eye to
+// resolve, while ink that stays the prose colour makes the chip read as
+// text on a tint, which is what a badge is.
+//
+// PALETTE hue (theme::native). We cannot measure it — the terminal owns
+// those 16 entries — and we must not project it, because projecting throws
+// away the colour the user actually chose. Their `text` is no help either:
+// under native it is Default, the terminal's ORDINARY foreground, so
+// pairing it with a palette band is light-on-light, which is agentty #45
+// all over again.
+//
+// So hand the question to the one party that can answer it. SGR 7 tells
+// the terminal to swap its own foreground and background: the band becomes
+// the user's palette colour and the ink becomes the user's background, a
+// pair they chose together and the terminal knows exactly.
+[[nodiscard]] inline maya::Style chip_style(maya::Color hue) noexcept {
+    const maya::Theme& th = detail::thm();
+    const maya::LitColor lit = th.resolve(hue);
+
+    if (lit.kind() != maya::ColorKind::Rgb)
+        return maya::Style{}.with_fg(lit).with_inverse();
+
+    const maya::LitColor ink    = th.resolve(maya::Color::slot(maya::ThemeSlot::Text));
+    const maya::LitColor canvas = th.resolve(maya::Color::slot(maya::ThemeSlot::Background));
+    return maya::Style{}
+        .with_bg(maya::band_for(lit, ink, canvas))
+        .with_fg(maya::Color::slot(maya::ThemeSlot::Text));
+}
 
 // Status — severity / outcome ONLY. Never a category color.
-inline constexpr auto status_ok      = maya::Color::bright_green();
-inline constexpr auto status_info    = maya::Color::bright_blue();
-inline constexpr auto status_warn    = maya::Color::bright_yellow();
-inline constexpr auto status_error   = maya::Color::bright_red();
+inline constexpr auto status_ok    = AGENTTY_THEME_SLOT(success);
+inline constexpr auto status_info  = AGENTTY_THEME_SLOT(info);
+inline constexpr auto status_warn  = AGENTTY_THEME_SLOT(warning);
+inline constexpr auto status_error = AGENTTY_THEME_SLOT(error);
 
 // Code references — file paths, identifiers, command args.
-inline constexpr auto code_path      = maya::Color::bright_cyan();   // file paths, identifiers
-inline constexpr auto code_text      = maya::Color::cyan();          // code-block body content
+inline constexpr auto code_path = AGENTTY_THEME_SLOT(link);  // file paths, identifiers
+inline constexpr auto code_text = AGENTTY_THEME_SLOT(info);  // code-block body content
 
 // Role / identity — persistent identifier colors. One hue per role.
-inline constexpr auto role_brand     = maya::Color::magenta();          // agentty brand, Write profile, queue chips
-inline constexpr auto role_brand_alt = maya::Color::bright_magenta();   // queued-message chips, alt brand
-inline constexpr auto role_info      = maya::Color::blue();             // Ask profile, threads, vcs context
+inline constexpr auto role_brand     = AGENTTY_THEME_SLOT(accent);   // brand, Write profile
+inline constexpr auto role_brand_alt = AGENTTY_THEME_SLOT(primary);  // queue chips, alt brand
+inline constexpr auto role_info      = AGENTTY_THEME_SLOT(info);     // Ask profile, threads, vcs
 
 // ── Style presets — terminal default fg unless overridden ─────────────────
 inline maya::Style dim()    { return maya::Style{}.with_dim(); }
@@ -71,20 +274,40 @@ inline maya::Style fg_bold(maya::Color c)       { return maya::Style{}.with_fg(c
 // color (bright_black / gray) collapses below the readable floor on
 // dark / low-contrast themes (true-black backgrounds, OLED palettes,
 // some Solarized variants). The intent of `fg_dim(muted)` is "subdued
-// secondary text," and bright_black ALONE already carries that role
+// secondary text," and the muted ink ALONE already carries that role
 // on every reasonable theme — stacking the SGR `dim` attribute on top
 // just trades readability for nothing. So suppress the `with_dim()`
-// when the color is bright_black; keep it for everything else, where
-// dimming a bright color is exactly the meaningful signal we want
-// (a muted form of the brand color, etc.).
+// when the colour already IS the muted ink; keep it for everything
+// else, where dimming a bright colour is exactly the meaningful signal
+// we want (a muted form of the brand colour, etc.).
+//
+// maya::theme::is_muted is the shared definition of that question. This
+// used to test `Named && index == BrightBlack` by hand, which was the
+// same check six maya widgets had each grown privately — and which
+// silently stopped being true for any theme whose muted slot is not
+// literally bright_black (i.e. all 57 built-in schemes).
 inline maya::Style fg_dim(maya::Color c) {
-    const bool is_already_muted =
-        c.kind() == maya::Color::Kind::Named
-        && c.index() == static_cast<uint8_t>(maya::AnsiColor::BrightBlack);
-    return is_already_muted
+    return maya::theme::is_muted(c)
         ? maya::Style{}.with_fg(c)
         : maya::Style{}.with_fg(c).with_dim();
 }
 inline maya::Style fg_italic(maya::Color c)     { return maya::Style{}.with_fg(c).with_italic(); }
+
+// ── Palette row visibility ─────────────────────────────────────
+//
+// Rows are GATED — Review/Accept-all need pending changes, Run-code-block a
+// fenced reply, Update a release — and THREE places must agree on which are
+// visible: the VIEW that renders the list, the REDUCER that resolves a cursor
+// to a command, and back_to() restoring a cursor after Esc. When they
+// disagree the palette shows one list while the cursor indexes another, so
+// Enter fires a neighbour and Esc restores the wrong row.
+//
+// It was written out twice — in palette.cpp and in nav_pickers.cpp — each
+// commented "the SAME predicate" as the other. One definition makes that
+// comment true rather than aspirational.
+//
+// Lives here rather than beside the command table because it needs the Model,
+// and command_palette.hpp is deliberately Model-free.
+[[nodiscard]] PaletteContext palette_context(const Model& m);
 
 } // namespace agentty::ui

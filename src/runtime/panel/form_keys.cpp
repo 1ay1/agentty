@@ -1,0 +1,342 @@
+// form_keys.cpp — the one key map every form obeys.
+//
+// Pure: (focus, key) -> intent, then intent -> mutation. No pane re-derives
+// navigation, so the panes cannot drift apart, and the whole interaction model
+// is testable by feeding synthetic KeyEvents with no terminal attached.
+
+#include "agentty/runtime/panel/form_keys.hpp"
+
+#include "agentty/runtime/panel/nav.hpp"
+
+namespace agentty::form::keys {
+
+namespace {
+
+using maya::KeyEvent;
+using maya::SpecialKey;
+
+[[nodiscard]] const SpecialKey* special(const KeyEvent& ev) {
+    return std::get_if<SpecialKey>(&ev.key);
+}
+
+} // namespace
+
+std::optional<Action> translate(const Form& f, const KeyEvent& ev) {
+    return translate(f.editing(), f.choosing(), ev);
+}
+
+std::optional<Action> translate(bool editing, bool choosing, const KeyEvent& ev) {
+    const auto sk = special(ev);
+    const auto ch = ui::nav::char_view(ev);   // folds raw ctrl bytes to letter+ctrl
+
+    // ── Choosing: the floating list owns everything ──────────────────
+    // A dropdown only ever holds an enum, so the key map is small on purpose:
+    // no filter, no query. A set that needs searching is a Pick row that
+    // opens a real picker instead.
+    if (choosing) {
+        if (sk) switch (*sk) {
+            case SpecialKey::Escape: return Action{Intent::MenuCancel};
+            case SpecialKey::Enter:  return Action{Intent::MenuCommit};
+            case SpecialKey::Up:     return Action{Intent::MenuPrev};
+            case SpecialKey::Down:   return Action{Intent::MenuNext};
+            default: break;
+        }
+        // Swallow everything else — including bare printables (the one key
+        // policy: letters never act) — so an open menu can't leak keys to
+        // the form beneath it.
+        return Action{Intent::None};
+    }
+
+    // ── Editing: printable keys edit, they do not navigate ─────────
+    if (editing) {
+        if (sk) switch (*sk) {
+            case SpecialKey::Escape:
+            case SpecialKey::Enter:     return Action{Intent::LeaveField};
+            // Tab asks the PANE to complete. Forms without a completer ignore
+            // it (apply() has no arm), so this is inert everywhere it is not
+            // wanted and costs nothing to translate unconditionally.
+            case SpecialKey::Tab:       return Action{Intent::Complete};
+            // ↑/↓ leave the field AND move (apply() ends the edit first).
+            // Without this the editing table swallowed them — Enter on a
+            // text row then any arrow read as "the panel froze", because
+            // the only exits were the two keys nothing advertised.
+            case SpecialKey::Up:        return Action{Intent::MovePrev};
+            case SpecialKey::Down:      return Action{Intent::MoveNext};
+            case SpecialKey::Backspace: return Action{Intent::Backspace};
+            case SpecialKey::Delete:    return Action{Intent::DeleteForward};
+            case SpecialKey::Left:      return Action{Intent::CaretLeft};
+            case SpecialKey::Right:     return Action{Intent::CaretRight};
+            case SpecialKey::Home:      return Action{Intent::CaretHome};
+            case SpecialKey::End:       return Action{Intent::CaretEnd};
+            default: break;
+        }
+        if (ch && ch->ctrl) {
+            if (ch->c == U'u') return Action{Intent::ClearField};
+            if (ch->c == U'a') return Action{Intent::CaretHome};
+            if (ch->c == U'e') return Action{Intent::CaretEnd};
+            return Action{Intent::None};    // don't leak ^X to navigation
+        }
+        if (ch) return Action{Intent::Insert, ch->c};
+        return Action{Intent::None};
+    }
+
+    // ── Browsing ─────────────────────────────────────────────────────
+    if (sk) switch (*sk) {
+        case SpecialKey::Escape:   return Action{Intent::Close};
+        case SpecialKey::Enter:    return Action{Intent::Activate};
+        case SpecialKey::Up:       return Action{Intent::MovePrev};
+        case SpecialKey::Down:     return Action{Intent::MoveNext};
+        case SpecialKey::Left:     return Action{Intent::AdjustDown};
+        case SpecialKey::Right:    return Action{Intent::AdjustUp};
+        case SpecialKey::Home:     return Action{Intent::MoveFirst};
+        case SpecialKey::End:      return Action{Intent::MoveLast};
+        case SpecialKey::PageUp:   return Action{Intent::MovePageUp};
+        case SpecialKey::PageDown: return Action{Intent::MovePageDown};
+        // Backspace while BROWSING is still a Backspace.
+        //
+        // It used to fall through to None and be silently lost, which is why
+        // the first press after opening a list did nothing: the pane opens in
+        // Browsing, so the key never reached apply() at all and the user had
+        // to press it twice without ever learning why.
+        //
+        // Translating it does NOT make it destructive -- apply() still
+        // requires an edit session before touching bytes (see its Backspace
+        // arm, and the note there about never destroying value the user
+        // cannot see a caret in). What this buys is that the keystroke
+        // ARRIVES, so a pane can give it a meaning and the default stays a
+        // no-op rather than a hole in the router.
+        case SpecialKey::Backspace: return Action{Intent::Backspace};
+        // Delete has the same hole Backspace did, for the same reason, and is
+        // closed the same way: translate it so apply() (or the pane) can give
+        // it a meaning, rather than losing it in the router and leaving the
+        // user to wonder why one delete key reaches the field and the other
+        // does not.
+        case SpecialKey::Delete:    return Action{Intent::DeleteForward};
+        default: break;
+    }
+    if (ch && ch->ctrl) {
+        // No ^S: Esc IS the save. Leaving a field commits it (Esc, arrows,
+        // Enter) and Esc at the row level closes the pane — so "write it
+        // and get out" is Esc, or Esc-Esc from inside a field. A second
+        // key for the same act is a second thing to learn and a second
+        // thing to keep in sync.
+        if (ch->c == U'x') return Action{Intent::ResetField};
+        return std::nullopt;                // ^C and friends stay ambient
+    }
+    if (ch) {
+        // ── Bare printables NEVER act (the no-surprises key policy) ───
+        // They TYPE on a text-like row (type-to-edit — the edit session
+        // starts on the first character, no Enter modality) and do nothing
+        // anywhere else.
+        //
+        // The row kind is decided by apply(), NOT here. The router
+        // translates a whole input BATCH against ONE focus snapshot taken
+        // at frame start, so any cursor-dependent decision made here goes
+        // stale the instant the batch contains a move: pressing ↓ then a
+        // letter in the same batch translated the letter against the OLD
+        // row and DROPPED it — the reported "input doesn't register".
+        // Emitting TypeToEdit unconditionally keeps the router
+        // cursor-independent (its founding contract: three bools, no
+        // rows); apply() sees the real focused row and ignores the intent
+        // when it isn't text-like.
+        return Action{Intent::TypeToEdit, ch->c};
+    }
+    return std::nullopt;
+}
+
+Applied apply(Form& f, Action a) {
+    Applied out;
+    Field* row = f.focused();
+
+    // End the current edit session (if any) and record commit-on-exit:
+    // leaving a field whose value changed IS the save signal. One helper so
+    // Enter/Esc/arrows/PgUp/Home all agree — a divergent exit path here is
+    // a field that silently never commits.
+    auto leave_edit = [&] {
+        if (!f.editing()) return;
+        (void)escape(f);
+        if (f.edit_dirty) { out.left_field = true; f.edit_dirty = false; }
+    };
+
+    switch (a.intent) {
+        case Intent::None: break;
+
+        case Intent::MovePrev:
+        case Intent::MoveNext:
+            // Arrows while EDITING: leave the field (commit what was typed —
+            // text edits are in-place, so "commit" is just dropping the
+            // caret), then move. Ending the edit first keeps the invariant
+            // that Editing focus always refers to the cursor row.
+            leave_edit();
+            move(f, a.intent == Intent::MovePrev ? -1 : +1);
+            break;
+
+        case Intent::MoveFirst: leave_edit();
+                                 move_edge(f, /*last=*/false); break;
+        case Intent::MoveLast:  leave_edit();
+                                 move_edge(f, /*last=*/true);  break;
+        // Viewport-sized strides. The form does not know the viewport (a
+        // widget concern), so a fixed stride matching the default
+        // panel_viewport_h keeps PgUp/PgDn meaningful without a layout
+        // back-channel; move_page CLAMPS at the edges (no wrap) and skips
+        // headers.
+        case Intent::MovePageUp:   leave_edit();
+                                   move_page(f, -10); break;
+        case Intent::MovePageDown: leave_edit();
+                                   move_page(f, +10); break;
+
+        case Intent::AdjustDown:
+        case Intent::AdjustUp:
+            if (row && row->editable()) {
+                adjust(row->value, a.intent == Intent::AdjustUp ? +1 : -1);
+                f.dirty = true;
+                out.changed = true;
+            }
+            break;
+
+        case Intent::Complete:
+            // Deliberately nothing. Completion is a PANE concern -- it needs the
+            // candidate set, which the form layer has no business knowing
+            // about. The pane checks for this intent before calling apply()
+            // (see update/sandbox.cpp's list editor); reaching here means no
+            // completer was offered, and the keystroke is inert.
+            break;
+
+        case Intent::Activate: {
+            const auto r = activate(f);
+            out.fired    = (r == Activated::FiredAction);
+            out.hand_off = (r == Activated::HandOff);
+            out.changed  = (r == Activated::Changed);
+            break;
+        }
+
+        case Intent::ResetField:
+            // The pane owns what "default" means for a row, so this only
+            // signals intent; a pane that has no default simply ignores it.
+            break;
+
+        case Intent::Close:
+            // Esc while editing leaves the field — and commits like every
+            // other exit (in-place edits mean Esc was never a revert; making
+            // it the one uncommitted exit would be a silent-drift trap).
+            if (f.editing()) { leave_edit(); break; }
+            out.close = escape(f);
+            break;
+
+        // ── Editing-only intents ──────────────────────────────────
+        // Guarded by the TRUE focus, not the caller's belief. subscribe.cpp
+        // translates a whole input batch against ONE FormFocus snapshot
+        // (rebuilt only after the batch drains), so a paste of "abc\ndef"
+        // translates d/e/f as Insert even though the \n already left the
+        // field — without this guard those characters mutate a row the
+        // user is no longer editing. The reducer is the only layer that
+        // sees the real mode; intent from a stale snapshot dies here.
+        case Intent::TypeToEdit:
+            // Type-to-edit: a printable typed while BROWSING a text-like
+            // row starts the edit session and lands as its first insert.
+            // Only translate() emits this, and only when the router said
+            // the focused row is text-like AND focus was Browsing — so it
+            // cannot fire from a stale batch (those arrive as Insert and
+            // die on the editing-focus guard below). Deletion keys
+            // deliberately do NOT auto-enter: a stray Backspace must never
+            // destroy value bytes the user couldn't see a caret in.
+            if (!f.editing() && row && row->is_text_like()
+                && row->editable() && !row->locked) {
+                // Does the row ACCEPT this character?
+                //
+                // A Number row takes digits only, and typing a letter used to
+                // enter the edit session anyway: focus flipped to Editing,
+                // edit_dirty went true, and number_insert silently dropped the
+                // character. The row was then live and "changed" with nothing
+                // on screen to show it -- so the next Esc committed a no-op
+                // edit, arrows behaved like caret moves instead of row moves,
+                // and the pane read as having swallowed the keystroke. That is
+                // the "alpha char misbehaves everywhere".
+                //
+                // Checked BEFORE any state moves, so a rejected character is
+                // exactly a no-op rather than a half-entered session.
+                const bool numeric_row =
+                    std::holds_alternative<field::Number>(row->value);
+                if (numeric_row && (a.ch < U'0' || a.ch > U'9')) break;
+
+                f.focus = focus::Editing{};
+                f.edit_dirty = false;
+                // Unambiguously the first keystroke of the session, so a
+                // Number row takes this digit as the whole value rather than
+                // appending it to the saved one.
+                insert(row->value, a.ch, /*fresh=*/true);
+                out.changed = true;
+                f.edit_dirty = true;
+            }
+            break;
+        case Intent::Insert:
+            if (f.editing() && row && row->editable()) {
+                // A Number row takes digits only. Inserting a letter is a
+                // no-op there, and reporting `changed` for it armed
+                // commit-on-exit for an edit that never happened -- the same
+                // half-state that made a letter on a numeric row read as the
+                // pane swallowing the key.
+                //
+                // Checked by KIND rather than by comparing values: FieldValue
+                // is a variant of types that are not equality-comparable, and
+                // Number is the only kind that can refuse a character.
+                if (std::holds_alternative<field::Number>(row->value)
+                    && (a.ch < U'0' || a.ch > U'9'))
+                    break;
+
+                // Fresh until something in THIS session has changed the value.
+                // That makes Enter-then-type behave like type-to-edit above:
+                // the first digit replaces, the rest append.
+                insert(row->value, a.ch, /*fresh=*/!f.edit_dirty);
+                out.changed = true;
+                f.edit_dirty = true;
+            }
+            break;
+        case Intent::Backspace:
+            if (f.editing() && row && row->editable()) {
+                backspace(row->value);
+                out.changed = true;
+                f.edit_dirty = true;
+            }
+            break;
+        case Intent::DeleteForward:
+            if (f.editing() && row && row->editable()) {
+                delete_forward(row->value);
+                out.changed = true;
+                f.edit_dirty = true;
+            }
+            break;
+        case Intent::CaretLeft:
+            if (f.editing() && row) move_cursor(row->value, -1);
+            break;
+        case Intent::CaretRight:
+            if (f.editing() && row) move_cursor(row->value, +1);
+            break;
+        case Intent::CaretHome:
+            if (f.editing() && row) cursor_home(row->value);
+            break;
+        case Intent::CaretEnd:
+            if (f.editing() && row) cursor_end(row->value);
+            break;
+        case Intent::ClearField:
+            if (f.editing() && row && row->editable()) {
+                clear(row->value);
+                out.changed = true;
+                f.edit_dirty = true;
+            }
+            break;
+        case Intent::LeaveField:
+            leave_edit();
+            break;
+
+        case Intent::MenuPrev:      dropdown_move(f, -1); break;
+        case Intent::MenuNext:      dropdown_move(f, +1); break;
+        case Intent::MenuCommit:    out.changed = dropdown_commit(f); break;
+        case Intent::MenuCancel:    (void)escape(f); break;
+    }
+
+    if (out.changed) f.dirty = true;
+    return out;
+}
+
+} // namespace agentty::form::keys

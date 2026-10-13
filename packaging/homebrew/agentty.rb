@@ -30,7 +30,10 @@ class Agentty < Formula
     end
 
     def install
-      bin.install Dir["*"].first => "agentty"
+      # The release asset is the bare static binary; Homebrew downloads it to
+      # the staging dir under the URL's basename. Install it by that exact name
+      # so a stray file in the dir can never be picked instead.
+      bin.install Dir["agentty-*"].first => "agentty"
       chmod 0755, bin/"agentty"
     end
   end
@@ -46,9 +49,19 @@ class Agentty < Formula
     end
 
     def install
-      bin.install Dir["*"].first => "agentty"
+      bin.install Dir["agentty-*"].first => "agentty"
       chmod 0755, bin/"agentty"
     end
+  end
+
+  def caveats
+    <<~EOS
+      agentty is installed. Get started with:
+        agentty
+
+      It talks to Claude via your ANTHROPIC_API_KEY (or `agentty` will prompt
+      you to sign in on first run). Docs: https://agentty.org/docs
+    EOS
   end
 
   test do

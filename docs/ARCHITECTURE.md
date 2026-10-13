@@ -25,6 +25,13 @@ Rendering is a second pure function, `view : Model -> Element`, delegated to
 constructs chrome glyphs or makes layout decisions; it builds widget *Config*
 values from `Model` state and maya owns every pixel, border, and animation.
 
+The loop itself, the effects, tasks, subscriptions and every thread and lock
+in the process are **jaal**, which agentty reaches only through maya:
+agentty → maya → jaal, strictly. agentty orchestrates; no other submodule
+runs anything of its own. See [LAYERING.md](LAYERING.md), and for the
+protocol libraries (mcp-cpp, acp-cpp, rag-cpp) the binding rules in
+[PROTOCOL_LIBRARIES.md](PROTOCOL_LIBRARIES.md).
+
 The four maya `Program` hooks are bound in
 `include/agentty/runtime/app/program.hpp`:
 
@@ -54,10 +61,13 @@ types and inline logic; `src/` carries the heavier implementations.
   newtype is a compile error, not a debugging session.
 - **`runtime/`** — the application proper.
   - `model.hpp` — the composed `Model` plus UI-only sub-states (composer,
-    pickers, palette, modals) that belong to no domain.
+    the panel slot, modals) that belong to no domain.
+  - `panel/` — the panel subsystem: the exclusive slot, priority routing,
+    per-panel state, forms. See [`PANELS.md`](PANELS.md).
   - `msg.hpp` — the `Msg` sum, split into domain sub-variants (see §4).
   - `app/update/<domain>.cpp` — per-domain reducers.
-  - `view/` — the `Model -> Element` pipeline, one file per widget family.
+  - `view/` — the `Model -> Element` pipeline, one file per widget family;
+    every panel view under `view/panels/`.
 - **`provider/`** — the `Provider` concept and its implementations:
   `anthropic/transport.cpp` (HTTP/2 + SSE, the OAuth/Pro/Max default) and
   `openai/transport.cpp` (any OpenAI-compatible endpoint — openai, groq,
@@ -66,7 +76,13 @@ types and inline logic; `src/` carries the heavier implementations.
 - **`tool/`** — the `Tool` concept, the registry, the permission policy, and
   one file per tool under `tool/tools/`. `memory_store.cpp` backs
   `remember`/`forget`.
-- **`io/`** — `http`, `tls` (certificate pinning), `auth` (OAuth + PKCE),
+- **`scope/`** — the config-resolution algebra (`Locus × Dialect` precedence,
+  provenance-carrying `Source`, `resolve_first`/`resolve_union` folds,
+  content-bound `Trust`). One pure primitive that memory, skills, agents, and
+  slash-command discovery all fold through instead of hand-rolling roots. See
+  [`design/scope-model.md`](design/scope-model.md).
+- **`io/`** — `http`, `inflate` (gzip/deflate response decoding — self-contained,
+  no zlib dependency), `tls` (certificate pinning), `auth` (OAuth + PKCE),
   `persistence` (atomic writes), `clipboard`.
 - **`airgap/`** — SOCKS5-over-SSH so the agent can run on a host with no direct
   internet while the laptop relays the bytes.
@@ -104,6 +120,30 @@ Anything that streams a chat completion satisfies it — the real Anthropic
 and OpenAI-compatible transports in production, a deterministic in-memory
 script in tests.
 
+How the many concrete transports behind this seam stay coherent — routing
+as a registry-row field with `static_assert` proofs, model quirks as
+catalog facts, shared wire scaffolding — is its own document:
+[PROVIDER_HETEROGENEITY.md](PROVIDER_HETEROGENEITY.md).
+
+The layering question underneath that — why a model is keyed
+`(provider, model)` while a subscription fact is keyed
+`(provider, account, model)`, and how to tell which layer a new fact
+belongs to — is
+[IDENTITY_CAPABILITY_ENTITLEMENT.md](IDENTITY_CAPABILITY_ENTITLEMENT.md).
+
+The four transports (Anthropic, OpenAI-compat, Ollama-native, ChatGPT/Codex
+Responses) each own their provider-specific streaming/salvage logic, but every
+ingress concern that is genuinely SHARED lives in exactly one place so a fix
+can't drift into three copies of itself: `provider::finish_stream` +
+`wire::SseFramer`/`LineFramer` (byte-level framing + terminal-event epilogue),
+`provider::parse_retry_after` (Retry-After backoff), `wire::scrub_utf8`
+(strict UTF-8 validation), `wire::could_be_tool_json` (the leaked-tool-call
+prefix sniffer weak local models need), `provider::usage::{from_openai,
+from_responses,from_ollama}` (the three token-usage wire shapes), and
+`auth::bearer_token` (OpenAI-family auth header emission — Anthropic keeps its
+own arm-typed visit since an API key must route to `x-api-key`, never
+`Bearer`).
+
 ---
 
 ## 4. Msg: a closed sum, split for compile speed
@@ -112,10 +152,10 @@ A naive design inlines every leaf event in one giant variant. That pins
 `sizeof(Msg)` to the heaviest leaf, instantiates an N-wide `std::visit`
 dispatch table, and forces the whole reducer TU to rebuild on any leaf change.
 
-agentty instead groups leaves into ~12 **domain sub-variants** in `msg.hpp`
+agentty instead groups leaves into ~15 **domain sub-variants** in `msg.hpp`
 (`ComposerMsg`, `StreamMsg`, `ToolMsg`, `ModelPickerMsg`, `ThreadListMsg`,
 `CommandPaletteMsg`, `MentionPaletteMsg`, `SymbolPaletteMsg`, `TodoMsg`,
-`LoginMsg`, `DiffReviewMsg`, `MetaMsg`). The top-level reducer in
+`LoginMsg`, `DiffReviewMsg`, `CheckpointMsg`, `MetaMsg`). The top-level reducer in
 `update.cpp` is then a small `std::visit` that forwards each domain to its own
 TU:
 
@@ -166,11 +206,24 @@ strategies:
 - **HeadTail** — keep both ends with a middle elision marker; right for tools
   where both ends carry signal (grep, web_*, git diff/log/status).
 
-The shipped tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`,
-`list_dir`, `find_definition`, `web_fetch`, `web_search`, `todo`,
-`diagnostics`, `git_status`, `git_diff`, `git_log`, `git_commit`, `remember`,
-`forget`, `wipe_memory`, `task` (subagent dispatch), `skill` (load a skill
-body on demand).
+The shipped tools: `read`, `write`, `edit`, `move`, `remove`, `bash`,
+`process_start`/`process_poll`/`process_stop`, `grep`, `glob`, `list_dir`,
+`repo_map`, `find_definition`, `search_structural`, `web_fetch`, `web_search`,
+`todo`, `diagnostics`, `test`, `git_status`, `git_diff`, `git_log`,
+`git_show`, `git_blame`, `git_commit`, `remember`, `forget`, `wipe_memory`,
+`search_docs`, `search_code`, `task` (subagent dispatch), `skill` (load a
+skill body on demand).
+
+The tree-walking tools (`grep`, `glob`, `list_dir`, `repo_map`,
+`find_definition`, the @-file picker, the symbol index) share one directory
+skip-list (`should_skip_dir`: `.git`, `node_modules`, `build*`,
+`cmake-build*`, `_deps`, `target`, `vendor`, `.venv`, …) so generated and
+fetched trees never flood results. `grep`/`find_definition` prefer ripgrep
+when present and pass that same skip-list as `-g '!…'` excludes, so both the
+ripgrep and built-in backends prune identically — a cold-cache win (rg no
+longer stat + gitignore-checks tens of thousands of build files) and a
+quality win in repos with no `.gitignore` (build artifacts stop polluting
+hits).
 
 ---
 
@@ -260,14 +313,103 @@ Reliability rides on two independent pieces:
 
 ---
 
+## 8.5. Context management: smart compaction, not a fixed cliff
+
+A long thread eventually has to be summarized so it fits the model's context
+window. Two things make this cheap AND rarely-needed instead of a recurring
+tax:
+
+- **The trigger rides DEEP — 95 % of the window — and compaction is the
+  expensive event, so we fire seldom.** `StreamState::compaction_threshold()`
+  (`domain/session.hpp`) fires at `min(kSoftFillPct% of context_max,
+  context_max - kMinOutputHeadroom)` = `min(95 %, window - 20K)`. A 200K
+  window fires at 180K (the 20K reply floor binds); a 1M window rides all the
+  way to **950K**. Counter-intuitively this is also the *cheapest* policy:
+  the repeated conversation prefix is a prompt-cache HIT across turns (the
+  1-hour Anthropic anchor breakpoint in `wire_body.cpp`, the pinned OpenAI
+  `prompt_cache_key`), so a large live prefix costs ~10 % of fresh input per
+  turn — while each **compaction** runs a summary request AND resets the
+  cache (the next turn is a full miss). Firing at 95 % instead of early means
+  ~4× fewer of those expensive events on a big window → lower total token
+  burn. There is **no user knob** (the old *Compaction depth* command is
+  gone); the policy is chosen to give maximum context and minimum burn
+  automatically.
+- **The summarised slice is bounded** so the summary request stays cheap even
+  on a huge window. `wire_messages_for_compaction` (`cmd_factory.cpp`) hands
+  the summariser the smaller of ~65 % of the window and `kCompactionSliceCap`
+  (~150K) of the most recent transcript, keeping the first user turn so the
+  original task framing survives. A cheap model compresses 150K of recent
+  history far better — and cheaper — than 650K in one shot.
+- **Idle cache-lapse pre-compaction — the one guard against a price spike.**
+  Deep-ride is cheap *only while the prompt cache holds the prefix*. The one
+  case it would cost you: ride to 950K, walk away past the cache TTL (~1h),
+  and your next message re-prices all 950K at full input rate. So the `Tick`
+  handler (`update/meta.cpp`) watches for it: `should_compact_on_idle()`
+  (`domain/session.hpp`) fires a compaction PRE-EMPTIVELY once the session
+  has been idle ~48 min (`kIdleCompactAfter`, 80 % of the TTL) AND the prefix
+  is large (≥ `kIdleCompactMinTokens`, 200K). The summary runs while the
+  prefix is still a warm cache hit (cheap), so you return to a small warm
+  context instead of eating a cold re-price. It is bounded to large +
+  near-TTL-idle states, so ordinary pauses never trip it — this is the *only*
+  proactive early-compaction path.
+- **The summarization request itself runs on the cheapest capable model on
+  the active provider** (the same `cheapest_capable_model` router subagents
+  use — see §8.5.1), not the flagship model you're chatting with.
+  Compacting used to mean sending the ENTIRE conversation prefix plus a
+  verbose summarize prompt to Opus/Sonnet at full input price on every trigger
+  — the single biggest hidden cost in a long session. Now it costs a
+  Haiku-class summary.
+- **The 1M context window is an explicit, entitlement-gated model variant**,
+  not an auto-detected tier probe — matching Claude Code's own model catalog
+  (verified against its shipped binary). Anthropic's `/v1/models` list is
+  augmented with a `<model>[1m]` companion row per 1M-capable model on the
+  OAuth (Pro/Max) path; the `[1m]` marker is a **picker-only** signal
+  (`ModelCapabilities::extended_context_1m`) that widens `context_window()`
+  and requests the `context-1m-2025-08-07` beta — it is stripped
+  (`wire_model_id()`) before the model field ever reaches the wire.
+
+### 8.5.1 The subagent cost router
+
+`task` subagents already avoid the same trap: read-only roles (`explorer`,
+`reviewer`) route to the cheapest model on the active provider that still
+passes a capability floor (tool support, non-embedding/image/audio asset,
+non-Weak tier); `tester`/`coder`/`general` keep the parent model since they
+mutate the workspace. `ModelCapabilities::tier()` derives strength
+provider-RELATIVELY from the id (family lane + weak-tool-use signal) since no
+vendor ships a comparable power number — it only orders models WITHIN one
+provider, never across. The router never routes up and keeps the parent
+model when nothing cheaper qualifies, so a single-model or Opus-only account
+sees no behavior change.
+
+---
+
 ## 9. Safety boundaries
 
-- **Workspace boundary.** Filesystem tools refuse any path outside the launch
-  directory (or `--workspace DIR`). `--workspace /` opts out.
-- **Sandbox.** `bash` and `diagnostics` run inside `bwrap` (Linux) or
-  `sandbox-exec` (macOS) by default. Workspace + system libs + network are
-  reachable; `~/.ssh`, `/etc`, and other projects are read-only. An approved
-  `bash` call still can't `cat ~/.ssh/id_rsa`. `--sandbox auto|on|off`.
+- **Two roots: access boundary vs active project.** agentty keeps these
+  distinct. The **access boundary** (`util::workspace_root()`) is the security
+  gate: filesystem tools refuse any path outside it. It defaults to the launch
+  directory and is *widenable* — `--workspace DIR` moves it, and `--workspace /`
+  opts out entirely (whole-disk power). The **active project**
+  (`util::project_root()`) is the process cwd (agentty never `chdir`s away from
+  the launch dir) *clamped inside the boundary*. Relative tool paths and
+  repo/project-scoped defaults resolve against the **project**, not the
+  boundary, so under `--workspace /` a model's `read src/foo.cpp` still lands in
+  the launched project rather than at `/src/foo.cpp`. By default the two are the
+  same directory, so ordinary launches see no difference; the split only matters
+  when the boundary is widened past the project. Everything that means "the
+  project" — `normalize_path` (relative-path anchor), `grep`/`glob`/`list_dir`
+  defaults, `repo_map`, `find_definition`, `diagnostics`/`test` (build dir +
+  manifest), git tools (`default_git_start`), checkpoints, the @-file picker,
+  the symbol index, and project-scoped `remember` — routes through
+  `project_root()`; everything that means "the security gate" (containment
+  checks, sandbox bind-mounts, refuse-delete-root) uses `workspace_root()`.
+- **Sandbox.** `bash` and `diagnostics` run inside `claybin` by default on both
+  Linux (namespaces + landlock + seccomp + cgroup2) and macOS (seatbelt +
+  rlimits), with `bwrap` and `sandbox-exec` as the respective fallbacks.
+  Workspace + system libs + network are reachable; `~/.ssh`, `/etc`, and other
+  projects are read-only. An approved `bash` call still can't
+  `cat ~/.ssh/id_rsa`. `--sandbox auto|on|off`,
+  `--sandbox-backend claybin|bwrap`.
 - **TLS pinning.** Certificates are pinned on the real upstreams, end-to-end,
   including through the airgap SOCKS tunnel.
 - **Atomic writes.** Every persisted file is `write` + `fsync` + `rename` (or
@@ -301,20 +443,27 @@ input, or timer tick. Two host-side optimizations keep it cheap under load:
 - `-DAGENTTY_STANDALONE=ON` statically links OpenSSL + nghttp2 + libstdc++ +
   libgcc when their `.a` archives are present; libc stays dynamic. A musl
   toolchain with `-DAGENTTY_FULLY_STATIC=ON` yields a 100% static binary.
-- `-DAGENTTY_USE_MIMALLOC=ON` (default) routes global `new`/`delete` through
-  mimalloc; the override lives in exactly one TU (`main.cpp`).
-- **Gotcha:** `AGENTTY_AUTO_PULL_MAYA=ON` is the default and runs
-  `git reset --hard origin/master` on the `maya/` submodule during build. Its
-  only guard checks for *uncommitted* changes, so committed local maya work
-  still gets wiped. Build with `-DAGENTTY_AUTO_PULL_MAYA=OFF` when iterating on
-  maya.
+- `-DAGENTTY_USE_MIMALLOC=ON` (default) routes `malloc`/`free` and global
+  `new`/`delete` through **mimalloc**. CMake `FetchContent` follows upstream
+  `main` and checks for updates on every configure; no mimalloc source or
+  submodule is stored in this repository. mimalloc is compiled as a static C
+  library with its C and C++ allocation overrides enabled.
+  `release_to_kernel()` calls `mi_collect(true)` at coarse memory-release
+  boundaries.
+- **Submodules don't move on their own.** Auto-pull is OFF by default
+  (`AGENTTY_AUTO_PULL_SUBMODULES`), because fetching during a normal build
+  perturbs header mtimes and needlessly rebuilds the ~64 TUs that include
+  them. Sync on demand with `cmake --build build --target submodules_sync`
+  (or `./resync.sh`). The pull refuses to touch a submodule that has unstaged
+  changes, staged-uncommitted work, or local commits not on origin, and uses
+  `merge --ff-only`, so it never discards local work.
 
 ---
 
 ## 12. One-paragraph mental model
 
 `main.cpp` resolves credentials and installs a Provider + Store behind the
-`Deps` seam, then hands control to maya. maya calls `view(model)` to paint and
+`Deps` seam, then hands control to maya, which runs the program on jaal. maya calls `view(model)` to paint and
 `update(model, msg)` for every event. User input and SSE chunks become `Msg`s;
 the reducer dispatches each to a per-domain handler that returns the next
 `Model` plus a `Cmd` describing any side effects. Tools run behind a JSON

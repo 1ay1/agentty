@@ -1,0 +1,46 @@
+---
+title: Architecture
+description: The update loop, the view function, the provider, and the subprocess model.
+nav_section: Advanced
+nav_order: 70
+slug: architecture
+---
+
+agentty is small enough to read in an afternoon. The whole thing is a pure update loop with a single render function and a closed set of effects.
+
+:::tip
+Curious *why* it's C++26 and not Rust? See [Why modern C++ (not Rust)](/docs/why-not-rust) for the case, and [The Rust critique, answered](/docs/rust-critique) for the honest opposition research.
+:::
+
+## The update loop
+
+Everything is one pure function: `(Model, Msg) → (Model, Cmd)`. State transitions are total and inspectable. Strong ID newtypes — `ToolCallId`, `ThreadId`, `OAuthCode`, `PkceVerifier` — mean swapping two arguments is a compile error, not a debugging session.
+
+```text
+Msg  →  reducer (one std::visit over a closed event sum)  →  (Model, Cmd)
+Cmd  →  runtime executes side effects  →  new Msg events
+```
+
+## The view
+
+Rendering is a single function `Model → Element`. agentty builds widget Configs from `Model` state; the actual chrome — every glyph, layout decision, and breathing animation — is owned by [maya](https://github.com/1ay1/maya), a sister header-mostly TUI engine. The host constructs no Elements directly.
+
+## The provider
+
+The Anthropic provider speaks HTTP/2 + SSE directly through an in-house `nghttp2` + OpenSSL stack. OAuth (PKCE) and API key both flow through the same `auth::cmd_login` path. SSE deltas are smoothed into the screen at ⅛ buffer per tick so server batching doesn't produce chunky text.
+
+A second transport (OpenAI Chat Completions) covers every OpenAI-compatible backend — OpenAI, DeepSeek, Kimi, Google Gemini, xAI Grok, Mistral, Groq, OpenRouter, Together, Cerebras, Fireworks, GitHub Copilot, and local Ollama — collapsing the differences to configuration (base URL, auth header, model id). A third transport is Ollama's native `/api/chat` path, which adds incremental salvage for weaker local models that leak tool calls as raw JSON so they can still drive the full tool suite; a fourth speaks OpenAI's Responses API for ChatGPT/Codex sign-in. Every ingress concern the four transports genuinely share — stream framing, the terminal-event epilogue, Retry-After backoff, UTF-8 scrubbing, the leaked-tool-call sniffer, token-usage parsing, OpenAI-family auth headers, the tool-schema encoder, the SSE anti-buffering headers, and the reasoning-effort tier — lives in exactly one shared helper each, so a fix can't drift into silently-diverging copies. Reasoning is uniform: each wire encodes effort in its own shape (`thinking.budget_tokens` / `reasoning.effort` / `reasoning_effort`) but the *value* is single-source, and streamed chain-of-thought (Anthropic thinking, DeepSeek/Grok/Gemini `reasoning_content`) all surfaces through the same event, so it renders identically everywhere. The active provider is chosen per session and switchable live. See [Providers & Models](/docs/providers).
+
+Compaction and subagent fan-out are cost-aware: background summarization and read-only `task` roles (explorer, reviewer) route to the cheapest capable model on the active provider rather than the flagship model you're chatting with, and the auto-compaction trigger scales with the model's real context window instead of a fixed token margin — see [Providers & Models](/docs/providers#1m-context-models) and the *Compaction depth* command.
+
+## The subprocess model
+
+Subprocesses use `posix_spawn` + `poll(2)` with in-process `SIGTERM → SIGKILL` deadlines on POSIX, and `CreateProcessW` + a reader thread on Windows. No GNU `timeout` dependency, no `popen` quoting hazards. File writes are atomic: `write` + `fsync`/`_commit` + `rename`/`MoveFileExW`.
+
+## The permission matrix
+
+The permission policy is a `constexpr` matrix guarded by `static_assert`s. Each tool declares its effect set at compile time; changing a policy cell breaks the build rather than silently weakening a guarantee.
+
+:::tip
+Going deeper? The repo's `docs/RENDERING.md` walks the view pipeline turn-by-turn and `docs/UI.md` is the per-widget Config reference. For how all of this stays fast — input-to-photon latency, render caching, connection warmth, and speculative tool execution — see **[Performance](/docs/performance)**.
+:::

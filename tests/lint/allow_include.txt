@@ -1,0 +1,61 @@
+# Header-side allowlist for the concurrency ban-list (see allowlist.txt for
+# the rationale; this file covers include/, that one covers src/).
+#
+# Paths are relative to include/.
+
+# ── Lock-order capability roots (cap_mint) ───────────────────────────────
+# See tests/lint/allowlist.txt for the rule. Effect seams: called only by
+# the effect host and init(), on the loop thread between steps, where no
+# lock is held (update() and view() can't take locks).
+agentty/io/persistence.hpp: cap_mint
+agentty/runtime/app/deps.hpp: cap_mint
+agentty/runtime/app/host.hpp: cap_mint
+# Job entry: a background job starts on a pool thread holding nothing; this
+# is where its body receives the fresh thread's `unlocked`.
+agentty/util/background.hpp: cap_mint
+
+# ── Types whose whole job is to be the safe wrapper ──────────────────
+# NOTE: util/background.hpp (was isolated_thread.hpp) is deliberately NOT
+# here any more. It used to need `thread detach` because it hand-rolled a
+# detached worker, exempted on the grounds that the ACP process mode has no
+# jaal loop and therefore no task machinery. That premise was wrong:
+# maya::pool is standalone and needs no loop, so background.hpp now
+# posts to it and spawns no thread of its own.
+agentty/util/logx.hpp: atomic
+
+# ── The turn's cancel token ──────────────────────────────────────────────
+# agentty/io/http.hpp has NO entry. http::CancelToken is still the app's own
+# (a reducer tripping a specific in-flight request from a later step — see the
+# Sendable opt-in in runtime/cmd.hpp), but it is a std::stop_source now, not
+# an atomic flag, so it can hand out a real stop_token and needs no exemption.
+# backoff_with_jitter(): per-thread mt19937 for retry jitter. The generator
+# holds no shared state; each caller thread gets its own seeded from
+# random_device. thread_local is what makes this branch-free at the call
+# site without a per-turn allocation.
+agentty/provider/error_class.hpp: thread_local
+
+# ── Caches and registries below the loop ─────────────────────────────────
+# catalog: the fact registries are maya::snapshots (lock-free reads on the
+# per-frame render path); the atomic is the caps epoch counter.
+agentty/domain/catalog.hpp: atomic
+agentty/domain/lazy_bytes.hpp: atomic
+agentty/domain/ui_theme.hpp: atomic
+# const_cast on a std::variant alternative accessor, not on shared state.
+agentty/domain/smart_mode.hpp: const_cast
+
+# ── ACP: a separate process mode, no jaal loop ───────────────────────────
+agentty/acp/server.hpp: atomic
+
+# ── Process plumbing ─────────────────────────────────────────────────────
+# child_process: the child's stop/reap/close-stdin claim and the stdin
+# buf's closed/writing flags are single atomic words, claimed by CAS.
+# They are reached from a destructor and a std::streambuf::sync override,
+# which can't be handed a lock capability, so a lock there would sit outside
+# the compile-time order; a claim that loses does nothing (see the class
+# comments). The stdout buf's interrupt bit is a plain atomic flag.
+agentty/util/child_process.hpp: atomic
+# mcp::Connection's reconnecting_ / turn gates: single-word claims taken by
+# CAS (atomic wait/notify, no sleep-poll) from tool workers and the MCP
+# reader alike; holding a guarded across reconnect would block every
+# caller behind a subprocess spawn.
+agentty/mcp/connection.hpp: atomic

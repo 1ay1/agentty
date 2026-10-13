@@ -1,0 +1,405 @@
+// providers.cpp — the provider picker's reducer: selecting a row
+// live-switches the active backend (no restart). Split from panels.cpp;
+// self-contained (none of the fused/MRU machinery).
+
+#include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/update.hpp"
+
+#include <algorithm>
+#include <utility>
+
+#include <maya/core/overload.hpp>
+#include <maya/platform/io.hpp>
+
+#include "agentty/runtime/app/cmd_factory.hpp"
+#include "agentty/runtime/app/deps.hpp"
+#include "agentty/provider/registry.hpp"
+#include "agentty/provider/auth_state.hpp"
+#include "agentty/provider/acp_agents.hpp"
+#include "agentty/provider/selection.hpp"
+#include "agentty/auth/vault.hpp"
+#include "agentty/provider/credentials.hpp"
+#include "agentty/auth/auth.hpp"
+#include "agentty/auth/accounts.hpp"
+#include "agentty/runtime/login.hpp"
+#include "agentty/runtime/panel/common.hpp"
+#include "agentty/runtime/provider_rows.hpp"
+#include "agentty/runtime/view/cache.hpp"
+#include "agentty/runtime/view/helpers.hpp"
+#include "agentty/tool/skills.hpp"
+#include "agentty/tool/subagent.hpp"
+
+namespace pn = agentty::ui::panel;
+
+namespace agentty::app::detail {
+
+namespace {
+// Re-enter the whole-Msg reducer, in place.
+//
+// These rows dispatch across FIVE different domains (profile, rag, smart,
+// appearance, meta), which is exactly why they go through the top-level
+// reducer instead of naming a domain reducer each: the row's action IS the
+// dispatch table. update() still returns a pair, so unpack it here — one
+// place rather than at every row.
+[[nodiscard]] Cmd reenter(Model& m, Msg msg) {
+    auto [next, cmd] = agentty::app::update(std::move(m), std::move(msg));
+    m = std::move(next);
+    return std::move(cmd);
+}
+} // namespace
+
+
+namespace pick = agentty::ui::pick;
+using maya::overload;
+// ── Provider picker ────────────────────────────────────────────────────────
+// Selecting a row live-switches the active backend: parse the preset id
+// into a Selection, install it (process-global), persist it, swap the
+// Deps auth to the new provider's resolved credentials, and kick a fresh
+// model fetch so the model list reflects the new backend. No restart.
+Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
+    // The picker's rows are ONE ordered list (presets + ACP agents + saved
+    // custom hosts + "Custom host…" sentinel), built once from the current
+    // search query. The cursor is an index into THIS list — no offset math,
+    // and the same list the view renders (see build_provider_rows).
+    const std::string query = [&] {
+        const auto* p = m.ui.panel.get<pn::Providers>();
+        return p ? p->query : std::string{};
+    }();
+    const auto& settings = m.d.persisted;
+    const std::vector<std::string> saved_custom_hosts =
+        provider::saved_custom_hosts(settings.provider_keys);
+    const auto rows = ui::build_provider_rows(saved_custom_hosts, query);
+    const int n = static_cast<int>(rows.size());
+
+    return std::visit(overload{
+        [&](OpenProviders) -> Cmd {
+            // Close the model picker if the user cross-hopped here from it
+            // (^P in the model picker). Without this the model picker stays
+            // open and wins pick_panel's priority order (checked first), so
+            // the hop would render nothing new. Flush any pending effort-tier
+            // change first — the same persist CloseModels does on Esc,
+            // so a hop doesn't silently drop it.
+            Cmd effort_save = Cmd::none();
+            if (m.ui.effort_dirty) {
+                effort_save = persist_settings(m);
+                m.ui.effort_dirty = false;
+            }
+            // Abandon a pending Smart-Mode slot assignment: hopping away from
+            // the model picker mid-assign must not leave the mode armed. The
+            // mode lives ON the picker value now, so replacing it is the reset
+            // — nothing separate to clear.
+            //
+            // ONE move, not close<Models>() + descend(). The pair reads like a
+            // swap and behaved like a truncation: close() leaves the slot
+            // empty, so the descend() that followed had no parent to stash and
+            // silently dropped the GRANDparent. palette → models → ^P → Esc
+            // then left the stack entirely instead of returning to the
+            // palette. replace() says "sideways": the picker we are leaving
+            // goes, whatever opened IT stays.
+            //
+            // Open at the row matching the currently-active provider. Fresh
+            // rows with an empty query (so every provider is present to match).
+            const auto fresh = ui::build_provider_rows(saved_custom_hosts, "");
+            const auto& sel = m.d.selection;
+            const std::string active_label =
+                sel.kind == provider::Kind::ExternalAcp ? sel.acp_agent_id
+                : sel.kind == provider::Kind::OpenAI    ? sel.openai_endpoint.label
+                : std::string{provider::default_provider_id()};
+            int idx = 0;
+            for (int i = 0; i < static_cast<int>(fresh.size()); ++i) {
+                const auto& row = fresh[static_cast<std::size_t>(i)];
+                if (const auto* pr = row.preset(); pr && pr->id == active_label) { idx = i; break; }
+                if (const auto* ag = row.acp();    ag && ag->id == active_label) { idx = i; break; }
+                if (const auto* ch = row.custom_host(); ch && *ch == active_label) { idx = i; break; }
+            }
+            // A hop REPLACES the picker we came from; opening cold DESCENDS
+            // over whatever is there (usually nothing).
+            if (m.ui.panel.is<pn::Models>()) m.ui.panel.replace(pn::Providers{{idx}});
+            else                             m.ui.panel.descend(pn::Providers{{idx}});
+            return effort_save;
+        },
+        [&](CloseProviders) -> Cmd {
+            ascend(m);   // Esc: back to whatever opened this, or close
+            return Cmd::none();
+        },
+        [&](ProvidersMove& e) -> Cmd {
+            auto* p = m.ui.panel.get<pn::Providers>();
+            if (!p || n == 0) return Cmd::none();
+            p->confirm_remove.clear();   // navigating disarms a pending delete
+            p->index = (p->index + e.delta + n) % n;
+            return Cmd::none();
+        },
+        [&](ProvidersJump& e) -> Cmd {
+            auto* p = m.ui.panel.get<pn::Providers>();
+            if (!p || n == 0) return Cmd::none();
+            p->confirm_remove.clear();   // navigating disarms a pending delete
+            using W = ProvidersJump::Where;
+            constexpr int kPage = 14;  // matches kViewportH in pickers.cpp
+            switch (e.where) {
+                case W::Home:     p->index = 0; break;
+                case W::End:      p->index = n - 1; break;
+                case W::PageUp:   p->index = std::max(0, p->index - kPage); break;
+                case W::PageDown: p->index = std::min(n - 1, p->index + kPage); break;
+            }
+            return Cmd::none();
+        },
+        [&](ProvidersFilterInput& e) -> Cmd {
+            auto* p = m.ui.panel.get<pn::Providers>();
+            if (!p) return Cmd::none();
+            p->confirm_remove.clear();   // typing disarms a pending ^D delete
+            // Append the typed codepoint (UTF-8) and reset the cursor to the
+            // top of the freshly-narrowed list.
+            char32_t cp = e.codepoint;
+            if (cp < 0x80) { p->query.push_back(static_cast<char>(cp)); }
+            else {
+                // Minimal UTF-8 encode for multibyte input (rare in provider
+                // names, but never corrupt the buffer).
+                if (cp < 0x800) {
+                    p->query.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+                    p->query.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                } else if (cp < 0x10000) {
+                    p->query.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+                    p->query.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                    p->query.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                } else {
+                    p->query.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+                    p->query.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+                    p->query.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+                    p->query.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+                }
+            }
+            p->index = 0;
+            return Cmd::none();
+        },
+        [&](ProvidersFilterBackspace) -> Cmd {
+            auto* p = m.ui.panel.get<pn::Providers>();
+            if (!p || p->query.empty()) return Cmd::none();
+            // Pop one UTF-8 codepoint (trim continuation bytes then the lead).
+            while (!p->query.empty()
+                   && (static_cast<unsigned char>(p->query.back()) & 0xC0) == 0x80)
+                p->query.pop_back();
+            if (!p->query.empty()) p->query.pop_back();
+            p->index = 0;
+            return Cmd::none();
+        },
+        [&](ProvidersDelete) -> Cmd {
+            auto* p = m.ui.panel.get<pn::Providers>();
+            if (!p || p->index < 0 || p->index >= n)
+                return Cmd::none();
+            const ui::ProviderRow& row =
+                rows[static_cast<std::size_t>(p->index)];
+
+            // Two removable things share the Del key:
+            //  (a) a SAVED CUSTOM HOST — remove the host entirely.
+            //  (b) a PRESET with a SAVED API KEY (e.g. openrouter) — the
+            //      preset itself is built-in and stays, but Del clears its
+            //      saved key (a sign-out), which is what "delete openrouter"
+            //      means in practice. Presets with no saved key, ACP agents,
+            //      and the "Custom host…" sentinel are not removable.
+            std::string target;          // settings key to erase
+            bool is_custom_host = false;
+            if (const std::string* spec = row.custom_host()) {
+                target = *spec;
+                is_custom_host = true;
+            } else if (const auto* pr = row.preset()) {
+                const auto& s = m.d.persisted;
+                const std::string pid{pr->id};
+                if (s.provider_keys.count(pid)) target = pid;  // has a saved key
+            }
+            if (target.empty()) {        // nothing removable on this row
+                p->confirm_remove.clear();
+                return Cmd::none();
+            }
+            // Two-press: first press ARMS (marks confirm_remove on this
+            // target), second press on the SAME row COMMITS. Mirrors
+            // ThreadListDelete / AccountRemove.
+            if (p->confirm_remove != target) {
+                p->confirm_remove = target;
+                return Cmd::none();
+            }
+            const std::string removed = target;
+            Cmd key_save = Cmd::none();
+            {
+                m.d.persisted.provider_keys.erase(removed);
+                if (is_custom_host) m.d.persisted.provider_models.erase(removed);
+                key_save = save_record(m);
+            }
+            // Also drop any stored account credentials for a preset sign-out
+            // (custom hosts keep everything in provider_keys, handled above).
+            if (!is_custom_host) {
+                std::vector<Cmd> ops;
+                if (const auto* pa = m.d.auth.find(removed))
+                    for (const auto& l : pa->accounts)
+                        ops.push_back(Cmd(AccountOp{
+                            .kind = AccountOp::Kind::Remove,
+                            .provider = removed, .label = l}));
+                ops.push_back(Cmd(LoadAuthView{}));
+                key_save = Cmd::batch(std::move(key_save),
+                                      Cmd::batch(std::move(ops)));
+            }
+            p->confirm_remove.clear();
+            // Signing out of the ACTIVE provider must not leave the session
+            // pointing at a dead credential — the palette SignOut zeroes the
+            // live header and prompts re-auth, and this path is the same
+            // action spelled differently. Zero the header (the next turn
+            // must not reuse the erased key) and say what to do next; the
+            // picker stays open so the user can pick another provider (or
+            // re-enter this one to sign back in).
+            const bool was_active = (removed == active_provider_id(m));
+            Cmd clear_auth = was_active
+                ? Cmd(InstallAuth{.provider = removed, .clear = true})
+                : Cmd::none();
+            // Rebuild the row list so a removed custom host is gone; clamp.
+            const auto& s2 = m.d.persisted;
+            const auto fresh = ui::build_provider_rows(
+                provider::saved_custom_hosts(s2.provider_keys), p->query);
+            if (!fresh.empty() && p->index >= static_cast<int>(fresh.size()))
+                p->index = static_cast<int>(fresh.size()) - 1;
+            auto toast = set_status_toast(m,
+                was_active
+                    ? "signed out of " + removed
+                          + " (active) — pick a provider to continue"
+                    : (is_custom_host ? "removed custom host: "
+                                      : "signed out of ") + removed);
+            return Cmd::batch(std::move(key_save), std::move(clear_auth),
+                              std::move(toast));
+        },
+        [&](ProvidersSelect) -> Cmd {
+            // Capture the cursor before closing: assigning Closed destroys the
+            // OpenAt alternative, so keeping a pointer into it would dangle.
+            const auto* p = m.ui.panel.get<pn::Providers>();
+            const int selected = p ? p->index : -1;
+            m.ui.panel.close<pn::Providers>();
+            if (selected < 0 || selected >= n) return Cmd::none();
+            const ui::ProviderRow& chosen = rows[static_cast<std::size_t>(selected)];
+
+            // "Custom host…" sentinel: hand off to the free-text endpoint modal.
+            // If the row was PROMOTED (the query was endpoint-shaped), carry
+            // the typed text straight in with the cursor at the end, so Enter
+            // goes to the probe instead of reopening an empty field. Retyping
+            // a hostname you just typed is the kind of friction that makes
+            // people conclude the feature does not exist.
+            if (chosen.is_new_custom_host()) {
+                ui::login::CustomHostInput ch;
+                if (const std::string* prefill = chosen.new_host_prefill()) {
+                    ch.host_input = *prefill;
+                    ch.cursor     = static_cast<int>(ch.host_input.size());
+                }
+                ch.origin = ui::login::origin::Providers{};  // Esc = one step back
+                m.ui.login = std::move(ch);
+                return Cmd::none();
+            }
+
+            // An external ACP agent row: agentty drives the agent subprocess,
+            // which does its OWN auth — no key resolution here.
+            if (const provider::AcpAgentSpec* agent = chosen.acp()) {
+                return commit_provider_switch(m, agent->id, agent->id);
+            }
+
+            // A saved custom OpenAI-compatible host row: the spec string is the
+            // key into Settings.provider_keys. Resolve the saved key and commit
+            // directly — no re-entry, because the key is already on disk.
+            if (const std::string* spec_ptr = chosen.custom_host()) {
+                const std::string spec = *spec_ptr;
+                // If this custom host is ALREADY the active provider, Enter
+                // opens its accounts drill-down (a custom host can hold
+                // multiple saved keys, switchable like the OAuth providers —
+                // account_provider_id returns the spec for a custom OpenAI
+                // endpoint). Esc from that list steps back to this picker.
+                const auto& active = m.d.selection;
+                const bool is_active =
+                    active.kind == provider::Kind::OpenAI
+                    && active.openai_endpoint.label == spec;
+                if (is_active)
+                    return reenter(m, Msg{OpenAccounts{}});
+
+                // Not active — switch to it via the central resolver (the key
+                // is already on disk; resolve reads provider_keys[spec]).
+                return commit_provider_switch(m, spec, spec);
+            }
+
+            const auto& preset = *chosen.preset();
+            // Enter on an ACCOUNT-CAPABLE provider opens its account manager
+            // DIRECTLY — UNIFORM across every provider that has accounts (OAuth:
+            // Anthropic/ChatGPT/Copilot/Kimi; hosted API key: Mistral/Groq/…;
+            // custom hosts), whether or not it's the active provider. No
+            // switch-first (that popped the model picker); OpenAccounts targets
+            // this provider by id and builds its list from a parsed Selection.
+            // Only keyless local servers (add_method == None) skip straight to
+            // the switch. Esc from the account list steps back to this picker.
+            if (provider::credentials::add_method(preset.id)
+                    != provider::credentials::AddMethod::None) {
+                m.ui.panel.close<pn::Providers>();
+                return reenter(m, Msg{OpenAccounts{std::string{preset.id}}});
+            }
+
+            const std::string spec{preset.id};
+
+            // Refuse a switch that would land in a silently-broken state.
+            // Whether a key exists is answered from the settings record (and
+            // the env chain), the same check sign-out's fallback uses.
+            const bool has_key =
+                provider::auth_source(preset, m.d.persisted, m.d.auth)
+                    != provider::AuthSource::None;
+
+            // A hosted (non-local) OpenAI-family provider with no resolvable
+            // key can't stream. Open the in-app key-entry modal for THIS
+            // provider instead of a dead-end error; login_submit commits the
+            // switch once the key lands.
+            const bool needs_key =
+                preset.kind() == provider::Kind::OpenAI && !preset.is_local
+                && preset.auth != provider::AuthStyle::None;
+            if (needs_key && !has_key) {
+                m.ui.login = ui::login::ApiKeyInput{
+                    .key_input      = {},
+                    .cursor         = 0,
+                    .provider       = spec,
+                    .provider_label = std::string{preset.label},
+                    .origin         = ui::login::origin::Providers{},
+                };
+                return Cmd::none();
+            }
+
+            // OAuth providers: if not signed in, launch the login flow rather
+            // than switching to a backend that would fail on the first turn.
+            //
+            // Routed off registry capabilities + the auth vault, not provider
+            // names. The SPECIFIC flag is tested first: `device_login` marks
+            // the providers that share the device-code launcher (Copilot,
+            // Kimi), while `oauth_native` only means "authenticates by sign-in
+            // and rides its own long-lived transport" — which is true of those
+            // two as well, so it cannot identify the Codex flow by itself.
+            // Testing it first sent Copilot and Kimi into the ChatGPT browser
+            // flow, i.e. picking either opened the OpenAI sign-in panel.
+            // vault::signed_in answers "has this provider a live token" for
+            // every OAuth row through one table.
+            if (preset.token_in_transport
+                && !provider::signed_in(spec, m.d.persisted, m.d.auth)) {
+                // State only — subscribe() runs the worker, keyed on the
+                // attempt, so leaving the state cancels it.
+                const auto attempt_id = cmd::next_codex_login_attempt_id();
+                if (preset.codex_login()) {
+                    m.ui.login = ui::login::ChatGptWaiting{
+                        .attempt_id = attempt_id,
+                        .device_auth =
+                            provider::chatgpt::codex_device_auth_preferred(),
+                    };
+                    return Cmd::none();
+                }
+                m.ui.login = ui::login::DeviceWaiting{
+                    .provider = std::string{spec},
+                    .provider_label = std::string{preset.label},
+                    .attempt_id = attempt_id,
+                };
+                return Cmd::none();
+            }
+
+            // Every entry point funnels the actual switch through the ONE
+            // helper so provider + per-provider model recall + effort clamp +
+            // auth swap + refetch can never drift between call sites.
+            return commit_provider_switch(m, spec, std::string{preset.label});
+        },
+    }, pm);
+}
+
+} // namespace agentty::app::detail

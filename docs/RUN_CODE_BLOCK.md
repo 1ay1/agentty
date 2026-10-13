@@ -20,6 +20,13 @@ blocks in it, a toast nudges you — *▶ 2 runnable code blocks — Ctrl+G to
 run*. Replies without runnable blocks stay quiet, so the nudge keeps its
 meaning.
 
+**You don't have to wait for the reply to finish.** Ctrl+G works *while the
+reply is still streaming* — it offers every block whose closing ` ``` ` has
+already arrived (a block still being typed is withheld until its fence lands,
+so you never run a half-line). The network stream runs on a background
+worker, so suspending the UI to run a block doesn't pause it: the rest of the
+reply keeps arriving and is waiting for you when the run returns.
+
 ## The flow
 
 ```
@@ -54,10 +61,15 @@ Three beats, each one a decision point:
 one with the commands) and lists them in document order — block 1 is the
 topmost on screen, so the numbers read naturally against the reply.
 
-Each row shows the block's first line, its language tag, and its line count.
-Non-shell blocks (python, js, …) are dimmed: they can be edited or copied but
-not run — `sh -c` on a python script fails confusingly, so Run shows a toast
-instead of executing garbage.
+Each row leads with a **run-affordance badge** — a bright `▶` in the accent
+hue when the block is runnable on this platform, or the language tag in muted
+when it is edit/copy-only — followed by the block's first non-blank line, and
+trails with the language dialect and line count. The badge is a stable colour
+anchor (it is *not* dimmed on the selected row), so "which of these actually
+runs" reads at a glance. Non-shell blocks (python, js, …) show their dimmed
+tag instead of a `▶`: they can be edited or copied but not run — `sh -c` on a
+python script fails confusingly, so Run shows a toast instead of executing
+garbage.
 
 | Key | Action |
 |-----|--------|
@@ -96,17 +108,25 @@ through the bash tool's sandboxed, non-interactive runner. Instead:
 
 1. maya **suspends the TUI**: raw mode off, alternate keyboard protocols off,
    mouse reporting off, the writer's non-blocking mode off. You're back on a
-   cooked tty, exactly as if agentty had exited.
+   cooked tty, exactly as if agentty had exited. The visible screen is then
+   **cleared** and the cursor homed before anything prints — inline-mode
+   suspend leaves the last TUI frame painted on screen, and without the clear
+   the run header and the child's output (and your typing) would overlap that
+   stale frame. Only the *viewport* is cleared; your conversation history
+   stays in native scrollback.
 2. The block runs via `/bin/sh -c` with **stdin inherited from the real
    terminal** — password reads, line editing, and anything that opens
    `/dev/tty` (sudo does) behave exactly as in your shell.
 3. stdout + stderr flow through a **tee pipe**: every byte is written straight
    to your screen *live* and simultaneously appended to a capture buffer.
-4. A `$ command` banner is echoed first and an
-   `[exit N — returning to agentty]` banner last, so the transcript reads
-   like a shell session.
-5. On exit the TUI restores. The run's output stays in your terminal's
-   native scrollback **above** the restored UI, like shell history.
+4. A framed `╭─ running ─ Ctrl-C to stop` banner with the `$ command` is echoed
+   first and a colour-coded `╰─ ✓ done` / `✗ failed` / `■ stopped` footer with
+   the exit code and elapsed time last, so the transcript reads like a shell
+   session and it's obvious the run is interruptible.
+5. On exit, a **press-any-key** prompt holds the output on screen so a fast
+   command isn't repainted away before you can read it; then the TUI restores.
+   The run's output stays in your terminal's native scrollback **above** the
+   restored UI, like shell history.
 
 Signal semantics are classic `system()`: while the child runs, agentty
 ignores `SIGINT`/`SIGQUIT` and the child gets the default dispositions —
@@ -137,19 +157,28 @@ signal (the shell convention — Ctrl+C shows as `exit 130`).
 ## The Result card
 
 When the run exits, agentty shows a summary card — green accent on exit 0,
-red on failure or timeout:
+red on failure or timeout. The full capture below the header is **line-
+numbered** (a right-aligned gutter + a `│` pipe that turns red on a failed or
+timed-out run), so "it broke on line 42" is something you can actually point
+at, and it reads the same as the Ctrl+O tool-output viewer. A scroll-position
+readout (`12–30 / 214 lines`) in the footer tells you there is more above or
+below:
 
 ```
-┌ Run Result ───────────────────────────────┐
+┌ Run Result ──────────────────────────┐
 │ $ sudo mkfs.vfat -F 32 -n USB /dev/sdb1   │
 │   exit 0 · 14 lines · 1 KB                │
-│ ──────────────────────────────────────────│
-│   mkfs.fat 4.2 (2021-01-31)               │
-│   …full capture, scrollable…              │
+│ ──────────────────────────│
+│   1 │ mkfs.fat 4.2 (2021-01-31)          │
+│   2 │ …full capture, scrollable…         │
 │                                           │
+│  1–14 / 14 lines                          │
 │  a attach to composer   y copy   Esc discard │
-└───────────────────────────────────────────┘
+└───────────────────────────┘
 ```
+
+The body is windowed to the viewport (only the visible slice is rendered each
+frame), so paging through a multi-megabyte capture stays instant.
 
 | Key | Action |
 |-----|--------|
@@ -201,7 +230,7 @@ thing — and without a 48 KB wall of text ever cluttering your composer.
 | Extraction + picker state (pure) | `include/agentty/runtime/code_block_picker.hpp` |
 | Reducer + tty runner | `src/runtime/app/update/codeblock.cpp` |
 | Key dispatch | `src/runtime/app/subscribe.cpp` (`on_code_block_picker`, `on_code_block_result`) |
-| Picker + Result card views | `src/runtime/view/pickers.cpp` |
+| Picker + Result card views | `src/runtime/view/pickers/tool_pickers.cpp` |
 | Output chip kind + wire expansion | `include/agentty/runtime/composer_attachment.hpp`, `src/runtime/composer_attachment.cpp` |
 | TUI suspend primitive | maya: `Runtime::suspend` (`app.cpp`), `Terminal::suspend` (`terminal.hpp`), `Cmd::suspend` (`cmd.hpp`) |
 

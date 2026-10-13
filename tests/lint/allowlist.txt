@@ -1,0 +1,236 @@
+# Files allowed to use raw concurrency primitives, and which ones.
+#
+# Everything else must go through jaal's safe types: a task or scope instead
+# of std::thread, guarded<T> instead of std::mutex, loop_bound<T> instead of
+# thread_local. See maya/third_party/jaal/docs/concurrency.md §7, and
+# jaal's tests/lint/banlist.cmake for the check itself.
+#
+# WHY THIS FILE EXISTS. jaal runs that check over its OWN tree, which says
+# nothing about a consumer: agentty could spawn a bare thread beside the
+# loop, park reducer state in a thread_local, or forge a Sink, and jaal
+# would never notice. Pointing the same check at agentty is what closes it.
+#
+# ── Lock-order capability roots (cap_mint) ───────────────────────────────────
+# jaal makes lock order a type (jaal core/capability.hpp): taking a lock needs
+# a capability proving every held lock ranks lower, and a blocking wait needs
+# `unlocked`. Capabilities are handed out at thread entry (job/task/stream/
+# scope bodies), inside lock bodies, and nowhere else -- EXCEPT the roots
+# listed with `cap_mint` below, each a place a thread starts holding nothing
+# but whose signature a library or the language fixes. Each is a claim a
+# human checked: no agentty lock can be held when control reaches it.
+# Adding one is a review.
+#
+# main(): the process root; run_main threads `cap` everywhere below it.
+runtime/main.cpp: cap_mint
+# The ACP server: the URL-elicitation-complete callback (MCP transport
+# thread), tool progress / update sinks and the elicit relay (tool worker
+# thread) -- all reached from threads that hold no agentty lock.
+acp/server.cpp: cap_mint
+# rpc::Peer's destructor joins its tasks. Peer is joins_on_destroy, so no
+# guarded can own one and it is never destroyed inside a lock body.
+rpc/peer.cpp: cap_mint atomic
+# mcp-cpp's CapabilityProvider virtuals (execute/list/read_resource/...):
+# signatures fixed by the library; called from tool bodies and MCP
+# transports. The class holds no jaal lock at all (atomics + snapshots).
+mcp/connection.cpp: atomic cap_mint
+# The Retriever's public API (tool bodies, proactive path, settings worker)
+# and its warm worker; the index lock and the memory store below it are
+# checked against this one root.
+# mcp-cpp's MemoryStore interface (no Call is passed to it).
+# mcp-cpp's StateAccess::with (the tool state gate) -- a library virtual.
+# exec.cpp: mcp-cpp's Session poll/stop virtuals, run_child's feeder join,
+# and the scan Splitter mcp-cpp / rag-cpp call.
+tool/util/exec.cpp: cap_mint
+tool/mcp_tools_bridge.cpp: cap_mint
+#
+# Each entry names the primitives that file may use, so a file allowed
+# std::mutex still cannot sneak in a .detach(). Adding a line is a
+# deliberate act: it says someone checked by hand that the raw primitive IS
+# the implementation of a safe thing, not a shortcut around one.
+#
+# WHAT THIS BUYS, HONESTLY. jaal grades its guarantees (concurrency.md §6):
+# Level A is "the bug cannot be written", B is "a tool catches it", C is
+# "convention". Everything on this list is Level B. A file here has been
+# READ and judged correct; nothing stops the next edit to it from adding a
+# second lock and an inversion. jaal's guarded<T> would make that Level A
+# (a second lock cannot be named inside with()/read()), and agentty uses it
+# in zero places — 44 files hold a raw std::mutex instead.
+#
+# That is a deliberate position, not an oversight: most of these locks guard
+# a process-wide cache read from CLI paths that have no kernel in scope, and
+# guarded<T> binds to one. But it means the list is a promise to keep
+# checking, not a proof. Two things keep it honest:
+#
+#   tests/seam_stress_test.cpp   drives the process-wide seams (provider
+#                                selection, tool catalog, capability
+#                                registry) from many threads under TSan.
+#   allowlist_tight_*            fails the build when an entry outlives the
+#                                code that justified it.
+#
+# When a file here gains a SECOND mutex, that is the moment to reach for
+# guarded<T> or an owner thread instead of extending the grant.
+#
+# Paths are relative to src/ (the check runs once per scanned root).
+
+# ── Owned background workers ─────────────────────────────────────────────
+# Three subsystems own a thread that outlives any one turn. They are NOT
+# jaal tasks because they are not part of a turn: they start at init and run
+# until teardown, while jaal's task/stream lifetimes are per-Cmd and
+# per-subscription. Each registers its own join with util::teardown, so
+# main() cannot forget one — that registration is the safety property here.
+#
+# settings_cache: the write-behind settings worker; its state is
+# maya::guarded and the worker sleeps in wait_with. Nothing banned left.
+# blob_gc: the sweep moved to its own maya::pool; the walk takes the pool's
+# stop_token and the schedule is a once_flag. Nothing banned left.
+# modelsdev: same shape as blob_gc. Nothing banned left.
+
+# ── HTTP: the turn's cancel token, and the transport ─────────────────────
+# A streaming turn is a Cmd::task holding an http::CancelToken, tripped from
+# a reducer on Esc. jaal has no effect for "cancel that specific in-flight
+# request from a later step" — its stop_token is the runtime's, and fires
+# when work stops being subscribed — so this atomic is the app's own. The
+# reasoning is written out on the Sendable opt-in in runtime/cmd.hpp.
+# http: prewarm dials run on a maya::pool, the connection pool is
+# maya::guarded. thread_local is the retry-jitter RNG; const_cast is the
+# OpenSSL C API.
+io/http.cpp: thread_local const_cast atomic
+io/tls.cpp: const_cast
+
+# ── Persistence and credentials ──────────────────────────────────────────
+# Not reducer code: these run on a worker a task already put them on, or on
+# CLI paths with no loop at all.
+io/auth.cpp: const_cast
+io/keystore.cpp: const_cast
+io/cred_crypt.cpp: const_cast
+
+# ── Tools ────────────────────────────────────────────────────────────────
+# A tool runs on a worker and may spawn a child process. Its progress sink,
+# cancel, reader and nesting travel in tools::CallContext, not on the thread.
+# rag apply is synchronous now (the TUI runs it through cmd::apply_rag_settings)
+# and the subagent stream's cancel bridge is stop_callbacks on real tokens, so
+# this file starts no thread of its own. Its caches are maya::guarded or
+# published; the atomics are two sequence counters.
+tool/mcp_tools_backends.cpp: atomic cap_mint
+tool/plugin.cpp: atomic
+# skills: the atomic counts discovery-cache resolutions for a test.
+tool/skills.cpp: atomic
+# The subagent run registry. A subagent runs on a Cmd::task_isolated thread
+# and holds provider objects by reference off main's stack, so teardown has to
+# stop each live run and wait a bounded moment for it to leave the stream.
+#
+# This used to be hand-rolled here (a cancel flag + done latch per run, a
+# condition variable, a rescan on every wakeup) on the grounds that the wait
+# "cannot be expressed as a jaal task — the threads are ones jaal disowned".
+# True of a task, and exactly the gap maya::stop_group now fills:
+# cancel + wait for work on threads you don't own, with admission closing
+# at shutdown (which the old snapshot-then-wait missed). Nesting depth and the
+# inherited deadline travel in the tool call's CallContext. The installed
+# Config is maya::guarded, so nothing here needs a grant any more.
+# Windows: run_command_s tees child output while polling for exit. It used to
+# be a bare reader std::thread plus `std::mutex buf_mu` guarding four loose
+# `shared_*` variables, joined ~90 lines later with a caller-supplied
+# on_progress callback invoked in between — so a throwing callback meant
+# ~thread on a joinable thread, i.e. std::terminate with no stack.
+#
+# Now maya::scope() owns the reader (joined on EVERY exit path, so the [&]
+# captures are warranted rather than lucky) and maya::guarded<PipeBuf> owns
+# the buffer with its mutex, so "took the lock" is not something to remember.
+# jaal caught a real violation during the conversion: the first version
+# passed `char*` into the lock body, which it rejects because a pointer
+# argument is how a body reaches data the lock does not cover.
+#
+# The reader's EOF is a field in PipeBuf now, waited on with wait_with_for.
+# Unique temp names for atomic writes, and a parallel directory walk.
+tool/util/fs_helpers.cpp: atomic
+tool/util/sandbox.cpp: atomic
+
+# ── Workspace scans ──────────────────────────────────────────────────
+# The symbol index fans a directory walk across helpers in a maya::scope; the
+# atomic is the shared work cursor they pull file indexes from.
+workspace/symbols.cpp: atomic
+# files.cpp: the atomic is the walk's single-flight latch. The prewarms
+# stop on their task's stop_token.
+workspace/files.cpp: atomic
+# checkpoint.cpp: the atomic is the "repo info is ready" latch that lets
+# the reducer read the cache without blocking.
+workspace/checkpoint.cpp: atomic
+
+# ── Providers: transports and their shared state ─────────────────────────
+provider/chatgpt/responses.cpp: thread_local
+provider/copilot/copilot_oauth.cpp: atomic
+provider/kimi/kimi_oauth.cpp: atomic
+
+# ── MCP and RAG: their own servers and index workers ─────────────────────
+# bridge: the MCP connects moved to pool.submit_isolated, whose future does
+# not join in its destructor — so the detached orphan-waiter that existed only
+# to absorb that stall is gone too, along with the shared_future it needed.
+# The pool is published whole (maya::published) and the seen-tools cache is
+# maya::guarded; `atomic` is the pool's list-changed generation counter.
+mcp/bridge.cpp: atomic
+# http_server: POST workers are a util::WorkerGroup and the session is
+# maya::guarded. The atomic is the liveness flag the provider reads.
+mcp/http_server.cpp: atomic
+mcp/oauth.cpp: atomic
+# rag/adapter: the warm worker is a util::WorkerGroup; the index and the
+# feedback store are maya::guarded (the status row uses try_read so a frame
+# never waits on a rebuild). atomic is the warming gate and the stop flag.
+rag/adapter.cpp: atomic cap_mint
+
+# ── Process-wide plumbing ────────────────────────────────────────────────
+util/logx.cpp: atomic
+
+# ── The runtime ──────────────────────────────────────────────────────────
+# next_tool_exec_seq(): a static atomic counter minted per dispatch, echoed by
+# the worker so the reducer can drop stale results from a superseded turn.
+runtime/app/cmd_factory.cpp: atomic
+# acp/server.cpp has NO entry: its tool dispatch moved to pool.submit_isolated
+# and waits on a stop_token (delay_for) instead of the standard async helper
+# plus a 50 ms poll, so it uses none of the banned primitives.
+# The Windows code-block runner ticks a heartbeat title/line while a blocking
+# subprocess call runs. The helper is a maya::scope() nursery spawn now, not a
+# bare std::thread with an unguarded join (same std::terminate-on-throw bug as
+# subprocess.cpp above), and it takes its own stop_token so Esc stops the
+# spinner through the task's cancellation instead of a second ad-hoc flag.
+# "command finished" is a stop_source the spinner's delay_for waits on.
+
+# View-layer render caches: NO LONGER LISTED, and that is the interesting
+# part. They were four thread_locals (three LRU caches in agent_timeline.cpp,
+# the render-phase flag in tool_body_preview.cpp) whose grant read "every one
+# is a bounded LRU on the UI thread, documented at the definition;
+# thread_local is how they say 'one thread owns this' without a lock."
+#
+# That is exactly the claim jaal's loop_bound<T> exists to CHECK rather than
+# assert, and the failure mode it names is this one: a worker reaching a
+# render cache does not crash, it silently gets its own empty copy and paints
+# from it. A missing panel with no trace of why is worse than an abort.
+#
+# They are maya::loop_bound<T> now. Reaching the value needs proof of
+# being on the kernel's loop thread, the kernel arms that identity for its
+# whole lifetime (so view(), which runs between steps, is covered), and off
+# the loop the access aborts naming the rule. The on-loop path is unchanged:
+# still no lock, still one thread.
+#
+# Dropping these two lines is the point of the exercise. An allowlist entry
+# removed because the primitive was replaced by a checked one is the only kind
+# of progress this file can record.
+
+# ── Lock-free by design: reached where no capability can be ──────────────────
+# The typed-lock migration replaced these files' mutexes. Each spot is a
+# single word reached from a context that can't carry a capability (a
+# std::stop_callback, a static used from every layer, a lock body that must
+# not nest another lock), so a guarded<T> would either be unreachable or
+# put a capability on half the program. Each has its reasoning in place.
+#   io/http.cpp: the connection-pool slot state (CAS-claimed, see above).
+#   rpc/peer.cpp: the cancel flag a stop_callback raises from any thread.
+#   persistence.cpp: random_hex_id's seeded counter (every layer mints ids).
+io/persistence.cpp: atomic
+# codex_oauth: the login listener's wake fds + in-flight count, touched by
+# the cancel callback on whichever thread requests the stop.
+provider/chatgpt/codex_oauth.cpp: atomic
+# registry: the MCP connect phase and the reload running/pending word;
+# registry() is read from views, lock bodies and tool workers alike.
+tool/registry.cpp: atomic
+# memory_store: the per-thread id RNG, so remember() can mint an id inside
+# the store's own lock body without taking a second lock.
+tool/memory_store.cpp: thread_local

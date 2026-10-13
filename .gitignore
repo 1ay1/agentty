@@ -18,6 +18,10 @@ credentials.json
 # / CLAUDE.md for team-shared project context instead).
 .agentty/
 
+# Cross-client agent skills/commands the runtime reads from <cwd>/.agents/
+# — a local per-workspace convention, not a shipped project asset.
+.agents/
+
 # Release artifacts (uploaded to GitHub releases, not committed)
 agentty-linux-*
 SHA256SUMS
@@ -28,5 +32,33 @@ dotfiles/
 packaging/windows/license.rtf
 Testing/
 
+# RAG on-disk index cache (rebuilt from the docs tree; never committed)
+.agentty_rag_cache.bin
+
 # Local scratchpad — repro/diag sources, build artifacts (.exe/.obj), logs
 scratch/
+AGENTTY_ASSISTANT_USAGE.md
+
+# Cross-built / downloaded release binaries left at the repo root. These are
+# ~20 MB each and are PRODUCED by the release workflow, never an input to it.
+# One was sitting untracked at release time and would have been swept into the
+# release commit by a stage_all.
+*.exe
+/agentty
+
+# Personal files that live in this workspace but are NOT part of the
+# project — must never be committed (a stage_all once swept resume/ into
+# a public commit; the ignore makes that structurally impossible).
+hand/
+resume/
+
+__pycache__/
+docs/cpp-book/
+
+# ThreadLog writes a sibling `<name>.ofs` offset cache for any thread file it
+# opens, including the checked-in bench fixture. It is a regenerable cache, not
+# truth (see include/agentty/io/thread_log.hpp), so never commit it.
+tests/fixtures/*.ofs
+
+# local python venv for tests/acp schema checks
+.venv-acp

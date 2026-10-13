@@ -1,0 +1,443 @@
+// hooks.cpp — user-authored lifecycle hooks. See hooks.hpp for the design
+// and the consent-gate rationale. Implementation notes:
+//
+//   • The payload travels via AGENTTY_HOOK_PAYLOAD_FILE (a mode-0600 temp
+//     file) instead of stdin: run_shell_command has no stdin-pipe seam,
+//     and a file keeps multi-MB tool results out of the environment block
+//     (env vars have hard platform caps).
+//   • Hook commands run through run_shell_command — the SAME bwrap /
+//     sandbox-exec wrapper the bash tool uses — so an approved hook is
+//     workspace-confined exactly like model-driven shell.
+//   • Approval store: content-hash trust via the SHARED scope::Approvals
+//     primitive (the same one plugins use), persisted at
+//     ~/.agentty/hooks_approved.json as a list of approved file hashes. Any
+//     byte change to a hooks file yields a new hash → re-gated. A pre-scope
+//     {path: hash} store is migrated transparently on first read.
+
+#include "agentty/tool/hooks.hpp"
+#include "agentty/util/user_root.hpp"
+#include "agentty/config/inventory.hpp"   // kHooksApprovals — the one name
+#include "agentty/util/capped_read.hpp"   // the one capped-read primitive
+
+#include "agentty/auth/auth.hpp"            // auth::sha256_hex (file-content hash)
+#include "agentty/scope/scope.hpp"          // scope::Approvals (shared trust store)
+#include "agentty/tool/util/sandbox.hpp"    // run_shell_command
+#include "agentty/tool/util/subprocess.hpp"
+#include "agentty/tool/util/utf8.hpp"        // strip_terminal_controls, to_valid_utf8
+
+#include <nlohmann/json.hpp>
+
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <initializer_list>
+#include <regex>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#ifndef _WIN32
+#include <sys/stat.h>   // chmod
+#include <unistd.h>     // getpid
+#else
+#include <process.h>    // _getpid
+#endif
+
+namespace fs = std::filesystem;
+using nlohmann::json;
+
+namespace agentty::tools::hooks {
+
+namespace {
+
+constexpr std::size_t kMaxHooksFileBytes = 64 * 1024;
+constexpr std::size_t kMaxPayloadBytes   = 4 * 1024 * 1024;
+constexpr auto        kHookTimeout       = std::chrono::seconds{30};
+
+[[nodiscard]] inline std::uint64_t current_pid() {
+#ifdef _WIN32
+    return static_cast<std::uint64_t>(::_getpid());
+#else
+    return static_cast<std::uint64_t>(::getpid());
+#endif
+}
+
+struct HookEntry {
+    std::string match;   // ERE on the tool name
+    std::string run;     // sh -c command
+};
+
+struct HooksFile {
+    std::string            path;      // absolute path of the file loaded
+    std::string            hash;      // sha256 of the raw bytes
+    std::vector<HookEntry> pre_tool;
+    std::vector<HookEntry> post_tool;
+    bool                   ok = false;
+    // Set when a hooks file EXISTS but is past the size cap, so nothing
+    // could be loaded from it. Distinct from "no file": a user whose
+    // blocking hook is silently inert deserves to be told which it is.
+    std::string            too_big;   // the oversized path, else empty
+};
+
+[[nodiscard]] bool hooks_disabled() {
+    const char* off = std::getenv("AGENTTY_NO_HOOKS");
+    return off && off[0] && off[0] != '0';
+}
+
+// NOTE: the local read_all() is gone — see util/capped_read.hpp. It, and the
+// two other copies in skills.cpp and commands.cpp, all shipped the same bug:
+// "" meant missing AND too big, so `agentty hooks` printed "no hooks file"
+// with the user's file right there and a blocking hook silently inert.
+
+// Locate + parse the active hooks file. NOT cached across calls on
+// purpose: hooks fire once per tool call (seconds apart), a stat+parse is
+// noise there, and skipping the cache removes a whole class of staleness
+// bugs (edit hooks.json → next tool call sees it, gated on approval).
+[[nodiscard]] HooksFile load_hooks_file() {
+    HooksFile out;
+    const fs::path candidates[] = {
+        fs::path{".agentty"} / "hooks.json",
+        ::agentty::util::user_root().empty() ? fs::path{}
+                                  : ::agentty::util::user_root() / "hooks.json",
+    };
+    for (const auto& c : candidates) {
+        if (c.empty()) continue;
+        const auto got = ::agentty::util::capped_read(c, kMaxHooksFileBytes);
+        if (::agentty::util::oversize_bytes(got) > 0 && out.too_big.empty())
+            out.too_big = c.string();
+        const std::string& raw = ::agentty::util::bytes_or_empty(got);
+        if (raw.empty()) continue;
+        std::error_code ec;
+        auto abs = fs::weakly_canonical(c, ec);
+        out.path = (ec ? fs::absolute(c, ec) : abs).string();
+        out.hash = auth::sha256_hex(raw);
+        json j = json::parse(raw, nullptr, /*throw=*/false);
+        if (!j.is_object()) return out;   // ok=false: unparseable
+        auto read_list = [&](const char* key, std::vector<HookEntry>& dst) {
+            if (!j.contains(key) || !j[key].is_array()) return;
+            for (const auto& e : j[key]) {
+                if (!e.is_object()) continue;
+                HookEntry h;
+                h.match = e.value("match", std::string{});
+                h.run   = e.value("run", std::string{});
+                if (!h.run.empty()) dst.push_back(std::move(h));
+            }
+        };
+        read_list("pre_tool",  out.pre_tool);
+        read_list("post_tool", out.post_tool);
+        out.ok = true;
+        return out;
+    }
+    return out;   // no file
+}
+
+// The pre-scope {path: hash} store, if one is still around. scope owns the
+// current location (user root / state/); this only has to find an old file
+// to migrate, so it looks in both.
+[[nodiscard]] fs::path legacy_approvals_path() {
+    auto root = ::agentty::util::user_root();
+    if (root.empty()) return {};
+    const fs::path leaf{::agentty::config::kHooksApprovals};
+    std::error_code ec;
+    const fs::path in_state = ::agentty::util::user_state_dir() / leaf;
+    if (fs::is_regular_file(in_state, ec)) return in_state;
+    return root / leaf;
+}
+
+// Hooks trust now rides on the SHARED content-hash primitive
+// (scope::Approvals) instead of a bespoke store — one trust mechanism for
+// every executable-from-untrusted-origin surface (plugins, hooks). The hash
+// is the same value either way (scope::content_hash == auth::sha256_hex, and
+// hf.hash is already sha256_hex(raw)), so nothing about the security property
+// changes: approve a file's exact bytes; any byte change yields a new hash
+// that isn't in the approved set, so it re-gates.
+//
+// The store leaf stays "hooks_approved.json" for continuity. scope::Approvals
+// is a flat hash LIST; the pre-scope format was a {abs_path: hash} OBJECT.
+// load_hook_approvals() reads either — an object is migrated in place by
+// taking its hash VALUES — so nobody loses an approval across the upgrade.
+constexpr std::string_view kHooksApprovalsLeaf =
+    ::agentty::config::kHooksApprovals;
+
+[[nodiscard]] scope::Approvals load_hook_approvals() {
+    // Fast path: the scope loader handles the new array form (and returns
+    // empty on the legacy object form, which it can't parse as an array).
+    scope::Approvals a = scope::load_approvals(kHooksApprovalsLeaf);
+    if (!a.shas.empty()) return a;
+    // Legacy {path: hash} object — migrate its values into the list.
+    const auto p = legacy_approvals_path();
+    std::string raw = std::string{::agentty::util::bytes_or_empty(
+        ::agentty::util::capped_read(p, kMaxHooksFileBytes))};
+    if (raw.empty()) return a;
+    json j = json::parse(raw, nullptr, /*throw=*/false);
+    if (j.is_object())
+        for (auto it = j.begin(); it != j.end(); ++it)
+            if (it->is_string()) a.approve(it->get<std::string>());
+    return a;
+}
+
+[[nodiscard]] bool is_approved(const HooksFile& hf) {
+    if (hf.path.empty() || hf.hash.empty()) return false;
+    return load_hook_approvals().approved(hf.hash);
+}
+
+void store_approval(const HooksFile& hf) {
+    if (hf.hash.empty()) return;
+    scope::Approvals a = load_hook_approvals();   // includes any migrated legacy hashes
+    a.approve(hf.hash);
+    (void)scope::save_approvals(kHooksApprovalsLeaf, a);   // rewrites as the array form
+}
+
+[[nodiscard]] bool name_matches(const std::string& ere, std::string_view tool) {
+    if (ere.empty()) return true;   // no match key ⇒ every tool
+    try {
+        std::regex re(ere, std::regex::extended | std::regex::nosubs);
+        return std::regex_search(std::string{tool}, re);
+    } catch (const std::regex_error&) {
+        return false;   // bad pattern never matches (fail closed for pre)
+    }
+}
+
+// Write the payload to a private temp file; returns its path ('' on error).
+[[nodiscard]] std::string write_payload(const std::string& payload) {
+    std::error_code ec;
+    auto dir = fs::temp_directory_path(ec);
+    if (ec) return {};
+    auto p = dir / ("agentty_hook_" + std::to_string(current_pid()) + "_" +
+                    std::to_string(reinterpret_cast<std::uintptr_t>(&payload)));
+    std::ofstream f(p, std::ios::binary | std::ios::trunc);
+    if (!f) return {};
+    f << payload;
+    f.close();
+#ifndef _WIN32
+    ::chmod(p.c_str(), 0600);
+#endif
+    return p.string();
+}
+
+// Prefix `cmd` with variable assignments the shell applies to that command
+// only. POSIX: `export A='v' B='v'; <cmd>` (exported so a hook that is a
+// script sees them, and single-quoted so nothing in a value is interpreted).
+// Windows cmd.exe: `set "A=v" && set "B=v" && call <cmd>`; the values here
+// are an event name, a tool name and a temp path, none of which carry `"`
+// or `%`. The `call` is load-bearing: cmd expands %VAR% when it PARSES the
+// line, before any `set` on it has run, so a hook written as
+// `findstr x "%AGENTTY_HOOK_PAYLOAD_FILE%"` saw the literal text. `call`
+// re-parses its argument after the sets, which is when the vars exist.
+[[nodiscard]] std::string with_hook_env(
+    const std::string& cmd,
+    std::initializer_list<std::pair<const char*, std::string>> vars) {
+    std::string out;
+#ifndef _WIN32
+    out = "export";
+    for (const auto& [k, v] : vars) {
+        out += ' ';
+        out += k;
+        out += "='";
+        for (char c : v) {
+            if (c == '\'') out += "'\\''";
+            else out += c;
+        }
+        out += '\'';
+    }
+    out += "; ";
+#else
+    for (const auto& [k, v] : vars) {
+        out += "set \"";
+        out += k;
+        out += '=';
+        out += v;
+        out += "\" && ";
+    }
+    out += "call ";
+#endif
+    out += cmd;
+    return out;
+}
+
+// Run one hook command with the payload plumbed via env + file. Returns
+// {exit_code, captured output}.
+struct HookRun { int exit_code = 0; std::string output; };
+[[nodiscard]] HookRun run_hook(const HookEntry& h, std::string_view event,
+                               std::string_view tool,
+                               const std::string& payload) {
+    const std::string pf = write_payload(payload);
+    // The hook's context goes in ITS command line, not the process env:
+    // setenv/unsetenv mutate state every thread shares, so concurrent tools
+    // needed a global lock around the whole run. A prefix is per-process.
+    const std::string cmd = with_hook_env(h.run, {
+        {"AGENTTY_HOOK_EVENT",        std::string{event}},
+        {"AGENTTY_HOOK_TOOL",         std::string{tool}},
+        {"AGENTTY_HOOK_PAYLOAD_FILE", pf},
+    });
+    auto res = util::sandbox::run_shell_command(cmd, kMaxPayloadBytes,
+                                                kHookTimeout);
+    if (!pf.empty()) {
+        std::error_code ec;
+        fs::remove(pf, ec);
+    }
+    return {res.exit_code, std::move(res.output)};
+}
+
+} // namespace
+
+PreToolDecision run_pre_tool(std::string_view tool,
+                             const std::string& args_json) {
+    PreToolDecision d;
+    if (hooks_disabled()) return d;
+    HooksFile hf = load_hooks_file();
+    if (!hf.ok || hf.pre_tool.empty()) return d;
+    if (!is_approved(hf)) return d;   // unapproved file NEVER runs
+
+    json payload = {{"event", "pre_tool"},
+                    {"tool", std::string{tool}},
+                    {"args", args_json}};
+    // error_handler_t::replace: args_json may embed lossy bytes; dump()
+    // THROWS on invalid UTF-8 by default — a crash inside the tool path.
+    const std::string body =
+        payload.dump(-1, ' ', false, json::error_handler_t::replace);
+    for (const auto& h : hf.pre_tool) {
+        if (!name_matches(h.match, tool)) continue;
+        HookRun r = run_hook(h, "pre_tool", tool, body);
+        if (r.exit_code != 0) {
+            d.blocked = true;
+            if (r.output.empty()) {
+                d.reason = "blocked by pre_tool hook (`" + h.run + "` exited "
+                         + std::to_string(r.exit_code) + ")";
+            } else {
+                // Hook stdout becomes the error the MODEL reads — scrub
+                // terminal controls, force valid UTF-8, and cap it (a 4 MB
+                // guard-script dump would blow the turn's token budget).
+                std::string reason = util::to_valid_utf8(
+                    util::strip_terminal_controls(r.output));
+                if (reason.size() > 4096) {
+                    reason.resize(4096);
+                    reason = util::to_valid_utf8(std::move(reason));
+                    reason += "\n[hook output truncated at 4 KiB]";
+                }
+                d.reason = std::move(reason);
+            }
+            return d;
+        }
+    }
+    return d;
+}
+
+void run_post_tool(std::string_view tool, const std::string& args_json,
+                   const std::string& result_text) {
+    if (hooks_disabled()) return;
+    HooksFile hf = load_hooks_file();
+    if (!hf.ok || hf.post_tool.empty()) return;
+    if (!is_approved(hf)) return;
+
+    json payload = {{"event", "post_tool"},
+                    {"tool", std::string{tool}},
+                    {"args", args_json},
+                    {"result",
+                     result_text.size() > kMaxPayloadBytes
+                         ? result_text.substr(0, kMaxPayloadBytes)
+                         : result_text}};
+    // replace-handler: result_text is arbitrary tool output (bash can emit
+    // raw bytes); default dump() throws on invalid UTF-8.
+    const std::string body =
+        payload.dump(-1, ' ', false, json::error_handler_t::replace);
+    for (const auto& h : hf.post_tool) {
+        if (!name_matches(h.match, tool)) continue;
+        (void)run_hook(h, "post_tool", tool, body);   // fire-and-forget
+    }
+}
+
+bool pending_approval(Io) {
+    if (hooks_disabled()) return false;
+    HooksFile hf = load_hooks_file();
+    return hf.ok && !is_approved(hf);
+}
+
+std::string active_file(Io) {
+    return load_hooks_file().path;
+}
+
+int cli(const std::string& verb) {
+    HooksFile hf = load_hooks_file();
+    if (verb == "list" || verb.empty()) {
+        if (hf.path.empty()) {
+            // "No file" and "a file too big to load" are different answers,
+            // and printing the first for the second is how a blocking hook
+            // stays silently inert while the user believes it is armed.
+            if (!hf.too_big.empty()) {
+                std::printf("%s is over the %zu KB limit — NOT loaded,"
+                            " so no hooks are running\n",
+                            hf.too_big.c_str(), kMaxHooksFileBytes / 1024);
+                return 1;
+            }
+            std::printf("no hooks file (.agentty/hooks.json or "
+                        "~/.agentty/hooks.json)\n");
+            return 0;
+        }
+        std::printf("hooks file: %s\n", hf.path.c_str());
+        if (!hf.ok) {
+            std::printf("  PARSE ERROR — file is not valid JSON\n");
+            return 1;
+        }
+        std::printf("  approval:  %s\n",
+                    is_approved(hf) ? "APPROVED"
+                                    : "NOT APPROVED (hooks will not run — "
+                                      "`agentty hooks approve`)");
+        auto show = [](const char* ev, const std::vector<HookEntry>& v) {
+            for (const auto& h : v)
+                std::printf("  %-9s match=%-20s run=%s\n", ev,
+                            h.match.empty() ? "(all)" : h.match.c_str(),
+                            h.run.c_str());
+        };
+        show("pre_tool",  hf.pre_tool);
+        show("post_tool", hf.post_tool);
+        return 0;
+    }
+    if (verb == "approve") {
+        if (hf.path.empty()) {
+            if (!hf.too_big.empty()) {
+                std::fprintf(stderr, "agentty hooks approve: %s is over the "
+                                     "%zu KB limit — nothing to approve\n",
+                             hf.too_big.c_str(), kMaxHooksFileBytes / 1024);
+                return 1;
+            }
+            std::fprintf(stderr, "agentty hooks approve: no hooks file found\n");
+            return 1;
+        }
+        if (!hf.ok) {
+            std::fprintf(stderr, "agentty hooks approve: %s is not valid "
+                                 "JSON — fix it first\n", hf.path.c_str());
+            return 1;
+        }
+        if (is_approved(hf)) {
+            std::printf("already approved: %s\n", hf.path.c_str());
+            return 0;
+        }
+        // Show the exact bytes being approved, then require explicit y.
+        std::printf("── %s ──\n%s\n────────\n"
+                    "These hooks run ARBITRARY SHELL automatically on "
+                    "matching tool calls\n(sandboxed like the bash tool, "
+                    "but still able to act inside your workspace).\n"
+                    "Approve this exact file content? [y/N] ",
+                    hf.path.c_str(),
+                    std::string{::agentty::util::bytes_or_empty(
+                        ::agentty::util::capped_read(
+                            hf.path, kMaxHooksFileBytes))}.c_str());
+        std::fflush(stdout);
+        std::string line;
+        std::getline(std::cin, line);
+        if (line != "y" && line != "Y" && line != "yes") {
+            std::printf("not approved\n");
+            return 1;
+        }
+        store_approval(hf);
+        std::printf("approved (any byte change re-gates)\n");
+        return 0;
+    }
+    std::fprintf(stderr, "usage: agentty hooks [list|approve]\n");
+    return 2;
+}
+
+} // namespace agentty::tools::hooks

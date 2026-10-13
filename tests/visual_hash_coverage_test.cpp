@@ -45,13 +45,24 @@
 // ignores, add a row to kInvariantAxes.
 
 #include <chrono>
-#include <cstdio>
 #include <functional>
+#include <set>
 #include <string>
 #include <vector>
+#include <map>
+
+#include <maya/style/schemes.hpp>
+
+#include <maya/core/anim_clock.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/program.hpp"
+#include "agentty/runtime/panel/smart_form.hpp"
 #include "agentty/runtime/model.hpp"
+
+namespace pn = agentty::ui::panel;
+namespace smart = agentty::smart;
 
 using agentty::Model;
 using agentty::app::AgenttyApp;
@@ -59,15 +70,7 @@ using agentty::app::AgenttyApp;
 namespace {
 
 int g_checks = 0;
-int g_failures = 0;
 
-void check(bool cond, const std::string& what) {
-    ++g_checks;
-    if (!cond) {
-        ++g_failures;
-        std::fprintf(stderr, "  FAIL: %s\n", what.c_str());
-    }
-}
 
 std::uint64_t hash_of(const Model& m) { return AgenttyApp::visual_hash(m); }
 
@@ -120,11 +123,61 @@ const std::vector<Axis>& visual_axes() {
             m.d.profile = (m.d.profile == agentty::Profile::Write)
                         ? agentty::Profile::Ask : agentty::Profile::Write;
         }},
+        {"reasoning effort tier", [](Model& m) {
+            // The effort tier renders in the model badge (and picker line);
+            // ←/→ must repaint. High → Low is a visible change.
+            m.d.effort = (m.d.effort == agentty::Effort::High)
+                       ? agentty::Effort::Low : agentty::Effort::High;
+        }},
         {"model_id swap", [](Model& m) {
             m.d.model_id = agentty::ModelId{std::string{"claude-haiku-4-5"}};
         }},
         {"pending_permission appears", [](Model& m) {
             m.d.pending_permission = agentty::PendingPermission{};
+        }},
+
+        // ── Appearance ────────────────────────────────────────────────
+        //
+        // Every one of these repaints the screen, and this gate skips
+        // view() entirely when the hash does not move. They were ALL
+        // missing, which is why picking a theme looked like it did
+        // nothing: the model changed, the choice persisted, the right
+        // Theme resolved — and the frame was never rebuilt, so the old
+        // palette stayed up until an unrelated keystroke moved the hash.
+        // The panel's own footer promises "changes apply immediately";
+        // these rows are what hold it to that.
+        {"ui theme swap", [](Model& m) {
+            m.d.ui().theme = "Dracula";
+        }},
+        {"ui color tier override", [](Model& m) {
+            m.d.ui().tier = agentty::ui_prefs::ColorTier::Ansi16;
+        }},
+        {"ui background polarity override", [](Model& m) {
+            m.d.ui().polarity = agentty::ui_prefs::Polarity::Light;
+        }},
+        {"ui density", [](Model& m) {
+            m.d.ui().density = agentty::ui_prefs::Density::Compact;
+        }},
+        {"ui prose width cap", [](Model& m) {
+            m.d.ui().prose_width = 88;
+        }},
+        {"ui compact turns", [](Model& m) {
+            m.d.ui().compact_turns = true;
+        }},
+        {"ui motion", [](Model& m) {
+            m.d.ui().motion = agentty::ui_prefs::Motion::Off;
+        }},
+        {"ui syntax highlighting", [](Model& m) {
+            m.d.ui().syntax = false;
+        }},
+        {"ui tool output", [](Model& m) {
+            m.d.ui().tool_output = agentty::ui_prefs::ToolOutput::Collapsed;
+        }},
+        {"ui thinking", [](Model& m) {
+            m.d.ui().thinking = agentty::ui_prefs::Thinking::Hidden;
+        }},
+        {"ui timestamps", [](Model& m) {
+            m.d.ui().timestamps = agentty::ui_prefs::Timestamps::Absolute;
         }},
         {"phase Idle -> Streaming", [](Model& m) {
             m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
@@ -139,9 +192,9 @@ const std::vector<Axis>& visual_axes() {
         }},
         {"spinner frame (while active)", [](Model& m) {
             m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
-            // Advance the spinner past a full frame-interval so
-            // frame_index() changes.
-            m.s.spinner.advance(1.0f);
+            // The spinner is clock-driven: advance the shared animation
+            // clock past a full frame-interval so frame_index() changes.
+            maya::testing::advance_anim_clock_ms(1000);
         }},
         {"composer text", [](Model& m) {
             m.ui.composer.text = "typing";
@@ -166,87 +219,172 @@ const std::vector<Axis>& visual_axes() {
             m.ui.frozen_turn = 7;
         }},
         {"model_picker opens", [](Model& m) {
-            m.ui.model_picker = agentty::ui::pick::OpenAt{0};
+            m.ui.panel.descend(pn::Models{{0, ""}});
         }},
         {"model_picker cursor move", [](Model& m) {
-            m.ui.model_picker = agentty::ui::pick::OpenAt{3};
+            m.ui.panel.descend(pn::Models{{3}});
+        }},
+        {"model_picker query", [](Model& m) {
+            agentty::ui::pick::OpenAt o; o.index = 0; o.query = "free";
+            m.ui.panel.descend(pn::Models{std::move(o)});
         }},
         {"provider_picker opens", [](Model& m) {
-            m.ui.provider_picker = agentty::ui::pick::OpenAt{0};
+            m.ui.panel.descend(pn::Providers{{0}});
         }},
         {"provider_picker cursor move", [](Model& m) {
-            m.ui.provider_picker = agentty::ui::pick::OpenAt{2};
+            m.ui.panel.descend(pn::Providers{{2}});
         }},
         {"thread_list opens", [](Model& m) {
-            m.ui.thread_list = agentty::ui::pick::OpenAt{0};
+            m.ui.panel.descend(pn::ThreadList{{0}});
         }},
         {"thread_list cursor move", [](Model& m) {
-            m.ui.thread_list = agentty::ui::pick::OpenAt{4};
+            m.ui.panel.descend(pn::ThreadList{{4}});
+        }},
+        {"thread_list delete confirm", [](Model& m) {
+            auto o = agentty::ui::pick::OpenAt{2};
+            o.confirm_remove = "abc123";
+            m.ui.panel.descend(agentty::ui::panel::ThreadList{std::move(o)});
         }},
         {"diff_review opens at cell", [](Model& m) {
-            m.ui.diff_review = agentty::ui::pick::OpenAtCell{0, 0};
+            m.ui.panel.descend(pn::DiffReview{{0, 0}});
         }},
         {"diff_review hunk move", [](Model& m) {
-            m.ui.diff_review = agentty::ui::pick::OpenAtCell{1, 2};
-        }},
-        {"diff_review body scroll", [](Model& m) {
-            m.ui.diff_review = agentty::ui::pick::OpenAtCell{0, 0, 5};
-        }},
-        {"pending change appears", [](Model& m) {
-            agentty::FileChange fc;
-            fc.path = "src/foo.cpp";
-            fc.added = 1;
-            fc.hunks.push_back(agentty::Hunk{});
-            m.d.pending_changes.push_back(std::move(fc));
-        }},
-        {"hunk decision flips", [](Model& m) {
-            agentty::FileChange fc;
-            fc.path = "src/foo.cpp";
-            fc.added = 1;
-            agentty::Hunk hk;
-            hk.status = agentty::Hunk::Status::Accepted;
-            fc.hunks.push_back(std::move(hk));
-            m.d.pending_changes.push_back(std::move(fc));
-        }},
-        {"review_enabled toggles", [](Model& m) {
-            m.d.review_enabled = false;
+            m.ui.panel.descend(pn::DiffReview{{1, 2}});
         }},
         {"command_palette opens", [](Model& m) {
-            m.ui.command_palette = agentty::palette::Open{};
+            m.ui.panel.descend(pn::Palette{{}});
         }},
         {"command_palette query", [](Model& m) {
-            m.ui.command_palette = agentty::palette::Open{"git", 0};
+            m.ui.panel.descend(pn::Palette{{"git", 0}});
         }},
         {"command_palette index", [](Model& m) {
-            m.ui.command_palette = agentty::palette::Open{"git", 5};
+            m.ui.panel.descend(pn::Palette{{"git", 5}});
         }},
-        {"mention_palette opens", [](Model& m) {
-            m.ui.mention_palette = agentty::mention::Open{};
+        {"mention opens", [](Model& m) {
+            m.ui.panel.descend(agentty::ui::panel::Mention{});
         }},
-        {"mention_palette query", [](Model& m) {
-            agentty::mention::Open o; o.query = "src"; o.index = 0;
-            m.ui.mention_palette = std::move(o);
+        {"mention query", [](Model& m) {
+            // The picker owns query + cursor now; drive it through its own
+            // verbs so the test exercises the same path the reducer does.
+            agentty::mention::Open o;
+            o.picker.type(std::string_view{"src"});
+            m.ui.panel.descend(pn::Mention{std::move(o)});
         }},
-        {"mention_palette index", [](Model& m) {
-            agentty::mention::Open o; o.query = "src"; o.index = 3;
-            m.ui.mention_palette = std::move(o);
+        {"mention index", [](Model& m) {
+            agentty::mention::Open o;
+            o.picker.type(std::string_view{"src"});
+            o.picker.jump_to(3);
+            m.ui.panel.descend(pn::Mention{std::move(o)});
         }},
-        {"symbol_palette opens", [](Model& m) {
-            m.ui.symbol_palette = agentty::symbol_palette::Open{};
+        {"symbol opens", [](Model& m) {
+            m.ui.panel.descend(agentty::ui::panel::Symbol{});
         }},
-        {"symbol_palette query", [](Model& m) {
-            agentty::symbol_palette::Open o; o.query = "foo"; o.index = 0;
-            m.ui.symbol_palette = std::move(o);
+        {"symbol query", [](Model& m) {
+            agentty::symbol::Open o;
+            o.picker.type(std::string_view{"foo"});
+            m.ui.panel.descend(pn::Symbol{std::move(o)});
         }},
-        {"symbol_palette index", [](Model& m) {
-            agentty::symbol_palette::Open o; o.query = "foo"; o.index = 2;
-            m.ui.symbol_palette = std::move(o);
+        {"symbol index", [](Model& m) {
+            agentty::symbol::Open o;
+            o.picker.type(std::string_view{"foo"});
+            o.picker.jump_to(2);
+            m.ui.panel.descend(pn::Symbol{std::move(o)});
         }},
         {"todo modal opens", [](Model& m) {
             m.ui.todo.open = agentty::ui::pick::OpenModal{};
         }},
+        {"tool viewer opens", [](Model& m) {
+            m.ui.panel.descend(pn::ToolOutput{{{}, 0, false}});
+        }},
+        {"tool viewer list cursor move", [](Model& m) {
+            m.ui.panel.descend(pn::ToolOutput{{{}, 2, false}});
+        }},
+        {"tool viewer list -> body stage", [](Model& m) {
+            m.ui.panel.descend(pn::ToolOutput{{{}, 0, true}});
+        }},
+        {"tool viewer body scroll", [](Model& m) {
+            m.ui.panel.descend(pn::ToolOutput{{{}, 0, true}});
+            m.ui.tool_viewer_scroll.y = 5;
+        }},
+        {"tool viewer live tail toggled", [](Model& m) {
+            m.ui.panel.descend(pn::ToolOutput{{
+                {agentty::tool_output::Entry{}}, 0, /*viewing=*/true}});
+            m.ui.tool_viewer_tail = false;
+        }},
+        {"code block picker opens", [](Model& m) {
+            m.ui.panel.descend(pn::CodeBlocks{{{}, 0}});
+        }},
+        {"code block picker cursor move", [](Model& m) {
+            m.ui.panel.descend(pn::CodeBlocks{{{}, 3}});
+        }},
         {"login modal opens", [](Model& m) {
             m.ui.login = agentty::ui::login::Picking{};
+        }},
+        {"login chatgpt waiting", [](Model& m) {
+            m.ui.login = agentty::ui::login::ChatGptWaiting{};
+        }},
+        {"settings_list opens (Plugins)", [](Model& m) {
+            agentty::settings::ListOpen o;
+            o.concern = agentty::settings::Category::Plugins;
+            m.ui.panel.descend(agentty::ui::panel::SettingsList{o});
+        }},
+        {"settings_list cursor move", [](Model& m) {
+            agentty::settings::ListOpen o;
+            o.concern = agentty::settings::Category::Plugins;
+            o.index = 3;
+            m.ui.panel.descend(agentty::ui::panel::SettingsList{o});
+        }},
+        {"settings_list add-mode input", [](Model& m) {
+            agentty::settings::ListOpen o;
+            o.concern = agentty::settings::Category::Plugins;
+            o.input_active = true;
+            o.input = "date -- /path/date_server";
+            o.cursor = 4;
+            m.ui.panel.descend(agentty::ui::panel::SettingsList{o});
+        }},
+        {"plugins loading flag", [](Model& m) {
+            m.ui.plugins_loading = true;
+        }},
+        {"plugins snapshot lands (server connected)", [](Model& m) {
+            agentty::mcp::ServerState s;
+            s.name = "date";
+            s.connected = true;
+            s.tools.push_back({"current_date", "", true, false});
+            m.ui.plugins.servers.push_back(std::move(s));
+        }},
+        {"plugins server disabled toggles the hash", [](Model& m) {
+            agentty::mcp::ServerState s;
+            s.name = "date";
+            s.disabled = true;   // distinct from plain disconnected
+            s.tools.push_back({"current_date", "", true, false});
+            m.ui.plugins.servers.push_back(std::move(s));
+        }},
+        {"smart_mode overlay opens", [](Model& m) {
+            agentty::smart_form::Inputs in;
+            in.enabled = true;
+            m.ui.panel.descend(pn::SmartMode{{}, agentty::smart_form::build_form(in)});
+        }},
+        {"smart_mode cursor move", [](Model& m) {
+            agentty::smart_form::Inputs in;
+            in.enabled = true;
+            auto f = agentty::smart_form::build_form(in);
+            agentty::smart_form::focus_role(f, agentty::smart::ModelRole::Utility);
+            m.ui.panel.descend(pn::SmartMode{{}, std::move(f)});
+        }},
+        {"rag picker opens", [](Model& m) {
+            agentty::rag_settings::Open o;
+            m.ui.panel.descend(agentty::ui::panel::Rag{o});
+        }},
+        {"rag picker cursor move", [](Model& m) {
+            agentty::rag_settings::Open o;
+            o.cursor = agentty::store::RagMode::Off;
+            m.ui.panel.descend(agentty::ui::panel::Rag{o});
+        }},
+        {"fork picker opens", [](Model& m) {
+            m.ui.panel.descend(pn::Fork{{agentty::fork_panel::Choice::RagPerTurn}});
+        }},
+        {"fork picker cursor move", [](Model& m) {
+            m.ui.panel.descend(pn::Fork{{agentty::fork_panel::Choice::RagOff}});
         }},
     };
     return axes;
@@ -265,11 +403,16 @@ const std::vector<Axis>& invariant_axes() {
             m.s.tokens_in  = 12345;
             m.s.tokens_out = 67890;
         }},
+        {"pending rehydrate trim", [](Model& m) {
+            m.ui.pending_rehydrate_trim = true;
+        }},
     };
     return axes;
 }
 
-void test_visual_axes_advance_hash() {
+}  // namespace (helpers)
+
+TEST_CASE("visual axes advance hash") {
     std::printf("visual_hash: each view axis advances the hash\n");
     for (const auto& ax : visual_axes()) {
         Model before = baseline();
@@ -285,7 +428,7 @@ void test_visual_axes_advance_hash() {
     }
 }
 
-void test_invariant_axes_preserve_hash() {
+TEST_CASE("invariant axes preserve hash") {
     std::printf("visual_hash: non-visual axes do NOT advance the hash\n");
     for (const auto& ax : invariant_axes()) {
         Model before = baseline();
@@ -303,7 +446,16 @@ void test_invariant_axes_preserve_hash() {
 
 // Sanity: the baseline itself is stable across two calls (no time term
 // leaking for a settled/idle model — regime (c): nothing animating).
-void test_idle_settled_is_stable() {
+TEST_CASE("idle settled is stable") {
+    // Pin the animation clock. These cases assert that two hashes of an
+    // UNCHANGED model agree, which is only meaningful if time cannot move
+    // between the two calls. visual_hash mixes a time BUCKET whenever
+    // anything animates — and a bare Model has no messages, so the welcome
+    // bob counts as animating. Unfrozen, the two calls could straddle a
+    // bucket edge and disagree: reliably so under `ctest -j12`, where load
+    // widens the gap between them. The clock is frozen, not merely read
+    // once, so the assertion tests the MODEL rather than the scheduler.
+    maya::testing::freeze_anim_clock(1000000);
     std::printf("visual_hash: settled idle model is hash-stable across calls\n");
     Model m = baseline();
     const std::uint64_t a = hash_of(m);
@@ -316,19 +468,330 @@ void test_idle_settled_is_stable() {
           "term is leaking into a regime (c) state (should be none).");
 }
 
-}  // namespace
+// ── Spinner gates: subscription, advance and hash must agree ────────────
+//
+// A time-based animation in this app passes through THREE independent
+// gates, and all three must name the same condition:
+//
+//   1. subscribe.cpp   — is a Tick even delivered?
+//   2. update/meta.cpp — does the spinner advance on that Tick?
+//   3. program.hpp     — does the new frame change the visual hash
+//                        (i.e. does anything repaint)?
+//
+// Disagreement is SILENT: a frame that advances without being hashed
+// animates invisibly; one hashed without advancing burns renders on an
+// unchanged glyph. The fused picker's "loading …" spinner needs all
+// three while `models_loading` is set — a frozen glyph reads as a hang,
+// which is the exact opposite of what it exists to say.
+TEST_CASE("visual hash: spinner advances the hash while models load") {
+    // Frozen so the ONLY time motion is the explicit advance below.
+    maya::testing::freeze_anim_clock(2000000);
+    Model m;
+    REQUIRE(!m.s.active());          // idle: the streaming gate is off
+    m.s.models_loading = true;
 
-int main() {
-    std::printf("visual_hash_coverage_test\n");
-    test_idle_settled_is_stable();
-    test_visual_axes_advance_hash();
-    test_invariant_axes_preserve_hash();
+    const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+    // The spinner derives its frame from the shared clock; move it past a
+    // full frame-interval so frame_index() changes.
+    maya::testing::advance_anim_clock_ms(1000);
+    const auto h1 = agentty::app::AgenttyApp::visual_hash(m);
+    CHECK(h0 != h1);
+    maya::testing::unfreeze_anim_clock();
+}
 
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    if (g_failures == 0) {
-        std::printf("PASSED\n");
-        return 0;
+TEST_CASE("visual hash: an idle picker with no load does NOT animate") {
+    maya::testing::freeze_anim_clock(2000000);
+    // The complement: without models_loading (and not streaming) the
+    // spinner must stay out of the hash, or an idle agentty repaints
+    // forever for a glyph nobody is looking at. STRONGER than the old
+    // advance()-based check: with a clock-driven spinner we assert the
+    // hash is time-independent outright — moving the clock (which moves
+    // the spinner's frame) must not move the hash.
+    Model m;
+    REQUIRE(!m.s.active());
+    m.s.models_loading = false;
+
+    const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+    // Parity-neutral advance: a multiple of the 530 ms blink period so the
+    // caret parity bucket (now/265 & 1) is unchanged, while the spinner
+    // (80 ms/frame) moves through ~13 frames. Isolates the axis under test.
+    maya::testing::advance_anim_clock_ms(1060);
+    CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+    maya::testing::unfreeze_anim_clock();
+}
+
+TEST_CASE("visual hash: spinner animates while a PICKER catalog loads") {
+    // Frozen: this asserts the hash CHANGES for one spinner step, which a
+    // live clock could satisfy by accident (a bucket flip) instead of by
+    // the spinner frame the case is actually about.
+    maya::testing::freeze_anim_clock(2000000);
+    // The picker fans out to every authed provider and tracks each fetch on
+    // ProviderCatalog::state — it never sets Session::models_loading (that
+    // covers the ACTIVE provider only: provider switch / startup). Gating
+    // the spinner on the wrong flag left it frozen in the one surface it
+    // exists for, which reads as a hang.
+    Model m;
+    REQUIRE(!m.s.active());
+    REQUIRE(!m.s.models_loading);
+    agentty::ProviderCatalog c;
+    c.provider_id = "openai";
+    c.state = agentty::ProviderCatalog::State::Loading;
+    m.d.provider_catalogs.push_back(std::move(c));
+    m.ui.panel.descend(agentty::ui::panel::Models{});
+    REQUIRE(m.loading_spinner_visible());
+
+    const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+    maya::testing::advance_anim_clock_ms(1000);   // move the spinner's frame
+    CHECK(agentty::app::AgenttyApp::visual_hash(m) != h0);
+    maya::testing::unfreeze_anim_clock();
+}
+
+TEST_CASE("visual hash: a READY catalog does not animate") {
+    maya::testing::freeze_anim_clock(2000000);
+    Model m;
+    agentty::ProviderCatalog c;
+    c.provider_id = "openai";
+    c.state = agentty::ProviderCatalog::State::Ready;
+    m.d.provider_catalogs.push_back(std::move(c));
+    m.ui.panel.descend(agentty::ui::panel::Models{});
+    REQUIRE(!m.loading_spinner_visible());
+
+    const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+    // Parity-neutral advance (multiple of the 530 ms blink period) — see
+    // the idle-picker case above; moves the spinner ~13 frames while the
+    // caret parity bucket stays put.
+    maya::testing::advance_anim_clock_ms(1060);
+    CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+    maya::testing::unfreeze_anim_clock();
+}
+
+// ── A widget-paced visual gets NO time term from the host ────────────
+//
+// The design rule, enforced here rather than remembered: a visual is EITHER
+// host-paced (we arm a timer and bucket the hash at that period) OR
+// widget-paced (it calls request_animation_frame(_after) and maya's run loop
+// renders it on its own schedule). Never both.
+//
+// Both is what broke: agentty bucketed the RAF-driven welcome screen at its
+// streaming-tick period (80 ms over ssh) while welcome_screen.hpp was asking
+// for 110 ms. Two independent clocks for one visual, so renders landed
+// part-way through animation steps — 42 hash values per 30 requested frames,
+// and an idle welcome screen that visibly flickered instead of bobbing.
+//
+// maya::animation_pending() reports "a widget already owns the next frame".
+// While that holds, visual_hash must contribute no time term at all: maya's
+// RAF override renders those frames regardless of this hash, so any bucket
+// we add is purely a second, out-of-phase clock.
+TEST_CASE("visual hash: a widget-paced frame gets no host time bucket") {
+    Model m;
+    m.d.current.messages.clear();          // welcome screen: RAF-driven
+    REQUIRE(!m.s.active());
+
+    // Simulate a widget having asked for the next frame, exactly as
+    // welcome_screen.hpp's mount does during build().
+    maya::request_animation_frame_after(110);
+    REQUIRE(maya::animation_pending());
+
+    // With a frame pending, the hash must be time-INDEPENDENT: sweep a span
+    // far wider than any plausible bucket and demand a single value.
+    std::set<std::uint64_t> distinct;
+    for (std::int64_t t = 0; t < 3300; t += 7) {
+        maya::testing::freeze_anim_clock(1000000 + t);
+        distinct.insert(agentty::app::AgenttyApp::visual_hash(m));
     }
-    std::printf("FAILED\n");
-    return 1;
+    CHECK(distinct.size() == 1);
+
+    // And the converse: with NO widget-paced frame pending, a host-paced
+    // animation still gets its bucket — the deferral must not disable the
+    // hash's own animations. An active turn is host-paced (Tick-driven).
+    maya::detail::animation_requested_ = false;
+    REQUIRE(!maya::animation_pending());
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    REQUIRE(m.s.active());
+    std::set<std::uint64_t> active_hashes;
+    for (std::int64_t t = 0; t < 3300; t += 7) {
+        maya::testing::freeze_anim_clock(1000000 + t);
+        active_hashes.insert(agentty::app::AgenttyApp::visual_hash(m));
+    }
+    CHECK(active_hashes.size() > 1);
+
+    maya::testing::freeze_anim_clock(1000000);
+}
+
+// ── An idle WELCOME screen must be hash-stable ───────────────────────
+//
+// The welcome screen is the one state with no messages, so it exercises a
+// different set of hash terms than baseline() (which has two). It is also
+// the state a user stares at longest before typing, and the one where a
+// repaint they didn't ask for is most visible.
+//
+// With the animation clock frozen, visual_hash must be a PURE function of
+// the model: two calls on an untouched Model must agree, and must keep
+// agreeing. A difference here means the hash is reading something outside
+// the model — which the run loop then sees as "the screen changed", so it
+// repaints, and the caret is redrawn under the user for no reason.
+TEST_CASE("visual hash: an idle welcome screen is hash-stable") {
+    maya::testing::freeze_anim_clock(1000000);
+
+    Model m;                          // no messages: the welcome screen
+    REQUIRE(!m.s.active());
+    REQUIRE(m.d.current.messages.empty());
+
+    const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+    for (int i = 0; i < 16; ++i) {
+        CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+    }
+
+    // Advancing the clock must not move the hash WHEN THE TERMINAL OWNS THE
+    // CARET. That is the case this exists to pin: with the hardware caret
+    // maya paints no caret cell and schedules no frames, so there is no
+    // visible step for a time bucket to track, and mixing one makes the loop
+    // repaint against the terminal's own blink.
+    //
+    // With the PAINTED caret the opposite is true — maya blinks it and asks
+    // for the frames — so a parity term is correct and the hash SHOULD move.
+    // Asserting time-independence unconditionally would be asserting a bug.
+    if (agentty::ui::composer_uses_hardware_caret(m)) {
+        maya::request_animation_frame_after(110);
+        for (std::int64_t t = 0; t < 2000; t += 37) {
+            maya::testing::freeze_anim_clock(1000000 + t);
+            CHECK(agentty::app::AgenttyApp::visual_hash(m) == h0);
+        }
+    }
+    maya::detail::animation_requested_ = false;
+    maya::testing::freeze_anim_clock(1000000);
+}
+
+// ── The three-gate agreement, pinned structurally ───────────────────────
+//
+// animation_demand / reveal_needs_frames / reveal_draining (subscribe.hpp)
+// are the single definitions of "something is moving". This case pins the
+// agreement those predicates exist to guarantee:
+//
+//   ARMED ⇒ HASHED: any state where the Tick subscription arms the timer
+//   for REVEAL reasons must be a state whose visual_hash carries a time
+//   term — otherwise the loop wakes and the hash gate discards every
+//   wake: armed frames, frozen pixels (the mid-glide freeze). The
+//   converse (hashed ⇒ armed) is deliberately NOT asserted: widget-paced
+//   and caret-parity terms are maya's own frame sources, armed outside
+//   the Tick.
+//
+// Falsified: killing the drain bucket in visual_hash fails the three
+// drain-shaped cases below. Two honest limits, verified by trying:
+//   • reveal_needs_frames' REASONING term is cadence-only today —
+//     fine_anim_live (m.s.active()) sits below it in the chain and mixes
+//     a coarser bucket for the same states, so dropping the term degrades
+//     16ms→33/100ms smoothness on sync terminals but cannot freeze the
+//     hash. Defense-in-depth, deliberate; this test cannot (and should
+//     not) fail on cadence.
+//   • The drain states are the load-bearing ones: in that window BOTH
+//     m.s.active() and fine_anim_live are false, so the drain bucket is
+//     the ONLY time term — exactly why killing it fails here.
+TEST_CASE("visual hash: every reveal-armed state carries a time term") {
+    struct Case {
+        const char* name;
+        std::function<void(Model&)> setup;
+    };
+    const Case cases[] = {
+        {"streaming answer bytes", [](Model& m) {
+            m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+            agentty::Message a; a.role = agentty::Role::Assistant;
+            a.streaming_text = "partial answer";
+            m.d.current.messages.push_back(std::move(a));
+        }},
+        {"pure reasoning phase", [](Model& m) {
+            m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+            m.d.show_reasoning = true;
+            agentty::Message a; a.role = agentty::Role::Assistant;
+            a.thinking = "chain of thought so far";
+            m.d.current.messages.push_back(std::move(a));
+        }},
+        {"undrained bytes after active dropped", [](Model& m) {
+            agentty::Message a; a.role = agentty::Role::Assistant;
+            a.pending_stream = "tail not yet drained";
+            m.d.current.messages.push_back(std::move(a));
+        }},
+        {"settle-freeze pending", [](Model& m) {
+            agentty::Message a; a.role = agentty::Role::Assistant;
+            a.text = "done";
+            m.d.current.messages.push_back(std::move(a));
+            m.ui.pending_settle_freeze = true;
+        }},
+        {"settle cooldown", [](Model& m) {
+            agentty::Message a; a.role = agentty::Role::Assistant;
+            a.text = "done";
+            m.d.current.messages.push_back(std::move(a));
+            m.ui.settle_cooldown_ticks = 2;
+        }},
+    };
+
+    for (const auto& c : cases) {
+        Model m;
+        c.setup(m);
+        // Only assert on states the subscription actually arms for reveal
+        // reasons — the agreement under test.
+        if (!agentty::app::animation_demand(m)) continue;
+
+        maya::testing::freeze_anim_clock(3000000);
+        const auto h0 = agentty::app::AgenttyApp::visual_hash(m);
+        // One reveal bucket is 16-33ms; 300ms crosses several regardless
+        // of terminal sync mode. If no time term is mixed, the hash is
+        // frozen and the armed wakes render nothing.
+        maya::testing::freeze_anim_clock(3000000 + 300);
+        const auto h1 = agentty::app::AgenttyApp::visual_hash(m);
+        maya::testing::unfreeze_anim_clock();
+
+        INFO(c.name);
+        CHECK_MESSAGE(h0 != h1,
+            c.name << ": the Tick subscription arms for this state but "
+            "visual_hash mixes no time term — armed frames would be gated "
+            "away and the animation freezes until a keypress");
+    }
+}
+
+// Every built-in scheme name must hash distinctly.
+//
+// A visual axis is only guarded if DIFFERENT values of it produce different
+// hashes. The theme axis passed "advances the hash" above while still being
+// broken, because that test compares one theme against the baseline — it
+// never compares two themes against each other.
+//
+// mix_str() samples (length + first + last + middle byte), which is right
+// for a 50 KB tool output and wrong for a scheme name. 76 of the 615 names
+// collided under it, and since the sample keys on the ENDS the collisions
+// fell between alphabetical neighbours — precisely the pairs you visit
+// arrowing through the browser:
+//
+//   Acid Lime -> Adventure, Rose Pine Dawn -> Rose Pine Moon, ...
+//
+// Landing on one changed the model, published the theme, and left the gate
+// saying "nothing visual moved". No repaint. The theme appeared only after
+// some unrelated key moved the hash — "it doesn't register until you hit it
+// again".
+TEST_CASE("visual_hash: every scheme name hashes distinctly") {
+    std::printf("visual_hash: %zu scheme names must not collide\n",
+                std::size(maya::theme::schemes));
+
+    std::map<std::uint64_t, std::string> seen;
+    std::vector<std::string> collisions;
+
+    for (const auto& s : maya::theme::schemes) {
+        Model m = baseline();
+        m.d.ui().theme = s.name;
+        const std::uint64_t h = hash_of(m);
+        if (auto it = seen.find(h); it != seen.end())
+            collisions.push_back(it->second + " == " + s.name);
+        else
+            seen.emplace(h, s.name);
+    }
+
+    if (!collisions.empty()) {
+        std::printf("  %zu collision(s):\n", collisions.size());
+        for (std::size_t i = 0; i < collisions.size() && i < 10; ++i)
+            std::printf("    %s\n", collisions[i].c_str());
+    }
+    check(collisions.empty(),
+          "two schemes share a visual_hash — switching between them is a "
+          "silent no-repaint. Hash the theme name in FULL rather than "
+          "sampling it (program.hpp).");
 }

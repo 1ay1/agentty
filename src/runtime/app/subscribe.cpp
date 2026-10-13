@@ -8,16 +8,23 @@
 #include <maya/terminal/ansi.hpp>
 
 #include "agentty/runtime/login.hpp"
-#include "agentty/runtime/picker.hpp"
+#include "agentty/domain/ui_live.hpp"   // thinking pref: gates the reasoning reveal
+#include "agentty/runtime/view/helpers.hpp"  // ui::reasoning_shown
+#include "agentty/runtime/panel/common.hpp"
+#include "agentty/runtime/panel/top.hpp"
+#include "agentty/runtime/panel/nav.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"   // device_login_sub / codex_login_sub
+
+namespace pn = agentty::ui::panel;
 
 namespace agentty::app {
 
-using maya::Sub;
 using maya::KeyEvent;
 using maya::CharKey;
 using maya::SpecialKey;
 namespace pick = agentty::ui::pick;
+namespace nav  = agentty::ui::nav;
 
 namespace {
 
@@ -28,39 +35,24 @@ namespace {
 // high-latency / low-bandwidth link, producing the mid-turn lag and
 // the end-of-turn catch-up repaint. We slow the streaming tick when
 // remote (see the cadence block below).
-bool running_over_ssh() {
-    static const bool remote = [] {
-        // Escape hatch: a fast LAN SSH hop doesn't need throttling.
-        if (const char* off = std::getenv("AGENTTY_NO_SSH_THROTTLE");
-            off && off[0] && off[0] != '0')
-            return false;
-        return std::getenv("SSH_CONNECTION") != nullptr
-            || std::getenv("SSH_TTY") != nullptr
-            || std::getenv("SSH_CLIENT") != nullptr;
-    }();
-    return remote;
-}
+// SSH detection moved to app::detail (stream.cpp) so the end-of-turn
+// reveal policy can share it; see internal.hpp. This TU keeps using it
+// via the detail:: declaration.
 
 } // namespace
 
 // The single definition of the streaming Tick cadence. See the
-// declaration in subscribe.hpp for the full rationale. Computed once
-// per session — the inputs are immutable — and shared verbatim by both
-// subscribe() (the timer interval) and Program::visual_hash() (the
-// phase-locked animation bucket).
-std::chrono::milliseconds streaming_tick_period() noexcept {
-    static const std::chrono::milliseconds period = [] {
-        auto base = maya::ansi::env_supports_synchronized_output()
-            ? std::chrono::milliseconds(33)
-            : std::chrono::milliseconds(100);
-        if (running_over_ssh())
-            return std::max(base, std::chrono::milliseconds(80));
-        return base;
-    }();
-    return period;
+// declaration in subscribe.hpp for the full rationale. A function of the
+// launch environment, which init() captured into Model::env — so it reads the
+// Model, not the process, and subscribe() and visual_hash() agree because
+// they read the same field.
+std::chrono::milliseconds streaming_tick_period(const Model::Env& env) noexcept {
+    const auto base = env.synchronized_output
+        ? std::chrono::milliseconds(33)
+        : std::chrono::milliseconds(100);
+    if (env.remote) return std::max(base, std::chrono::milliseconds(80));
+    return base;
 }
-
-namespace {
 
 // True when the last message still carries in-flight wire bytes
 // (streaming_text / pending_stream not yet drained into the settled
@@ -83,11 +75,93 @@ bool tail_has_live_bytes(const Model& m) noexcept {
     return !back.streaming_text.empty() || !back.pending_stream.empty();
 }
 
+bool reveal_needs_frames(const Model& m) noexcept {
+    if (!m.s.active() || m.d.current.messages.empty()) return false;
+    const auto& back = m.d.current.messages.back();
+    if (back.role != Role::Assistant) return false;
+    return !back.streaming_text.empty()
+        || !back.pending_stream.empty()
+        // Pure-reasoning phase: no answer bytes yet, but the reasoning
+        // channel (msg.thinking) streams through its own reveal. Omitting
+        // this term is the "Thinking gets stuck" bug: the fast bucket
+        // never engages, armed RAF frames get gated away, and the
+        // reasoning typewriter freezes until a keypress.
+        //
+        // ui::reasoning_shown is the SAME predicate the view renders on and
+        // the activity indicator defers to. Whatever decides to SHOW
+        // reasoning has to be what decides to animate it, or one of the two
+        // is always wrong.
+        || ::agentty::ui::reasoning_shown(back);
+}
+
+bool reveal_draining(const Model& m) noexcept {
+    return m.ui.pending_settle_freeze
+        || m.ui.settle_cooldown_ticks > 0
+        // True exactly while the reveal (is_live / reveal_in_progress /
+        // is_finalizing / is_parsing) has NOT drained — the wall-clock
+        // typewriter often has seconds of animation left after the wire
+        // goes quiet, and stopping the clock here freezes it mid-glide at
+        // 1% CPU until the next keystroke.
+        || !detail::live_tail_reveal_settled(m);
+}
+
+// Whether the changes-strip bulk chords (^A accept all / ^X reject all) are
+// LIVE on the main screen. ONE definition, read by both subscribe() (which
+// captures it into the key router) and subs_key() (which keys the memo on
+// it) — the same shape as animation_demand() just below, and for the same
+// reason: a predicate spelled out twice is a predicate that drifts, and a
+// router capture going stale is invisible until a key routes against last
+// frame's state.
+//
+// The three terms:
+//   * show_changes_strip — the chords are ADVERTISED by the strip's header
+//     hints and nowhere else. With the strip hidden (the default) there is
+//     no on-screen affordance, so a live ^X would be an unannounced way to
+//     revert every pending edit. Advertised and reachable stay the same bit.
+//   * pending_changes non-empty — nothing to accept or reject otherwise.
+//   * !m.s.active() — mid-turn the changeset is still growing, so a bulk
+//     decision would be taken against a set the agent hasn't finished
+//     writing.
+// The composer is deliberately NOT a term: the chords are Ctrl-held, so
+// they can't collide with typing (see the chord policy in on_diff_review).
+bool strip_chords_armed(const Model& m) noexcept {
+    return m.d.show_changes_strip
+        && !m.d.pending_changes.empty()
+        && !m.s.active();
+}
+
+bool animation_demand(const Model& m) noexcept {
+    return m.s.active()
+        // `models_loading` keeps the fused picker's "loading …" spinner
+        // spinning while a slow backend (Ollama, a custom host) is still
+        // answering — a frozen glyph is the visual signature of a hang,
+        // the opposite of what it must convey.
+        || m.s.models_loading
+        || m.loading_spinner_visible()
+        || tail_has_live_bytes(m)
+        || m.ui.pending_rehydrate_trim
+        // A LOOP waiting out a backoff must keep the frame clock alive: the
+        // re-send fires from the settle path, and the countdown chip has to
+        // tick down. Without this the app goes fully idle after a failed
+        // iteration and the loop silently never resumes until a keystroke.
+        || m.ui.composer.loop_wait_until_ms > 0
+        || reveal_draining(m);
+}
+
+namespace {
+
 // ── Per-modal key handlers — return std::nullopt to fall through ──────────
 
 std::optional<Msg> on_permission(const KeyEvent& ev) {
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
+        char32_t c = ck->codepoint;
+        // ^C must stay quittable while a prompt is up — this handler's
+        // result is returned unconditionally (never falls through to
+        // on_global), so swallow-by-nullopt would make the app unquittable
+        // until the prompt is answered. Legacy terminals send raw 0x03.
+        if (c == 0x03 || (ev.mods.ctrl && (c == U'c' || c == U'C')))
+            return Quit{};
+        switch (c) {
             case 'y': case 'Y': return PermissionApprove{};
             case 'n': case 'N': return PermissionReject{};
             case 'a': case 'A': return PermissionApproveAlways{};
@@ -100,54 +174,47 @@ std::optional<Msg> on_permission(const KeyEvent& ev) {
 }
 
 std::optional<Msg> on_command_palette(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:    return CloseCommandPalette{};
-            case SpecialKey::Enter:     return CommandPaletteSelect{};
-            case SpecialKey::Up:        return CommandPaletteMove{-1};
-            case SpecialKey::Down:      return CommandPaletteMove{+1};
-            case SpecialKey::Backspace: return CommandPaletteBackspace{};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        return CommandPaletteInput{ck->codepoint};
-    return std::nullopt;
+    // ^K palette: shared grammar + typed filter. No jump/vim (printables
+    // type into the query). Ctrl chords other than the toggle are eaten —
+    // they must never become query text.
+    nav::NavSpec s;
+    s.close     = [] { return Msg{ClosePalette{}}; };
+    s.select    = [] { return Msg{PaletteSelect{}}; };
+    s.move      = [](int d) { return Msg{PaletteMove{d}}; };
+    s.filter_bs = [] { return Msg{PaletteBackspace{}}; };
+    s.filter_ch = [](char32_t c) { return Msg{PaletteInput{c}}; };
+    s.toggle_close_chord = U'k';
+    return nav::translate(s, ev);
 }
 
 std::optional<Msg> on_mention_palette(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:    return CloseMentionPalette{};
-            case SpecialKey::Enter:     return MentionPaletteSelect{};
-            case SpecialKey::Up:        return MentionPaletteMove{-1};
-            case SpecialKey::Down:      return MentionPaletteMove{+1};
-            case SpecialKey::Backspace: return MentionPaletteBackspace{};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        return MentionPaletteInput{ck->codepoint};
-    return std::nullopt;
+    // @-mention list rides the composer: every CharKey (even ctrl'd) goes
+    // to the palette's own input handling, so `extra` claims chars first.
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseMention{}}; };
+    s.select    = [] { return Msg{MentionSelect{}}; };
+    s.move      = [](int d) { return Msg{MentionMove{d}}; };
+    s.filter_bs = [] { return Msg{MentionBackspace{}}; };
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (auto* ck = std::get_if<CharKey>(&e.key))
+            return Msg{MentionInput{ck->codepoint}};
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
 std::optional<Msg> on_symbol_palette(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:    return CloseSymbolPalette{};
-            case SpecialKey::Enter:     return SymbolPaletteSelect{};
-            case SpecialKey::Up:        return SymbolPaletteMove{-1};
-            case SpecialKey::Down:      return SymbolPaletteMove{+1};
-            case SpecialKey::Backspace: return SymbolPaletteBackspace{};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        return SymbolPaletteInput{ck->codepoint};
-    return std::nullopt;
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseSymbol{}}; };
+    s.select    = [] { return Msg{SymbolSelect{}}; };
+    s.move      = [](int d) { return Msg{SymbolMove{d}}; };
+    s.filter_bs = [] { return Msg{SymbolBackspace{}}; };
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (auto* ck = std::get_if<CharKey>(&e.key))
+            return Msg{SymbolInput{ck->codepoint}};
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
 // Ctrl+G code-block picker. Enter runs the cursor row; a bare digit
@@ -155,173 +222,545 @@ std::optional<Msg> on_symbol_palette(const KeyEvent& ev) {
 // zero-navigation fast path: Ctrl+G, 2, done). `e` stages into the
 // composer for editing, `y` copies clean.
 std::optional<Msg> on_code_block_picker(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape: return CloseCodeBlockPicker{};
-            case SpecialKey::Enter:  return CodeBlockPickerSelect{};
-            case SpecialKey::Up:     return CodeBlockPickerMove{-1};
-            case SpecialKey::Down:   return CodeBlockPickerMove{+1};
+    nav::NavSpec s;
+    s.close  = [] { return Msg{CloseCodeBlocks{}}; };
+    s.select = [] { return Msg{CodeBlocksSelect{}}; };
+    s.move   = [](int d) { return Msg{CodeBlocksMove{d}}; };
+    s.toggle_close_chord = U'g';
+    s.extra  = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto v = nav::char_view(e);
+        if (!v) return std::nullopt;
+        // Digits stay bare: they are SELECTORS (run block N), the numeric
+        // analogue of Enter — not letter commands.
+        if (!v->ctrl && v->c >= U'1' && v->c <= U'9')
+            return Msg{CodeBlocksSelect{static_cast<int>(v->c - U'1')}};
+        // Actions are chords — and letters below (pure list, nothing types).
+        if (v->ctrl) switch (v->c) {
+            case U'e': return Msg{CodeBlocksEdit{}};
+            case U'y': return Msg{CodeBlocksCopy{}};
             default: break;
         }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        char32_t c = ck->codepoint;
-        if (c >= U'1' && c <= U'9')
-            return CodeBlockPickerSelect{static_cast<int>(c - U'1')};
-        switch (c) {
-            case U'e': case U'E': return CodeBlockPickerEdit{};
-            case U'y': case U'Y': return CodeBlockPickerCopy{};
-            case U'q': case U'Q': return CloseCodeBlockPicker{};
-            default: break;
-        }
-    }
-    return std::nullopt;
+        return std::nullopt;
+    };
+    // Pure list: letters work alongside the chords, so a multiplexer
+    // stealing ^E/^Y can't lock you out.
+    s.letter_verbs = {
+        {U'e', [] { return Msg{CodeBlocksEdit{}}; }},
+        {U'y', [] { return Msg{CodeBlocksCopy{}}; }},
+    };
+    return nav::translate(s, ev);
 }
 
-// Post-run result card: a = attach to composer, y = copy, Esc/q/Enter
+// Post-run result card: ^A = attach to composer, ^Y = copy, Esc/Enter
 // dismiss. Enter deliberately DISCARDS rather than attaches — the
 // default action must be the safe one (no surprise composer content);
-// attaching is the explicit `a`.
+// attaching is the explicit chord.
 std::optional<Msg> on_code_block_result(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        switch (std::get<SpecialKey>(ev.key)) {
-            case SpecialKey::Escape:
-            case SpecialKey::Enter:    return CodeBlockResultDiscard{};
-            // Scroll the capture. The result card is read-only (no
-            // selection cursor), so Move deltas translate straight to
-            // viewport scroll rows in the reducer.
-            case SpecialKey::Up:       return CodeBlockPickerMove{-1};
-            case SpecialKey::Down:     return CodeBlockPickerMove{+1};
-            case SpecialKey::PageUp:   return CodeBlockPickerMove{-10};
-            case SpecialKey::PageDown: return CodeBlockPickerMove{+10};
-            default: break;
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CodeBlockResultDiscard{}}; };
+    s.select    = [] { return Msg{CodeBlockResultDiscard{}}; };   // safe default
+    s.move      = [](int d) { return Msg{CodeBlocksMove{d}}; };
+    s.page_step = 10;
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto v = nav::char_view(e);
+        if (!v || !v->ctrl) return std::nullopt;
+        switch (v->c) {
+            case U'a': return Msg{CodeBlockResultAttach{}};
+            case U'y': return Msg{CodeBlockResultCopy{}};
+            default:   return std::nullopt;
         }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
-            case U'a': case U'A': return CodeBlockResultAttach{};
-            case U'y': case U'Y': return CodeBlockResultCopy{};
-            case U'q': case U'Q': case U'd': case U'D':
-                return CodeBlockResultDiscard{};
-            default: break;
+    };
+    s.letter_verbs = {
+        {U'a', [] { return Msg{CodeBlockResultAttach{}}; }},
+        {U'y', [] { return Msg{CodeBlockResultCopy{}}; }},
+    };
+    return nav::translate(s, ev);
+}
+
+// The stats viewer: a READ-ONLY tabbed pane.
+//
+// No `select` and no `move`: there is no cursor, because nothing in the
+// panel can be acted on. Wiring a selection into a viewer would light a
+// highlight that promises an Enter which does nothing.
+//
+// Tab / Shift-Tab step the tab set, and ←/→ do the same because a tab strip
+// reads as horizontal. Scrolling stays with the shared grammar via
+// page_step, so a long tally pages like every other panel.
+std::optional<Msg> on_stats_viewer(const KeyEvent& ev) {
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseStats{}}; };
+    // A tab is TALLER than the panel viewport whenever it carries a figure
+    // (Tokens is ~22 rows against a 14-row body), so the panel scrolls it
+    // and the scrollbar appears — but without this the arrows did nothing
+    // and the plot at the bottom was unreachable. Read-only, so ↑/↓ scroll
+    // the BODY rather than moving a cursor; there is nothing to select.
+    s.move      = [](int d) { return Msg{StatsScroll{d}}; };
+    s.page_step = 10;
+    s.extra = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto* sk = std::get_if<SpecialKey>(&e.key);
+        if (!sk) return std::nullopt;
+        switch (*sk) {
+            case SpecialKey::Tab:     return Msg{StatsTab{+1}};
+            case SpecialKey::BackTab: return Msg{StatsTab{-1}};
+            case SpecialKey::Left:    return Msg{StatsTab{-1}};
+            case SpecialKey::Right:   return Msg{StatsTab{+1}};
+            default:                  return std::nullopt;
         }
-    }
+    };
+    return nav::translate(s, ev);
+}
+
+// The skills viewer: a READ-ONLY list.
+//
+// It HAS a cursor (unlike the stats viewer) because each row has its own
+// detail — moving the selection changes what the footer explains. But it
+// has no `select`: Enter does nothing, deliberately.
+//
+// There is no approve key either, and that is the load-bearing omission.
+// Anthropic measured 93% approval on Claude Code permission prompts; an
+// approval one keystroke from a list you are already scrolling is the
+// fastest habituated yes there is. Approval lives in
+// `agentty skill approve NAME`, where the consent screen can show both the
+// findings and the body. The panel tells you WHAT and WHY; the decision
+// happens somewhere you had to go on purpose.
+std::optional<Msg> on_skills_viewer(const KeyEvent& ev) {
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseSkills{}}; };
+    s.move      = [](int d) { return Msg{SkillsMove{d}}; };
+    s.page_step = 10;
+    return nav::translate(s, ev);
+}
+
+// Rewind checkpoint picker: shared grammar + vim nav; read-only list.
+std::optional<Msg> on_checkpoint_picker(const KeyEvent& ev) {
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseCheckpoints{}}; };
+    s.select    = [] { return Msg{CheckpointsSelect{}}; };
+    s.move      = [](int d) { return Msg{CheckpointsMove{d}}; };
+    s.page_step = 10;
+    return nav::translate(s, ev);
+}
+
+// What the key router needs to know about a form-backed pane.
+//
+// NOT the form itself. `subscribe()` runs every frame, and a Form owns a
+// vector of rows each holding several std::strings — snapshotting it per frame
+// meant an allocation and a deep copy of the whole settings pane on every
+// keystroke and every animation tick, which is exactly the input lag it was
+// meant to avoid. The router only ever asks WHICH MODE owns the keyboard and,
+// for Choosing, nothing else. Three bools and an int is the whole dependency.
+struct FormFocus {
+    bool open     = false;
+    bool editing  = false;
+    bool choosing = false;
+};
+
+[[nodiscard]] inline FormFocus focus_of(const form::Form& f) noexcept {
+    return FormFocus{true, f.editing(), f.choosing()};
+}
+
+// Forward a key to the shared form layer. Returns nullopt when the form does
+// not claim the key, so ambient handling (^C quits from anywhere) still runs.
+template <class Wrap>
+[[nodiscard]] std::optional<Msg> on_form(const FormFocus& f, const KeyEvent& ev,
+                                        Wrap&& wrap) {
+    if (!f.open) return std::nullopt;
+    if (auto a = form::keys::translate(f.editing, f.choosing, ev))
+        return wrap(*a);
     return std::nullopt;
 }
 
-std::optional<Msg> on_model_picker(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:   return CloseModelPicker{};
-            case SpecialKey::Enter:    return ModelPickerSelect{};
-            case SpecialKey::Up:       return ModelPickerMove{-1};
-            case SpecialKey::Down:     return ModelPickerMove{+1};
-            case SpecialKey::Home:     return ModelPickerJump{ModelPickerJump::Where::Home};
-            case SpecialKey::End:      return ModelPickerJump{ModelPickerJump::Where::End};
-            case SpecialKey::PageUp:   return ModelPickerJump{ModelPickerJump::Where::PageUp};
-            case SpecialKey::PageDown: return ModelPickerJump{ModelPickerJump::Where::PageDown};
-            // ←/→ cycle the reasoning-effort tier for the highlighted model.
-            case SpecialKey::Left:     return ModelPickerCycleEffort{-1};
-            case SpecialKey::Right:    return ModelPickerCycleEffort{+1};
-            default: break;
-        }
-    }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        if (ck->codepoint == 'f' || ck->codepoint == 'F')
-            return ModelPickerToggleFavorite{};
-    return std::nullopt;
+// Key routing for the Retrieval overlay. The ENTIRE key map lives in the
+// shared form layer — which mode owns the keyboard, what Enter does per row
+// kind, how Esc unwinds — so this only forwards.
+//
+// ^E is the one exception: it changes which rows EXIST rather than acting
+// on a row, so it is pane state. A chord, not a bare letter — bare
+// printables TYPE on text rows now (type-to-edit), so letter commands are
+// gone everywhere; ^E is free in browse mode (the form layer only claims
+// it as caret-end while EDITING, which wins below by claim order).
+std::optional<Msg> on_rag_settings(const FormFocus& f, const KeyEvent& ev) {
+    if (f.open && !f.editing)
+        if (const auto v = nav::char_view(ev); v && v->ctrl && v->c == U'e')
+            return Msg{RagAdvanced{}};
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{RagEmbedKey{a}}; });
 }
 
+// Settings pickers (Plugins/Commands/Agents/Hooks). Two modes:
+//   list mode — shared grammar + vim nav, `a` add, `d` remove, Space act.
+//   add mode  — a one-line text prompt: every printable is LITERAL text,
+//               so the nav shortcuts are suppressed entirely.
+std::optional<Msg> on_settings_list(const KeyEvent& ev, bool input_active) {
+    if (input_active) {
+        nav::NavSpec s;
+        s.close     = [] { return Msg{SettingsListCancelInput{}}; };
+        s.select    = [] { return Msg{SettingsListSubmitInput{}}; };
+        s.filter_bs = [] { return Msg{SettingsListBackspace{}}; };
+        s.filter_ch = [](char32_t c) { return Msg{SettingsListChar{c}}; };
+        return nav::translate(s, ev);
+    }
+    nav::NavSpec s;
+    s.close   = [] { return Msg{CloseSettingsList{}}; };
+    s.select  = [] { return Msg{SettingsListActivate{}}; };
+    s.move    = [](int d) { return Msg{SettingsListMove{d}}; };
+    s.extra   = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto v = nav::char_view(e);
+        if (!v || !v->ctrl) return std::nullopt;
+        switch (v->c) {
+            // Chords — and their bare-letter twins below. ^A opens the
+            // form-based add (kind-first wizard) on Plugins and the
+            // one-line starter prompt elsewhere; ^N is the legacy one-line
+            // add; ^E edits; ^D removes (two-step).
+            case U'a': return Msg{SettingsListEditOpen{/*add=*/true}};
+            case U'n': return Msg{SettingsListAddStart{}};
+            case U'e': return Msg{SettingsListEditOpen{/*add=*/false}};
+            case U'd': return Msg{SettingsListRemove{}};
+            default:   return std::nullopt;
+        }
+    };
+    // This list has NO text input, so bare letters are unambiguous — and
+    // the chords above are exactly the ones a multiplexer steals (^A is
+    // tmux's prefix, so its first press never reaches us). Both work.
+    s.letter_verbs = {
+        {U'a', [] { return Msg{SettingsListEditOpen{/*add=*/true}}; }},
+        {U'n', [] { return Msg{SettingsListAddStart{}}; }},
+        {U'e', [] { return Msg{SettingsListEditOpen{/*add=*/false}}; }},
+        {U'd', [] { return Msg{SettingsListRemove{}}; }},
+    };
+    return nav::translate(s, ev);
+}
+
+// Fork picker: a pure list — each row is a distinct RAG mode for the fork.
+std::optional<Msg> on_fork_picker(const KeyEvent& ev) {
+    nav::NavSpec s;
+    s.close   = [] { return Msg{CloseFork{}}; };
+    s.select  = [] { return Msg{ForkThread{}}; };
+    s.move    = [](int d) { return Msg{ForkMove{d}}; };
+    return nav::translate(s, ev);
+}
+
+// The model picker: full grammar + typed filter + effort cycling. ^P
+// cross-hops to providers, ^F favourites, ^R toggles reasoning display,
+// ^L force-refreshes every catalog. There is exactly one model surface.
+std::optional<Msg> on_fused_picker(const KeyEvent& ev) {
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseModels{}}; };
+    s.select    = [] { return Msg{ModelsSelect{}}; };
+    s.move      = [](int d) { return Msg{ModelsMove{d}}; };
+    s.jump      = [](nav::Jump j) {
+        using W = ModelsJump::Where;
+        return Msg{ModelsJump{j == nav::Jump::Home ? W::Home
+                                 : j == nav::Jump::End  ? W::End
+                                 : j == nav::Jump::PageUp ? W::PageUp
+                                                          : W::PageDown}};
+    };
+    s.filter_bs = [] { return Msg{ModelsFilterBackspace{}}; };
+    s.filter_ch = [](char32_t c) { return Msg{ModelsFilterInput{c}}; };
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (const auto* sk = std::get_if<SpecialKey>(&e.key)) {
+            // ←/→ cycle the highlighted model's reasoning-effort tier.
+            if (*sk == SpecialKey::Left)  return Msg{ModelsCycleEffort{-1}};
+            if (*sk == SpecialKey::Right) return Msg{ModelsCycleEffort{+1}};
+            return std::nullopt;
+        }
+        const auto v = nav::char_view(e);
+        if (!v) return std::nullopt;
+        // ^/ (also arrives as raw 0x1F, which carries no ctrl flag) scopes
+        // the list to the highlighted row's provider — press again to clear.
+        // Close is Esc (the fused picker is the only model surface now, so ^/
+        // no longer needs to toggle a second one shut).
+        if (v->raw == 0x1F || (v->ctrl && v->c == U'/'))
+            return Msg{ModelsScopeProvider{}};
+        if (v->ctrl) {
+            switch (v->c) {
+                case U'p': return Msg{OpenProviders{}};   // cross-hop
+                case U'f': return Msg{ModelsToggleFavorite{}};
+                // ^W (cycle the context-window override) is deliberately NOT
+                // here, for the same reason as ^R below: it is a per-model
+                // SETTING you configure once, not a navigation action you
+                // reach for while choosing a model — and a keybinding on a
+                // list row is a poor home for a value you set and forget.
+                //
+                // It should also be needed almost never. The window now
+                // resolves automatically from three sources before any
+                // manual rung: what the gateway advertises in /v1/models,
+                // what it answers to a probe (/v1/model/info, /props,
+                // /api/show), and models.dev's declaration — which together
+                // cover ~95% of the providers agentty ships (openrouter
+                // 368/368, google 39/39, anthropic 14/14, openai 43/48).
+                // What remains is the genuinely unknowable case: a private
+                // gateway serving an id no catalog has heard of. That gets
+                // AGENTTY_MAX_CONTEXT_TOKENS, which is discoverable from the
+                // docs and does not cost every user a keybinding.
+                // ^R (toggle reasoning display) is deliberately NOT here.
+                // Whether reasoning is SHOWN is an Appearance setting — the
+                // "Thinking" row — and having a second, invisible keybinding
+                // for it in this picker is how the two came to disagree.
+                // A hidden control that contradicts a visible one is worse
+                // than no control.
+                case U'l': return Msg{ModelsRefresh{}};
+                default:   break;
+            }
+            // Fall through to nullopt: translate() never types ctrl'd
+            // chars into the filter, and the dispatch chain returns this
+            // handler's result unconditionally — the chord is swallowed.
+        }
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
+}
+
+// Provider picker: shared grammar + typed filter. ^/ hops to the fused
+// model picker; ^D (and forward-Delete) removes a saved host / signs out
+// of a keyed preset — two-press. Ctrl'd so it can't collide with typing
+// a provider name starting with 'd' (deepseek…).
 std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:   return CloseProviderPicker{};
-            case SpecialKey::Enter:    return ProviderPickerSelect{};
-            case SpecialKey::Up:       return ProviderPickerMove{-1};
-            case SpecialKey::Down:     return ProviderPickerMove{+1};
-            case SpecialKey::Home:     return ProviderPickerJump{ProviderPickerJump::Where::Home};
-            case SpecialKey::End:      return ProviderPickerJump{ProviderPickerJump::Where::End};
-            case SpecialKey::PageUp:   return ProviderPickerJump{ProviderPickerJump::Where::PageUp};
-            case SpecialKey::PageDown: return ProviderPickerJump{ProviderPickerJump::Where::PageDown};
-            default: break;
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseProviders{}}; };
+    s.select    = [] { return Msg{ProvidersSelect{}}; };
+    s.move      = [](int d) { return Msg{ProvidersMove{d}}; };
+    s.jump      = [](nav::Jump j) {
+        using W = ProvidersJump::Where;
+        return Msg{ProvidersJump{j == nav::Jump::Home ? W::Home
+                                    : j == nav::Jump::End  ? W::End
+                                    : j == nav::Jump::PageUp ? W::PageUp
+                                                             : W::PageDown}};
+    };
+    s.filter_bs = [] { return Msg{ProvidersFilterBackspace{}}; };
+    s.filter_ch = [](char32_t c) { return Msg{ProvidersFilterInput{c}}; };
+    s.toggle_close_chord = U'p';
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (const auto* sk = std::get_if<SpecialKey>(&e.key)) {
+            // Forward-Delete removes; Mac laptops lack the key (their
+            // "delete" sends Backspace) — ^D below is the reachable twin.
+            if (*sk == SpecialKey::Delete) return Msg{ProvidersDelete{}};
+            return std::nullopt;
         }
-    }
-    return std::nullopt;
+        const auto v = nav::char_view(e);
+        if (!v) return std::nullopt;
+        if (v->raw == 0x1F || (v->ctrl && v->c == U'/'))
+            return Msg{OpenModels{}};                       // cross-hop
+        if (v->ctrl && (v->c == U'd' || v->c == U'D'))
+            return Msg{ProvidersDelete{}};
+        return std::nullopt;
+    };
+    return nav::translate(s, ev);
 }
 
+// Thread list: shared grammar + vim nav; n = new thread, d = delete
+// (two-press confirm).
 std::optional<Msg> on_thread_list(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)) {
-        auto sk = std::get<SpecialKey>(ev.key);
-        switch (sk) {
-            case SpecialKey::Escape:   return CloseThreadList{};
-            case SpecialKey::Enter:    return ThreadListSelect{};
-            case SpecialKey::Up:       return ThreadListMove{-1};
-            case SpecialKey::Down:     return ThreadListMove{+1};
-            case SpecialKey::Home:     return ThreadListJump{ThreadListJump::Where::Home};
-            case SpecialKey::End:      return ThreadListJump{ThreadListJump::Where::End};
-            case SpecialKey::PageUp:   return ThreadListJump{ThreadListJump::Where::PageUp};
-            case SpecialKey::PageDown: return ThreadListJump{ThreadListJump::Where::PageDown};
-            default: break;
+    nav::NavSpec s;
+    s.close   = [] { return Msg{CloseThreadList{}}; };
+    s.select  = [] { return Msg{ThreadListSelect{}}; };
+    s.move    = [](int d) { return Msg{ThreadListMove{d}}; };
+    s.jump    = [](nav::Jump j) {
+        using W = ThreadListJump::Where;
+        return Msg{ThreadListJump{j == nav::Jump::Home ? W::Home
+                                : j == nav::Jump::End  ? W::End
+                                : j == nav::Jump::PageUp ? W::PageUp
+                                                         : W::PageDown}};
+    };
+    // ^J re-press closes (raw 0x0A is Enter on legacy terminals and maya
+    // maps it to SpecialKey::Enter first, so only the flagged form arrives).
+    s.toggle_close_chord = U'j';
+    s.extra   = [](const KeyEvent& e) -> std::optional<Msg> {
+        const auto v = nav::char_view(e);
+        if (!v || !v->ctrl) return std::nullopt;   // chords only
+        switch (v->c) {
+            case U'n': return Msg{NewThread{}};
+            case U'd': return Msg{ThreadListDelete{}};
+            default:   return std::nullopt;
         }
+    };
+    s.letter_verbs = {
+        {U'n', [] { return Msg{NewThread{}}; }},
+        {U'd', [] { return Msg{ThreadListDelete{}}; }},
+    };
+    return nav::translate(s, ev);
+}
+
+// Smart Mode config: shared grammar + vim nav; Space toggles the row,
+// x resets the selected slot to auto.
+// Smart Mode. Same three lines as Retrieval, by construction — that is what
+// keeps the two panes behaving identically.
+std::optional<Msg> on_smart_mode(const FormFocus& f, const KeyEvent& ev) {
+    // ^S re-pressed closes the pane it opened, the one chord that is genuinely
+    // pane-specific (the form layer has no concept of an open chord).
+    if (const auto v = nav::char_view(ev); v && v->ctrl && v->c == U's')
+        return Msg{CloseSmartMode{}};
+    // ^E reveals/hides the advanced routing-policy rows — same chord as the
+    // Rag pane's advanced toggle, one vocabulary across form panes. Bare
+    // letters no longer act anywhere (they type on text rows, nothing
+    // elsewhere).
+    if (!f.editing)
+        if (const auto v = nav::char_view(ev); v && v->ctrl && v->c == U'e')
+            return Msg{SmartModeAdvanced{}};
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{SmartModeKey{a}}; });
+}
+
+// Web Search. Pure form pane — no pane-specific chords. Esc at the outer
+// level closes back to the settings list it was opened from.
+std::optional<Msg> on_web_search(const FormFocus& f, const KeyEvent& ev) {
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{WebSearchKey{a}}; });
+}
+
+// Plugin editor. Pure form pane — no pane-specific chords; Esc routes
+// through the nav close so the settings list underneath is restored.
+std::optional<Msg> on_plugin_edit(const FormFocus& f, const KeyEvent& ev) {
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{PluginEditKey{a}}; });
+}
+
+// Appearance. A form pane, plus one modal child: the theme browser.
+//
+// The browser is a filtering LIST, so it gets the shared nav grammar rather
+// than a hand-rolled switch — that is the whole point of NavSpec, and it is
+// how the browser inherits PageUp/PageDn and Home/End without this file
+// knowing they exist. While it is up it owns the keyboard outright: it has
+// a `filter_ch`, so a printable is a query character and never a form verb.
+std::optional<Msg> on_appearance(const FormFocus& f, bool picking,
+                                 const KeyEvent& ev) {
+    if (picking) {
+        nav::NavSpec s;
+        s.close     = [] { return Msg{AppearanceThemeCancel{}}; };
+        s.select    = [] { return Msg{AppearanceThemeCommit{}}; };
+        s.move      = [](int d) { return Msg{AppearanceThemeMove{d}}; };
+        s.filter_ch = [](char32_t c) {
+            std::string t;
+            maya::detail::encode_utf8(t, c);
+            return Msg{AppearanceThemeQuery{std::move(t)}};
+        };
+        // Empty text IS the backspace signal — one message for "the query
+        // changed", so the reducer has one place to re-filter and re-preview.
+        s.filter_bs = [] { return Msg{AppearanceThemeQuery{""}}; };
+        s.page_step = 10;
+        // Modal: swallow anything the grammar doesn't claim, so a stray key
+        // cannot fall through to the pane painted behind the list.
+        if (auto msg = nav::translate(s, ev)) return msg;
+        return Msg{NoOp{}};
     }
-    if (auto* ck = std::get_if<CharKey>(&ev.key))
-        if (ck->codepoint == 'n' || ck->codepoint == 'N') return NewThread{};
-    return std::nullopt;
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{AppearanceKey{a}}; });
+}
+
+// Sandbox. A plain form pane -- no chord of its own.
+//
+// It used to have ^S, on the reasoning that a half-typed port list is a policy
+// nobody asked for. That conflated two things: PERSISTING the policy (a file
+// write) and APPLYING it (installing the live boundary). Only the second is
+// dangerous mid-session, and it still never happens -- the policy is sealed at
+// startup and no pane path calls set_config(). The first is just a save, and
+// requiring a chord for it only ever lost people's edits.
+//
+// So edits persist as you type, exactly like every other pane, and the footer
+// still says the policy applies on restart -- which was always the honest
+// statement and is now true without a keystroke.
+std::optional<Msg> on_sandbox(const FormFocus& f, const KeyEvent& ev) {
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{SandboxKey{a}}; });
 }
 
 std::optional<Msg> on_diff_review(const KeyEvent& ev) {
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
         switch (sk) {
-            case SpecialKey::Escape:   return CloseDiffReview{};
-            case SpecialKey::Enter:    return DiffReviewFinish{};
-            case SpecialKey::Up:       return DiffReviewMove{-1};
-            case SpecialKey::Down:     return DiffReviewMove{+1};
-            case SpecialKey::Left:     return DiffReviewPrevFile{};
-            case SpecialKey::Right:    return DiffReviewNextFile{};
-            // Tab mirrors → (cycle files) — muscle memory from tabbed UIs.
+            case SpecialKey::Escape: return CloseDiffReview{};
+            case SpecialKey::Up:     return DiffReviewMove{-1};
+            case SpecialKey::Down:   return DiffReviewMove{+1};
+            case SpecialKey::Left:   return DiffReviewPrevFile{};
+            case SpecialKey::Right:  return DiffReviewNextFile{};
+            // Enter accepts the current hunk (the primary action), so a
+            // terminal with only Return + letters can still drive the review.
+            case SpecialKey::Enter:  return AcceptHunk{};
             case SpecialKey::Tab:      return DiffReviewNextFile{};
             case SpecialKey::BackTab:  return DiffReviewPrevFile{};
-            case SpecialKey::Home:     return DiffReviewJump{false};
-            case SpecialKey::End:      return DiffReviewJump{true};
-            // Page WITHIN the focused hunk's diff body (tall hunks).
-            case SpecialKey::PageUp:   return DiffReviewBodyScroll{-8};
-            case SpecialKey::PageDown: return DiffReviewBodyScroll{+8};
+            // Page INSIDE the focused hunk's capped body (a monster hunk
+            // can exceed the 24-row window; without this rows 25+ were
+            // unreachable — you decided blind).
+            case SpecialKey::PageDown: return DiffReviewScroll{+12};
+            case SpecialKey::PageUp:   return DiffReviewScroll{-12};
             default: break;
         }
     }
     if (auto* ck = std::get_if<CharKey>(&ev.key)) {
-        switch (ck->codepoint) {
-            // Decide the focused hunk (auto-advances to next pending).
-            case 'y': case 'Y': return AcceptHunk{};
-            case 'n': case 'N': return RejectHunk{};
-            // Undo a decision — back to pending, cursor stays.
-            case 'u': case 'U': return DiffReviewUndoHunk{};
-            // Whole-file decisions (advance to next file with pending).
-            case 'f': case 'F': return DiffReviewAcceptFile{};
-            case 'd': case 'D': return DiffReviewRejectFile{};
-            // Whole-set decisions.
-            case 'a': case 'A': return AcceptAllChanges{};
-            case 'x': case 'X': return RejectAllChanges{};
-            // Vim navigation.
-            case 'j':           return DiffReviewMove{+1};
-            case 'k':           return DiffReviewMove{-1};
-            case 'h':           return DiffReviewPrevFile{};
-            case 'l':           return DiffReviewNextFile{};
-            case 'g':           return DiffReviewJump{false};
-            case 'G':           return DiffReviewJump{true};
+        char32_t c = ck->codepoint;
+        // Legacy terminals deliver Ctrl-<letter> as the raw control byte
+        // 0x01..0x1A with NO ctrl-modifier flag; normalise to the letter and
+        // treat it as ctrl-held so the bulk shortcuts fire regardless of
+        // keyboard-protocol support.
+        const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+        if (raw_ctrl) c = U'a' + (c - 1);
+        const bool ctrl = ev.mods.ctrl || raw_ctrl;
+
+        // BULK actions are destructive/irreversible-ish, so they require
+        // Ctrl — Ctrl+A = accept all, Ctrl+X = reject all. This also frees
+        // plain a/x from being a one-key "reject everything" footgun.
+        if (ctrl) {
+            switch (c) {
+                case U'a': case U'A': return AcceptAllChanges{};
+                case U'x': case U'X': return RejectAllChanges{};
+                // Per-hunk decisions — same chord policy as everything else
+                // (Enter remains the primary accept).
+                case U'y': case U'Y': return AcceptHunk{};
+                case U'n': case U'N': return RejectHunk{};
+                // ^R re-press closes the pane (same commit semantics as Esc
+                // — decisions persist, undecided hunks stay live).
+                case U'r': case U'R': return CloseDiffReview{};
+                // half-page scroll inside the focused hunk's body.
+                case U'd': case U'D': return DiffReviewScroll{+12};
+                case U'u': case U'U': return DiffReviewScroll{-12};
+                default: break;
+            }
+            return std::nullopt;   // don't let a ctrl-chord fall through to a per-hunk key
+        }
+
+        switch (c) {
+            // Per-hunk decisions. Chords above; bare letters here because
+            // this pane has NO text input — nothing to disambiguate against,
+            // and a multiplexer prefix (^A/^B) must never be able to lock
+            // the user out of accepting a hunk.
+            case U'y': case U'Y': return AcceptHunk{};
+            case U'n': case U'N': return RejectHunk{};
+            default: break;
         }
     }
     return std::nullopt;
 }
 
+// Todo modal is AMBIENT: it only claims Esc + its ^T toggle; every other
+// key falls through to on_global via the dispatcher's todo arm.
 std::optional<Msg> on_todo_modal(const KeyEvent& ev) {
-    if (std::holds_alternative<SpecialKey>(ev.key)
-        && std::get<SpecialKey>(ev.key) == SpecialKey::Escape)
-        return CloseTodoModal{};
-    return std::nullopt;
+    nav::NavSpec s;
+    s.close = [] { return Msg{CloseTodoModal{}}; };
+    s.toggle_close_chord = U't';
+    return nav::translate(s, ev);
+}
+
+// Ctrl+O tool-output viewer. Two stages share one handler: the LIST
+// (↑↓/j/k move the cursor, Enter opens the body, y copies, Esc/q close)
+// and the BODY (↑↓/j/k/PgUp/PgDn/Home/End scroll, y copies, Esc back to
+// the list). The reducer branches on Open::viewing, so the same Move/
+// Copy msgs serve both stages. h/l (and ←/→) step between entries.
+std::optional<Msg> on_tool_viewer(const KeyEvent& ev) {
+    nav::NavSpec s;
+    s.close     = [] { return Msg{CloseToolOutput{}}; };
+    s.select    = [] { return Msg{ToolOutputSelect{}}; };
+    s.move      = [](int d) { return Msg{ToolOutputMove{d}}; };
+    s.page_step = 10;
+    s.toggle_close_chord = U'o';
+    s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (const auto* sk = std::get_if<SpecialKey>(&e.key)) {
+            if (*sk == SpecialKey::Left)  return Msg{ToolOutputStep{-1}};
+            if (*sk == SpecialKey::Right) return Msg{ToolOutputStep{+1}};
+            return std::nullopt;
+        }
+        const auto v = nav::char_view(e);
+        if (!v || !v->ctrl) return std::nullopt;   // chords only
+        switch (v->c) {
+            case U'y': return Msg{ToolOutputCopy{}};
+            default:   return std::nullopt;
+        }
+    };
+    s.letter_verbs = { {U'y', [] { return Msg{ToolOutputCopy{}}; }} };
+    return nav::translate(s, ev);
 }
 
 // Login modal — dispatches based on which sub-state we're in.
@@ -332,10 +771,13 @@ std::optional<Msg> on_todo_modal(const KeyEvent& ev) {
 std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
     using namespace agentty::ui::login;
 
-    // Esc always closes — gives the user an out from any sub-state.
+    // Esc pops ONE level of the flow (key prompt → host input → provider
+    // picker → closed) — stepwise back-out, not a full collapse. The
+    // reducer reads each sub-state's `back` origin; states with no parent
+    // still close outright.
     if (std::holds_alternative<SpecialKey>(ev.key)
         && std::get<SpecialKey>(ev.key) == SpecialKey::Escape)
-        return CloseLogin{};
+        return LoginBack{};
 
     if (std::holds_alternative<Picking>(state)
         || std::holds_alternative<Failed>(state)) {
@@ -344,9 +786,32 @@ std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
         return std::nullopt;
     }
 
-    if (std::holds_alternative<OAuthExchanging>(state)) {
-        // Awaiting HTTP completion. No keys accepted besides Esc (above).
+    if (std::holds_alternative<OAuthExchanging>(state)
+        || std::holds_alternative<ChatGptWaiting>(state)
+        || std::holds_alternative<HostProbing>(state)) {
+        // Awaiting an async result (HTTP exchange / loopback callback /
+        // host probe). No keys accepted besides Esc (handled above).
         return NoOp{};
+    }
+
+    // ── Account switcher: a LIST, not a text field ────────────────
+    // ↑/↓ move the highlight, Enter switches to / adds the highlighted
+    // account, Delete/Backspace (or ^D) twice confirms removal. Bare
+    // letters do nothing — the one key policy.
+    if (std::holds_alternative<AccountList>(state)) {
+        if (std::holds_alternative<SpecialKey>(ev.key)) {
+            switch (std::get<SpecialKey>(ev.key)) {
+                case SpecialKey::Up:        return AccountMove{-1};
+                case SpecialKey::Down:      return AccountMove{+1};
+                case SpecialKey::Enter:     return AccountSelect{};
+                case SpecialKey::Backspace: return AccountRemove{};
+                case SpecialKey::Delete:    return AccountRemove{};
+                default: return std::nullopt;
+            }
+        }
+        if (const auto v = nav::char_view(ev); v && v->c == U'd')
+            return AccountRemove{};   // pure list: chord OR letter
+        return std::nullopt;
     }
 
     // ── OAuthCode-only chrome shortcuts ─────────────────────────────
@@ -375,6 +840,22 @@ std::optional<Msg> on_login(const ui::login::State& state, const KeyEvent& ev) {
             if (ev.mods.ctrl && is_o) return LoginOpenBrowserAgain{};
             if (empty_code && is_c)   return LoginCopyAuthUrl{};
             if (empty_code && is_o)   return LoginOpenBrowserAgain{};
+        }
+    }
+
+    // Copilot device-flow modal: there's no free-text field (the user types
+    // the code into their BROWSER, not here), so `c` copies the code and `o`
+    // reopens the browser — no modifier needed, and no `empty_code` gate.
+    if (std::holds_alternative<DeviceWaiting>(state)) {
+        // Device-flow modal (Copilot / Kimi / …): the user types the CODE into
+        // the BROWSER, so bare letters are safe here (no text field). `c`
+        // copies the code, `u` copies the URL, `o` reopens the browser.
+        if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+            char32_t c = ck->codepoint;
+            if (ev.mods.ctrl && c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
+            if (c == U'c' || c == U'C') return LoginCopyCode{};
+            if (c == U'u' || c == U'U') return LoginCopyAuthUrl{};
+            if (c == U'o' || c == U'O') return LoginOpenBrowserAgain{};
         }
     }
 
@@ -438,26 +919,52 @@ std::optional<Msg> on_global(const KeyEvent& ev) {
         // turns it into Enter before we ever see it as a CharKey.)
         const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
         if (raw_ctrl) c = U'a' + (c - 1);
+        // Ctrl-/ arrives as the raw byte 0x1F on legacy terminals (it sits
+        // just past the 0x01..0x1A letter range above, so raw_ctrl misses
+        // it and no ctrl modifier is reported). Map it to '/' with ctrl
+        // implied so the model picker's primary key fires without needing
+        // the kitty / modifyOtherKeys protocol. Mirrors on_provider_picker,
+        // which already special-cases 0x1F.
+        const bool ctrl_slash = (c == 0x1F);
+        if (ctrl_slash) c = U'/';
         // 0x09 (Ctrl-I / Tab) and 0x0D (Ctrl-M / Enter) are excluded:
         // those are unconditionally Tab / Enter on legacy terminals and
         // hijacking them would break tab-completion and submit.
-        const bool ctrl = ev.mods.ctrl || (raw_ctrl && c != U'i' && c != U'm');
+        const bool ctrl = ev.mods.ctrl || ctrl_slash
+                       || (raw_ctrl && c != U'i' && c != U'm');
         if (ctrl) {
             switch (c) {
                 case U'c': case U'C': return Quit{};
-                case U'/':           return OpenModelPicker{};
+                case U'/':           return OpenModels{};
                 case U'j': case U'J': return OpenThreadList{};
-                case U'k': case U'K': return OpenCommandPalette{};
-                case U'p': case U'P': return OpenProviderPicker{};
-                case U'l': case U'L': return RedrawScreen{};
+                case U'k': case U'K': return OpenPalette{};
+                case U'p': case U'P': return OpenProviders{};
+                case U'l': case U'L': return OpenStats{};
+                // Redraw moved off ^L when Stats took it. ^Y is free, and
+                // a manual repaint is a recovery gesture for a corrupted
+                // screen — reached rarely, and never the key a user is
+                // hunting for while the screen looks fine.
+                case U'y': case U'Y': return RedrawScreen{};
                 case U'r': case U'R': return OpenDiffReview{};
                 case U'n': case U'N': return NewThread{};
                 case U't': case U'T': return OpenTodoModal{};
                 case U'e': case U'E': return ComposerToggleExpand{};
-                case U'g': case U'G': return OpenCodeBlockPicker{};
+                // ^B — LOOP: send this message, then keep re-sending it after
+                // every completed turn until toggled off. Global (not
+                // composer-local) so it can also be disarmed mid-stream,
+                // when the composer isn't the thing taking keys.
+                case U'b': case U'B': return ComposerToggleLoop{};
+                case U'g': case U'G': return OpenCodeBlocks{};
+                case U'o': case U'O': return OpenToolOutput{};
+                case U's': case U'S': return OpenSmartMode{};
                 default: break;
             }
         }
+    }
+    if (ev.mods.ctrl && std::holds_alternative<SpecialKey>(ev.key)) {
+        auto sk = std::get<SpecialKey>(ev.key);
+        // ^Tab — quick-swap to the previous (provider,model) in the MRU.
+        if (sk == SpecialKey::Tab) return SwitchToPreviousModel{};
     }
     if (ev.mods.shift && std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
@@ -574,7 +1081,6 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
             // with mods.ctrl=true. Normalise.
             if (c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
             switch (c) {
-                case U'k': return ComposerKillToEndOfLine{};
                 case U'u': return ComposerKillToBeginningOfLine{};
                 case U'w':
                     // Ctrl+W — delete word backward (readline
@@ -616,6 +1122,15 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
             // Symmetric to Ctrl+W; arrives as ESC d → CharKey{'d'}+alt.
             if (c == U'd' || c == U'D')
                 return ComposerDeleteWordForward{};
+            // Alt+K — kill to END of line. Readline's kill-to-end is
+            // Ctrl+K, but that's reserved app-wide for the command
+            // palette (on_global claims every Ctrl+K before the
+            // composer sees it), so kill-to-end moves to the meta
+            // variant. Pairs with Ctrl+U (kill-to-start), the same way
+            // Alt+D (kill word forward) pairs with Ctrl+W (kill word
+            // back).
+            if (c == U'k' || c == U'K')
+                return ComposerKillToEndOfLine{};
         }
         if (ck->codepoint >= 0x20) return ComposerCharInput{ck->codepoint};
     }
@@ -624,19 +1139,18 @@ std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
 
 } // namespace
 
-Sub<Msg> subscribe(const Model& m) {
-    const bool in_perm    = m.d.pending_permission.has_value();
-    const bool in_cmd     = is_open(m.ui.command_palette);
-    const bool in_mention = mention_is_open(m.ui.mention_palette);
-    const bool in_symbol  = symbol_palette_is_open(m.ui.symbol_palette);
-    const bool in_blocks  = code_block_picker_is_open(m.ui.code_blocks);
-    const bool in_blockres = code_block_result_is_open(m.ui.code_blocks);
-    const bool in_models  = pick::is_open(m.ui.model_picker);
-    const bool in_providers = pick::is_open(m.ui.provider_picker);
-    const bool in_threads = pick::is_open(m.ui.thread_list);
-    const bool in_diff    = pick::is_open(m.ui.diff_review);
-    const bool in_todo    = pick::is_open(m.ui.todo.open);
-    const bool in_login   = ui::login::is_open(m.ui.login);
+Sub subscribe(const Model& m) {
+    // THE routing decision: which overlay owns the keyboard. Computed once
+    // per subscription rebuild by panel::top() — the SAME function the
+    // view uses to decide what renders, so keys and pixels can never go to
+    // different surfaces (the old twin if-chains could, and did, disagree
+    // on order).
+    const auto active_panel = ui::panel::top(m);
+    const bool in_login = active_panel == ui::panel::Kind::Login;
+    const bool settings_list_adding = [&] {
+        const auto* so = m.ui.panel.get<pn::SettingsList>();
+        return so && so->input_active;
+    }();
     const bool streaming  = m.s.active()
                          && !m.s.is_awaiting_permission();
     // Ctrl+←/→ thread-cycle gate: the agent turn must be fully idle.
@@ -647,31 +1161,169 @@ Sub<Msg> subscribe(const Model& m) {
     bool has_history = false;
     for (const auto& msg : m.d.current.messages)
         if (msg.role == Role::User && !msg.text.empty()) { has_history = true; break; }
+    // Newest LIVE (not-yet-frozen) retrieved-context card, if any — the
+    // target for the Ctrl+U expand toggle. Empty when the most recent
+    // proactive card has already settled into the frozen prefix (its
+    // Element is baked; the reducer would no-op) or none exists. Frozen
+    // cards' full passages are viewed via the Ctrl+O overlay instead.
+    std::optional<MessageId> live_retrieved_id;
+    for (std::size_t i = m.d.current.messages.size(); i-- > m.ui.frozen_through; ) {
+        if (m.d.current.messages[i].is_proactive_context()) {
+            live_retrieved_id = m.d.current.messages[i].id;
+            break;
+        }
+    }
     const ComposerKeyState composer_state{
         m.ui.composer.text.empty(),
         !m.ui.composer.queued.empty(),
-        m.ui.composer.history_idx >= 0,
+        m.ui.composer.history_index().has_value(),
         has_history,
-        m.ui.composer.queue_peek_idx >= 0,
+        m.ui.composer.queue_peek_index().has_value(),
     };
 
-    auto key_sub = Sub<Msg>::on_key(
-        [=, login_state = m.ui.login](const KeyEvent& ev) -> std::optional<Msg> {
+    // Changes-strip bulk chords. ONE predicate, shared with subs_key() so the
+    // captured copy below and the memo key can never disagree.
+    const bool chords_armed = strip_chords_armed(m);
+
+    // Which mode each form-backed pane is in. Three bools per pane — NOT the
+    // pane's rows, which would be a per-frame deep copy on the input path.
+    FormFocus rag_form, smart_form_snap, plugin_form_snap, appearance_form_snap;
+    FormFocus sandbox_form_snap, web_search_form_snap;
+    bool appearance_picking = false;
+    if (const auto* o = m.ui.panel.get<ui::panel::Rag>())
+        rag_form = focus_of(o->embed.form);
+    if (const auto* o = m.ui.panel.get<ui::panel::SmartMode>())
+        smart_form_snap = focus_of(o->form);
+    if (const auto* o = m.ui.panel.get<ui::panel::WebSearch>())
+        web_search_form_snap = focus_of(o->form);
+    if (const auto* o = m.ui.panel.get<ui::panel::PluginEdit>())
+        plugin_form_snap = focus_of(o->form);
+    if (const auto* o = m.ui.panel.get<ui::panel::Appearance>()) {
+        appearance_form_snap = focus_of(o->pane.form);
+        appearance_picking   = o->pane.picking;
+    }
+    if (const auto* o = m.ui.panel.get<ui::panel::Sandbox>())
+        sandbox_form_snap = focus_of(o->pane.form);
+    FormFocus sandbox_list_snap;
+    if (const auto* o = m.ui.panel.get<ui::panel::SandboxList>())
+        sandbox_list_snap = focus_of(o->pane.form);
+
+    // Snapshot the login state ONLY when login actually owns the keyboard.
+    //
+    // This used to be an unconditional `login_state = m.ui.login` in the
+    // capture list. login::State is a variant whose alternatives carry up to
+    // a dozen std::strings plus a vector<AccountRow> — and maya marks
+    // subscriptions dirty after EVERY message, so that deep copy ran on every
+    // keystroke, every 30 fps tick while streaming, and every SSE delta, to
+    // feed a handler that is unreachable unless `active_panel == Login`.
+    //
+    // std::optional makes the dependency explicit rather than incidental: the
+    // payload exists exactly in the state that consumes it, which is the same
+    // "data lives in the alternative that owns it" rule the panel slot and
+    // ToolUse::Status follow.
+    std::optional<ui::login::State> login_state;
+    if (in_login) login_state = m.ui.login;
+
+    auto key_sub = Sub::on(maya::on_key{}, 
+        [=, login_state = std::move(login_state)](const KeyEvent& ev) -> std::optional<Msg> {
+            // ^C quits from ANYWHERE, before overlay routing. Every modal
+            // picker's handler returns UNCONDITIONALLY (the dispatch below
+            // never falls through for them), so without this a ^C pressed
+            // while a picker/thread-list/palette is open would be swallowed
+            // and the app would feel unquittable until you Esc'd out first.
+            // on_permission already did this locally; hoisting it here makes
+            // it uniform. Legacy terminals send raw 0x03.
+            if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+                const char32_t c = ck->codepoint;
+                if (c == 0x03 || (ev.mods.ctrl && (c == U'c' || c == U'C')))
+                    return Quit{};
+            }
             // Login modal owns the whole keyboard — auth is the gating
             // step, no other UI is reachable until the user finishes
             // (or Escs out, which is allowed but leaves agentty unauth'd).
-            if (in_login)   return on_login(login_state, ev);
-            if (in_perm)    return on_permission(ev);
-            if (in_cmd)     return on_command_palette(ev);
-            if (in_mention) return on_mention_palette(ev);
-            if (in_symbol)  return on_symbol_palette(ev);
-            if (in_blocks)  return on_code_block_picker(ev);
-            if (in_blockres) return on_code_block_result(ev);
-            if (in_models)  return on_model_picker(ev);
-            if (in_providers) return on_provider_picker(ev);
-            if (in_threads) return on_thread_list(ev);
-            if (in_diff)    return on_diff_review(ev);
-            if (in_todo)    if (auto r = on_todo_modal(ev)) return r;
+            // Route to the active overlay's handler. Exhaustive on Kind
+            // (-Wswitch): adding an overlay without a routing arm is a
+            // compile warning, not a silent dead key. Kind::Todo is the one
+            // AMBIENT overlay — unclaimed keys fall THROUGH to the global
+            // handling below rather than being swallowed.
+            using OK = ui::panel::Kind;
+
+            // ── The escape guarantee ──────────────────────────────────
+            // Every EXCLUSIVE overlay swallows unclaimed keys (that is what
+            // makes it modal), which means a handler that fails to answer Esc
+            // strands the user with no way out and the app appears frozen.
+            // The Retrieval pane shipped exactly that bug: it owned the
+            // keyboard for a frame before its form existed, so every key
+            // — Esc included — went nowhere.
+            //
+            // Per-handler diligence cannot enforce this: it is one missing
+            // branch away, in any of fifteen handlers, forever. So it is
+            // enforced HERE, once, structurally. `dispatch` runs the overlay's
+            // own handler; if that handler declines an Escape, the overlay's
+            // generic close fires instead. A modal can therefore be buggy,
+            // half-built, or brand new and STILL never trap the user.
+            //
+            // Ambient overlays (Todo) are exempt by construction — they fall
+            // through to global handling and never swallow anything.
+            const auto dispatch = [&]() -> std::optional<Msg> {
+                switch (active_panel) {
+                    case OK::Login:
+                        // Reachable only when in_login, which is exactly the
+                        // condition under which the snapshot was taken.
+                        return login_state ? on_login(*login_state, ev)
+                                           : std::nullopt;
+                    case OK::Permission:     return on_permission(ev);
+                    case OK::Palette: return on_command_palette(ev);
+                    case OK::Mention:        return on_mention_palette(ev);
+                    case OK::Symbol:         return on_symbol_palette(ev);
+                    case OK::CodeBlocks:     return on_code_block_picker(ev);
+                    case OK::CodeBlockResult: return on_code_block_result(ev);
+                    case OK::ToolOutput:     return on_tool_viewer(ev);
+                    case OK::Checkpoints:    return on_checkpoint_picker(ev);
+                    case OK::Rag:    return on_rag_settings(rag_form, ev);
+                    case OK::Stats:          return on_stats_viewer(ev);
+                    case OK::Skills:         return on_skills_viewer(ev);
+                    case OK::SettingsList:
+                        return on_settings_list(ev, settings_list_adding);
+                    case OK::Fork:           return on_fork_picker(ev);
+                    case OK::Models:    return on_fused_picker(ev);
+                    case OK::Providers: return on_provider_picker(ev);
+                    case OK::ThreadList:     return on_thread_list(ev);
+                    case OK::SmartMode:      return on_smart_mode(smart_form_snap, ev);
+                    case OK::WebSearch:      return on_web_search(web_search_form_snap, ev);
+                    case OK::PluginEdit:     return on_plugin_edit(plugin_form_snap, ev);
+                    case OK::Appearance:
+                        return on_appearance(appearance_form_snap,
+                                             appearance_picking, ev);
+                    case OK::Sandbox:        return on_sandbox(sandbox_form_snap, ev);
+                    // The path list editor. A plain form pane -- no chord of
+                    // its own, because Esc already commits (the form layer's
+                    // rule) and a list with a save key would be the only one.
+                    case OK::SandboxList:
+                        return on_form(sandbox_list_snap, ev,
+                                       [](form::keys::Action a) {
+                                           return Msg{SandboxListKey{a}};
+                                       });
+                    case OK::DiffReview:     return on_diff_review(ev);
+                    case OK::Todo:           return on_todo_modal(ev);
+                    case OK::None:           break;
+                }
+                return std::nullopt;
+            };
+
+            if (auto r = dispatch()) return r;
+
+            // Todo is ambient: unclaimed keys fall THROUGH to global handling
+            // below rather than being swallowed, so the guarantee (and the
+            // swallow) do not apply to it.
+            if (active_panel != OK::None && active_panel != OK::Todo) {
+                if (std::holds_alternative<SpecialKey>(ev.key)
+                    && std::get<SpecialKey>(ev.key) == SpecialKey::Escape)
+                    return ui::panel::close_msg(active_panel);
+                // Exclusive overlay, unclaimed non-Esc key: swallow it, as
+                // modality requires.
+                return Msg{NoOp{}};
+            }
             // Esc during a live stream cancels the request rather than
             // quitting the app. Modals above swallow Esc themselves, so this
             // only fires from the bare composer view.
@@ -695,15 +1347,98 @@ Sub<Msg> subscribe(const Model& m) {
                     default: break;
                 }
             }
+            // Ctrl+U on an EMPTY composer — expand / collapse the newest
+            // retrieved-context card (full passage text ↔ one-line snippet).
+            // Guarded on empty composer so it never steals Ctrl+U's
+            // readline "kill-to-start-of-line" meaning while typing; with
+            // no live card it simply falls through. Handled here (not
+            // on_global) because it needs the pre-computed target id.
+            if (composer_state.text_empty && live_retrieved_id
+                && ev.mods.ctrl && !ev.mods.alt) {
+                if (auto* ck = std::get_if<CharKey>(&ev.key)) {
+                    char32_t c = ck->codepoint;
+                    if (c >= 0x01 && c <= 0x1A) c = U'a' + (c - 1);
+                    if (c == U'u')
+                        return ToggleRetrievedExpanded{*live_retrieved_id};
+                }
+            }
             if (auto msg = on_global(ev)) return msg;
+
+            // Changes-strip bulk chords: ^A (accept all, non-destructive —
+            // the tools already wrote these bytes) and ^X (reject all, which
+            // reverts files on disk, so the reducer holds a two-press guard).
+            //
+            // CTRL-HELD, matching the in-pane policy in on_diff_review: bulk
+            // decisions are destructive enough that they must not sit on a
+            // bare letter, and the same action keeping the same chord inside
+            // and outside the pane is the whole point. A bare `x` here would
+            // also be a footgun the moment focus assumptions shift.
+            //
+            // Gated on the bare main screen (no overlay, not even an ambient
+            // Todo) so a modal always keeps its own key surface; the rest of
+            // the arming condition lives in strip_chords_armed().
+            if (chords_armed && active_panel == OK::None) {
+                if (auto* ck = std::get_if<CharKey>(&ev.key); ck && !ev.mods.alt) {
+                    char32_t c = ck->codepoint;
+                    // Legacy terminals deliver Ctrl+letter as the raw control
+                    // byte with no modifier reported — same normalisation the
+                    // global and in-pane routers do, so the chords work
+                    // without keyboard-protocol support.
+                    const bool raw_ctrl = (c >= 0x01 && c <= 0x1A);
+                    if (raw_ctrl) c = U'a' + (c - 1);
+                    if (ev.mods.ctrl || raw_ctrl) {
+                        if (c == U'a' || c == U'A')
+                            return Msg{AcceptAllChanges{}};
+                        if (c == U'x' || c == U'X')
+                            return Msg{RejectAllChanges{}};
+                    }
+                }
+            }
+
             return on_composer(composer_state, ev);
         });
 
-    auto paste_sub = Sub<Msg>::on_paste([in_login](std::string s) -> Msg {
-        // Pastes go to the login modal's text fields when it's open
-        // (users will paste OAuth codes / API keys); otherwise they're
-        // composer pastes.
+    auto paste_sub = Sub::on(maya::on_paste{}, 
+        [in_login, settings_list_adding,
+         rag_editing   = rag_form.editing,
+         smart_editing = smart_form_snap.editing,
+         web_search_open = web_search_form_snap.open,
+         plugin_editing = plugin_form_snap.editing,
+         filter_open   = active_panel == ui::panel::Kind::Palette
+                      || active_panel == ui::panel::Kind::Models
+                      || active_panel == ui::panel::Kind::Providers
+                      || active_panel == ui::panel::Kind::Mention
+                      || active_panel == ui::panel::Kind::Symbol](const maya::PasteEvent& pe) -> Msg {
+        const std::string& s = pe.content;
+        // Route a bracketed paste to whatever modal currently owns text
+        // input, so it lands in that field's buffer — NOT the composer.
+        //   • login modal open      → its code/key fields (OAuth codes, keys)
+        //   • settings-list add-mode → the inline prompt (e.g. a plugin's
+        //     "name command args…" line under Ctrl+K → Plugins). Without
+        //     this the paste fell through to ComposerPaste and appeared in
+        //     the composer while the add-prompt had visual focus.
+        //   • a form field being EDITED (Retrieval / Smart Mode) → that
+        //     field — API keys and hosts are the fields pasting exists for;
+        //     these panes' reducers re-verify the mode, so a stale snapshot
+        //     degrades to a dropped paste, never a mis-target.
+        //   • the Web Search pane OPEN, editing or not → the pane. Its
+        //     reducer (form::paste_into_focused) lands it on the focused
+        //     text row as type-to-edit does and drops it anywhere else, so
+        //     a key pastes straight onto an empty key row; before, a paste
+        //     there fell through to the composer hidden behind the pane.
+        //   • otherwise               → the composer.
         if (in_login) return LoginPaste{std::move(s)};
+        if (settings_list_adding) return SettingsListPaste{std::move(s)};
+        if (rag_editing)   return RagEmbedPaste{std::move(s)};
+        if (smart_editing) return SmartModePaste{std::move(s)};
+        if (web_search_open) return WebSearchPaste{std::move(s)};
+        if (plugin_editing) return PluginEditPaste{std::move(s)};
+        //   • a FILTER panel open (palette/models/providers/mention/symbol)
+        //     → its query. Without this the paste dropped into the composer
+        //     BEHIND the open panel — same silent mis-target the form panes
+        //     had. The reducer replays it as typed input, so panel-hop mid-
+        //     batch degrades to a dropped paste, never a mis-target.
+        if (filter_open) return PanelFilterPaste{std::move(s)};
         return ComposerPaste{std::move(s)};
     });
 
@@ -762,13 +1497,167 @@ Sub<Msg> subscribe(const Model& m) {
     // is_parsing) has NOT drained, so we keep waking the widget until the
     // typewriter reaches the live edge — the same reason build_live_tail
     // and the deferred settle-freeze consult this predicate.
-    if (m.s.active() || tail_has_live_bytes(m) || m.ui.pending_settle_freeze
-        || m.ui.settle_cooldown_ticks > 0
-        || !detail::live_tail_reveal_settled(m)) {
-        auto tick = Sub<Msg>::every(streaming_tick_period(), Tick{});
-        return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub), std::move(tick));
+    // Terminal window focus (?1004, maya enables it in inline mode).
+    // Gates the hardware caret: unfocused ⇒ the composer stops emitting
+    // its caret anchor and the real cursor parks + hides.
+    auto focus_sub = Sub::on(maya::on_focus{}, 
+        [](const maya::FocusEvent& fe) -> Msg { return TerminalFocus{fe.focused}; });
+    // Terminal size: the host reports it at attach and on every SIGWINCH, so
+    // the reducers' row math reads the Model, never the tty.
+    auto resize_sub = Sub::on(maya::on_resize{},
+        [](const maya::ResizeEvent& re) -> Msg {
+            return TerminalResized{re.width.value, re.height.value};
+        });
+
+    // ── The login workers ────────────────────────────────────────────
+    //
+    // A device/ChatGPT login block-polls its provider for up to 900 s. As a
+    // Cmd that was fire-and-forget: Esc closed the modal and the worker
+    // carried on to the end of its budget, one leaked thread per attempt.
+    //
+    // As a keyed source it stops itself. While the model holds the waiting
+    // state we ask for the stream; when the state goes (Esc, success, a
+    // newer attempt) the key goes with it and jaal fires the body's
+    // stop_token. "Close the modal" and "cancel the worker" become one act,
+    // which is the only way they can't drift apart. jaal also discards
+    // messages from a stopped generation, so a late result can't land in a
+    // model that moved on.
+    //
+    // Computed BEFORE the Tick gate below, and included in both returns: a
+    // login can be open while a turn animates, and dropping it from the
+    // animating branch would silently stop the worker mid-sign-in.
+    Sub login_sub = Sub::none();
+    if (const auto* dw = std::get_if<ui::login::DeviceWaiting>(&m.ui.login))
+        login_sub = cmd::device_login_sub(dw->provider, dw->provider_label,
+                                          dw->attempt_id);
+    else if (const auto* cw = std::get_if<ui::login::ChatGptWaiting>(&m.ui.login))
+        login_sub = cmd::codex_login_sub(cw->attempt_id);
+
+    // Tick drives every time-based animation. THREE gates must agree on
+    // WHAT is animating, and animation_demand (subscribe.hpp) is now the
+    // one definition they share — this subscription arms the timer, the
+    // spinner advance (update/meta.cpp Tick arm) steps reducer state, and
+    // the visual hash (app/program.hpp) lets the wake reach view(). The
+    // per-term rationale lives on animation_demand's definition above.
+    if (animation_demand(m)) {
+        auto tick = Sub::every(streaming_tick_period(m.env), Tick{});
+        return Sub::batch(std::move(key_sub), std::move(paste_sub),
+                               std::move(focus_sub), std::move(resize_sub),
+                               std::move(tick), std::move(login_sub));
     }
-    return Sub<Msg>::batch(std::move(key_sub), std::move(paste_sub));
+    return Sub::batch(std::move(key_sub), std::move(paste_sub),
+                           std::move(focus_sub), std::move(resize_sub),
+                           std::move(login_sub));
+}
+
+// Keep this in step with subscribe() above: every field it reads, and every
+// local the key router captures by `[=]`, has to be represented here. The
+// contract and the reasoning are on SubsKey in app/subscribe.hpp.
+//
+// Read it top-down against subscribe(): the order below is deliberately the
+// order the values are computed there, so the two can be diffed by eye.
+SubsKey subs_key(const Model& m) noexcept {
+    SubsKey k;
+
+    // Which overlay owns the keyboard (panel::top()), plus the two pane
+    // sub-modes that change routing without changing the Kind.
+    const auto top = ui::panel::top(m);
+    k.active_panel = static_cast<int>(top);
+
+    if (const auto* o = m.ui.panel.get<ui::panel::SettingsList>())
+        k.settings_adding = o->input_active;
+
+    // focus_of() for each form-backed pane. Packed rather than four structs:
+    // the router only branches on these bits, and packing keeps the key
+    // trivially comparable. 3 bits per pane, in a fixed order.
+    const auto pack = [](FormFocus f) -> unsigned {
+        return (f.open ? 1u : 0u) | (f.editing ? 2u : 0u) | (f.choosing ? 4u : 0u);
+    };
+    unsigned modes = 0;
+    if (const auto* o = m.ui.panel.get<ui::panel::Rag>())
+        modes |= pack(focus_of(o->embed.form));
+    if (const auto* o = m.ui.panel.get<ui::panel::SmartMode>())
+        modes |= pack(focus_of(o->form)) << 3;
+    if (const auto* o = m.ui.panel.get<ui::panel::PluginEdit>())
+        modes |= pack(focus_of(o->form)) << 6;
+    if (const auto* o = m.ui.panel.get<ui::panel::Appearance>()) {
+        modes |= pack(focus_of(o->pane.form)) << 9;
+        k.appearance_picking = o->pane.picking;
+    }
+    if (const auto* o = m.ui.panel.get<ui::panel::Sandbox>())
+        modes |= pack(focus_of(o->pane.form)) << 12;
+    // The path list editor. Missing this is why typing in it did nothing: the
+    // key router closes over ONE focus snapshot per subscription rebuild, so a
+    // pane whose focus is not part of the key keeps the snapshot from whenever
+    // the subs last changed -- it reads as Browsing forever, and every
+    // printable dies on apply()'s editing guard. Exactly the hazard
+    // SubsKey's own header warns about, and the rule in
+    // docs/design/sandbox-boundary.md: a new form pane goes in BOTH
+    // subscribe() and subs_key().
+    if (const auto* o = m.ui.panel.get<ui::panel::SandboxList>())
+        modes |= pack(focus_of(o->pane.form)) << 15;
+    // Web Search: its own three bits, so entering/leaving a text row changes
+    // the key and the router never translates against a stale focus.
+    if (const auto* o = m.ui.panel.get<ui::panel::WebSearch>())
+        modes |= pack(focus_of(o->form)) << 18;
+    k.form_modes = modes;
+
+    // Turn gates. animation_demand is what arms the Tick subscription, so a
+    // change in it must rebuild — this is the term that starts and stops a
+    // real timer. `streaming` carves out awaiting-permission (so Esc keeps
+    // meaning "cancel"); `turn_active` does not. Both matter to routing, so
+    // both are here — mirroring subscribe() exactly.
+    k.streaming        = m.s.active() && !m.s.is_awaiting_permission();
+    k.turn_active      = m.s.active();
+    k.animation_demand = animation_demand(m);
+
+    // The changes-strip chord gate the key router captures. Same function
+    // subscribe() calls — not a re-spelling of its terms, so the two cannot
+    // drift apart the way the form-pane focus snapshots once did.
+    k.strip_chords     = strip_chords_armed(m);
+
+    // The composer predicates the router closes over (ComposerKeyState),
+    // plus the has_history scan subscribe() performs — including the
+    // !text.empty() term, which decides whether ↑ recalls anything.
+    k.text_empty    = m.ui.composer.text.empty();
+    k.has_queued    = !m.ui.composer.queued.empty();
+    k.in_history    = m.ui.composer.history_index().has_value();
+    k.peeking_queue = m.ui.composer.queue_peek_index().has_value();
+    for (const auto& msg : m.d.current.messages)
+        if (msg.role == Role::User && !msg.text.empty()) { k.has_history = true; break; }
+
+    // Ctrl+U's target: the newest LIVE (not-yet-frozen) retrieved card.
+    // Same walk as subscribe(), bounded by frozen_through — which means a
+    // card settling into the frozen prefix changes the key, as it must.
+    for (std::size_t i = m.d.current.messages.size(); i-- > m.ui.frozen_through; ) {
+        if (m.d.current.messages[i].is_proactive_context()) {
+            k.live_retrieved_id = m.d.current.messages[i].id;
+            break;
+        }
+    }
+
+    // The login payload's identity. Only meaningful while login owns the
+    // keyboard — that is exactly when subscribe() snapshots it.
+    if (top == ui::panel::Kind::Login) {
+        k.login_alt = static_cast<int>(m.ui.login.index());
+        if (const auto* oc = std::get_if<ui::login::OAuthCode>(&m.ui.login))
+            k.login_code_empty = oc->code_input.empty();
+    }
+
+    // The login worker's SOURCE KEY — not just a capture.
+    //
+    // subscribe() returns a keyed stream while a login is waiting, so this
+    // decides whether the worker runs at all. It is deliberately read off
+    // m.ui.login directly rather than under the Kind::Login guard above: a
+    // waiting login keeps polling while another overlay is on top, and
+    // gating it on "login owns the keyboard" would stop the worker the
+    // moment the user opened anything over it.
+    if (const auto* dw = std::get_if<ui::login::DeviceWaiting>(&m.ui.login))
+        k.login_worker = {dw->attempt_id, dw->provider};
+    else if (const auto* cw = std::get_if<ui::login::ChatGptWaiting>(&m.ui.login))
+        k.login_worker = {cw->attempt_id, std::string{"codex"}};
+
+    return k;
 }
 
 } // namespace agentty::app

@@ -1,85 +1,83 @@
-// mention_update — reducer for `msg::MentionPaletteMsg`. The @file
-// picker captures a snapshot of the workspace's files at open time and
-// then filters that snapshot per-keystroke. On select, an Attachment
+// mention_update — reducer for `msg::MentionMsg`. The @file
+// picker reads a snapshot of the workspace's files and filters it
+// per-keystroke. On select, an Attachment
 // of kind FileRef is appended to composer.attachments and the inline
 // SOH placeholder is inserted at the cursor; the file's bytes are
 // loaded later, at submit time (modal.cpp), so an edited file is read
 // with its latest contents.
+//
+// The snapshot/memo/cursor mechanics are the shared FilteredPicker's
+// (panel/filtered_picker.hpp). Notably the COLD-OPEN REFILL: it used to live
+// only in the `MentionInput` arm behind an `o->files.empty()` guard, so a
+// picker opened before the index published and then arrowed (rather than
+// typed into) never refilled — and once the query was non-empty the guard
+// could never fire again, pinning the picker to whatever partial list it
+// caught on keystroke one. The refill now happens on every READ of the
+// snapshot, which is total by construction.
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/update.hpp"
 
-#include <algorithm>
 #include <utility>
 
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/composer_attachment.hpp"
-#include "agentty/runtime/mention_palette.hpp"
+#include "agentty/runtime/panel/mention.hpp"
 #include "agentty/workspace/files.hpp"
+
+namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
 
 using maya::overload;
 
-Step mention_update(Model m, msg::MentionPaletteMsg mm) {
+Cmd mention_update(Model& m, msg::MentionMsg mm) {
     return std::visit(overload{
-        [&](OpenMentionPalette) -> Step {
-            // Capture the workspace listing once on open. Re-walking
-            // disk on every keystroke would dominate frame cost on
-            // larger repos and produce visible lag in the picker.
-            mention::Open o;
-            o.files = list_workspace_files();
-            m.ui.mention_palette = std::move(o);
-            return done(std::move(m));
+        // (No OpenMention arm: the panel opens from the COMPOSER's `@`
+        // handler, which builds pn::Mention directly with the file listing
+        // — see composer.cpp. A message nobody sent sat here for months.)
+        [&](CloseMention) -> Cmd {
+            ascend(m);   // usually → thread (opened by typing @), or a parent
+            return Cmd::none();
         },
-        [&](CloseMentionPalette) -> Step {
-            m.ui.mention_palette = mention::Closed{};
-            return done(std::move(m));
+        [&](MentionInput& e) -> Cmd {
+            if (auto* o = m.ui.panel.get<pn::Mention>()) o->picker.type(e.ch);
+            return Cmd::none();
         },
-        [&](MentionPaletteInput& e) -> Step {
-            auto* o = mention_opened(m.ui.mention_palette);
-            if (o && static_cast<uint32_t>(e.ch) < 0x80
-                  && e.ch >= 0x20) {
-                o->query.push_back(static_cast<char>(e.ch));
-                o->index = 0;
+        [&](MentionBackspace) -> Cmd {
+            auto* o = m.ui.panel.get<pn::Mention>();
+            if (!o) return Cmd::none();
+            // Backspace on an empty query closes the picker — same
+            // affordance as command palette + most chat apps. The picker
+            // answers "was there anything to erase", so the test and the
+            // mutation cannot drift apart.
+            if (!o->picker.backspace()) m.ui.panel.close<pn::Mention>();
+            return Cmd::none();
+        },
+        [&](MentionMove& e) -> Cmd {
+            if (auto* o = m.ui.panel.get<pn::Mention>()) o->picker.move(e.delta);
+            return Cmd::none();
+        },
+        [&](MentionSelect) -> Cmd {
+            auto* o = m.ui.panel.get<pn::Mention>();
+            if (!o) return Cmd::none();
+            const auto* hit = o->picker.selected();
+            if (!hit) {
+                m.ui.panel.close<pn::Mention>();
+                return Cmd::none();
             }
-            return done(std::move(m));
-        },
-        [&](MentionPaletteBackspace) -> Step {
-            auto* o = mention_opened(m.ui.mention_palette);
-            if (!o) return done(std::move(m));
-            if (o->query.empty()) {
-                // Backspace on empty query closes the picker — same
-                // affordance as command palette + most chat apps.
-                m.ui.mention_palette = mention::Closed{};
-                return done(std::move(m));
-            }
-            o->query.pop_back();
-            o->index = 0;
-            return done(std::move(m));
-        },
-        [&](MentionPaletteMove& e) -> Step {
-            auto* o = mention_opened(m.ui.mention_palette);
-            if (!o) return done(std::move(m));
-            int sz = static_cast<int>(mention_filtered(*o).size());
-            if (sz <= 0) { o->index = 0; return done(std::move(m)); }
-            o->index = std::clamp(o->index + e.delta, 0, sz - 1);
-            return done(std::move(m));
-        },
-        [&](MentionPaletteSelect) -> Step {
-            auto* o = mention_opened(m.ui.mention_palette);
-            if (!o) return done(std::move(m));
-            const auto& matches = mention_filtered(*o);
-            if (matches.empty()
-                || o->index < 0
-                || o->index >= static_cast<int>(matches.size())) {
-                m.ui.mention_palette = mention::Closed{};
-                return done(std::move(m));
-            }
-            std::string path = std::move(o->files[matches[
-                static_cast<std::size_t>(o->index)]]);
-            m.ui.mention_palette = mention::Closed{};
+            // COPY, not move: the snapshot is shared and immutable now, so
+            // stealing the string out of it would corrupt the cached index
+            // every other reader (and the next `@`) sees. The old move was
+            // only safe because each picker owned a private deep copy of the
+            // whole file list — which is precisely the copy we removed.
+            std::string path = *hit;
+            m.ui.panel.close<pn::Mention>();
+
+            // Frecency: this path just got referenced — rank it near the
+            // top of the next `@`. Cheap, bounded recency window.
+            note_file_referenced(path);
 
             // Append a FileRef attachment + insert its placeholder at
             // the composer cursor. Body is filled at submit time
@@ -94,7 +92,7 @@ Step mention_update(Model m, msg::MentionPaletteMsg mm) {
             auto placeholder = attachment::make_placeholder(idx);
             m.ui.composer.text.insert(m.ui.composer.cursor, placeholder);
             m.ui.composer.cursor += static_cast<int>(placeholder.size());
-            return done(std::move(m));
+            return Cmd::none();
         },
     }, mm);
 }

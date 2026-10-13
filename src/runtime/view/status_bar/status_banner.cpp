@@ -1,4 +1,5 @@
 #include "agentty/runtime/view/status_bar/status_banner.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
 
 #include <chrono>
 #include <string_view>
@@ -52,7 +53,7 @@ maya::StatusBanner::Kind classify(std::string_view status) noexcept {
 maya::StatusBanner::Config status_banner_config(const Model& m) {
     maya::StatusBanner::Config cfg;
     if (m.s.status.empty() || m.s.status == "ready") return cfg;
-    if (!m.s.status_active(std::chrono::steady_clock::now())) return cfg;
+    if (!m.s.status_active(maya::anim_now())) return cfg;
     cfg.text     = m.s.status;
     cfg.kind     = classify(m.s.status);
     cfg.is_error = (cfg.kind == maya::StatusBanner::Kind::Error);

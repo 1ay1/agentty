@@ -21,31 +21,48 @@
 // Flow:
 //   mcp_tools()
 //     → resolve config (.agentty/mcp.json / $AGENTTY_MCP_CONFIG / ~)
-//     → for each server: cap::StdioServerProvider (connects synchronously)
+//     → for each server: an mcp::Connection over its stdio (connects synchronously)
 //     → cap::Registry fans them in + namespaces collisions
 //     → project registry tools/resources/prompts onto agentty ToolDefs
 //   The Registry (and its live server connections) live in a process-wide
 //   ConnectionPool kept alive by a shared_ptr the execute() closures capture.
 
 #include "agentty/mcp/client.hpp"
+#include "agentty/mcp/connection.hpp"
 #include "agentty/mcp/http_server.hpp"
+#include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kMcpLayout — the one declaration
+#include "agentty/io/http.hpp"
+#include "agentty/tool/plugin.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/utf8.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/home_dir.hpp"
+#include "agentty/util/user_root.hpp"
+#include "agentty/util/background.hpp"
 
+#include <maya/runtime.hpp>
 #include <mcp/cap/cap.hpp>
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "agentty/util/logx.hpp"
+#include "agentty/util/lock_levels.hpp"
+
+
 
 namespace agentty::mcp {
 
@@ -57,23 +74,100 @@ using json   = nlohmann::json;
 // processes + transports). A mutex guards dispatch since several tool workers
 // may call into it concurrently; the Registry routes to per-server providers
 // that already serialize their own transport.
-struct ConnectionPool {
-    ::mcp::cap::Registry registry;
-    std::mutex           mu;          // guards registry dispatch + list rebuild
-    std::atomic<unsigned long> generation{0};   // bumps on any *_list_changed
+struct ServerPolicy {
+    bool trust_annotations = false;
+    int max_output_chars = 30'000;
+    std::unordered_set<std::string> include;
+    std::unordered_set<std::string> exclude;
+    std::unordered_set<std::string> pin;
 };
+
+struct ConnectionPool {
+    // External capabilities are always namespaced. Conditional namespacing
+    // makes a tool's wire identity change when another server is enabled and
+    // cannot detect collisions with agentty's native catalog.
+    //
+    // Threading: a pool is BUILT by one mcp_tools() call and only then
+    // published (current_pool). `policies` and `connect_errors` are written
+    // during the build and never after, so readers of a published pool need
+    // no lock for them. The registry too is filled during the build and only
+    // read after, and `generation` is an atomic counter.
+    ::mcp::cap::Registry registry{true};
+    std::atomic<unsigned long> generation{0};   // bumps on any *_list_changed
+    std::unordered_map<std::string, ServerPolicy> policies;
+    // Why a configured server did NOT connect this session (empty entry =
+    // connected fine). Filled during the build so plugin_model() can show
+    // the user "connected" vs "failed: <reason>".
+    std::unordered_map<std::string, std::string> connect_errors;
+};
+
+// Soft cap on total tools carried on the wire (native + enabled MCP). Past
+// this, the projection trims MCP tools (native always ship) and the model
+// reports over_budget so the picker can warn. Sized generously — the point
+// is to catch runaway plugin sets, not to police a healthy toolset.
+//
+// Configurable via $AGENTTY_MCP_TOOL_BUDGET: a positive value sets the cap,
+// 0 disables the cap entirely, anything unparsable or negative keeps the
+// default. Same env pattern as call_timeout() below — read live, never
+// cached, so tests (and a restarted session) pick changes up immediately.
+std::size_t tool_budget() {
+    constexpr std::size_t kDefaultToolBudget = 100;
+    if (const char* e = std::getenv("AGENTTY_MCP_TOOL_BUDGET"); e && e[0]) {
+        try {
+            const long v = std::stol(e);
+            if (v >= 0) return static_cast<std::size_t>(v);
+        } catch (const std::exception& ex) {
+            util::dbglog("mcp.tool_budget.env", ex.what());
+        }
+    }
+    return kDefaultToolBudget;
+}
 
 namespace {
 
 // ── process-wide pool ─────────────────────────────────────────────────────
 // mcp_tools() stores the pool here so the resource/prompt/live accessors can
 // reach the same connections without threading a handle through every caller.
-std::mutex&  g_pool_mu()  { static std::mutex m;            return m; }
-PoolHandle&  g_pool_ref() { static PoolHandle p; return p; }
+// The live pool: built whole, then published. Readers on any thread take
+// the current handle and keep it alive for their call; a rebuild publishes
+// a new pool without freeing the old one under them. ConnectionPool is safe
+// to share once published (see its threading note).
+maya::published<ConnectionPool>& g_pool() {
+    static maya::published<ConnectionPool> p;
+    return p;
+}
+
+// Serializes the ENTIRE connect-and-swap in mcp_tools(). Two independent
+// callers reach mcp_tools() — connect_initial_mcp() (first catalog access,
+// under the registry's cache.mu) and mcp_reload() (add/remove/toggle/panel-
+// open, under reload_mu). Those are DIFFERENT mutexes, so without this both
+// could run mcp_tools() at once: each spawns the full server set (the "date
+// connected" printed 4×), and a late/concurrent build could mutate a pool a
+// reader (plugin_model) is iterating — a data race that SIGSEGVs with no
+// abort message. One coarse mutex around the whole build makes connect+swap
+// strictly sequential; readers take current_pool() and are unaffected. Connects are rare (startup / explicit toggles), so serializing
+// them costs nothing on the hot path.
+// The pool a rebuild replaced. Destroying it stops its servers (joins their
+// peers), which must not happen under g_connecting(); it waits here and
+// mcp_tools() drops it after the lock.
+maya::published<ConnectionPool>& g_retired() {
+    static maya::published<ConnectionPool> r;
+    return r;
+}
+
+// Single-flight for the WHOLE connect-and-swap: no two builds run at once.
+// Not a jaal lock: mcp_tools() is reached from the tool registry's lazy
+// build, which has dozens of callers and no capability, and the build
+// itself blocks for seconds (spawning servers, RPC handshakes). A gate a
+// loser waits on in short sleeps holds nothing, so it can't be half of a
+// lock-order cycle; the build never waits for anything a waiter holds.
+std::atomic<bool>& g_connecting() {
+    static std::atomic<bool> c{false};
+    return c;
+}
 
 PoolHandle current_pool() {
-    std::lock_guard<std::mutex> lk(g_pool_mu());
-    return g_pool_ref();
+    return g_pool().current();
 }
 
 std::chrono::milliseconds call_timeout() {
@@ -86,42 +180,268 @@ std::chrono::milliseconds call_timeout() {
     return std::chrono::milliseconds{ms};
 }
 
-// Resolve the config path per the documented precedence. Empty if none.
-// `out_project_local` is set true when the config came from the WORKSPACE
-// (./.agentty/mcp.json) — which can ride in on a cloned repo — vs. an
-// explicitly-pointed ($AGENTTY_MCP_CONFIG) or user-global (~/.agentty)
-// config the user themselves placed. Project-local stdio servers spawn
-// arbitrary commands, so they're gated behind an opt-in (see mcp_tools).
-fs::path resolve_config(bool& out_project_local) {
-    out_project_local = false;
-    std::error_code ec;
-    if (const char* e = std::getenv("AGENTTY_MCP_CONFIG"); e && e[0]) {
-        fs::path p{e};
-        return fs::is_regular_file(p, ec) ? p : fs::path{};
-    }
-    if (auto local = fs::path{".agentty"} / "mcp.json"; fs::is_regular_file(local, ec)) {
-        out_project_local = true;
-        return local;
-    }
-    if (const char* home = std::getenv("HOME"); home && home[0]) {
-        auto user = fs::path{home} / ".agentty" / "mcp.json";
-        if (fs::is_regular_file(user, ec)) return user;
-    }
-    return {};
+// NOTE: resolve_config() is GONE.
+//
+// It was a second ladder -- env ▷ project ▷ user, ONE winning file -- living
+// beside the scope::plan ladder read_config_servers() uses. Two answers to
+// one question, and they disagreed: plan() MERGES project+user, so the
+// Plugins pane, `agentty config mcp` and delegation all listed both, while
+// the connect path resolved a single file and silently dropped every user
+// server whenever a project mcp.json existed. You saw your server; it never
+// ran.
+//
+// Everything now folds read_config_servers(), which is scope::plan + the
+// union monoid. The scope header's own prologue named this function as the
+// thing it replaced; this is that migration finished.
+
+// The approvals store leaf under ~/.agentty (scope::load/save_approvals).
+inline constexpr std::string_view kMcpApprovalsLeaf =
+    ::agentty::config::kMcpApprovals;
+
+// May a WORKSPACE-LOCAL config spawn its (stdio) servers this session?
+// A project mcp.json rides in on a clone and can spawn arbitrary commands
+// with no per-tool prompt, so it stays untrusted until the human vouches for
+// it. Two ways to grant trust, both preserved here:
+//   1. AGENTTY_MCP_ALLOW_PROJECT=1 — the original coarse env opt-in (back-compat).
+//   2. The file's CONTENT HASH is in the user-root approvals store — the
+//      MCPoison-safe path: approve THIS exact file; edit its bytes (swap a
+//      command) and the hash changes, so the approval no longer matches and
+//      it re-gates. Approvals live under ~/.agentty, unreachable by the clone.
+// Non-project configs ($AGENTTY_MCP_CONFIG / ~/.agentty) are always trusted.
+[[nodiscard]] bool env_allows_project() noexcept {
+    const char* e = std::getenv("AGENTTY_MCP_ALLOW_PROJECT");
+    return e && (e[0] == '1' || e[0] == 't' || e[0] == 'T'
+              || e[0] == 'y' || e[0] == 'Y');
 }
 
-// Convenience overload for callers that don't care about the trust source.
-fs::path resolve_config() {
-    bool ignore = false;
-    return resolve_config(ignore);
+// Is the config at `cfg`, read from `src`, trusted to spawn?
+//
+// The LOCUS decision is scope::trust_of's, not ours. That function is the
+// one place that knows Explicit/User are trusted because a human placed
+// them while Project/Local rode in on a clone -- this used to be a `bool
+// project_local` threaded through four functions plus a convenience overload
+// that threw the answer away (`bool ignore`), which is provenance being
+// reconstructed badly when plan() already returned it.
+//
+// The env opt-in stays as a pre-check for back-compat, and only as that: it
+// is a blunt instrument (one variable trusts EVERY project config forever,
+// including the repo you cloned ten minutes ago) and the content-hash path
+// below is the one that actually re-gates on an edit.
+[[nodiscard]] bool source_trusted(const scope::Source& src,
+                                  const fs::path& cfg) noexcept {
+    if (env_allows_project()) return true;
+    std::error_code ec;
+    std::string bytes;
+    // A directory opens successfully and throws on read, so check the KIND
+    // first. Leaving bytes empty here is also the safe answer: the guard
+    // below refuses to hand an empty hash to trust_of for a project source.
+    if (fs::is_regular_file(cfg, ec)) {
+        std::ifstream in(cfg, std::ios::binary);
+        if (in) bytes.assign((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+    }
+    // An empty hash would make trust_of answer Trusted (it reads "nothing to
+    // bind to"), so an unreadable project file must not reach it.
+    if (bytes.empty() && src.locus != scope::Locus::Explicit
+                      && src.locus != scope::Locus::User)
+        return false;
+    const scope::Trust t = scope::trust_of(
+        src, scope::content_hash(bytes),
+        scope::load_approvals(kMcpApprovalsLeaf));
+    return std::holds_alternative<scope::Trusted>(t);
+}
+
+// Parsed per-server config the model needs: command + the exclude set.
+// One place that reads mcp.json, so every consumer (projection, model,
+// picker) agrees on the same bytes. Missing/invalid config → empty map.
+//
+// Now a UNION of project + user configs (via agentty::scope), not one
+// winning file: a project server and a user server are BOTH visible, each
+// tagged with the scope::Source it came from so an editor can write back to
+// the right file (Source::base) and the trust gate can see its locus.
+struct ConfigServer {
+    std::string command;
+    std::string url;             // HTTP/SSE transport (no command)
+    std::string type;            // "stdio" | "http" | "sse" | "passthrough" | "" (inferred)
+    std::vector<std::string> args;   // stdio command args (part of spawn identity)
+    std::unordered_set<std::string> exclude;
+    bool disabled = false;
+    scope::Source source;        // WHERE this entry was read from (provenance)
+    // type == "passthrough": user-declared foreign tools (a proxy/gateway
+    // in front of the model endpoint advertised them; we execute by POSTing
+    // args to `url`). Each entry: name [+ description] [+ advertise].
+    struct PassthroughTool {
+        std::string name;
+        std::string description;
+        bool advertise = false;  // default: proxy owns the schema
+    };
+    std::vector<PassthroughTool> passthrough;
+
+    // The entry's raw JSON, and the file it came from.
+    //
+    // Carried so the CONNECT path can use this merged map instead of
+    // re-reading one winning file. Before, read_config_servers() (via
+    // scope::plan) merged project+user while mcp_tools() independently
+    // resolved ONE file -- two ladders, and they disagreed: a project
+    // mcp.json silently disabled every user server, while the Plugins pane
+    // and `agentty config mcp` both still listed them. Keeping the spec here
+    // means there is one read of the config and one answer.
+    json       spec;
+    fs::path   file;     // the concrete mcp.json this entry was read from
+};
+
+// NOTE: json_flag() is gone with the second ladder. It existed because the
+// connect loop re-parsed raw JSON and needed a throw-safe `disabled` read;
+// that loop now consumes ConfigServer, where read_one_config has already
+// done the type-checked parse once.
+
+// The scope Layout for MCP config. Declared ONCE in config/inventory.hpp and
+// consumed here, so `agentty config mcp` prints the same ladder this reads --
+// there is no second definition to drift from it.
+[[nodiscard]] const scope::Layout& mcp_layout() noexcept {
+    return ::agentty::config::kMcpLayout;
+}
+
+// Parse one mcp.json file's server entries into `out`, tagging each with
+// `src`. First-writer-wins shadow: a server name already present (from a
+// higher-precedence source) is NOT overwritten — project shadows user, exactly
+// like skills/agents/commands. Missing/invalid file → no-op.
+void read_one_doc(const json& doc, const scope::Source& src, const fs::path& file,
+                  std::unordered_map<std::string, ConfigServer>& out);
+
+void read_one_config(const fs::path& file, const scope::Source& src,
+                     std::unordered_map<std::string, ConfigServer>& out) {
+    if (file.empty()) return;
+    // is_regular_file, not just a successful open. Opening a DIRECTORY
+    // succeeds on Linux -- the failure arrives later, as an exception out of
+    // the first read, and nlohmann's noexcept parse does not catch it. So
+    // `mkdir .agentty/mcp.json` aborted the whole agent with
+    // `basic_filebuf::underflow error reading the file: Is a directory`,
+    // which names neither agentty nor the path that did it.
+    //
+    // Config lives where users (and other tools, and scripts) can put
+    // anything, so "not the kind of thing I expected" has to be a no-op
+    // rather than a crash -- every other malformed case here already is.
+    std::error_code ec;
+    if (!fs::is_regular_file(file, ec)) return;
+    std::ifstream in(file);
+    if (!in) return;
+    json doc = json::parse(in, nullptr, /*throw=*/false);
+    read_one_doc(doc, src, file, out);
+}
+
+// MCP servers the ACP client sent with session/new (Zed's context servers,
+// JetBrains' MCP settings), in mcp.json shape. Process-wide: one editor drives
+// one agent process. A snapshot of the serialised object: replaced whole, and
+// read from the config walk that the (capability-free) build runs.
+maya::snapshot<std::string>& client_servers() {
+    static maya::snapshot<std::string> s{std::string{"{}"}};
+    return s;
+}
+json client_servers_json() {
+    try { return json::parse(*client_servers().load()); } catch (...) { return json::object(); }
+}
+
+void read_one_doc(const json& doc, const scope::Source& src, const fs::path& file,
+                  std::unordered_map<std::string, ConfigServer>& out) {
+    if (!doc.is_object()) return;
+    const json* servers = nullptr;
+    if (doc.contains("mcpServers") && doc["mcpServers"].is_object())
+        servers = &doc["mcpServers"];
+    else if (doc.contains("servers") && doc["servers"].is_object())
+        servers = &doc["servers"];
+    if (!servers) return;
+    for (auto it = servers->begin(); it != servers->end(); ++it) {
+        if (out.count(it.key())) continue;   // shadowed by a higher-precedence source
+        const json& e = it.value();
+        if (!e.is_object()) continue;
+        ConfigServer cs;
+        cs.command = e.value("command", std::string{});
+        cs.url     = e.value("url", std::string{});   // HTTP/SSE servers have no command
+        cs.type    = e.value("type", std::string{});
+        cs.source  = src;
+        cs.spec    = e;      // the connect path spawns from this
+        cs.file    = file;   // and reports/approves against this file
+        if (e.contains("args") && e["args"].is_array())
+            for (const auto& a : e["args"])
+                if (a.is_string()) cs.args.push_back(a.get<std::string>());
+        // A hand-edited non-bool `disabled` (e.g. the string "true") must not
+        // throw type_error and take down the whole config read — treat any
+        // non-bool as "not disabled".
+        if (auto dit = e.find("disabled");
+            dit != e.end() && dit->is_boolean())
+            cs.disabled = dit->get<bool>();
+        if (e.contains("tools") && e["tools"].is_object()) {
+            const json& tj = e["tools"];
+            if (tj.contains("exclude") && tj["exclude"].is_array())
+                for (const auto& v : tj["exclude"])
+                    if (v.is_string()) cs.exclude.insert(v.get<std::string>());
+        }
+        // type:"passthrough" — declared foreign tools. Entries may be bare
+        // strings (name only) or objects {name, description?, advertise?}.
+        // Malformed entries are skipped, never fatal (same fail-open
+        // posture as `disabled` above).
+        if (e.contains("passthrough") && e["passthrough"].is_array()) {
+            for (const auto& pt : e["passthrough"]) {
+                ConfigServer::PassthroughTool t;
+                if (pt.is_string()) {
+                    t.name = pt.get<std::string>();
+                } else if (pt.is_object()) {
+                    t.name        = pt.value("name", std::string{});
+                    t.description = pt.value("description", std::string{});
+                    if (auto ad = pt.find("advertise");
+                        ad != pt.end() && ad->is_boolean())
+                        t.advertise = ad->get<bool>();
+                }
+                if (!t.name.empty()) cs.passthrough.push_back(std::move(t));
+            }
+            if (cs.type.empty() && !cs.passthrough.empty())
+                cs.type = "passthrough";
+        }
+        out.emplace(it.key(), std::move(cs));
+    }
+}
+
+[[nodiscard]] std::unordered_map<std::string, ConfigServer>
+read_config_servers() {
+    std::unordered_map<std::string, ConfigServer> out;
+    // Servers the editor handed us over ACP come first: the user set them up
+    // in their editor, which is a stronger statement than a file we found.
+    {
+        const json extra = client_servers_json();
+        if (extra.is_object() && !extra.empty()) {
+            scope::Source src;
+            src.locus = scope::Locus::Explicit;   // trusted: the editor vouches
+            json doc{{"mcpServers", extra}};
+            read_one_doc(doc, src, "(editor)", out);
+        }
+    }
+    const scope::Env env = scope::current_env(mcp_layout());
+    // scope::plan yields sources in precedence order, and mcp_layout() asks
+    // for the native dialect ONLY (mcp.json isn't an .agents/.claude
+    // convention), so every source here is one we read. Higher precedence
+    // first = first-writer-wins shadow in read_one_config.
+    //
+    // This used to re-filter with `if (src.dialect != Agentty) continue;`
+    // because plan() emitted all three dialects for everyone. That made the
+    // ladder a lie: plan reported six sources where three were read. The
+    // breadth now lives on the Layout, so the plan IS the behaviour.
+    for (const scope::Source& src : scope::plan(mcp_layout(), env)) {
+        // Explicit source's base is the file's parent; its leaf is the exact
+        // env-named file. Project/User join the standard leaf onto the base.
+        const fs::path file = (src.locus == scope::Locus::Explicit && env.explicit_config)
+            ? *env.explicit_config
+            : src.base / "mcp.json";
+        read_one_config(file, src, out);
+    }
+    return out;
 }
 
 // Build a cap provider from one server config entry. Returns nullptr (and logs)
 // on any failure so the caller can skip it.
 //
 // STDIO transport spawns the server as a child process. This is supported on
-// every platform: POSIX via fork/exec, Windows via CreateProcess (mcp-cpp's
-// ChildProcess, MCP_CAP_HAVE_PROCESS). HTTP/SSE servers take the
+// every platform: POSIX via fork/exec, Windows via CreateProcess (util::ChildProcess). HTTP/SSE servers take the
 // make_http_provider path instead.
 std::shared_ptr<::mcp::cap::CapabilityProvider>
 make_provider(const std::string& name, const json& spec) {
@@ -130,9 +450,55 @@ make_provider(const std::string& name, const json& spec) {
         std::fprintf(stderr, "mcp: server '%s' has no \"command\"\n", name.c_str());
         return nullptr;
     }
-    ::mcp::cap::StdioServerProvider::Config cfg;
-    cfg.name           = name;
-    cfg.spawn.command  = command;
+    // ── Pre-flight: resolve the command BEFORE forking + exec ────────────
+    // A missing binary otherwise fails deep in the child
+    // (execvp -> "mcp::cap: exec '…' failed: No such file or directory"),
+    // whose stderr can bleed onto the TUI and whose failure recurs every
+    // connect. Resolve it up front and skip the server with ONE clear line
+    // if it doesn't exist — no fork, no exec, no terminal corruption.
+    {
+        const bool has_slash = command.find('/') != std::string::npos
+#ifdef _WIN32
+                            || command.find('\\') != std::string::npos
+#endif
+            ;
+        bool resolvable = false;
+        std::error_code ec;
+        if (has_slash) {
+            // Explicit path (absolute or relative): must exist + be a file.
+            resolvable = fs::exists(command, ec) && !fs::is_directory(command, ec);
+        } else {
+            // Bare name: search PATH, like execvp will.
+            if (const char* path = std::getenv("PATH"); path && *path) {
+                std::string p(path);
+                std::size_t start = 0;
+                while (start <= p.size() && !resolvable) {
+                    std::size_t sep = p.find(':', start);
+                    std::string dir = p.substr(start,
+                        sep == std::string::npos ? std::string::npos : sep - start);
+                    if (!dir.empty()) {
+                        fs::path cand = fs::path{dir} / command;
+                        if (fs::exists(cand, ec) && !fs::is_directory(cand, ec))
+                            resolvable = true;
+                    }
+                    if (sep == std::string::npos) break;
+                    start = sep + 1;
+                }
+            }
+        }
+        if (!resolvable) {
+            std::fprintf(stderr,
+                "mcp: server '%s' skipped — command not found: %s\n"
+                "     (check the path in mcp.json; use an ABSOLUTE path for a "
+                "local build)\n",
+                name.c_str(), command.c_str());
+            return nullptr;
+        }
+    }
+    ConnectionConfig cfg;
+    cfg.name = name;
+    ::agentty::util::ChildProcess::Spawn spawn;
+    spawn.command = command;
     // Coerce non-string args/env elements instead of throwing: a single
     // numeric/bool element used to make `.get<std::string>()` throw
     // json::type_error and skip the WHOLE server. Strings pass through
@@ -142,15 +508,29 @@ make_provider(const std::string& name, const json& spec) {
         return v.is_string() ? v.get<std::string>() : v.dump();
     };
     if (spec.contains("args") && spec["args"].is_array())
-        for (const auto& a : spec["args"]) cfg.spawn.args.push_back(as_str(a));
+        for (const auto& a : spec["args"]) spawn.args.push_back(as_str(a));
     if (spec.contains("env") && spec["env"].is_object())
         for (auto it = spec["env"].begin(); it != spec["env"].end(); ++it)
-            cfg.spawn.env_kv.push_back(it.key() + "=" + as_str(it.value()));
+            spawn.env_kv.push_back(it.key() + "=" + as_str(it.value()));
     cfg.client_info  = ::mcp::Implementation{"agentty", AGENTTY_VERSION};
     cfg.call_timeout = call_timeout();
+    if (const auto ms = spec.value("timeoutMs", 0L); ms > 0)
+        cfg.call_timeout = std::chrono::milliseconds{ms};
+    if (const auto ms = spec.value("connectTimeoutMs", 0L); ms > 0)
+        cfg.handshake_timeout = std::chrono::milliseconds{ms};
+
+    const std::string root = tools::util::workspace_root().generic_string();
+    if (!root.empty()) {
+        std::string uri = "file://" + root;
+#ifdef _WIN32
+        if (root.size() > 1 && root[1] == ':') uri = "file:///" + root;
+#endif
+        cfg.roots.push_back(
+            ::mcp::Root{std::move(uri), std::string{"workspace"}, json::object()});
+    }
 
     try {
-        return std::make_shared<::mcp::cap::StdioServerProvider>(std::move(cfg));
+        return std::make_shared<Connection>(std::move(cfg), stdio_link(std::move(spawn)));
     } catch (const std::exception& e) {
         std::fprintf(stderr, "mcp: server '%s' failed: %s\n", name.c_str(), e.what());
         return nullptr;
@@ -167,17 +547,23 @@ make_provider(const std::string& name, const json& spec) {
 // affirmatively says readOnlyHint:true AND does NOT also claim destructive.
 // Everything else gets the full effect set (always asks permission) — the
 // safe default that the original bridge applied unconditionally.
-tools::EffectSet effects_for(const ::mcp::Tool& t) {
+tools::EffectSet effects_for(const ::mcp::Tool& t, bool trust_annotations) {
     using tools::Effect;
     const tools::EffectSet full{Effect::Exec, Effect::WriteFs, Effect::Net, Effect::ReadFs};
-    if (!t.annotations.has_value()) return full;
+    // An annotation is an untrusted server hint. Only an explicitly trusted
+    // server may use it to reduce permission/scheduling effects.
+    if (!trust_annotations || !t.annotations.has_value()) return full;
     const auto& a = *t.annotations;
     const bool read_only   = a.readOnlyHint.has_value()    && *a.readOnlyHint;
     const bool destructive = a.destructiveHint.has_value() && *a.destructiveHint;
     if (read_only && !destructive) {
         // Read-only remote tool: it observes the world but does not mutate it.
-        // Model it as ReadFs|Net (the two non-exclusive, permission-free
-        // effects) so the permission policy treats it like `read`/`grep`.
+        // ReadFs|Net, which still PROMPTS under Ask and Minimal because Net is
+        // in the set -- the call's arguments leave this process either way.
+        // (An earlier comment here called these "the two permission-free
+        // effects" and said the policy treats them like read/grep. It does
+        // not: policy.hpp prompts for Net under Ask. The code was always the
+        // conservative thing; only the comment was wrong.)
         return tools::EffectSet{Effect::ReadFs, Effect::Net};
     }
     return full;
@@ -221,17 +607,68 @@ std::string render_result(const ::mcp::cap::Result& r) {
         if (!out.empty() && out.back() != '\n') out += '\n';
         out += "```json\n" + r.structured.dump(2) + "\n```\n";
     }
+    // TRUST BOUNDARY. An MCP server is an arbitrary external process; its
+    // bytes go into the conversation the model reads and the TUI renders.
+    // Strip terminal control sequences (a malicious/buggy server could
+    // otherwise inject cursor-moves/OSC into the terminal via the transcript)
+    // and force valid UTF-8 (invalid sequences 400 the provider API on the
+    // next turn — poisoning the whole session, not just this call).
+    return tools::util::to_valid_utf8(
+        tools::util::strip_terminal_controls(out));
+}
+
+std::string canonical_mcp_name(std::string_view exposed) {
+    // Registry names are `mcp:<server>__<tool>` when always_namespace=true.
+    // Provider APIs accept only a conservative identifier alphabet, so map
+    // punctuation to underscores and retain the raw route only in execute().
+    if (exposed.starts_with("mcp:")) exposed.remove_prefix(4);
+    std::string out = "mcp__";
+    out.reserve(out.size() + exposed.size());
+    for (unsigned char c : exposed)
+        out.push_back((std::isalnum(c) || c == '_' || c == '-')
+                          ? static_cast<char>(c)
+                          : '_');
+    constexpr std::size_t kMaxToolName = 128;
+    if (out.size() > kMaxToolName) out.resize(kMaxToolName);
     return out;
 }
 
+std::string mcp_origin_id(std::string_view exposed) {
+    if (exposed.starts_with("mcp:")) exposed.remove_prefix(4);
+    if (auto split = exposed.find("__"); split != std::string_view::npos)
+        exposed = exposed.substr(0, split);
+    return std::string{exposed};
+}
+
+std::string mcp_bare_name(std::string_view exposed) {
+    if (exposed.starts_with("mcp:")) exposed.remove_prefix(4);
+    if (auto split = exposed.find("__"); split != std::string_view::npos)
+        exposed.remove_prefix(split + 2);
+    return std::string{exposed};
+}
+
 // Synthesize a ToolDef that routes through the shared registry by EXPOSED name.
-tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t) {
+tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t,
+                         const ServerPolicy& policy) {
     tools::ToolDef def;
-    def.name = ToolName{t.name};   // already namespaced by the registry
+    const std::string exposed = t.name;
+    def.name = ToolName{canonical_mcp_name(exposed)};
+    def.origin = tools::ToolOrigin::Mcp;
+    def.origin_id = mcp_origin_id(exposed);
 
     std::string desc = t.description.has_value() ? *t.description : std::string{};
-    def.description = "[MCP] " +
-        (desc.empty() ? ("Remote MCP tool '" + t.name + "'.") : desc);
+    // Trust boundary: the DESCRIPTION rides in the tool list of every turn's
+    // system-side payload — an adversarial server could inject control bytes
+    // or a wall of text there. Scrub + cap it (a useful description fits in
+    // 1 KiB; the full text was never rendered anyway).
+    desc = tools::util::to_valid_utf8(tools::util::strip_terminal_controls(desc));
+    if (desc.size() > 1024) {
+        desc.resize(1024);
+        desc = tools::util::to_valid_utf8(std::move(desc));   // re-seal the cut edge
+        desc += "…";
+    }
+    def.description = "[MCP " + def.origin_id + "] " +
+        (desc.empty() ? ("Remote tool '" + def.name.value + "'.") : desc);
 
     json schema = ::mcp::to_json(t.inputSchema);
     if (!schema.is_object()) schema = json::object();
@@ -239,19 +676,28 @@ tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t) {
     if (!schema.contains("properties")) schema["properties"] = json::object();
     def.input_schema = std::move(schema);
 
-    def.effects = effects_for(t);
+    def.effects = effects_for(t, policy.trust_annotations);
+    def.scheduling_effects = def.effects;
+    def.max_output_chars = std::clamp(policy.max_output_chars, 2'000, 100'000);
+    def.always_expose = policy.pin.contains(mcp_bare_name(exposed));
+    def.output_truncation = tools::OutputTruncation::HeadTail;
 
-    const std::string exposed = t.name;
-    def.execute = [pool, exposed](const json& args) -> tools::ExecResult {
+    def.execute = [pool, exposed](const maya::unlocked&, const json& args,
+                                  const tools::CallContext& ctx) -> tools::ExecResult {
         try {
             ::mcp::cap::Result r;
-            {
-                std::lock_guard<std::mutex> lk(pool->mu);
-                r = pool->registry.dispatch(exposed, args);
-            }
+            // Registry dispatch resolves a provider through its own
+            // generation-safe route snapshot; independent servers may run in
+            // parallel and each provider serializes only its own transport.
+            ::mcp::cap::Request req{exposed, args, ctx.progress,
+                                    [&ctx] { return ctx.cancelled(); }};
+            req.elicit = ctx.elicit;   // the server may ask the user mid-call
+            r = pool->registry.dispatch(req);
             if (r.is_error)
                 return std::unexpected(tools::ToolError::subprocess(
-                    r.text.empty() ? "MCP tool reported an error" : r.text));
+                    r.text.empty() ? "MCP tool reported an error"
+                                   : tools::util::to_valid_utf8(
+                                         tools::util::strip_terminal_controls(r.text))));
             std::string text = render_result(r);
             return tools::ToolOutput{text.empty() ? "(no output)" : text, std::nullopt};
         } catch (const std::exception& e) {
@@ -285,12 +731,15 @@ tools::ToolDef make_read_resource_tool(PoolHandle pool) {
         }},
     };
     def.effects = tools::EffectSet{tools::Effect::ReadFs, tools::Effect::Net};
-    def.execute = [pool](const json& args) -> tools::ExecResult {
+    def.origin = tools::ToolOrigin::Mcp;
+    def.origin_id = "resources";
+    def.scheduling_effects = def.effects;
+    def.max_output_chars = 30'000;
+    def.execute = [pool](const maya::unlocked&, const json& args, const tools::CallContext&) -> tools::ExecResult {
         const std::string uri = args.is_object() ? args.value("uri", std::string{}) : std::string{};
         const bool want_list  = uri.empty() || (args.is_object() && args.value("list", false));
         try {
             if (want_list) {
-                std::lock_guard<std::mutex> lk(pool->mu);
                 auto res = pool->registry.resources();
                 auto tpls = pool->registry.resource_templates();
                 if (res.empty() && tpls.empty())
@@ -314,7 +763,6 @@ tools::ToolDef make_read_resource_tool(PoolHandle pool) {
             std::string err;
             bool ok;
             {
-                std::lock_guard<std::mutex> lk(pool->mu);
                 ok = pool->registry.read_resource(uri, contents, err);
             }
             if (!ok)
@@ -362,6 +810,21 @@ std::string render_prompt(const ::mcp::GetPromptResult& r) {
     return out;
 }
 
+std::optional<std::string> resolve_prompt_route(
+    const ::mcp::cap::Registry& registry, std::string_view requested) {
+    std::optional<std::string> match;
+    for (const auto& prompt : registry.prompts()) {
+        const std::string canonical = canonical_mcp_name(prompt.name);
+        const bool bare_match = prompt.name.size() > requested.size() + 2
+            && prompt.name.ends_with("__" + std::string{requested});
+        if (prompt.name == requested || canonical == requested || bare_match) {
+            if (match && *match != prompt.name) return std::nullopt;
+            match = prompt.name;
+        }
+    }
+    return match;
+}
+
 tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
     tools::ToolDef def;
     def.name        = ToolName{"mcp_get_prompt"};
@@ -379,18 +842,21 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
         }},
     };
     def.effects = tools::EffectSet{tools::Effect::ReadFs, tools::Effect::Net};
-    def.execute = [pool](const json& args) -> tools::ExecResult {
+    def.origin = tools::ToolOrigin::Mcp;
+    def.origin_id = "prompts";
+    def.scheduling_effects = def.effects;
+    def.max_output_chars = 30'000;
+    def.execute = [pool](const maya::unlocked&, const json& args, const tools::CallContext&) -> tools::ExecResult {
         const std::string name = args.is_object() ? args.value("name", std::string{}) : std::string{};
         const bool want_list   = name.empty() || (args.is_object() && args.value("list", false));
         try {
             if (want_list) {
-                std::lock_guard<std::mutex> lk(pool->mu);
                 auto prompts = pool->registry.prompts();
                 if (prompts.empty())
                     return tools::ToolOutput{"(no prompts advertised)", std::nullopt};
                 std::string out = "Available MCP prompts:\n";
                 for (const auto& p : prompts) {
-                    out += "  " + p.name;
+                    out += "  " + canonical_mcp_name(p.name);
                     if (p.description.has_value() && !p.description->empty())
                         out += "  — " + *p.description;
                     out += '\n';
@@ -415,8 +881,11 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
             std::string err;
             bool ok;
             {
-                std::lock_guard<std::mutex> lk(pool->mu);
-                ok = pool->registry.get_prompt(name, kv, res, err);
+                auto route = resolve_prompt_route(pool->registry, name);
+                if (!route)
+                    return std::unexpected(tools::ToolError::not_found(
+                        "MCP prompt is missing or ambiguous: " + name));
+                ok = pool->registry.get_prompt(*route, kv, res, err);
             }
             if (!ok)
                 return std::unexpected(tools::ToolError::subprocess(
@@ -433,79 +902,552 @@ tools::ToolDef make_get_prompt_tool(PoolHandle pool) {
     return def;
 }
 
+std::optional<std::string> resolve_tool_route(
+    const ::mcp::cap::Registry& registry, std::string_view requested) {
+    std::optional<std::string> match;
+    for (const auto& tool : registry.tools()) {
+        const std::string canonical = canonical_mcp_name(tool.name);
+        const bool bare_match = tool.name.size() > requested.size() + 2
+            && tool.name.ends_with("__" + std::string{requested});
+        if (tool.name == requested || canonical == requested || bare_match) {
+            if (match && *match != tool.name) return std::nullopt;
+            match = tool.name;
+        }
+    }
+    return match;
+}
+
+// ── "is this tool actually enabled?" ──────────────────────────────────
+//
+// Two sources, both of which projection already consults: the per-server
+// policy baked at connect (tools.include / tools.exclude) and the LIVE config
+// exclude that the Plugins pane toggle writes.
+//
+// This used to be spelled inline inside project_tools only, which meant
+// mcp_call and mcp_search_tools -- both of which go straight to the registry
+// -- ignored it completely. A tool the user switched off stayed advertised by
+// search and stayed callable by mcp_call; the toggle only removed it from the
+// inline catalog. A deny that merely hides something is not a deny, so the
+// check lives here and every path reads the same function.
+[[nodiscard]] std::unordered_map<std::string, std::unordered_set<std::string>>
+live_exclude_map() {
+    std::unordered_map<std::string, std::unordered_set<std::string>> m;
+    for (const auto& [sname, cs] : read_config_servers())
+        if (!cs.exclude.empty()) m[sname] = cs.exclude;
+    return m;
+}
+
+// Reads pool->policies, which is fixed once the pool is published.
+[[nodiscard]] bool tool_enabled(
+    const PoolHandle& pool, std::string_view exposed,
+    const std::unordered_map<std::string, std::unordered_set<std::string>>& live_excl) {
+    const auto origin = mcp_origin_id(exposed);
+    const auto bare   = mcp_bare_name(exposed);
+    const ServerPolicy fallback;
+    const auto it = pool->policies.find(origin);
+    const auto& policy = it == pool->policies.end() ? fallback : it->second;
+    if (!policy.include.empty() && !policy.include.contains(bare)) return false;
+    if (policy.exclude.contains(bare)) return false;
+    if (auto le = live_excl.find(origin);
+        le != live_excl.end() && le->second.contains(bare))
+        return false;
+    return true;
+}
+
+tools::ToolDef make_search_tools_tool(PoolHandle pool) {
+    tools::ToolDef def;
+    def.name = ToolName{"mcp_search_tools"};
+    def.description =
+        "Search connected MCP capability catalogs by meaning. Use this when "
+        "the needed integration is not already visible as a direct mcp__ tool; "
+        "then invoke it through mcp_call.";
+    def.input_schema = json{
+        {"type", "object"},
+        {"properties", json{
+            {"query", json{{"type", "string"}, {"description", "Capability or action to find."}}},
+            {"k", json{{"type", "integer"}, {"minimum", 1}, {"maximum", 20}, {"default", 8}}},
+        }},
+        {"required", json::array({"query"})},
+    };
+    def.origin = tools::ToolOrigin::Mcp;
+    def.origin_id = "catalog";
+    // Not Pure. Pure means "no IO at all", which is the one class the policy
+    // allows even under Minimal -- and this walks the registry, which can
+    // trigger a blocking list_tools RPC to every connected server
+    // (cap/registry.hpp rebuild_ -> provider->list()). ReadFs|Net is what a
+    // read-only MCP tool carries, and this reads the same servers' catalogs,
+    // so it carries the same thing. Effects describe what a tool CAN reach,
+    // not how harmless its intent is.
+    def.effects = tools::EffectSet{tools::Effect::ReadFs, tools::Effect::Net};
+    def.scheduling_effects = def.effects;
+    def.max_output_chars = 12'000;
+    def.always_expose = true;
+    def.execute = [pool](const maya::unlocked&, const json& args, const tools::CallContext&) -> tools::ExecResult {
+        const std::string query = args.value("query", std::string{});
+        if (query.empty())
+            return std::unexpected(tools::ToolError::invalid_args("query is required"));
+        const int k = std::clamp(args.value("k", 8), 1, 20);
+        std::string needle = query;
+        std::ranges::transform(needle, needle.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::vector<std::pair<int, ::mcp::Tool>> ranked;
+        const auto live_excl = live_exclude_map();
+        std::vector<::mcp::Tool> visible;
+        {
+            for (auto& t : pool->registry.tools())
+                if (tool_enabled(pool, t.name, live_excl))
+                    visible.push_back(std::move(t));
+        }
+        for (auto tool : visible) {
+            std::string text = tool.name + " " + tool.description.value_or("");
+            std::ranges::transform(text, text.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            int score = text.find(needle) != std::string::npos ? 20 : 0;
+            std::size_t pos = 0;
+            while (pos < needle.size()) {
+                while (pos < needle.size() && !std::isalnum(static_cast<unsigned char>(needle[pos]))) ++pos;
+                auto begin = pos;
+                while (pos < needle.size() && std::isalnum(static_cast<unsigned char>(needle[pos]))) ++pos;
+                if (pos - begin > 1 && text.find(needle.substr(begin, pos - begin)) != std::string::npos)
+                    score += 3;
+            }
+            ranked.emplace_back(score, std::move(tool));
+        }
+        std::stable_sort(ranked.begin(), ranked.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::string out;
+        for (int i = 0; i < k && i < static_cast<int>(ranked.size()); ++i) {
+            const auto& tool = ranked[static_cast<std::size_t>(i)].second;
+            out += "- `" + canonical_mcp_name(tool.name) + "`";
+            if (tool.description && !tool.description->empty()) {
+                // Server-supplied bytes — scrub + one-line clip per row.
+                std::string d = tools::util::to_valid_utf8(
+                    tools::util::strip_terminal_controls(*tool.description));
+                for (auto& c : d) if (c == '\n' || c == '\r') c = ' ';
+                if (d.size() > 200) {
+                    d.resize(200);
+                    d = tools::util::to_valid_utf8(std::move(d));
+                    d += "…";
+                }
+                out += " — " + d;
+            }
+            out += '\n';
+        }
+        return tools::ToolOutput{out.empty() ? "(no MCP tools available)" : out, std::nullopt};
+    };
+    return def;
+}
+
+tools::ToolDef make_call_tool(PoolHandle pool) {
+    tools::ToolDef def;
+    def.name = ToolName{"mcp_call"};
+    def.description =
+        "Call a connected MCP tool discovered with mcp_search_tools. Direct "
+        "mcp__ tools are preferred when visible because their typed schema is safer.";
+    def.input_schema = json{
+        {"type", "object"},
+        {"properties", json{
+            {"name", json{{"type", "string"}, {"description", "Canonical mcp__server__tool name."}}},
+            {"arguments", json{{"type", "object"}, {"description", "Arguments for the target tool."}}},
+        }},
+        {"required", json::array({"name", "arguments"})},
+    };
+    def.origin = tools::ToolOrigin::Mcp;
+    def.origin_id = "catalog";
+    def.effects = tools::EffectSet{tools::Effect::Exec, tools::Effect::WriteFs,
+                                   tools::Effect::Net, tools::Effect::ReadFs};
+    def.scheduling_effects = tools::EffectSet{tools::Effect::Exec};
+    def.max_output_chars = 30'000;
+    def.always_expose = true;
+    def.execute = [pool](const maya::unlocked&, const json& args, const tools::CallContext& ctx) -> tools::ExecResult {
+        const std::string name = args.value("name", std::string{});
+        const json call_args = args.contains("arguments") && args["arguments"].is_object()
+            ? args["arguments"] : json::object();
+        auto route = resolve_tool_route(pool->registry, name);
+        if (!route)
+            return std::unexpected(tools::ToolError::not_found(
+                "MCP tool is missing or ambiguous: " + name));
+        // The user's toggle binds here too, not just in the inline catalog --
+        // otherwise mcp_call is a documented way around it.
+        {
+            const auto live_excl = live_exclude_map();
+            if (!tool_enabled(pool, *route, live_excl))
+                return std::unexpected(tools::ToolError::denied(
+                    "MCP tool '" + name + "' is disabled. Enable it in the "
+                    "Plugins pane, or remove it from tools.exclude in "
+                    "mcp.json."));
+        }
+        ::mcp::cap::Request req{*route, call_args, ctx.progress,
+                                [&ctx] { return ctx.cancelled(); }};
+        req.elicit = ctx.elicit;
+        auto result = pool->registry.dispatch(req);
+        if (result.is_error)
+            return std::unexpected(tools::ToolError::subprocess(
+                result.text.empty() ? "MCP tool reported an error"
+                                    : tools::util::to_valid_utf8(
+                                          tools::util::strip_terminal_controls(result.text))));
+        auto text = render_result(result);
+        return tools::ToolOutput{text.empty() ? "(no output)" : text, std::nullopt};
+    };
+    return def;
+}
+
 // Build the full ToolDef vector for a pool: every server tool + the generic
 // resource/prompt access tools (only when the union exposes any).
+// ── Passthrough tools ────────────────────────────────────────────
+// A `type:"passthrough"` server declares tools some OTHER party advertises
+// to the model (canonical case: a LiteLLM+headroom proxy injecting
+// `headroom_retrieve` into our requests in its pre-call hook). agentty
+// executes them by POSTing the args JSON to the entry's url; the response
+// body is the tool result. No process, no MCP handshake — synthesized
+// straight from config at projection time, so add/toggle/remove behave
+// exactly like MCP tool toggles (config edit + cache invalidation).
+//
+// "Allowing" one of these has a concrete meaning: Effect::Net, so under
+// Ask/Minimal profiles the standard permission prompt asks before the
+// call's arguments leave the machine for the configured URL. That — not a
+// blanket bypass — is the honest consent question.
+std::vector<tools::ToolDef> passthrough_tools() {
+    // Minimal absolute-URL parse (scheme/host/port/path) — passthrough
+    // endpoints are plain http(s)://host[:port]/path, same shape the MCP
+    // HTTP transport accepts. Local so this TU doesn't depend on
+    // http_server.cpp internals.
+    struct PtUrl { bool ok=false, tls=true; std::string host;
+                   std::uint16_t port=443; std::string path="/"; };
+    auto parse_pt_url = [](const std::string& url) -> PtUrl {
+        PtUrl u;
+        std::string_view s{url};
+        if (s.starts_with("https://"))     { u.tls = true;  u.port = 443; s.remove_prefix(8); }
+        else if (s.starts_with("http://")) { u.tls = false; u.port = 80;  s.remove_prefix(7); }
+        else return u;
+        const auto slash = s.find('/');
+        std::string_view hostport = s.substr(0, slash);
+        if (slash != std::string_view::npos) u.path = std::string{s.substr(slash)};
+        if (const auto colon = hostport.rfind(':');
+            colon != std::string_view::npos) {
+            const auto pstr = hostport.substr(colon + 1);
+            unsigned long p = 0;
+            for (char c : pstr) {
+                if (c < '0' || c > '9') { p = 0; break; }
+                p = p * 10 + static_cast<unsigned long>(c - '0');
+            }
+            if (p == 0 || p > 65535) return u;
+            u.port = static_cast<std::uint16_t>(p);
+            hostport = hostport.substr(0, colon);
+        }
+        if (hostport.empty()) return u;
+        u.host = std::string{hostport};
+        u.ok = true;
+        return u;
+    };
+    std::vector<tools::ToolDef> out;
+    for (const auto& [sname, cs] : read_config_servers()) {
+        if (cs.disabled || cs.passthrough.empty()) continue;
+        if (cs.type != "passthrough") continue;
+        // Project-scope entries are trust-gated like stdio servers: the
+        // call EXFILTRATES tool arguments to a URL the repo chose — worth
+        // a vouch even though nothing spawns. User/explicit configs are
+        // user-placed and trusted by construction.
+        if (cs.source.locus == scope::Locus::Project
+            && !source_trusted(cs.source, cs.file))
+            continue;
+        const std::string url = cs.url;
+        if (url.empty()) continue;
+        for (const auto& pt : cs.passthrough) {
+            if (cs.exclude.contains(pt.name)) continue;   // toggled off
+            tools::ToolDef def;
+            def.name        = ToolName{pt.name};
+            def.origin      = tools::ToolOrigin::Passthrough;
+            def.origin_id   = sname;
+            def.advertise   = pt.advertise;
+            // Same trust boundary as MCP descriptions: scrub + cap.
+            std::string desc = tools::util::to_valid_utf8(
+                tools::util::strip_terminal_controls(pt.description));
+            if (desc.size() > 1024) { desc.resize(1024); desc += "…"; }
+            def.description = "[passthrough " + sname + "] "
+                + (desc.empty() ? ("Forwarded to " + url) : desc);
+            def.input_schema = {{"type", "object"}};
+            def.effects  = tools::EffectSet{tools::Effect::Net};
+            def.scheduling_effects = def.effects;
+            def.max_output_chars   = 30'000;
+            def.execute = [url, name = pt.name, parse_pt_url](const maya::unlocked&, const json& args, const tools::CallContext&)
+                -> tools::ExecResult {
+                const PtUrl u = parse_pt_url(url);
+                if (!u.ok)
+                    return std::unexpected(tools::ToolError::invalid_args(
+                        "passthrough url is malformed: " + url));
+                http::Request req;
+                req.method    = http::HttpMethod::Post;
+                req.host      = u.host;
+                req.port      = u.port;
+                req.path      = u.path;
+                req.plaintext = !u.tls;
+                req.body      = args.is_null() ? "{}" : args.dump();
+                req.headers.push_back({"content-type", "application/json"});
+                req.headers.push_back({"accept", "application/json"});
+                auto res = http::default_client(::agentty::IoAccess::grant()).send(req);
+                if (!res)
+                    return std::unexpected(tools::ToolError::subprocess(
+                        "passthrough '" + name + "' → " + url + " failed: "
+                        + res.error().detail
+                        + ". The upstream service may be down or the cached "
+                          "entry may have expired — proceed without it if "
+                          "possible."));
+                if (res->status < 200 || res->status >= 300)
+                    return std::unexpected(tools::ToolError::subprocess(
+                        "passthrough '" + name + "' → " + url + " returned HTTP "
+                        + std::to_string(res->status)
+                        + (res->body.empty() ? std::string{}
+                                             : (": " + tools::util::to_valid_utf8(
+                                                   res->body.substr(0, 512))))
+                        + ". Proceed without this data if possible; do not "
+                          "retry with the same arguments."));
+                std::string text = tools::util::to_valid_utf8(
+                    tools::util::strip_terminal_controls(res->body));
+                return tools::ToolOutput{
+                    text.empty() ? "(empty response)" : std::move(text),
+                    std::nullopt};
+            };
+            out.push_back(std::move(def));
+        }
+    }
+    return out;
+}
+
 std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
     std::vector<tools::ToolDef> out;
     bool any_resources = false, any_prompts = false;
+
+    // LIVE exclude: read the current config's per-server tools.exclude here,
+    // at PROJECTION time, rather than trusting only the policy baked at
+    // connect. This makes enabling/disabling a tool a config edit + cache
+    // invalidation — NO server re-spawn — so a toggle can't hang on a
+    // reload/re-connect race.
+    //
+    // Reads the MERGED map rather than re-parsing one winning file. The old
+    // form resolved a single config, so a user server's tool-exclude was
+    // silently ignored whenever a project mcp.json existed -- a toggle in the
+    // Plugins pane appeared to do nothing.
+    std::unordered_map<std::string, std::unordered_set<std::string>> live_excl =
+        live_exclude_map();
+
     {
-        std::lock_guard<std::mutex> lk(pool->mu);
-        for (auto& t : pool->registry.tools()) out.push_back(make_tool(pool, t));
+        for (auto& t : pool->registry.tools()) {
+            const auto origin = mcp_origin_id(t.name);
+            if (!tool_enabled(pool, t.name, live_excl)) continue;
+            const auto policy_it = pool->policies.find(origin);
+            const ServerPolicy fallback;
+            const auto& policy = policy_it == pool->policies.end()
+                ? fallback : policy_it->second;
+            out.push_back(make_tool(pool, t, policy));
+        }
         any_resources = !pool->registry.resources().empty() ||
                         !pool->registry.resource_templates().empty();
         any_prompts   = !pool->registry.prompts().empty();
     }
+    // mcp_search_tools / mcp_call are the on-demand discovery layer: they let
+    // the model find MCP tools that AREN'T shipped inline. They only earn
+    // their place when there are MORE direct MCP tools than the wire's inline
+    // budget (select_wire_tools caps external tools at kInlineBudget) —
+    // otherwise every MCP tool already ships inline and the meta-tools are
+    // pure overhead.
+    //
+    // They also actively BREAK the Anthropic OAuth (first-party) path: that
+    // endpoint validates the tool set against Claude Code's and rejects a
+    // client-defined tool-search capability with HTTP 400 ("third-party apps
+    // now draw from your extra usage") — taking down EVERY turn while any MCP
+    // server is configured. Isolated empirically: dropping just these two
+    // tools flips the request 400→200 with the direct MCP tools still
+    // present (see the acp A/B in the plugins investigation). So: expose
+    // them only when they're genuinely needed (direct count over budget),
+    // which is also exactly when the small-setup 400 can't happen.
+    constexpr std::size_t kInlineBudget = 16;
+    const std::size_t direct_mcp = out.size();
+    const bool need_search = direct_mcp > kInlineBudget;
+    if (need_search) {
+        out.push_back(make_search_tools_tool(pool));
+        out.push_back(make_call_tool(pool));
+    }
     if (any_resources) out.push_back(make_read_resource_tool(pool));
     if (any_prompts)   out.push_back(make_get_prompt_tool(pool));
+
+    // Budget enforcement: the wire must never carry more than the
+    // configured budget (AGENTTY_MCP_TOOL_BUDGET, default 100) total
+    // tools (native + MCP). Native tools are the core toolset and
+    // always ship; if native + these MCP tools exceed the cap, TRIM the MCP
+    // tail so the request stays within provider limits. The picker surfaces
+    // the same over-budget count (plugin_model) and lets the user disable
+    // some to make room — so a runaway plugin set degrades gracefully
+    // (fewer MCP tools) instead of failing the whole turn.
+    const std::size_t native = tools::native_registry().size();
+    const std::size_t budget = tool_budget();
+    // budget == 0 means "no cap" (same as the plugin_model guard below) —
+    // never trim, or env var 0 would silently drop every MCP tool.
+    if (budget > 0 && native + out.size() > budget) {
+        const std::size_t room = budget > native ? budget - native : 0;
+        if (out.size() > room) out.resize(room);
+    }
+    // Passthrough tools ride OUTSIDE the budget trim: they are few,
+    // user-declared one at a time, and mostly advertise=false (zero wire
+    // cost — the proxy already put the schema on the wire).
+    for (auto& pt : passthrough_tools()) out.push_back(std::move(pt));
     return out;
 }
 
 } // namespace
 
-bool mcp_config_present() { return !resolve_config().empty(); }
+bool mcp_config_present() { return !read_config_servers().empty(); }
+
+std::vector<ServerLaunch> configured_servers_for_delegation() {
+    // One ladder. This used to resolve ONE winning file, so a project
+    // mcp.json silently hid every user server from delegation while the
+    // Plugins pane (which reads the merged map) still listed them.
+    //
+    // Trust is now per SOURCE rather than per whole-config: a user server
+    // beside an unvouched project one stays available instead of being
+    // collateral damage.
+    auto string_value = [](const json& value) {
+        return value.is_string() ? value.get<std::string>() : value.dump();
+    };
+    std::vector<ServerLaunch> out;
+    for (const auto& [sname, cs] : read_config_servers()) {
+        if (cs.disabled) continue;
+        // Passthrough entries are dispatch-only tool declarations, not
+        // delegable MCP servers.
+        if (cs.type == "passthrough") continue;
+        // Same gate as mcp_tools(): a config that rode in on a clone only
+        // exposes its servers once the human has vouched for it.
+        if (cs.source.locus == scope::Locus::Project
+            && !source_trusted(cs.source, cs.file))
+            continue;
+        const json& spec = cs.spec;
+        ServerLaunch launch;
+        launch.name = sname;
+        launch.command = cs.command;
+        launch.url = cs.url;
+        if (!launch.url.empty() || cs.type == "http" || cs.type == "streamable-http")
+            launch.transport = ServerLaunch::Transport::Http;
+        else if (cs.type == "sse")
+            launch.transport = ServerLaunch::Transport::Sse;
+        if (auto args = spec.find("args"); args != spec.end() && args->is_array())
+            for (const auto& value : *args) launch.args.push_back(string_value(value));
+        if (auto env = spec.find("env"); env != spec.end() && env->is_object())
+            for (auto entry = env->begin(); entry != env->end(); ++entry)
+                launch.env.emplace_back(entry.key(), string_value(entry.value()));
+        if (auto headers = spec.find("headers"); headers != spec.end() && headers->is_object())
+            for (auto entry = headers->begin(); entry != headers->end(); ++entry)
+                launch.headers.emplace_back(entry.key(), string_value(entry.value()));
+        if ((launch.transport == ServerLaunch::Transport::Stdio && launch.command.empty())
+            || (launch.transport != ServerLaunch::Transport::Stdio && launch.url.empty()))
+            continue;
+        out.push_back(std::move(launch));
+    }
+    return out;
+}
+
+void set_client_servers(const json& servers) {
+    // A union over sessions: an editor normally sends the same list each
+    // time, and a session that sends fewer must not unplug another's.
+    // A server sent again with a new spec replaces the old one.
+    if (!servers.is_object()) return;
+    const std::string before = *client_servers().load();
+    const auto after = client_servers().update([](const std::string& cur, const std::string& add) {
+        json s = json::object();
+        try { s = json::parse(cur); } catch (...) {}
+        const json n = json::parse(add);
+        for (auto it = n.begin(); it != n.end(); ++it) {
+            auto c = s.find(it.key());
+            if (c == s.end() || *c != it.value()) s[it.key()] = it.value();
+        }
+        return s.dump();
+    }, servers.dump());
+    const bool changed = *after != before;
+    // Through the registry, so the tool catalog the model sees is rebuilt too.
+    if (changed) (void)::agentty::tools::reload_mcp_plugins();
+}
+
+std::vector<std::string> configured_server_names_from_client() {
+    std::vector<std::string> out;
+    const json s = client_servers_json();
+    for (auto it = s.begin(); it != s.end(); ++it) out.push_back(it.key());
+    return out;
+}
+
+namespace {
+std::vector<tools::ToolDef> build_pool(PoolHandle& out_pool);
+}
 
 std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
-    std::vector<tools::ToolDef> out;
-    bool project_local = false;
-    fs::path cfg = resolve_config(project_local);
-    if (cfg.empty()) return out;          // no config → zero work, zero tools
+    // Serialize the whole connect+swap — no two builds ever run at once.
+    // build_pool publishes the pool itself, so out_pool reads it back.
+    auto& gate = g_connecting();
+    bool expected = false;
+    while (!gate.compare_exchange_weak(expected, true, std::memory_order_acquire)) {
+        // Block until the holder releases (atomic wait, not a sleep-poll).
+        if (expected) gate.wait(true, std::memory_order_acquire);
+        expected = false;
+    }
+    auto release = [&gate] {
+        gate.store(false, std::memory_order_release);
+        gate.notify_all();
+    };
+    std::vector<tools::ToolDef> defs;
+    try {
+        PoolHandle built;
+        defs = build_pool(built);
+    } catch (...) { release(); throw; }
+    release();
+    // The replaced pool dies here, with no lock held.
+    (void)g_retired().replace(nullptr);
+    out_pool = current_pool();
+    return defs;
+}
 
-    // ── Untrusted-workspace spawn gate (security) ────────────────────────
+namespace {
+std::vector<tools::ToolDef> build_pool(PoolHandle& out_pool) {
+    std::vector<tools::ToolDef> out;
+
+    // ONE ladder. This used to resolve a single winning file while
+    // read_config_servers() (the Plugins pane, `agentty config mcp`,
+    // delegation) merged project+user via scope::plan. The two disagreed,
+    // and the disagreement was silent and bad: a project mcp.json DISABLED
+    // every user server, while every surface that lists servers still showed
+    // them. You saw your server, and it never ran.
+    const auto config = read_config_servers();
+    if (config.empty()) return out;       // no config → zero work, zero tools
+
+    // ── Untrusted-workspace spawn gate (security) ────────────────────
     // A project-local ./.agentty/mcp.json can ride in on a cloned repo, and
     // its stdio servers spawn ARBITRARY commands at registry-build time with
     // no per-tool permission prompt — bypassing the Exec gate every other
-    // code path honors. So when the config is workspace-local we require an
-    // explicit opt-in (AGENTTY_MCP_ALLOW_PROJECT=1). $AGENTTY_MCP_CONFIG and
-    // ~/.agentty/mcp.json are trusted (the user placed them) and never gated.
-    bool allow_project = false;
-    if (const char* e = std::getenv("AGENTTY_MCP_ALLOW_PROJECT");
-        e && (e[0] == '1' || e[0] == 't' || e[0] == 'T' || e[0] == 'y' || e[0] == 'Y'))
-        allow_project = true;
-    if (project_local && !allow_project) {
-        std::fprintf(stderr,
-            "mcp: ignoring workspace-local %s (it can spawn arbitrary\n"
-            "     commands). Set AGENTTY_MCP_ALLOW_PROJECT=1 to enable it, or\n"
-            "     move trusted servers to ~/.agentty/mcp.json.\n",
-            cfg.string().c_str());
-        return out;
-    }
-
-    json doc;
-    try {
-        std::ifstream f(cfg);
-        f >> doc;
-    } catch (const std::exception& e) {
-        // cfg.c_str() is wchar_t* on Windows — narrow it for %s.
-        std::fprintf(stderr, "mcp: failed to parse %s: %s\n",
-                     cfg.string().c_str(), e.what());
-        return out;
-    }
-
-    const json* servers = nullptr;
-    if (doc.contains("mcpServers") && doc["mcpServers"].is_object())
-        servers = &doc["mcpServers"];
-    else if (doc.contains("servers") && doc["servers"].is_object())
-        servers = &doc["servers"];
-    if (!servers) return out;
+    // code path honors. So a workspace-local config's stdio servers connect
+    // only when the human has vouched for them.
+    //
+    // The locus decision belongs to scope::trust_of (see source_trusted):
+    // Explicit/User are trusted because a human placed them, Project/Local
+    // rode in on a clone. Trust is also per SOURCE now, not per whole-config
+    // — an unvouched project file no longer takes the user's own servers down
+    // with it. Within a project source it stays per SERVER (the spec-hash
+    // check in the loop below), so approving one server doesn't bless a
+    // later-added one and editing one command re-gates only that one.
+    std::unordered_map<std::string, bool> source_ok;   // memoize per file
+    auto whole_source_trusted = [&](const ConfigServer& cs) -> bool {
+        if (cs.source.locus != scope::Locus::Project) return true;
+        const std::string key = cs.file.string();
+        if (auto it = source_ok.find(key); it != source_ok.end()) return it->second;
+        const bool ok = source_trusted(cs.source, cs.file);
+        source_ok.emplace(key, ok);
+        return ok;
+    };
 
     auto pool = std::make_shared<ConnectionPool>();
     // tools/list_changed (+ resources/prompts) from any server bumps the
     // pool generation. Callers compare mcp_generation() to know the snapshot
     // moved; the dispatch path keeps working regardless (it routes by name).
-    pool->registry.set_on_list_changed([wp = std::weak_ptr<ConnectionPool>(pool)] {
+    auto bump_on_change = [wp = std::weak_ptr<ConnectionPool>(pool)] {
         if (auto p = wp.lock())
             p->generation.fetch_add(1, std::memory_order_relaxed);
-    });
+    };
 
     // ── Connect every server IN PARALLEL with a global deadline ──────────
     // Each provider's constructor blocks on a handshake (up to the SDK's
@@ -524,17 +1466,81 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
 
     struct Pending {
         std::string name;
-        std::shared_future<std::shared_ptr<::mcp::cap::CapabilityProvider>> fut;
+        // A plain future, not a shared_future. It was shared only so the
+        // orphan-waiter below could keep a timed-out connect alive; the pool
+        // owns the job now, so nothing else needs a handle on it.
+        std::future<std::shared_ptr<::mcp::cap::CapabilityProvider>> fut;
     };
     std::vector<Pending> pending;
-    for (auto it = servers->begin(); it != servers->end(); ++it) {
-        const std::string sname = it.key();
-        const json spec = it.value();   // copy: detached worker outlives `doc`
+    // Per-server trust set, loaded once. For a workspace-local config that
+    // isn't blanket-trusted, a stdio server connects only if its own spec
+    // hash is in the user-root approvals store (see source_trusted /
+    // plugin::server_spec_hash).
+    const scope::Approvals approvals = scope::load_approvals(kMcpApprovalsLeaf);
+    for (const auto& [sname_key, cs] : config) {
+        const std::string sname = sname_key;
+        const json spec = cs.spec;   // copy: detached worker outlives `config`
+        if (cs.disabled) continue;
+
+        // Untrusted-workspace spawn gate, PER SERVER. A stdio server (has a
+        // command, no url) from a not-yet-trusted project config is skipped
+        // unless its exact spec hash is approved. HTTP/SSE servers spawn no
+        // local command, so they're not gated. plugin_model() shows the
+        // skipped server as "untrusted — approve to enable".
+        // type:"passthrough" entries are NOT MCP servers at all — no
+        // process, no handshake; their tools are synthesized from config in
+        // passthrough_tools(). Handing one to the HTTP transport here made
+        // the connect loop handshake a non-MCP endpoint (headroom's
+        // /v1/retrieve) and burn the full 15 s deadline — the Plugins pane
+        // sat on "connecting…" and startup paid the wait for nothing.
+        if (cs.type == "passthrough") continue;
+        if (!whole_source_trusted(cs)) {
+            const std::string command = spec.value("command", std::string{});
+            const std::string url     = spec.value("url", std::string{});
+            if (!command.empty() && url.empty()) {
+                std::vector<std::string> args;
+                if (spec.contains("args") && spec["args"].is_array())
+                    for (const auto& a : spec["args"])
+                        if (a.is_string()) args.push_back(a.get<std::string>());
+                const std::string h =
+                    tools::plugin::server_spec_hash(command, url, args);
+                if (h.empty() || !approvals.approved(h)) {
+                    std::fprintf(stderr,
+                        "mcp: skipping untrusted project server '%s' — approve it\n"
+                        "     in the Plugins picker or set AGENTTY_MCP_ALLOW_PROJECT=1.\n",
+                        sname.c_str());
+                    continue;
+                }
+            }
+        }
+
+        ServerPolicy policy;
+        policy.trust_annotations = spec.value("trustAnnotations", false);
+        policy.max_output_chars = spec.value("maxOutputChars", 30'000);
+        auto add_names = [&](const json& values, std::unordered_set<std::string>& out) {
+            if (!values.is_array()) return;
+            for (const auto& value : values)
+                if (value.is_string()) out.insert(value.get<std::string>());
+        };
+        if (auto tools_it = spec.find("tools"); tools_it != spec.end() && tools_it->is_object()) {
+            add_names(tools_it->value("include", json::array()), policy.include);
+            add_names(tools_it->value("exclude", json::array()), policy.exclude);
+            add_names(tools_it->value("pin", json::array()), policy.pin);
+        }
+        pool->policies[sname] = std::move(policy);
         // A server entry with a "url" (or type:"http"/"sse") is a remote
         // Streamable HTTP server; anything with a "command" is a spawned
         // stdio server. URL wins when both are present.
-        pending.push_back(Pending{sname, std::async(std::launch::async,
-            [sname, spec]() -> std::shared_ptr<::mcp::cap::CapabilityProvider> {
+        // submit_isolated, not the standard async helper: a connect is a
+        // network dial that can wedge, and that helper's future JOINS in its
+        // destructor — so dropping a timed-out connect below would have
+        // blocked startup at the line that dropped it. The pool's future does
+        // not, and the job stays owned (waited for at teardown) rather than
+        // detached.
+        pending.push_back(Pending{sname,
+            ::agentty::util::background_pool().submit_isolated(
+            [](std::stop_token, std::string sname, json spec)
+                -> std::shared_ptr<::mcp::cap::CapabilityProvider> {
                 const std::string url  = spec.value("url", std::string{});
                 const std::string type = spec.value("type", std::string{});
                 const bool is_http = !url.empty() || type == "http" || type == "sse"
@@ -548,13 +1554,16 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
                                                                  ? h.value().get<std::string>()
                                                                  : h.value().dump());
                     hc.call_timeout = call_timeout();
+                    hc.workspace_root = tools::util::workspace_root().generic_string();
+                    if (const auto ms = spec.value("timeoutMs", 0L); ms > 0)
+                        hc.call_timeout = std::chrono::milliseconds{ms};
                     std::string err;
                     auto p = make_http_provider(sname, hc, err);
                     if (!p) std::fprintf(stderr, "mcp: %s\n", err.c_str());
                     return p;
                 }
                 return make_provider(sname, spec);
-            }).share()});
+            }, sname, spec)});
     }
 
     const auto deadline = std::chrono::steady_clock::now()
@@ -567,9 +1576,15 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
             std::fprintf(stderr,
                 "mcp: server '%s' did not connect within the deadline — skipping\n",
                 pend.name.c_str());
-            // Detach so the still-handshaking worker can finish and clean up
-            // without blocking startup; its result is dropped.
-            std::thread([f = pend.fut]() mutable { f.wait(); }).detach();
+            pool->connect_errors[pend.name] = "did not connect within deadline";
+            // stderr is invisible under the TUI, so this used to vanish: a
+            // plugin that silently failed to connect just meant its tools
+            // "weren't there", with no way to tell that from a config typo.
+            AGT_LOG(Mcp, Warn, "mcp.connect", "server={} result=timeout", pend.name);
+            // Just drop it. The still-handshaking job keeps running on the
+            // pool and is waited for at teardown; its result is discarded.
+            // This used to need a detached waiter whose only job was to
+            // absorb a blocking future destructor somewhere other than here.
             continue;
         }
         auto p = pend.fut.get();
@@ -577,18 +1592,32 @@ std::vector<tools::ToolDef> mcp_tools(PoolHandle& out_pool) {
             std::fprintf(stderr,
                 "mcp: server '%s' connected (%zu tools, %zu resources, %zu prompts)\n",
                 pend.name.c_str(), p->list().size(), p->resources().size(), p->prompts().size());
+            AGT_LOG(Mcp, Info, "mcp.connect",
+                    "server={} result=ok tools={} resources={} prompts={}",
+                    pend.name, p->list().size(), p->resources().size(),
+                    p->prompts().size());
+            p->set_on_list_changed(bump_on_change);
             pool->registry.add(std::move(p));
+        } else {
+            // make_provider returned nullptr — spawn/handshake failed. The
+            // specific reason went to stderr; record a generic marker so the
+            // model shows this server as failed rather than silently absent.
+            AGT_LOG(Mcp, Warn, "mcp.connect", "server={} result=spawn_failed",
+                    pend.name);
+            if (!pool->connect_errors.count(pend.name))
+                pool->connect_errors[pend.name] = "failed to start (see stderr log)";
         }
     }
-    if (pool->registry.provider_count() == 0) return out;   // nothing connected
+    // NOTE: do NOT early-return when provider_count()==0 — a config with only
+    // failed servers still needs its pool published so plugin_model() can
+    // report the failures. The pool is installed below unconditionally.
 
     out_pool = pool;                       // keep providers alive (caller)
-    {
-        std::lock_guard<std::mutex> lk(g_pool_mu());
-        g_pool_ref() = pool;               // process-wide handle for accessors
-    }
+    // process-wide handle for accessors
+    g_retired().publish(g_pool().replace(pool));
     return project_tools(pool);
 }
+}  // namespace
 
 // ── live / dynamic accessors ──────────────────────────────────────────────
 
@@ -604,11 +1633,303 @@ unsigned long mcp_generation() noexcept {
     return pool->generation.load(std::memory_order_relaxed);
 }
 
+void mcp_bump_generation() noexcept {
+    if (auto pool = current_pool())
+        pool->generation.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::vector<std::string> mcp_server_tools(const std::string& server) {
+    std::vector<std::string> out;
+    auto pool = current_pool();
+    if (!pool) return out;
+    for (const auto& t : pool->registry.tools()) {
+        if (mcp_origin_id(t.name) == server)
+            out.push_back(mcp_bare_name(t.name));
+    }
+    return out;
+}
+
+PluginModel plugin_model() {
+    PluginModel model;
+    model.tool_budget = tool_budget();
+
+    // Native tools always ship — count them for the budget math.
+    model.native_tool_count = tools::native_registry().size();
+
+    // Config: which servers exist, their command, and disabled tools.
+    const auto cfg = read_config_servers();
+
+    // Live: advertised tools + connect errors, under the pool lock.
+    struct LiveTool { std::string bare, desc; };
+    std::unordered_map<std::string, std::vector<LiveTool>> live;
+    std::unordered_map<std::string, std::string> errors;
+    if (auto pool = current_pool()) {
+        for (const auto& t : pool->registry.tools()) {
+            const std::string origin = mcp_origin_id(t.name);
+            LiveTool lt;
+            lt.bare = mcp_bare_name(t.name);
+            lt.desc = t.description.has_value() ? *t.description : std::string{};
+            live[origin].push_back(std::move(lt));
+        }
+        errors = pool->connect_errors;
+    }
+
+    // Last-known tool set per server. A DISABLED (or momentarily
+    // disconnected) server advertises nothing live, so without this its whole
+    // tool list would vanish the instant you turn it off — while a server
+    // that started disabled would show nothing, and one with individually-
+    // excluded tools would show only those. Inconsistent + confusing.
+    // Remember what each server last advertised so its tree stays populated
+    // (shown dimmed) across a disable→enable round-trip. Process-lifetime,
+    // mutex-guarded, keyed by server name.
+    //
+    // Bounded + identity-checked: we PRUNE entries for servers no longer in
+    // config (so add/remove churn can't grow it without bound), and store the
+    // command so a re-add under the SAME name with a DIFFERENT command evicts
+    // the stale tools (otherwise the new server would show the old one's
+    // tools until it connects).
+    struct SeenEntry {
+        std::string command;
+        std::vector<std::pair<std::string, std::string>> tools;  // (bare, desc)
+    };
+    using SeenMap = std::unordered_map<std::string, SeenEntry>;
+    static maya::snapshot<SeenMap> s_seen;
+    // What the cache needs from config and the live pool, as plain values:
+    // each configured server's command, and what each live server advertises.
+    std::unordered_map<std::string, std::string> commands;
+    for (const auto& [name, cs] : cfg) commands.emplace(name, cs.command);
+    SeenMap advertised;
+    for (const auto& [srv, tools] : live) {
+        auto& ent = advertised[srv];
+        if (auto cit = cfg.find(srv); cit != cfg.end()) ent.command = cit->second.command;
+        for (const auto& lt : tools) ent.tools.emplace_back(lt.bare, lt.desc);
+    }
+    // Prune entries for servers no longer configured (or whose command
+    // changed: identity reuse), then record what live servers advertise.
+    // Lock-free: plugin_model() is read from a view-side command.
+    const SeenMap seen = *s_seen.update(
+        [](const SeenMap& prev, const std::unordered_map<std::string, std::string>& cmds,
+           const SeenMap& adv) {
+            SeenMap m = prev;
+            for (auto it = m.begin(); it != m.end();) {
+                auto cit = cmds.find(it->first);
+                if (cit == cmds.end() || cit->second != it->second.command)
+                    it = m.erase(it);
+                else
+                    ++it;
+            }
+            for (const auto& [srv, ent] : adv) m[srv] = ent;
+            return m;
+        },
+        std::move(commands), std::move(advertised));
+
+    // Build one ServerState per configured server, unifying config + live.
+    // Per-server trust (the RCE gate): a workspace-local config's stdio
+    // servers only connect once vouched for. Trust is per SOURCE (each
+    // server knows the file it came from), then per SERVER within it — the
+    // same two-step the connect loop runs, so the pane never shows a server
+    // as available that mcp_tools() would skip.
+    std::unordered_map<std::string, bool> source_ok;
+    auto whole_source_trusted = [&](const ConfigServer& cs) -> bool {
+        if (cs.source.locus != scope::Locus::Project) return true;
+        const std::string key = cs.file.string();
+        if (auto it = source_ok.find(key); it != source_ok.end()) return it->second;
+        const bool ok = source_trusted(cs.source, cs.file);
+        source_ok.emplace(key, ok);
+        return ok;
+    };
+    const scope::Approvals approvals = scope::load_approvals(kMcpApprovalsLeaf);
+    std::size_t enabled_mcp = 0;
+    for (const auto& [name, cs] : cfg) {
+        ServerState ss;
+        ss.name    = name;
+        ss.command = cs.command;
+        ss.url     = cs.url;
+        ss.passthrough = (cs.type == "passthrough");
+        // Provenance from the scope::Source this entry was read from, mapped
+        // to the value-header Origin so the picker can badge scope and a
+        // reducer can route an edit to cs.source.base (the right mcp.json).
+        switch (cs.source.locus) {
+            case scope::Locus::Project:  ss.origin = Origin::Project;  break;
+            case scope::Locus::Explicit: ss.origin = Origin::Explicit; break;
+            default:                     ss.origin = Origin::User;     break;
+        }
+        ss.config_dir = cs.source.base.string();
+        auto lit = live.find(name);
+        ss.connected = (lit != live.end() && !lit->second.empty());
+        ss.disabled  = cs.disabled;
+        // A server turned off on purpose is NOT an error and never connected,
+        // so it carries no error and no live tools — disabled wins over any
+        // stale connect-error entry from a previous session.
+        if (!ss.disabled && cs.type == "passthrough") {
+            // (ss.passthrough set above — also true when disabled, so the
+            // row keeps its ⇄ badge while toggled off.)
+            // Passthrough: no process, no handshake — "connected" means
+            // "declared + reachable config". Tools come from the config
+            // declarations, not a live pool. Project-scope entries are
+            // trust-gated (args exfiltrate to the URL).
+            if (cs.url.empty()) {
+                ss.error = "passthrough needs a \"url\" in mcp.json";
+            } else if (cs.source.locus == scope::Locus::Project
+                       && !whole_source_trusted(cs)
+                       && !approvals.approved(
+                              tools::plugin::server_spec_hash(
+                                  cs.command, cs.url, cs.args))) {
+                ss.untrusted = true;
+                ss.error = "untrusted project config — approve to enable";
+            } else {
+                ss.connected = true;
+            }
+            for (const auto& pt : cs.passthrough) {
+                ToolState ts;
+                ts.name        = pt.name;
+                ts.description = pt.description.empty()
+                    ? ("forwarded to " + cs.url
+                       + (pt.advertise ? "" : " · proxy-advertised"))
+                    : pt.description;
+                ts.enabled     = !cs.exclude.contains(pt.name);
+                ss.tools.push_back(std::move(ts));
+            }
+        } else if (!ss.disabled) {
+            // A server with a `url` is HTTP/SSE and legitimately has no
+            // `command` — only a stdio server (no url) missing its command
+            // can never connect. This is the fix for the false "no command"
+            // error every remote server used to show.
+            if (cs.command.empty() && cs.url.empty()) {
+                ss.error = "no \"command\" or \"url\" in mcp.json";
+            } else if (cs.source.locus == scope::Locus::Project
+                       && !cs.command.empty() && cs.url.empty()
+                       && !whole_source_trusted(cs)
+                       && !approvals.approved(
+                              tools::plugin::server_spec_hash(
+                                  cs.command, cs.url, cs.args))) {
+                // A project (workspace-local) stdio server whose OWN spec
+                // hasn't been approved won't connect (the per-server RCE
+                // gate). Same spec hash (command+url+args) the connect loop
+                // uses, so picker and wire agree. HTTP/SSE (url) servers spawn
+                // nothing and aren't gated.
+                ss.untrusted = true;
+                ss.error = "untrusted project config — approve to enable";
+            } else if (auto eit = errors.find(name); eit != errors.end()) {
+                ss.error = eit->second;
+            }
+        }
+
+        // Tools: authoritative from the LIVE advertised set (so a disabled
+        // tool never vanishes); enabled derived from config exclude.
+        // (Passthrough already filled ss.tools from its declarations above.)
+        if (cs.type == "passthrough") {
+            // no live pool, no s_seen — declarations were the whole truth
+        } else if (lit != live.end()) {
+            for (const auto& lt : lit->second) {
+                ToolState ts;
+                ts.name        = lt.bare;
+                ts.description = lt.desc;
+                ts.enabled     = !cs.exclude.contains(lt.bare);
+                ss.tools.push_back(std::move(ts));
+            }
+        } else {
+            // Not connected this instant (disabled on purpose, or momentarily
+            // between reloads). Fall back to what this server LAST advertised
+            // so its tool tree stays populated instead of collapsing the
+            // moment you disable the plugin — the exact inconsistency where a
+            // just-disabled server lost its tools while a start-disabled one
+            // or an individually-excluded set kept them.
+            if (auto sit = seen.find(name); sit != seen.end()) {
+                for (const auto& [bare, desc] : sit->second.tools) {
+                    ToolState ts;
+                    ts.name        = bare;
+                    ts.description = desc;
+                    ts.enabled     = !cs.exclude.contains(bare);
+                    ss.tools.push_back(std::move(ts));
+                }
+            }
+        }
+        // A disabled tool the server no longer advertises (e.g. excluded so
+        // hard the server dropped it) — fold in from config so it shows.
+        // (Skip for passthrough: its declarations are complete by
+        // construction, and every excluded name is already rendered.)
+        if (cs.type != "passthrough")
+        for (const auto& ex : cs.exclude) {
+            if (ex.empty()) continue;   // a stray "" exclude → don't add a blank row
+            bool present = false;
+            for (const auto& ts : ss.tools) if (ts.name == ex) present = true;
+            if (!present) {
+                ToolState ts; ts.name = ex; ts.enabled = false;
+                ss.tools.push_back(std::move(ts));
+            }
+        }
+        std::sort(ss.tools.begin(), ss.tools.end(),
+                  [](const ToolState& a, const ToolState& b){ return a.name < b.name; });
+        // Only a server that is actually ON THE WIRE (connected, not disabled)
+        // contributes to the tool budget. A disabled or not-yet-connected
+        // server's tools come from the s_seen CACHE for display only — they
+        // are not in the live pool and not sent to the model, so counting
+        // them would over-report "N tools on the wire" and steal budget,
+        // falsely flagging real enabled tools on OTHER servers as
+        // over-budget. (project_tools iterates the live pool, which never
+        // includes these, so this keeps the budget math in sync with reality.)
+        // Passthrough tools are dispatch-only (advertise=false — the proxy
+        // owns the wire schema), so they never consume wire budget; skip the
+        // count entirely. The rare advertise=true one rides outside the
+        // budget by design (see project_tools).
+        if (cs.type != "passthrough" && ss.connected && !ss.disabled)
+            enabled_mcp += ss.enabled_count();
+        model.servers.push_back(std::move(ss));
+    }
+    std::sort(model.servers.begin(), model.servers.end(),
+              [](const ServerState& a, const ServerState& b){ return a.name < b.name; });
+
+    // Budget: native always ship; enabled MCP fill the rest. Anything past
+    // the budget is trimmed (recorded), and the over-budget tools are
+    // flagged so the picker can mark them.
+    model.wire_tool_count = model.native_tool_count + enabled_mcp;
+    if (model.tool_budget > 0 && model.wire_tool_count > model.tool_budget) {
+        std::size_t room = model.tool_budget > model.native_tool_count
+            ? model.tool_budget - model.native_tool_count : 0;
+        std::size_t taken = 0;
+        for (auto& ss : model.servers) {
+            // Match the enabled_mcp accounting: only live wire tools can be
+            // trimmed / flagged over-budget. A cached disabled/disconnected
+            // server's tools aren't on the wire, so never flag them.
+            if (!ss.connected || ss.disabled) continue;
+            for (auto& ts : ss.tools)
+                if (ts.enabled) {
+                    if (taken < room) ++taken;
+                    else { ts.over_budget = true; ++model.trimmed_count; }
+                }
+        }
+    }
+    return model;
+}
+
+std::size_t mcp_reload() {
+    // Rebuild the pool from the CURRENT config. mcp_tools() reads the
+    // config fresh, spawns every listed server, and installs the new pool
+    // as g_pool_ref (replacing the old one). We throw away the returned
+    // ToolDefs here — the registry re-projects them from the pool on its
+    // next refresh; what matters is that g_pool_ref now points at the
+    // reloaded pool and its generation is non-zero.
+    //
+    // Generation: a fresh pool starts at 0, but refresh_wire_cache_locked
+    // treats generation==0 as "use the cached initial_mcp snapshot" — so a
+    // reloaded pool MUST report a non-zero generation to route through the
+    // live projection. Seed it to 1 before mcp_tools() connects (any
+    // subsequent list_changed bumps from there).
+    PoolHandle throwaway;
+    (void)mcp_tools(throwaway);
+    if (auto p = current_pool()) {
+        unsigned long g = p->generation.load(std::memory_order_relaxed);
+        if (g == 0) p->generation.store(1, std::memory_order_relaxed);
+        return p->registry.provider_count();
+    }
+    return 0;
+}
+
 std::vector<ResourceInfo> mcp_resources() {
     auto pool = current_pool();
     if (!pool) return {};
     std::vector<ResourceInfo> out;
-    std::lock_guard<std::mutex> lk(pool->mu);
     for (const auto& r : pool->registry.resources()) {
         ResourceInfo ri;
         ri.uri         = r.uri;
@@ -626,7 +1947,6 @@ std::optional<std::string> mcp_read_resource(const std::string& uri, std::string
     if (!pool) { err = "MCP not configured"; return std::nullopt; }
     std::vector<::mcp::ResourceContents> contents;
     {
-        std::lock_guard<std::mutex> lk(pool->mu);
         if (!pool->registry.read_resource(uri, contents, err)) return std::nullopt;
     }
     std::string out;
@@ -650,10 +1970,10 @@ std::vector<PromptInfo> mcp_prompts() {
     auto pool = current_pool();
     if (!pool) return {};
     std::vector<PromptInfo> out;
-    std::lock_guard<std::mutex> lk(pool->mu);
     for (const auto& p : pool->registry.prompts()) {
         PromptInfo pi;
-        pi.name        = p.name;
+        pi.name        = canonical_mcp_name(p.name);
+        pi.server      = mcp_origin_id(p.name);
         pi.title       = p.title.has_value() ? *p.title : p.name;
         pi.description = p.description.has_value() ? *p.description : std::string{};
         if (p.arguments.has_value())
@@ -675,10 +1995,27 @@ std::optional<std::string> mcp_get_prompt(
     if (!pool) { err = "MCP not configured"; return std::nullopt; }
     ::mcp::GetPromptResult res;
     {
-        std::lock_guard<std::mutex> lk(pool->mu);
-        if (!pool->registry.get_prompt(name, args, res, err)) return std::nullopt;
+        auto route = resolve_prompt_route(pool->registry, name);
+        if (!route) { err = "prompt is missing or ambiguous: '" + name + "'"; return std::nullopt; }
+        if (!pool->registry.get_prompt(*route, args, res, err)) return std::nullopt;
     }
     return render_prompt(res);
+}
+
+void release_servers() noexcept {
+    // Drop the process-wide pool PROMPTLY on quit, instead of leaving it to
+    // static destruction after main() returns. Two wins:
+    //   1. Teardown happens while the app is still "alive" and visible, not
+    //      during the opaque static-dtor phase where a hang looks like the
+    //      whole process wedged (the "first Ctrl-C doesn't quit" symptom).
+    //   2. The child MCP servers get their stdin closed + SIGTERM now; a
+    //      well-behaved stdio server exits on EOF in ~1ms, so the common
+    //      case is instant. A wedged one is still bounded by ChildProcess's
+    //      own SIGTERM→SIGKILL deadline.
+    // Swap the handle out under the lock, then let the Registry destructor
+    // run OUTSIDE the lock (it terminates each child).
+    PoolHandle drained = g_pool().take();
+    // `drained` drops here: Registry → providers → ChildProcess teardown.
 }
 
 } // namespace agentty::mcp

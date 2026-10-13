@@ -42,12 +42,12 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/stream_epilogue.hpp"  // complete provider::StreamResult
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/runtime/msg.hpp"
 
 #include <maya/maya.hpp>
-#include <maya/app/inline.hpp>
-#include <maya/app/quit.hpp>
+#include <maya/print.hpp>
 #include <maya/widget/markdown.hpp>
 
 using namespace agentty;
@@ -84,7 +84,7 @@ int do_capture(const std::string& out_path,
                const std::string& prompt,
                const std::string& model) {
     // Resolve creds exactly like main.cpp does.
-    auth::Credentials creds = auth::resolve(/*cli_api_key=*/"");
+    auth::Credentials creds = auth::resolve(::agentty::IoAccess::grant(), /*cli_api_key=*/"");
     auth::AuthHeader  hdr   = auth::make_auth_header(creds);
     if (auth::is_empty(hdr)) {
         die("no credentials — set ANTHROPIC_API_KEY or run `agentty login`", 3);
@@ -98,7 +98,7 @@ int do_capture(const std::string& out_path,
 
     provider::anthropic::Request req;
     req.model         = model.empty() ? std::string{"claude-sonnet-4-5"} : model;
-    req.system_prompt = provider::anthropic::default_system_prompt();
+    req.system_prompt = provider::default_system_prompt(::agentty::IoAccess::grant());
     req.messages      = t.messages;
     req.max_tokens    = provider::kSafeMaxTokens;
     req.auth          = hdr;
@@ -139,7 +139,12 @@ int do_capture(const std::string& out_path,
     };
 
     std::println(stderr, "→ capturing from api.anthropic.com (model={}) ...", req.model);
-    provider::anthropic::run_stream_sync(std::move(req), sink, /*cancel=*/{});
+    const provider::StreamResult sr =
+        provider::anthropic::run_stream_sync(std::move(req), sink, /*cancel=*/{});
+    if (!sr.ok() && !failed) {
+        failed = true;
+        if (sr.error) err_msg = *sr.error;
+    }
     std::println(stderr, "");
 
     if (failed) {
@@ -328,20 +333,253 @@ int do_replay(const std::string& in_path,
                 md->append(deltas[i].text);
             }
         }
-        // Let the reveal cursor catch up + chrome settle before quit.
+        // Let the reveal cursor catch up + chrome settle before stopping.
         std::this_thread::sleep_for(2s);
         md->finish();
         std::this_thread::sleep_for(500ms);
         done = true;
-        maya::quit();
     });
 
-    maya::live({.fps = 30, .max_width = width}, [&] {
-        return md->build();
-    });
+    // The host split removed maya::live (and the global maya::quit it needed
+    // to break out of). This mode is the INTERACTIVE replay — the ctest arms
+    // all run `det` — so a plain 30 fps render loop over the same builder is
+    // an honest stand-in: it exercises the identical StreamingMarkdown path
+    // and ends when the producer sets `done`, no quit flag required.
+    while (!done) {
+        (void)maya::render_to_string(md->build(), width);
+        std::this_thread::sleep_for(33ms);
+    }
 
     producer.join();
     std::println(stderr, "→ replay done ({} deltas)", deltas.size());
+    return 0;
+}
+
+// ── deterministic replay (the trustworthy measurement) ─────────────────────
+// Single-threaded, frozen anim clock. Walks a virtual timeline in fixed
+// frame steps; appends each recorded delta when its t_ms has passed; renders
+// every frame and measures the per-frame VISIBLE-character delta. Because
+// everything runs on one thread at a frozen clock, source / clip / cursor /
+// visible are all consistent — no producer-thread race, no wall-clock jitter.
+// This is what tells us, on REAL recorded bytes, whether the reveal glides.
+int do_det(const std::string& in_path, int width, double floor_cps,
+           double drain_secs, bool fx_on, int snap_at_frame, int snap_glide_ms,
+           long long assert_max_delta, bool adaptive,
+           long long assert_finalize_max, long long assert_finalize_ms,
+           bool deco_on = true, int frame_div = 1,
+           double adapt_min = 20.0, double adapt_max = 220.0) {
+    std::vector<Delta> deltas = load_fixture(in_path);
+    if (deltas.empty()) { std::println(stderr, "no deltas"); return 2; }
+
+    maya::testing::freeze_anim_clock(0);
+    // Motion level under test. The divisor is what makes "Reduced" mean
+    // something on a slow link; without it the bench can only measure the
+    // two extremes.
+    maya::anim::set_frame_divisor(frame_div);
+    maya::StreamingMarkdown md;
+    md.set_live(true);
+    md.set_reveal_fx(fx_on);
+    // The three motion levels the Appearance pane offers map onto these two
+    // switches, so a bench that can only say fx on/off cannot measure the
+    // MIDDLE one — which is the level that matters for a high-latency link
+    // (issue #36): keep the progressive clip (progress information) and
+    // drop the decorative glyph churn (not information).
+    //   Full    = fx on,  deco on
+    //   Reduced = fx on,  deco OFF
+    //   Off     = fx off, deco off
+    md.set_reveal_decorate(fx_on && deco_on);
+    md.set_reveal_pacing(floor_cps, drain_secs);
+    // The adaptive WINDOW is part of the profile under test, not a detail:
+    // the lane's ceiling is what decides whether the cursor sprints through
+    // a burst and then sits at the edge. Defaulting it here measured the
+    // answer lane's window (20..220) while calling itself the reasoning
+    // profile, which is the instrument lying again.
+    if (adaptive) md.set_reveal_adaptive(true, adapt_min, adapt_max);
+
+    std::size_t wire_bytes_total = 0, wire_bytes_changed = 0, wire_frames_changed = 0;
+    std::string prev_render;
+
+    auto visible_of = [&](const maya::Element& el) -> std::size_t {
+        std::string s = maya::render_to_string(el, width);
+        // Count real CONTENT codepoints only: skip newlines, spaces, and
+        // (crucially) box-drawing / block-element chrome (U+2500..U+259F —
+        // heading underline rules, table borders). Those are decoration the
+        // renderer adds whole when a block exists; counting them as "visible"
+        // would report a heading's full-width underline as a content burst.
+        std::size_t v = 0;
+        for (std::size_t i = 0; i < s.size(); ) {
+            unsigned char c = static_cast<unsigned char>(s[i]);
+            if ((c & 0x80) == 0) {            // ASCII
+                if (c != '\n' && c != ' ') ++v;
+                ++i;
+            } else if ((c & 0xE0) == 0xC0) {  // 2-byte
+                ++v; i += 2;
+            } else if ((c & 0xF0) == 0xE0) {  // 3-byte
+                // Decode to test the box-drawing/block range.
+                char32_t cp = (c & 0x0F) << 12;
+                if (i + 1 < s.size()) cp |= (static_cast<unsigned char>(s[i+1]) & 0x3F) << 6;
+                if (i + 2 < s.size()) cp |= (static_cast<unsigned char>(s[i+2]) & 0x3F);
+                if (!(cp >= 0x2500 && cp <= 0x259F)) ++v;   // skip chrome
+                i += 3;
+            } else {                          // 4-byte (emoji etc.)
+                ++v; i += 4;
+            }
+        }
+        return v;
+    };
+
+    constexpr std::int64_t kFrameMs = 16;
+    const std::int64_t last_t = deltas.back().t_ms;
+    const std::int64_t end_t  = last_t + 4000;   // drain tail
+
+    std::size_t di = 0, prev_vis = 0;
+    long long max_delta = 0, worst_t = 0, max_delta_all = 0;
+    int frame = 0, over24 = 0;
+    // Finalize-glide instrumentation (#5 positive verification): the
+    // streaming gate above deliberately EXCLUDES finalizing frames, so the
+    // end-of-turn contract — a bounded visible glide, never a paste — was
+    // only verified by eyeball. Track the finalize phase separately:
+    //   • fin_max_delta: worst single finalizing-frame reveal. A glide
+    //     paints a few cells/frame; a paste paints the whole backlog.
+    //   • fin_arm_t / fin_land_t: wall-clock from the first finalizing
+    //     frame to the cursor landing (live_ off) — must be bounded by
+    //     the ramp deadline + the settle window (the widget holds live_
+    //     through scramble resolution: settle_window_ms × 2.5 ≈ 940 ms).
+    long long fin_max_delta = 0, fin_worst_t = 0;
+    std::int64_t fin_arm_t = -1, fin_land_t = -1;
+    std::println(stderr,
+        "→ det replay {} deltas (w={}, cps={}, drain={}s, fx={})",
+        deltas.size(), width, floor_cps, drain_secs, fx_on);
+
+    for (std::int64_t t = 0; t <= end_t; t += kFrameMs) {
+        while (di < deltas.size() && deltas[di].t_ms <= t) {
+            md.append(deltas[di].text);
+            ++di;
+        }
+        if (di >= deltas.size()) md.request_finalize(200);
+        // Simulate a TOOL BOUNDARY: agentty calls snap_reveal_to_edge() when
+        // a tool card appears mid-stream (turn.cpp) — it jumps the reveal
+        // cursor straight to the edge, pasting the whole typed-but-unrevealed
+        // backlog in one frame. This is the burst the user sees on real
+        // turns ("first char sticks, then it all appears with the next
+        // tool") that a pure-text replay never triggers.
+        if (snap_at_frame >= 0 && frame == snap_at_frame) {
+            md.snap_reveal_to_edge(snap_glide_ms);
+            std::println(stderr, "  >>> snap_reveal_to_edge({}) at frame {} "
+                                 "(simulated tool boundary)", snap_glide_ms, frame);
+        }
+        const std::size_t vis = visible_of(md.build());
+        // WIRE COST. Content cells are the right metric for "does the reveal
+        // glide", but they are not what a high-latency link pays for
+        // (issue #36: agentty over mosh). What crosses the wire is the
+        // RENDERED FRAME, escape sequences and all, so measure that too —
+        // and measure how much of it CHANGED, since an unchanged frame is
+        // one the render gate should have skipped entirely.
+        {
+            std::string s = maya::render_to_string(md.build(), width);
+            wire_bytes_total += s.size();
+            if (s != prev_render) {
+                ++wire_frames_changed;
+                // Longest common prefix/suffix: a rough stand-in for what a
+                // diffing terminal writer would actually send.
+                std::size_t p = 0;
+                const std::size_t lim = std::min(s.size(), prev_render.size());
+                while (p < lim && s[p] == prev_render[p]) ++p;
+                std::size_t q = 0;
+                while (q < lim - p && s[s.size()-1-q] == prev_render[prev_render.size()-1-q]) ++q;
+                wire_bytes_changed += s.size() - p - q;
+                prev_render = std::move(s);
+            }
+        }
+        if (const char* df = std::getenv("DET_DUMP_FRAME");
+            df && frame == std::atoi(df)) {
+            std::println(stderr, "===== DUMP frame {} (src={} clip={} tailclip={} cur={:.0f} cmt={}) =====",
+                frame, md.debug_source_size(), md.debug_reveal_byte_clip(),
+                md.debug_tail_clip(), md.debug_reveal_cp(), md.debug_committed());
+            std::string s = maya::render_to_string(md.build(), width);
+            std::println(stderr, "---- rendered ({} bytes) ----\n{}\n---- end ----", s.size(), s);
+        }
+        const long long d = static_cast<long long>(vis)
+                          - static_cast<long long>(prev_vis);
+        // Track the burst maximum over the STREAMING body only. Finalizing
+        // frames are the deliberate end-of-turn / tool-boundary glide that is
+        // allowed to move faster to land the tail; counting them would flag
+        // the intended settle as a burst. (max_delta_all still reported for
+        // visibility.)
+        if (d > max_delta_all) { max_delta_all = d; }
+        if (!md.is_finalizing() && d > max_delta) { max_delta = d; worst_t = t; }
+        if (!md.is_finalizing() && d > 24) ++over24;
+        if (md.is_finalizing()) {
+            if (fin_arm_t < 0) fin_arm_t = t;
+            if (d > fin_max_delta) { fin_max_delta = d; fin_worst_t = t; }
+        }
+        if (fin_arm_t >= 0 && fin_land_t < 0 && !md.is_live())
+            fin_land_t = t;
+        if (d != 0 || (frame % 30 == 0))
+            std::println(stderr,
+                "[{:>6} ms] f={:>4} vis={:>5} d={:+5} src={} clip={} cur={:.0f} cmt={} live={}",
+                t, frame, vis, d,
+                md.debug_source_size(), md.debug_reveal_byte_clip(),
+                md.debug_reveal_cp(), md.debug_committed(), (int)md.is_live());
+        prev_vis = vis;
+        ++frame;
+        maya::testing::advance_anim_clock_ms(kFrameMs);
+        if (di >= deltas.size() && !md.is_live() && !md.is_finalizing()) break;
+    }
+    maya::testing::unfreeze_anim_clock();
+    std::println(stderr,
+        "\u2192 wire cost: frames={} changed={} bytes_rendered={} bytes_changed={} "
+        "(avg {} changed B/frame)",
+        frame, wire_frames_changed, wire_bytes_total, wire_bytes_changed,
+        frame ? wire_bytes_changed / frame : 0);
+    std::println(stderr,
+        "→ det done: frames={} max_frame_delta={} (@ {} ms) frames_over_24={} "
+        "(incl-settle max={})",
+        frame, max_delta, worst_t, over24, max_delta_all);
+    std::println(stderr,
+        "→ finalize glide: max_delta={} (@ {} ms) armed@{} ms landed@{} ms "
+        "({} ms arm→land)",
+        fin_max_delta, fin_worst_t, fin_arm_t, fin_land_t,
+        (fin_arm_t >= 0 && fin_land_t >= 0) ? fin_land_t - fin_arm_t : -1);
+    // Regression gate: a burst is a single frame that reveals more than
+    // assert_max_delta content cells. Ignored during the settle/finalize tail
+    // (finalizing frames are the deliberate land-the-tail glide, allowed to
+    // move faster). 0 = no assertion (interactive / measurement use).
+    if (assert_max_delta > 0 && max_delta > assert_max_delta) {
+        std::println(stderr,
+            "FAIL: max_frame_delta {} exceeds cap {} — the reveal burst "
+            "instead of gliding", max_delta, assert_max_delta);
+        return 1;
+    }
+    // #5 positive gates. --assert-finalize-max: even the deliberate
+    // land-the-tail glide must be PACED — a finalizing frame that reveals
+    // the whole backlog at once is the end-of-turn paste the glide was
+    // built to remove. --assert-finalize-ms: the glide must actually LAND
+    // (live_ off) within the bound — catches a wedged ramp (the #2 class)
+    // and an unbounded adaptive stretch (the #1 class).
+    if (assert_finalize_max > 0 && fin_max_delta > assert_finalize_max) {
+        std::println(stderr,
+            "FAIL: finalize-frame delta {} exceeds cap {} — the end-of-turn "
+            "glide pasted instead of gliding",
+            fin_max_delta, assert_finalize_max);
+        return 1;
+    }
+    if (assert_finalize_ms > 0) {
+        if (fin_arm_t < 0 || fin_land_t < 0) {
+            std::println(stderr,
+                "FAIL: finalize glide never {} (armed@{} landed@{}) — the "
+                "ramp wedged instead of landing",
+                fin_arm_t < 0 ? "armed" : "landed", fin_arm_t, fin_land_t);
+            return 1;
+        }
+        if (fin_land_t - fin_arm_t > assert_finalize_ms) {
+            std::println(stderr,
+                "FAIL: finalize glide took {} ms (cap {}) — deadline "
+                "stretched past its contract",
+                fin_land_t - fin_arm_t, assert_finalize_ms);
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -364,7 +602,9 @@ void usage() {
         "                 faster than chars appear, so the user sees every\n"
         "                 byte show up. Try `--feed-cps 25` first.\n"
         "  --cps N        floor cps of maya's own reveal cursor (default 120).\n"
-        "  --drain SECS   target seconds to clear a burst backlog (default 0.8).\n");
+        "  --drain SECS   target seconds to clear a burst backlog (default 0.8).\n"
+        "  --adaptive-min/--adaptive-max N   the lane's adaptive cps window\n"
+        "                 (production: answer 25..180, reasoning 45..280).\n");
 }
 
 } // namespace
@@ -384,6 +624,44 @@ int main(int argc, char** argv) {
             else { usage(); return 1; }
         }
         return do_capture(path, prompt, model);
+    }
+    if (mode == "det") {
+        int    width      = 100;
+        double floor_cps  = 90.0;   // production default
+        double drain_secs = 0.15;   // production default
+        bool   fx_on      = true;
+        int    snap_at    = -1;     // frame to fire a simulated tool-boundary snap
+        int    snap_glide = 0;      // 0 = instant snap; >0 = bounded glide ms
+        long long assert_max = 0;   // >0 = fail if a streaming frame bursts past it
+        bool   adaptive   = false;  // auto-tune floor to wire rate
+        bool   deco_on    = true;   // Reduced motion = fx on, deco off
+        int    frame_div  = 1;      // Reduced motion also thins repaints
+        long long assert_fin_max = 0;  // >0 = cap on a finalizing frame's reveal
+        long long assert_fin_ms  = 0;  // >0 = cap on arm→land wall-clock
+        double adapt_min = 20.0;       // maya's set_reveal_adaptive defaults
+        double adapt_max = 220.0;
+        for (int i = 3; i < argc; ++i) {
+            std::string a = argv[i];
+            if      (a == "--no-fx")  fx_on = false;
+            else if (a == "--width" && i + 1 < argc) width = std::atoi(argv[++i]);
+            else if (a == "--cps"   && i + 1 < argc) floor_cps  = std::atof(argv[++i]);
+            else if (a == "--drain" && i + 1 < argc) drain_secs = std::atof(argv[++i]);
+            else if (a == "--snap-at" && i + 1 < argc) snap_at = std::atoi(argv[++i]);
+            else if (a == "--snap-glide" && i + 1 < argc) snap_glide = std::atoi(argv[++i]);
+            else if (a == "--assert-max-delta" && i + 1 < argc) assert_max = std::atoll(argv[++i]);
+            else if (a == "--assert-finalize-max" && i + 1 < argc) assert_fin_max = std::atoll(argv[++i]);
+            else if (a == "--assert-finalize-ms" && i + 1 < argc) assert_fin_ms = std::atoll(argv[++i]);
+            else if (a == "--adaptive") adaptive = true;
+            else if (a == "--adaptive-min" && i + 1 < argc) adapt_min = std::atof(argv[++i]);
+            else if (a == "--adaptive-max" && i + 1 < argc) adapt_max = std::atof(argv[++i]);
+            else if (a == "--no-deco") deco_on = false;
+            else if (a == "--frame-div" && i + 1 < argc) frame_div = std::atoi(argv[++i]);
+            else { usage(); return 1; }
+        }
+        return do_det(path, width, floor_cps, drain_secs, fx_on, snap_at,
+                      snap_glide, assert_max, adaptive,
+                      assert_fin_max, assert_fin_ms, deco_on, frame_div,
+                      adapt_min, adapt_max);
     }
     if (mode == "replay") {
         bool   realtime   = false, fx_on = true;

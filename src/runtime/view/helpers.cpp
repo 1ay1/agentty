@@ -1,12 +1,18 @@
+#include <cstdlib>
+#include <limits>
 #include "agentty/runtime/view/helpers.hpp"
 
 #include <concepts>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
+#include <string>
 #include <variant>
+#include <vector>
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/model_name.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/view/palette.hpp"
 
@@ -51,13 +57,17 @@ maya::Color phase_color(const Phase& p) noexcept {
         using T = std::decay_t<decltype(v)>;
         // Use bright ANSI variants for active phases so the pulsing
         // spinner in the status-bar chip reads as "alive" on every
-        // palette, not just high-contrast dark themes. `highlight`
-        // and `success` alone were landing on the desaturated end of
-        // several popular light themes.
+        // palette, not just high-contrast dark themes.
+        //
+        // These were bright_* literals, chosen because `highlight` and
+        // `success` landed on the desaturated end of several light themes.
+        // The tokens are theme reads now, so the theme itself answers that
+        // — a literal here would be the same bet on someone else's palette
+        // that it always was, just in the other direction.
         if      constexpr (std::same_as<T, phase::Idle>)               return muted;
-        else if constexpr (std::same_as<T, phase::Streaming>)          return maya::Color::bright_cyan();
-        else if constexpr (std::same_as<T, phase::AwaitingPermission>) return maya::Color::bright_yellow();
-        else                                                           return maya::Color::bright_green();
+        else if constexpr (std::same_as<T, phase::Streaming>)          return status_info;
+        else if constexpr (std::same_as<T, phase::AwaitingPermission>) return status_warn;
+        else                                                           return status_ok;
     }, p);
 }
 
@@ -120,108 +130,27 @@ std::string format_duration_compact(float secs) {
 }
 
 std::string pretty_model_label(std::string_view id) {
-    // Drop the agentty extended-context marker anywhere in the id.
-    if (auto pos = id.find("[1m]"); pos != std::string_view::npos) {
-        std::string stripped{id.substr(0, pos)};
-        stripped += id.substr(pos + 4);
-        return pretty_model_label(stripped);
-    }
+    // Thin delegate. Every rule that used to live here (family taxonomy,
+    // version extraction, snapshot-date and `:latest` stripping, Ollama tag
+    // handling, acronym casing) now lives in the domain SSOT so the turn
+    // header, the composer chip, the welcome screen and the pickers cannot
+    // disagree. See domain/model_name.hpp.
+    return model_name::decode(id).full();
+}
 
-    // Strip provider namespace: keep the segment after the last '/'.
-    if (auto slash = id.find_last_of('/'); slash != std::string_view::npos)
-        id.remove_prefix(slash + 1);
+std::string model_display_label(std::string_view id,
+                                std::string_view display_name) {
+    // Thin delegate — the decoder owns the id-vs-server-name reconciliation.
+    return model_name::decode(id, display_name).full();
+}
 
-    // Split off an optional `:tag` (Ollama size/quant selector).
-    std::string_view tag;
-    if (auto colon = id.find(':'); colon != std::string_view::npos) {
-        tag = id.substr(colon + 1);
-        id  = id.substr(0, colon);
-    }
-    // `:latest` carries no information — every Ollama pull defaults to it.
-    if (tag == "latest") tag = {};
-
-    auto is_alpha = [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-    };
-    auto is_upper = [](char c) { return c >= 'A' && c <= 'Z'; };
-    auto is_lower = [](char c) { return c >= 'a' && c <= 'z'; };
-    auto is_digit = [](char c) { return c >= '0' && c <= '9'; };
-    auto lower_eq = [&](std::string_view w, std::string_view lit) {
-        if (w.size() != lit.size()) return false;
-        for (std::size_t i = 0; i < w.size(); ++i) {
-            char a = w[i];
-            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
-            if (a != lit[i]) return false;
-        }
-        return true;
-    };
-
-    // Emit one word, title-cased, with these refinements:
-    //   • a word that's ALREADY an all-caps acronym (≤4 chars) is kept
-    //     verbatim (GPT, GLM, SQL).
-    //   • a curated set of well-known lowercase acronyms is upper-cased
-    //     (gpt → GPT, glm → GLM) — these read wrong title-cased.
-    //   • a DIGIT-LED word (4o, 8x7b, 70b, 9b, 2.5) keeps every letter
-    //     lowercase — these are version/size runs, not names.
-    //   • otherwise: upper-case the first letter, lower-case the rest
-    //     handled implicitly (we only touch the leading alpha).
-    auto emit_word = [&](std::string& out, std::string_view w) {
-        if (w.empty()) return;
-        bool all_caps = true, has_alpha = false;
-        for (char c : w) {
-            if (is_alpha(c)) { has_alpha = true; if (!is_upper(c)) all_caps = false; }
-        }
-        if (has_alpha && all_caps && w.size() <= 4) {
-            out.append(w);                       // GPT / GLM / SQL acronym
-            return;
-        }
-        if (lower_eq(w, "gpt") || lower_eq(w, "glm") || lower_eq(w, "sql") ||
-            lower_eq(w, "tts")  || lower_eq(w, "vl")) {
-            for (char c : w) out.push_back(
-                is_lower(c) ? static_cast<char>(c - 'a' + 'A') : c);
-            return;
-        }
-        // Digit-led word: version/size run — keep letters lowercase.
-        if (is_digit(w.front())) {
-            for (char c : w) out.push_back(
-                is_upper(c) ? static_cast<char>(c - 'A' + 'a') : c);
-            return;
-        }
-        // OpenAI o-series reasoning models (o1 / o3 / o4 / o4-mini): a
-        // lone 'o' followed by a digit is conventionally lowercase.
-        if (w.size() >= 2 && (w[0] == 'o' || w[0] == 'O') && is_digit(w[1])) {
-            out.push_back('o');
-            out.append(w.substr(1));
-            return;
-        }
-        bool cased = false;
-        for (char c : w) {
-            if (!cased && is_lower(c)) { c = static_cast<char>(c - 'a' + 'A'); cased = true; }
-            else if (is_alpha(c))      { cased = true; }
-            out.push_back(c);
-        }
-    };
-
-    std::string out;
-    out.reserve(id.size() + tag.size() + 1);
-    std::size_t w0 = 0;
-    for (std::size_t i = 0; i <= id.size(); ++i) {
-        const bool boundary =
-            (i == id.size() || id[i] == '-' || id[i] == '_' || id[i] == ' ');
-        if (!boundary) continue;
-        if (i > w0) {
-            if (!out.empty()) out.push_back(' ');
-            emit_word(out, id.substr(w0, i - w0));
-        }
-        w0 = i + 1;
-    }
-    if (out.empty()) out = std::string{id};   // pathological all-delim id
-
-    if (!tag.empty()) {
-        out.push_back(' ');
-        out.append(tag);
-    }
-    return out;
+std::string model_display_label_qualified(std::string_view id,
+                                          std::string_view display_name) {
+    // Same label, prefixed with the routing namespace when the id carries
+    // one. For the picker's collision case only: a gateway fronting several
+    // backends namespaces by LANE (`dgpu/x` on the discrete GPU,
+    // `utils/x` on CPU), and those decode to the same label.
+    return model_name::decode(id, display_name).qualified();
 }
 
 std::string timestamp_hh_mm(std::chrono::system_clock::time_point tp) {
@@ -280,13 +209,169 @@ std::string utf8_encode(char32_t cp) {
     return out;
 }
 
+std::string context_window_label(int tokens) {
+    if (tokens <= 0) return "auto";
+    if (tokens >= 1'000'000) {
+        std::string s = std::to_string(tokens / 1'000'000) + "M";
+        if (tokens % 1'000'000 != 0) s += "+";
+        return s;
+    }
+    if (tokens >= 1000) return std::to_string(tokens / 1000) + "k";
+    return std::to_string(tokens);
+}
+
+std::string context_override_key(std::string_view provider_id,
+                                std::string_view model_id) {
+    // Tab-separated, matching the recent-models MRU on disk. A model id can
+    // contain '/' (openrouter) and ':' (ollama), so a tab is the one
+    // separator no id carries.
+    std::string k;
+    k.reserve(provider_id.size() + model_id.size() + 1);
+    k.append(provider_id);
+    k.push_back('\t');
+    k.append(model_id);
+    return k;
+}
+
+int max_context_tokens_from_env() noexcept {
+    const char* env = std::getenv("AGENTTY_MAX_CONTEXT_TOKENS");   // launch-env: read once by read_launch_env
+    if (!env || !*env) return 0;
+    char* end = nullptr;
+    const long v = std::strtol(env, &end, 10);
+    if (end && *end == '\0' && v > 0 && v <= std::numeric_limits<int>::max())
+        return static_cast<int>(v);
+    return 0;
+}
+
+int resolve_context_window(std::string_view provider_id,
+                           std::string_view model_id,
+                           int advertised,
+                           const store::Settings& settings,
+                           int env_max) noexcept {
+    // FIVE rungs, strongest evidence first. The ordering is the whole design,
+    // so it is stated here rather than inferred from the code below.
+    //
+    //   1. user override        per-model, they configured the gateway
+    //   2. live advertised      the API is TRUTH — only it can 400 on overflow
+    //   3. models.dev           a real declaration for 7824 models
+    //   4. id inference         Claude/GPT families, [1m] suffix
+    //   5. env / 200k default   nothing is known
+    //
+    // Rungs 2-4 are AUTOMATIC and cover ~95% of what agentty ships: measured
+    // against the live catalogs, openrouter declares a window for 368/368
+    // models, google 39/39, anthropic 14/14, openai 43/48, xai 12/12. The
+    // manual rungs exist for the case no catalog can reach — a private
+    // gateway serving an id nobody has published — and should be rare enough
+    // that most users never meet one.
+
+    // 1. The user's override wins outright. They configured the gateway;
+    //    nothing we can infer is better evidence than that.
+    try {
+        const auto it =
+            settings.context_overrides.find(context_override_key(provider_id, model_id));
+        if (it != settings.context_overrides.end() && it->second > 0)
+            return it->second;
+    } catch (...) {
+        // A lookup must never take down a turn; fall through to inference.
+    }
+
+    // 2. What the endpoint actually told us, from a probe or a /v1/models
+    //    row. This outranks every static source and always will: the same
+    //    model name behind two gateways can be served with two different
+    //    windows, only the gateway knows which applies to the request we are
+    //    about to send, and only the gateway can reject us for overflowing
+    //    it. Third-party metadata describing the model in general cannot
+    //    overrule the host describing THIS deployment.
+    if (advertised > 0) return advertised;
+
+    // 3. models.dev's declaration. The rung that makes non-Claude models
+    //    honest.
+    //
+    //    from_id() below answers 200k for a known family and 0 otherwise —
+    //    correct for Claude, which is the family it decodes, and wrong for
+    //    almost everything else. Measured against the live snapshot: 2698 of
+    //    7824 models have a real window of 1M or more, and every one of them
+    //    reached this function as 0 and left as the 200k default.
+    //    gemini-2.5-pro (1M), gpt-4.1 (1M), qwen3-coder-plus (1M),
+    //    llama-4-scout (10M) — all understated, all compacting several times
+    //    sooner than they need to.
+    //
+    //    Scoped by provider first, because the same bare id is genuinely
+    //    served at different sizes by different hosts; a cross-provider
+    //    disagreement poisons the shared key to "no declaration" rather than
+    //    letting one host's figure bleed onto another's.
+    //
+    //    BELOW the live advertisement and ABOVE the id guess, which is
+    //    exactly what it is: better than a guess, worse than the truth.
+    if (const int w = catalog_context_window_for(model_id, provider_id); w > 0)
+        return w;
+    //    Endpoint-origin declarations: the CUSTOM-HOST seam. A session's
+    //    provider id is the endpoint spec itself, which the scoped lookup
+    //    above can never resolve — but models.dev declares entries by api
+    //    URL, so the same declaration is reachable keyed by origin. Port
+    //    is a user definition, not identity (loopback entries live at
+    //    whatever port the user picked); the second qualifier between the
+    //    several same-host entries is the model id itself, with
+    //    disagreement → no claim. Only consulted here, after the scoped
+    //    hit, because a preset's own identity outranks its URL's.
+    {
+        std::uint16_t port = 0;
+        const std::string host =
+            context_endpoint_origin(provider_id, port);
+        if (!host.empty())
+            if (const int w = endpoint_context_window_for(model_id, host,
+                                                          port);
+                w > 0)
+                return w;
+    }
+    if (int w = catalog_context_window_for(model_id); w > 0)
+        return w;
+
+    // 4. The id. Claude/GPT families are known, `[1m]` forces the wide
+    //    window, unknown families report 0.
+    if (const int w = ModelCapabilities::from_id(model_id).context_window(); w > 0)
+        return w;
+
+    // 5. An explicit floor for the unknowable case, then the conservative
+    //    default.
+    //
+    //    AGENTTY_MAX_CONTEXT_TOKENS is the escape hatch for a private
+    //    gateway: an id no catalog has published, served by a host that
+    //    advertises nothing. Every serious client keeps one of these because
+    //    discovery provably cannot cover that case — Zed requires max_tokens
+    //    in settings.json for OpenAI-compatible endpoints, Claude Code has
+    //    CLAUDE_CODE_MAX_CONTEXT_TOKENS. The spelling here deliberately
+    //    mirrors Claude Code's so it is guessable by anyone who has hit this
+    //    before.
+    //
+    //    LAST, not first: it is global, so a session that reaches several
+    //    models would otherwise have one number applied to all of them. It
+    //    only speaks when nothing better did.
+    //    Read once at launch (Model::Env::max_context_tokens); bad input
+    //    parses to 0, i.e. unset.
+    if (env_max > 0) return env_max;
+
+    // Nothing is known. Stay conservative: an over-estimate fails the turn
+    // on the wire, an under-estimate only compacts sooner than it had to.
+    return kDefaultContextWindow;
+}
+
+void bake_context_window(ModelInfo& row,
+                         std::string_view provider_id,
+                         const store::Settings& settings,
+                         int env_max) noexcept {
+    // The row's current value IS the advertisement (0 = nothing reported),
+    // so feed it in as rung 2 and take whatever the ladder returns.
+    row.context_window =
+        resolve_context_window(provider_id, row.id.value,
+                               row.context_window, settings, env_max);
+}
+
 int context_max_for_model(std::string_view model_id) noexcept {
-    // ModelCapabilities owns the model-id parsing; this just consumes
-    // the typed flag. If new models with different windows ship,
-    // extend ModelCapabilities or branch on caps.family/generation
-    // here rather than re-introducing substring sniffing.
-    return ModelCapabilities::from_id(model_id).extended_context_1m
-         ? 1'000'000 : 200'000;
+    // The id-only path, for the call sites that have no catalog or settings
+    // in hand. Prefer resolve_context_window() wherever both are available.
+    const int w = ModelCapabilities::from_id(model_id).context_window();
+    return w > 0 ? w : kDefaultContextWindow;
 }
 
 int utf8_prev(std::string_view s, int byte_pos) noexcept {
@@ -325,6 +410,81 @@ int chip_next(std::string_view s, int byte_pos) noexcept {
         return byte_pos + static_cast<int>(len);
     }
     return utf8_next(s, byte_pos);
+}
+
+namespace {
+// Natural three-way compare of two labels: split each into alternating
+// non-digit / digit chunks and compare chunk-by-chunk — digit chunks as
+// INTEGERS (so "10" > "2"), non-digit chunks case-folded lexically. The
+// leading non-digit chunk is the family; the first numeric chunk is the
+// generation, etc. Returns <0 / 0 / >0.
+[[nodiscard]] int natural_cmp(std::string_view a, std::string_view b) noexcept {
+    auto lower = [](char c) -> char {
+        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    };
+    std::size_t i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+        const bool da = std::isdigit(static_cast<unsigned char>(a[i]));
+        const bool db = std::isdigit(static_cast<unsigned char>(b[j]));
+        if (da && db) {
+            // Compare digit runs as integers: skip leading zeros, then
+            // longer run wins; equal length → lexical over the digits.
+            std::size_t ia = i, jb = j;
+            while (ia < a.size() && a[ia] == '0') ++ia;
+            while (jb < b.size() && b[jb] == '0') ++jb;
+            std::size_t ea = ia; while (ea < a.size() && std::isdigit((unsigned char)a[ea])) ++ea;
+            std::size_t eb = jb; while (eb < b.size() && std::isdigit((unsigned char)b[eb])) ++eb;
+            const std::size_t la = ea - ia, lb = eb - jb;
+            if (la != lb) return la < lb ? -1 : 1;
+            for (std::size_t k = 0; k < la; ++k)
+                if (a[ia + k] != b[jb + k])
+                    return a[ia + k] < b[jb + k] ? -1 : 1;
+            // advance past the FULL digit runs (including the zeros)
+            i = ea; j = eb;
+            while (i < a.size() && std::isdigit((unsigned char)a[i])) ++i;   // no-op after ea
+            while (j < b.size() && std::isdigit((unsigned char)b[j])) ++j;
+        } else if (da != db) {
+            // A number sorts before letters at the same position so
+            // "gpt-4" and "gpt-4o" group before "gpt-image".
+            return da ? -1 : 1;
+        } else {
+            const char ca = lower(a[i]), cb = lower(b[j]);
+            if (ca != cb) return ca < cb ? -1 : 1;
+            ++i; ++j;
+        }
+    }
+    if (i < a.size()) return 1;
+    if (j < b.size()) return -1;
+    return 0;
+}
+
+// The leading non-digit run, case-folded — the "family" ("claude sonnet",
+// "gpt", "gemini"). Trailing separators are trimmed so "gpt-" == "gpt".
+[[nodiscard]] std::string family_of(std::string_view s) noexcept {
+    std::string out;
+    for (char c : s) {
+        if (std::isdigit(static_cast<unsigned char>(c))) break;
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    while (!out.empty() && (out.back() == ' ' || out.back() == '-'
+                            || out.back() == '_' || out.back() == '.'))
+        out.pop_back();
+    return out;
+}
+}  // namespace
+
+bool model_order_less(std::string_view a, std::string_view b) noexcept {
+    // 1. Family ASCENDING (all Sonnets together, alphabetical across
+    //    families) — the categorized look.
+    const std::string fa = family_of(a), fb = family_of(b);
+    if (fa != fb) return fa < fb;
+    // 2. Within a family, NEWEST FIRST: natural compare, DESCENDING, so
+    //    the higher version number floats to the top.
+    const int c = natural_cmp(a, b);
+    if (c != 0) return c > 0;
+    // 3. Fully equal under natural compare (e.g. "latest" vs a dated
+    //    alias of the same model) — raw byte order for a stable result.
+    return a < b;
 }
 
 } // namespace agentty::ui

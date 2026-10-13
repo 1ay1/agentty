@@ -1,0 +1,242 @@
+// subagent_pin_test — a pinned Smart Mode slot must be honoured by the FIRST
+// delegation, not only after a successful model-catalog fetch.
+//
+// The bug (reported against GitHub Copilot): the user pins Implementation to a
+// specific model, Smart Mode is on, and the first `task` subagent nonetheless
+// dispatches on a completely different model — one the provider may not even
+// serve on that endpoint (a gpt-5.x-codex id that only the Responses API
+// accepts), so the delegation 400s.
+//
+// Root cause: the subagent router keeps its own process-global snapshot of the
+// Smart Mode config (tools::subagent::Config::smart), because `task` runs on a
+// worker thread with no access to the reducer's Model. main() calls install()
+// with a DEFAULT-CONSTRUCTED RoleConfig (enabled=false, no slots) and init()
+// rehydrates m.d.smart from settings.json without ever pushing it down. Only
+// two paths call set_smart():
+//
+//   1. persist_settings()  — fires when the user edits Smart Mode this session
+//   2. the ModelsLoaded reducer arm — fires only on a SUCCESSFUL fetch
+//
+// So a user whose pins are already saved from a previous session, and whose
+// catalog fetch fails / returns empty / is superseded by a provider switch
+// (all three are early-returns before set_smart), delegates with
+// enabled=false — i.e. the pin is silently ignored and the tier auto-router
+// picks whatever it likes.
+//
+// This test drives the real seam: install a config the way main() does, then
+// assert resolution honours the pin.
+
+#include <string>
+#include <vector>
+
+#include "agtest.hpp"
+
+#include "agentty/domain/smart_mode.hpp"
+#include "agentty/tool/subagent.hpp"
+
+using namespace agentty;
+
+namespace {
+
+ModelInfo mi(std::string id, int ctx = 200000) {
+    ModelInfo m;
+    m.id = ModelId{std::move(id)};
+    m.context_window = ctx;
+    return m;
+}
+
+// The agent types the router resolves for. `Implementation` is the role
+// coder/tester/general workers map to — the one in the bug report.
+smart::RoleConfig pinned_impl(const std::string& model) {
+    smart::RoleConfig cfg;
+    cfg.enabled = true;
+    cfg.implementation.model = model;
+    cfg.implementation.set   = true;
+    return cfg;
+}
+
+} // namespace
+
+TEST_CASE("subagent honours a pinned Smart Mode slot from the first turn") {
+    const std::vector<ModelInfo> candidates = {
+        mi("gpt-5.3-codex"), mi("luna-2"), mi("gpt-4o-mini"),
+    };
+
+    // ── The resolver itself is correct: a pin wins outright ──────────
+    // (Guards the contract the fix depends on — if this ever regresses,
+    // pushing the config down would not be enough.)
+    {
+        const auto cfg = pinned_impl("luna-2");
+        const auto p = smart::resolve_role(smart::ModelRole::Implementation,
+                                           "gpt-5.3-codex", Effort::None,
+                                           candidates, cfg);
+        CHECK(p.model == "luna-2",
+              "resolve_role: an explicit slot pin beats the parent model");
+    }
+
+    // ── THE BUG: main()'s install() leaves `smart` default-constructed ──
+    // Reproduces the reported failure without any UI: install exactly the way
+    // main() does, then ask the router what a worker would run on.
+    {
+        tools::subagent::install(tools::subagent::Config{
+            .model = "gpt-5.3-codex",
+            .installed = true,
+        });
+        tools::subagent::set_candidates(::agentty::IoAccess::grant(), candidates);
+
+        const auto cfg = tools::subagent::current();
+        CHECK(!cfg.smart.enabled,
+              "precondition: install() alone leaves Smart Mode off in the "
+              "subagent router — this is what the fix must close");
+
+        // With enabled=false the pin cannot be seen: every role passes through
+        // to the parent model. That is the observed bug — the worker runs on
+        // gpt-5.3-codex (Responses-only on Copilot) instead of the pin.
+        const auto p = smart::resolve_role(smart::ModelRole::Implementation,
+                                           cfg.model, Effort::None,
+                                           cfg.candidates, cfg.smart);
+        CHECK(p.model == "gpt-5.3-codex",
+              "with a stale RoleConfig the pin is ignored (the bug)");
+    }
+
+    // ── THE FIX: startup pushes the rehydrated config down ───────────
+    {
+        tools::subagent::set_smart(::agentty::IoAccess::grant(), pinned_impl("luna-2"));
+        const auto cfg = tools::subagent::current();
+        REQUIRE(cfg.smart.enabled);
+
+        const auto p = smart::resolve_role(smart::ModelRole::Implementation,
+                                           cfg.model, Effort::None,
+                                           cfg.candidates, cfg.smart);
+        CHECK(p.model == "luna-2",
+              "after set_smart the first delegation honours the pin");
+        CHECK(cfg.smart.implementation.set, "the slot survived the push-down");
+    }
+
+    // ── The pin must survive a FAILED catalog fetch ──────────────
+    // The ModelsLoaded arm returns early on error / empty / provider mismatch,
+    // so it must not be the only thing keeping the router in sync. Candidates
+    // going empty (a failed fetch) must not resurrect the auto-router.
+    {
+        tools::subagent::set_candidates(::agentty::IoAccess::grant(), {});
+        const auto cfg = tools::subagent::current();
+        const auto p = smart::resolve_role(smart::ModelRole::Implementation,
+                                           cfg.model, Effort::None,
+                                           cfg.candidates, cfg.smart);
+        CHECK(p.model == "luna-2",
+              "an empty/failed catalog must not discard the user's pin");
+    }
+
+    // ── A pin is honoured even for a model absent from `candidates` ───
+    // The pinned id is the user's explicit instruction, not a ranking input:
+    // resolve_role must NOT fall back to the auto-router just because the
+    // catalog fetch hasn't landed (or landed without that id). This is the
+    // exact shape of the Copilot report — pin present, catalog incomplete.
+    {
+        tools::subagent::set_smart(::agentty::IoAccess::grant(), pinned_impl("luna-2"));
+        tools::subagent::set_candidates(::agentty::IoAccess::grant(), {mi("gpt-5.3-codex")});   // pin absent
+        const auto cfg = tools::subagent::current();
+        const auto p = smart::resolve_role(smart::ModelRole::Implementation,
+                                           cfg.model, Effort::None,
+                                           cfg.candidates, cfg.smart);
+        CHECK(p.model == "luna-2",
+              "a pin outranks the candidate list — it is an instruction, "
+              "not a hint");
+    }
+
+    // ── An UNPINNED slot still auto-routes (the fix isn't a pin-everything) ──
+    {
+        smart::RoleConfig cfg;
+        cfg.enabled = true;              // on, but no slot pinned
+        tools::subagent::set_smart(::agentty::IoAccess::grant(), cfg);
+        tools::subagent::set_candidates(::agentty::IoAccess::grant(), candidates);
+        const auto c = tools::subagent::current();
+        const auto p = smart::resolve_role(smart::ModelRole::Utility,
+                                           "gpt-5.3-codex", Effort::None,
+                                           c.candidates, c.smart);
+        CHECK(!p.model.empty(),
+              "an unpinned role still resolves through the auto-router");
+        CHECK(p.effort == Effort::None,
+              "utility workers never carry a reasoning budget");
+    }
+
+    // ── install() can carry the config, for the paths with no Model ───
+    // `agentty run` and `agentty acp` never construct a Model, so they never
+    // reach init()'s push-down — main() must seed Smart Mode at install time
+    // or headless delegation silently ignores every pin. Headless runs are
+    // all delegation, so this is where role routing matters most.
+    {
+        tools::subagent::install(tools::subagent::Config{
+            .model = "gpt-5.3-codex",
+            .installed = true,
+            .smart = pinned_impl("luna-2"),
+        });
+        tools::subagent::set_candidates(::agentty::IoAccess::grant(), candidates);
+        const auto cfg = tools::subagent::current();
+        CHECK(cfg.smart.enabled,
+              "install() carries Smart Mode for the Model-less entry points");
+        const auto p = smart::resolve_role(smart::ModelRole::Implementation,
+                                           cfg.model, Effort::None,
+                                           cfg.candidates, cfg.smart);
+        CHECK(p.model == "luna-2",
+              "headless / ACP delegation honours the pinned slot");
+    }
+
+    // ── A pin does NOT cross providers ──────────────────────────────
+    // The mirror image of the case above, and a real dispatch bug: a model id
+    // is only meaningful to the endpoint that serves it. The picker refuses to
+    // SELECT a cross-provider row, but a pin PERSISTS to settings.json — so a
+    // pin made on Anthropic was silently replayed after the user switched to
+    // another provider, sending an id that provider never heard of. Every turn
+    // (and every delegation) 400s until the user finds the Smart Mode overlay.
+    //
+    // The fix records the provider ON the pin and scopes replay to it. It is
+    // deliberately NOT a catalog-membership test — that would break the
+    // empty/stale-catalog cases asserted above.
+    {
+        smart::RoleConfig cfg = pinned_impl("claude-opus-4-5");
+        cfg.implementation.provider = "anthropic";
+
+        // Same provider → the pin applies, exactly as before.
+        const auto same = smart::resolve_role(
+            smart::ModelRole::Implementation, "claude-opus-4-5", Effort::None,
+            candidates, cfg, "anthropic");
+        CHECK(same.model == "claude-opus-4-5",
+              "a pin still applies under the provider it was made on");
+
+        // Different provider → the foreign id must NOT reach the wire.
+        const auto other = smart::resolve_role(
+            smart::ModelRole::Implementation, "gpt-5.3-codex", Effort::None,
+            candidates, cfg, "openai");
+        CHECK(other.model != "claude-opus-4-5",
+              "an Anthropic pin is never dispatched to another provider");
+        CHECK(!other.model.empty(),
+              "a foreign pin falls back to a real model, never to empty");
+
+        // An UNKNOWN-provenance pin (settings written before pins were
+        // provider-scoped) stays honoured everywhere — upgrading users must
+        // not silently lose their pins.
+        smart::RoleConfig legacy = pinned_impl("luna-2");   // .provider == ""
+        const auto up = smart::resolve_role(
+            smart::ModelRole::Implementation, "gpt-5.3-codex", Effort::None,
+            candidates, legacy, "openai");
+        CHECK(up.model == "luna-2",
+              "a pre-upgrade pin with no recorded provider is still honoured");
+
+        // Likewise when the CALLER doesn't know the provider (empty arg):
+        // strictly fewer surprises than before, never more.
+        const auto unknown_caller = smart::resolve_role(
+            smart::ModelRole::Implementation, "gpt-5.3-codex", Effort::None,
+            candidates, cfg, "");
+        CHECK(unknown_caller.model == "claude-opus-4-5",
+              "an unknown active provider preserves the old honour-always path");
+
+        // The subagent entry point scopes identically — delegations were the
+        // reported symptom, so assert the worker path, not just the main turn.
+        const auto worker = smart::resolve_subagent_role(
+            smart::ModelRole::Implementation, "gpt-5.3-codex", Effort::None,
+            candidates, cfg, "openai");
+        CHECK(worker.model != "claude-opus-4-5",
+              "a delegation never inherits a foreign-provider pin either");
+    }
+}

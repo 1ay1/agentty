@@ -41,6 +41,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>   // setenv
 #include <thread>
 
 #include <maya/widget/markdown.hpp>   // maya::StreamingMarkdown
@@ -54,6 +55,7 @@ using agentty::Message;
 using agentty::Role;
 using agentty::app::AgenttyApp;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static int g_checks = 0, g_failures = 0;
 #define CHECK(cond, msg)                                                    \
     do {                                                                    \
@@ -152,31 +154,51 @@ static void test_freeze_window_exists_and_is_now_driven() {
     //     Across a 16 ms step that parity does NOT flip → hash static →
     //     frame gated away → FREEZE. Demonstrate the parity is unchanged.
     {
-        const auto now_ms = []() {
-            return std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-        };
+        // Demonstrate the pre-fix gate algebra WITHOUT reading the real wall
+        // clock: on a live runner the 16 ms sleep can straddle a 265 ms
+        // boundary and flip the parity, making this check flaky (that was a
+        // TEST bug, not a product regression). Instead pick a reference time
+        // that is phase-aligned to the START of a blink half-period, so a
+        // 16 ms step provably stays inside the same bucket. The point stands:
+        // the OLD ~265 ms caret bucket does not advance across a 16 ms reveal
+        // step, so the frame was gated away.
         const std::int64_t kBlinkHalfMs = 265;
-        const auto p0 = (now_ms() / kBlinkHalfMs) & 1;
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
-        const auto p1 = (now_ms() / kBlinkHalfMs) & 1;
+        const std::int64_t t0 = 1000 * kBlinkHalfMs;  // aligned to bucket edge
+        const std::int64_t t1 = t0 + 16;              // 16 ms later
+        const auto p0 = (t0 / kBlinkHalfMs) & 1;
+        const auto p1 = (t1 / kBlinkHalfMs) & 1;
         CHECK(p0 == p1,
-              "pre-fix regime: caret parity flipped within 16 ms — pick a "
-              "different step; the point is the OLD bucket was ~265 ms so a "
-              "16 ms reveal step was gated away");
+              "pre-fix regime: caret parity flipped within 16 ms — the OLD "
+              "bucket was ~265 ms so a 16 ms reveal step was gated away");
     }
 
-    // (B) POST-FIX: the real visual_hash must ADVANCE across a 16 ms step
+    // (B) POST-FIX: the real visual_hash must ADVANCE across a reveal step
     //     while the reveal is in progress. This is the fix working: the
     //     reveal bucket (16 ms) is now keyed on !live_tail_reveal_settled,
     //     so each armed frame actually renders and the typewriter glides.
+    //
+    //     The reveal bucket is floor(now_ms / 16). A bare 16 ms sleep is
+    //     exactly ONE bucket wide, so under scheduler jitter (an early
+    //     wake, or two reads that happen to land inside the same bucket)
+    //     the two floors can be equal and the advance is missed — a flaky
+    //     TEST bug, not a product regression. Sample the real hash in a
+    //     short loop that sleeps in sub-bucket steps until wall-clock has
+    //     provably advanced past a full bucket boundary; the moment it
+    //     crosses, the hash MUST move. Bounded so a genuinely dead gate
+    //     still fails loudly instead of spinning.
     const std::uint64_t h0 = AgenttyApp::visual_hash(m);
-    std::this_thread::sleep_for(std::chrono::milliseconds(16));
-    const std::uint64_t h1 = AgenttyApp::visual_hash(m);
-    CHECK(h0 != h1,
-          "FIX BROKEN: visual_hash did NOT advance across a 16 ms step "
-          "while a reveal was in progress — the freeze window is still "
-          "dead; the typewriter will stall until a caret flip / keypress");
+    bool advanced = false;
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        if (AgenttyApp::visual_hash(m) != h0) { advanced = true; break; }
+    }
+    CHECK(advanced,
+          "FIX BROKEN: visual_hash did NOT advance across a reveal-bucket "
+          "boundary while a reveal was in progress — the freeze window is "
+          "still dead; the typewriter will stall until a caret flip / "
+          "keypress");
 }
 
 static void test_settled_turn_is_hash_stable() {
@@ -195,21 +217,122 @@ static void test_settled_turn_is_hash_stable() {
           "after finish(): live_tail_reveal_settled must be true — the "
           "widget dropped live_/reveal/finalize/parse");
 
-    // With the reveal settled AND phase Idle, the hash must be stable
-    // across a 16 ms step — a settled thread does ZERO idle renders.
-    const std::uint64_t h0 = AgenttyApp::visual_hash(m);
-    std::this_thread::sleep_for(std::chrono::milliseconds(16));
-    const std::uint64_t h1 = AgenttyApp::visual_hash(m);
-    CHECK(h0 == h1,
-          "IDLE REGRESSION: visual_hash advanced across 16 ms on a fully "
+    // With the reveal settled AND phase Idle, the ONLY time term the hash
+    // carries is the composer caret-blink PARITY (one flip per 265 ms).
+    // Across a short real-clock step that parity must NOT change — the
+    // settled turn does ZERO fast idle renders. A single ±16 ms sample can,
+    // however, straddle a 265 ms parity boundary purely by where the wall
+    // clock happens to sit (the same clock-alignment hazard check (C)
+    // documents), which would flip the hash for a reason that has nothing
+    // to do with a reveal leak — a flaky TEST bug. Take several closely
+    // spaced samples well inside one parity half-period: if the fast reveal
+    // bucket were leaking, the 16 ms bucket would flip repeatedly across the
+    // samples; a settled turn holds a single value, or at most transitions
+    // ONCE if the sampling window happens to straddle a 265 ms parity edge.
+    // So the tell is the number of *transitions*: 0 (or 1, one boundary
+    // crossing) is settled; many transitions is a leak.
+    std::uint64_t prev = AgenttyApp::visual_hash(m);
+    int transitions = 0;
+    for (int i = 0; i < 8; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        const std::uint64_t h = AgenttyApp::visual_hash(m);
+        if (h != prev) { ++transitions; prev = h; }
+    }
+    CHECK(transitions <= 1,
+          "IDLE REGRESSION: visual_hash transitioned repeatedly across a "
           "settled idle turn — the fast reveal bucket is leaking and the "
           "loop will burn CPU at idle");
 }
 
+}  // namespace (fold)
+
+static Model reasoning_window_model() {
+    Model m;
+    m.d.show_reasoning = true;
+
+    Message a; a.role = Role::Assistant;
+    a.id = agentty::MessageId{"reason1"};
+    // PURE-REASONING window: the answer body has NOT started (text +
+    // streaming_text + pending_stream all empty), but the reasoning channel
+    // (msg.thinking) is streaming. This is the exact state the user hit where
+    // the "Thinking" typewriter froze mid-stream.
+    a.thinking =
+        "Let me work through this. First I'll pull a ranked map of the repo, "
+        "then check the directory structure, then read the key files like the "
+        "README so I understand how the whole thing fits together before I act.";
+    m.d.current.messages.push_back(std::move(a));
+
+    // Phase STREAMING (reasoning arrives during the streaming phase in
+    // agentty — there is no separate Thinking phase).
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+
+    // Prime the sibling REASONING slot (id + "#r") with a widget mid-reveal,
+    // exactly as cached_markdown_for(MdView::Reasoning) does.
+    const auto rid = agentty::MessageId{
+        m.d.current.messages.back().id.value + "#r"};
+    auto& cache = m.ui.view_cache.message_md_live(m.d.current.id, rid);
+    cache.streaming = std::make_shared<maya::StreamingMarkdown>();
+    cache.streaming->set_reveal_fx(true);
+    cache.streaming->set_reveal_pacing(/*floor_cps=*/45.0, /*drain_secs=*/0.40);
+    cache.streaming->set_content(m.d.current.messages.back().thinking);
+    cache.streaming->set_live(true);
+    (void)cache.streaming->build();          // seat the reveal cursor at 0
+    (void)cache.streaming->build();          // one frame; still mid-glide
+    return m;
+}
+
+static void test_reasoning_reveal_drives_the_hash() {
+    std::printf("reasoning window: pure-thinking reveal must advance the hash\n");
+    Model m = reasoning_window_model();
+
+    // Precondition: the reasoning reveal is genuinely mid-glide, so the frame
+    // is NOT settled. If this trips, the widget priming above is wrong.
+    CHECK(!agentty::app::detail::live_tail_reveal_settled(m),
+          "precondition: reasoning reveal in progress (live_tail_reveal_settled "
+          "must be false while the #r slot is animating)");
+
+    // THE FIX: while the model is only reasoning (no answer bytes), the
+    // reasoning reveal must still advance visual_hash so armed frames paint
+    // and the typewriter glides. Before the fix, revealing_text/draining were
+    // both keyed off the ANSWER channel only, the hash fell to the 265 ms
+    // caret bucket, and the reasoning froze until a keypress.
+    const std::uint64_t h0 = AgenttyApp::visual_hash(m);
+    bool advanced = false;
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        if (AgenttyApp::visual_hash(m) != h0) { advanced = true; break; }
+    }
+    CHECK(advanced,
+          "FIX BROKEN: visual_hash did NOT advance while reasoning was "
+          "streaming with no answer body yet — the reasoning typewriter "
+          "freezes until a caret flip / keypress");
+}
+
 int main() {
+    // Pin the sync-output classification so the reveal render bucket is the
+    // deterministic 16 ms (60 fps) cadence this probe's ±16 ms step
+    // assertions are written against. On a NON-sync terminal the bucket is
+    // 100 ms — correct behaviour (see program.hpp: 60 fps only floods a
+    // progressively-painting terminal like Termux), but a 16 ms step
+    // wouldn't reliably cross a 100 ms bucket boundary, making these timing
+    // checks flaky. The gate MECHANISM under test (armed reveal frames
+    // advance the hash; settled turns go quiet) is identical in both modes
+    // — only the period differs — so forcing sync keeps the probe
+    // deterministic without weakening what it proves.
+    //
+    // The bucket's INPUTS are pinned separately by reveal_bucket_test: it
+    // must depend on sync support alone, never on whether the session is
+    // remote. It used to read streaming_tick_period(), which folds in an
+    // ssh floor, and that made the typewriter chunky over ssh for a
+    // bandwidth reason the eye cannot see.
+    setenv("MAYA_FORCE_SYNC", "1", /*overwrite=*/1);
+
     std::printf("reveal_freeze_gate_probe\n");
     test_freeze_window_exists_and_is_now_driven();
     test_settled_turn_is_hash_stable();
+    test_reasoning_reveal_drives_the_hash();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     if (g_failures == 0) { std::printf("PASSED\n"); return 0; }
     std::printf("FAILED\n");

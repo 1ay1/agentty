@@ -79,6 +79,7 @@ using agentty::ToolUse;
 using namespace maya;
 using namespace maya::inline_frame;
 
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static int g_failures = 0;
 static int g_checks   = 0;
 
@@ -97,7 +98,7 @@ static Canvas paint_view(const Model& m, int width, int term_h,
     Canvas c(width, 8000, &pool);
     c.clear();
     std::vector<layout::LayoutNode> nodes;
-    maya::render_tree(agentty::ui::view(m), c, pool, maya::theme::dark, nodes,
+    maya::render_tree(agentty::ui::view(m), c, pool, maya::theme::native, nodes,
                       /*auto_height=*/true);
     return c;
 }
@@ -455,13 +456,12 @@ struct Harness {
     // semantics). Without this the harness diverges from production and
     // the freeze frame re-emits the whole turn — but that divergence is
     // ALSO the real bug surface, so we keep both code paths exercised.
-    void apply_trim(maya::Cmd<agentty::Msg>& cmd) {
+    void apply_trim(agentty::Cmd& cmd) {
         if (dead || !synced) return;
-        using Cmd = maya::Cmd<agentty::Msg>;
-        const auto* c = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+        const auto* c = std::get_if<maya::CommitScrollback>(&cmd.inner);
         if (!c) return;
         const int prev_rows = synced->rows();
-        const int safe = std::min(c->rows, std::max(0, prev_rows - term_h));
+        const int safe = std::min(c->debt.rows(), std::max(0, prev_rows - term_h));
         if (safe <= 0) return;
         synced = std::move(*synced).commit(synced->scrollback_marker(safe));
         commits += static_cast<std::size_t>(safe);
@@ -735,6 +735,10 @@ static void run_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"reveal"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -818,6 +822,113 @@ static void run_scenario(int width, int term_h) {
     if (pty_master >= 0) close(pty_master);
 }
 
+// Reasoning (thinking) scenario — the block whose HEADER changes at settle
+// ("✦ Thinking ⠻ · N tok" → "✦ Reasoned · N tokens") and whose spinner
+// animates every frame. A long reasoning overflows the viewport so the
+// header + early thought rows scroll off and COMMIT to native scrollback
+// while live; at settle the block must not rewrite any committed row.
+static void run_reasoning_scenario(int width, int term_h) {
+    setenv("LINES", std::to_string(term_h).c_str(), 1);
+    setenv("COLUMNS", std::to_string(width).c_str(), 1);
+    const int pty_master = install_pty_stdout(width, term_h);
+
+    Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
+    m.d.current.id = agentty::ThreadId{"reason"};
+    m.d.available_models.push_back({});
+    m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
+    m.d.show_reasoning = true;
+    agentty::app::detail::clear_frozen(m);
+
+    Harness h(width, term_h);
+    h.frame(m, "rwelcome");
+
+    {
+        Message u; u.role = Role::User;
+        u.text = "Think hard, then answer: uniq-R-Q.";
+        m.d.current.messages.push_back(std::move(u));
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        h.frame(m, "rsubmit");
+    }
+
+    // Assistant enters the PURE-REASONING phase (no answer text yet).
+    Message a; a.role = Role::Assistant;
+    m.d.current.messages.push_back(std::move(a));
+    m.s.phase = agentty::phase::Streaming{agentty::phase::Active{}};
+    for (int f = 0; f < 6; ++f) { tick(); h.frame(m, "ropen" + std::to_string(f)); }
+
+    // Stream a long reasoning body that overflows the viewport so the header
+    // + early thoughts scroll off the top and commit to scrollback.
+    auto& back = m.d.current.messages.back();
+
+    // CLIPPING ORACLE (distinct from the R1-R6 duplication oracle): the R
+    // checks prove no row is ever REWRITTEN, but they are blind to a row
+    // that is never emitted at all — the original "reasoning hides rows"
+    // symptom (a fixed-height reasoning window capping the block). Guard it
+    // directly: every one of the 60 thought markers MUST appear literally in
+    // the terminal transcript (native scrollback ++ on-screen) at some frame.
+    // A height cap would render only a trailing window, so the middle markers
+    // would never reach the terminal and `seen[d]` would stay false.
+    std::vector<bool> seen(60, false);
+    auto scan_terminal = [&]() {
+        const auto tr = h.emu.transcript();
+        for (int d = 0; d < 60; ++d) {
+            if (seen[d]) continue;
+            const std::string marker =
+                "Thought " + std::to_string(d)
+                + " (#" + std::to_string(d * 7 + 3) + ")";
+            for (const auto& row : tr)
+                if (row.find(marker) != std::string::npos) { seen[d] = true; break; }
+        }
+    };
+
+    for (int d = 0; d < 60; ++d) {
+        back.thinking +=
+            "\n\nThought " + std::to_string(d)
+            + " (#" + std::to_string(d * 7 + 3) + "): weigh option "
+            + std::to_string(d) + " against constraint-" + std::to_string(d * 2)
+            + " and revise plan-" + std::to_string(d * 3) + ".";
+        tick(); h.frame(m, "rdelta" + std::to_string(d));
+        tick(); h.frame(m, "ranim" + std::to_string(d));
+        scan_terminal();
+        if (h.dead) { if (pty_master >= 0) close(pty_master); return; }
+    }
+
+    // Settle: the answer arrives (flips reasoning live→settled), then idle +
+    // wait for the reveal to drain + freeze — the production gate.
+    {
+        auto& b = m.d.current.messages.back();
+        b.text = "Answer: uniq-R-A.";
+        agentty::app::detail::settle_message_md(m, b);
+        m.s.phase = agentty::phase::Idle{};
+        int guard = 0;
+        do {
+            tick();
+            h.frame(m, "rsettle" + std::to_string(guard));
+            scan_terminal();
+        } while (!agentty::app::detail::live_tail_reveal_settled(m)
+                 && ++guard < 200 && !h.dead);
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto trim = agentty::app::detail::trim_frozen_if_oversized(m);
+        h.apply_trim(trim);
+        h.frame(m, "rfreeze");
+        scan_terminal();
+
+        // No thought row may have been hidden by a height cap.
+        int hidden = 0;
+        for (int d = 0; d < 60; ++d) if (!seen[d]) ++hidden;
+        CHK(hidden == 0,
+            "reasoning CLIPPED: " + std::to_string(hidden)
+            + " of 60 thought rows never reached the terminal (height cap hid"
+            " them) [" + std::to_string(width) + "x"
+            + std::to_string(term_h) + "]");
+    }
+    if (pty_master >= 0) close(pty_master);
+}
+
 // Multi-sub-turn scenario — the screenshot shape: text → ACTIONS panel →
 // continuation text → ACTIONS panel … all inside ONE live (un-frozen)
 // assistant run. When a tool sub-turn lands, the prior text message's
@@ -850,7 +961,7 @@ static ToolUse running_tool(const std::string& tag) {
     ToolUse t;
     auto now = std::chrono::steady_clock::now();
     t.id   = agentty::ToolCallId{"bash_" + tag};
-    t.name = agentty::ToolName{"bash"};
+    t.name = agentty::ToolName{"shell"};
     t.args = nlohmann::json{{"command", "git commit -m " + tag}};
     t.status = ToolUse::Running{now - std::chrono::milliseconds{5}};
     return t;
@@ -899,6 +1010,10 @@ static void run_prior_writecard_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealpw"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -990,6 +1105,10 @@ static void run_multiturn_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealmt"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1077,6 +1196,10 @@ static void run_submit_mid_reveal_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealsub"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1138,23 +1261,24 @@ static void run_submit_mid_reveal_scenario(int width, int term_h) {
     if (pty_master >= 0) close(pty_master);
 }
 
-// Code-block fold scenario — the screenshot shape: "Let me check the
+// Code-block scenario — the screenshot shape: "Let me check the
 // diagram source:" followed by a LONG fenced code block (a mermaid /
-// diagram source) that overflows the viewport. auto_fold_long_blocks
-// folds a >40-line code block to ~1 row THE MOMENT its closing fence
-// commits, WHILE LIVE (turn.cpp). That is a large mid-stream height
-// SHRINK over content that has already overflowed into native
-// scrollback. If maya re-emits the post-fold (short) canvas from the
-// top against the pre-fold (tall) prev_cells, the body lands a second
-// time below the committed copy — the visible duplicate. Reveal_fx is
-// ON, so the live edge is also animating colored SGR onto the rows that
-// scroll off. This is the closest reproduction of the reported bug.
+// diagram source) that overflows the viewport. Auto-fold is DISABLED, so
+// the block renders in FULL at every stage — live, settled and frozen
+// height all agree (no mid-stream fold shrink). This still stresses the
+// reveal/freeze scrollback path over content that has overflowed into
+// native scrollback with reveal_fx ON; the assertions verify no stranded
+// duplicate across the freeze handoff.
 static void run_codeblock_fold_scenario(int width, int term_h) {
     setenv("LINES", std::to_string(term_h).c_str(), 1);
     setenv("COLUMNS", std::to_string(width).c_str(), 1);
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealcb"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1239,6 +1363,10 @@ static void run_toolgrow_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealtg"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1353,6 +1481,10 @@ static void run_trimstorm_scenario(int width, int term_h) {
     const int pty_master = install_pty_stdout(width, term_h);
 
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"revealts"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -1421,6 +1553,8 @@ static void run_trimstorm_scenario(int width, int term_h) {
     }
     if (pty_master >= 0) close(pty_master);
 }
+
+}  // namespace (fold)
 
 int main() {
     // Each scenario dup2's a PTY over STDOUT to give term_dims() real
@@ -1503,6 +1637,18 @@ int main() {
     for (auto s : tall_shapes) {
         if (g_failures) break;
         run_trimstorm_scenario(s.w, s.th);
+    }
+    // Long REASONING that overflows: the ✦ Thinking/Reasoned header + spinner
+    // scroll off + commit while live, then the header flips at settle — must
+    // not rewrite any committed row. Small shapes force the overflow; tall
+    // shapes exercise the no-overflow path.
+    for (auto s : shapes) {
+        if (g_failures) break;
+        run_reasoning_scenario(s.w, s.th);
+    }
+    for (auto s : tall_shapes) {
+        if (g_failures) break;
+        run_reasoning_scenario(s.w, s.th);
     }
     if (saved_stdout >= 0) { dup2(saved_stdout, STDOUT_FILENO); close(saved_stdout); }
     std::fprintf(stderr, "%d checks, %d failures\n", g_checks, g_failures);

@@ -8,13 +8,21 @@
 #include <variant>
 #include <vector>
 
-#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>  // only json signatures below; full type lives in transport.cpp
 
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/catalog.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/provider/prompt.hpp"  // default_system_prompt / default_tools (provider-neutral)
+#include "agentty/provider/provider.hpp"   // provider::ToolSpec, provider::Request, lower_shared
 #include "agentty/runtime/msg.hpp"
+#include "agentty/util/io.hpp"
+
+namespace agentty::provider {
+// Forward-decl: the shared stream-epilogue outcome (stream_epilogue.hpp).
+struct StreamResult;
+}
 
 namespace agentty::provider::anthropic {
 
@@ -27,12 +35,12 @@ using auth::BearerHeader;
 using auth::make_auth_header;
 using auth::is_empty;
 
-struct ToolSpec {
-    std::string name;
-    std::string description;
-    nlohmann::json input_schema;
-    bool eager_input_streaming = false;
-};
+// The tool spec is provider-agnostic: same shape on every wire (name,
+// description, JSON schema, eager-streaming flag). Aliased to the shared
+// provider::ToolSpec rather than re-declared, so the abstract request's tools
+// move straight into an anthropic::Request with no per-field conversion (see
+// provider::lower_shared). One type, one source of truth.
+using ToolSpec = provider::ToolSpec;
 
 struct Request {
     std::string model;
@@ -59,16 +67,22 @@ struct Request {
     // Empty = no thinking (default). Non-empty makes run_stream_sync send
     // adaptive thinking + output_config.effort and replay thinking blocks.
     std::string effort;
+    // Copied from provider::Request: when true AND effort is on, request
+    // VISIBLE thinking (interleaved-thinking beta) so thinking deltas reach
+    // the wire instead of being redacted. See beta_values_for.
+    bool show_reasoning = false;
 };
 
 using EventSink = std::function<void(Msg)>;
 
 // Runs a streaming request synchronously on the calling thread. Each SSE event
-// is dispatched through `sink` as a Msg. Returns when the stream closes.
+// is dispatched through `sink` as a Msg. Returns a StreamResult naming how the
+// turn ended (the terminal Msg is derived from the same classification).
 // `cancel` is polled at frame boundaries; tripping it sends RST_STREAM and
 // returns within ~200 ms with a StreamError("cancelled") if no cleaner
 // terminal event has arrived first.
-void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = {});
+provider::StreamResult run_stream_sync(Request req, EventSink sink,
+                                       http::CancelTokenPtr cancel = {});
 
 // Build the Anthropic-shaped messages array from our Thread.
 [[nodiscard]] nlohmann::json build_messages(const Thread& t);
@@ -79,15 +93,23 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel = 
 [[nodiscard]] std::string messages_json_string(const Thread& t,
                                                bool include_thinking = false);
 
-// Standard system prompt with env info.
-[[nodiscard]] std::string default_system_prompt();
-
-// Tool specs corresponding to our local tool implementations.
-[[nodiscard]] std::vector<ToolSpec> default_tools();
+// default_system_prompt() + default_tools() now live in the provider-neutral
+// prompt.cpp). Re-included here so every existing `transport.hpp` consumer
+// still sees the same public surface — the split is internal.
+// (see agentty/provider/prompt.hpp)
 
 // Fetch available models from Anthropic API. Takes the typed AuthHeader
 // so the model-list endpoint shares the same header-vs-token discipline
 // as the streaming path.
-[[nodiscard]] std::vector<ModelInfo> list_models(const AuthHeader& auth);
+[[nodiscard]] std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth);
+
+// TEST SEAM: drive the SSE event parser directly. Feeds each (event, data)
+// pair through the same dispatch_event() the live on_chunk path uses and
+// returns the exact Msg sequence the reducer would see. Lets a golden test
+// pin the SSE→Msg behavior so the parser can be refactored (e.g. split into
+// its own module) with a byte/shape guarantee — mirrors the ChatGPT /
+// OpenAI providers' parse_sse_for_test.
+[[nodiscard]] std::vector<Msg> parse_sse_for_test(
+    const std::vector<std::pair<std::string, std::string>>& events);
 
 } // namespace agentty::provider::anthropic

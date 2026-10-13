@@ -24,13 +24,64 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
+
+#include "agentty/util/identity.hpp"
 
 namespace agentty::provider {
 
-// Which wire dialect a provider speaks. The runtime branches on this exactly
-// once (when building the concrete Provider); everything else is data.
-enum class Kind : std::uint8_t { Anthropic, OpenAI };
+// ── The two orthogonal axes of a provider ────────────────────────────────
+//
+// `Kind` used to conflate them into one enum, which is why "is this ChatGPT?"
+// had to be re-derived as `kind == OpenAI && label == "chatgpt"` at six sites.
+// They are separated here:
+//
+//   Wire     — the on-the-wire DIALECT (which serializer/parser a turn uses).
+//              This is the ONLY thing the transport layer branches on.
+//   Lifetime — whether the concrete Provider is built once and reused for the
+//              whole process (it holds connection / OAuth-token state) or is a
+//              cheap value rebuilt per call from the active Endpoint.
+//
+// Provider IDENTITY ("chatgpt" vs "groq") is never an enum — it is the row's
+// `id`. Anything that used to switch on identity now reads a capability field
+// off the row (see ProviderDescriptor), so adding a provider is adding a row.
+
+// Which wire dialect a turn is serialized/parsed as. Multiple providers share
+// one dialect (every hosted OpenAI-compat clone speaks OpenAIChat); a provider
+// is special only if it needs a NEW dialect.
+enum class Wire : std::uint8_t {
+    AnthropicMessages,  // Anthropic /v1/messages SSE.
+    OpenAIResponses,    // OpenAI /responses SSE (Codex/ChatGPT + api.openai.com).
+    OpenAIChat,         // OpenAI /chat/completions SSE + Ollama /api/chat NDJSON.
+    Acp,                // external ACP agent subprocess (no HTTP dialect).
+};
+
+// Is the concrete Provider long-lived (owns refreshed tokens / a warm pool, so
+// it is constructed once in main() and reused) or built per call?
+enum class Lifetime : std::uint8_t {
+    PerCall,    // cheap value transport, rebuilt from the active Endpoint.
+    LongLived,  // holds cross-turn state; one instance owned by main().
+};
+
+// `Kind` is retained as a COARSE, derived view of `Wire` for the handful of
+// call sites that only care "Anthropic vs OpenAI-family vs ACP subprocess".
+// It is no longer stored on a row — it is a pure function of Wire — so it can
+// never drift from the dialect. New code should prefer `Wire` + capability
+// fields; `Kind` stays only to keep the migration mechanical.
+enum class Kind : std::uint8_t { Anthropic, OpenAI, ExternalAcp };
+
+[[nodiscard]] constexpr Kind kind_of(Wire w) noexcept {
+    switch (w) {
+        case Wire::AnthropicMessages: return Kind::Anthropic;
+        case Wire::Acp:               return Kind::ExternalAcp;
+        case Wire::OpenAIResponses:
+        case Wire::OpenAIChat:        return Kind::OpenAI;
+    }
+    return Kind::OpenAI;
+}
 
 // How a provider authenticates — drives both the UI hint and which env vars
 // the auth resolver consults.
@@ -40,45 +91,456 @@ enum class AuthStyle : std::uint8_t {
     None,        // local server (Ollama / llama.cpp): no auth needed.
 };
 
-// One backend agentty knows how to reach. POD + string_view so the whole
-// table is a constant-initialised `constexpr` array with zero heap.
-struct ProviderPreset {
+// Which long-lived provider slot serves this row. A LongLived-lifetime
+// provider holds cross-turn state (refreshed OAuth tokens / a warm
+// transport), so it is constructed ONCE in main() and reused; dispatch
+// indexes the router by this value. `None` = served by a per-call transport
+// (the generic OpenAI-compat/Ollama builder) or the ACP arm.
+//
+// This lives ON THE ROW — not in an if-chain inside dispatch — so routing is
+// a data lookup and the static_asserts below can PROVE the table coherent:
+// adding an OAuth-native provider without a slot, or a slot without the
+// long-lived lifetime, is a compile error, not a field bug.
+enum class RouteSlot : std::uint8_t { None, Anthropic, ChatGpt, Copilot, Kimi };
+inline constexpr std::size_t kRouteSlots = 5;
+
+// Log/diagnostic tag for a slot — the `route=` value in dispatch.turn.
+[[nodiscard]] constexpr std::string_view slot_tag(RouteSlot s) noexcept {
+    switch (s) {
+        case RouteSlot::Anthropic: return "anthropic-messages";
+        case RouteSlot::ChatGpt:   return "chatgpt-responses";
+        case RouteSlot::Copilot:   return "copilot";
+        case RouteSlot::Kimi:      return "kimi";
+        case RouteSlot::None:      return "";
+    }
+    return "";
+}
+
+// One backend agentty knows how to reach: its identity, how it authenticates,
+// which wire dialect it speaks, and its lifetime. POD + string_view so the
+// whole table is a constant-initialised `constexpr` array with zero heap.
+//
+// This is THE source of truth. Every subsystem that used to switch on a
+// provider (dispatch, model-list, prewarm, login gate, picker) reads a field
+// here instead. "Add a provider" == "append a row".
+struct ProviderDescriptor {
     std::string_view id;        // canonical spec token ("anthropic", "groq").
     std::string_view label;     // display name for the picker / badge.
     std::string_view blurb;     // one-line description (picker trailing text).
-    Kind             kind;
+    Wire             wire;       // on-the-wire dialect (transport branches here).
+    Lifetime         lifetime;   // long-lived (owns state) vs rebuilt per call.
     AuthStyle        auth;
-    bool             is_local;  // localhost backend — no network key needed.
+    // TRUE only for a backend that runs on this machine (Ollama, a custom
+    // localhost host). NOT "needs no API key" — that is AuthStyle::None, and
+    // conflating the two is why ChatGPT once claimed to be local. Read by the
+    // credential layer to skip key resolution and by the picker to skip the
+    // key prompt.
+    bool             is_local;
 
     // Env vars consulted (in order) to find this provider's API key. The
     // last entry is usually the generic OPENAI_API_KEY fallback. Empty for
     // Anthropic (creds come from `agentty login`) and local backends.
     // Stored as a fixed 3-slot array of string_views; unused slots are "".
     std::array<std::string_view, 3> auth_env;
+
+    // Key PREFIXES unique enough to identify this provider from a pasted key
+    // alone, most specific first. Unused slots are "".
+    //
+    // Why this lives on the row: `agentty login` and the first-run modal both
+    // accept "an API key" and then had nowhere to ask which provider it
+    // belonged to, so every pasted key was written to the Anthropic store
+    // (issue #68). The prompt says "or any provider" and the code meant
+    // "Anthropic" -- a key for Groq was accepted, saved, and then failed on
+    // the first turn with an auth error naming the wrong vendor.
+    //
+    // Detection HAS to be a registry fact rather than a switch somewhere in
+    // the auth layer: a new provider already declares its host, its env vars
+    // and its wire dialect here, and a prefix table living anywhere else is
+    // one more place to forget. This is the same reasoning auth_env above
+    // follows.
+    //
+    // ONLY unambiguous prefixes belong here. `sk-` is shared by Anthropic,
+    // OpenAI and DeepSeek, so it identifies nothing and is deliberately
+    // absent -- a guess that silently picks the wrong provider is worse than
+    // asking, because the user then debugs a credential they believe is
+    // correct. An empty match means "ask", which is the honest outcome.
+    std::array<std::string_view, 2> key_prefixes;
+
+    // The FIXED host to open a warm TLS connection to before the first turn,
+    // when it is NOT derivable from the runtime Endpoint. Two backends need
+    // this: Anthropic (the transport hardcodes api.anthropic.com; no Endpoint
+    // is dialled) and ChatGPT (talks to chatgpt.com/backend-api/codex while
+    // its Endpoint carries a sentinel port 0). Empty for every other row:
+    // hosted OpenAI-compat backends prewarm their own Endpoint host, and
+    // local / ACP backends have nothing worth warming. This makes
+    // prewarm_active_provider a data lookup instead of a hand-written switch.
+    std::string_view prewarm_host;
+
+    // OAuth-native: the backend authenticates by "sign in with <provider>"
+    // (its own OAuth flow, tokens auto-refreshed in-process) rather than a
+    // bearer API key, AND it rides a DEDICATED long-lived transport instead of
+    // the generic OpenAI-compat one. Today only ChatGPT/Codex sets this
+    // (Anthropic OAuth speaks AnthropicMessages, so it never needs the flag to
+    // be routed). "This endpoint is special" is a DATUM on the row, read at the
+    // routing/prewarm/login sites — a second such provider just sets the flag.
+    bool oauth_native = false;
+
+    // ── Wire endpoint (the HTTP facts) ───────────────────────────────
+    // Where this provider is actually dialled. These used to live in a
+    // 14-arm if-chain inside Endpoint::from_spec, RE-STATING host/path
+    // facts that were already half-present on this row. Two sources of
+    // truth drifted exactly as you'd expect: the `openai` row claimed
+    // Wire::OpenAIResponses while the transport dialled
+    // /v1/chat/completions, which silently made the reasoning-text UI
+    // promise something the wire never delivers.
+    //
+    // Keeping them HERE, one column over from `wire`, makes that class of
+    // drift unrepresentable: a row that says Responses but points at
+    // /chat/completions is now a visible contradiction on a single line,
+    // and a static_assert below rejects it at compile time.
+    //
+    // Empty `host` means "not dialled over the generic OpenAI-compat
+    // transport": Anthropic (own transport, hardcoded host), ChatGPT
+    // (dedicated OAuth transport) and ACP (subprocess, no HTTP) leave
+    // these blank and are routed by `wire` / `oauth_native` instead.
+    std::string_view host;          // "api.groq.com"; "" = not HTTP-dialled.
+    std::string_view path;          // completions path, e.g. "/v1/chat/completions".
+    std::string_view models_path;   // model-list path, e.g. "/v1/models".
+    std::uint16_t    port = 443;
+    bool             use_tls = true;
+
+    // ── The SECOND dialect (optional) ────────────────────────────────
+    // A host is not always ONE dialect. `wire`/`path` above is the row's
+    // DEFAULT; this is the Responses path on the SAME host, when it has
+    // one. Empty = this host speaks its default dialect only.
+    //
+    // Why this column has to exist: OpenAI's own docs now say that from
+    // GPT-5.4 on, Chat Completions does NOT support tool calling with a
+    // reasoning_effort other than `none` — and GPT-6-class models drop
+    // chat function-calling entirely. So for a reasoning agent the
+    // dialect is not a style preference, it is the difference between a
+    // working turn and a 400. A host therefore needs to advertise BOTH
+    // paths and let the per-model predicate choose.
+    //
+    // Copilot proved the shape before it was a column: its row says
+    // OpenAIChat while `prefers_responses_dialect()` quietly re-routed
+    // gpt-5* and mai-code-* to /responses — the row was lying again, just
+    // in a function instead of a field. With this column the lie has
+    // somewhere true to live, and `endpoints_consistent()` checks it.
+    std::string_view responses_path;   // "" = no Responses endpoint here.
+
+    // ── App attribution (optional) ───────────────────────────────────
+    // Some aggregators ask a client to NAME ITSELF, and give the user
+    // something back for it. OpenRouter is the case that exists today: a
+    // request carrying `HTTP-Referer` (+ `X-Title`) is credited to an app
+    // page, shows up in the public rankings, and — the part users actually
+    // feel — satisfies the models that only serve a recognised agent
+    // harness. Issue #74.
+    //
+    // A COLUMN, not a branch in the transport, for the reason the endpoint
+    // block above exists: the identity would otherwise be a string literal
+    // sitting next to an `if (label == "openrouter")`, which is the same
+    // shape as the 14-arm if-chain that drifted from these rows. Here the
+    // fact is one line next to the host it belongs to, every transport that
+    // dials the row picks it up for free, and a row that wants no
+    // attribution simply leaves it empty.
+    //
+    // This is deliberately NOT a general "static headers" escape hatch:
+    // Endpoint::extra_headers already plays that role for per-request
+    // protocol junk (Copilot's editor block, Kimi's device ids). This column
+    // is narrower on purpose — it answers "who is calling", so it holds a
+    // URL and a display name and nothing else, and the values come from the
+    // ONE place agentty states its own identity (identity.hpp).
+    bool             attribution = false;
+
+    // The row's API accepts OpenAI's `prompt_cache_key` body field.
+    //
+    // OpenAI-COMPATIBLE is not OpenAI: the compat layers validate the body
+    // strictly and 400 an unknown field, killing the turn (#93) --
+    //   Groq:   "property 'prompt_cache_key' is unsupported"
+    //   Gemini: "Unknown name \"prompt_cache_key\": Cannot find field."
+    // So this is opt-IN per row, set only where the API documents the field
+    // (OpenAI) or passes it through (OpenRouter, which routes to OpenAI and
+    // ignores it elsewhere). Omitting it costs a cache optimisation;
+    // sending it to a strict host costs the whole turn. When in doubt, omit.
+    bool             accepts_prompt_cache_key = false;
+
+    // Ollama's NATIVE /api/chat protocol (NDJSON, structured tool_calls)
+    // instead of its OpenAI-compat shim, which makes weak local models
+    // leak tool calls as raw JSON in `content`.
+    bool             native_api = false;
+
+    // ── Auth capabilities (what the LOGIN flow needs to know) ───────
+    // These four used to be ~26 provider-name string compares scattered
+    // through login.cpp / modal.cpp / pickers.cpp — exactly the
+    // `if anthropic {} else if copilot {}` chain the registry exists to
+    // delete. Each is the CAPABILITY the branch was really testing, so a
+    // new OAuth provider becomes a row edit rather than a grep.
+
+    // Runs a device/browser OAuth flow (no key prompt). Copilot and Kimi
+    // share the generic launcher; ChatGPT has its own because the Codex
+    // flow negotiates device-vs-browser at runtime (see oauth_native).
+    bool device_login = false;
+
+    // Does this row use the bespoke ChatGPT/Codex login flow?
+    //
+    // A PREDICATE rather than a raw flag test, because the obvious test is
+    // wrong and was wrong at two call sites. `oauth_native` reads as "the
+    // Codex one" but actually means "authenticates by sign-in and rides its
+    // own long-lived transport" — true of Copilot and Kimi as well, which is
+    // exactly how credentials.cpp uses it. So `if (p->oauth_native)` sent
+    // every device-flow provider into the ChatGPT browser flow: picking
+    // "GitHub Copilot" opened the OpenAI sign-in panel.
+    //
+    // The two flags are not independent — device_login is the more specific
+    // claim and wins — so the relationship belongs here, once, instead of
+    // being re-derived (and mis-ordered) by each caller.
+    [[nodiscard]] constexpr bool codex_login() const noexcept {
+        return oauth_native && !device_login;
+    }
+
+    // The login modal offers a CHOICE of method (OAuth subscription vs
+    // API key). Only Anthropic does today: everything else is either
+    // key-only or OAuth-only, and showing a one-item menu is noise.
+    bool method_menu = false;
+
+    // Tokens live in the provider's OWN store (the transport reads them
+    // per turn) rather than in a resolvable AuthHeader. On account switch
+    // these need the cached header CLEARED, not replaced — resolve()
+    // returns empty for them by design.
+    bool token_in_transport = false;
+
+    // Anthropic-only extras that are genuinely not uniform: a long-idle
+    // OAuth token gets a proactive background refresh on account switch,
+    // and the learned "1M context is blocked" flag is re-armed because the
+    // switched-to account may hold a different entitlement.
+    bool oauth_proactive_refresh = false;
+
+    // Model to select when switching TO this provider with no recalled
+    // choice, and no live catalog yet (the switch runs on the UI thread, so
+    // it cannot fetch). Empty = "let the ModelsLoaded refetch auto-select
+    // the first available", which is right for local backends and for any
+    // provider whose line-up is server-driven.
+    //
+    // A static default belongs on the row; a DERIVED one does not — ChatGPT
+    // reads its cached catalog and Copilot's line-up varies by tier, so those
+    // stay in code with the reason written down at the call site.
+    std::string_view default_model;
+
+    // The long-lived routing slot serving this row (see RouteSlot above).
+    // RouteSlot::None = per-call transport chosen by wire/native_api at
+    // dispatch time. Proven coherent against lifetime/oauth_native by the
+    // static_asserts under kProviders.
+    RouteSlot route = RouteSlot::None;
+
+    // True when this row is reached over the generic OpenAI-compat
+    // transport (i.e. it carries real endpoint data above).
+    [[nodiscard]] constexpr bool http_dialled() const noexcept {
+        return !host.empty();
+    }
+
+    // Coarse Kind view, derived from `wire` so it can never drift. Kept for
+    // the call sites that only need Anthropic-vs-OpenAI-family-vs-ACP.
+    [[nodiscard]] constexpr Kind kind() const noexcept { return kind_of(wire); }
 };
+
+// Legacy name. `ProviderPreset` was the row type before it grew wire/lifetime
+// and became the behaviour source of truth; kept as an alias so the ~dozen
+// call sites naming it keep compiling during and after the migration.
+using ProviderPreset = ProviderDescriptor;
 
 // ── The table ────────────────────────────────────────────────────────────
 // Order = display order in the picker. Anthropic first (the default), then
 // hosted OpenAI-family by popularity, then the local backend last.
 //
-// To add a provider: append a row here, and — if it's OpenAI-compatible with
-// a non-default wire path — add the matching `Endpoint` arm in
-// openai/transport.cpp::from_spec keyed on the same `id`.
-inline constexpr std::array<ProviderPreset, 7> kProviders{{
-    {"anthropic",  "Anthropic",  "Claude — OAuth (Pro/Max) or API key",
-     Kind::Anthropic, AuthStyle::OAuthOrKey, false, {"", "", ""}},
-    {"openai",     "OpenAI",     "GPT — api.openai.com",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENAI_API_KEY", "", ""}},
-    {"groq",       "Groq",       "Llama/Mixtral on Groq LPUs — very fast",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"GROQ_API_KEY", "OPENAI_API_KEY", ""}},
-    {"openrouter", "OpenRouter", "Any model via openrouter.ai",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""}},
-    {"together",   "Together",   "Open models on together.ai",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""}},
-    {"cerebras",   "Cerebras",   "Wafer-scale inference — very fast",
-     Kind::OpenAI,    AuthStyle::ApiKey,     false, {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""}},
-    {"ollama",     "Ollama",     "Local models at localhost:11434",
-     Kind::OpenAI,    AuthStyle::None,       true,  {"", "", ""}},
+// To add a provider: append ONE row here. The endpoint columns below are the
+// only place its host/path live — Endpoint::from_spec is a lookup over this
+// table, so there is no second arm to keep in sync.
+inline constexpr std::array<ProviderDescriptor, 15> kProviders{{
+    {.id = "anthropic", .label = "Anthropic",
+     .blurb = "Claude — OAuth (Pro/Max) or API key",
+     // Own transport (not the OpenAI-compat one): no endpoint columns.
+     // The one row that gets a proactive token refresh + 1M-entitlement
+     // re-arm on an account switch.
+     .wire = Wire::AnthropicMessages, .lifetime = Lifetime::LongLived,
+     .auth = AuthStyle::OAuthOrKey,
+     // sk-ant- covers both the API key (sk-ant-api03-) and the OAuth token
+     // (sk-ant-oat01-). Unambiguous, unlike the bare sk- that OpenAI and
+     // DeepSeek also use -- which is why neither of those rows has a prefix.
+     .key_prefixes = {"sk-ant-", ""},
+     .prewarm_host = "api.anthropic.com",
+     .method_menu = true, .oauth_proactive_refresh = true,
+     .default_model = "claude-opus-4-5",
+     .route = RouteSlot::Anthropic},
+
+    {.id = "openai", .label = "OpenAI", .blurb = "GPT / Codex — api.openai.com",
+     // DEFAULT is Chat Completions; `responses_path` below carries the second
+     // dialect. The row once claimed Wire::OpenAIResponses while dialling
+     // /v1/chat/completions — the label was decorative (nothing dispatched on
+     // it) so the lie went unnoticed and made the reasoning-text UI
+     // over-promise. Wire and path must agree; the SECOND path is now a
+     // column of its own rather than a fib in the first one.
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"OPENAI_API_KEY", "CODEX_API_KEY", ""},
+     .host = "api.openai.com", .path = "/v1/chat/completions",
+     .models_path = "/v1/models",
+     // Reasoning models are routed here by dialect_for(). Not cosmetic:
+     // GPT-5.4+ rejects tool calls on chat with a real reasoning effort.
+     .responses_path = "/v1/responses",
+     // The field's home: documented on Chat Completions and Responses.
+     .accepts_prompt_cache_key = true,
+     .default_model = "gpt-4o"},
+
+    {.id = "chatgpt", .label = "ChatGPT",
+     .blurb = "Sign in with ChatGPT — Codex models, no API key",
+     // Genuinely Responses — but over its OWN OAuth transport
+     // (/backend-api/codex/responses), not the compat one, so no endpoint
+     // columns. is_local stays FALSE: chatgpt.com is a remote host, and
+     // "needs no API key" is what AuthStyle::None already says.
+     // No default_model: the cached catalog picks.
+     .wire = Wire::OpenAIResponses, .lifetime = Lifetime::LongLived,
+     .auth = AuthStyle::None,
+     .prewarm_host = "chatgpt.com", .oauth_native = true,
+     .token_in_transport = true,
+     .route = RouteSlot::ChatGpt},
+
+    {.id = "copilot", .label = "GitHub Copilot",
+     .blurb = "Sign in with GitHub — Copilot models, no API key",
+     // gpt-4o runs on every Copilot tier; the async fetch replaces it with
+     // the account's real line-up (incl. Auto) shortly after the switch.
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::LongLived,
+     .auth = AuthStyle::None,
+     .prewarm_host = "api.githubcopilot.com", .oauth_native = true,
+     .host = "api.githubcopilot.com", .path = "/chat/completions",
+     .models_path = "/models",
+     // Copilot was ALWAYS mixed — gpt-5*/mai-code-* only work on /responses.
+     // That fact used to live solely inside prefers_responses_dialect();
+     // now the endpoint it implies is on the row where it can be checked.
+     // (The live host is overridden per-session from endpoints.api; this is
+     // the path, which is stable across Individual/Business/Enterprise.)
+     .responses_path = "/responses",
+     .device_login = true, .token_in_transport = true,
+     .default_model = "gpt-4o",
+     .route = RouteSlot::Copilot},
+
+    {.id = "kimi", .label = "Kimi",
+     .blurb = "Sign in with Kimi — Kimi K2 models, no API key",
+     // Kimi Code inference API: base https://api.kimi.com/coding/v1 (its own
+     // provider builds this; the columns must agree with it).
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::LongLived,
+     .auth = AuthStyle::None,
+     .prewarm_host = "api.kimi.com", .oauth_native = true,
+     .host = "api.kimi.com", .path = "/coding/v1/chat/completions",
+     .models_path = "/coding/v1/models",
+     .device_login = true, .token_in_transport = true,
+     .route = RouteSlot::Kimi},
+
+    {.id = "groq", .label = "Groq",
+     .blurb = "Llama/Mixtral on Groq LPUs — very fast",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"GROQ_API_KEY", "OPENAI_API_KEY", ""},
+     .key_prefixes = {"gsk_", ""},
+     .host = "api.groq.com", .path = "/openai/v1/chat/completions",
+     .models_path = "/openai/v1/models"},
+
+    {.id = "openrouter", .label = "OpenRouter",
+     .blurb = "Any model via openrouter.ai",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", ""},
+     .key_prefixes = {"sk-or-v1-", "sk-or-"},
+     .host = "openrouter.ai", .path = "/api/v1/chat/completions",
+     .models_path = "/api/v1/models",
+     // OpenRouter shipped an OpenAI-compatible Responses endpoint; upstream
+     // reasoning models behind it need the same routing as first-party.
+     .responses_path = "/api/v1/responses",
+     // Name ourselves: OpenRouter credits attributed requests to an app page
+     // and some models only serve a recognised harness. Issue #74.
+     .attribution = true,
+     // Passed through to OpenAI upstreams (where it pins the cache node)
+     // and dropped for the others: OpenRouter normalises the body.
+     .accepts_prompt_cache_key = true},
+
+    {.id = "together", .label = "Together",
+     .blurb = "Open models on together.ai",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"TOGETHER_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.together.xyz", .path = "/v1/chat/completions",
+     .models_path = "/v1/models"},
+
+    {.id = "cerebras", .label = "Cerebras",
+     .blurb = "Wafer-scale inference — very fast",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"CEREBRAS_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.cerebras.ai", .path = "/v1/chat/completions",
+     .models_path = "/v1/models"},
+
+    {.id = "deepseek", .label = "DeepSeek",
+     .blurb = "DeepSeek V4 — api.deepseek.com",
+     // DeepSeek serves completions WITHOUT the /v1 prefix.
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"DEEPSEEK_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.deepseek.com", .path = "/chat/completions",
+     .models_path = "/models"},
+
+    {.id = "xai", .label = "xAI (Grok)", .blurb = "Grok models — api.x.ai",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"XAI_API_KEY", "OPENAI_API_KEY", ""},
+     .key_prefixes = {"xai-", ""},
+     .host = "api.x.ai", .path = "/v1/chat/completions",
+     .models_path = "/v1/models"},
+
+    {.id = "mistral", .label = "Mistral",
+     .blurb = "Mistral / Codestral / Magistral — api.mistral.ai",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"MISTRAL_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.mistral.ai", .path = "/v1/chat/completions",
+     .models_path = "/v1/models"},
+
+    {.id = "gemini", .label = "Google Gemini",
+     .blurb = "Gemini models via the OpenAI-compat API",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"},
+     // AIzaSy is the legacy Developer API key prefix; AQ. is the newer
+     // AI-Studio-issued key format (see Google AI Studio forum reports --
+     // ai.google.dev/t/my-account-only-generates-aq-keys/170801 and
+     // sibling threads). New AI Studio accounts now issue AQ. keys
+     // exclusively, so leaving them unrouted sent every one of them to
+     // the Anthropic store on paste. Both prefixes carry a Gemini key.
+     .key_prefixes = {"AIzaSy", "AQ."},
+     .host = "generativelanguage.googleapis.com",
+     .path = "/v1beta/openai/chat/completions",
+     .models_path = "/v1beta/openai/models"},
+
+    {.id = "fireworks", .label = "Fireworks",
+     .blurb = "Open models on fireworks.ai",
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::ApiKey,
+     .auth_env = {"FIREWORKS_API_KEY", "OPENAI_API_KEY", ""},
+     .host = "api.fireworks.ai", .path = "/inference/v1/chat/completions",
+     .models_path = "/inference/v1/models"},
+
+    {.id = "ollama", .label = "Ollama",
+     .blurb = "Local models at localhost:11434",
+     // Plain HTTP on loopback, and the NATIVE /api/chat protocol.
+     .wire = Wire::OpenAIChat, .lifetime = Lifetime::PerCall,
+     .auth = AuthStyle::None, .is_local = true,
+     .host = "localhost", .path = "/api/chat", .models_path = "/api/tags",
+     .port = 11434, .use_tls = false, .native_api = true},
+
+    // NOTE: no "llama.cpp" preset row. A llama.cpp / vLLM / LM Studio server is
+    // just a generic OpenAI-compatible host — use "Custom host…" (which the
+    // picker offers, saves, and can delete). The from_spec("llama.cpp") alias in
+    // openai/transport.cpp is kept so `--provider llama.cpp` on the CLI still
+    // resolves to localhost:8080.
 }};
 
 // All presets, for the picker / iteration.
@@ -92,6 +554,258 @@ inline constexpr std::array<ProviderPreset, 7> kProviders{{
     for (const auto& p : kProviders)
         if (p.id == id) return &p;
     return nullptr;
+}
+
+// Which provider does this API key belong to, judged by its prefix alone?
+// Empty when no row claims it — which is the common case and NOT a failure.
+//
+// Why empty is a real answer: a bare `sk-` key could be OpenAI, DeepSeek or a
+// custom endpoint, and silently picking one is how issue #68 happened in the
+// first place. Every pasted key was written to the Anthropic store because the
+// prompt said "or any provider" while the code had no way to ask. The user
+// then debugged a credential they believed was correct, against an error
+// naming a vendor they had not chosen.
+//
+// So the contract is: a confident answer, or none. A caller that gets none
+// must ASK rather than assume. Longest match wins, so `sk-or-v1-` beats
+// `sk-or-` and a future `sk-ant-oat02-` cannot be shadowed by `sk-ant-`.
+[[nodiscard]] inline std::string_view provider_for_api_key(
+        std::string_view key) noexcept {
+    std::string_view best;
+    std::size_t best_len = 0;
+    for (const auto& p : kProviders) {
+        for (std::string_view pre : p.key_prefixes) {
+            if (pre.empty() || key.size() < pre.size()) continue;
+            if (key.substr(0, pre.size()) != pre) continue;
+            if (pre.size() > best_len) { best_len = pre.size(); best = p.id; }
+        }
+    }
+    return best;
+}
+
+// ── Compile-time invariants ─────────────────────────────────────────────
+// These are what make the single source of truth actually HOLD. The
+// `openai` row previously claimed Wire::OpenAIResponses while the
+// transport dialled /v1/chat/completions; nothing dispatched on the enum,
+// so the contradiction survived review and silently taught the UI to
+// promise reasoning text the wire never sends. Now the dialect and the
+// path live on one row, and disagreeing is a BUILD ERROR rather than a
+// bug someone notices months later.
+namespace detail {
+
+[[nodiscard]] constexpr bool ends_with(std::string_view s,
+                                      std::string_view suf) noexcept {
+    return s.size() >= suf.size() && s.substr(s.size() - suf.size()) == suf;
+}
+
+[[nodiscard]] constexpr bool endpoints_consistent() noexcept {
+    for (const auto& p : kProviders) {
+        // Attribution names agentty to a HOST, so it only means something on a
+        // row we actually dial over HTTP. Checked BEFORE the http_dialled()
+        // bail below, because the rows that would get this wrong (the chatgpt
+        // / acp sentinels) are exactly the ones that bail.
+        if (p.attribution && !p.http_dialled()) return false;
+        if (!p.http_dialled()) {
+            // Not dialled over the compat transport ⇒ must not carry half
+            // an endpoint (a stray path with no host is how rows rot).
+            if (!p.path.empty() || !p.models_path.empty()) return false;
+            continue;
+        }
+        if (p.path.empty() || p.models_path.empty()) return false;
+        if (p.port == 0) return false;
+        // Anthropic/ACP are never reached over the OpenAI-compat transport.
+        if (p.wire == Wire::AnthropicMessages || p.wire == Wire::Acp)
+            return false;
+        if (p.native_api) continue;   // Ollama's /api/chat is its own shape.
+        if (p.wire == Wire::OpenAIChat
+            && !ends_with(p.path, "/chat/completions")) return false;
+        if (p.wire == Wire::OpenAIResponses
+            && !ends_with(p.path, "/responses")) return false;
+        // The second dialect gets the SAME treatment as the first: if a row
+        // advertises a Responses path it must actually end in /responses,
+        // and it must not duplicate the primary path (a row claiming both
+        // dialects on one URL is the drift this column exists to kill).
+        if (!p.responses_path.empty()) {
+            if (!ends_with(p.responses_path, "/responses")) return false;
+            if (p.responses_path == p.path) return false;
+            // Only meaningful on a host we actually dial over HTTP.
+            if (p.host.empty()) return false;
+        }
+        // A row whose DEFAULT is already Responses must not also carry a
+        // secondary Responses path — there'd be two answers to one question.
+        if (p.wire == Wire::OpenAIResponses && !p.responses_path.empty())
+            return false;
+    }
+    return true;
+}
+
+// Ids are the primary key: a duplicate makes preset_for() ambiguous.
+[[nodiscard]] constexpr bool ids_unique() noexcept {
+    for (std::size_t i = 0; i < kProviders.size(); ++i)
+        for (std::size_t j = i + 1; j < kProviders.size(); ++j)
+            if (kProviders[i].id == kProviders[j].id) return false;
+    return true;
+}
+
+// No two providers may claim the same key prefix, and no prefix may be a
+// prefix OF another provider's prefix.
+//
+// The second half is the one that matters. provider_for_api_key() takes the
+// longest match, so `sk-or-v1-` beating `sk-or-` within OpenRouter is fine and
+// intended. But if a FUTURE row declared `sk-` while Anthropic declares
+// `sk-ant-`, every Anthropic key would still resolve correctly and every
+// unrecognised `sk-` key would silently resolve to that new provider -- which
+// is issue #68 again, wearing a different vendor's name. A prefix that can
+// swallow another row's keys must not compile.
+//
+// Checked at build time rather than tested, because the failure is silent at
+// runtime: the user gets a credential stored against the wrong provider and an
+// auth error that names someone they never chose.
+[[nodiscard]] constexpr bool key_prefixes_unambiguous() noexcept {
+    for (std::size_t i = 0; i < kProviders.size(); ++i) {
+        for (std::string_view a : kProviders[i].key_prefixes) {
+            if (a.empty()) continue;
+            for (std::size_t j = 0; j < kProviders.size(); ++j) {
+                if (i == j) continue;
+                for (std::string_view b : kProviders[j].key_prefixes) {
+                    if (b.empty()) continue;
+                    // Either being a prefix of the other is ambiguous ACROSS
+                    // rows; equality is the degenerate case of that.
+                    const auto n = a.size() < b.size() ? a.size() : b.size();
+                    if (a.substr(0, n) == b.substr(0, n)) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+static_assert(key_prefixes_unambiguous(),
+              "two providers claim overlapping API-key prefixes: a pasted key "
+              "would resolve to the wrong vendor's store (issue #68)");
+
+// Auth capabilities must be internally consistent. These fields replaced a
+// chain of provider-name compares in login.cpp, so a row that contradicts
+// itself is exactly the bug the migration set out to make impossible — catch
+// it at build time rather than at a user's login prompt.
+[[nodiscard]] constexpr bool auth_caps_consistent() noexcept {
+    for (const auto& p : kProviders) {
+        // A method menu only makes sense when there IS more than one method.
+        if (p.method_menu && p.auth != AuthStyle::OAuthOrKey) return false;
+        // Device login is an OAuth flow: a row that also advertises a key
+        // env var would present two conflicting paths to the same account.
+        if (p.device_login && p.auth != AuthStyle::None) return false;
+        // Local backends never authenticate at all.
+        if (p.is_local
+            && (p.device_login || p.method_menu || p.token_in_transport))
+            return false;
+        // A transport-held token implies an OAuth backend, never a keyed
+        // one — an API key is resolvable, so it would never need the cached
+        // header cleared. NOT equality with oauth_native: that flag means
+        // specifically "OpenAI-FAMILY OAuth transport" and is false for
+        // Anthropic, whose OAuth rides its own AnthropicMessages transport.
+        // (An earlier draft asserted the two were equal; this static_assert
+        // caught it, which is the point of encoding the rule.)
+        if (p.token_in_transport && p.auth == AuthStyle::ApiKey) return false;
+        if (p.oauth_native && !p.token_in_transport) return false;
+        // The proactive-refresh extra is meaningless without OAuth.
+        if (p.oauth_proactive_refresh && p.auth == AuthStyle::ApiKey)
+            return false;
+    }
+    return true;
+}
+
+} // namespace detail
+
+namespace detail {
+// Routing must be coherent with the rest of the row — this is the proof
+// that makes RouteSlot-on-the-row safe to trust blindly at dispatch time:
+//   • a routed row must be LongLived (slots hold cross-turn state);
+//   • a LongLived row must be routed (otherwise it can never be reached);
+//   • an oauth_native OpenAI-family row must be routed (its dedicated
+//     transport IS its slot — unrouted it would silently degrade to the
+//     generic per-call path, the exact custom-host bug class);
+//   • no two rows may share a slot (a slot is one provider instance).
+[[nodiscard]] constexpr bool routing_consistent() noexcept {
+    for (const auto& p : kProviders) {
+        if (p.route != RouteSlot::None && p.lifetime != Lifetime::LongLived)
+            return false;
+        if (p.lifetime == Lifetime::LongLived && p.route == RouteSlot::None)
+            return false;
+        if (p.oauth_native && p.route == RouteSlot::None) return false;
+    }
+    for (std::size_t i = 0; i < kProviders.size(); ++i)
+        for (std::size_t j = i + 1; j < kProviders.size(); ++j)
+            if (kProviders[i].route != RouteSlot::None
+                && kProviders[i].route == kProviders[j].route) return false;
+    return true;
+}
+} // namespace detail
+
+static_assert(detail::routing_consistent(),
+              "provider row: route slot contradicts lifetime/oauth_native, "
+              "or two rows share a long-lived slot");
+
+static_assert(detail::endpoints_consistent(),
+              "provider row: Wire disagrees with the path it dials, or an "
+              "HTTP-dialled row is missing endpoint data");
+static_assert(detail::ids_unique(), "duplicate provider id in kProviders");
+static_assert(detail::auth_caps_consistent(),
+              "provider row: auth capability flags contradict the row's "
+              "AuthStyle (see ProviderDescriptor's auth capability block)");
+
+// Can this wire DIALECT carry reasoning TEXT back to us, for THIS model?
+//
+// A model reasoning and a model letting you SEE it are different things.
+// OpenAI's Chat Completions dialect does not transmit reasoning text for
+// the GPT-5 family: the tokens are generated and billed, but the response
+// carries no reasoning_content / summary — that is exclusive to the
+// Responses API. Anthropic Messages streams thinking blocks natively, and
+// many OpenAI-COMPAT servers (DeepSeek-R1, Mistral, vLLM, OpenRouter) do
+// populate reasoning_content on the Chat dialect, which is why the
+// transport parses it unconditionally.
+//
+// `model` matters because a provider is not necessarily ONE dialect.
+// GitHub Copilot serves the same account over both: gpt-5* and mai-code-*
+// stream over the Responses API (where reasoning summaries DO come back —
+// measured), while claude-* and gpt-4.x are chat-only (where they do not).
+// Passing an empty model asks the coarser question "could ANY model on this
+// provider show reasoning", which is what a provider-level row wants.
+[[nodiscard]] bool wire_streams_reasoning_text(
+        std::string_view provider_id, std::string_view model = {}) noexcept;
+
+// The attribution headers for a provider row, or empty when the row doesn't
+// ask for them.
+//
+// ONE builder, so the chat path and the Responses path cannot disagree about
+// who agentty is. Both dialects dial the same host and both are credited to
+// the same app page, so a second spelling of these two headers is a bug
+// waiting for the day one of them is edited.
+//
+// Header names, from openrouter.ai/docs/app-attribution:
+//   HTTP-Referer  REQUIRED. The app URL, and the primary key for rankings.
+//                 Without it no app page exists and nothing else matters.
+//   X-Title       The display name. Does nothing on its own — it only
+//                 labels an app page that HTTP-Referer already created.
+//
+// On the name: the docs now call the title header `X-OpenRouter-Title` and
+// keep `X-Title` as a supported alias. We send `X-Title` deliberately — it
+// is what the overwhelming bulk of real traffic uses, it is still documented
+// as supported, and a shipped harness has already been bitten sending ONLY
+// the newer name (QwenLM/qwen-code#12072). Sending both would be the
+// belt-and-braces option, but two headers claiming one field is how you end
+// up with two app pages if a vendor ever disagrees with itself.
+//
+// Lowercase names: header names are case-insensitive per RFC 9110 and the
+// rest of agentty sends lowercase, so these match their neighbours on the
+// wire rather than the spelling used in vendor docs.
+[[nodiscard]] inline std::vector<std::pair<std::string, std::string>>
+attribution_headers(const ProviderDescriptor* row) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (!row || !row->attribution) return out;
+    out.reserve(2);
+    out.emplace_back("http-referer", std::string{util::identity::url});
+    out.emplace_back("x-title",      std::string{util::identity::name});
+    return out;
 }
 
 // The default provider's id — first row of the table.

@@ -23,6 +23,11 @@
 //     allowed-tools: bash read                              # optional
 //     disable-model-invocation: true                        # optional
 //     ---
+//
+// The directory may sit at any depth below a discovery root; nested
+// group folders are joined with `-` into the skill name (`skills/
+// embedded/startup/` → name `embedded-startup`, see the discovery
+// table below).
 //     <full markdown body: detailed instructions, code snippets, ...>
 //
 // Discovery roots, in precedence order (first hit on a name wins):
@@ -33,6 +38,21 @@
 //   user      ~/.agentty/skills/<slug>/SKILL.md       (native)
 //   user      ~/.agents/skills/<slug>/SKILL.md        (cross-client convention)
 //   user      ~/.claude/skills/<slug>/SKILL.md        (Claude Code compat)
+//
+// `<slug>` may be nested up to `kMaxSkillDepth` levels below the root
+// (`skills/embedded/startup/SKILL.md` is a skill named
+// `embedded-startup`): group folders organize the library, and the
+// skill's name is its path below the root, SANITIZED to the spec's
+// `a-z0-9-` charset (see slug_from_path) — the name is what the user
+// types as `/name`, so it is enforced rather than assumed. Hidden
+// directories (leading `.`) are never descended into; symlinked skill
+// directories are discovered without following symlinks during the
+// walk. Names collide across roots or depths: the earlier root in the
+// table wins, and within a root the SHALLOWER skill wins — so a
+// root-level `startup/` keeps its name even when a grouped
+// `embedded/startup/` exists, and a flat `a-b/` is not displaced by an
+// unrelated `a/b/` group folder. Flat single-level layouts keep their
+// existing names unchanged.
 //
 // The `.agents/skills/` convention means skills installed by any
 // compliant client (Claude Code, Codex, Cursor, ...) are automatically
@@ -46,8 +66,14 @@
 // SKILL.md skips the entry.
 
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "agentty/scope/scope.hpp"
+#include "agentty/tool/effects.hpp"
+#include "agentty/util/io.hpp"
 
 namespace agentty::tools::skills {
 
@@ -59,9 +85,33 @@ struct Skill {
     std::string compatibility; // frontmatter `compatibility` (env requirements)
     std::string allowed_tools; // frontmatter `allowed-tools` (experimental)
     std::string license;       // frontmatter `license`
+    // Frontmatter `effects:` — what this skill will tell the agent to DO,
+    // in the SAME four-bit vocabulary tools already declare (effects.hpp),
+    // so a skill's impact is read off the same axis as a tool's and the
+    // permission UI has one word list to render. ABSENT is the common case
+    // and means prose-only: every skill that exists today parses to an
+    // empty set and takes the untouched path (see needs_trust_gate).
+    EffectSet   effects{};
+    // Frontmatter `source:` — where the skill CAME FROM ("github.com/…").
+    // Provenance, in the spirit of scope::Source: a skill the user fetched
+    // is a different thing from one they wrote, and the install prompt says
+    // so. Empty for hand-authored skills.
+    std::string origin;
     bool        user_only = false; // `disable-model-invocation`: hidden from the
                                    // model-facing catalog, loadable explicitly
+    // Non-zero when SKILL.md is PRESENT but larger than kMaxBodyBytes, so
+    // nothing could be loaded from it. The entry exists purely to be
+    // reported: an oversized skill used to vanish with `0 warning(s)` and
+    // the author had no way to tell it from a path typo. Such a skill is
+    // never usable -- it carries no name, description or body.
+    std::uintmax_t oversized_bytes = 0;
     std::filesystem::path dir; // absolute skill directory (tier-3 base path)
+    // Spec-derived name: the path below the discovery root with segments
+    // joined by '-' — for a root-level skill this IS the leaf directory
+    // name. Kept alongside `name` because frontmatter may override the
+    // name; lint compares the two (nested skills never match their leaf
+    // directory alone, so that would be a false mismatch).
+    std::string slug;
     // Frontmatter `metadata:` nested mapping, flattened to key/value
     // pairs in file order. Spec: arbitrary client-defined properties.
     std::vector<std::pair<std::string, std::string>> metadata;
@@ -72,16 +122,18 @@ struct Skill {
 };
 
 // Discover + parse every skill under the project + user roots. Bounded:
-// at most kMaxSkills entries, each body capped at kMaxBodyBytes. Result
+// at most the catalog cap (kMaxSkills by default; the AGENTTY_MAX_SKILLS
+// env var overrides it per discovery pass — see catalog_cap() in
+// skills.cpp), each body capped at kMaxBodyBytes. Result
 // is cached process-wide keyed by the roots' AND each SKILL.md's mtime
 // (an in-place edit to a skill is picked up next turn). Project skills
 // shadow user skills with the same name.
-[[nodiscard]] const std::vector<Skill>& all();
+[[nodiscard]] std::vector<Skill> all(Io);
 
 // Look up one skill by exact name. nullptr if absent. Finds
 // `disable-model-invocation` skills too (explicit lookup is allowed;
 // only the catalog hides them).
-[[nodiscard]] const Skill* find(std::string_view name);
+[[nodiscard]] std::optional<Skill> find(Io, std::string_view name);
 
 // Render the compact tier-1 catalog block for the system prompt:
 //   <skills>
@@ -92,24 +144,53 @@ struct Skill {
 // Skills flagged `disable-model-invocation` are omitted entirely (hidden
 // beats listed-but-blocked: the model never wastes a turn on them).
 // Empty string when no eligible skills exist (no block emitted).
-[[nodiscard]] std::string catalog_block();
+[[nodiscard]] std::string catalog_block(Io);
 
 // Render one skill's tier-2 activation payload: the body wrapped in
 // <skill_content name="...">, the absolute skill directory (so the model
 // can resolve relative references), the compatibility note when present,
 // and the <skill_resources> listing of bundled files. This is what the
 // `skill` tool returns.
-[[nodiscard]] std::string activation_payload(const Skill& s);
+[[nodiscard]] std::string activation_payload(Io, const Skill& s);
+// The same against an approvals store the caller already has: pure.
+[[nodiscard]] std::string activation_payload(const Skill& s, const scope::Approvals& approvals);
 
-// ── Activation tracking (spec: deduplicate activations) ──────────────
+// ── Activation: derived from the transcript, not stored ──────────────
 // Once a skill body is in the conversation, re-injecting it doubles the
-// token cost for zero signal. `note_activated` returns true the FIRST
-// time a name is recorded (caller should return the full payload) and
-// false on repeats (caller returns a short already-active sentinel).
-// `reset_activations` clears the set — called on thread swap / new
-// thread / session load, where the old tool_results leave context.
-[[nodiscard]] bool note_activated(std::string_view name);
-void reset_activations();
+// token cost for zero signal, so a second load returns a short "already
+// active" sentinel instead.
+//
+// "Already active" means: a <skill_content name="X"> block is in a message
+// the model can still SEE. That is a fact about the transcript, so it is
+// computed from the transcript — never kept in a separate set.
+//
+// It used to be a process-global set (note_activated / reset_activations),
+// and a set that only approximates the transcript drifts from it:
+//   * after /compact the tool_result holding the body is summarised away,
+//     but the set still said "active", so the model was told the
+//     instructions were "in an earlier tool_result" that no longer existed
+//     and never got them back;
+//   * resuming a thread started the set empty, so a body still in plain
+//     view was injected a second time;
+//   * every thread switch, new thread and fork had to remember to call
+//     reset_activations(), from inside the reducer.
+// Deriving it removes all three: there is nothing to reset, and the answer
+// is whatever the model actually sees.
+//
+// `visible` is the wire-visible messages' text: what the model is sent
+// (the latest compaction applied). Callers build it from the Thread; the
+// skill TOOL, which runs on a worker with no Thread, receives the derived
+// set as part of its dispatch.
+[[nodiscard]] bool is_active_in(std::string_view name,
+                                const std::vector<std::string_view>& visible);
+
+// Every skill name with a body in `visible`, for a caller that needs the
+// whole set at once (the tool dispatch). Same rule as is_active_in.
+[[nodiscard]] std::vector<std::string>
+active_in(const std::vector<std::string_view>& visible);
+
+// The skill tool's "already active" set travels with the call:
+// tools::CallContext::active_skills, derived from the visible transcript.
 
 // ── Spec validation (the spec's `skills-ref validate` equivalent) ────
 // Lint one skill against the agentskills.io constraints. Loading stays
@@ -117,18 +198,242 @@ void reset_activations();
 // this surface is for authors: `agentty skills` prints every discovered
 // skill with its diagnostics. Checks: name charset (lowercase alnum +
 // single hyphens, no edge hyphens), name ≤ 64 chars, name matches the
-// parent directory, description present and ≤ 1024 chars, body ≤ 500
-// lines (spec recommendation — move detail to references/).
+// spec-derived slug (the '-'-joined path below the discovery root —
+// for flat layouts that is the parent directory), description present
+// and ≤ 1024 chars, body ≤ 500 lines (spec recommendation — move detail
+// to references/).
 [[nodiscard]] std::vector<std::string> lint(const Skill& s);
+
+// ── Effects: declared capability, parsed from frontmatter ────────────
+// Lenient like the rest of the parser (the spec's client-implementation
+// guidance): `[exec, net]`, `exec net`, `exec,net` and `write-fs` /
+// `write_fs` / `writefs` all parse. Unknown words are IGNORED rather
+// than fatal — a future effect name must not make a skill unloadable on
+// an older binary. An empty or absent value yields the empty set, which
+// is exactly today's behaviour for every skill in the wild.
+[[nodiscard]] EffectSet parse_effects(std::string_view value) noexcept;
+
+// Render an EffectSet as the frontmatter spelling ("exec, net"), for
+// `agentty skill list` and the install prompt. Inverse of parse_effects
+// on the canonical names.
+[[nodiscard]] std::string effects_to_frontmatter(EffectSet e);
+
+// ── Trust: does loading this skill require a deliberate approval? ─────
+// A skill is INSTRUCTIONS, not sandboxed code — but instructions that
+// say "run npx, create a remote tenant, write credentials into the
+// repo" are the same threat class as a project-local MCP server, and
+// that class is already solved (scope::Trust, content-bound approval —
+// the MCPoison lesson: pin trust to CONTENT, never to a name).
+//
+// The gate fires ONLY on declared effects. Prose-only skills — which is
+// every skill that exists today — are never gated, so adopting this
+// costs existing users nothing. That claim is a static_assert below,
+// not a comment.
+[[nodiscard]] constexpr bool needs_trust_gate(EffectSet e) noexcept {
+    return !e.empty();
+}
+
+namespace proofs {
+// "Off is a byte-for-byte no-op" as a build error rather than a promise:
+// a prose-only skill must never reach the approval path.
+static_assert(!needs_trust_gate(EffectSet{}));
+static_assert( needs_trust_gate(EffectSet{Effect::Exec}));
+static_assert( needs_trust_gate(EffectSet{Effect::Net}));
+static_assert( needs_trust_gate(EffectSet{Effect::WriteFs}));
+// ReadFs alone still gates: "read every file under ~" is a real ask.
+static_assert( needs_trust_gate(EffectSet{Effect::ReadFs}));
+} // namespace proofs
+
+// Total: (skill, approvals) → Trust. Pure, so a reducer/test can drive
+// it with a fabricated store.
+//
+//   effects empty                    → Trusted   (prose; today's path)
+//   effects + content hash approved  → Trusted
+//   effects + fetched (`source:`)    → Pending   (user didn't author it)
+//   effects, hand-authored, project  → Pending   (a repo can't vouch for
+//                                                 itself — cloned config)
+//   effects, hand-authored, user     → Trusted   (the human wrote it)
+//
+// Change the body and the hash changes, so an approval earned by v1 does
+// not carry to a v2 that gained `exec`. That re-gate is the whole point.
+[[nodiscard]] scope::Trust trust_of(const Skill& s,
+                                    const scope::Approvals& approvals) noexcept;
+
+// Parse one SKILL.md's text. Exposed so `skill add` can describe a file it
+// is about to install WITHOUT a second, subtly-different parser — the CLI
+// briefly had one, and it silently failed on block scalars (`description:
+// |`), showing the user a bare "|" where the description should be. One
+// parser, one set of quirks.
+//   raw    — file contents
+//   slug   — directory name, the identity fallback when `name:` is absent
+//   source — "user" | "project" | ""
+[[nodiscard]] Skill parse_skill_text(const std::string& raw,
+                                     const std::string& slug,
+                                     const std::string& source);
+
+// A skill that lost a name collision. Shadowing ACROSS scopes is a
+// feature — a project skill overriding a user one is the documented rule.
+// Two directories claiming the same name in the SAME scope is not: it is
+// either a mistake, or a way to sit on disk while something else wears
+// your name. Either way the user should be able to see it.
+//
+// Kept separate from the loaded set so nothing downstream can accidentally
+// treat a shadowed skill as active — it is a diagnostic, not a skill.
+struct Shadowed {
+    std::string name;          // the contested name
+    std::string dir;           // where the losing copy lives
+    std::string source;        // its scope
+    EffectSet   effects{};     // what it declared — a hidden effectful
+                               // skill is the interesting case
+    std::string winner_dir;    // the directory that won the name
+};
+
+// Every skill dropped for a name collision during the last discovery.
+// Empty in the overwhelming majority of installs.
+[[nodiscard]] std::vector<Shadowed> shadowed(Io);
+
+// Is this name claimed by more than one directory in the SAME scope?
+// That is the case worth flagging — cross-scope shadowing is intended.
+[[nodiscard]] bool shadowed_within_scope(Io, std::string_view name);
+
+// Is this name safe to use as a directory name?
+//
+// A skill's `name:` is author-controlled and `skill add` builds an INSTALL
+// PATH from it — which was an arbitrary-filesystem-write primitive until
+// this existed. A skill declaring `name: ../../../../tmp/PWNED` installed
+// outside the skills root, and it did it from a PROSE skill, which never
+// even prompts. `name: /etc/cron.d/x` ignored the root entirely.
+//
+// One plain path component: letters, digits, '-', '_', '.', no leading dot
+// or dash, max 64. Anything else is REFUSED rather than rewritten —
+// silently installing "foo" when the file said "../../foo" trades one
+// surprise for another.
+[[nodiscard]] bool safe_skill_name(std::string_view name) noexcept;
+
+// Is `child` genuinely inside `root` after resolution? The second,
+// independent check on the install path, so containment doesn't rest on
+// the charset rule being exhaustive.
+[[nodiscard]] bool path_inside(const std::filesystem::path& root,
+                               const std::filesystem::path& child) noexcept;
+
+// ── Untrusted author text ───────────────────────────────────────
+// A skill's `description` is written by whoever wrote the skill, and it is
+// rendered in TWO places that must not be hijackable: the consent prompt
+// (where agentty is supposed to be the one talking) and the model-facing
+// catalog (one line away from instructions).
+//
+// Snyk's Feb-2026 audit of 3,984 skills found 91% of confirmed-malicious
+// skills carried prompt injection; the arXiv 98k-skill study documents
+// hidden directives in HTML comments and invisible Unicode. So author text
+// is sanitised before display: control characters, bidi/zero-width
+// smuggling and newlines are stripped, and it is length-capped. This does
+// NOT make the text safe to obey — it makes it unable to impersonate the
+// frame around it.
+[[nodiscard]] std::string sanitize_author_text(std::string_view raw,
+                                              std::size_t max_len = 160);
+
+// ── Injection screening ────────────────────────────────────────────
+// One finding drives this: a prompt everyone approves is not a control.
+// Anthropic measured 93% approval on Claude Code permission prompts;
+// Akhawe & Felt measured 70% clickthrough on Chrome SSL interstitials.
+// Habituation is the DEFAULT outcome of a uniform prompt.
+//
+// So agentty doesn't ask the same question every time. It screens the body
+// for patterns that actually appeared in the wild and RAISES the prompt
+// when they're present — a differentiated warning, which is the one
+// intervention the habituation literature found works (BYU fMRI study:
+// polymorphic warnings substantially reduced habituation of attention).
+//
+// A REVIEW AID, never a verdict. A clean result is one piece of evidence.
+struct Finding {
+    enum class Severity : std::uint8_t { Note, Warn, Critical };
+    Severity    severity;
+    std::string code;      // stable id, e.g. "curl-pipe-shell"
+    std::string detail;    // what was seen, in agentty's words
+    int         line = 0;  // 1-based line in the body; 0 = whole file
+};
+
+// Screen a skill body for documented attack patterns. Ordered by severity,
+// then line. Empty for the overwhelming majority of skills.
+[[nodiscard]] std::vector<Finding> screen_body(std::string_view body);
+
+[[nodiscard]] constexpr std::string_view to_string(Finding::Severity s) noexcept {
+    switch (s) {
+        case Finding::Severity::Critical: return "critical";
+        case Finding::Severity::Warn:     return "warn";
+        case Finding::Severity::Note:     return "note";
+    }
+    return "note";
+}
+
+// The approvals store leaf, under the USER root — a cloned repo cannot
+// write here, so it cannot pre-approve its own skills.
+inline constexpr std::string_view kApprovalsLeaf = "skills_approved.json";
+// NOTE: config::kSkillsApprovals is the same name, declared in the inventory.
+// A static_assert in skills_cli.cpp keeps the two from drifting.
+
+// Load / persist the skill approvals store (kApprovalsLeaf under the user
+// root). Separate from hooks' and MCP's stores on purpose: approving a
+// skill must not silently approve an MCP server.
+[[nodiscard]] scope::Approvals load_approvals(Io);
+void                           save_approvals(const scope::Approvals&);
+
+// Convenience: resolve a skill's trust against the persisted store.
+[[nodiscard]] scope::Trust trust_of(Io, const Skill& s) noexcept;
+
+// The exact bytes an approval is keyed by: body + declared effects. Exposed
+// so the consent UI can show the user what they are approving, and so a
+// test can assert the re-gate without reaching into the implementation.
+[[nodiscard]] std::string content_sha_of(const Skill& s);
+
+// ── The `agentty skill` CLI ────────────────────────────────────────────────
+// verb ∈ {add, list, remove, approve}. One install path for every source:
+//
+//   agentty skill add github.com/user/repo      fetched (needs approval)
+//   agentty skill add ./path/to/skill-dir       local copy
+//   agentty skill list                          with effects + trust column
+//   agentty skill remove NAME
+//   agentty skill approve NAME                  after reading it
+//
+// Deliberately NOT a first-run screen and NOT a menu entry: a capability
+// arrives because the user asked for it by name. Returns a process exit
+// code; prints what it did.
+int cli(const std::vector<std::string>& argv);
 
 // CLI entry: list every discovered skill (scope, dir, resource count)
 // with lint diagnostics. Returns 0 when every skill is clean, 1 when
 // any diagnostic fired — usable in CI exactly like `skills-ref
 // validate`, with zero extra tooling.
-int cmd_skills();
+int cmd_skills(Io);
 
 inline constexpr std::size_t kMaxSkills     = 64;
 inline constexpr std::size_t kMaxBodyBytes  = 64 * 1024;
 inline constexpr std::size_t kMaxResources  = 32;
+// Deepest group nesting a skill root is walked to. Group folders are an
+// ORGANIZING device — `embedded/startup/`, at most a category and a
+// sub-category — so 4 is already generous, while an uncapped walk turns a
+// skills root that happens to contain a large tree (a stray checkout, a
+// node_modules) into unbounded work on every cache miss. It also bounds the
+// derived name: each level appends a path segment, and a 40-deep nest
+// produced a 238-character "name" that no `/command` could ever invoke.
+inline constexpr std::size_t kMaxSkillDepth = 4;
+// Longest derived skill name. A name is typed as `/name`, so one that
+// cannot be typed is not a name.
+inline constexpr std::size_t kMaxSlugLen    = 64;
+
+// Test seam: how many times the catalog cap has been resolved from the
+// environment since process start.
+//
+// The cap bounds scan_root's walk, so it was once consulted per DIRECTORY
+// ENTRY — which made a malformed AGENTTY_MAX_SKILLS log its breadcrumb per
+// entry (measured: 120 ERROR-level lines for a single pass over 40 skills,
+// every turn, into the crash flight recorder). It is now resolved ONCE per
+// all() pass and threaded through.
+//
+// A test can assert that directly: log-line counting would need logx's file
+// sink, which latches on first use and so is unreliable inside the shared
+// test binary. Counting resolutions asserts the same property at its
+// source, without depending on sink state.
+[[nodiscard]] std::size_t debug_cap_resolutions() noexcept;
 
 } // namespace agentty::tools::skills

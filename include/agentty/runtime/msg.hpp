@@ -27,13 +27,22 @@
 //       longer forces stream/login/diff to recompile.
 
 #include <chrono>
+#include <cstdint>
 #include <expected>
+#include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/provider/chatgpt/codex_oauth.hpp"
+#include "agentty/provider/copilot/copilot_oauth.hpp"
+#include "agentty/provider/kimi/kimi_oauth.hpp"
+#include "agentty/runtime/panel/fork.hpp"
+#include "agentty/runtime/panel/form_keys.hpp"
+#include "agentty/runtime/panel/settings/categories.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/tool/registry.hpp"
 
@@ -51,11 +60,38 @@ struct ComposerEnter {};
 struct ComposerNewline {};
 struct ComposerSubmit {};
 struct ComposerToggleExpand {};
+// ^B — arm/disarm LOOP mode: re-send the armed message automatically after
+// every completed turn until toggled off. Arming snapshots the composer's
+// current text+attachments (see ComposerState::loop_text) and submits it
+// immediately, so ^B reads as "send this, and keep sending it".
+struct ComposerToggleLoop {};
 struct ComposerCursorLeft {};
 struct ComposerCursorRight {};
 struct ComposerCursorHome {};
 struct ComposerCursorEnd {};
-struct ComposerPaste { std::string text; };
+struct ComposerPaste {
+    std::string text;
+    // Set when this paste already went through the image-path check (see
+    // ImagePathSniffed), so it is not sent round again.
+    bool path_checked = false;
+};
+// The worker looked at a pasted path. `path` is empty when it was not a
+// readable image; then the reducer pastes `text` as ordinary text.
+struct ImagePathSniffed {
+    std::string text;
+    std::string path;
+    std::string media_type;
+    std::string body;
+};
+// Fired ~1.2s after an escape-based clipboard read (OSC 5522 / OSC 52) was
+// emitted. If no paste reply arrived by then, the reducer surfaces an
+// ACTIONABLE diagnosis (which terminal, tmux, mosh, the exact env-var fix)
+// instead of the old behaviour — the "reading clipboard…" toast silently
+// lapsing and teaching the user nothing. `seq` matches the query that armed
+// it so a stale timeout never fires after a successful paste.
+struct ClipboardQueryTimeout { std::uint64_t seq = 0; };
+// The worker's answer to "why did that clipboard read go unanswered".
+struct ClipboardDiagnosed { std::string message; };
 // Recall queued messages back into the composer for editing. Bound to
 // Up-arrow when the composer is empty and queued messages exist.
 // Mirrors Claude Code's `Lc_` (binary offset 76303220): drains every
@@ -140,8 +176,27 @@ struct StreamTextDelta { std::string text; };
 // burst at the text→tool seam). No-op if no text block was open.
 struct StreamTextBlockClosed {};
 struct StreamToolUseStart { ToolCallId id; ToolName name; };
-struct StreamToolUseDelta { std::string partial_json; };
-struct StreamToolUseEnd {};
+// Append-only wire fragment, always addressed by the stable tool-call id.
+// Anthropic, Codex Responses, and OpenAI Chat all expose an id when the call
+// opens; carrying it on every update makes overlapping/parallel streams safe
+// and removes the reducer's provider-ordering fallback.
+struct StreamToolUseDelta { ToolCallId id; std::string partial_json; };
+// Full current argument snapshot. ACP tool_call_update.rawInput has replace
+// semantics (it is not a textual delta), so keeping this distinct prevents
+// repeated snapshots from producing concatenated, invalid JSON.
+struct StreamToolUseSnapshot { ToolCallId id; std::string json; };
+// Completion is also explicitly addressed. An empty/default id is not a valid
+// wire event: adapters must retain the id they received at call start.
+struct StreamToolUseEnd { ToolCallId id; };
+// Terminal result for a tool executed by a delegated agent (external ACP).
+// It follows StreamToolUseEnd so the shared argument assembler still parses
+// the final input, then marks the card terminal without scheduling the host's
+// tool executor a second time.
+struct StreamObservedToolResult {
+    ToolCallId id;
+    bool failed = false;
+    std::string output;
+};
 // A chunk of the assistant's thinking block (adaptive thinking). `text` is
 // the visible reasoning delta (empty under display:omitted); `signature` is
 // the opaque per-block signature that arrives once, near the block's end.
@@ -149,7 +204,38 @@ struct StreamToolUseEnd {};
 // block can be replayed verbatim on the next turn (Anthropic requires it
 // when the turn also carries tool_use). Doubles as a liveness heartbeat —
 // the handler bumps last_event_at like StreamHeartbeat does.
-struct StreamThinkingDelta { std::string text; std::string signature; };
+//
+// `block_boundary` marks the START of a NEW reasoning block/paragraph:
+// Anthropic emits it on each thinking content_block_start (interleaved
+// thinking produces several signed blocks per response — merging them
+// corrupts the signature replay), and Codex/Responses emits it on each new
+// reasoning summary part / reasoning item (paragraph boundaries that would
+// otherwise concatenate into run-together prose). The reducer seals the
+// previous block and inserts a display separator.
+struct StreamThinkingDelta {
+    std::string text;
+    std::string signature;
+    bool block_boundary = false;
+    // Non-empty = a complete REDACTED thinking block (Anthropic safety
+    // encryption; opaque). The reducer stores it as its own ThinkingBlock so
+    // the wire replays it verbatim — required before tool_use. Not rendered.
+    std::string redacted_data;
+};
+// Codex/Responses reasoning-item capture. Unlike StreamThinkingDelta (which
+// carries visible summary text for the thinking block), this carries the
+// OPAQUE `encrypted_content` blob from a completed reasoning output item.
+// The reducer stashes it on the in-flight assistant Message so the follow-up
+// turn can replay it in `input[]` and preserve chain-of-thought across tool
+// rounds under store:false. Never rendered; wire-only.
+// An opaque, ACCOUNT-SCOPED reasoning blob the backend asked us to replay on
+// the next turn. `site` records which host minted it (responses::Site::id).
+//
+// The pairing is the whole point: ciphertext from one backend sent to another
+// is a 400 that fails the entire request, not a field the server ignores
+// (openclaw#72602). Carrying the origin with the payload is what lets the
+// replay be decided rather than assumed — the two travel together or the
+// invariant is only a comment.
+struct StreamReasoning { std::string encrypted; std::string site; };
 // Mirrors Anthropic's message.usage shape. cache_* fields are non-zero only
 // when the request hit a cache_control breakpoint. Fields default to 0 so
 // callers that only care about input/output keep working.
@@ -158,6 +244,13 @@ struct StreamUsage {
     int output_tokens              = 0;
     int cache_creation_input_tokens = 0;
     int cache_read_input_tokens    = 0;
+    // Reasoning/thinking tokens billed WITHIN output_tokens (OpenAI counts
+    // them under completion_tokens_details.reasoning_tokens /
+    // output_tokens_details.reasoning_tokens; Anthropic doesn't break them
+    // out). Purely informational — do NOT add to output_tokens for cost/
+    // context math, they are already included there. 0 when the wire omits
+    // the detail (non-reasoning model, or a provider that doesn't report it).
+    int reasoning_output_tokens    = 0;
 };
 // Why the stream ended. Maps Anthropic's wire string
 // (`message_delta.delta.stop_reason`: "end_turn" | "tool_use" |
@@ -171,6 +264,19 @@ enum class StopReason : std::uint8_t {
     ToolUse,        // model wants tool results before continuing
     MaxTokens,      // hit the output token cap mid-stream
     StopSequence,   // matched a configured stop_sequence
+    // Safety classifiers declined the request. Arrives as a NORMAL HTTP 200
+    // with a well-formed stream -- a thinking block, a handful of output
+    // tokens, and no content blocks at all. Nothing about the transport
+    // looks wrong, which is exactly why this needs its own value: folded
+    // into Unspecified it was "treat as a clean stream end", and a clean
+    // end with no content renders as an empty bubble. Observed live: a
+    // turn with out=4, no text, no tool calls, and no visible explanation.
+    Refusal,
+    // The response filled the model's context window (as opposed to the
+    // request's own max_tokens cap, which is MaxTokens). Same truncation
+    // semantics, different cause, and the fix the user needs differs:
+    // raising max_tokens cannot help here.
+    ContextExceeded,
     Unspecified,    // wire absent, empty, or unknown
 };
 
@@ -180,6 +286,9 @@ enum class StopReason : std::uint8_t {
         case StopReason::ToolUse:      return "tool_use";
         case StopReason::MaxTokens:    return "max_tokens";
         case StopReason::StopSequence: return "stop_sequence";
+        case StopReason::Refusal:      return "refusal";
+        case StopReason::ContextExceeded:
+            return "model_context_window_exceeded";
         case StopReason::Unspecified:  return "";
     }
     return "";
@@ -194,10 +303,18 @@ enum class StopReason : std::uint8_t {
     if (s == "tool_use")      return StopReason::ToolUse;
     if (s == "max_tokens")    return StopReason::MaxTokens;
     if (s == "stop_sequence") return StopReason::StopSequence;
+    if (s == "refusal")       return StopReason::Refusal;
+    if (s == "model_context_window_exceeded")
+        return StopReason::ContextExceeded;
+    // pause_turn: a server-tool sampling loop hit its iteration limit. We
+    // send no server tools, so it cannot arrive today; when it can, it needs
+    // RESUME semantics (send the assistant content back), not a stop. Left
+    // deliberately unmapped rather than given a value nothing implements.
     return StopReason::Unspecified;
 }
 
 struct StreamFinished { StopReason stop_reason = StopReason::Unspecified; };
+
 // Stream-level failure. `message` is human-readable (used for both the
 // status banner and `provider::classify(string)` fallback). `retry_after`
 // is the server's Retry-After hint when present — Anthropic sets it on
@@ -210,6 +327,19 @@ struct StreamFinished { StopReason stop_reason = StopReason::Unspecified; };
 struct StreamError {
     std::string message;
     std::optional<std::chrono::seconds> retry_after;
+    // The observed HTTP response status when the failure was an HTTP-status
+    // error (0 when it wasn't one — a transport/socket failure, a synthetic
+    // stall, or an SSE `event: error` body where no status is available). The
+    // transport already KNOWS this precisely; carrying it lets the retry
+    // reducer classify via the typed, compile-time-proven
+    // provider::classify(HttpError) path instead of substring-sniffing the
+    // human `message`. Non-zero ⇒ classify by status; zero ⇒ fall back to the
+    // string sniff. This is how the StreamResult's precision reaches the
+    // reducer without changing the Msg-driven runtime seam.
+    int http_status = 0;
+    // The server accepted a non-idempotent request before transport failure;
+    // retrying could duplicate model work/cost.
+    bool non_replayable = false;
     // True only for the SYNTHETIC StreamError the stall watchdog dispatches
     // after it trips the cancel token (see meta.cpp Tick). The handler must
     // treat a `from_stall` error as a recoverable upstream stall (reclassify
@@ -222,17 +352,17 @@ struct StreamError {
     // turns/retries that ran in between.
     bool from_stall = false;
 };
-// Wire-alive heartbeat. Emitted by the transport for SSE frames that
-// carry no reducer-visible payload but prove the connection is healthy
-// and the model is still working: SSE `ping` events (Anthropic's proxy
-// keepalive, every 10-15 s), and `thinking_delta` blocks (extended-
-// thinking models emit these while reasoning silently — no `text` /
-// `input_json` for seconds or minutes at a time). Without this Msg the
-// reducer's stall watchdog can't distinguish "model is thinking" from
-// "transport is wedged" and fires spurious "stream stalled" errors.
-// The handler does nothing but bump `last_event_at` — no render
-// churn, no state transitions, no visible UI effect.
-struct StreamHeartbeat {};
+// Wire-alive heartbeat. Model/SSE heartbeats reset transient retry history;
+// transport-only activity (for example HTTP/2 PING ACK bytes) merely prevents
+// the 120-second UI watchdog from misclassifying a buffering corporate
+// gateway as dead.
+struct StreamHeartbeat {
+    bool transport_only = false;
+};
+// A live intermediary is withholding response DATA. Unlike a generic
+// heartbeat this is user-visible: the reducer keeps the bounded request alive
+// and explains why output may arrive in one burst instead of incrementally.
+struct StreamBufferedWait {};
 // User-driven cancel of the in-flight stream (Esc while streaming). The
 // reducer trips the StreamState cancel token; the http layer notices within
 // ~200 ms and the worker thread eventually emits a StreamError("cancelled").
@@ -253,19 +383,36 @@ struct RetryStream {};
 struct ToolExecOutput {
     ToolCallId id;
     std::expected<std::string, tools::ToolError> result;
-    // Structured file edit computed by the tool (edit / write): path,
-    // before/after contents, hunks. Feeds m.d.pending_changes so the
-    // diff-review pane + changes strip reflect what the agent actually
-    // touched this session. nullopt for tools that don't mutate files
-    // and for failed runs.
+    // Structured filesystem mutation a file-touching tool (edit / write /
+    // apply_patch / replace) returns alongside its text; std::nullopt for
+    // every other tool. The reducer appends it to m.d.pending_changes so the
+    // diff-review pane (Ctrl+R) can walk / accept / reject the hunks before
+    // they're kept. Decoded from the tool's FileChange meta in the mcp bridge
+    // (decode_result), which rebuilds structured hunks via diff::compute.
     std::optional<FileChange> change;
+    // Multi-file edits (replace) — one entry per written file. When non-empty
+    // it supersedes `change` for queuing; `change` remains its first element
+    // for single-file compatibility.
+    std::vector<FileChange> changes;
+    // Images a tool surfaced for a vision model (read on an image file). The
+    // reducer stores them on ToolUse::Done so the wire renders them as image
+    // blocks in this call's tool_result. Empty for text-only tools.
+    std::vector<ImageContent> images;
+    // Which execution produced this result (ToolUse::Running::exec_seq).
+    // Tool ids are not unique across turns (gateways and our own synthetic
+    // ids restart at call_0), so a worker that outlives a cancel must not
+    // land its output on a new call that reuses the id. 0 = untagged.
+    std::uint64_t exec_seq = 0;
 };
-// Live progress snapshot from a running tool (e.g. bash stdout+stderr so far).
 // Contains the FULL accumulated output, not a delta — the update handler can
 // assign unconditionally without maintaining append state. Coalesced at the
 // subprocess boundary (~100 ms) so a chatty command doesn't flood the event
 // queue with micro-updates.
-struct ToolExecProgress { ToolCallId id; std::string snapshot; };
+struct ToolExecProgress {
+    ToolCallId id;
+    std::string snapshot;
+    std::uint64_t exec_seq = 0;   // see ToolExecOutput::exec_seq
+};
 // Wall-clock watchdog for tool execution. Scheduled by kick_pending_tools
 // via Cmd::after when a non-subprocess tool transitions to Running. If the
 // tool has reached a terminal state by the time the check fires, this is
@@ -282,39 +429,131 @@ struct PermissionApprove {};
 struct PermissionReject {};
 struct PermissionApproveAlways {};
 
-// ── Model picker ─────────────────────────────────────────────────────────
-struct OpenModelPicker {};
-struct CloseModelPicker {};
-struct ModelPickerMove { int delta; };
-// Absolute-jump nav for long lists. Where::Home/End snap to first/last;
-// PageUp/PageDown step by one viewport (no wrap, clamped at the edges).
-// Saves the user mashing ↑/↓ through hundreds of entries.
-struct ModelPickerJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
-struct ModelPickerSelect {};
-struct ModelPickerToggleFavorite {};
-// Cycle the reasoning effort tier (←/→ in the model picker). delta steps
-// within the active model's supported efforts (wrapping); the new tier is
-// persisted immediately. No-op when the model doesn't support effort.
-struct ModelPickerCycleEffort { int delta; };
-struct ModelsLoaded { std::vector<ModelInfo> models; };
+// ── Model catalog ────────────────────────────────────────────────────────
+// Result of a background model-catalog fetch. `provider_id` is the canonical
+// id of the provider the fetch was FOR (captured when the fetch launched):
+// the reducer drops the payload if the active provider has changed since —
+// without it, an in-flight fetch for provider A landing after a switch to B
+// installs A's catalog under B (picking from it then streams B with an
+// A-model id: the "model changed, provider didn't" bug).
+struct ModelsLoaded {
+    std::vector<ModelInfo> models;
+    std::string            provider_id;
+    // Non-empty ⇒ the fetch FAILED and this is the human-readable reason.
+    // Carried here (not as a StreamError) because StreamError feeds the
+    // LIVE TURN's retry state machine: a catalog failure dispatched as
+    // StreamError while a stream is active would pop the assistant message
+    // receiving deltas, schedule RetryStream (racing a second worker into
+    // the session), or latch the healthy turn terminal — all for an error
+    // that has nothing to do with the stream. The reducer surfaces this as
+    // a transient status toast instead.
+    std::string            error;
+};
 
+// ── Fused cross-provider model picker ────────────────────────────────────
+// The unified list spanning EVERY authenticated provider (docs/design/
+// unified-model-picker.md). Each row is a concrete (provider, model) the
+// user switches to atomically, or a "sign in to X" offer that routes to
+// login. Opened with `^/` and the `/model` slash command.
+//
+// This is the ONE model surface. It also serves Smart Mode role→model
+// assignment: when the open Models panel carries assign_slot the list is
+// scoped to
+// the active provider and Select writes the slot instead of switching.
+struct OpenModels {};
+// Deferred lazy refresh: after the ACTIVE provider's fast refetch is issued on
+// open, this fires (via a short After delay) to background-refresh every OTHER
+// authed provider's live catalog. Keeping them off the initial batch means the
+// active provider's result isn't queued behind slower providers on the bounded
+// worker pool — the selected models refresh first, the rest trickle in.
+struct FusedRefreshOthers {};
+// Result of re-probing ONE model's live window on a local endpoint (see
+// cmd::probe_model_window). A llama.cpp router with one model resident at a
+// time only reports the loaded model's size, so the window is re-checked
+// after a switch and after each turn. `window` is 0 when the server couldn't
+// say (model not loaded yet); the reducer then keeps what it had.
+struct ModelWindowProbed {
+    std::string provider_id;
+    std::string model_id;
+    int         window = 0;
+};
+// ^L — force a full live refresh: mark EVERY authed provider's catalog stale
+// and refetch (active immediately, others deferred). The manual escape hatch
+// when a catalog is stale/failed and the user doesn't want to wait for the TTL
+// or reopen. Shows the loading hint while fetches are in flight.
+struct ModelsRefresh {};
+struct CloseModels {};
+struct ModelsMove { int delta; };
+struct ModelsJump { enum class Where { Home, End, PageUp, PageDown }; Where where; };
+struct ModelsSelect {};        // atomic switch to the highlighted row
+struct ModelsToggleFavorite {};
+// ←/→ cycles the reasoning-effort tier of the highlighted model; ^E toggles
+// thinking on/off. The fused picker is the COMPLETE "pick + tune your model"
+// surface — there is no second picker.
+struct ModelsCycleEffort { int delta; };
+// Step the highlighted model's CONTEXT WINDOW override through a ladder of
+// common sizes, wrapping back to "auto".
+//
+// A cycle rather than a text prompt on purpose: the picker is a list with a
+// live filter, so a numeric entry mode would have to steal the keyboard from
+// the filter and then hand it back. The ladder covers what gateways actually
+// serve, and "auto" (no override) is a rung on it — so the control is
+// reversible without a separate clear action.
+struct ModelsCycleContext { int delta = +1; };
+struct ModelsToggleReasoning {};
+// ^/ — scope the browse/filter list to ONLY the provider of the currently
+// highlighted row (so you can drill into "just this provider's models").
+// Pressing it again when already scoped clears the scope (back to all
+// providers). A no-op when the highlighted row has no provider (offers).
+struct ModelsScopeProvider {};
+struct ModelsFilterInput { char32_t ch; };
+struct ModelsFilterBackspace {};
+// One authed provider's catalog resolved (async, one per provider on open).
+// `provider_id` guards against a provider signed out mid-fetch; `ok=false`
+// marks the group Failed. Merges into Model::d.provider_catalogs in place.
+struct FusedCatalogLoaded {
+    std::string            provider_id;
+    std::vector<ModelInfo> models;
+    bool                   ok = true;
+};
+// ^Tab MRU cycle: walk the recent (provider,model) ring to progressively
+// older models (A → B → C → D → A), no overlay. Reuses the atomic-switch
+// resolution but does NOT reorder the MRU, so repeated presses cycle the
+// whole ring instead of toggling the last two.
+struct SwitchToPreviousModel {};
 // ── Provider picker ──────────────────────────────────────────────────────
 // Mirrors the model picker. Selecting a provider live-switches the active
 // backend (provider::select + a deps() seam swap), persists the choice, and
 // kicks a fresh model fetch so the model list reflects the new backend.
-struct OpenProviderPicker {};
-struct CloseProviderPicker {};
-struct ProviderPickerMove { int delta; };
-struct ProviderPickerJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
-struct ProviderPickerSelect {};
+struct OpenProviders {};
+struct CloseProviders {};
+struct ProvidersMove { int delta; };
+struct ProvidersJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
+struct ProvidersSelect {};
+// Live search-filter over the provider list (mirrors the model picker): a
+// typed character appends to the query, Backspace trims it. The row list
+// narrows to fuzzy/substring matches on the id + label + blurb.
+struct ProvidersFilterInput { char32_t codepoint; };
+struct ProvidersFilterBackspace {};
+// ^D on a row — two-press delete (confirm_remove): removes a SAVED CUSTOM
+// HOST from Settings entirely, OR signs out of a PRESET that has a saved key
+// (clears the key; the built-in preset stays). Mirrors ThreadListDelete /
+// AccountRemove. No-op on presets with no saved key, ACP, and the sentinel.
+struct ProvidersDelete {};
 
 // ── Thread list ──────────────────────────────────────────────────────────
 struct OpenThreadList {};
 struct CloseThreadList {};
 struct ThreadListMove { int delta; };
-// Absolute-jump nav for long thread histories. See ModelPickerJump.
+// Absolute-jump nav for long thread histories. See ModelsJump.
 struct ThreadListJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
 struct ThreadListSelect {};
+// `d` / `D` in the thread picker — two-press delete with confirm_remove.
+// Mirrors the established SettingsListRemove / AccountRemove pattern:
+// first press marks the focused thread as pending-delete (⚠ badge),
+// second press on the SAME row commits via persistence::delete_thread().
+// Any move/select/new/close disarms the pending state.
+struct ThreadListDelete {};
 // Quick-cycle: switch to the adjacent thread (by recency order, the
 // same order the ^J picker shows) WITHOUT opening the picker. delta is
 // applied to the thread-list index: +1 = older, -1 = newer; wraps at
@@ -344,28 +583,32 @@ struct ThreadsLoaded    { std::vector<Thread> threads; };
 struct ThreadLoaded     { Thread thread; };
 
 // ── Command palette ──────────────────────────────────────────────────────
-struct OpenCommandPalette {};
-struct CloseCommandPalette {};
-struct CommandPaletteInput { char32_t ch; };
-struct CommandPaletteBackspace {};
-struct CommandPaletteMove { int delta; };
-struct CommandPaletteSelect {};
+struct OpenPalette {};
+struct ClosePalette {};
+struct PaletteInput { char32_t ch; };
+// Bracketed paste while a FILTER panel owns the keyboard (palette, models,
+// providers, mention, symbol): the text lands in that panel's query — not
+// the composer behind it. One message; the reducer of whichever panel is
+// open handles it (the router targets by the open Kind, and the reducers
+// re-verify — same staleness discipline as every input path).
+struct PanelFilterPaste { std::string text; };
+struct PaletteBackspace {};
+struct PaletteMove { int delta; };
+struct PaletteSelect {};
 
 // ── @file mention picker ────────────────────────────────────────────────
-struct OpenMentionPalette {};
-struct CloseMentionPalette {};
-struct MentionPaletteInput { char32_t ch; };
-struct MentionPaletteBackspace {};
-struct MentionPaletteMove { int delta; };
-struct MentionPaletteSelect {};
+struct CloseMention {};
+struct MentionInput { char32_t ch; };
+struct MentionBackspace {};
+struct MentionMove { int delta; };
+struct MentionSelect {};
 
 // ── #symbol picker (parallel to @file) ────────────────────────────────────
-struct OpenSymbolPalette {};
-struct CloseSymbolPalette {};
-struct SymbolPaletteInput { char32_t ch; };
-struct SymbolPaletteBackspace {};
-struct SymbolPaletteMove { int delta; };
-struct SymbolPaletteSelect {};
+struct CloseSymbol {};
+struct SymbolInput { char32_t ch; };
+struct SymbolBackspace {};
+struct SymbolMove { int delta; };
+struct SymbolSelect {};
 
 // ── Code-block picker (Ctrl+G — run AI-suggested commands) ──────────
 // Open scans the newest assistant reply for fenced ``` blocks; the modal
@@ -381,12 +624,16 @@ struct SymbolPaletteSelect {};
 // opens the RESULT card (exit code + tail preview) where the user
 // decides: a = attach to composer as an Output chip, y = copy clean,
 // Esc = discard (the live transcript already sits in scrollback).
-struct OpenCodeBlockPicker {};
-struct CloseCodeBlockPicker {};
-struct CodeBlockPickerMove { int delta; };
-struct CodeBlockPickerSelect { int index = -1; };
-struct CodeBlockPickerEdit {};
-struct CodeBlockPickerCopy {};
+struct OpenCodeBlocks {};
+struct CloseCodeBlocks {};
+struct CodeBlocksMove { int delta; };
+// Select a code block. `index` absent = act on the row under the cursor
+// (Enter); engaged = a direct 1-9 number key naming a row. It was
+// `int = -1`, so "no override" and "row -1" were the same value and every
+// reader had to remember which one it meant.
+struct CodeBlocksSelect { std::optional<int> index; };
+struct CodeBlocksEdit {};
+struct CodeBlocksCopy {};
 struct CodeBlockRunFinished {
     std::string command;
     std::string output;
@@ -397,20 +644,237 @@ struct CodeBlockResultAttach {};
 struct CodeBlockResultCopy {};
 struct CodeBlockResultDiscard {};
 
+// ── Tool-output viewer ───────────────────────────────────────────────────────
+// Ctrl+O scrollable overlay for reading the FULL stored output of any
+// settled tool call — the timeline cards elide long bodies (head/tail
+// windows) and expanding them in place would rewrite committed scrollback
+// rows, so inspection happens in an overlay that paints strictly over the
+// live viewport. Open snapshots the entries; Move drives the list cursor
+// (or the body scroll in the viewing stage); Select enters the body
+// stage; Close = Esc (body → back to list, list → closed); Copy = y.
+struct OpenToolOutput {};
+struct CloseToolOutput {};
+struct ToolOutputMove { int delta; };
+struct ToolOutputSelect {};
+struct ToolOutputCopy {};
+// ←/→: in the body stage, jump straight to the previous/next entry's
+// output without bouncing through the list; in the list stage ←/→ are
+// unbound (the viewer swallows all keys while open, so they simply no-op).
+struct ToolOutputStep { int delta; };
+
 // ── Todo modal ───────────────────────────────────────────────────────────
 struct OpenTodoModal {};
 struct CloseTodoModal {};
-struct UpdateTodos { std::vector<TodoItem> items; };
+
+// ── Smart Mode overlay ───────────────────────────────────────────────────
+// A dedicated config overlay for role-based routing (docs/design/smart-mode.md).
+// A picker-style modal: row 0 is the master Enabled toggle, rows 1-3 are the
+// Strategic / Implementation / Utility slots. Enter on row 0 flips enabled;
+// Enter on a slot row opens the model picker in slot-assign mode. All changes
+// persist to settings.json.
+//
+// ONE key message, like the Retrieval pane: navigation, the master toggle and
+// the picker hand-off are all resolved by the shared form layer, so this pane
+// cannot drift from that one.
+struct OpenSmartMode {};
+struct CloseSmartMode {};
+struct SmartModeKey { form::keys::Action action; };
+// Bracketed paste while a Smart Mode field is being edited — lands in the
+// field's buffer, not the composer behind the panel.
+struct SmartModePaste { std::string text; };
+// Reveal/hide the advanced routing-policy rows (^A). View state on the
+// overlay; the pane rebuilds. Not persisted.
+struct SmartModeAdvanced {};
+struct SmartModeClearSlot {};     // 'x' on a slot row: reset it to auto
+
+// ── Web Search (Settings → Web Search) ─────────────────────────
+// The web_search tool's policy: on/off, result count, ceiling, excluded
+// sites. One form pane, built from the settings registry's web_search.* rows;
+// every committed edit persists and is published to the tool layer as an
+// effect.
+//
+// ONE key message like Smart Mode and Retrieval: navigation, toggles and
+// text editing all come from the shared form layer.
+struct OpenWebSearch {};
+struct CloseWebSearch {};
+struct WebSearchKey { form::keys::Action action; };
+// Bracketed paste while the Web Search pane is open. The reducer lands it on
+// the focused text row (starting the edit, as typing does) and drops it
+// anywhere else -- an API key is the field pasting exists for.
+struct WebSearchPaste { std::string text; };
+// The API-key store is IO (a sealed file, and `secret-tool` when the OS
+// keystore is on), so the pane never touches it from the reducer: it is read
+// and written on a worker, and these carry the outcome back. None of them
+// carries a key. `gen` is the pane's keys_gen when the read started; a reply
+// to an older read (one that a store or a removal has since overtaken) is
+// dropped.
+struct WebSearchKeysRead {
+    std::uint64_t gen = 0;
+    // service id -> "stored" | "env: AGENTTY_WEB_SEARCH_KEY_..." | "" (none)
+    std::vector<std::pair<std::string, std::string>> origins;
+};
+struct WebSearchKeySaved   { std::string service; bool ok = true; };
+struct WebSearchKeyRemoved { std::string service; bool ok = true; };
+
+// ── Plugin editor (detail / add form) ──────────────────────────
+// Opened from the Plugins settings list: `e` on a server row → detail form
+// for THAT server; `a` → add form (kind-first: the kind choice rebuilds the
+// field set as the user picks stdio/http/sse/passthrough). Same shared form
+// layer as SmartMode/Rag — one key message, paste routed to the focused
+// field, close via nav so Esc restores the settings list.
+struct OpenPluginEdit {
+    std::string server;   // "" = add mode
+    bool        project = false;
+};
+struct ClosePluginEdit {};
+struct PluginEditKey { form::keys::Action action; };
+struct PluginEditPaste { std::string text; };
+
+// ── Appearance pane ──────────────────────────────────────────────────────
+// The look of the thing, as a form: theme, colour tier, density, motion,
+// chrome. Every row is LIVE — the reducer mutates the pref, persists it to
+// the user store and the next frame is painted with it. A settings screen
+// for appearance cannot have an apply step: a theme is judged by LOOKING at
+// it, and between choosing and seeing there must not be a restart.
+struct OpenAppearance {};
+struct CloseAppearance {};
+struct AppearanceKey { form::keys::Action action; };
+// The theme browser, floating over the pane. Its own messages because it is
+// a real picker (57 schemes and growing, fuzzy-searched) rather than a
+// dropdown — see form.hpp's Pick-vs-Choice rule.
+struct AppearancePickTheme {};        // open the browser on the Theme row
+struct AppearanceThemeMove { int delta = 0; };
+struct AppearanceThemeQuery { std::string text; };   // "" = backspace one
+struct AppearanceThemeCommit {};      // Enter: keep the highlighted scheme
+struct AppearanceThemeCancel {};      // Esc: restore the theme we came in on
+
+// ── Sandbox pane ─────────────────────────────────────────
+// What a command may touch: filesystem scope, network, syscall profile,
+// resource caps, and the trust-handoff policy.
+//
+// Unlike Appearance, this pane is NOT live. A boundary must not change under
+// a command that is already running, and a half-applied policy is a policy
+// nobody can reason about -- so edits accumulate in the form, the pane shows
+// the walls they WOULD produce (a compile, not a spawn), and SandboxSave
+// commits the whole config at once. That is also why there is a Save message
+// here and none in Appearance: a theme is judged by looking, a sandbox by
+// reading what it promises before you trust it.
+struct OpenSandbox {};
+struct CloseSandbox {};
+struct SandboxKey { form::keys::Action action; };
+// Recompile the preview from the current form. The reducer raises this after
+// any edit, so the wall report can never describe a config the rows no
+// longer say.
+struct SandboxRefreshPreview {};
+// Persist the form's config and install it for the rest of the session.
+struct SandboxSave {};
+
+// ── Path list editor ──────────────────────────────────────────
+//
+// The path rows ("Also readable", "Masked", allowed ports) were ONE text
+// field holding a comma-separated string. That is a serialisation format, not
+// an interface: you cannot see where one entry ends, a stray comma silently
+// changes the policy, and editing the third of four paths means cursoring
+// through the other three. For a security control whose whole job is being
+// legible, that is the wrong shape.
+//
+// So the row becomes a Pick that opens a real list: one entry per line, add
+// and remove as discrete acts. The parent form is untouched until the editor
+// commits, so Esc is a true cancel.
+struct SandboxEditList { std::string row_id; };   // open the editor for a row
+struct SandboxListKey  { form::keys::Action action; };
+struct SandboxListClose {};                       // commit back into the row
 
 // ── In-app login modal ───────────────────────────────────────────────────
 // Shown when the user starts agentty with no valid credentials, OR
-// triggered explicitly from the command palette to switch accounts.
+// triggered explicitly in-app to sign in or add an account.
 // Same state-machine flavor as the other modals: closed → picking →
 // {oauth_code | api_key_input} → done. The async OAuth exchange runs
 // on a worker thread (Cmd::task) and reports back via LoginExchanged.
 struct OpenLogin {};
 struct CloseLogin {};
-struct LoginPickMethod  { char32_t key; };          // '1' = OAuth, '2' = ApiKey
+// Esc in a login sub-modal: pop ONE level of the flow (key prompt → host
+// input → provider picker → closed) instead of collapsing everything.
+// The reducer reads the sub-state's `back` origin field.
+struct LoginBack {};
+// Async custom-host probe result (worker → reducer). `ok` means a model
+// list answered somewhere; `models_path`/`native_api` carry the DETECTED
+// dialect so the commit adopts what the server actually speaks. On failure
+// `error` is the human reason ("nothing listening", "HTTP 401", …).
+// attempt_id matches HostProbing so a stale result is dropped.
+struct HostProbed {
+    std::uint64_t attempt_id = 0;
+    std::string   spec;
+    bool          ok = false;
+    std::string   models_path;   // the path that answered
+    bool          native_api = false;
+    int           model_count = 0;
+    long          latency_ms = 0;
+    std::string   error;
+    // The endpoint answered 401/403: the ADDRESS IS CORRECT, it just wants
+    // credentials. Distinct from every other failure, because the fix is
+    // "paste a key", not "fix the URL" — so the reducer sends the user to the
+    // key prompt instead of back to an address field that was already right.
+    // Without this, the most common paid-provider onboarding (type host, get
+    // 401) dumped you back into editing a URL you had typed correctly.
+    bool          needs_key = false;
+    // Did this host tell us a real context window, and if not, is that
+    // because we declined to ask?
+    //
+    // A local server is the only thing that knows its own RUNTIME window
+    // (llama.cpp's meta.n_ctx, LM Studio's loaded instance, Ollama's
+    // /api/ps) — no catalog can. When we get one, saying so at add time is
+    // the difference between trusting the number and wondering about it.
+    //
+    // When we DON'T, the reason matters. `probe_skipped` means the host
+    // did not look self-hosted, so the extra round-trips were withheld on
+    // purpose — which is correct for api.openai.com and wrong for the
+    // GPU box on someone's LAN reached by a public name. That is the one
+    // case worth offering a fix for, right where the user is looking.
+    int  window_tokens  = 0;      // 0 = none learned
+    bool probe_skipped  = false;  // true = host not classified self-hosted
+    // Set when a host at a PUBLIC-looking address answered a runtime route
+    // anyway — i.e. it is self-hosted despite not looking it.
+    //
+    // /props, /api/ps, loaded_instances and meta.n_ctx are not things a
+    // hosted API serves, so answering one is proof. Remembering the host
+    // here lets every later model refresh probe it too, which is the whole
+    // reason this would otherwise need a settings toggle: the server
+    // already told us what it is, so asking the user to confirm it would
+    // be asking them to repeat an answer we have.
+    std::string learned_self_hosted;   // "" = nothing learned
+};
+// Sign out of the ACTIVE provider: clear its on-disk credentials (Anthropic
+// credentials.json, or the Codex/ChatGPT token store), zero the live auth
+// header via update_auth, and re-open the sign-in modal so the user lands
+// exactly where they'd start a fresh login. Triggered from the command
+// palette ("Sign out"). Lets a user switch OAuth ↔ API key / accounts without
+// dropping to the CLI `agentty logout`.
+struct SignOut {};
+// Open the in-app account switcher for the ACTIVE provider. Entering the
+// active Anthropic or ChatGPT row in the provider picker opens this list, so
+// provider and account selection stay in one provider-centric flow. It lists
+// every saved account so the user can switch who they're signed in as without
+// leaving agentty. On first open with only a legacy single login, that login is
+// auto-registered as "default" so it shows up as a switchable row.
+// Open the account manager. Empty `provider` = the ACTIVE provider (the
+// classic drill-down); a non-empty id opens accounts for THAT provider without
+// switching to it first — so Enter on any provider row shows its accounts, not
+// the model picker.
+struct OpenAccounts { std::string provider; };
+// Move the highlight in the account switcher (wraps at both ends; the last
+// row is always "+ Add another account…").
+struct AccountMove { int delta; };
+// Activate the highlighted account switcher row. On a saved account: swap its
+// stored credential into the live store + re-install the auth header. On the
+// trailing add-new row: drop into the normal Picking flow, tagged so the
+// resulting login is captured under a new name.
+struct AccountSelect {};
+// Remove the highlighted saved account (its stored credential snapshot). If it
+// was the active one, the newest remaining account for the provider becomes
+// active; if it was the last, the switcher falls back to Picking.
+struct AccountRemove {};
+struct LoginPickMethod  { char32_t key; };          // '1' = ApiKey, '2' = OAuth, '3' = ChatGPT
 struct LoginCharInput   { char32_t ch; };
 struct LoginBackspace   {};
 struct LoginPaste       { std::string text; };
@@ -418,10 +882,14 @@ struct LoginCursorLeft  {};
 struct LoginCursorRight {};
 struct LoginSubmit      {};
 // User pressed the "copy URL to clipboard" key while the OAuthCode
-// modal is up. The reducer issues a Cmd<Msg>::write_clipboard with
+// modal is up. The reducer issues a cmd::write_clipboard with
 // the active authorize URL, then surfaces a brief status toast so
 // the user has visual confirmation the keystroke registered.
 struct LoginCopyAuthUrl {};
+// User pressed the copy-CODE key in a device-flow modal: copies the one-time
+// user_code (the thing typed into the browser) rather than the URL. Distinct
+// from LoginCopyAuthUrl so device modals can offer BOTH shortcuts.
+struct LoginCopyCode {};
 // User pressed the "open browser again" key. Re-issues the same
 // xdg-open / `open` invocation that fired when OAuth was first
 // selected, in case the original launch was missed (alt-tabbed away
@@ -432,6 +900,53 @@ struct LoginOpenBrowserAgain {};
 // `auth::TokenResult` so the reducer can distinguish ApiError /
 // Network / MissingToken without parsing strings.
 struct LoginExchanged   { agentty::auth::TokenResult result; };
+// The PKCE pair for an Anthropic OAuth login, minted by a Cmd (random bytes
+// are not something update can make). `error` set when the CSPRNG failed.
+struct LoginOAuthMinted {
+    agentty::auth::PkceVerifier verifier;
+    agentty::auth::OAuthState   state;
+    std::string                 authorize_url;
+    std::string                 error;
+};
+// The SSH/device flow dispatches this as soon as OpenAI allocates the
+// one-time code, while the same worker continues polling for approval.
+struct CodexDeviceCodeReady {
+    std::uint64_t attempt_id = 0;
+    std::string verification_url;
+    std::string user_code;
+};
+
+// Final result of the native ChatGPT OAuth login. The flow is either the
+// local loopback callback or SSH-friendly device authorization; both return
+// the same credential shape. The reducer persists it only after matching the
+// active attempt id.
+struct CodexLoginDone {
+    std::uint64_t attempt_id = 0;
+    std::expected<agentty::provider::chatgpt::CodexCredentials,
+                  agentty::auth::OAuthError> result;
+};
+
+// Native OAuth **device-flow** login (GitHub Copilot, Kimi, or any future
+// device-flow provider) — the sibling of the Codex pair, but PROVIDER-GENERIC.
+// The worker dispatches DeviceCodeReady as soon as the provider issues the
+// one-time code (so the modal can show it) and DeviceLoginDone when the user
+// approves (or the flow fails/times out). `provider` is the canonical registry
+// id ("copilot", "kimi"). The worker persists the token itself before
+// dispatching DeviceLoginDone, so the reducer only needs success-or-error —
+// hence `error` (nullopt = success) rather than a provider-specific token type.
+struct DeviceCodeReady {
+    std::string   provider;
+    std::uint64_t attempt_id = 0;
+    std::string   verification_url;   // BARE url (shown in the panel, has a code field)
+    std::string   browser_url;         // pre-filled url (auto-opened; copied by `u`)
+    std::string   user_code;
+};
+struct DeviceLoginDone {
+    std::string                 provider;
+    std::string                 provider_label;   // "GitHub Copilot" | "Kimi"
+    std::uint64_t               attempt_id = 0;
+    std::optional<std::string>  error;             // nullopt = signed in OK
+};
 // Result of the background OAuth refresh kicked off from init() when
 // `auth::resolve()` returned an expired token paired with a refresh
 // token. Same TokenResult shape as LoginExchanged, handled in
@@ -441,43 +956,215 @@ struct LoginExchanged   { agentty::auth::TokenResult result; };
 // leaves the queue intact so the user can retry through the in-app
 // login modal.
 struct TokenRefreshed   { agentty::auth::TokenResult result; };
+// cmd::refresh_oauth_if_due looked and the token was not near expiry (or not
+// refreshable). Clears the in-flight flag the reducer set when it asked.
+struct OAuthRefreshNotDue {};
+// The host re-read credential state (see LoadAuthView). `provider_keys` is
+// the key vault as it now stands: account ops write it on the host side, so
+// the reply carries it back into m.d.persisted.
+struct AuthViewLoaded {
+    agentty::auth::AuthView view;
+    std::map<std::string, std::string> provider_keys;
+};
+
+// Proactive pre-turn retrieval landed off-thread. Proactive RAG runs on the
+// submit path under a small wall-clock hedge so Enter never freezes (see
+// proactive_retrieve). When the funnel overruns the hedge on a large/slow
+// corpus, the worker keeps running detached and dispatches THIS when the
+// grounding is ready. `block` is the fenced <retrieved-context> text; empty
+// means the late retrieval cleared no confidence bar (nothing to inject).
+// The reducer STAGES it (m.d.staged_proactive_context) so the next user
+// submit flushes it into the transcript at a safe boundary — a slow first
+// turn's grounding is deferred by one turn instead of being dropped.
+struct ProactiveContextReady { std::string block; double confidence = -1.0; };
+
+// ── Stats viewer ───────────────────────────────────────
+// A read-only, tabbed projection of what the session actually did. Three
+// messages is the whole surface: it opens, it steps between tabs, it
+// closes. There is nothing to select and nothing to commit — which is the
+// point of a viewer, and why it needs no per-row message.
+struct OpenStats {};
+struct CloseStats {};
+// Read-only skills viewer. There is no ApproveSkill msg on purpose: an
+// approval one keystroke from a list you are already scrolling is the
+// habituated yes the install flow exists to avoid (93% of Claude Code
+// permission prompts get approved). The decision lives in
+// `agentty skill approve`, where the consent screen can show the body.
+struct OpenSkills {};
+struct CloseSkills {};
+struct SkillsMove { int delta = 0; };
+// Step the tab selection, wrapping. Signed so one message serves Tab and
+// Shift-Tab (and ←/→) rather than two near-identical ones.
+struct StatsTab { int delta = +1; };
+// Scroll the stats body. The panel is READ-ONLY, so there is no cursor to
+// move and ↑/↓ act on the viewport directly — which is also why the delta
+// is in rows rather than in items: the body is a rendered sheet, not a
+// list, and "the next row" is the only unit that means anything on it.
+struct StatsScroll { int delta = +1; };
+
+// ── RAG mode picker ────────────────────────────────────────────────
+// One decision: how proactive (pre-turn) retrieval behaves — On / First turn
+// only / Off. Selecting commits the mode (persist + live-apply) and closes.
+struct OpenRag {};
+struct CloseRag {};
+// Reveal/hide the Tier::Advanced rows (^A). The pane rebuilds its form; the
+// flag is view state, not config, so it is not persisted.
+struct RagAdvanced {};
+
+// ── Embeddings sub-form (RAG picker → Embeddings) ──────────────────
+// Which embedder retrieval uses, configured entirely in the TUI.
+//
+// There is ONE key message, not fifteen. Navigation, editing and the dropdown
+// are owned by the shared form layer (runtime/panel/form_keys.hpp), which turns a
+// KeyEvent into a pane-agnostic intent; the reducer applies it and handles
+// only what is genuinely embeddings-specific. A pane that spelled out
+// Char/Backspace/CursorLeft/… messages would be re-deriving that key map, and
+// two panes doing so is how they drift apart.
+struct RagEmbedClose {};                   // leave one level (menu/field/pane)
+struct RagEmbedKey   { form::keys::Action action; };
+// Bracketed paste while a Retrieval field is being edited (API keys, hosts,
+// paths — the fields pasting was born for).
+struct RagEmbedPaste { std::string text; };
+struct RagEmbedTest  {};                   // run the probe (worker thread)
+// Probe result. Carries the MEASURED dimension — the only trustworthy source
+// for it, since a wrong dim makes rag-cpp's HNSW silently drop every vector.
+struct RagEmbedTestDone {
+    bool          ok = false;
+    std::uint32_t dim = 0;
+    int           latency_ms = 0;
+    std::string   error;
+    // Echo of EmbedForm::probe_gen at launch — the reducer drops answers
+    // from a superseded launch (config edited / re-tested meanwhile).
+    std::uint64_t gen = 0;
+};
+struct RagEmbedSave  {};                    // persist + live-apply
+// The stored API key for the pane's endpoint, read on a worker after open.
+struct RagEmbedKeyLoaded { std::string endpoint; std::string key; };
+// What the live retriever reported when the pane opened, read on a worker.
+// `gen` is the form's probe_gen then; a later edit or test supersedes it.
+struct RagEmbedStatusRead {
+    std::uint64_t gen = 0;
+    bool          ready = false;
+    bool          failed = false;
+    std::uint32_t dim = 0;
+    int           latency_ms = 0;
+    std::string   reason;
+};
+// The key write the save asked for; false when there was no secure store.
+struct RagEmbedKeySaved  { bool ok = true; };
+
+// ── Settings pickers (Ctrl+K → Plugins/Commands/Agents/Hooks) ──────
+// One shared list modal, parameterised by the config concern. Opening
+// carries which concern; Move scrolls; Activate acts on the focused row.
+struct OpenSettingsList  { settings::Category concern; };
+struct CloseSettingsList {};
+struct SettingsListMove  { int delta; };
+struct SettingsListActivate {};
+// Inline add-mode.
+struct SettingsListAddStart   {};              // `A` — enter the one-line add prompt
+struct SettingsListRemove     {};              // `d` — delete the highlighted plugin (deliberate)
+// `e`/`a` — open the plugin editor form (detail on the highlighted server,
+// or add mode). On non-Plugins concerns `add=true` falls back to the
+// one-line starter prompt and `add=false` is a no-op — resolved in the
+// reducer, where the concern is known.
+struct SettingsListEditOpen   { bool add = false; };
+struct SettingsListChar       { char32_t ch; };// typed codepoint
+struct SettingsListPaste      { std::string text; }; // bracketed paste into the add-mode input
+// The MCP connection snapshot the Plugins panel renders. Dispatched by the
+// load_plugins_async() Cmd when a connect/reload finishes on a worker. The
+// reducer stores it in m.ui.plugins — the SINGLE source the view reads, so
+// the panel is a pure function of the Model (no plugin_model() at render
+// time). Mirrors the ThreadsLoaded{vec} pattern.
+struct PluginsUpdated         { mcp::PluginModel model; };
+
+// The result of a write to an mcp.json, reported back to the reducer that
+// asked for it.
+//
+// Reducers used to call tools::plugin::*() directly and branch on the return
+// value — a file read, a JSON rewrite and an atomic rename, all inside
+// update. Now a reducer returns cmd::edit_plugin(op), the write happens on a
+// worker, and this Msg carries the outcome back. Everything the reducer used
+// to do after a successful write (reload the plugin model, toast, close the
+// pane) happens when this arrives.
+//
+// `op` is echoed, not reconstructed, so the reply carries exactly what was
+// asked — the server name, the tool, the direction of a toggle — even if the
+// pane has since moved on.
+struct PluginEdited {
+    enum class Kind : std::uint8_t {
+        SetServerDisabled, SetToolEnabled, Approve, Remove, Add, Update,
+    };
+    enum class From : std::uint8_t { SettingsList, EditPane };
+    Kind        kind{};
+    From        from{};
+    std::string server;
+    std::string tool;          // SetToolEnabled only
+    bool        flag = false;  // SetServerDisabled: disabled; SetToolEnabled: enabled
+    bool        exit_commit = false;  // EditPane save: a field-exit, pane stays open
+    // Which config the edit pane was editing (project mcp.json vs the user
+    // one). Echoed so the reply can reopen the pane on the SAME scope, rather
+    // than reading it off whatever pane happens to be open when it lands.
+    bool        project = false;
+    // The outcome. `ok` folds approve_server's bool and EditResult::Ok into one
+    // answer; `already_exists` and `parse_error` are kept because the edit pane
+    // shows them inline on specific rows.
+    bool        ok = false;
+    bool        already_exists = false;
+    bool        parse_error    = false;
+};
+struct SettingsListBackspace  {};
+struct SettingsListSubmitInput{};              // Enter in add-mode → create
+struct SettingsListCancelInput{};              // Esc in add-mode → back to list
+// The add-mode create (a plugin into mcp.json, or a starter command/agent
+// file) ran as an effect; this is its answer.
+struct SettingsAddDone {
+    settings::Category concern{};
+    bool               ok = false;
+    std::string        message;
+};
+
+// ── Fork picker ──────────────────────────────────────────────
+// Branch the current thread into a FRESH one (near-zero context) and choose
+// how proactive RAG behaves in the fork. The parent's transcript is written
+// to disk and the fork carries a read-on-demand pointer to it — no copy, no
+// summary. ForkThread does the branch. See docs/FORK.md.
+struct OpenFork  {};
+struct CloseFork {};
+struct ForkMove  { int delta; };
+// Fork with the CURRENTLY-highlighted choice (the reducer reads the picker's
+// cursor). A leaf with no payload keeps the key handler from needing Model.
+struct ForkThread      {};
+// The worker wrote the parent's transcript (and let the read tool see it).
+// `path` is empty when the write failed. The fork is built on this reply.
+struct ForkTranscriptWritten {
+    std::string        parent_id;
+    fork_panel::Choice choice = fork_panel::Choice::RagOff;
+    std::string        path;
+};
 
 // ── Diff review ──────────────────────────────────────────────────────────
 struct OpenDiffReview {};
 struct CloseDiffReview {};
 struct DiffReviewMove { int delta; };
+// Page the FOCUSED hunk's body window by `delta` diff lines (^D/^U,
+// PgDn/PgUp). Clamped in the reducer against the hunk's real line count.
+struct DiffReviewScroll { int delta; };
 struct DiffReviewNextFile {};
 struct DiffReviewPrevFile {};
 struct AcceptHunk {};
 struct RejectHunk {};
-// Reset the focused hunk back to Pending — the "oops" key for a
-// mis-pressed accept/reject. No auto-advance (the user is revisiting).
-struct DiffReviewUndoHunk {};
-// Decide every hunk of the FOCUSED file at once, then advance to the
-// next file that still has pending hunks.
-struct DiffReviewAcceptFile {};
-struct DiffReviewRejectFile {};
-// Jump to the first (to_end=false) or last (to_end=true) hunk of the
-// focused file — vim g/G plus Home/End.
-struct DiffReviewJump { bool to_end = false; };
-// Scroll WITHIN the focused hunk's diff body (PgUp/PgDn) for hunks
-// taller than the viewport window. delta is in body lines.
-struct DiffReviewBodyScroll { int delta; };
-// Finish the review (Enter): remaining Pending hunks count as Accepted
-// ("keep everything I didn't explicitly reject" — the disk already
-// holds the new contents), every file materialises, the set clears.
-struct DiffReviewFinish {};
-// Enable/disable the whole review workflow (persisted setting). When
-// disabled, completed edits are treated as auto-accepted: nothing folds
-// into pending_changes, the changes strip stays hidden, and Ctrl+R
-// explains how to re-enable.
-struct ToggleDiffReview {};
 struct AcceptAllChanges {};
-struct RejectAllChanges {};
+// Revert every pending change on disk. `confirmed` carries the INTENT past
+// the reducer's two-press guard: a key chord sends it false (first press
+// arms, second executes), while an explicitly chosen palette row — already a
+// multi-step open → select → Enter — sends it true and executes at once.
+// Keeping that on the message means no caller has to pre-stage guard state
+// in the Model and then re-enter update().
+struct RejectAllChanges { bool confirmed = false; };
 
 // ── Meta / session-level ─────────────────────────────────────────────────
 // CompactContext, Tick, Quit, NoOp, ClearStatus, CycleProfile,
-// RestoreCheckpoint, ScrollThread, ToggleToolExpanded — all events that
+// RestoreCheckpoint — all events that
 // are conceptually "above" any single domain (the session itself, the
 // tick clock, profile mode, etc.).
 
@@ -495,6 +1182,11 @@ struct RejectAllChanges {};
 struct CompactContext {};
 
 struct CycleProfile {};
+// Show / hide the persistent "N changes" banner. A display PREFERENCE, so
+// it has its own message rather than living inline in the palette reducer:
+// Settings owns it now, and a setting reachable from one place only is a
+// setting that moves when that place does.
+struct ToggleChangesStrip {};
 struct RestoreCheckpoint { CheckpointId id; };
 // Completion of the async git-restore kicked off by RestoreCheckpoint.
 // `ok=false` carries a human-readable reason in `error`. The transcript
@@ -502,15 +1194,50 @@ struct RestoreCheckpoint { CheckpointId id; };
 // worktree is already byte-identical to the snapshot when the user sees
 // their old prompt reappear in the composer.
 struct CheckpointRestored { CheckpointId id; bool ok = false; std::string error; };
-struct ScrollThread { int delta; };
-struct ToggleToolExpanded { ToolCallId id; };
 
+// ── Checkpoint picker ────────────────────────────────────────────────────
+// Rewind picker over ALL checkpointed turns in the thread (not just the
+// newest). Open builds the entry list from messages carrying a
+// checkpoint_id and kicks an async diff-summary per entry; Select maps the
+// highlighted entry onto the existing RestoreCheckpoint flow.
+struct OpenCheckpoints {};
+struct CloseCheckpoints {};
+struct CheckpointsMove { int delta; };
+struct CheckpointsSelect {};
+// One entry's async "what changed since here" summary landed. `index` is
+// the entry's position in Open::entries at dispatch time; the reducer
+// re-validates it against the current list (an open/close race can't
+// corrupt a stale index).
+struct CheckpointDiffLoaded {
+    int  index          = 0;
+    bool ok             = false;
+    int  files_changed  = 0;
+    int  insertions     = 0;
+    int  deletions      = 0;
+};
+// The startup probe answered: is the workspace a git repo? Checkpoints read
+// this from the Model instead of asking git on the reducer thread.
+struct RepoProbed { bool in_repo = false; };
+// The on-disk library (skills, approvals, commands, hooks), read on a worker.
+struct LibraryLoaded { Library library; };
+// Terminal window focus changed (?1004 CSI I/O via maya Sub::on_focus).
+// Gates the hardware caret: an unfocused agentty parks + hides the real
+// cursor instead of leaving a blinking bar in an inactive pane.
+struct TerminalFocus { bool focused = true; };
+// The terminal's size, from the host: once at attach, then on every SIGWINCH.
+// The reducers' row math reads it from the Model instead of asking the tty.
+struct TerminalResized { int cols = 0; int rows = 0; };
+// Ctrl+U on the transcript — flip the newest retrieved-context card between
+// its compact one-line-per-source form and a full-passage-text expansion.
+// Carries the target message id so the reducer mutates exactly that card
+// (id-addressed mutation + render-key bump).
+struct ToggleRetrievedExpanded { MessageId id; };
 struct Tick {};
 struct Quit {};
 struct NoOp {};
 // User-triggered "drop the renderer's cell cache and repaint from
 // scratch". Bound to Ctrl-L (universal terminal redraw convention).
-// Dispatches `Cmd::force_redraw()`, which mirrors the SIGWINCH
+// Dispatches `cmd::force_redraw()`, which mirrors the SIGWINCH
 // coherence-collapse — no scrollback wipe, just an in-place rebuild
 // of `prev_cells` from the current canvas. Doubles as a debug hatch
 // when something visibly desyncs.
@@ -521,6 +1248,50 @@ struct RedrawScreen {};
 // written a newer status, stamps won't match and this Msg is a no-op.
 struct ClearStatus { std::chrono::steady_clock::time_point stamp; };
 
+// ── Self-update ───────────────────────────────────────────
+// Background release check finished (worker thread → UI). Empty `latest`
+// or update_available=false = nothing to announce; the reducer stores the
+// state so the status-bar chip + palette entry appear. Check errors are
+// swallowed silently — an update NOTICE must never surface as an error.
+struct UpdateCheckDone {
+    bool        update_available = false;
+    std::string latest;   // "0.3.1"
+    std::string url;      // release page (used in the toast)
+};
+// Download progress during an in-TUI update (worker → UI).
+//
+// perform_update() has always taken a progress callback and `agentty update`
+// from a shell has always used it — it prints a live percentage. The TUI
+// passed no callback at all, so a ~15 MB download sat behind one frozen
+// "⬆ downloading…" line for the whole transfer. On a slow link that is
+// indistinguishable from a hang, and the one thing a user must not think
+// about a self-update is that it has hung.
+//
+// `total` is 0 when the server sent no Content-Length; the reducer shows
+// bytes-so-far rather than a percentage in that case.
+struct UpdateProgress {
+    std::size_t got   = 0;
+    std::size_t total = 0;   // 0 = unknown
+};
+// In-TUI update finished (worker → UI). Success shows the restart toast;
+// failure shows the error + a hint to run `agentty update` from a shell.
+struct UpdateApplied {
+    bool        ok = false;
+    std::string detail;   // version on success, error text on failure
+};
+
+// The background `git status` refresh behind the `@` picker's working-set
+// ranking has finished (worker → UI). Carries no payload: the git map is a
+// process-wide cache the picker reads directly. Its ONLY job is to clear
+// Model::UI::git_refresh_inflight, which is what makes the refresh
+// single-flight.
+//
+// Coalescing this way — a flag on the Model, cleared by a Msg — rather than
+// with a static atomic inside the workspace layer is what keeps it Elm: the
+// in-flight state is part of the model a test can construct and assert on,
+// not hidden mutable state the reducer cannot see.
+struct GitSignalsRefreshed {};
+
 // ============================================================================
 // Domain variants — one per orthogonal slice of the runtime. Each is a
 // `std::variant` over its leaves; per-domain reducers visit on these.
@@ -529,7 +1300,7 @@ namespace msg {
 
 using ComposerMsg = std::variant<
     ComposerCharInput, ComposerBackspace, ComposerEnter, ComposerNewline,
-    ComposerSubmit, ComposerToggleExpand,
+    ComposerSubmit, ComposerToggleExpand, ComposerToggleLoop,
     ComposerCursorLeft, ComposerCursorRight, ComposerCursorHome, ComposerCursorEnd,
     ComposerCursorWordLeft, ComposerCursorWordRight,
     ComposerKillToEndOfLine, ComposerKillToBeginningOfLine,
@@ -537,73 +1308,151 @@ using ComposerMsg = std::variant<
     ComposerUndo, ComposerRedo,
     ComposerHistoryPrev, ComposerHistoryNext,
     ComposerImagePasteFromClipboard,
-    ComposerPaste, ComposerRecallQueued,
+    ComposerPaste, ImagePathSniffed, ClipboardQueryTimeout, ClipboardDiagnosed,
+    ComposerRecallQueued,
     ComposerQueuePeekPrev, ComposerQueuePeekNext, ComposerQueuePopLast>;
 
 using StreamMsg = std::variant<
     StreamStarted, StreamTextDelta, StreamTextBlockClosed,
-    StreamToolUseStart, StreamToolUseDelta, StreamToolUseEnd,
+    StreamToolUseStart, StreamToolUseDelta, StreamToolUseSnapshot,
+    StreamToolUseEnd, StreamObservedToolResult,
     StreamThinkingDelta,
+    StreamReasoning,
     StreamUsage, StreamFinished, StreamError, StreamHeartbeat,
-    CancelStream, RetryStream>;
+    StreamBufferedWait, CancelStream, RetryStream, ProactiveContextReady>;
 
 using ToolMsg = std::variant<
     ToolExecOutput, ToolExecProgress, ToolTimeoutCheck,
     PermissionApprove, PermissionReject, PermissionApproveAlways>;
 
-using ModelPickerMsg = std::variant<
-    OpenModelPicker, CloseModelPicker, ModelPickerMove, ModelPickerJump,
-    ModelPickerSelect, ModelPickerToggleFavorite, ModelPickerCycleEffort,
-    ModelsLoaded>;
+// The tool-output viewer PANEL's messages — split from ToolMsg so the
+// panel's reducer lives in its own file (update/tool_output.cpp), leaving
+// tool.cpp to the execution plumbing the name promises.
+using ToolOutputMsg = std::variant<
+    OpenToolOutput, CloseToolOutput,
+    ToolOutputMove, ToolOutputSelect, ToolOutputCopy, ToolOutputStep>;
 
-using ProviderPickerMsg = std::variant<
-    OpenProviderPicker, CloseProviderPicker, ProviderPickerMove,
-    ProviderPickerJump, ProviderPickerSelect>;
+using ProvidersMsg = std::variant<
+    OpenProviders, CloseProviders, ProvidersMove,
+    ProvidersJump, ProvidersSelect,
+    ProvidersFilterInput, ProvidersFilterBackspace,
+    ProvidersDelete>;
+
+// The ONE model surface: browse/filter every provider's models, tune effort,
+// and (in Smart Mode slot-assign mode) pin a role→model. `ModelsLoaded` is
+// the active provider's catalog fetch; `FusedCatalogLoaded` is a background
+// per-provider one.
+using ModelsMsg = std::variant<
+    OpenModels, CloseModels, ModelsMove, ModelsJump,
+    ModelsSelect, ModelsToggleFavorite,
+    ModelsCycleEffort, ModelsCycleContext, ModelsToggleReasoning,
+    ModelsScopeProvider,
+    ModelsFilterInput, ModelsFilterBackspace,
+    ModelsLoaded, FusedCatalogLoaded, SwitchToPreviousModel, FusedRefreshOthers,
+    ModelsRefresh, ModelWindowProbed>;
 
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,
-    ThreadListSelect, ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded>;
+    ThreadListSelect, ThreadListDelete, ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded>;
 
-using CommandPaletteMsg = std::variant<
-    OpenCommandPalette, CloseCommandPalette, CommandPaletteInput,
-    CommandPaletteBackspace, CommandPaletteMove, CommandPaletteSelect>;
+using PaletteMsg = std::variant<
+    OpenPalette, ClosePalette, PaletteInput, PanelFilterPaste,
+    PaletteBackspace, PaletteMove, PaletteSelect>;
 
-using MentionPaletteMsg = std::variant<
-    OpenMentionPalette, CloseMentionPalette, MentionPaletteInput,
-    MentionPaletteBackspace, MentionPaletteMove, MentionPaletteSelect>;
+using MentionMsg = std::variant<
+    CloseMention, MentionInput,
+    MentionBackspace, MentionMove, MentionSelect>;
 
-using SymbolPaletteMsg = std::variant<
-    OpenSymbolPalette, CloseSymbolPalette, SymbolPaletteInput,
-    SymbolPaletteBackspace, SymbolPaletteMove, SymbolPaletteSelect>;
+using SymbolMsg = std::variant<
+    CloseSymbol, SymbolInput,
+    SymbolBackspace, SymbolMove, SymbolSelect>;
 
 using CodeBlockMsg = std::variant<
-    OpenCodeBlockPicker, CloseCodeBlockPicker, CodeBlockPickerMove,
-    CodeBlockPickerSelect, CodeBlockPickerEdit, CodeBlockPickerCopy,
+    OpenCodeBlocks, CloseCodeBlocks, CodeBlocksMove,
+    CodeBlocksSelect, CodeBlocksEdit, CodeBlocksCopy,
     CodeBlockRunFinished,
     CodeBlockResultAttach, CodeBlockResultCopy, CodeBlockResultDiscard>;
 
+using CheckpointMsg = std::variant<
+    OpenCheckpoints, CloseCheckpoints, CheckpointsMove,
+    CheckpointsSelect, CheckpointDiffLoaded, RepoProbed, LibraryLoaded>;
+
+using RagMsg = std::variant<
+    OpenRag, CloseRag, RagAdvanced,
+    RagEmbedClose, RagEmbedKey, RagEmbedPaste,
+    RagEmbedTest, RagEmbedTestDone, RagEmbedSave,
+    RagEmbedKeyLoaded, RagEmbedKeySaved, RagEmbedStatusRead>;
+
+// Its own domain, not a corner of RagMsg: the stats viewer shares no state
+// and no reducer with retrieval, and folding unrelated panels into one
+// variant is how a reducer grows arms it has no business owning.
+using StatsMsg = std::variant<
+    OpenStats, CloseStats, StatsTab, StatsScroll,
+    OpenSkills, CloseSkills, SkillsMove>;
+
+using SettingsListMsg = std::variant<
+    OpenSettingsList, CloseSettingsList, SettingsListMove,
+    SettingsListActivate, SettingsListAddStart, SettingsListRemove,
+    SettingsListEditOpen,
+    SettingsListChar, SettingsListPaste, PluginsUpdated, PluginEdited,
+    SettingsListBackspace, SettingsListSubmitInput, SettingsListCancelInput,
+    SettingsAddDone>;
+
+using ForkMsg = std::variant<
+    OpenFork, CloseFork, ForkMove, ForkThread, ForkTranscriptWritten>;
+
 using TodoMsg = std::variant<
-    OpenTodoModal, CloseTodoModal, UpdateTodos>;
+    OpenTodoModal, CloseTodoModal>;
 
 using LoginMsg = std::variant<
-    OpenLogin, CloseLogin, LoginPickMethod, LoginCharInput, LoginBackspace,
+    OpenLogin, CloseLogin, LoginBack, SignOut,
+    OpenAccounts, AccountMove, AccountSelect, AccountRemove,
+    LoginPickMethod, LoginCharInput, LoginBackspace,
     LoginPaste, LoginCursorLeft, LoginCursorRight, LoginSubmit,
-    LoginCopyAuthUrl, LoginOpenBrowserAgain,
-    LoginExchanged, TokenRefreshed>;
+    LoginCopyAuthUrl, LoginCopyCode, LoginOpenBrowserAgain,
+    LoginExchanged, LoginOAuthMinted, CodexDeviceCodeReady, CodexLoginDone,
+    DeviceCodeReady, DeviceLoginDone, TokenRefreshed, OAuthRefreshNotDue,
+    AuthViewLoaded, HostProbed>;
 
 using DiffReviewMsg = std::variant<
-    OpenDiffReview, CloseDiffReview, DiffReviewMove,
+    OpenDiffReview, CloseDiffReview, DiffReviewMove, DiffReviewScroll,
     DiffReviewNextFile, DiffReviewPrevFile,
-    AcceptHunk, RejectHunk, DiffReviewUndoHunk,
-    DiffReviewAcceptFile, DiffReviewRejectFile,
-    DiffReviewJump, DiffReviewBodyScroll, DiffReviewFinish,
-    ToggleDiffReview,
-    AcceptAllChanges, RejectAllChanges>;
+    AcceptHunk, RejectHunk, AcceptAllChanges, RejectAllChanges>;
+
+using SmartModeMsg = std::variant<
+    OpenSmartMode, CloseSmartMode, SmartModeKey, SmartModePaste,
+    SmartModeAdvanced, SmartModeClearSlot>;
+
+// ── Web Search (web_search policy and services) ─────────────
+using WebSearchMsg = std::variant<
+    OpenWebSearch, CloseWebSearch, WebSearchKey, WebSearchPaste,
+    WebSearchKeysRead, WebSearchKeySaved, WebSearchKeyRemoved>;
+
+// ── Plugin editor (detail / add form) ──────────────────────────
+using PluginEditMsg = std::variant<
+    OpenPluginEdit, ClosePluginEdit, PluginEditKey, PluginEditPaste>;
+
+// ── Appearance (theme / density / motion) ──────────────────────
+// ── Appearance (theme / density / motion) ─────────────
+using AppearanceMsg = std::variant<
+    OpenAppearance, CloseAppearance, AppearanceKey, AppearancePickTheme,
+    AppearanceThemeMove, AppearanceThemeQuery, AppearanceThemeCommit,
+    AppearanceThemeCancel>;
+
+// ── Sandbox (filesystem / network / syscalls / limits) ─────
+using SandboxMsg = std::variant<
+    OpenSandbox, CloseSandbox, SandboxKey, SandboxRefreshPreview,
+    SandboxSave,
+    SandboxEditList, SandboxListKey, SandboxListClose>;
 
 using MetaMsg = std::variant<
-    CompactContext, CycleProfile, RestoreCheckpoint, CheckpointRestored,
-    ScrollThread, ToggleToolExpanded,
-    Tick, Quit, NoOp, ClearStatus, RedrawScreen>;
+    CompactContext, CycleProfile, ToggleChangesStrip,
+    RestoreCheckpoint, CheckpointRestored,
+    ToggleRetrievedExpanded,
+    TerminalFocus,
+    TerminalResized,
+    Tick, Quit, NoOp, ClearStatus, RedrawScreen,
+    UpdateCheckDone, UpdateProgress, UpdateApplied, GitSignalsRefreshed>;
 
 } // namespace msg
 
@@ -614,7 +1463,7 @@ using MetaMsg = std::variant<
 // implicit:
 //
 //   Msg m = ComposerEnter{};       //  -> Msg{ComposerMsg{ComposerEnter{}}}
-//   Cmd<Msg>::after(d, RetryStream{}); // same path
+//   Cmd::after(d, RetryStream{}); // same path
 //
 // std::visit on a Msg dispatches on domain, not leaf — see update.cpp.
 // ============================================================================
@@ -622,16 +1471,27 @@ using Msg = std::variant<
     msg::ComposerMsg,
     msg::StreamMsg,
     msg::ToolMsg,
-    msg::ModelPickerMsg,
-    msg::ProviderPickerMsg,
+    msg::ToolOutputMsg,
+    msg::ProvidersMsg,
+    msg::ModelsMsg,
     msg::ThreadListMsg,
-    msg::CommandPaletteMsg,
-    msg::MentionPaletteMsg,
-    msg::SymbolPaletteMsg,
+    msg::PaletteMsg,
+    msg::MentionMsg,
+    msg::SymbolMsg,
     msg::CodeBlockMsg,
+    msg::CheckpointMsg,
+    msg::RagMsg,
+    msg::StatsMsg,
+    msg::SettingsListMsg,
+    msg::ForkMsg,
     msg::TodoMsg,
     msg::LoginMsg,
     msg::DiffReviewMsg,
+    msg::SmartModeMsg,
+    msg::WebSearchMsg,
+    msg::PluginEditMsg,
+    msg::AppearanceMsg,
+    msg::SandboxMsg,
     msg::MetaMsg
 >;
 
@@ -662,16 +1522,26 @@ consteval int leaf_domain_count() {
     return int{in_variant_v<L, msg::ComposerMsg>}
          + int{in_variant_v<L, msg::StreamMsg>}
          + int{in_variant_v<L, msg::ToolMsg>}
-         + int{in_variant_v<L, msg::ModelPickerMsg>}
-         + int{in_variant_v<L, msg::ProviderPickerMsg>}
+         + int{in_variant_v<L, msg::ProvidersMsg>}
+         + int{in_variant_v<L, msg::ModelsMsg>}
          + int{in_variant_v<L, msg::ThreadListMsg>}
-         + int{in_variant_v<L, msg::CommandPaletteMsg>}
-         + int{in_variant_v<L, msg::MentionPaletteMsg>}
-         + int{in_variant_v<L, msg::SymbolPaletteMsg>}
+         + int{in_variant_v<L, msg::PaletteMsg>}
+         + int{in_variant_v<L, msg::MentionMsg>}
+         + int{in_variant_v<L, msg::SymbolMsg>}
          + int{in_variant_v<L, msg::CodeBlockMsg>}
+         + int{in_variant_v<L, msg::CheckpointMsg>}
+         + int{in_variant_v<L, msg::RagMsg>}
+         + int{in_variant_v<L, msg::StatsMsg>}
+         + int{in_variant_v<L, msg::ForkMsg>}
          + int{in_variant_v<L, msg::TodoMsg>}
          + int{in_variant_v<L, msg::LoginMsg>}
          + int{in_variant_v<L, msg::DiffReviewMsg>}
+         + int{in_variant_v<L, msg::SmartModeMsg>}
+         + int{in_variant_v<L, msg::WebSearchMsg>}
+         + int{in_variant_v<L, msg::PluginEditMsg>}
+         + int{in_variant_v<L, msg::AppearanceMsg>}
+         + int{in_variant_v<L, msg::SandboxMsg>}
+         + int{in_variant_v<L, msg::ToolOutputMsg>}
          + int{in_variant_v<L, msg::MetaMsg>};
 }
 
@@ -688,34 +1558,52 @@ static_assert(leaf_domain_count<StreamTextDelta>()           == 1,
               "StreamTextDelta must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<ToolExecOutput>()            == 1,
               "ToolExecOutput must belong to exactly one Msg domain");
-static_assert(leaf_domain_count<OpenModelPicker>()           == 1,
-              "OpenModelPicker must belong to exactly one Msg domain");
-static_assert(leaf_domain_count<OpenProviderPicker>()        == 1,
-              "OpenProviderPicker must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenModels>()            == 1,
+              "OpenModels must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<ModelsLoaded>()               == 1,
+              "ModelsLoaded must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenProviders>()        == 1,
+              "OpenProviders must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<NewThread>()                 == 1,
               "NewThread must belong to exactly one Msg domain");
-static_assert(leaf_domain_count<CommandPaletteSelect>()      == 1,
-              "CommandPaletteSelect must belong to exactly one Msg domain");
-static_assert(leaf_domain_count<MentionPaletteSelect>()      == 1,
-              "MentionPaletteSelect must belong to exactly one Msg domain");
-static_assert(leaf_domain_count<SymbolPaletteSelect>()       == 1,
-              "SymbolPaletteSelect must belong to exactly one Msg domain");
-static_assert(leaf_domain_count<CodeBlockPickerSelect>()     == 1,
-              "CodeBlockPickerSelect must belong to exactly one Msg domain");
-static_assert(leaf_domain_count<UpdateTodos>()               == 1,
-              "UpdateTodos must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<PaletteSelect>()      == 1,
+              "PaletteSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<MentionSelect>()      == 1,
+              "MentionSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<SymbolSelect>()       == 1,
+              "SymbolSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<CodeBlocksSelect>()     == 1,
+              "CodeBlocksSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<CheckpointsSelect>()    == 1,
+              "CheckpointsSelect must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenRag>()           == 1,
+              "OpenRag must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenStats>()         == 1,
+              "OpenStats must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenSkills>()        == 1,
+              "OpenSkills must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<StatsTab>()          == 1,
+              "StatsTab must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<StatsScroll>()       == 1,
+              "StatsScroll must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<ForkThread>()                == 1,
+              "ForkThread must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenTodoModal>()             == 1,
+              "OpenTodoModal must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<LoginSubmit>()               == 1,
               "LoginSubmit must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<AcceptAllChanges>()          == 1,
               "AcceptAllChanges must belong to exactly one Msg domain");
 static_assert(leaf_domain_count<Tick>()                      == 1,
               "Tick must belong to exactly one Msg domain");
+static_assert(leaf_domain_count<OpenWebSearch>()             == 1,
+              "OpenWebSearch must belong to exactly one Msg domain");
 
 // Pin the top-level Msg domain count too — if someone adds a new domain
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 14,
+static_assert(std::variant_size_v<Msg> == 25,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

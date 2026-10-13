@@ -83,7 +83,12 @@ esac
 echo "$NEWVER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
     || die "version '$NEWVER' must be exactly MAJOR.MINOR.PATCH"
 
-CURVER=$(sed -nE 's/.*project\(agentty VERSION ([0-9.]+).*/\1/p' "$cml" | head -1)
+# The project() call spans multiple lines and pads the keyword:
+#     project(agentty
+#         VERSION     0.5.0
+# so match the VERSION field on its own line, tolerating any whitespace.
+# (A single-line `project(agentty VERSION X.Y.Z)` still matches.)
+CURVER=$(sed -nE 's/^[[:space:]]*VERSION[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' "$cml" | head -1)
 [ -n "$CURVER" ] || die "could not read current VERSION from CMakeLists.txt"
 
 # Strictly-greater check via sort -V (version sort). If the max of the two is
@@ -125,8 +130,12 @@ fi
 
 # ---- 1. bump CMakeLists ------------------------------------------------------
 info "bumping CMakeLists.txt: $CURVER -> $NEWVER"
-new_cml=$(sed -E "s/(project\(agentty VERSION )[0-9.]+/\1$NEWVER/" "$cml")
-printf '%s\n' "$new_cml" | grep -q "project(agentty VERSION $NEWVER" \
+# Rewrite the VERSION field wherever it lives — same pattern the reader
+# above uses, so the two cannot disagree about which line is canonical.
+# Anchored to a line whose first token is VERSION, which in this file is
+# only ever the project() version.
+new_cml=$(sed -E "s/^([[:space:]]*VERSION[[:space:]]+)[0-9]+\.[0-9]+\.[0-9]+/\1$NEWVER/" "$cml")
+printf '%s\n' "$new_cml" | grep -Eq "^[[:space:]]*VERSION[[:space:]]+$NEWVER" \
     || die "failed to rewrite version line in CMakeLists.txt"
 
 # ---- 2. promote CHANGELOG ----------------------------------------------------

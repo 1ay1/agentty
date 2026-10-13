@@ -10,33 +10,61 @@
 #include <maya/widget/app_layout.hpp>
 #include <maya/widget/overlay.hpp>
 
+#include "agentty/domain/ui_theme.hpp"
+#include "agentty/domain/ui_live.hpp"
 #include "agentty/runtime/login.hpp"
+#include "agentty/runtime/panel/top.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
 #include "agentty/runtime/view/composer.hpp"
 #include "agentty/runtime/view/diff_review.hpp"
 #include "agentty/runtime/view/login.hpp"
-#include "agentty/runtime/view/pickers.hpp"
+#include "agentty/runtime/view/panels.hpp"
 #include "agentty/runtime/view/status_bar/status_bar.hpp"
 #include "agentty/runtime/view/thread/thread.hpp"
+
+namespace pn = agentty::ui::panel;
 
 namespace agentty::ui {
 
 namespace {
 
-// Pick the active overlay, if any. Login modal has highest priority —
-// auth gates everything else.
-std::optional<maya::Element> pick_overlay(const Model& m) {
-    if (login::is_open(m.ui.login))        return login_modal(m);
-    if (pick::is_open(m.ui.model_picker))  return model_picker(m);
-    if (pick::is_open(m.ui.provider_picker)) return provider_picker(m);
-    if (pick::is_open(m.ui.thread_list))   return thread_list(m);
-    if (is_open(m.ui.command_palette))     return command_palette(m);
-    if (mention_is_open(m.ui.mention_palette)) return mention_palette(m);
-    if (symbol_palette_is_open(m.ui.symbol_palette)) return symbol_palette(m);
-    if (code_block_picker_is_open(m.ui.code_blocks)) return code_block_picker(m);
-    if (code_block_result_is_open(m.ui.code_blocks)) return code_block_result_card(m);
-    if (pick::is_open(m.ui.diff_review))   return diff_review(m);
-    if (pick::is_open(m.ui.todo.open))     return todo_modal(m);
+// Render the active overlay, if any. WHICH overlay is active is decided by
+// panel::top() — the SAME function subscribe.cpp routes keys through, so
+// what renders and what owns the keyboard cannot diverge (they used to be
+// two hand-ordered if-chains that DID disagree on priority). This function
+// only maps Kind → view; it holds no ordering knowledge of its own.
+// Exhaustive on Kind (-Wswitch): a new overlay without a view arm is a
+// compile warning, not an invisible modal.
+std::optional<maya::Element> pick_panel(const Model& m) {
+    using OK = panel::Kind;
+    switch (panel::top(m)) {
+        case OK::Login:          return login_modal(m);
+        case OK::Permission:     return std::nullopt;   // renders inline, not as an overlay
+        case OK::Palette: return palette_panel(m);
+        case OK::Mention:        return mention_panel(m);
+        case OK::Symbol:         return symbol_panel(m);
+        case OK::CodeBlocks:     return code_blocks_panel(m);
+        case OK::CodeBlockResult: return code_block_result_panel(m);
+        case OK::ToolOutput:     return tool_output_panel(m);
+        case OK::Checkpoints:    return checkpoints_panel(m);
+        case OK::Rag:    return rag_panel(m);
+        case OK::Stats:          return stats_panel(m);
+        case OK::Skills:         return skills_panel(m);
+        case OK::SettingsList:   return settings_list_panel(m);
+        case OK::Fork:           return fork_panel(m);
+        case OK::Models:    return models_panel(m);
+        case OK::Providers: return providers_panel(m);
+        case OK::ThreadList:     return thread_list_panel(m);
+        case OK::SmartMode:      return smart_mode_panel(m);
+        case OK::WebSearch:      return web_search_panel(m);
+        case OK::PluginEdit:     return plugin_edit_panel(m);
+        case OK::Appearance:     return appearance_panel(m);
+        case OK::Sandbox:        return sandbox_panel(m);
+        case OK::SandboxList:    return sandbox_list_panel(m);
+        case OK::DiffReview:     return diff_review(m);
+        case OK::Todo:           return todo_panel(m);
+        case OK::None:           return std::nullopt;
+    }
     return std::nullopt;
 }
 
@@ -58,7 +86,7 @@ std::optional<maya::Element> pick_overlay(const Model& m) {
 // viewport boundary and nothing strands. maya::Overlay's Anchor +
 // inset express exactly this (the inset sits OUTSIDE the bg-filled box,
 // which a plain in-box padding can't do).
-maya::Element compose_overlay(maya::Element base, maya::Element overlay) {
+maya::Element compose_panel(maya::Element base, maya::Element overlay) {
     return maya::Overlay{{
         .base    = std::move(base),
         .overlay = std::move(overlay),
@@ -71,26 +99,81 @@ maya::Element compose_overlay(maya::Element base, maya::Element overlay) {
 } // namespace
 
 maya::Element view(const Model& m) {
+    // Apply the appearance prefs before painting anything.
+    //
+    // The reducer is pure — it cannot reach the runtime — so the swap lands
+    // here, on the one path that sees both the Model and the frame. It is a
+    // no-op whenever the resolved theme has not changed, which is every
+    // frame but the one after a settings row is pressed. "auto" resolves
+    // against what the terminal reported at launch (m.env.terminal); the
+    // env vars it came from cannot change while we run.
+    {
+        const auto r = ui_prefs::resolve(m.d.ui(), m.env.terminal);
+        // ONE call, two sinks. There used to be a `static const Theme*
+        // applied` cache here that skipped the push when the pointer had not
+        // moved, which duplicated a guard maya already owns — app_set_theme()
+        // compares by value and returns early itself, because what a swap
+        // costs is maya's knowledge, not ours. Two caches for one fact is how
+        // they desync: a `static` outlives any Runtime, so after the runtime
+        // is torn down and rebuilt (suspend for a child process, a resize
+        // re-init) the fresh Runtime holds a default-constructed theme while
+        // this cache still claims the user's scheme was applied — and never
+        // pushes it again. That is a permanently mis-themed session with no
+        // way back short of picking a different scheme. The redundant guard
+        // bought one pointer compare per frame and cost correctness.
+        //
+        // The two sinks used to be two calls here as well — maya's renderer
+        // slot plus agentty's build-time palette — which is a pairing a
+        // caller has to remember. The appearance reducer did not, and re-
+        // sealed the transcript against a palette maya had not been told
+        // about. publish_theme owns both now, so there is nothing to forget.
+        ui_prefs::publish_theme(*r.theme);
+        // The rest of the prefs reach their consumers the same way, and for
+        // the same reason: density is read by panel_viewport_h(), a free
+        // function twenty panel builders call without a Model in hand, and
+        // motion by the StreamingMarkdown setup deep in turn.cpp. Publishing
+        // here keeps them a pure projection of the Model — refreshed every
+        // frame, written nowhere else.
+        ui_prefs::publish(m.d.ui());
+        // Paths in tool cards are shown relative to these (Model::env,
+        // captured at launch), so the view never asks the OS for its cwd.
+        ui_prefs::publish_path_roots({m.env.cwd, m.env.home, m.ui.library.project_agents});
+        // Motion::Off freezes maya's stepped animations at their source —
+        // one gate under every spinner, blink and frame counter, including
+        // widgets that do not know this setting exists. It also stops the
+        // frame REQUESTS, so "off" means the render loop goes quiet rather
+        // than repainting an unchanging glyph 11× a second.
+        maya::anim::set_reduce_motion(m.d.ui().motion == ui_prefs::Motion::Off);
+        // Reduced sits between the two: keep the motion, thin the REPAINTS.
+        // Measured on a recorded stream, Reduced used to change exactly as
+        // many frames as Full (1753 of them) because it only dropped
+        // decoration — which restyles bytes that were being sent anyway. For
+        // a user on mosh over a high-latency link that made the middle
+        // setting worthless: full churn or nothing (issue #36).
+        maya::anim::set_frame_divisor(ui_prefs::motion_frame_divisor());
+        // Syntax highlighting, same seam and same reason: the renderer
+        // decides per code block, far below any Model, so the preference has
+        // to be published rather than threaded. It was persisted and hashed
+        // into the render key but read by NOTHING until maya grew a switch
+        // for it — a toggle that moved, saved, and changed no pixel.
+        maya::set_syntax_highlighting(m.d.ui().syntax);
+    }
+
     // ── Terminal dimensions for the BUILD phase ──
     // maya's run loop calls P::view(model) BEFORE Runtime::render
-    // installs the sized RenderContext (the only guard site), so any
-    // available_height()/available_width() read during Element
-    // construction would see the 24x80 DEFAULT. Parent ctx wins (a
-    // nested render or a test harness driving simulated dims), else
-    // one cheap ioctl, else COLUMNS/LINES (tests, pipes).
+    // installs the sized RenderContext, so the view installs one itself.
+    // The size comes from the Model (TerminalResized, fed by the host), so
+    // a view is a function of the Model and nothing else: every panel and
+    // tool body below reads available_width()/available_height(), never
+    // the tty. A parent context still wins (a nested render, or a test
+    // harness driving simulated dims).
     int cols = 0, rows = 0;
-    if (maya::detail::render_ctx_) {
+    if (maya::have_render_context()) {
         cols = maya::available_width();
         rows = maya::available_height();
     } else {
-        const auto sz = maya::platform::query_terminal_size(
-            maya::platform::stdout_handle());
-        cols = sz.width.value;
-        rows = sz.height.value;
-        if (cols <= 0)
-            if (const char* e = std::getenv("COLUMNS")) cols = std::atoi(e);
-        if (rows <= 0)
-            if (const char* e = std::getenv("LINES"))   rows = std::atoi(e);
+        cols = m.ui.term_cols;
+        rows = m.ui.term_rows;
     }
     if (cols <= 0) cols = 80;
     if (rows <= 0) rows = 24;
@@ -108,7 +191,7 @@ maya::Element view(const Model& m) {
         alc.changes_strip = changes_strip_config(m);
         alc.composer      = composer_config(m);
         alc.status_bar    = status_bar_config(m);
-        overlay = pick_overlay(m);
+        overlay = pick_panel(m);
     }
 
     // ── Phase 2: layout build under a HEIGHT-CAPPED context ──
@@ -134,7 +217,7 @@ maya::Element view(const Model& m) {
 
     auto base = maya::AppLayout{std::move(alc)}.build();
     if (!overlay) return base;
-    return compose_overlay(std::move(base), std::move(*overlay));
+    return compose_panel(std::move(base), std::move(*overlay));
 }
 
 } // namespace agentty::ui

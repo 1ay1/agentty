@@ -16,11 +16,12 @@
 // live tail) to a Canvas and read the cells back as text.
 
 #include <algorithm>
-#include <cstdio>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "agtest.hpp"
 
 #include <maya/render/canvas.hpp>
 #include <maya/render/renderer.hpp>
@@ -45,19 +46,6 @@ using agentty::ToolUse;
 using std::chrono::steady_clock;
 using std::chrono::milliseconds;
 
-static int g_failures = 0;
-static int g_checks   = 0;
-
-#define CHECK(cond, msg)                                                   \
-    do {                                                                   \
-        ++g_checks;                                                        \
-        if (!(cond)) {                                                     \
-            ++g_failures;                                                  \
-            std::fprintf(stderr, "  FAIL [%s:%d] %s\n",                    \
-                         __FILE__, __LINE__, (msg));                       \
-        }                                                                  \
-    } while (0)
-
 // Render the whole conversation (frozen + live tail) and dump painted
 // rows as ASCII-folded text.
 static std::string render_dump(const Model& m, int width = 100,
@@ -73,7 +61,7 @@ static std::string render_dump(const Model& m, int width = 100,
     maya::StylePool pool;
     maya::Canvas canvas(width, height, &pool);
     canvas.clear();
-    maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+    maya::render_tree(root, canvas, pool, maya::theme::native, true);
 
     std::string out;
     const int max_row = canvas.max_content_row();
@@ -146,7 +134,7 @@ static Model active_run(int n) {
 
 // 1. During an active run NOTHING beyond the User is frozen (the whole
 //    run is live, agent_session-style); at settle the run freezes whole.
-static void test_live_bounded() {
+TEST_CASE("live bounded") {
     Model m = active_run(40);
     CHECK(m.ui.frozen_through == 1,
           "mid-run freeze fired during an active run — the single freeze "
@@ -166,7 +154,7 @@ static void test_live_bounded() {
 }
 
 // 2. Every completed sub-turn renders in full (nothing hidden).
-static void test_all_content_present() {
+TEST_CASE("all content present") {
     constexpr int N = 40;
     Model m = active_run(N);
     auto txt = render_dump(m);
@@ -183,7 +171,7 @@ static void test_all_content_present() {
 //    frozen↔live continuation seam). The assistant label is the model
 //    badge; we count the meta "turn N" marker which only the HEADER row
 //    carries — a continuation suppresses it.
-static void test_single_turn_header() {
+TEST_CASE("single turn header") {
     Model m = active_run(20);
     auto txt = render_dump(m);
     // The turn meta carries "turn N". For one logical assistant turn it
@@ -196,7 +184,7 @@ static void test_single_turn_header() {
 // 4. Compare a SETTLED+frozen render of the run against the same
 //    messages rendered fully live: the freeze changes WHERE rows render
 //    (frozen vs live), never WHICH rows.
-static void test_split_preserves_content() {
+TEST_CASE("split preserves content") {
     constexpr int N = 15;
     Model split = active_run(N);
     // Settle + freeze whole (production path).
@@ -236,7 +224,7 @@ static void test_split_preserves_content() {
 //    tool in the tail, freeze_through stops at the run start; once the
 //    run is fully terminal it freezes whole. (run_is_freezable — the
 //    only mid-run safety the single-freeze discipline still needs.)
-static void test_trailing_tool_batch_freezes() {
+TEST_CASE("trailing tool batch freezes") {
     Model m;
     m.d.current.id = agentty::ThreadId{"trailing"};
     Message u; u.role = Role::User; u.text = "write a file";
@@ -307,7 +295,7 @@ static int leading_blank_rows(const Model& m) {
 //    continuation — the top of the canvas must be a real turn header.
 //    (The reported bug: saved threads render with a blank hole / a
 //    turn whose header was cut off.)
-static void test_rehydrate_top_is_header() {
+TEST_CASE("rehydrate top is header") {
     Model m;
     m.d.current.id = agentty::ThreadId{"saved"};
     // Several complete user+assistant exchanges, then one GIANT final
@@ -360,7 +348,7 @@ static void test_rehydrate_top_is_header() {
 // 7. Trim must never strand a leading blank gap row. After
 //    trim_frozen_if_oversized drops front entries, the new first frozen
 //    entry must be a turn, not the inter-turn gap_row that preceded it.
-static void test_trim_no_leading_gap() {
+TEST_CASE("trim no leading gap") {
     Model m;
     m.d.current.id = agentty::ThreadId{"trim"};
     // Many complete idle exchanges so freeze pushes [turn][gap][turn]...
@@ -402,7 +390,7 @@ static void test_trim_no_leading_gap() {
 //    lockstep so the next render aligns and the boundary lands once.
 //    CONTRACT: the trim mutates the model AND returns
 //    commit_scrollback(removed_rows).
-static void test_trim_commits_exact_dropped_rows() {
+TEST_CASE("trim commits exact dropped rows") {
     Model m;
     m.d.current.id = agentty::ThreadId{"trimrows"};
     // A handful of tall write turns, each well over a viewport, so the
@@ -459,14 +447,13 @@ static void test_trim_commits_exact_dropped_rows() {
     // the host must commit the dropped rows against the still-valid old
     // frame so the next render's shorter canvas aligns. Returning none()
     // (or commit_scrollback_overflow) strands a duplicate boundary.
-    using Cmd = maya::Cmd<agentty::Msg>;
-    const auto* commit = std::get_if<Cmd::CommitScrollback>(&cmd.inner);
+    const auto* commit = std::get_if<maya::CommitScrollback>(&cmd.inner);
     CHECK(commit != nullptr,
           "trim must return commit_scrollback(N) for the top-deletion; "
           "none() leaves maya unable to reconcile and strands a duplicate "
           "of the trimmed boundary one screen up.");
     if (commit) {
-        CHECK(commit->rows == static_cast<int>(dropped_rows),
+        CHECK(commit->debt.rows() == static_cast<int>(dropped_rows),
               "trim committed the wrong row count — must equal the rows "
               "dropped from the frozen prefix, or the scrollback boundary "
               "misaligns (under-commit strands the new prefix; over-commit "
@@ -486,7 +473,88 @@ static void test_trim_commits_exact_dropped_rows() {
 //     entry and stranding a committed-scrollback ghost band (the bash-card
 //     overlap bug). Assert the stored estimate stays close to the real
 //     rendered height for a bash card with a huge output.
-static void test_output_elided_tool_row_estimate_matches_render() {
+TEST_CASE("rehydrate bounds a LATER oversized run") {
+    // The keep-loop walks newest-first and used to cut inside a run only
+    // when it was the FIRST one considered (`units == 0`). A big run
+    // reached second or later was therefore taken WHOLE, and the budget
+    // check fired only afterwards — by which point the rows were already
+    // in. One real thread ended up with 2247 frozen rows against a
+    // 180-row budget because run #2 was 2100 rows on its own.
+    //
+    // It matters most on RESIZE: a width change invalidates every cached
+    // layout, so the whole frozen canvas re-lays-out. Measured on that
+    // thread, 4.44 ms per resize against 0.43 ms warm — and a drag emits
+    // one resize per column.
+    //
+    // Shape: a SMALL newest run (so the first iteration does not trip the
+    // old cut), then a huge one behind it.
+    Model m;
+    m.d.current.id = agentty::ThreadId{"laterbig"};
+
+    for (int t = 0; t < 4; ++t) {
+        Message u; u.role = Role::User;
+        u.text = "early " + std::to_string(t);
+        m.d.current.messages.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+        a.text = "reply " + std::to_string(t);
+        m.d.current.messages.push_back(std::move(a));
+    }
+    // The huge run — second-newest once the small one is appended.
+    Message gu; gu.role = Role::User; gu.text = "do a huge refactor";
+    m.d.current.messages.push_back(std::move(gu));
+    for (int e = 0; e < 60; ++e) {
+        Message a; a.role = Role::Assistant;
+        a.tool_calls.push_back(settled_edit("big" + std::to_string(e)));
+        m.d.current.messages.push_back(std::move(a));
+    }
+    // A small NEWEST run in front of it.
+    Message lu; lu.role = Role::User; lu.text = "thanks";
+    m.d.current.messages.push_back(std::move(lu));
+    Message la; la.role = Role::Assistant; la.text = "you're welcome";
+    m.d.current.messages.push_back(std::move(la));
+    m.s.phase = agentty::phase::Idle{};
+
+    agentty::app::detail::rehydrate_frozen(m);
+
+    // What this test is really about: the oversized run must not be taken
+    // WHOLE. It used to check `rows < 1000`, which worked only because
+    // rehydrate seeded the live budget (~3 viewports) — 1000 was "far
+    // above the legitimate bound, far below the 2247 bug".
+    //
+    // Rehydrate now seeds a WIDER window on purpose, so the canvas can
+    // legitimately exceed 1000 rows before the post-paint trim runs. The
+    // row count stopped being the invariant; check the invariant itself.
+    //
+    // Two ways the run is prevented from being one indivisible lump, and
+    // either is a pass: the keep-walk CUT it (so only part of it is
+    // present), or freeze_range SPLIT it into per-sub-turn blocks (so the
+    // trim can shed them one at a time). The bug this test exists for
+    // produced neither — one giant block, every row of it.
+    const std::size_t rows    = m.ui.frozen.row_total();
+    const std::size_t entries = m.ui.frozen.size();
+
+    // The 60-tool run would be ONE block if taken whole. Splitting or
+    // cutting both leave many blocks, so entry count is the tell.
+    CHECK_MESSAGE(entries > 4,
+                  "frozen canvas is " << entries << " entries / " << rows
+                  << " rows — an oversized run behind the newest one was "
+                  "taken whole instead of being cut or split");
+
+    // And no single block may dominate: that is what pins the canvas,
+    // because a block is the trim's atom (it drops whole blocks or none).
+    std::size_t tallest = 0;
+    for (std::size_t k = 0; k < entries; ++k)
+        tallest = std::max(tallest, m.ui.frozen.block_rows(k));
+    CHECK_MESSAGE(tallest < 1000,
+                  "one block is " << tallest << " rows — the trim can only "
+                  "drop whole blocks, so this pins the canvas forever");
+
+    // And the canvas must still be usable: bounding it must not empty it.
+    CHECK_MESSAGE(rows > 0, "the bound must keep SOME history, not none");
+    CHECK(m.ui.frozen.size() > 0);
+}
+
+TEST_CASE("output elided tool row estimate matches render") {
     Model m;
     m.d.current.id = agentty::ThreadId{"bashcap"};
     Message u; u.role = Role::User; u.text = "run a noisy command";
@@ -494,7 +562,7 @@ static void test_output_elided_tool_row_estimate_matches_render() {
     Message a; a.role = Role::Assistant;
     agentty::ToolUse tb;
     tb.id   = agentty::ToolCallId{"bash_noisy"};
-    tb.name = agentty::ToolName{"bash"};
+    tb.name = agentty::ToolName{"shell"};
     tb.args = {{"command", "grep -rn pattern src"}};
     std::string output;
     for (int i = 0; i < 200; ++i)
@@ -527,19 +595,72 @@ static void test_output_elided_tool_row_estimate_matches_render() {
           "bash tail rows missing from the render");
 }
 
-int main() {
-    std::printf("midrun_freeze_test\n");
-    test_live_bounded();
-    test_all_content_present();
-    test_single_turn_header();
-    test_split_preserves_content();
-    test_trailing_tool_batch_freezes();
-    test_rehydrate_top_is_header();
-    test_trim_no_leading_gap();
-    test_trim_commits_exact_dropped_rows();
-    test_output_elided_tool_row_estimate_matches_render();
-    std::printf("%d checks, %d failures\n", g_checks, g_failures);
-    if (g_failures) { std::printf("FAILED\n"); return 1; }
-    std::printf("PASSED\n");
-    return 0;
+// 10b. The same invariant for EVERY output-elided tool, not just bash.
+//      The case above pinned bash and passed for years while the estimator
+//      quietly disagreed with the renderer for other tools: frozen.cpp's
+//      cap was a hand-written list of names, and git_status/log/commit were
+//      on it while git_diff/show/blame/branch/stash/rebase/cherry_pick were
+//      not — so a long `git diff` was ESTIMATED at its full output height
+//      (~500 rows) and RENDERED elided (~7). That over-count is precisely
+//      what makes the keep-loop drop an entry that is still on screen.
+//
+//      Looping over the tools makes the coverage gap structural rather than
+//      a matter of remembering to add a case per tool.
+TEST_CASE("output elided row estimate matches render for every such tool") {
+    const char* kTools[] = {
+        "shell", "diagnostics", "read", "find_definition",
+        "grep", "glob", "list_dir", "web_search",
+        "git_status", "git_diff", "git_log", "git_show", "git_blame",
+        "git_commit", "git_branch", "git_stash", "git_rebase",
+        "git_cherry_pick",
+    };
+
+    for (const char* tool_cstr : kTools) {
+        const std::string tool{tool_cstr};
+        CAPTURE(tool);
+        Model m;
+        m.d.current.id = agentty::ThreadId{"elide"};
+        Message u; u.role = Role::User; u.text = "do a thing";
+        m.d.current.messages.push_back(std::move(u));
+        Message a; a.role = Role::Assistant;
+
+        agentty::ToolUse tc;
+        tc.id   = agentty::ToolCallId{tool + "_1"};
+        tc.name = agentty::ToolName{tool};
+        tc.args = nlohmann::json::object();
+        std::string output;
+        for (int i = 0; i < 400; ++i)
+            output += "output line " + std::to_string(i)
+                    + " with some trailing text to make it wrap-ish\n";
+        auto now = steady_clock::now();
+        tc.status = agentty::ToolUse::Done{now - milliseconds{5}, now,
+                                           std::move(output)};
+        a.tool_calls.push_back(std::move(tc));
+        m.d.current.messages.push_back(std::move(a));
+        m.s.phase = agentty::phase::Idle{};
+
+        // The REAL rendered height of the whole transcript at this width.
+        constexpr int kCols = 100;
+        agentty::app::detail::clear_frozen(m);
+        agentty::app::detail::freeze_through(m, m.d.current.messages.size());
+        auto txt = render_dump(m, kCols);
+        int real_rows = 0;
+        for (char c : txt) if (c == '\n') ++real_rows;
+
+        // The PREDICTION the keep-loop actually consumes. row_total() is
+        // measured from the real render, so asserting on it can't catch an
+        // estimator bug — estimate_msg_rows is the function under test.
+        const std::size_t est =
+            agentty::app::detail::estimate_msg_rows(
+                m.d.current.messages[1], kCols);
+
+        // One-sided: UNDER-counting only keeps more history (safe); an
+        // OVER-count makes the keep-loop stop early and silently drop
+        // history it believed it had covered. For an eliding renderer the
+        // gap is unbounded — 400 lines of output drawn as ~7 rows.
+        CHECK(est <= static_cast<std::size_t>(real_rows),
+              tool << ": estimate " << est << " exceeds the real render "
+                   << real_rows << " rows — frozen.cpp counts this tool's "
+                      "full output while its renderer elides it");
+    }
 }

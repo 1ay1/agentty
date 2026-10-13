@@ -3,8 +3,10 @@
 `agentty.wxs` is a [WiX v4](https://wixtoolset.org/) source that produces a
 proper Windows installer (`agentty-windows-x86_64.msi`) which:
 
-- installs `agentty.exe` to `%ProgramFiles%\agentty\`
-- adds that folder to the **system PATH** (so `agentty` works in any shell)
+- installs **per-user, with no admin rights / UAC prompt** — a double-click
+  just works
+- installs `agentty.exe` to `%LocalAppData%\Programs\agentty\`
+- adds that folder to the **user PATH** (so `agentty` works in any shell)
 - creates a **Start Menu** shortcut
 - registers a normal **Add/Remove Programs** entry with a working uninstall
 - carries a fixed `UpgradeCode`, so installing a newer MSI cleanly replaces the old

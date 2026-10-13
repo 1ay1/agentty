@@ -4,712 +4,86 @@
 #include "agentty/io/fsm.hpp"
 
 #include <algorithm>
-#include <array>
-#include <atomic>
 #include <chrono>
-#include <cstdio>
-#include <cstring>
-#include <mutex>
-#include <sstream>
+#include <cstdlib>
 #include <string>
-#include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  ifndef NOMINMAX
-#    define NOMINMAX
-#  endif
-#  include <windows.h>
-#else
-#  include <cerrno>
-#  include <fcntl.h>
-#  include <poll.h>
-#  include <signal.h>
-#  include <spawn.h>
-#  include <sys/wait.h>
-#  include <unistd.h>
-extern char** environ;
-#endif
+#include "agentty/tool/util/exec.hpp"   // run_child: the one supervise loop
+#include <maya/runtime.hpp>                // windows command-line helpers
 
 namespace agentty::tools::util {
 
 namespace {
 
-// Best-effort progress flush throttle. 80 ms keeps the UI responsive without
-// drowning the event queue — the worst case (30 KB / flush) is a few hundred
-// µs of UTF-8 decode work, negligible against the subprocess wall clock.
-constexpr std::chrono::milliseconds kEmitGap{80};
-
-#ifdef _WIN32
-
-// Owns one Win32 HANDLE; closes on scope exit unless released. Move-only.
-// Mirrors the POSIX FdGuard — collapses the CreatePipe/CreateFile/
-// CreateProcess failure ladders (each previously had to CloseHandle every
-// handle acquired so far) into RAII so a new early-return can't leak one.
-struct HandleGuard {
-    HANDLE h = nullptr;
-    HandleGuard() = default;
-    explicit HandleGuard(HANDLE x) noexcept : h(x) {}
-    HandleGuard(HandleGuard&& o) noexcept : h(std::exchange(o.h, nullptr)) {}
-    HandleGuard& operator=(HandleGuard&& o) noexcept {
-        if (this != &o) { reset(); h = std::exchange(o.h, nullptr); }
-        return *this;
-    }
-    ~HandleGuard() { reset(); }
-    void reset() noexcept {
-        if (h && h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
-        h = nullptr;
-    }
-    [[nodiscard]] HANDLE release() noexcept { return std::exchange(h, nullptr); }
-};
-
-// UTF-8 → UTF-16. Win32 process APIs are UTF-16 natively; anything narrower
-// routes through the ANSI code page and silently corrupts non-ASCII bytes.
-std::wstring utf8_to_wide(std::string_view s) {
-    if (s.empty()) return {};
-    int n = ::MultiByteToWideChar(CP_UTF8, 0, s.data(),
-                                  static_cast<int>(s.size()), nullptr, 0);
-    if (n <= 0) return {};
-    std::wstring out(static_cast<size_t>(n), L'\0');
-    ::MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
-                          out.data(), n);
-    return out;
-}
-
-// CommandLineToArgvW-compatible quoting (see MSDN "Parsing C++ Command-Line
-// Arguments"). Run of backslashes doubles if followed by `"`, literal `"`
-// gets prefixed with `\`. Quoting only wraps the arg when it contains
-// whitespace or `"`.
-std::string win_quote_arg(const std::string& arg) {
-    if (!arg.empty()
-        && arg.find_first_of(" \t\n\v\"") == std::string::npos) {
-        return arg;
-    }
-    std::string out;
-    out.push_back('"');
-    int backslashes = 0;
-    for (char c : arg) {
-        if (c == '\\') { backslashes++; continue; }
-        if (c == '"') {
-            out.append((size_t)backslashes * 2, '\\');
-            out += "\\\"";
-        } else {
-            out.append((size_t)backslashes, '\\');
-            out.push_back(c);
-        }
-        backslashes = 0;
-    }
-    out.append((size_t)backslashes * 2, '\\');
-    out.push_back('"');
-    return out;
-}
-
-// Return true when the argv path resolves to a .bat / .cmd file on PATH.
-// CreateProcess cannot natively spawn batch files — they require cmd.exe —
-// but tools like npx / npm / yarn ship as .cmd on Windows, and the model
-// will reach for them. SearchPathW honors PATHEXT so .cmd is found even
-// when the caller wrote just "npx".
-bool resolves_to_batch(const std::string& exe) {
-    auto we = utf8_to_wide(exe);
-    wchar_t out[MAX_PATH * 2]{};
-    DWORD n = ::SearchPathW(nullptr, we.c_str(), L".exe",
-                            (DWORD)std::size(out), out, nullptr);
-    if (n == 0 || n >= std::size(out)) {
-        // .exe miss — try default PATHEXT order (batch files second).
-        n = ::SearchPathW(nullptr, we.c_str(), nullptr,
-                          (DWORD)std::size(out), out, nullptr);
-        if (n == 0 || n >= std::size(out)) return false;
-    }
-    std::wstring_view resolved{out, n};
-    auto dot = resolved.find_last_of(L'.');
-    if (dot == std::wstring_view::npos) return false;
-    auto ext = resolved.substr(dot);
-    auto ieq = [](wchar_t a, wchar_t b) {
-        return (a >= L'A' && a <= L'Z' ? a - L'A' + L'a' : a)
-            == (b >= L'A' && b <= L'Z' ? b - L'A' + L'a' : b);
-    };
-    auto equal_i = [&](std::wstring_view s, std::wstring_view t) {
-        if (s.size() != t.size()) return false;
-        for (size_t i = 0; i < s.size(); ++i) if (!ieq(s[i], t[i])) return false;
-        return true;
-    };
-    return equal_i(ext, L".cmd") || equal_i(ext, L".bat");
-}
-
-// CreateProcess-based runner. Redirects the child's stdin to NUL so it
-// can't steal keystrokes from the TUI or disturb the console mode. Saves +
-// restores the stdin console mode as a belt-and-suspenders guard: a child
-// that resets ENABLE_LINE_INPUT / ENABLE_ECHO_INPUT (bash, some shells)
-// would otherwise make the next keystroke echo at the cursor instead of
-// flowing into the composer.
-SubprocessResult run_win32_cmdline(const std::string& cmdline,
-                                   const SubprocessOptions& opts) {
-    SubprocessResult r;
-    HANDLE h_stdin = ::GetStdHandle(STD_INPUT_HANDLE);
-    DWORD saved_in_mode = 0;
-    bool  have_saved_mode =
-        h_stdin != INVALID_HANDLE_VALUE && ::GetConsoleMode(h_stdin, &saved_in_mode);
-
-    struct Restore {
-        HANDLE h; DWORD mode; bool active;
-        ~Restore() { if (active) ::SetConsoleMode(h, mode); }
-    } restore{h_stdin, saved_in_mode, have_saved_mode};
-
-    HANDLE rd_raw = nullptr, wr_raw = nullptr;
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
-    // 64 KiB pipe buffer instead of the default (4 KiB). A chatty child
-    // (cmake/clang/msbuild, test runners, npm) fills a 4 KiB pipe in a
-    // single printf and blocks on write until our reader thread drains it,
-    // serializing the child's stdout with our UI loop. 64 KiB soaks a full
-    // compile-step's output so the child keeps running while we read.
-    if (!::CreatePipe(&rd_raw, &wr_raw, &sa, 64 * 1024)) {
-        r.started = false; r.start_error = "CreatePipe failed"; return r;
-    }
-    // Own both pipe ends via RAII: every early return below closes whatever
-    // is still live, no hand-written CloseHandle ladder.
-    HandleGuard rd{rd_raw};
-    HandleGuard wr{wr_raw};
-    ::SetHandleInformation(rd.h, HANDLE_FLAG_INHERIT, 0);
-
-    HandleGuard nul{::CreateFileW(L"NUL", GENERIC_READ,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
-                                  OPEN_EXISTING, 0, nullptr)};
-    if (nul.h == INVALID_HANDLE_VALUE) {
-        r.started = false; r.start_error = "CreateFile(NUL) failed"; return r;
-    }
-
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput  = nul.h;
-    si.hStdOutput = wr.h;
-    si.hStdError  = wr.h;
-
-    // CreateProcessW takes a mutable LPWSTR — widen the UTF-8 cmdline and
-    // give it a writable buffer.
-    std::wstring wcmd = utf8_to_wide(cmdline);
-    std::vector<wchar_t> mutable_cmdline(wcmd.begin(), wcmd.end());
-    mutable_cmdline.push_back(L'\0');
-
-    PROCESS_INFORMATION pi{};
-    BOOL ok = ::CreateProcessW(nullptr, mutable_cmdline.data(),
-                               nullptr, nullptr,
-                               TRUE,
-                               CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                               nullptr, nullptr,
-                               &si, &pi);
-    // The child has its own dup'd copies now; drop the parent's write end +
-    // NUL handle (RAII no-ops them at scope exit too, but eager release
-    // matches the original ordering so the child's EOF is observable).
-    wr.reset();
-    nul.reset();
-    if (!ok) {
-        DWORD e = ::GetLastError();
-        r.started = false;
-        r.start_error = "CreateProcess failed (" + std::to_string(e) + ")";
-        return r;   // ~rd closes the read end
-    }
-    // The read end is handed to the reader thread below and force-closed
-    // after join(); take it out of RAII so the guard's dtor doesn't
-    // double-close. `rd` (the raw HANDLE) is the owner from here on.
-    HANDLE rd_h = rd.release();
-
-    // Reader thread drains the pipe into `shared_buf` under a mutex. The
-    // previous single-thread loop read synchronously with no deadline —
-    // a child that spawned a detached grandchild (and so kept the write
-    // end of the pipe open after its own exit) or that wedged without
-    // emitting output would pin ReadFile forever, because the outer
-    // WaitForSingleObject only ran *after* the read loop closed.
-    //
-    // With the reader split off:
-    //   • main thread does WaitForSingleObject(pi.hProcess, …) with the
-    //     full timeout in short chunks, flushing progress between chunks;
-    //   • timeout fires → TerminateProcess → child's write end closes →
-    //     reader's ReadFile returns 0 → reader thread exits cleanly;
-    //   • grandchild-keeps-pipe-alive edge case → after the terminate,
-    //     we CloseHandle(rd) to force-unblock the reader.
-    std::mutex          buf_mu;
-    std::ostringstream  shared_buf;
-    std::size_t         shared_total = 0;
-    bool                shared_truncated = false;
-    std::atomic<bool>   reader_done{false};
-
-    std::thread reader([&, rd_h]{
-        char tmp[4096];
-        for (;;) {
-            DWORD n = 0;
-            if (!::ReadFile(rd_h, tmp, sizeof(tmp), &n, nullptr) || n == 0) break;
-            std::lock_guard lk(buf_mu);
-            if (shared_truncated) continue;
-            std::size_t room = (shared_total < (std::size_t)opts.max_bytes)
-                             ? (std::size_t)opts.max_bytes - shared_total : 0;
-            std::size_t w = n < room ? n : room;
-            shared_buf.write(tmp, (std::streamsize)w);
-            shared_total += w;
-            if (w < (std::size_t)n) shared_truncated = true;
-        }
-        reader_done.store(true, std::memory_order_release);
-    });
-
-    auto snapshot = [&]{
-        std::lock_guard lk(buf_mu);
-        return shared_buf.str();
-    };
-
-    auto now_ms = []{
-        return std::chrono::steady_clock::now();
-    };
-
-    auto total_snapshot = [&]{
-        std::lock_guard lk(buf_mu);
-        return shared_total;
-    };
-
-    // Idle deadline: same semantics as the POSIX path — we cap *silence*,
-    // not total wall-clock from spawn.  A child that's actively writing
-    // stdout/stderr keeps rolling the deadline forward, so a long but
-    // chatty build never trips the watchdog; only a stuck child that goes
-    // quiet for `opts.timeout` seconds gets terminated.  Activity is
-    // detected by snapshotting the reader's `shared_total` byte counter
-    // under the buffer mutex — when it grows between iterations, the
-    // window resets.
-    const auto idle_window = (opts.timeout.count() > 0)
-        ? std::chrono::milliseconds(opts.timeout.count() * 1000)
-        : std::chrono::milliseconds::zero();
-    const bool has_idle_window = idle_window.count() > 0;
-    auto idle_deadline = has_idle_window
-        ? now_ms() + idle_window
-        : std::chrono::steady_clock::time_point::max();
-    auto last_emit = now_ms();
-    std::size_t last_total_seen = 0;
-
-    bool timed_out = false;
-    for (;;) {
-        auto now = now_ms();
-        // Reset the idle window if the reader thread has appended bytes
-        // since our last check.  Snapshot is cheap (one mutex acquire +
-        // size_t copy) and we only do it once per outer iteration.
-        if (has_idle_window) {
-            const auto t = total_snapshot();
-            if (t > last_total_seen) {
-                last_total_seen = t;
-                idle_deadline = now + idle_window;
-            }
-        }
-        auto remaining_deadline = has_idle_window
-            ? std::chrono::duration_cast<std::chrono::milliseconds>(idle_deadline - now)
-            : std::chrono::milliseconds::max();
-        if (has_idle_window && remaining_deadline.count() <= 0) {
-            timed_out = true;
-            break;
-        }
-        auto to_emit = kEmitGap - std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - last_emit);
-        if (to_emit.count() < 0) to_emit = std::chrono::milliseconds{0};
-        auto sleep_ms = std::min<std::chrono::milliseconds>(
-            to_emit, has_idle_window ? remaining_deadline : std::chrono::milliseconds{1000});
-
-        DWORD w = ::WaitForSingleObject(
-            pi.hProcess,
-            (DWORD)std::max<std::chrono::milliseconds::rep>(sleep_ms.count(), 0));
-        if (w == WAIT_OBJECT_0) break;   // child exited
-
-        auto after = now_ms();
-        if (opts.on_progress && (after - last_emit) >= kEmitGap) {
-            opts.on_progress(to_valid_utf8(snapshot()));
-            last_emit = after;
-        }
-    }
-
-    DWORD exit_code = 0;
-    if (timed_out) {
-        ::TerminateProcess(pi.hProcess, 1);
-        ::WaitForSingleObject(pi.hProcess, 2000);
-        r.timed_out = true;
-    } else {
-        ::GetExitCodeProcess(pi.hProcess, &exit_code);
-        r.exit_code = (int)exit_code;
-    }
-
-    // Give the reader a grace window to drain the remaining pipe bytes
-    // after the child exited (its write end closed → ReadFile is returning).
-    // Grandchildren that inherited the pipe can hold it open past the
-    // parent's death — if the reader is still blocked, force-close rd.
-    const auto grace_deadline = now_ms() + std::chrono::milliseconds(500);
-    while (!reader_done.load(std::memory_order_acquire)
-           && now_ms() < grace_deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    ::CloseHandle(rd_h);   // safe: even if reader is mid-ReadFile, it returns false
-    reader.join();
-
-    if (opts.on_progress) {
-        opts.on_progress(to_valid_utf8(snapshot()));
-    }
-    ::CloseHandle(pi.hProcess);
-    ::CloseHandle(pi.hThread);
-    {
-        std::lock_guard lk(buf_mu);
-        r.truncated = shared_truncated;
-        r.output    = to_valid_utf8(shared_buf.str());
-    }
-    return r;
-}
-
-#else // POSIX
-
-// In-process runner: posix_spawn the child with stdout+stderr piped back
-// here, then poll(2) the read end with a deadline. Replaces the previous
-// `popen("timeout ... sh -c ...")` design, which had two problems:
-//   1. macOS doesn't ship GNU `timeout` (it lives in coreutils → brew),
-//      so every bash call on a stock Mac failed at the shell layer.
-//   2. Even on Linux it stacked an extra process layer, made stderr
-//      structure invisible (forced 2>&1 in the shell), and gave us no
-//      handle to actually kill the child if shell quoting went sideways.
-//
-// The new design owns the entire lifecycle: we hold the pid, we send
-// SIGTERM at the deadline, we escalate to SIGKILL after a 2 s grace,
-// and we close the read end ourselves once the child reaps so a
-// grandchild that inherits the pipe can't block us forever (same edge
-// case the Windows path handles via the reader-thread grace + force-
-// close pattern).
-
-namespace {
-
-// Drain whatever's currently readable on `fd` without blocking.
-// Returns true if EOF (read==0) was observed; the caller uses that to
-// distinguish "more might come later" from "writer closed for good".
-bool drain_pipe(int fd, std::ostringstream& out, std::size_t& total,
-                std::size_t max_bytes, bool& truncated) {
-    if (fd < 0) return true;
-    char buf[4096];
-    for (;;) {
-        ssize_t n = ::read(fd, buf, sizeof(buf));
-        if (n > 0) {
-            if (truncated) continue;
-            std::size_t room = (total < max_bytes) ? max_bytes - total : 0;
-            std::size_t w = std::min<std::size_t>(static_cast<std::size_t>(n), room);
-            out.write(buf, static_cast<std::streamsize>(w));
-            total += w;
-            if (w < static_cast<std::size_t>(n)) truncated = true;
-            continue;
-        }
-        if (n == 0) return true;                          // EOF
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return false;
-        return true;                                       // fatal read error
-    }
+// Terminal line-discipline + UTF-8 repair, applied to EVERY byte that
+// leaves the subprocess runners — live progress snapshots and the final
+// captured output alike. The live path is the one that used to leak raw
+// escapes: bash progress snapshots went straight to the UI card, so a
+// child that thought it owned a tty (ls --color, cargo, top -b, anything
+// probing with DECSTBM/SGR) painted its CSI parameter bytes as literal
+// glyphs ("[1;24r" → stray "r" cells), which then committed to native
+// scrollback — the reported per-frame corruption during bash tool use.
+std::string clean_capture(std::string s) {
+    return to_valid_utf8(strip_terminal_controls(s));
 }
 
 } // namespace
 
-// -----------------------------------------------------------------------
-// Spawn-lifecycle RAII + typestate (POSIX).
-// -----------------------------------------------------------------------
-// run_posix's prologue acquires resources in sequence — a pipe (two fds),
-// a posix_spawn_file_actions_t, then the child pid — and EVERY early
-// failure path used to hand-unwind whatever was acquired so far
-// (::close(pipefd[0]); ::close(pipefd[1]); posix_spawn_file_actions_destroy).
-// That ladder is correct but fragile: a new early-return added mid-prologue
-// silently leaks an fd. Model it as move-only owning guards + a two-state
-// typestate (Piped ─spawn─▶ Spawned) so cleanup is RAII and the legal
-// ordering is compiler-checked. Zero overhead: the guards are thin
-// fd/handle wrappers, the states are empty move-only tokens.
 namespace {
 
-// Owns one fd; closes on destruction unless released. Move-only.
-struct FdGuard {
-    int fd = -1;
-    FdGuard() = default;
-    explicit FdGuard(int f) noexcept : fd(f) {}
-    FdGuard(FdGuard&& o) noexcept : fd(std::exchange(o.fd, -1)) {}
-    FdGuard& operator=(FdGuard&& o) noexcept {
-        if (this != &o) { reset(); fd = std::exchange(o.fd, -1); }
-        return *this;
-    }
-    ~FdGuard() { reset(); }
-    void reset() noexcept { if (fd >= 0) ::close(fd); fd = -1; }
-    [[nodiscard]] int release() noexcept { return std::exchange(fd, -1); }
-    [[nodiscard]] bool valid() const noexcept { return fd >= 0; }
-};
-
-// Owns a posix_spawn_file_actions_t; destroys on scope exit. Move-only.
-struct SpawnFileActions {
-    posix_spawn_file_actions_t a{};
-    bool inited = false;
-    SpawnFileActions() = default;
-    SpawnFileActions(SpawnFileActions&& o) noexcept
-        : a(o.a), inited(std::exchange(o.inited, false)) {}
-    SpawnFileActions& operator=(SpawnFileActions&&) = delete;
-    ~SpawnFileActions() { if (inited) ::posix_spawn_file_actions_destroy(&a); }
-    [[nodiscard]] bool init() noexcept {
-        inited = (::posix_spawn_file_actions_init(&a) == 0);
-        return inited;
-    }
-};
-
-// Typestate: a wired-up pipe + file_actions, ready to spawn. OWNS both pipe
-// ends and the file_actions until spawn consumes it.
-struct Piped : io::fsm::State<struct PipedTag> {
-    using fsm_to = io::fsm::to<struct Spawned>;
-    FdGuard          read_end;    // parent reads child stdout/stderr here
-    FdGuard          write_end;   // dup'd into child stdout/stderr, then closed
-    SpawnFileActions actions;
-};
-
-// Typestate: child is running. OWNS the read fd (parent side) and the pid.
-// The write end is closed by the spawn transition (parent never writes).
-struct Spawned : io::fsm::State<struct SpawnedTag> {
-    FdGuard read_end;
-    pid_t   pid = -1;
-};
-
-} // namespace
-
-// argv form: arguments passed verbatim, no shell. shell_command form:
-// `/bin/sh -c <cmd>`. Either way, env is inherited.
-SubprocessResult run_posix(const std::vector<std::string>& argv_in,
-                           bool                           use_shell,
-                           const SubprocessOptions&       opts) {
-    SubprocessResult r;
-
-    // ── Piped: create the pipe + file_actions ───────────────────────────
-    // Set the parent end non-blocking so drain_pipe returns instead of
-    // stalling on partial reads. Use pipe2(O_CLOEXEC) where available so the
-    // fd doesn't leak to nested posix_spawns; fall back to fcntl on macOS.
-    Piped piped;
-    {
-        int pipefd[2] = {-1, -1};
-#if defined(__linux__)
-        if (::pipe2(pipefd, O_CLOEXEC) != 0) {
-            r.started = false; r.start_error = "pipe2 failed: " + std::string{std::strerror(errno)};
-            return r;
+// One supervise loop for every child agentty runs: run_child (exec.cpp) on
+// jaal's native process. This only maps the options across. `win_cmdline`,
+// when set, is the verbatim Windows command line.
+SubprocessResult run_via_child(std::vector<std::string> argv, const SubprocessOptions& opts,
+                               std::string win_cmdline = {}) {
+    ChildRun run;
+    run.argv = std::move(argv);
+    run.windows_command_line = std::move(win_cmdline);
+    run.idle = opts.timeout;
+    run.wall = [&]() -> std::chrono::seconds {
+        // $AGENTTY_TOOL_HARD_TIMEOUT_SECS overrides for the whole process;
+        // 0 switches the ceiling off.
+        if (const char* e = std::getenv("AGENTTY_TOOL_HARD_TIMEOUT_SECS"); e && e[0]) {
+            char* end = nullptr;
+            const long v = std::strtol(e, &end, 10);
+            if (end != e && v >= 0) return std::chrono::seconds{v};
         }
-#else
-        if (::pipe(pipefd) != 0) {
-            r.started = false; r.start_error = "pipe failed: " + std::string{std::strerror(errno)};
-            return r;
-        }
-        (void)::fcntl(pipefd[0], F_SETFD, ::fcntl(pipefd[0], F_GETFD) | FD_CLOEXEC);
-        (void)::fcntl(pipefd[1], F_SETFD, ::fcntl(pipefd[1], F_GETFD) | FD_CLOEXEC);
+        if (opts.hard_timeout.count() > 0) return opts.hard_timeout;
+        if (opts.timeout.count() <= 0)     return std::chrono::seconds::zero();
+        return std::max<std::chrono::seconds>(opts.timeout * 20, std::chrono::minutes{10});
+    }();
+    run.max_output_bytes = opts.max_bytes;
+    run.stop_requested   = opts.stop_requested;
+    if (opts.on_progress)
+        run.on_progress = [&opts](std::string_view raw) { opts.on_progress(clean_capture(std::string{raw})); };
+#if !defined(_WIN32)
+    if (opts.spawner) {
+        run.spawn_adopted = [&opts](int out_fd) {
+            auto c = opts.spawner(opts, out_fd);
+            AdoptedChild a;
+            a.pid   = c.pid;
+            a.pidfd = c.pidfd;
+            if (c.pid < 0) a.error = c.error.empty() ? "sandbox spawner failed" : c.error;
+            a.supervisor_fd  = c.supervisor_fd;
+            a.service_broker = std::move(c.service);
+            a.kill_tree      = std::move(c.kill_tree);
+            return a;
+        };
+    }
 #endif
-        (void)::fcntl(pipefd[0], F_SETFL, ::fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
-        // From here on both fds are owned by RAII guards: any early return
-        // below closes them automatically (no hand-written close ladder).
-        piped.read_end  = FdGuard{pipefd[0]};
-        piped.write_end = FdGuard{pipefd[1]};
-    }
 
-    // file_actions: redirect stdin from /dev/null (so the child can't
-    // steal terminal input from the TUI), and stdout+stderr to the pipe
-    // write end. Close the read end in the child so grandchildren that
-    // inherit fds don't hold it open after the child itself exits.
-    if (!piped.actions.init()) {
-        r.started = false; r.start_error = "posix_spawn_file_actions_init failed";
-        return r;   // ~Piped closes both pipe fds
-    }
-    ::posix_spawn_file_actions_addopen(&piped.actions.a, STDIN_FILENO,
-        "/dev/null", O_RDONLY, 0);
-    ::posix_spawn_file_actions_adddup2 (&piped.actions.a, piped.write_end.fd, STDOUT_FILENO);
-    ::posix_spawn_file_actions_adddup2 (&piped.actions.a, piped.write_end.fd, STDERR_FILENO);
-    ::posix_spawn_file_actions_addclose(&piped.actions.a, piped.write_end.fd);
-    ::posix_spawn_file_actions_addclose(&piped.actions.a, piped.read_end.fd);
-
-    // Build child argv. Shell form goes through `/bin/sh -c <cmd>` so
-    // pipes / redirects / globs work; argv form bypasses the shell for
-    // exact-arg fidelity (matters for `git commit -m "msg with $vars"`
-    // and similar where the shell would mangle the message).
-    std::vector<std::string> argv_storage;
-    if (use_shell) {
-        if (argv_in.empty()) {
-            r.started = false; r.start_error = "empty shell command";
-            return r;   // ~Piped closes fds + destroys actions
-        }
-        argv_storage = {"sh", "-c", argv_in[0]};
-    } else {
-        argv_storage = argv_in;
-    }
-    std::vector<char*> arg_ptrs;
-    arg_ptrs.reserve(argv_storage.size() + 1);
-    for (auto& s : argv_storage) arg_ptrs.push_back(s.data());
-    arg_ptrs.push_back(nullptr);
-
-    // ── Piped ─spawn─▶ Spawned ──────────────────────────────────────────
-    io::fsm::assert_legal_edge<Piped, Spawned>();
-    pid_t pid = -1;
-    int rc = ::posix_spawnp(&pid, arg_ptrs[0], &piped.actions.a, nullptr,
-                            arg_ptrs.data(), environ);
-    // file_actions no longer needed; the write end is parent-side dead
-    // weight (the child has its dup'd copy). Releasing them here mirrors
-    // the original eager teardown — ~Piped would do it too, but we want
-    // the write end gone BEFORE the supervise loop so EOF is observable.
-    piped.write_end.reset();
-    // (piped.actions is destroyed when `piped` leaves scope below.)
-
-    if (rc != 0) {
-        r.started = false;
-        r.start_error = "spawn failed: " + std::string{std::strerror(rc)};
-        return r;   // ~Piped closes the read end
-    }
-
-    // Hand the read fd + pid to the running-child token. After this `piped`
-    // owns nothing but its (now-destroyed-on-scope-exit) file_actions.
-    Spawned child;
-    child.read_end = FdGuard{piped.read_end.release()};
-    child.pid      = pid;
-
-    // The supervise loop drives the genuinely-concurrent phase (poll +
-    // drain + idle-deadline SIGTERM/SIGKILL + reap). It is a select-loop,
-    // not a state sequence, so it stays a loop — but it now reads the
-    // child's read fd / pid through the owning Spawned token.
-    int read_fd = child.read_end.fd;
-    const pid_t cpid = child.pid;
-
-    using clock = std::chrono::steady_clock;
-    const auto start    = clock::now();
-    // Idle deadline: rather than an absolute wall-clock cap from spawn,
-    // the deadline rolls forward every time the child writes output.  A
-    // long-running command that's actively printing progress (a build,
-    // a streaming logs tail, a slow git operation) never trips the
-    // watchdog, but a stuck child that goes silent for `opts.timeout`
-    // seconds gets SIGTERM'd just as before.
-    //
-    // The window resets on EACH successful read (see the post-drain
-    // bump near the bottom of the loop), so the only way to die here is
-    // to actually go quiet for the configured budget.
-    const auto idle_window = (opts.timeout.count() > 0)
-        ? std::chrono::seconds(opts.timeout.count())
-        : std::chrono::seconds::zero();
-    const bool has_idle_window = idle_window > std::chrono::seconds::zero();
-    auto idle_deadline = has_idle_window
-        ? start + idle_window
-        : clock::time_point::max();
-    constexpr auto kKillGrace = std::chrono::milliseconds{2000};
-
-    auto last_emit  = start;
-    auto kill_at    = clock::time_point::max();
-    bool sent_term  = false;
-    bool sent_kill  = false;
-    bool timed_out  = false;
-    bool eof        = false;
-    int  wait_status = 0;
-
-    std::ostringstream out;
-    std::size_t total     = 0;
-    bool        truncated = false;
-
-    auto emit_progress = [&]{
-        if (!opts.on_progress) return;
-        opts.on_progress(to_valid_utf8(out.str()));
-        last_emit = clock::now();
-    };
-
-    // Main poll loop. Exits as soon as we've got both EOF on the pipe AND
-    // a reaped child — the order can vary (child can exit before its
-    // last bytes drain on a heavily-buffered pipe; pipe can EOF before
-    // waitpid completes if the child is being reparented).
-    bool reaped = false;
-    while (!eof || !reaped) {
-        auto now = clock::now();
-
-        // Idle-deadline state machine. SIGTERM first (cooperative
-        // shutdown), SIGKILL after a 2 s grace if still alive.
-        // `timed_out` is sticky so we report it even if the child
-        // happened to exit cleanly moments after we sent the signal.
-        // `idle_deadline` was reset to `now + idle_window` on every
-        // successful drain below, so reaching it means the child has
-        // gone silent for at least `opts.timeout` seconds.
-        if (!sent_term && has_idle_window && now >= idle_deadline) {
-            ::kill(cpid, SIGTERM);
-            sent_term = true;
-            timed_out = true;
-            kill_at   = now + kKillGrace;
-        }
-        if (sent_term && !sent_kill && now >= kill_at) {
-            ::kill(cpid, SIGKILL);
-            sent_kill = true;
-        }
-
-        // Compute the next event we care about and bound the poll
-        // accordingly. 100 ms ceiling so we still revisit the kill
-        // state even when the child is silent and no timer is close.
-        auto next = last_emit + kEmitGap;
-        if (!sent_term && has_idle_window && idle_deadline < next)
-            next = idle_deadline;
-        if (sent_term && !sent_kill && kill_at < next) next = kill_at;
-        auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           next - now).count();
-        if (wait_ms < 0)   wait_ms = 0;
-        if (wait_ms > 100) wait_ms = 100;
-
-        if (!eof) {
-            struct pollfd pfd{read_fd, POLLIN, 0};
-            int pn = ::poll(&pfd, 1, static_cast<int>(wait_ms));
-            if (pn > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR))) {
-                const auto bytes_before = total;
-                if (drain_pipe(read_fd, out, total, opts.max_bytes, truncated))
-                    eof = true;
-                // Any forward progress in stdout/stderr resets the idle
-                // window — a chatty child (build with progress lines, log
-                // tail, long-running test runner) never starves the
-                // watchdog.  The deadline only fires after `idle_window`
-                // of *silence*, not from spawn.
-                if (has_idle_window && total > bytes_before) {
-                    idle_deadline = clock::now() + idle_window;
-                }
-            } else if (pn < 0 && errno != EINTR) {
-                eof = true;   // poll error → stop trying to read
-            }
-        } else {
-            // Pipe is done; just sleep briefly until reap completes.
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(std::min<long>(wait_ms, 20)));
-        }
-
-        // Non-blocking reap. If the child is gone but the pipe's still
-        // open (grandchild inherited stdout), force-close the read end
-        // so the next loop iteration sees eof=true and we exit cleanly
-        // instead of waiting forever on a phantom writer.
-        if (!reaped) {
-            int status = 0;
-            pid_t w = ::waitpid(cpid, &status, WNOHANG);
-            if (w == cpid) {
-                wait_status = status;
-                reaped = true;
-                if (!eof) {
-                    // One last best-effort drain of buffered bytes the
-                    // child wrote between its final flush and exit.
-                    drain_pipe(read_fd, out, total, opts.max_bytes, truncated);
-                    child.read_end.reset();
-                    read_fd = -1;
-                    eof = true;
-                }
-            } else if (w < 0 && errno != EINTR && errno != ECHILD) {
-                // Genuinely unexpected — bail rather than spin.
-                reaped = true;
-            }
-        }
-
-        now = clock::now();
-        if (opts.on_progress && now - last_emit >= kEmitGap)
-            emit_progress();
-    }
-
-    if (read_fd >= 0) child.read_end.reset();
-    emit_progress();   // final flush so the UI sees the last bytes
-
-    if      (WIFEXITED  (wait_status)) r.exit_code = WEXITSTATUS(wait_status);
-    else if (WIFSIGNALED(wait_status)) r.exit_code = 128 + WTERMSIG(wait_status);
-    r.timed_out = timed_out;
-    r.truncated = truncated;
-    r.output    = to_valid_utf8(out.str());
+    auto c = run_child(run);
+    SubprocessResult r;
+    r.started     = c.started;
+    r.start_error = c.start_error;
+    r.output      = clean_capture(std::move(c.output));
+    r.truncated   = c.truncated;
+    r.timed_out   = c.timed_out_idle || c.timed_out_wall;
+    r.hard_capped = c.timed_out_wall;
+    r.exit_code   = c.exited ? c.exit_code : 128 + c.signal;
     return r;
 }
-
-#endif
 
 } // namespace
 
@@ -718,66 +92,59 @@ SubprocessResult Subprocess::run(SubprocessOptions opts) {
 
     // Build a final command line appropriate for this platform.
 #ifdef _WIN32
+    namespace pf = maya::platform;
     std::string cmdline;
-    if (opts.shell_command) {
-        // cmd.exe /S /C "…" — /S strips just the outermost quotes and
-        // leaves everything else (including embedded "...") intact.
-        cmdline = "cmd.exe /S /C \"" + *opts.shell_command + "\"";
-    } else if (opts.argv) {
-        if (opts.argv->empty()) {
+    if (const std::string* sh = opts.shell_if()) {
+        cmdline = pf::cmd_command_line(*sh);
+    } else {
+        const std::vector<std::string>& av = *opts.argv_if();
+        if (av.empty()) {
             r.started = false; r.start_error = "empty command"; return r;
         }
-        // If argv[0] is a .cmd / .bat on PATH, wrap through cmd.exe — raw
-        // CreateProcess refuses batch files (they need the interpreter).
-        // Checked once up-front so we don't quote twice on the happy path.
-        const bool needs_cmd_shell = resolves_to_batch((*opts.argv)[0]);
-        for (size_t i = 0; i < opts.argv->size(); ++i) {
-            if (i) cmdline.push_back(' ');
-            cmdline += win_quote_arg((*opts.argv)[i]);
-        }
-        if (needs_cmd_shell)
-            cmdline = "cmd.exe /S /C \"" + cmdline + "\"";
-    } else {
-        r.started = false; r.start_error = "no command specified"; return r;
+        // CreateProcess cannot start a .cmd/.bat (npx, npm, yarn); those go
+        // through cmd.exe.
+        cmdline = pf::join_command_line(av);
+        if (pf::resolves_to_batch(av[0])) cmdline = pf::cmd_command_line(cmdline);
     }
-    return run_win32_cmdline(cmdline, opts);
+    // No trailing "no command specified" arm: the variant has exactly two
+    // alternatives, so shell_if() being null means argv_if() is not.
+    const std::string prog = opts.shell_if() ? std::string{"cmd.exe"} : (*opts.argv_if())[0];
+    return run_via_child({prog}, opts, std::move(cmdline));
 #else
-    if (opts.shell_command) {
+    // Exactly two alternatives, so the null check on one IS the other:
+    // there is no "neither form set" arm to write, because that state no
+    // longer exists. The old chain ended in a `"no command specified"`
+    // runtime error for a condition the type now rules out.
+    if (const std::string* sh = opts.shell_if()) {
         // Shell form: pass the whole command string as the single sh -c
         // argument. The runner sets up sh "-c" "<cmd>" itself; no
         // additional quoting needed (and we don't want any — the user
         // passed shell syntax expecting it to be parsed verbatim).
-        return run_posix({*opts.shell_command}, /*use_shell=*/true, opts);
+        return run_via_child({"sh", "-c", *sh}, opts);
     }
-    if (opts.argv) {
-        if (opts.argv->empty()) {
-            r.started = false; r.start_error = "empty command"; return r;
-        }
-        // argv form: exec directly with no shell in the loop. Preserves
-        // every byte of every arg, which is what callers like git_commit
-        // (commit messages with $vars / quotes / newlines) actually need.
-        return run_posix(*opts.argv, /*use_shell=*/false, opts);
+    const std::vector<std::string>& av = *opts.argv_if();
+    if (av.empty()) {
+        r.started = false; r.start_error = "empty command"; return r;
     }
-    r.started = false; r.start_error = "no command specified";
-    return r;
+    // argv form: exec directly with no shell in the loop. Preserves
+    // every byte of every arg, which is what callers like git_commit
+    // (commit messages with $vars / quotes / newlines) actually need.
+    return run_via_child(av, opts);
 #endif
 }
 
 // ── Convenience wrappers ────────────────────────────────────────────────
 //
-// on_progress defaults to `progress::emit`, the thread-local sink the cmd
-// runner installs for tool execution. Wiring this at the wrapper level (not
-// inside Subprocess::run) keeps the core runner free of app-specific state
-// — other callers can skip the sink by going direct to Subprocess::run.
+// For agentty's own helpers (git for checkpoints, keyring, hooks). No live
+// progress: these are not tool calls, so nobody is watching a card.
 
 SubprocessResult run_command_s(const std::string& cmd,
                                std::size_t max_bytes,
                                std::chrono::seconds timeout) {
     SubprocessOptions opts;
-    opts.shell_command = cmd;
+    opts.command     = SubprocessOptions::Shell{cmd};
     opts.max_bytes   = max_bytes;
     opts.timeout     = timeout;
-    opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
     return Subprocess::run(std::move(opts));
 }
 
@@ -785,10 +152,9 @@ SubprocessResult run_argv_s(const std::vector<std::string>& argv,
                             std::size_t max_bytes,
                             std::chrono::seconds timeout) {
     SubprocessOptions opts;
-    opts.argv        = argv;
+    opts.command     = SubprocessOptions::Argv{argv};
     opts.max_bytes   = max_bytes;
     opts.timeout     = timeout;
-    opts.on_progress = [](std::string_view snap) { progress::emit(snap); };
     return Subprocess::run(std::move(opts));
 }
 
@@ -796,8 +162,22 @@ std::string legacy_format(const SubprocessResult& r, std::chrono::seconds timeou
     if (!r.started) return "[" + r.start_error + "]";
     std::string o = r.output;
     if (r.truncated) o += "\n[output truncated]";
-    if (r.timed_out) o += "\n[timed out after " + std::to_string(timeout.count()) + "s]";
-    else if (r.exit_code != 0) o += "\n[exit code " + std::to_string(r.exit_code) + "]";
+    if (r.hard_capped) {
+        // It was still producing output when we stopped it, so the useful
+        // next step is more time or a background session -- not the hunt for
+        // a hang that "timed out" would send the model on.
+        o += "\n[stopped at the wall-clock ceiling while still producing "
+             "output. It was not stuck. Re-run with a larger `timeout`, or "
+             "start it with `process_start` and poll it, which is the right "
+             "shape for anything long-running.]";
+    } else if (r.timed_out) {
+        o += "\n[no output for " + std::to_string(timeout.count())
+           + "s, so it was stopped. The clock measures SILENCE, not total "
+             "runtime -- a long build that keeps printing is never cut off. "
+             "If it is legitimately quiet for a while, raise `timeout`.]";
+    } else if (r.exit_code != 0) {
+        o += "\n[exit code " + std::to_string(r.exit_code) + "]";
+    }
     return o;
 }
 

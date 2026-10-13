@@ -28,8 +28,9 @@
 #include <string>
 #include <vector>
 
-#include <fcntl.h>
 #include <unistd.h>
+
+#include "wire_pipe.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -43,6 +44,8 @@
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/view/view.hpp"
+
+namespace pn = agentty::ui::panel;
 
 using agentty::Model;
 using agentty::Message;
@@ -59,6 +62,7 @@ using std::chrono::steady_clock;
 // to a constant instant (12:00 UTC — with TZ=UTC set in run_walk) so the
 // rendered header bytes are identical on every machine and a committed row's
 // content stays a pure function of model state.
+namespace {  // fold: TU-local (bundled into agentty_standalone_tests)
 static const std::chrono::system_clock::time_point kFixedTs =
     std::chrono::system_clock::time_point{std::chrono::hours{12}};
 
@@ -102,22 +106,8 @@ struct Rng {
 };
 
 // ── Pipe writer (real Writer over a real fd, drained per frame) ───────
-static std::pair<Writer, int> make_pipe_writer() {
-    int fds[2];
-    if (pipe(fds) != 0) { std::perror("pipe"); std::abort(); }
-    fcntl(fds[1], F_SETFL, fcntl(fds[1], F_GETFL, 0) | O_NONBLOCK);
-    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
-    return {Writer{static_cast<platform::NativeHandle>(fds[1])}, fds[0]};
-}
-
-static std::string drain_fd(int rfd) {
-    std::string out;
-    char buf[8192];
-    ssize_t n;
-    while ((n = read(rfd, buf, sizeof(buf))) > 0)
-        out.append(buf, static_cast<std::size_t>(n));
-    return out;
-}
+static std::pair<Writer, int> make_pipe_writer() { return wire_pipe::make_writer(); }
+static std::string drain_fd(int rfd) { return wire_pipe::drain(rfd); }
 
 // ── Settled tool-card builders (the realistic body shapes) ────────────
 static ToolUse settled_tool(Rng& rng, const std::string& tag) {
@@ -146,7 +136,7 @@ static ToolUse settled_tool(Rng& rng, const std::string& tag) {
         t.status = ToolUse::Done{now - milliseconds{5}, now, "edited"};
     } else if (kind == 2) {
         t.id = ToolCallId{"bash_" + tag};
-        t.name = ToolName{"bash"};
+        t.name = ToolName{"shell"};
         t.args = {{"command", "grep -rn pattern src # " + tag}};
         std::string out;
         const int n = 20 + rng.below(250);
@@ -180,7 +170,7 @@ static Canvas paint_view(const Model& m, int width, int term_h,
     Canvas c(width, 4000, &pool);
     c.clear();
     std::vector<layout::LayoutNode> nodes;
-    maya::render_tree(agentty::ui::view(m), c, pool, maya::theme::dark, nodes,
+    maya::render_tree(agentty::ui::view(m), c, pool, maya::theme::native, nodes,
                       /*auto_height=*/true);
     return c;
 }
@@ -461,6 +451,10 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
 
     Rng rng(seed);
     Model m;
+    // The size reaches reducers and view through the Model, as TerminalResized
+    // would deliver it.
+    m.ui.term_cols = width;
+    m.ui.term_rows = term_h;
     m.d.current.id = agentty::ThreadId{"wirefuzz"};
     m.d.available_models.push_back({});
     m.d.available_models.back().id = agentty::ModelId{"claude-opus-4-1"};
@@ -508,11 +502,11 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
                 break;
             }
             case 2: {   // picker open → frames → close → frames
-                m.ui.model_picker = agentty::ui::pick::OpenAt{0};
+                m.ui.panel.descend(pn::Models{{0, ""}});
                 op("picker open");
                 h.frame(m, "popen" + st);
                 if (rng.chance(50)) h.frame(m, "popen2-" + st);
-                m.ui.model_picker = agentty::ui::pick::Closed{};
+                m.ui.panel.close<pn::Models>();
                 op("picker close");
                 h.frame(m, "pclose" + st);
                 break;
@@ -544,14 +538,13 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
                 if (h.dead) break;
                 auto cmd =
                     agentty::app::detail::trim_frozen_if_oversized(m);
-                using Cmd = maya::Cmd<agentty::Msg>;
-                // W5: the trim returns commit_scrollback(N) when it drops
+                        // W5: the trim returns commit_scrollback(N) when it drops
                 // rows (a top-DELETION that maya's render-time reconciliation
                 // cannot fix — the host must commit in lockstep), or none()
                 // when it doesn't trim. Both are acceptable; the invariant
                 // is that no OTHER command type is returned.
-                INV(std::holds_alternative<Cmd::None>(cmd.inner) ||
-                    std::holds_alternative<Cmd::CommitScrollback>(cmd.inner),
+                INV(std::holds_alternative<agentty::Cmd::None>(cmd.inner) ||
+                    std::holds_alternative<maya::CommitScrollback>(cmd.inner),
                     "W5", "trim returned unexpected command type (must be "
                     "none() or commit_scrollback(N))");
                 op("trim");
@@ -597,10 +590,10 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
                 break;
             }
             case 2: {   // picker over a live stream
-                m.ui.model_picker = agentty::ui::pick::OpenAt{0};
+                m.ui.panel.descend(pn::Models{{0, ""}});
                 op("picker open (streaming)");
                 h.frame(m, "spopen" + st);
-                m.ui.model_picker = agentty::ui::pick::Closed{};
+                m.ui.panel.close<pn::Models>();
                 op("picker close (streaming)");
                 h.frame(m, "spclose" + st);
                 break;
@@ -635,6 +628,8 @@ static void run_walk(std::uint64_t seed, int width, int term_h) {
         }
     }
 }
+
+}  // namespace (fold)
 
 int main() {
     std::printf("scrollback_wire_fuzz\n");

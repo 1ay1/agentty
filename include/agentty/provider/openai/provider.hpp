@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/openai/transport.hpp"
 
 namespace agentty::provider::openai {
@@ -16,18 +17,16 @@ public:
     OpenAIProvider() = default;
     explicit OpenAIProvider(Endpoint endpoint) : endpoint_(std::move(endpoint)) {}
 
-    void stream(provider::Request req, provider::EventSink sink) {
+    // run_stream_sync takes no capability today; the cap is the
+    // Provider-concept contract (thread it through if the transport locks).
+    provider::StreamResult stream(const maya::unlocked&, provider::Request req,
+                                  provider::EventSink sink) {
         Request oreq;
-        oreq.model         = std::move(req.model);
-        oreq.system_prompt = std::move(req.system_prompt);
-        oreq.messages      = std::move(req.messages);
-        oreq.tools         = std::move(req.tools);
-        oreq.max_tokens    = req.max_tokens;
-        oreq.context_window = req.context_window;
-        oreq.auth          = std::move(req.auth);
-        oreq.retry_count   = req.retry_count;
-        oreq.endpoint      = endpoint_;
-        openai::run_stream_sync(std::move(oreq), std::move(sink), std::move(req.cancel));
+        provider::lower_shared(oreq, req);          // shared core
+        oreq.context_window = req.context_window;   // OpenAI-family: Ollama num_ctx
+        oreq.session_key    = req.session_key;       // prompt_cache_key routing
+        oreq.endpoint       = endpoint_;
+        return openai::run_stream_sync(std::move(oreq), std::move(sink), std::move(req.cancel));
     }
 
     [[nodiscard]] const Endpoint& endpoint() const noexcept { return endpoint_; }

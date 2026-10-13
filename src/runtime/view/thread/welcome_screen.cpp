@@ -3,14 +3,18 @@
 #include <maya/core/render_context.hpp>
 #include <maya/widget/model_badge.hpp>
 
+#include "agentty/domain/model_name.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 
 namespace agentty::ui {
 
 maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
-    maya::ModelBadge mb{m.d.model_id.value};
-    mb.set_compact(true);
+    // The welcome screen has the whole terminal to itself, so it shows the
+    // richest projection — `full()` keeps the `· 1M` annotation a
+    // width-tight status chip would shed.
+    const auto name = model_name::decode(m.d.model_id.value);
+    maya::ModelBadge mb{{.label = name.full(), .color = name.color}};
 
     maya::WelcomeScreen::Config cfg;
     cfg.sigil_color = role_brand_alt;                   // bright_magenta flagship sigil
@@ -69,7 +73,17 @@ maya::WelcomeScreen::Config welcome_screen_config(const Model& m) {
     // for the whole build phase (real ioctl dims, or the harness's
     // simulated dims) — do NOT ioctl here, it would override test
     // harnesses that pin a simulated geometry.
-    constexpr int kIdleChromeRows = 11;
+    // The reserve is SPELLED OUT rather than a single magic number,
+    // because a number is a claim nobody can check. It was 11 against real
+    // chrome of 10, so the welcome was budgeted one row short and the frame
+    // ended one row above the terminal's bottom edge — the gap under the
+    // composer. Each term below is one visible band, countable on screen:
+    constexpr int kOuterPadding = 1;   // AppLayout padding(1), top only
+    constexpr int kComposerRows = 5;   // border + input + rule + meta + border
+    constexpr int kStatusRows   = 3;   // rule + status line + rule
+    constexpr int kWelcomeGap   = 1;   // blank row between welcome and composer
+    constexpr int kIdleChromeRows =
+        kOuterPadding + kComposerRows + kStatusRows + kWelcomeGap;
     const int term_rows = maya::available_height();
     if (term_rows > 0)
         cfg.max_rows = std::max(4, term_rows - kIdleChromeRows);

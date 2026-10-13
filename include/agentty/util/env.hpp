@@ -39,6 +39,7 @@ enum class Var : std::uint8_t {
     ApiHost,                 // AGENTTY_API_HOST     (host[:port] override)
     OAuthHost,               // AGENTTY_OAUTH_HOST   (host[:port] override)
     Insecure,                // AGENTTY_INSECURE=1   (skip TLS verification)
+    NoPrewarm,               // AGENTTY_NO_PREWARM=1 (suppress prewarm dials)
 
     // ── Airgap (laptop side) ────────────────────────────────────────────
     AirgapSsh,               // AGENTTY_AIRGAP_SSH   (extra ssh flags)
@@ -46,9 +47,10 @@ enum class Var : std::uint8_t {
     // ── Clipboard override ──────────────────────────────────────────────
     ClipboardCmd,            // AGENTTY_CLIPBOARD_CMD (shell cmd → image bytes on stdout)
 
-    // ── Debug ───────────────────────────────────────────────────────────
-    DebugApi,                // AGENTTY_DEBUG_API=1  (dump streaming events)
-    DebugFile,               // AGENTTY_DEBUG_FILE   (target path for above)
+    // ── Debug ─────────────────────────────────────────────────────────────────────
+
+    // ── Smart Mode session pin ────────────────────────────────
+    SmartMode,               // AGENTTY_SMART_MODE=0|1    (session master-switch pin)
 };
 
 struct VarSpec {
@@ -63,10 +65,10 @@ inline constexpr std::array kCatalog = {
     VarSpec{Var::ApiHost,          "AGENTTY_API_HOST"},
     VarSpec{Var::OAuthHost,        "AGENTTY_OAUTH_HOST"},
     VarSpec{Var::Insecure,         "AGENTTY_INSECURE"},
+    VarSpec{Var::NoPrewarm,        "AGENTTY_NO_PREWARM"},
     VarSpec{Var::AirgapSsh,        "AGENTTY_AIRGAP_SSH"},
     VarSpec{Var::ClipboardCmd,     "AGENTTY_CLIPBOARD_CMD"},
-    VarSpec{Var::DebugApi,         "AGENTTY_DEBUG_API"},
-    VarSpec{Var::DebugFile,        "AGENTTY_DEBUG_FILE"},
+    VarSpec{Var::SmartMode,        "AGENTTY_SMART_MODE"},
 };
 
 // Compile-time name lookup. `env::name<Var::SocksProxy>()` returns the
@@ -96,9 +98,10 @@ consteval bool every_var_has_row() {
     constexpr Var kAll[] = {
         Var::AnthropicApiKey, Var::ClaudeOAuthToken,
         Var::SocksProxy, Var::ApiHost, Var::OAuthHost, Var::Insecure,
+        Var::NoPrewarm,
         Var::AirgapSsh,
         Var::ClipboardCmd,
-        Var::DebugApi, Var::DebugFile,
+        Var::SmartMode,
     };
     if (std::size(kAll) != kCatalog.size()) return false;
     for (auto v : kAll) {

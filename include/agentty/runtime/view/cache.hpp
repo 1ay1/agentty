@@ -54,12 +54,12 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <chrono>
-#include <list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 
 #include <maya/widget/turn.hpp>
 
@@ -89,6 +89,36 @@ struct MessageMdCache {
     std::size_t                               last_settled_size =
         static_cast<std::size_t>(-1);
 
+    // The motion level this widget's reveal-fx policy was configured with.
+    //
+    // Per-WIDGET, because the question "must I re-apply the policy" is
+    // per-widget. It used to be a compare-and-reset latch local to
+    // cached_markdown_for(), which runs SEVERAL times per frame -- once per
+    // streaming widget (the reasoning "#r" lane, the answer lane, and one per
+    // sub-turn in a multi-message turn). The first caller consumed the change
+    // and every later widget that frame read "unchanged", so toggling motion
+    // mid-stream applied to the reasoning block and left the answer
+    // animating.
+    //
+    // A process-global "changed this frame" flag fixes that and introduces
+    // worse problems: it is sticky across anything that does not publish
+    // every frame, so it leaks between tests and between a panel frame and a
+    // thread frame. Storing the applied value HERE needs no frame semantics
+    // at all -- a widget re-applies exactly when what it has differs from
+    // what is in force, which is the actual condition.
+    //
+    // -1 = nothing applied yet (a fresh widget configures unconditionally).
+    int                                       applied_motion = -1;
+
+    // Set once the reasoning->answer seam glide has been armed for this
+    // slot. The trigger is a state TRANSITION (reasoning settles when the
+    // answer's first byte lands), not a byte arrival, so it cannot live
+    // under the sizes-changed gate -- reasoning's source stops growing at
+    // exactly that moment, which is why the seam was previously unbounded.
+    // Latched so the deadline is stamped once; re-arming each frame would
+    // keep pushing it back and the cursor would never land.
+    bool                                      seam_glide_armed = false;
+
     // ── Reveal bookkeeping ──
     //
     // There is no host-side typewriter cursor: cached_markdown_for feeds
@@ -99,14 +129,21 @@ struct MessageMdCache {
     // has been fed before treating it as final.
     std::size_t                               revealed_size = 0;
 
-    // Wall-clock of the last frame at which `source` grew (new bytes
-    // arrived from the wire). Drives the "stream in motion" grace window
-    // that keeps the 16 ms animation frame armed while bytes are flowing
-    // so reveal_fx animates smoothly. Once the wire goes quiet for longer
-    // than the window (a model stall) RAF lapses and the loop falls back
-    // to the calmer Tick cadence; the next delta's eventfd wake revives
-    // it. Reset to zero on source shrink / roll.
-    std::chrono::steady_clock::time_point     last_grow_tick{};
+    // Animation-clock timestamp (ms, maya::anim_now_ms) of the last frame
+    // at which `source` grew (new bytes arrived from the wire). Drives the
+    // "stream in motion" grace window that keeps the 16 ms animation frame
+    // armed while bytes are flowing so reveal_fx animates smoothly. Once the
+    // wire goes quiet for longer than the window (a model stall) RAF lapses
+    // and the loop falls back to the calmer Tick cadence; the next delta's
+    // eventfd wake revives it. Reset to zero on source shrink / roll.
+    //
+    // On the ANIMATION clock (not raw steady_clock) so it advances in
+    // lockstep with the reveal widget it gates and stays deterministic
+    // under maya::testing::advance_anim_clock_ms — otherwise a
+    // synchronous, byte-identical render sequence could take a different
+    // finalize/defer path run-to-run purely from wall-clock jitter
+    // (the flaky midrun_seam_test committed-prefix divergence). 0 = unset.
+    std::int64_t                              last_grow_tick_ms = 0;
     std::size_t                               last_grow_size = 0;
 
     // Scratch buffer for multi-sub-turn rendering. When a single
@@ -166,8 +203,9 @@ struct MessageMdCache {
     bool defer_tool_panel = false;
     // First frame the defer engaged — drives the kMaxCardDeferMs hard cap
     // in cached_markdown_for so the card can never hide indefinitely.
-    // Zero-initialised = "not deferring".
-    std::chrono::steady_clock::time_point card_defer_since{};
+    // Animation-clock ms (maya::anim_now_ms) for determinism under a test
+    // clock, same rationale as last_grow_tick_ms. Zero = "not deferring".
+    std::int64_t card_defer_since_ms = 0;
     // Two-phase defer exit. When the glide completes, the exit frame runs
     // finish() + fx-off — which MUTATES rows at the viewport bottom (the
     // scramble tail un-ghosts, the trailing paragraph rewraps into the
@@ -178,29 +216,90 @@ struct MessageMdCache {
     // grow+mutation — maya's HardReset arm (oracle-proven: the one-frame
     // exit added 4 gate recoveries at 60x18).
     bool defer_exit_finished = false;
+
+    // ── Memoized assistant-turn elapsed (header meta) ──
+    //
+    // assistant_elapsed() reverse-scans m.d.current.messages to the
+    // previous User message to compute the turn's wall-clock duration.
+    // That scan is O(sub-turns since the last user turn) = O(turn
+    // length), run EVERY frame for the run head while the turn is in
+    // flight — a genuine per-frame cost that grows with turn depth
+    // (the whole in-flight turn stays in the live tail until settle;
+    // it is never frozen mid-turn — see frozen.cpp). The value only
+    // depends on two immutable timestamps (this head's + the prior
+    // user message's), so once computed it never changes. Cache it
+    // here keyed on the head message's id and skip the scan on every
+    // subsequent frame. `elapsed_valid` distinguishes "cached
+    // nullopt" (no prior user turn / out-of-range dt) from "not yet
+    // computed".
+    bool                 elapsed_valid = false;
+    std::optional<float> elapsed_cached{};
 };
 
-struct TurnConfigCache {
-    // Reserved for future per-(thread, msg) view-state. Empty for now —
-    // the legacy `agent_timeline` slot was removed: settled assistant
-    // panels are built into m.ui.frozen by freeze_range and never
-    // re-rendered from this cache, so the slot was populated and
-    // immediately bypassed forever.
-};
-
-// LRU-bounded render cache. Both the markdown render and the turn-config
-// caches share one entry per (thread, msg) pair — half-evictions force a
-// rebuild anyway, so coupling them simplifies invalidation.
+// Per-(thread, msg) render cache, partitioned by LIFECYCLE.
 //
-// Capacity defaults to 32 entries. With a 100 KB `read` result and a few
-// code blocks per turn, a single entry can cost several MiB of heap;
-// 256 entries on a long session was observed to retain >1 GiB of
-// Element nodes after the underlying tool_calls[].output strings had
-// already been compacted out of the conversation. 32 is the sweet spot:
-// a turn that scrolls off the visible window will *usually* still be
-// cached when the user scrolls back, and a thread switch / compaction
-// (which call evict_thread / evict_message directly) reclaims entries
-// immediately rather than waiting for LRU pressure that may never come.
+// The cache wears two hats that have genuinely different invariants, and
+// conflating them under a single LRU is what produced the whole class of
+// "typewriter stalls on a deep run" bugs. So they are split:
+//
+//   ┌─────────────┬──────────────────────────┬───────────────────────────┐
+//   │             │  LIVE (pinned)           │  SETTLED (staged)         │
+//   ├─────────────┼──────────────────────────┼───────────────────────────┤
+//   │ holds       │  animation state — the   │  a pure render memo — the │
+//   │             │  StreamingMarkdown +     │  built Element / md state  │
+//   │             │  reveal cursor + defer   │  of a fully-drained sub-   │
+//   │             │  machine bookkeeping     │  turn still in the live   │
+//   │             │                          │  tail (not yet frozen)    │
+//   │ evicting is │  a CORRECTNESS BUG       │  a cheap rebuild — but    │
+//   │             │  (destroys the reveal    │  never happens: the entry │
+//   │             │  widget mid-glide →      │  is DROPPED at freeze, the│
+//   │             │  the typewriter stalls)  │  last frame it is read    │
+//   │ count       │  bounded by the ACTIVE   │  bounded by the ACTIVE    │
+//   │             │  turn (≈1 streaming edge │  turn (drained sub-turns  │
+//   │             │  + its live sub-turns)   │  awaiting the freeze Tick)│
+//   │ policy      │  NEVER evicted           │  dropped at freeze        │
+//   └─────────────┴──────────────────────────┴───────────────────────────┘
+//
+// The caller declares which hat an access wants: `message_md_live()`
+// pins the entry; `message_md()` / `turn_config()` stage it as a settled
+// memo. A message is "live" exactly while its reveal widget is
+// live/finalizing/revealing/parsing OR its tool-panel defer machine is
+// running — i.e. while evicting it would corrupt on-screen output. The
+// view already computes that predicate (see turn.cpp
+// `subturn_stably_keyable`, whose negation IS liveness).
+//
+// ── Why there is NO cap ──
+//
+// The old design capped the settled side under an LRU, trading
+// correctness against RAM: too small and the live edge got evicted
+// (stall); too large and settled prose trees hoarded gigabytes. Both the
+// dilemma AND the cap are gone, because a settled entry has a PROVABLE
+// death instant: the frame its message freezes.
+//
+// Every settled-accessor call site (cached_markdown_for,
+// assistant_elapsed, settle_message_md, the error/cancel salvage) reads
+// a message in the LIVE TAIL — the range [frozen_through, size()). The
+// moment finalize_turn settles a run and the next Tick calls
+// freeze_through(), those messages move ABOVE frozen_through: their rows
+// are sealed into m.ui.frozen (the maya ledger, blitted from its own
+// component cache) and NO code path ever reads their ViewCache entry
+// again — not on the next frame, not on scroll-back (scroll-back is the
+// terminal's native scrollback, never a ViewCache rebuild). The entry is
+// dead the instant its turn freezes.
+//
+// So freeze_range() DROPS the entry for every message it seals (see its
+// settle-to-drop loop). The settled map therefore only ever holds
+// entries for the current, not-yet-frozen tail — bounded by ONE turn,
+// exactly like the pinned set. There is nothing to cap: the map is
+// self-emptying at every freeze, and a session of ten thousand turns
+// carries the same handful of settled entries as a session of one.
+//
+// A settle is a single migration: the one frame the widget finishes
+// draining, the caller stops passing the live flag and the entry moves
+// from the pinned map into the settled map (message_md() after a run of
+// message_md_live() calls performs that migration, payload preserved);
+// a few frames later freeze drops it.
+//
 class ViewCache {
 public:
     ViewCache() = default;
@@ -213,49 +312,127 @@ public:
     ViewCache(ViewCache&&) noexcept            = default;
     ViewCache& operator=(ViewCache&&) noexcept = default;
 
+    // ── Settled accessor (staged, dropped at freeze) ──
+    // For an entry whose animation state is fully drained: a pure render
+    // memo for a sub-turn still in the live tail. freeze_range() drops it
+    // the frame its message freezes (its last read), so the settled map
+    // stays bounded by the active turn — no cap, no LRU.
     [[nodiscard]] MessageMdCache&  message_md (const ThreadId& tid,
                                                const MessageId& mid);
-    [[nodiscard]] TurnConfigCache& turn_config(const ThreadId& tid,
-                                               const MessageId& mid);
 
-    // Drop every entry under `tid` whose MessageId isn't in `live`.
-    // Use after compaction (which clears most of `messages` while
-    // keeping the preserved tail's MessageIds intact) so the dropped
-    // pre-compact entries don't sit in the LRU consuming heap until
-    // pushed out by new accesses. The post-compact conversation is
-    // typically 3-5 messages; without this call, the 32-slot LRU
-    // would refill only as new turns arrive, holding pre-compact
-    // Element trees indefinitely on a quiet session.
+    // ── Live accessors (pinned — never evicted) ──
+    // For entries holding load-bearing animation state (a live reveal
+    // widget or an active defer machine). Pinning lives OUTSIDE the
+    // settled map, so no run depth can evict the streaming edge
+    // mid-glide. Calling a live accessor on a settled key MIGRATES it to
+    // the pinned map (and a settled accessor migrates it back), so a
+    // message's slot follows its lifecycle with its payload intact.
+    [[nodiscard]] MessageMdCache&  message_md_live (const ThreadId& tid,
+                                                    const MessageId& mid);
+
+    // Introspection for probes / assertions: is this key currently
+    // pinned (i.e. structurally exempt from eviction)?
+    [[nodiscard]] bool is_pinned(const ThreadId& tid,
+                                 const MessageId& mid) const noexcept;
+    [[nodiscard]] std::size_t pinned_count()  const noexcept { return pinned_.size(); }
+    [[nodiscard]] std::size_t settled_count() const noexcept { return entries_.size(); }
+
+    // Drop a message's entry from BOTH homes (pinned and settled),
+    // reclaiming its payload immediately. No-op if absent. This is the
+    // death instant of a settled entry: freeze_range() calls it on every
+    // message it seals, because once a message is frozen its rows live in
+    // m.ui.frozen (the maya ledger) and no code path ever reads its
+    // ViewCache entry again — so keeping it is pure leak. Dropping from
+    // the pinned side too closes the mirror hazard (a widget that stopped
+    // animating but never re-entered the render seam to be down-migrated,
+    // e.g. error/cancel mid-reveal): a frozen message is, by
+    // construction, in NEITHER map. This is what makes the settled map
+    // self-emptying and the cap unnecessary.
+    void drop(const ThreadId& tid, const MessageId& mid);
+
+    // Non-migrating, non-touching const peek. Returns the message's md
+    // slot from whichever home it lives in (pinned or settled), or
+    // nullptr if absent. Unlike message_md() / message_md_live(), it
+    // does NOT create, migrate, or reorder anything — it is a pure
+    // read. Use it for read-only STATE PROBES ("is this widget still
+    // animating?") that must not perturb the partition or the LRU
+    // order: routing such a probe through a mutating accessor would
+    // migrate a live entry down into the LRU (un-pinning the edge) or
+    // bump LRU recency spuriously. The pointer is valid until the next
+    // mutating cache call.
+    [[nodiscard]] const MessageMdCache* peek(const ThreadId& tid,
+                                             const MessageId& mid) const noexcept;
+
+    // Drop EVERYTHING — both maps, all threads. Called on a wholesale
+    // conversation swap (NewThread / ThreadLoaded / CheckpointRestored),
+    // where m.d.current is replaced and every cached (tid,msg) entry
+    // belongs to a conversation that is no longer on screen. Without this
+    // the previous thread's settled entries would linger forever: freeze
+    // only drops entries for the CURRENT thread's messages as they
+    // freeze, and a swapped-away thread's messages never freeze again.
+    // Since the keys embed thread_id there is no correctness bug (no
+    // collision) — only an unbounded-over-session-of-many-threads leak,
+    // which this closes. The new thread repopulates from scratch on its
+    // first render.
+    void clear() noexcept { entries_.clear(); pinned_.clear(); }
+
+    // Drop the SETTLED memos only, leaving pinned entries untouched.
     //
-    // Entries belonging to OTHER threads (different `tid`) are left
-    // alone — those are still reachable when the user switches back,
-    // and the LRU bounds their total footprint independently.
-    void retain_messages(const ThreadId& tid,
-                         const std::unordered_set<std::string>& live);
+    // For invalidating rendered appearance without disturbing the stream.
+    // A settled entry is a pure memo — `finalized` is a built Element with
+    // its colours already resolved — so after a theme change it is simply
+    // wrong, and dropping it costs one rebuild. A PINNED entry is the
+    // opposite: it holds load-bearing animation state (the live reveal
+    // widget, an active defer machine) that cannot be reconstructed from
+    // the message, and dropping it mid-stream would restart the reveal of
+    // the turn currently being written. Those entries are rebuilt from
+    // their widget every frame anyway, so they follow a new theme on their
+    // own without being destroyed.
+    void clear_settled() noexcept { entries_.clear(); }
 
-    // Override the LRU cap. Capacity 0 is treated as 1 (must hold the
-    // current touch). Aside from the targeted retain_messages() above
-    // (called once per compaction to drop entries for messages that
-    // didn't survive), there's no manual evict_* path — stale entries
-    // get pushed out by LRU as the new thread / new post-compaction
-    // messages access fresh keys. With the cap at 32 and a few MiB
-    // worst-case per entry, the transient memory footprint during a
-    // thread switch is bounded at ~tens of MiB until the new thread's
-    // accesses reclaim those slots.
-    void set_capacity(std::size_t max_entries) noexcept;
+    // (There is deliberately no invalidate_colours() here any more.)
+    //
+    // It used to drop each settled entry's built Element on a theme change,
+    // because that Element had the outgoing palette RESOLVED into it and
+    // nothing else would ever invalidate it — a theme switch changes no
+    // bytes, so no content-keyed cache notices.
+    //
+    // Colours are late-bound now (docs/LATE_BINDING.md): a built Element
+    // carries symbolic slots and resolves at PAINT, so it is simply not
+    // stale under a new theme and there is nothing to invalidate. If you
+    // find yourself wanting this function back, the real question is which
+    // value got resolved too early — MAYA_ASSERT_LATE_BOUND in
+    // maya/style/binding.hpp is where that gets caught.
 
 private:
+    // One payload type, two homes. A key lives in AT MOST ONE of these at
+    // a time; migrate_() moves the Entry between them, preserving the
+    // MessageMdCache payload (the reveal widget, block cache, defer
+    // state) so a settle never drops animation state. Both are bounded by
+    // the ACTIVE turn: pinned by the live sub-turns, settled by
+    // drained-but-not-yet-frozen sub-turns — freeze drops from settled,
+    // so neither grows over a session. No LRU, no cap: the death instant
+    // (freeze) is explicit, not amortised.
+    //   • entries_ — settled memo, dropped at freeze.
+    //   • pinned_  — live state, never evicted, drained → migrates down.
     struct Entry {
-        MessageMdCache  md;
-        TurnConfigCache cfg;
-        std::list<std::string>::iterator lru_it;
+        MessageMdCache md;
+        bool           pinned = false;
     };
+    std::unordered_map<std::string, Entry> entries_;   // settled
+    std::unordered_map<std::string, Entry> pinned_;    // live (never evict)
 
-    std::unordered_map<std::string, Entry> entries_;
-    std::list<std::string>                 lru_;
-    std::size_t                            cap_ = 32;
+    // Access `key` on the SETTLED side: find-or-insert in entries_. If
+    // the key was pinned, migrate it down first (payload preserved).
+    Entry& touch_settled_(const std::string& key);
+    // Access `key` on the LIVE side: find-or-insert in pinned_. If the
+    // key was settled, migrate it up (payload preserved). Never evicts.
+    Entry& touch_pinned_(const std::string& key);
+    // Move an existing key from one home to the other, carrying its
+    // payload. Returns a reference to the entry in its new home.
+    Entry& migrate_to_pinned_(const std::string& key);
+    Entry& migrate_to_settled_(const std::string& key);
 
-    Entry& touch_(const std::string& key);
     static std::string make_key_(const ThreadId& tid, const MessageId& mid);
 };
 

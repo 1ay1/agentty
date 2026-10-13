@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -26,8 +27,16 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agentty/provider/stream_epilogue.hpp"
+#include "agentty/provider/stream_scaffold.hpp"
+#include "agentty/provider/usage.hpp"
+#include "agentty/provider/msg_shared.hpp"
 #include "agentty/provider/wire.hpp"
+#include "agentty/provider/debug.hpp"
+#include "agentty/provider/openai/transport.hpp"   // local_model_action_rules (#91)
+#include "agentty/provider/wire_supersede.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"   // util::workspace_root/project_root — AGENTS.md anchor + walk start
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -35,34 +44,16 @@ namespace agentty::provider::ollama {
 
 using json = nlohmann::json;
 using auth::AuthHeader;
-using auth::ApiKeyHeader;
-using auth::BearerHeader;
 
 namespace {
 
 // ── UTF-8 scrub ─────────────────────────────────────────────────────────────
 // A tool output or pasted blob can carry invalid UTF-8; nlohmann's dump()
-// throws on it. Replace every malformed byte with U+FFFD.
-std::string scrub_utf8(std::string_view in) {
-    std::string out;
-    out.reserve(in.size());
-    const auto* p = reinterpret_cast<const unsigned char*>(in.data());
-    const auto* end = p + in.size();
-    auto push_replacement = [&] { out.append("\xEF\xBF\xBD"); };
-    while (p < end) {
-        unsigned char c = *p;
-        if (c < 0x80) { out.push_back(static_cast<char>(c)); ++p; continue; }
-        int extra = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : (c >= 0xC0) ? 1 : -1;
-        if (extra < 0 || p + extra >= end) { push_replacement(); ++p; continue; }
-        bool ok = true;
-        for (int k = 1; k <= extra; ++k)
-            if ((p[k] & 0xC0) != 0x80) { ok = false; break; }
-        if (!ok) { push_replacement(); ++p; continue; }
-        out.append(reinterpret_cast<const char*>(p), extra + 1);
-        p += extra + 1;
-    }
-    return out;
-}
+// throws on it. Replace every malformed byte with U+FFFD so the request
+// builds instead of the turn dying with a json type_error. Shared strict
+// implementation (rejects overlong encodings + surrogates) — see
+// wire::scrub_utf8.
+using wire::scrub_utf8;
 
 http::Headers build_request_headers(const AuthHeader& auth) {
     http::Headers h;
@@ -70,27 +61,27 @@ http::Headers build_request_headers(const AuthHeader& auth) {
     h.push_back({"content-type", "application/json"});
     h.push_back({"user-agent", "agentty/" AGENTTY_VERSION});
     // Ollama needs no auth by default, but a remote / proxied instance may
-    // sit behind a bearer key — emit it the same way the OpenAI family does.
-    std::visit([&](const auto& a) {
-        using T = std::decay_t<decltype(a)>;
-        if constexpr (std::is_same_v<T, ApiKeyHeader>) {
-            if (!a.value.empty())
-                h.push_back({"authorization", "Bearer " + a.value});
-        } else if constexpr (std::is_same_v<T, BearerHeader>) {
-            if (!a.token.empty())
-                h.push_back({"authorization", "Bearer " + a.token});
-        }
-    }, auth);
+    // sit behind a bearer key — emit it the same way the OpenAI family does
+    // (auth::bearer_token is the single source of truth for extraction).
+    if (std::string tok = auth::bearer_token(auth); !tok.empty())
+        h.push_back({"authorization", "Bearer " + tok});
     return h;
 }
 
 bool is_assistant_with_results(const Message& m) {
-    return m.role == Role::Assistant && !m.tool_calls.empty();
+    return wire::is_assistant_with_results(m);
 }
 
 // ── Stream state ─────────────────────────────────────────────────────────────
 struct StreamCtx {
     EventSink   sink;
+    // Mirrors req.show_reasoning — gates whether swallowed <think>…</think>
+    // text is surfaced as StreamThinkingDelta (visible reasoning) or reduced
+    // to a StreamHeartbeat (liveness only; no hidden capture bloating the
+    // message + session file). The native `thinking` field is already gated
+    // request-side (`think:true` only sent when show_reasoning). Defaults
+    // true so the test harnesses keep capture semantics.
+    bool        show_reasoning = true;
     // NDJSON line framing (buffer + read cursor + compaction) lives in the
     // shared wire::LineFramer — see include/agentty/provider/wire.hpp. Ollama
     // uses a larger compaction threshold than the SSE default because its
@@ -111,6 +102,9 @@ struct StreamCtx {
     bool        any_structured_tool = false;
     int         salvage_seq     = 0;       // uniquifies salvaged call ids
     std::vector<std::string> known_tools;  // tool names we may salvage to
+    bool allow_remember_salvage = false;
+    bool allow_forget_salvage = false;
+    bool allow_wipe_salvage = false;
     std::string full_content;              // every content byte (rescue scan)
 
     // JSON-protocol mode (agent-zero style, very weak models). No native
@@ -132,6 +126,11 @@ struct StreamCtx {
     // hold/classify on whatever follows.
     bool        in_think        = false;
     bool        think_seen      = false;  // ever entered a think block this turn
+    // Partial-tag hold: a <think>/</think> tag can split across NDJSON
+    // frames ("<thi" + "nk>"). filter_think holds back a chunk-final byte
+    // run that is a proper prefix of a tag and re-prepends it to the next
+    // chunk; flushed as literal content at `done` if the tag never completes.
+    std::string think_carry;
 
     // ── Progressive `response` streaming (JSON-protocol chat replies) ───
     // In json_protocol mode a plain chat reply arrives as a grammar-forced
@@ -184,7 +183,11 @@ void repair_arg_keys(const std::string& tool, json& args) {
             }
         }
     };
-    if (tool == "bash" || tool == "diagnostics") {
+    // `bash` is kept as a LEGACY ALIAS for `shell`: the tool is registered as
+    // `shell`, but the name `bash` is so overwhelmingly common in model
+    // training data that a weak local model will emit it — accept it here so
+    // its args still get canonicalised (and dispatch resolves it downstream).
+    if (tool == "shell" || tool == "bash" || tool == "diagnostics") {
         remap({{"command", {"cmd", "shell", "script", "run", "cmdline"}}});
     } else if (tool == "read" || tool == "list_dir" || tool == "find_definition") {
         remap({{"path", {"file", "filepath", "file_path", "filename", "dir",
@@ -212,43 +215,10 @@ void repair_arg_keys(const std::string& tool, json& args) {
 }
 
 // Could `s` be the START of a leaked tool-call? Only meaningful at the start
-// of a response (salvage_eligible). Detects: bare `{`, `[{`, `<tool_call>`,
-// or a ```json fence. Anything else is prose.
-[[nodiscard]] bool could_be_tool_json(std::string_view s) noexcept {
-    std::size_t i = 0;
-    while (i < s.size() && (s[i]==' '||s[i]=='\t'||s[i]=='\n'||s[i]=='\r')) ++i;
-    if (i >= s.size()) return true;            // only whitespace — undecided
-    std::string_view rest = s.substr(i);
-
-    if (rest.front() == '{') {
-        if (rest.size() == 1) return true;
-        std::string_view after = rest.substr(1);
-        std::size_t k = 0;
-        while (k < after.size() && (after[k]==' '||after[k]=='\t'
-               ||after[k]=='\n'||after[k]=='\r')) ++k;
-        if (k == after.size()) return true;
-        return after[k] == '"' || after[k] == '}';
-    }
-    if (rest.starts_with("[{") || rest.starts_with("[ {")) return true;
-    if (rest == "[" || rest == "[ ") return true;
-
-    if (rest.starts_with("<tool_call>")) return true;
-    constexpr std::string_view kTag = "<tool_call>";
-    if (rest.size() < kTag.size() && rest.front() == '<') {
-        for (std::size_t j = 0; j < rest.size(); ++j)
-            if (rest[j] != kTag[j]) return false;
-        return true;
-    }
-
-    if (rest.starts_with("```json")) return true;
-    if (rest.starts_with("```")) {
-        if (rest.size() <= 3) return true;
-        std::string_view after = rest.substr(3);
-        return after.empty() || after[0]=='\n' || after[0]=='\r'
-            || after[0]==' ' || after[0]=='\t' || after[0]=='j';
-    }
-    return false;
-}
+// of a response (salvage_eligible). Shared classifier — see
+// wire::could_be_tool_json (single source of truth; was duplicated here and in
+// the openai transport).
+using wire::could_be_tool_json;
 
 // Strip <tool_call>…</tool_call> and ```json…``` wrappers + surrounding ws.
 [[nodiscard]] std::string_view strip_tool_call_wrappers(std::string_view sv) noexcept {
@@ -371,13 +341,25 @@ void repair_arg_keys(const std::string& tool, json& args) {
         name = name.substr(0, colon);
     }
 
+    // Legacy alias: the tool is registered as `shell`, but `bash` is so
+    // common in model training data that weak local models emit it. If the
+    // model said `bash` and `shell` is advertised, canonicalise the name so
+    // the salvaged call targets the real tool (and downstream sees `shell`).
+    if (name == "bash") {
+        for (const auto& t : ctx.known_tools)
+            if (t == "shell") { name = "shell"; break; }
+    }
+
     bool known = false;
     for (const auto& t : ctx.known_tools) if (t == name) { known = true; break; }
     if (!known) return false;
-    // Never auto-run footgun tools from a leaked guess: swallow the JSON.
-    static constexpr std::string_view kNeverSalvage[] = {
-        "remember", "forget", "wipe_memory", "skill"};
-    for (auto t : kNeverSalvage) if (t == name) return true;
+    // Memory JSON is safe to salvage only for the exact operation the latest
+    // user explicitly requested. This preserves the unsolicited-mutation guard
+    // while making remember/forget work on models without native tool calls.
+    if (name == "remember" && !ctx.allow_remember_salvage) return true;
+    if (name == "forget" && !ctx.allow_forget_salvage) return true;
+    if (name == "wipe_memory" && !ctx.allow_wipe_salvage) return true;
+    if (name == "skill") return true;
 
     // Arguments under any of the accepted keys; default to {}.
     json args_obj = json::object();
@@ -411,8 +393,8 @@ void repair_arg_keys(const std::string& tool, json& args) {
 
     std::string call_id = "call_salvaged_" + std::to_string(ctx.salvage_seq++);
     ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
-    ctx.sink(StreamToolUseDelta{args});
-    ctx.sink(StreamToolUseEnd{});
+    ctx.sink(StreamToolUseDelta{ToolCallId{call_id}, args});
+    ctx.sink(StreamToolUseEnd{ToolCallId{call_id}});
     ctx.stop_reason = StopReason::ToolUse;
     return true;
 }
@@ -443,8 +425,16 @@ void repair_arg_keys(const std::string& tool, json& args) {
 void flush_text_hold(StreamCtx& ctx) {
     ctx.holding = false;
     if (ctx.text_hold.empty()) return;
-    if (hold_is_truncated_tool_json(ctx.text_hold)) { ctx.text_hold.clear(); return; }
+    if (hold_is_truncated_tool_json(ctx.text_hold)) {
+        AGT_LOG(Model, Warn, "salvage.dropped_truncated",
+                "dialect=ollama bytes={} head={}", ctx.text_hold.size(),
+                std::string_view{ctx.text_hold}.substr(0, 200));
+        ctx.text_hold.clear(); return;
+    }
     if (hold_is_unknown_tool_call(ctx.text_hold, ctx.known_tools)) {
+        AGT_LOG(Model, Warn, "salvage.dropped_unknown_tool",
+                "dialect=ollama bytes={} head={}", ctx.text_hold.size(),
+                std::string_view{ctx.text_hold}.substr(0, 200));
         ctx.text_hold.clear(); return;
     }
     // Whitespace-only hold is not a real reply — leave it for the
@@ -600,6 +590,15 @@ bool rescue_json_protocol(StreamCtx& ctx) {
     return false;
 }
 
+// Surface swallowed reasoning text: visible StreamThinkingDelta when the
+// user shows reasoning, otherwise a liveness-only StreamHeartbeat (no hidden
+// capture — see StreamCtx::show_reasoning).
+void emit_reasoning(StreamCtx& ctx, const std::string& text) {
+    if (text.empty()) return;
+    if (ctx.show_reasoning) ctx.sink(StreamThinkingDelta{text, {}});
+    else                    ctx.sink(StreamHeartbeat{});
+}
+
 // Final safety net — NEVER let an assistant turn render blank (Aider's
 // `if not received_content` discipline). Called at every terminal path after
 // salvage/flush. If the turn produced NO text and NO tool call, surface
@@ -611,6 +610,16 @@ bool rescue_json_protocol(StreamCtx& ctx) {
 //   • if even that is empty, a clear `(empty response)` marker (Aider's
 //     exact placeholder) so the turn isn't a silent void.
 void flush_unhandled_content(StreamCtx& ctx) {
+    // A partial <think>-tag hold that never completed is literal content —
+    // fold it back before the salvage/flush decisions below. (The done-frame
+    // path flushes it eagerly; this covers a wire cut before `done`.)
+    if (!ctx.think_carry.empty()) {
+        std::string tail = std::move(ctx.think_carry);
+        ctx.think_carry.clear();
+        if (ctx.in_think)      emit_reasoning(ctx, tail);
+        else if (ctx.holding)  ctx.text_hold += tail;
+        else                   ctx.full_content += tail;
+    }
     if (ctx.any_text_flushed) return;
     if (ctx.any_structured_tool) return;
     if (ctx.stop_reason == StopReason::ToolUse) return;
@@ -691,9 +700,44 @@ void flush_unhandled_content(StreamCtx& ctx) {
 // (non-think) text. The native `thinking` field is the clean path; this is the
 // fallback for models that inline their CoT into `content`. We also accept
 // <thinking>…</thinking> (some templates use the long form).
-[[nodiscard]] std::string filter_think(StreamCtx& ctx, std::string_view s) {
+[[nodiscard]] std::string filter_think(StreamCtx& ctx, std::string_view chunk) {
+    // Re-prepend any held-back partial tag from the previous chunk — tags
+    // split across token-sized NDJSON frames ("<thi" + "nk>") and a plain
+    // per-chunk find() would leak the fragment as visible prose (or swallow
+    // the answer, on a split close tag).
+    std::string joined;
+    std::string_view s = chunk;
+    if (!ctx.think_carry.empty()) {
+        joined = std::move(ctx.think_carry);
+        ctx.think_carry.clear();
+        joined.append(chunk);
+        s = joined;
+    }
     std::string out;
     out.reserve(s.size());
+    // Reasoning swallowed from inside <think>…</think> this chunk — surfaced
+    // via StreamThinkingDelta (the SAME unified event the native `thinking`
+    // field and every other provider use) instead of being discarded, so
+    // inline-CoT local models render reasoning in the shared block too.
+    std::string reasoning;
+    // Longest chunk-final suffix that is a PROPER prefix of an open/close
+    // tag — held back into think_carry instead of emitted. npos = none.
+    auto partial_tag_at = [](std::string_view text, bool closing) {
+        const std::size_t max_tag = closing ? 11 : 10;  // </thinking> / <thinking>
+        const std::size_t lo = text.size() > max_tag ? text.size() - max_tag + 1 : 0;
+        for (std::size_t p = lo; p < text.size(); ++p) {
+            if (text[p] != '<') continue;
+            std::string_view suf = text.substr(p);
+            auto is_pref = [&](std::string_view tag) {
+                return suf.size() < tag.size()
+                    && tag.substr(0, suf.size()) == suf;
+            };
+            if (closing ? (is_pref("</think>") || is_pref("</thinking>"))
+                        : (is_pref("<think>")  || is_pref("<thinking>")))
+                return p;
+        }
+        return std::string_view::npos;
+    };
     std::size_t i = 0;
     while (i < s.size()) {
         if (ctx.in_think) {
@@ -701,20 +745,45 @@ void flush_unhandled_content(StreamCtx& ctx) {
             std::size_t close = s.find("</think>", i);
             std::size_t close2 = s.find("</thinking>", i);
             std::size_t c = std::min(close, close2);
-            if (c == std::string_view::npos) return out;  // still inside think
+            if (c == std::string_view::npos) {
+                // Still inside think — the remainder is reasoning, minus a
+                // possible partial close tag held for the next chunk.
+                std::string_view rem = s.substr(i);
+                if (auto p = partial_tag_at(rem, /*closing=*/true);
+                    p != std::string_view::npos) {
+                    ctx.think_carry.assign(rem.substr(p));
+                    rem = rem.substr(0, p);
+                }
+                reasoning.append(rem);
+                emit_reasoning(ctx, reasoning);
+                return out;
+            }
+            reasoning.append(s.substr(i, c - i));
             ctx.in_think = false;
             i = c + (c == close ? 8 : 11);
         } else {
             std::size_t open = s.find("<think>", i);
             std::size_t open2 = s.find("<thinking>", i);
             std::size_t o = std::min(open, open2);
-            if (o == std::string_view::npos) { out.append(s.substr(i)); break; }
+            if (o == std::string_view::npos) {
+                // No open tag — the remainder is prose, minus a possible
+                // partial open tag held for the next chunk.
+                std::string_view rem = s.substr(i);
+                if (auto p = partial_tag_at(rem, /*closing=*/false);
+                    p != std::string_view::npos) {
+                    ctx.think_carry.assign(rem.substr(p));
+                    rem = rem.substr(0, p);
+                }
+                out.append(rem);
+                break;
+            }
             out.append(s.substr(i, o - i));
             ctx.in_think   = true;
             ctx.think_seen = true;
             i = o + (o == open ? 7 : 10);
         }
     }
+    emit_reasoning(ctx, reasoning);
     return out;
 }
 
@@ -901,6 +970,18 @@ done_decode:
 
 // Handle one native `message` object from an NDJSON frame.
 void handle_message(StreamCtx& ctx, const json& message) {
+    // Native reasoning: Ollama routes the model's chain-of-thought into a
+    // structured `thinking` field (streamed like content) when we send
+    // think:true. Emit it as StreamThinkingDelta — the SAME unified event the
+    // Anthropic (thinking_delta), OpenAI-compat (reasoning_content), and
+    // ChatGPT/Codex (reasoning_summary) transports emit — so local reasoning
+    // renders in the same block as every other provider. No signature on this
+    // wire. Doubles as a liveness heartbeat during a long reasoning pause.
+    if (auto it = message.find("thinking");
+        it != message.end() && it->is_string()) {
+        const auto& think = it->get_ref<const std::string&>();
+        emit_reasoning(ctx, think);
+    }
     // Structured tool calls. Ollama returns them fully-formed in one frame
     // (not streamed char-by-char), so emit Start+Delta+End back to back.
     if (message.contains("tool_calls") && message["tool_calls"].is_array()
@@ -939,8 +1020,8 @@ void handle_message(StreamCtx& ctx, const json& message) {
                 } catch (...) { /* leave args as-is on parse failure */ }
             }
             ctx.sink(StreamToolUseStart{ToolCallId{call_id}, ToolName{name}});
-            ctx.sink(StreamToolUseDelta{args});
-            ctx.sink(StreamToolUseEnd{});
+            ctx.sink(StreamToolUseDelta{ToolCallId{call_id}, args});
+            ctx.sink(StreamToolUseEnd{ToolCallId{call_id}});
             ctx.stop_reason = StopReason::ToolUse;
             ctx.any_structured_tool = true;
             ctx.salvage_eligible    = false;  // model drives the real channel
@@ -1004,6 +1085,21 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
         handle_message(ctx, j["message"]);
 
     if (j.value("done", false)) {
+        // Flush any held-back partial <think>-tag bytes — the tag never
+        // completed, so they are literal content: reasoning if we're still
+        // inside a think block, otherwise prose.
+        if (!ctx.think_carry.empty()) {
+            std::string tail = std::move(ctx.think_carry);
+            ctx.think_carry.clear();
+            if (ctx.in_think) {
+                emit_reasoning(ctx, tail);
+            } else if (ctx.holding) {
+                ctx.text_hold += tail;
+            } else if (!(ctx.resp_active && ctx.resp_done)) {
+                ctx.sink(StreamTextDelta{tail});
+                ctx.any_text_flushed = true;
+            }
+        }
         // If the progressive-response streamer already took ownership of this
         // turn's reply (json_protocol chat reply streamed incrementally), the
         // text is already emitted. Don't let rescue_json_protocol re-emit it
@@ -1020,10 +1116,7 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
                 if (ctx.stop_reason != StopReason::ToolUse)
                     ctx.stop_reason = StopReason::EndTurn;
             }
-            StreamUsage su;
-            su.input_tokens  = j.value("prompt_eval_count", 0);
-            su.output_tokens = j.value("eval_count", 0);
-            if (su.input_tokens || su.output_tokens) ctx.sink(su);
+            if (auto su = usage::from_ollama(j)) ctx.sink(*su);
             flush_unhandled_content(ctx);
             return;
         }
@@ -1050,10 +1143,7 @@ void dispatch_line(StreamCtx& ctx, std::string_view line) {
         // Never-blank-turn net: if nothing was emitted, surface the model's
         // content (or an explicit `(empty response)`).
         flush_unhandled_content(ctx);
-        StreamUsage su;
-        su.input_tokens  = j.value("prompt_eval_count", 0);
-        su.output_tokens = j.value("eval_count", 0);
-        if (su.input_tokens || su.output_tokens) ctx.sink(su);
+        if (auto su = usage::from_ollama(j)) ctx.sink(*su);
         auto reason = j.value("done_reason", std::string{"stop"});
         if (ctx.stop_reason != StopReason::ToolUse)
             ctx.stop_reason = (reason == "length") ? StopReason::MaxTokens
@@ -1068,40 +1158,22 @@ void feed_ndjson(StreamCtx& ctx, const char* data, std::size_t len) {
 }
 
 // ── CLAUDE.md memory tiers (user-authored, concise) ─────────────────────────
-std::filesystem::path home_dir() noexcept {
-    if (auto* h = std::getenv("HOME"); h && *h) return std::filesystem::path{h};
-#if defined(_WIN32)
-    if (auto* h = std::getenv("USERPROFILE"); h && *h)
-        return std::filesystem::path{h};
-#endif
-    return {};
-}
-
-std::string read_file(const std::filesystem::path& p) {
-    std::error_code ec;
-    if (p.empty() || !std::filesystem::exists(p, ec)) return {};
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return {};
-    std::string s((std::istreambuf_iterator<char>(f)),
-                   std::istreambuf_iterator<char>());
-    if (s.size() > 64 * 1024) s.resize(64 * 1024);
-    return s;
-}
-
+// AGENTS.md (AAIF standard, project-scoped) is prepended via
+// wire::agents_md_block so the standardized public project guidance appears
+// BEFORE the personal CLAUDE.md tiers — same ordering the Anthropic prompt
+// uses. Empty/missing AGENTS.md elides the block.
 std::string memory_blocks() {
-    std::string user    = read_file(home_dir() / "CLAUDE.md");
-    std::string project = read_file(std::filesystem::path{"CLAUDE.md"});
-    std::string local   = read_file(std::filesystem::path{"CLAUDE.local.md"});
-    if (user.empty() && project.empty() && local.empty()) return {};
-
-    std::string m = "\n\n<memory>\n"
-        "Project-specific guidance the user has authored. Treat these as "
-        "persistent context for THIS workspace and user.\n";
-    if (!user.empty())    m += "<user-memory>\n"    + user    + "\n</user-memory>\n";
-    if (!project.empty()) m += "<project-memory>\n" + project + "\n</project-memory>\n";
-    if (!local.empty())   m += "<local-memory>\n"   + local   + "\n</local-memory>\n";
-    m += "</memory>";
-    return m;
+    return wire::agents_md_block(
+               "Project guidance following the open AGENTS.md standard "
+               "(agents.md, stewarded by the Agentic AI Foundation under "
+               "the Linux Foundation). Treat as authoritative public "
+               "project conventions.",
+               tools::util::workspace_root(),
+               tools::util::project_root(),
+               wire::resolve_global_agents_md())
+         + wire::claude_md_blocks(
+               "Project-specific guidance the user has authored. Treat these as "
+               "persistent context for THIS workspace and user.");
 }
 
 } // namespace
@@ -1124,13 +1196,26 @@ std::string memory_blocks() {
 // exactly the shape the system prompt promised.
 json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
     json arr = json::array();
+    // Recency ranks for the shared age-tiered wire budget (0 = newest tool
+    // result). Stale successful dumps fade to a tight head+tail so a big read
+    // from many calls ago stops replaying in full — doubly valuable here,
+    // where local models have the SMALLEST context windows. Both the
+    // JSON-protocol "TOOL RESULT (name):" user turn and the native role:"tool"
+    // turn share the same counter. See wire::cap_tool_result_aged.
+    int total_tool_results = 0;
+    for (const auto& m : msgs)
+        if (is_assistant_with_results(m))
+            total_tool_results += static_cast<int>(m.tool_calls.size());
+    int tool_results_emitted = 0;
+    const auto superseded = wire::superseded_read_ids(msgs);
+    // Per-side image ceiling for THIS request (see wire::wire_image_count):
+    // the many-image rule counts blocks across the whole request, so the cap
+    // is derived once here rather than per message.
+    const unsigned max_side = util::wire_max_side(wire::wire_image_count(msgs));
     for (const auto& m : msgs) {
         const bool has_text  = !m.text.empty();
         const bool has_tools = is_assistant_with_results(m);
-        bool has_images = false;
-        if (m.role == Role::User)
-            for (const auto& img : m.images)
-                if (!img.bytes.empty()) { has_images = true; break; }
+        const bool has_images = wire::has_wire_message_image(m, max_side);
 
         // ── JSON-protocol round-trip: assistant tool call rendered as the
         //    model's own {tool_name,tool_args} object, result as a user turn.
@@ -1142,6 +1227,8 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
                                {"content", scrub_utf8(m.text)}});
             }
             for (const auto& tc : m.tool_calls) {
+                const int recency_rank = total_tool_results - 1 - tool_results_emitted;
+                ++tool_results_emitted;
                 json obj;
                 obj["tool_name"] = tc.name.value;
                 obj["tool_args"] = tc.args.is_null() ? json::object() : tc.args;
@@ -1150,9 +1237,14 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
                                {"content", scrub_utf8(obj.dump())}});
                 // Result as a USER turn the model was taught to read next.
                 std::string out = tc.output();
+                bool is_error = !tc.is_terminal() || tc.is_failed() || tc.is_rejected();
                 if (out.empty()) {
                     if (tc.is_rejected())       out = "(rejected by user)";
                     else if (!tc.is_terminal()) out = "(no output)";
+                } else if (!is_error && superseded.count(tc.id.value)) {
+                    out = std::string{wire::kSupersededReadPointer};
+                } else {
+                    out = wire::cap_tool_result_aged(out, recency_rank, is_error);
                 }
                 std::string body = "TOOL RESULT (" + tc.name.value + "):\n" + out;
                 arr.push_back({{"role", "user"},
@@ -1169,9 +1261,8 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
             msg["content"] = scrub_utf8(wire_text);
             if (has_images) {
                 json imgs = json::array();
-                for (const auto& img : m.images)
-                    if (!img.bytes.empty())
-                        imgs.push_back(agentty::util::base64_encode(img.bytes));
+                for (const auto* imgp : wire::wire_message_images(m, max_side))
+                    imgs.push_back(imgp->base64());
                 if (!imgs.empty()) msg["images"] = std::move(imgs);
             }
             if (has_tools) {
@@ -1192,16 +1283,32 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
         }
         if (has_tools) {
             for (const auto& tc : m.tool_calls) {
+                const int recency_rank = total_tool_results - 1 - tool_results_emitted;
+                ++tool_results_emitted;
                 std::string out = tc.output();
+                bool is_error = !tc.is_terminal() || tc.is_failed() || tc.is_rejected();
                 if (out.empty()) {
                     if (tc.is_rejected())       out = "(rejected by user)";
                     else if (!tc.is_terminal()) out = "(no output)";
+                } else if (!is_error && superseded.count(tc.id.value)) {
+                    out = std::string{wire::kSupersededReadPointer};
+                } else {
+                    out = wire::cap_tool_result_aged(out, recency_rank, is_error);
                 }
-                arr.push_back({
+                json tool_msg{
                     {"role", "tool"},
                     {"tool_name", tc.name.value},
                     {"content", scrub_utf8(out)},
-                });
+                };
+                // Vision tool_result: ollama's /api/chat accepts an `images`
+                // array on ANY message, including a tool result. Same SSOT
+                // selector as the other dialects; the base64 array shape is
+                // ollama-specific.
+                json tool_imgs = json::array();
+                for (const auto* imgp : wire::wire_tool_result_images(tc, max_side))
+                    tool_imgs.push_back(imgp->base64());
+                if (!tool_imgs.empty()) tool_msg["images"] = std::move(tool_imgs);
+                arr.push_back(std::move(tool_msg));
             }
         }
     }
@@ -1210,18 +1317,8 @@ json build_messages(const std::vector<Message>& msgs, bool json_protocol) {
 
 namespace {
 json build_tools(const std::vector<provider::ToolSpec>& tools) {
-    json arr = json::array();
-    for (const auto& t : tools) {
-        arr.push_back({
-            {"type", "function"},
-            {"function", {
-                {"name", t.name},
-                {"description", t.description},
-                {"parameters", t.input_schema},
-            }},
-        });
-    }
-    return arr;
+    // SSOT: shared with the OpenAI-compat transport — see wire::openai_chat_tools.
+    return wire::openai_chat_tools(tools);
 }
 
 // JSON-protocol addendum (agent-zero style) for very weak models. Appended to
@@ -1327,6 +1424,31 @@ json json_protocol_schema(const std::vector<provider::ToolSpec>& tools) {
 // is the single highest-leverage robustness lever for local models. Exposed
 // (non-anonymous) so a unit test can assert the chosen values without a
 // network round-trip. Reads AGENTTY_OLLAMA_NUM_CTX / _NUM_PREDICT overrides.
+int effective_num_ctx(int advertised) noexcept {
+    // The ONE place the served window is decided. build_options() below
+    // calls this for the wire, and the runtime calls it for the gauge, so
+    // the two cannot drift — which they did, by a factor of four.
+    constexpr int kAgentCtxFloor   = 8192;    // unknown-window default
+    constexpr int kAgentCtxCeiling = 32768;   // don't OOM a local KV cache
+
+    // The power-user escape hatch outranks everything: someone who set this
+    // knows their machine better than a ceiling we picked. Honoured here
+    // rather than only in build_options, or the gauge would ignore it and
+    // reintroduce the same divergence for exactly the users who cared
+    // enough to configure it.
+    if (const char* v = std::getenv("AGENTTY_OLLAMA_NUM_CTX")) {
+        char* end = nullptr;
+        const long n = std::strtol(v, &end, 10);
+        if (end && *end == '\0' && n > 0 && n <= std::numeric_limits<int>::max())
+            return static_cast<int>(n);
+    }
+
+    if (advertised <= 0) return kAgentCtxFloor;
+    if (advertised < kAgentCtxFloor)   return kAgentCtxFloor;
+    if (advertised > kAgentCtxCeiling) return kAgentCtxCeiling;
+    return advertised;
+}
+
 json build_options(const Request& req) {
     auto env_int = [](const char* name) -> int {
         if (const char* v = std::getenv(name)) {
@@ -1355,18 +1477,12 @@ json build_options(const Request& req) {
     //   3. A safe agent-sized default (8192) when the window is unknown — 4x
     //      Ollama's floor, enough to hold the prompt + a few tool turns,
     //      small enough to load on modest hardware.
-    int num_ctx = env_int("AGENTTY_OLLAMA_NUM_CTX");
-    if (num_ctx <= 0) {
-        constexpr int kAgentCtxFloor   = 8192;    // unknown-window default
-        constexpr int kAgentCtxCeiling = 32768;   // don't OOM a local KV cache
-        if (req.context_window > 0) {
-            num_ctx = req.context_window;
-            if (num_ctx < kAgentCtxFloor)   num_ctx = kAgentCtxFloor;
-            if (num_ctx > kAgentCtxCeiling) num_ctx = kAgentCtxCeiling;
-        } else {
-            num_ctx = kAgentCtxFloor;
-        }
-    }
+    //
+    // All three now live in effective_num_ctx(), because the context GAUGE
+    // needs the same answer: it used to score the unclamped window while
+    // the wire sent the clamped one, so the bar read a quarter of true
+    // usage on a 131k local model.
+    const int num_ctx = effective_num_ctx(req.context_window);
 
     // ── num_predict (max output tokens) ────────────────────────────────
     //
@@ -1465,9 +1581,14 @@ std::string system_prompt() {
            "answer from what it returns. Do NOT guess from memory when the "
            "answer should come from their documents.\n\n";
 
+    // Shared with the OpenAI-compat local prompt (one source, #91).
+    out += openai::local_model_action_rules();
+
     out += "OUTPUT\n"
            "- Output is rendered as GitHub-flavoured markdown in a terminal. "
-           "Use fenced code blocks for code. Keep tables small.\n\n";
+           "Use fenced code blocks for code. Keep tables small. LaTeX math "
+           "renders too: `$…$` inline, `$$…$$` or a ```math fence for "
+           "display (fractions, roots, sums, matrices).\n\n";
 
     out += "ENVIRONMENT\n";
     out += "- os: ";    out += os_name; out += "\n";
@@ -1478,10 +1599,31 @@ std::string system_prompt() {
     return out;
 }
 
+void set_memory_salvage_intent(StreamCtx& ctx, const Request& req) {
+    std::string text;
+    for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
+        if (it->role == Role::User && !it->is_proactive_context()) {
+            text = it->text;
+            break;
+        }
+    }
+    std::ranges::transform(text, text.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    auto has = [&](std::string_view s) { return text.find(s) != std::string::npos; };
+    ctx.allow_remember_salvage = has("remember") || has("don't forget")
+        || has("do not forget") || has("keep in mind") || has("from now on");
+    ctx.allow_forget_salvage = has("forget") || has("remove the memory")
+        || has("remove memory") || has("drop the memory");
+    ctx.allow_wipe_salvage = has("wipe memory") || has("wipe your memory")
+        || has("forget everything") || has("clean slate");
+}
+
 // ── Streaming entry point ────────────────────────────────────────────────────
-void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
+provider::StreamResult run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     StreamCtx ctx;
     ctx.sink = std::move(sink);
+    ctx.show_reasoning = req.show_reasoning;
+    set_memory_salvage_intent(ctx, req);
     // Salvage may only synthesise calls to tools we actually advertised.
     ctx.known_tools.reserve(req.tools.size());
     for (const auto& t : req.tools) ctx.known_tools.push_back(t.name);
@@ -1492,47 +1634,48 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     // hold + stay salvage-eligible (no native channel will arrive).
     if (ctx.json_protocol) { ctx.holding = true; ctx.salvage_eligible = true; }
 
-    auto emit_terminal = [](StreamCtx& c, std::optional<std::string> err,
-                            std::optional<std::chrono::seconds> retry_after = {}) {
-        if (c.terminated) return;
-        // Stream ended without a `done` frame (e.g. wire cut) but content may
-        // still be held — salvage or flush it before the terminal event.
-        if (!err) {
-            // Progressive-response already owned the turn — just drain any
-            // pending decoded bytes; never re-run rescue (would duplicate).
-            if (c.resp_active) {
-                if (!c.resp_done) {
-                    try_progressive_response(c);
-                    c.resp_done = true; c.holding = false; c.text_hold.clear();
-                    if (c.stop_reason != StopReason::ToolUse)
-                        c.stop_reason = StopReason::EndTurn;
-                }
-            } else {
-                bool jp_fired = false;
-                if (c.json_protocol) {
-                    jp_fired = rescue_json_protocol(c);
-                    if (jp_fired) { c.text_hold.clear(); c.holding = false; }
-                }
-                if (!jp_fired && c.holding && !c.text_hold.empty()) {
-                    if (!try_salvage_hold(c)) flush_text_hold(c);
-                    else { c.text_hold.clear(); c.holding = false; }
-                }
-                rescue_tool_from_prose(c);
-            }
-            flush_unhandled_content(c);
-        }
-        if (err) c.sink(StreamError{*err, retry_after});
-        else     c.sink(StreamFinished{c.stop_reason});
-        c.terminated = true;
-    };
-
-    // ── Build /api/chat body ─────────────────────────────────────────────────
+    // ── Build /api/chat body ────────────────────────────────────────────────
     json body;
     body["model"]  = req.model;
     body["stream"] = true;
     // Keep the model resident between turns so the next prompt is instant.
     body["keep_alive"] = "10m";
     body["options"] = build_options(req);
+
+    // Native reasoning: ask Ollama to route the model's chain-of-thought into
+    // the structured `message.thinking` field (instead of inline
+    // <think>…</think> in content) when the user opted into visible reasoning
+    // (^R) AND we're not in JSON-protocol mode (weak models can't reason and
+    // the grammar would fight the think field). Ollama ignores `think` on
+    // models that don't support it, so this is safe to send broadly. The
+    // stream handler emits message.thinking as StreamThinkingDelta — the SAME
+    // unified event every other provider uses — so local reasoning renders in
+    // the same block. Off by default keeps the dead-air-free wire unchanged.
+    // Native thinking. Ollama's `think` accepts a BOOLEAN or a graded level
+    // ("low"|"medium"|"high", newer builds also "max"); GPT-OSS in
+    // particular REQUIRES a level to tune trace length. Map the model-
+    // agnostic effort tier onto it so local reasoning models honour the
+    // picker's ladder exactly like hosted ones:
+    //   effort set  → think:"<level>"  (minimal folds to low — ollama
+    //                 rejects "minimal"; xhigh/max fold to "high" since
+    //                 "max" is not yet universal — see ollama#15831)
+    //   effort off  → think:true only when the user shows reasoning
+    //                 (visible thinking without a tier), else omitted.
+    // Ollama ignores `think` on models that can't reason, so sending it
+    // broadly is safe. Gated off in JSON-protocol mode (weak models; the
+    // grammar would fight the think field). The stream handler emits
+    // message.thinking as StreamThinkingDelta — the SAME unified event
+    // every other provider uses.
+    if (!ctx.json_protocol) {
+        if (!req.effort.empty()) {
+            std::string level = req.effort;
+            if (level == "minimal")                    level = "low";
+            else if (level == "xhigh" || level == "max") level = "high";
+            body["think"] = level;
+        } else if (req.show_reasoning) {
+            body["think"] = true;
+        }
+    }
 
     json messages = json::array();
     std::string sys = req.system_prompt;
@@ -1568,7 +1711,7 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
         ctx.sink(StreamError{std::string{"request build failed (invalid UTF-8): "}
                              + e.what()});
         ctx.sink(StreamFinished{StopReason::Unspecified});
-        return;
+        return provider::StreamResult::failed("request build failed: invalid UTF-8");
     }
 
     // ── HTTP request ─────────────────────────────────────────────────────────
@@ -1585,70 +1728,111 @@ void run_stream_sync(Request req, EventSink sink, http::CancelTokenPtr cancel) {
     hreq.headers = build_request_headers(req.auth);
     hreq.body    = std::move(body_str);
 
-    int  http_status = 0;
-    bool is_success  = false;
-    std::string error_body;
-
-    http::StreamHandler handler;
-    handler.on_headers = [&](int status, const http::Headers&) {
-        http_status = status;
-        is_success  = (status >= 200 && status < 300);
-    };
-    handler.on_chunk = [&](std::string_view chunk) -> bool {
-        if (is_success) {
-            feed_ndjson(ctx, chunk.data(), chunk.size());
-        } else if (error_body.size() < 64 * 1024) {
-            error_body.append(chunk.data(),
-                std::min(chunk.size(), 64 * 1024 - error_body.size()));
-        }
+    // Shared scaffold: status/Retry-After capture, heartbeats, buffered-wait
+    // (previously MISSING here — buffered sends showed as dead air), wire
+    // dump, capped error body. Only the NDJSON feed is ours.
+    provider::StreamScaffold sc;
+    sc.dialect = "ollama-native";
+    sc.sink    = ctx.sink;
+    sc.feed    = [&](std::string_view chunk) {
+        feed_ndjson(ctx, chunk.data(), chunk.size());
         return true;
     };
+    http::StreamHandler handler = sc.handler();
 
-    http::Timeouts tos;
-    tos.connect = std::chrono::milliseconds(10'000);
-    tos.total   = std::chrono::milliseconds(0);   // streaming unbounded
-    tos.ping    = std::chrono::milliseconds(15'000);
-    tos.idle    = std::chrono::milliseconds(120'000);  // local gen can be slow
+    // Standard ladder with the two local-server deviations: idle=120 s (local
+    // generation is slow between tokens) and total=0/unbounded (a big model
+    // can legitimately stream for longer than any hosted cap).
+    http::Timeouts tos = provider::stream_timeouts(
+        std::chrono::milliseconds(120'000));
+    tos.total = std::chrono::milliseconds(0);
 
-    auto result = http::default_client().stream(hreq, std::move(handler),
+    // Keep a copy of the cancel token: moved into the stream call, but
+    // finish_stream needs it to distinguish a user cancel from a transport
+    // error at the post-loop.
+    http::CancelTokenPtr cancel_for_end = cancel;
+    auto result = http::default_client(::agentty::IoAccess::grant()).stream(hreq, std::move(handler),
                                                 tos, std::move(cancel));
 
-    if (!result) {
-        std::string msg = std::string{"http: "} + result.error().render();
-        msg += "  (is Ollama running? start it with 'ollama serve', or check "
-               "--provider host:port)";
-        emit_terminal(ctx, std::move(msg));
-        return;
-    }
+    // Uniform end-of-turn pair via the scaffold — this transport previously
+    // logged NOTHING at stream end (drift vs every sibling).
+    sc.log_result(bool(result),
+                  result ? std::string_view{} : result.error().render());
 
-    if (!is_success) {
-        std::string msg = "HTTP " + std::to_string(http_status);
-        try {
-            auto j = json::parse(error_body);
-            if (j.contains("error") && j["error"].is_string())
-                msg += ": " + j["error"].get<std::string>();
-            else if (!error_body.empty())
-                msg += ": " + error_body.substr(0, 300);
-        } catch (...) {
-            if (!error_body.empty()) msg += ": " + error_body.substr(0, 300);
-        }
-        if (http_status == 404)
-            msg += "  (model not loaded — run 'ollama pull " + req.model + "')";
-        emit_terminal(ctx, std::move(msg));
-        return;
-    }
-
-    // 2xx — guarantee a terminal event even if `done` never arrived.
-    emit_terminal(ctx, std::nullopt);
+    // Whole post-loop through the SHARED epilogue: one terminal event, correct
+    // precedence, identical to every other provider. before_finish (success
+    // only) does Ollama's terminal salvage/flush — the stream may end without a
+    // `done` frame (wire cut) while content is still held, so drain/rescue it.
+    return provider::finish_stream({
+        .terminated  = ctx.terminated,
+        .sink        = ctx.sink,
+        .result_ok   = bool(result),
+        .http_status = sc.http_status,
+        .non_replayable = !result && result.error().non_replayable,
+        .cancel      = cancel_for_end,
+        .stop        = ctx.stop_reason,
+        .http_error_message = [&]() -> std::string {
+            std::string msg = "HTTP " + std::to_string(sc.http_status);
+            try {
+                auto j = json::parse(sc.error_body);
+                if (j.contains("error") && j["error"].is_string())
+                    msg += ": " + j["error"].get<std::string>();
+                else if (!sc.error_body.empty())
+                    msg += ": " + sc.error_body.substr(0, 300);
+            } catch (...) {
+                if (!sc.error_body.empty()) msg += ": " + sc.error_body.substr(0, 300);
+            }
+            if (sc.http_status == 404)
+                msg += "  (model not loaded — run 'ollama pull " + req.model + "')";
+            return msg;
+        },
+        .retry_after = sc.retry_after_hint,
+        .transport_error_message = [&]() -> std::string {
+            std::string msg = std::string{"http: "} + result.error().render();
+            msg += "  (is Ollama running? start it with 'ollama serve', or check "
+                   "--provider host:port)";
+            return msg;
+        },
+        .before_finish = [&ctx]() {
+            // Progressive-response already owned the turn — just drain any
+            // pending decoded bytes; never re-run rescue (would duplicate).
+            if (ctx.resp_active) {
+                if (!ctx.resp_done) {
+                    try_progressive_response(ctx);
+                    ctx.resp_done = true; ctx.holding = false; ctx.text_hold.clear();
+                    if (ctx.stop_reason != StopReason::ToolUse)
+                        ctx.stop_reason = StopReason::EndTurn;
+                }
+            } else {
+                bool jp_fired = false;
+                if (ctx.json_protocol) {
+                    jp_fired = rescue_json_protocol(ctx);
+                    if (jp_fired) { ctx.text_hold.clear(); ctx.holding = false; }
+                }
+                if (!jp_fired && ctx.holding && !ctx.text_hold.empty()) {
+                    if (!try_salvage_hold(ctx)) flush_text_hold(ctx);
+                    else { ctx.text_hold.clear(); ctx.holding = false; }
+                }
+                rescue_tool_from_prose(ctx);
+            }
+            flush_unhandled_content(ctx);
+        },
+    });
 }
 
 std::vector<Msg> parse_ndjson_for_test(std::string_view ndjson_bytes,
                                        std::vector<std::string> known_tools,
-                                       bool json_protocol) {
+                                       bool json_protocol,
+                                       bool allow_memory_salvage,
+                                       bool show_reasoning) {
     std::vector<Msg> out;
     StreamCtx ctx;
+    ctx.show_reasoning = show_reasoning;
     ctx.sink = [&out](Msg m) { out.push_back(std::move(m)); };
     ctx.known_tools = std::move(known_tools);
+    ctx.allow_remember_salvage = allow_memory_salvage;
+    ctx.allow_forget_salvage = allow_memory_salvage;
+    ctx.allow_wipe_salvage = allow_memory_salvage;
     ctx.json_protocol = json_protocol && !ctx.known_tools.empty();
     if (ctx.known_tools.empty()) { ctx.holding = false; ctx.salvage_eligible = false; }
     if (ctx.json_protocol) { ctx.holding = true; ctx.salvage_eligible = true; }

@@ -3,9 +3,9 @@
 //
 // Builds a cap::CapabilityProvider backed by a remote MCP server reached over
 // the Streamable HTTP transport (a single endpoint URL that speaks JSON-RPC
-// over POST, with optional text/event-stream responses). It drives the same
-// mcp::Client / RpcEngine the stdio path uses, but over agentty's own HTTP/2
-// client (TLS, connection pool, cancellation) instead of a spawned process.
+// over POST, with optional text/event-stream responses). It is the same
+// mcp::Connection the stdio path uses, over agentty's own HTTP/2 client (TLS,
+// connection pool, cancellation) instead of a spawned process.
 //
 // PERF: like the stdio path, construction connects synchronously (bounded by a
 // handshake timeout) and is only invoked when an `http`/`url` server is named
@@ -35,6 +35,7 @@ struct HttpConfig {
     std::vector<std::pair<std::string, std::string>> headers;   // extra request headers (auth, etc.)
     std::chrono::milliseconds handshake_timeout{15'000};
     std::chrono::milliseconds call_timeout{60'000};
+    std::string workspace_root;
 };
 
 // Connect to the server and return a CapabilityProvider, or nullptr (+ a human

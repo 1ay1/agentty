@@ -12,11 +12,12 @@
 //   4. a SMALL result is byte-identical (no marker, no truncation)
 //   5. the cut lands on a UTF-8 boundary (no mojibake / no invalid json)
 
-#include <cstdio>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
+
+#include "agtest.hpp"
 
 #include "agentty/domain/conversation.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
@@ -31,11 +32,6 @@ using agentty::ToolUse;
 
 namespace {
 
-int g_fails = 0;
-void check(bool ok, const char* what) {
-    if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++g_fails; }
-    else     { std::fprintf(stderr, "ok:   %s\n", what); }
-}
 
 // Build a one-turn thread: User prompt + Assistant turn with a single
 // Done tool_call carrying `output` as its result.
@@ -75,9 +71,33 @@ std::string tool_result_content(const std::string& wire, const char* tool_use_id
     return {};
 }
 
+// Build a thread with `n` Assistant tool-call turns, each carrying one Done
+// tool_call whose output is `big`. Returns the thread; the FIRST tool turn is
+// the oldest (highest recency rank), the LAST is the newest (rank 0).
+Thread make_thread_with_n_tool_turns(int n, const std::string& big) {
+    std::vector<Message> msgs;
+    Message user; user.role = Role::User; user.text = "start";
+    msgs.push_back(user);
+    for (int i = 0; i < n; ++i) {
+        ToolUse tc;
+        tc.id   = ToolCallId{"toolu_" + std::to_string(i)};
+        tc.name = ToolName{"grep"};
+        tc.status = ToolUse::Done{
+            std::chrono::steady_clock::now(),
+            std::chrono::steady_clock::now(),
+            big,
+        };
+        Message asst; asst.role = Role::Assistant;
+        asst.text = "call " + std::to_string(i);
+        asst.tool_calls.push_back(std::move(tc));
+        msgs.push_back(std::move(asst));
+    }
+    return Thread{ThreadId{"t"}, "", std::move(msgs), {}, {}};
+}
+
 } // namespace
 
-int main() {
+TEST_CASE("tool result budget") {
     namespace ap = agentty::provider::anthropic;
 
     // ── 1. Small result: byte-identical passthrough, no marker ──
@@ -180,7 +200,7 @@ int main() {
         user2.text = "two images";
         ImageContent empty2; empty2.media_type = "image/png";
         ImageContent real2;  real2.media_type = "image/png";
-        real2.bytes = "\x89PNG\r\n\x1a\n realbytes";
+        real2.set_bytes("\x89PNG\r\n\x1a\n realbytes");
         user2.images.push_back(std::move(empty2));
         user2.images.push_back(std::move(real2));
         Thread t2{ThreadId{"t"}, "", {user2}, {}, {}};
@@ -196,7 +216,162 @@ int main() {
         check(image_blocks == 1, "exactly the one real image ships");
     }
 
-    if (g_fails == 0) std::fprintf(stderr, "\nALL PASS\n");
-    else              std::fprintf(stderr, "\n%d FAILURE(S)\n", g_fails);
-    return g_fails == 0 ? 0 : 1;
+    // ── 5. Age-tiered clearing: recent full, ancient faded ──
+    // A long tool-burst turn: 20 calls, each dumping 60 KiB. The newest
+    // ~8 must keep the full budget (active working set); the oldest must
+    // collapse to the tight faded budget so stale dumps stop replaying.
+    {
+        std::string big;
+        big += "HEAD_SENTINEL_AAAA\n";
+        big.append(60 * 1024, 'x');
+        big += "\nTAIL_SENTINEL_ZZZZ";
+
+        const int n = 20;
+        Thread t = make_thread_with_n_tool_turns(n, big);
+        std::string wire = ap::messages_json_string(t);
+
+        // Newest call (id toolu_19, rank 0) keeps the full budget.
+        std::string newest = tool_result_content(wire, "toolu_19");
+        check(newest.size() > 40 * 1024,
+              "newest tool result keeps the full (large) budget");
+        check(newest.find("HEAD_SENTINEL_AAAA") != std::string::npos
+           && newest.find("TAIL_SENTINEL_ZZZZ") != std::string::npos,
+              "newest result keeps head+tail");
+
+        // Oldest call (id toolu_0, rank 19) is faded to the tight budget.
+        std::string oldest = tool_result_content(wire, "toolu_0");
+        check(oldest.size() < 6 * 1024,
+              "oldest tool result is faded to the tight budget");
+        check(oldest.find("bytes elided") != std::string::npos,
+              "faded result carries the elision marker");
+        check(oldest.find("HEAD_SENTINEL_AAAA") != std::string::npos
+           && oldest.find("TAIL_SENTINEL_ZZZZ") != std::string::npos,
+              "faded result STILL keeps head+tail (recall, not replay)");
+
+        // A result well inside the recent window (id toolu_15, rank 4)
+        // must NOT be faded.
+        std::string recent = tool_result_content(wire, "toolu_15");
+        check(recent.size() > 40 * 1024,
+              "a result inside the recent window stays full");
+    }
+
+    // ── 6. Error results NEVER fade, however old ──
+    {
+        std::string bigerr;
+        bigerr += "ERR_HEAD_AAAA\n";
+        bigerr.append(60 * 1024, 'e');
+        bigerr += "\nERR_TAIL_ZZZZ";
+
+        // 20 turns; make the OLDEST one a Failed (error) call, the rest Done.
+        std::vector<Message> msgs;
+        Message user; user.role = Role::User; user.text = "start"; msgs.push_back(user);
+        for (int i = 0; i < 20; ++i) {
+            ToolUse tc;
+            tc.id   = ToolCallId{"toolu_e" + std::to_string(i)};
+            tc.name = ToolName{"shell"};
+            if (i == 0) {
+                tc.status = ToolUse::Failed{
+                    std::chrono::steady_clock::now(),
+                    std::chrono::steady_clock::now(), bigerr};
+            } else {
+                tc.status = ToolUse::Done{
+                    std::chrono::steady_clock::now(),
+                    std::chrono::steady_clock::now(), bigerr};
+            }
+            Message asst; asst.role = Role::Assistant; asst.text = "c";
+            asst.tool_calls.push_back(std::move(tc));
+            msgs.push_back(std::move(asst));
+        }
+        Thread t{ThreadId{"t"}, "", std::move(msgs), {}, {}};
+        std::string wire = ap::messages_json_string(t);
+
+        // The oldest call is an ERROR — even at rank 19 it keeps full budget.
+        std::string olderr = tool_result_content(wire, "toolu_e0");
+        check(olderr.size() > 40 * 1024,
+              "oldest ERROR result is NOT faded (model needs it to recover)");
+    }
+
+    // ── 7. Short old results ship verbatim (nothing to fade) ──
+    {
+        const std::string small = "3 matches\n";
+        Thread t = make_thread_with_n_tool_turns(20, small);
+        std::string wire = ap::messages_json_string(t);
+        std::string oldest = tool_result_content(wire, "toolu_0");
+        check(oldest == small,
+              "small old result ships verbatim (no marker, no fade)");
+    }
+
+    // ── 8. Superseded read collapse: an earlier read of a file whose
+    //       contents a LATER turn re-read or edited is collapsed to a
+    //       one-line pointer NOW, not left to age-fade. ──
+    {
+        using json = nlohmann::json;
+        std::string big;
+        big += "FILE_HEAD_AAAA\n";
+        big.append(60 * 1024, 'r');
+        big += "\nFILE_TAIL_ZZZZ";
+
+        auto read_tc = [&](const char* id, const char* path,
+                           const std::string& out) {
+            ToolUse tc;
+            tc.id = ToolCallId{id};
+            tc.name = ToolName{"read"};
+            tc.args = json{{"path", path}};
+            tc.status = ToolUse::Done{
+                std::chrono::steady_clock::now(),
+                std::chrono::steady_clock::now(), out};
+            return tc;
+        };
+        auto edit_tc = [&](const char* id, const char* path) {
+            ToolUse tc;
+            tc.id = ToolCallId{id};
+            tc.name = ToolName{"edit"};
+            tc.args = json{{"path", path}};
+            tc.status = ToolUse::Done{
+                std::chrono::steady_clock::now(),
+                std::chrono::steady_clock::now(), "edited"};
+            return tc;
+        };
+
+        std::vector<Message> msgs;
+        Message user; user.role = Role::User; user.text = "work"; msgs.push_back(user);
+
+        // turn 1: read foo.cpp (this one gets superseded by the turn-3 edit)
+        { Message a; a.role = Role::Assistant; a.text = "read foo";
+          a.tool_calls.push_back(read_tc("toolu_r_foo1", "src/foo.cpp", big));
+          msgs.push_back(std::move(a)); }
+        // turn 2: read bar.cpp (NEVER touched again — must stay full)
+        { Message a; a.role = Role::Assistant; a.text = "read bar";
+          a.tool_calls.push_back(read_tc("toolu_r_bar", "src/bar.cpp", big));
+          msgs.push_back(std::move(a)); }
+        // turn 3: edit foo.cpp (supersedes the turn-1 read of foo)
+        { Message a; a.role = Role::Assistant; a.text = "edit foo";
+          a.tool_calls.push_back(edit_tc("toolu_e_foo", "src/foo.cpp"));
+          msgs.push_back(std::move(a)); }
+        // turn 4: read foo.cpp again (the LIVE read of foo — must stay full)
+        { Message a; a.role = Role::Assistant; a.text = "re-read foo";
+          a.tool_calls.push_back(read_tc("toolu_r_foo2", "src/foo.cpp", big));
+          msgs.push_back(std::move(a)); }
+
+        Thread t{ThreadId{"t"}, "", std::move(msgs), {}, {}};
+        std::string wire = ap::messages_json_string(t);
+
+        std::string foo1 = tool_result_content(wire, "toolu_r_foo1");
+        std::string bar  = tool_result_content(wire, "toolu_r_bar");
+        std::string foo2 = tool_result_content(wire, "toolu_r_foo2");
+
+        // The superseded turn-1 read collapses to the short pointer.
+        check(foo1.size() < 512,
+              "superseded earlier read is collapsed to a one-line pointer");
+        check(foo1.find("content was dropped to save context") != std::string::npos,
+              "collapsed read carries the superseded pointer text");
+        check(foo1.find("FILE_HEAD_AAAA") == std::string::npos,
+              "collapsed read does NOT ship the original body");
+        // The never-touched-again read stays full (it's recent + unique).
+        check(bar.size() > 40 * 1024,
+              "a read whose file is never touched again stays full");
+        // The most-recent read of foo is the live copy — never collapsed.
+        check(foo2.size() > 40 * 1024,
+              "the newest read of a file is never collapsed");
+    }
 }

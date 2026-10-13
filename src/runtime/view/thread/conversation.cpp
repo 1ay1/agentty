@@ -13,6 +13,11 @@
 // a rebuild.
 
 #include "agentty/runtime/view/thread/conversation.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
+
+#include "agentty/util/logx.hpp"
+
+#include <filesystem>
 
 #include <algorithm>
 #include <chrono>
@@ -31,6 +36,7 @@
 #include <maya/widget/turn.hpp>
 
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/helpers.hpp"   // ui::reasoning_shown
 #include "agentty/runtime/view/thread/activity_indicator.hpp"
 #include "agentty/runtime/view/thread/seam.hpp"
 #include "agentty/runtime/view/thread/turn/permission.hpp"
@@ -96,14 +102,18 @@ void build_live_tail(const Model& m, int& running_turn,
         // been deleted — finalize_turn is the only freeze site, so the
         // live tail always starts at a whole-turn boundary.
 
-        // Compaction divider FIRST (before the inter-turn gap), exactly
-        // as freeze_range orders it, so the live and frozen row
+        // Compaction divider, flanked by a full inter-turn gap on BOTH
+        // sides so the section break gets breathing room above (matching
+        // the gap below) instead of hugging the content above it. The
+        // ordering — leading gap, divider, trailing gap — is emitted
+        // identically by freeze_range, so the live and frozen row
         // sequences stay byte-identical across the freeze seam.
+        const bool first_overall = m.ui.frozen.empty() && first_in_tail && i == 0;
         if (compaction_boundary(i)) {
+            if (!first_overall) out.push_back(gap_row());   // space ABOVE
             out.push_back(compaction_divider_row());
         }
 
-        const bool first_overall = m.ui.frozen.empty() && first_in_tail && i == 0;
         if (!first_overall) {
             out.push_back(gap_row());
         }
@@ -162,7 +172,13 @@ void build_live_tail(const Model& m, int& running_turn,
             // every frame for the whole duration of the active run.
             const bool is_last_run     = (run_end >= total);
             const bool reserve_slot   = m.s.active() && is_last_run;
-            const bool show_indicator = reserve_slot && tail_is_empty_placeholder;
+            // ...and nothing else is already saying "still working". A live
+            // reasoning block has its own spinner, its own meter and text
+            // arriving in it; the hex tape under that is a second animation
+            // for the same fact, and it costs the rows it occupies plus the
+            // handoff when real content lands.
+            const bool show_indicator = reserve_slot && tail_is_empty_placeholder
+                                        && !reasoning_shown(tail);
             if (show_indicator) {
                 using namespace maya::dsl;
                 maya::ActivityIndicator::Config ind;
@@ -174,7 +190,7 @@ void build_live_tail(const Model& m, int& running_turn,
                 if (const auto* a = active_ctx(m.s.phase)) {
                     ind.stream_bytes = a->live_delta_bytes;
                     if (a->first_delta_at.time_since_epoch().count() != 0) {
-                        auto now = std::chrono::steady_clock::now();
+                        auto now = maya::anim_now();
                         auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                          now - a->first_delta_at).count();
                         if (ts_ms >= 250) {
@@ -254,14 +270,28 @@ void build_live_tail(const Model& m, int& running_turn,
             const bool reveal_settled = [&] {
                 for (std::size_t j = i; j < run_end && j < m.d.current.messages.size(); ++j) {
                     const auto& mj = m.d.current.messages[j];
-                    if (mj.role != Role::Assistant || mj.text.empty()) continue;
-                    const auto& mc = m.ui.view_cache.message_md(
+                    if (mj.role != Role::Assistant) continue;
+                    // Sibling REASONING slot (mj.id + "#r"): reasoning streams
+                    // through its own reveal even when the answer body is
+                    // still empty (pure-thinking phase). Check it FIRST and
+                    // unconditionally — skipping it when mj.text is empty is
+                    // exactly what froze the "Thinking" typewriter.
+                    if (const auto* rc = m.ui.view_cache.peek(
+                            m.d.current.id, MessageId{mj.id.value + "#r"});
+                        rc && rc->streaming && rc->streaming->is_animating())
+                        return false;
+                    if (mj.text.empty()) continue;
+                    // Non-migrating read-only probe: mj may be the PINNED
+                    // live edge, and message_md() would migrate it out of
+                    // the pinned set. peek() reads from either home.
+                    const auto* mc = m.ui.view_cache.peek(
                         m.d.current.id, mj.id);
-                    if (!mc.streaming) continue;
-                    if (mc.streaming->is_live()
-                     || mc.streaming->is_finalizing()
-                     || mc.streaming->reveal_in_progress()
-                     || mc.streaming->is_parsing())
+                    if (!mc || !mc->streaming) continue;
+                    // One authoritative predicate (see is_animating() in
+                    // maya) — MUST stay the exact mirror of
+                    // live_tail_reveal_settled's gate, which now also
+                    // calls it.
+                    if (mc->streaming->is_animating())
                         return false;
                 }
                 return true;
@@ -316,7 +346,7 @@ void build_queued_previews(const Model& m, int& running_turn,
                            std::vector<maya::Element>& out) {
     if (m.ui.composer.queued.empty()) return;
     out.reserve(out.size() + m.ui.composer.queued.size() * 2);
-    auto now = std::chrono::system_clock::now();
+    const auto now = m.wall_at(maya::anim_now());
     const std::size_t base_idx = m.d.current.messages.size();
     for (std::size_t qi = 0; qi < m.ui.composer.queued.size(); ++qi) {
         Message synthetic;
@@ -326,7 +356,7 @@ void build_queued_previews(const Model& m, int& running_turn,
         synthetic.timestamp   = now;
         std::string meta = "queued #" + std::to_string(qi + 1)
                          + " / "     + std::to_string(m.ui.composer.queued.size());
-        if (static_cast<int>(qi) == m.ui.composer.queue_peek_idx)
+        if (m.ui.composer.queue_peek_index() == static_cast<int>(qi))
             meta = "\xe2\x9c\x8e editing \xe2\x80\x94 " + meta;   // ✎
         out.push_back(gap_row());
         auto cfg = turn_config(synthetic, base_idx + qi, running_turn, m,
@@ -396,36 +426,29 @@ maya::Conversation::Config conversation_config(const Model& m) {
             cfg.live_tail.push_back(std::move(*e));
     }
 
-    // Optional shape probe. Set AGENTTY_VIEW_PROF=1 to log every
-    // conversation_config invocation's frozen/live_tail sizes plus
-    // a rough live-tail message-content sketch. One line per call.
-    static const bool view_prof = []{
-        const char* e = std::getenv("AGENTTY_VIEW_PROF");
-        return e && *e && *e != '0';
-    }();
-    if (view_prof) {
-        static std::FILE* out = std::fopen("/tmp/agentty-view-prof.log", "a");
-        if (out) {
-            std::size_t live_msgs = (m.d.current.messages.size()
-                > m.ui.frozen_through)
-                ? (m.d.current.messages.size() - m.ui.frozen_through)
-                : 0;
-            std::size_t live_text_bytes = 0;
-            std::size_t live_tool_count = 0;
-            for (std::size_t i = m.ui.frozen_through;
-                 i < m.d.current.messages.size(); ++i) {
-                const auto& msg = m.d.current.messages[i];
-                live_text_bytes += msg.text.size() + msg.streaming_text.size();
-                live_tool_count += msg.tool_calls.size();
-            }
-            std::fprintf(out,
-                "[view] frozen=%zu live_tail=%zu live_msgs=%zu "
-                "live_text=%zu live_tools=%zu frozen_through=%zu msgs=%zu\n",
+    // Shape probe: every conversation_config invocation's frozen/live_tail
+    // sizes plus a rough live-tail content sketch. AGENTTY_LOG=perf=trace
+    // surfaces it — trace, because it is one line per view build.
+    if (::agentty::logx::enabled(::agentty::logx::Channel::Perf,
+                                 ::agentty::logx::Level::Trace)) {
+        std::size_t live_msgs = (m.d.current.messages.size()
+            > m.ui.frozen_through)
+            ? (m.d.current.messages.size() - m.ui.frozen_through)
+            : 0;
+        std::size_t live_text_bytes = 0;
+        std::size_t live_tool_count = 0;
+        for (std::size_t i = m.ui.frozen_through;
+             i < m.d.current.messages.size(); ++i) {
+            const auto& msg = m.d.current.messages[i];
+            live_text_bytes += msg.text.size() + msg.streaming_text.size();
+            live_tool_count += msg.tool_calls.size();
+        }
+        AGT_LOG_HOT(Perf, Trace, "view.shape",
+                "frozen={} live_tail={} live_msgs={} "
+                "live_text={} live_tools={} frozen_through={} msgs={}",
                 m.ui.frozen.size(), cfg.live_tail.size(), live_msgs,
                 live_text_bytes, live_tool_count, m.ui.frozen_through,
                 m.d.current.messages.size());
-            std::fflush(out);
-        }
     }
 
     // No separate in_flight indicator — the empty-placeholder

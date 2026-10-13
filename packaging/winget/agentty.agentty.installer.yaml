@@ -14,9 +14,14 @@ InstallModes:
   - silent
   - silentWithProgress
 UpgradeBehavior: install
+# The MSI is a PER-USER install (installs to %LocalAppData%\Programs\agentty,
+# edits the user PATH) so it needs no admin/UAC. Declaring the scope tells
+# winget not to elevate and to treat it as a user-scope package.
+Scope: user
 Installers:
   - Architecture: x64
     InstallerType: wix
+    Scope: user
     InstallerUrl: https://github.com/1ay1/agentty/releases/download/v@VERSION@/agentty-windows-x86_64.msi
     InstallerSha256: @MSI_SHA256@
     ProductCode: "@MSI_PRODUCT_CODE@"

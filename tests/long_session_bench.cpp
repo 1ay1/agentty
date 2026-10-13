@@ -30,10 +30,24 @@
 //      No arg → run all scenarios.
 //      Arg    → run only scenarios whose name contains the substring.
 //
-// Env:
-//   BENCH_ITERS=N  override per-phase iteration count (default 5).
-//   BENCH_JSON=1   emit a JSON line per scenario instead of the table
-//                  (for automation / CI regression tracking).
+// Env knobs:
+//   BENCH_ASSERT=1  → fail (non-zero exit) if any hot path exceeds its
+//                     ceiling — the CI perf-regression gate.
+//   BENCH_PHASES=1  → print a per-scenario cold-render breakdown
+//                     (build / layout / paint nanoseconds + inner
+//                     component render() count) to stderr. This is how
+//                     the cold-render cost was characterised: for a tall
+//                     body it's ~70% layout / ~30% paint, and the render
+//                     count scales LINEARLY with content (one inner
+//                     component per markdown block, each rendered exactly
+//                     once — the measure and paint passes share the
+//                     within-frame result cache, so there is no
+//                     double-render to eliminate). Keep this when probing
+//                     the render path so the next person doesn't re-derive
+//                     that the cold frame is already single-pass.
+//   BENCH_ITERS=N   → override per-phase iteration count (default 5).
+//   BENCH_JSON=1    → emit a JSON line per scenario instead of the table
+//                     (for automation / CI regression tracking).
 
 #include <algorithm>
 #include <chrono>
@@ -236,7 +250,6 @@ int s_id_counter = 0;
         .finished_at = now,
         .output      = std::move(output),
     };
-    t.expanded = true;
     return t;
 }
 
@@ -272,7 +285,7 @@ int s_id_counter = 0;
 
 [[nodiscard]] ToolUse bash_tool(std::string_view cmd, int n_lines) {
     nlohmann::json args = {{"command", std::string{cmd}}};
-    return done("bash", std::move(args), gen::bash_output(n_lines));
+    return done("shell", std::move(args), gen::bash_output(n_lines));
 }
 
 [[nodiscard]] ToolUse read_tool(std::string_view path, int n_lines) {
@@ -286,6 +299,10 @@ int s_id_counter = 0;
 // Scenario shape — declarative parametrisation
 // ─────────────────────────────────────────────────────────────────────────
 
+// Anonymous namespace: bundled into agentty_standalone_tests, where
+// md_shape_sweep declares its own `Shape` — internal linkage keeps the two
+// TU-local types from colliding (ODR).
+namespace {
 struct Shape {
     std::string name;
     int  n_turns           = 0;     // assistant turns; user turn paired with each
@@ -300,6 +317,7 @@ struct Shape {
     int  user_text_chars   = 80;    // user message length per turn
     int  iters             = 5;     // outer-loop iterations for stats
 };
+}  // namespace (fold: Shape is TU-local)
 
 [[nodiscard]] std::string user_prompt(int chars) {
     std::string s;
@@ -467,16 +485,29 @@ struct RenderStats { Stats cold; Stats warm; };
         maya::Canvas canvas(kCanvasW, kCanvasH, &pool);
         canvas.clear();
 
+        const std::uint64_t b0 = maya::render_detail::rt_build_ns();
+        const std::uint64_t l0 = maya::render_detail::rt_layout_ns();
+        const std::uint64_t p0 = maya::render_detail::rt_paint_ns();
+        const std::uint64_t rc0 = maya::render_detail::component_render_calls();
         auto t0 = Clock::now();
-        maya::render_tree(root, canvas, pool, maya::theme::dark,
+        maya::render_tree(root, canvas, pool, maya::theme::native,
                           /*auto_height=*/true);
         auto t1 = Clock::now();
         cold_samples.push_back(ms(t1 - t0));
+        if (std::getenv("BENCH_PHASES")) {
+            std::fprintf(stderr,
+                "    [phases] %-30s total=%.2f build=%.2f layout=%.2f paint=%.2f renders=%llu (ms)\n",
+                sh.name.c_str(), ms(t1 - t0),
+                double(maya::render_detail::rt_build_ns()  - b0) / 1e6,
+                double(maya::render_detail::rt_layout_ns() - l0) / 1e6,
+                double(maya::render_detail::rt_paint_ns()  - p0) / 1e6,
+                (unsigned long long)(maya::render_detail::component_render_calls() - rc0));
+        }
 
         // Warm: same canvas + pool, same root → cache should blit.
         canvas.clear();
         auto t2 = Clock::now();
-        maya::render_tree(root, canvas, pool, maya::theme::dark,
+        maya::render_tree(root, canvas, pool, maya::theme::native,
                           /*auto_height=*/true);
         auto t3 = Clock::now();
         warm_samples.push_back(ms(t3 - t2));
@@ -553,7 +584,7 @@ struct MidrunStats { Stats frame; std::size_t frozen_rows_after = 0;
     maya::Canvas canvas(kCanvasW, kCanvasH, &pool);
     canvas.clear();
     // Prime once (cold) so the warm timings below are pure cache-hit.
-    maya::render_tree(root, canvas, pool, maya::theme::dark,
+    maya::render_tree(root, canvas, pool, maya::theme::native,
                       /*auto_height=*/true);
 
     std::vector<double> samples;
@@ -578,7 +609,7 @@ struct MidrunStats { Stats frame; std::size_t frozen_rows_after = 0;
         if (keep_top > 0) canvas.clear_below(keep_top);
         else              canvas.clear();
         auto tc1 = Clock::now();
-        maya::render_tree(root, canvas, pool, maya::theme::dark,
+        maya::render_tree(root, canvas, pool, maya::theme::native,
                           /*auto_height=*/true);
         auto t1 = Clock::now();
         clear_sum  += ms(tc1 - tc0);
@@ -654,6 +685,15 @@ struct StreamingStats { Stats frame; Stats build; Stats render;
             live.args_streaming =
                 "{\"file_path\":\"src/auth/login.cpp\",\"content\":\""
                 + gen::code_block(live_lines);
+            // ...and args carries the PARSED snapshot, exactly as the
+            // reducer's ~120ms try_parse_partial keeps it in production
+            // (stream.cpp). Without this the write card's body branch reads
+            // an empty "content" and renders NOTHING — the sweep then
+            // measures an empty card at every size and is flat by vacuity,
+            // which is precisely how an O(body) regression in the body
+            // renderer would slip past this probe unmeasured.
+            live.args = {{"file_path", "src/auth/login.cpp"},
+                         {"content", gen::code_block(live_lines)}};
             a.tool_calls.push_back(std::move(live));
         }
         msgs.push_back(std::move(a));
@@ -681,7 +721,7 @@ struct StreamingStats { Stats frame; Stats build; Stats render;
             .status_bar    = agentty::ui::status_bar_config(m),
             .overlay       = std::nullopt,
         }}.build();
-        maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+        maya::render_tree(root, canvas, pool, maya::theme::native, true);
     }
 
     for (int i = 0; i < iters; ++i) {
@@ -707,7 +747,7 @@ struct StreamingStats { Stats frame; Stats build; Stats render;
         else              canvas.clear();
 
         auto tr0 = Clock::now();
-        maya::render_tree(root, canvas, pool, maya::theme::dark, true);
+        maya::render_tree(root, canvas, pool, maya::theme::native, true);
         auto tr1 = Clock::now();
 
         build_s.push_back(ms(tb1 - tb0));
@@ -991,6 +1031,108 @@ int main(int argc, char** argv) {
     }
 
     int failures = 0;
+    // Perf-regression gate. Opt in with BENCH_ASSERT=1 (the CI perf job does).
+    // Ceilings are ~5-8× the observed values on a fast dev box — generous
+    // enough not to flake on a loaded/slow CI runner, tight enough to catch a
+    // genuine order-of-magnitude regression (an accidental O(n) reintroduced
+    // into the per-frame path, a lost cache, etc.). We gate the two metrics
+    // that actually bound interactivity:
+    //   • MIDRUN per-frame p99 — the REAL steady-state streaming cost the user
+    //     feels; observed ≤0.9ms, must stay far under the 16ms frame budget.
+    //   • render_key p99 — the per-frame visual_hash walk; observed sub-µs.
+    const bool assert_perf = std::getenv("BENCH_ASSERT") != nullptr;
+    constexpr double kMidrunFrameCeilMs = 5.0;   // 16ms budget, ~6× slack (MEDIAN)
+    // p99 is inherently jittery on a shared runner (one stalled frame in 100
+    // spikes it). Gate the median hard; keep p99 as a loose catastrophe
+    // tripwire only — still well under the 16ms frame budget.
+    constexpr double kMidrunFrameP99CeilMs = 12.0;
+    constexpr double kRenderKeyCeilMs   = 1.0;   // observed 0.00; huge slack
+    int perf_violations = 0;
+
+    // ── Live-tail FLATNESS gate ──────────────────────────────────
+    // The single most important perf property of the streaming path: the
+    // per-frame cost of an IN-FLIGHT turn must not scale with the size of
+    // the body being streamed. maya's agent_session has this structurally
+    // (closed blocks are rolled up into built Elements; only the live edge
+    // is rebuilt); agentty achieves the same via tail windowing
+    // (tool_body_common's kStreamTailLines slice + tail-anchored
+    // renderers). Measured: ~0.18ms/frame flat from 8 to 3000 body lines.
+    //
+    // That equivalence is load-bearing and was previously enforced
+    // NOWHERE — BENCH_STREAM was a manual probe. Any change that feeds an
+    // unwindowed body to the widget layer (dropping a tail_window call,
+    // a renderer that stops being tail-anchored, an accidental O(body)
+    // parse per frame) turns long streams into a per-frame tax that grows
+    // without bound, and no existing gate would notice. Compare a small
+    // vs a large in-flight body directly and fail on the RATIO — a
+    // machine-speed-independent assertion, unlike the absolute ceilings.
+    if (assert_perf) {
+        Shape base{.name = "flatness", .n_turns = 6, .write_lines = 300,
+                   .assistant_prose_p = 2, .iters = 20};
+        struct Probe { const char* what; int small_body; int big_body;
+                       double ratio_ceil; };
+        // 100 vs 12000 lines: a 120x body-size spread. An unwindowed body
+        // shows up as O(n) BUILD cost, and the wide spread separates broken
+        // from healthy decisively — at only 30x spread a broken build ratio
+        // (~2.8x) sat under any ceiling loose enough not to flake.
+        //
+        // Per-probe ceilings because the two paths are not equally flat:
+        //   • write tool — tail_window slices the body host-side, so build
+        //     is FLAT (~1x healthy; measured 9.1x with the window removed).
+        //   • prose — the body never passes tail_window; StreamingMarkdown
+        //     owns the full source, and build carries a small structural
+        //     O(body) term (~6 ns/line: 0.014 ms at 100 lines → 0.084 ms
+        //     at 12k, ratio ~4.2x). Negligible against the 16 ms frame
+        //     budget, but REAL — so the prose ceiling is set just above
+        //     today's coefficient to catch it growing, not to pretend the
+        //     path is flat.
+        for (const Probe p : {Probe{"write tool", 100, 12000, 3.0},
+                              Probe{"prose", -100, -12000, 6.0}}) {
+            const auto s = phase::streaming_frame(base, p.small_body);
+            const auto b = phase::streaming_frame(base, p.big_body);
+            // Guard the ratio against a denominator in the noise floor.
+            // Gate on the BUILD ratio, not the frame ratio. O(body) work
+            // lives in Element construction (view_build); render is
+            // dominated by the ~fixed painted row count and dilutes the
+            // signal — measured: breaking the write tail-window grew build
+            // 8.4x while the frame total moved only 2.5x. Floor the small
+            // side well above timer noise so the ratio is meaningful.
+            const double small_ms = std::max(s.build.median, 0.02);
+            const double ratio    = b.build.median / small_ms;
+            // The ratio alone is fragile when BOTH sides sit in the sub-
+            // millisecond floor: a healthy prose build is ~0.02 ms small /
+            // ~0.09 ms big (~4.2x), so a loaded CI runner jittering the
+            // 0.02 ms denominator alone crosses 6x with no real regression
+            // (observed on the linux-gcc gate). A GENUINE O(body) blowup
+            // — the tail-window removal this gate exists to catch — pushes
+            // the 12k-line big side into the multi-millisecond range (the
+            // write probe measured 8.4x AND ms-scale). So require the big
+            // side to also exceed a meaningful absolute cost before a high
+            // ratio counts: noise stays sub-ms, real regressions do not.
+            constexpr double kBuildRatioAbsFloorMs = 1.0;
+            if (ratio > p.ratio_ceil && b.build.median > kBuildRatioAbsFloorMs) {
+                ++perf_violations;
+                std::fprintf(stderr,
+                    "PERF REGRESSION [streaming %s]: live-tail BUILD cost is "
+                    "not flat — %.3f ms at %d lines vs %.3f ms at %d lines "
+                    "(%.1fx > %.1fx ceiling). Element construction now "
+                    "scales with the in-flight body; see tail_window / "
+                    "kStreamTailLines in tool_body_common.\n",
+                    p.what, b.build.median, std::abs(p.big_body),
+                    s.build.median, std::abs(p.small_body),
+                    ratio, p.ratio_ceil);
+            }
+            if (b.frame.median > kMidrunFrameCeilMs) {
+                ++perf_violations;
+                std::fprintf(stderr,
+                    "PERF REGRESSION [streaming %s]: %.3f ms/frame at %d "
+                    "lines > %.2f ms ceiling\n",
+                    p.what, b.frame.median, std::abs(p.big_body),
+                    kMidrunFrameCeilMs);
+            }
+        }
+    }
+
     for (const auto& sh : shapes) {
         if (*filter && sh.name.find(filter) == std::string::npos) continue;
 
@@ -1010,6 +1152,46 @@ int main(int argc, char** argv) {
             print_row(r);
             print_footnote(r);
         }
+
+        if (assert_perf) {
+            // Gate the MIDRUN cost on the MEDIAN, not p99. The median is the
+            // steady-state per-frame cost the user actually feels (observed
+            // ~0.9 ms, 16 ms budget); a single slow frame on a shared CI
+            // runner spikes p99 alone (measured 5.5 ms with the median still
+            // ~1 ms) and flaked this gate with no real regression. A genuine
+            // regression shifts the whole distribution, so the median moves
+            // too. p99 is still checked, but against a much looser tail
+            // ceiling so only a catastrophic per-frame stall trips it.
+            if (r.midrun_frame.median > kMidrunFrameCeilMs) {
+                ++perf_violations;
+                std::fprintf(stderr,
+                    "PERF REGRESSION [%s]: MIDRUN per-frame median %.2f ms > %.2f ms ceiling\n",
+                    r.shape.name.c_str(), r.midrun_frame.median, kMidrunFrameCeilMs);
+            }
+            if (r.midrun_frame.p99 > kMidrunFrameP99CeilMs) {
+                ++perf_violations;
+                std::fprintf(stderr,
+                    "PERF REGRESSION [%s]: MIDRUN per-frame p99 %.2f ms > %.2f ms ceiling\n",
+                    r.shape.name.c_str(), r.midrun_frame.p99, kMidrunFrameP99CeilMs);
+            }
+            if (r.render_key.p99 > kRenderKeyCeilMs) {
+                ++perf_violations;
+                std::fprintf(stderr,
+                    "PERF REGRESSION [%s]: render_key p99 %.4f ms > %.2f ms ceiling\n",
+                    r.shape.name.c_str(), r.render_key.p99, kRenderKeyCeilMs);
+            }
+        }
+    }
+
+    if (assert_perf) {
+        if (perf_violations == 0)
+            std::printf("\nBENCH_ASSERT: all %zu scenarios within perf ceilings.\n",
+                        shapes.size());
+        else
+            std::fprintf(stderr,
+                "\nBENCH_ASSERT: %d perf ceiling violation(s) — FAIL.\n",
+                perf_violations);
+        failures += perf_violations;
     }
 
     if (!emit_json_lines) {

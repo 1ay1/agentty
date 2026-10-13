@@ -1,4 +1,5 @@
 #include "agentty/runtime/view/thread/activity_indicator.hpp"
+#include <maya/core/anim_clock.hpp>   // anim_now: the frame clock
 
 #include <algorithm>
 #include <cctype>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include "agentty/domain/catalog.hpp"
+#include "agentty/domain/model_name.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/activity_indicator_words.hpp"
@@ -63,11 +65,14 @@ activity_indicator_config(const Model& m) {
                        [](const auto& tc){ return !tc.is_terminal(); });
     if (tl_visible) return std::nullopt;
 
-    const auto caps = ModelCapabilities::from_id(m.d.model_id.value);
-    maya::Color edge = caps.is_opus()   ? accent
-                     : caps.is_sonnet() ? info
-                     : caps.is_haiku()  ? success
-                                        : highlight;
+    // Edge colour comes from the model-name SSOT, not a local family branch.
+    // This site used to carry its OWN is_opus/is_sonnet/is_haiku chain, and
+    // it disagreed with every other surface: Opus was `accent` (plain
+    // magenta) where the turn header and badge use bright_magenta, and Haiku
+    // was `success` — GREEN, the status-ok hue, which is precisely the
+    // collision proofs::no_family_uses_a_status_hue() now forbids at compile
+    // time. One decode, one table. See domain/model_name.hpp.
+    const maya::Color edge = model_name::decode(m.d.model_id.value).color;
     maya::ActivityIndicator::Config cfg;
     cfg.edge_color    = edge;
     cfg.spinner_glyph = std::string{m.s.spinner.current_frame()};
@@ -81,7 +86,7 @@ activity_indicator_config(const Model& m) {
     // just started (< 1s) to avoid "0.0s" flicker on the first frame.
     if (const auto* a = active_ctx(m.s.phase);
         a && a->started.time_since_epoch().count() != 0) {
-        auto now = std::chrono::steady_clock::now();
+        auto now = maya::anim_now();
         auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
                        now - a->started).count();
         if (ms >= 1000) {

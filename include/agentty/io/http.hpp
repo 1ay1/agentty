@@ -24,9 +24,13 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <maya/runtime.hpp>
+#include "agentty/util/io.hpp"
 
 namespace agentty::http {
 
@@ -37,14 +41,37 @@ namespace agentty::http {
 // boundary and between poll() waits, so a trip lands within a few ms on a
 // live connection and immediately on an idle one (the socket is shut down,
 // which wakes poll()).
+//
+// BACKED BY A std::stop_source, not a bare atomic flag. A flag can only be
+// POLLED, so anything that wanted to react to a cancel — rather than check
+// for one inside its own loop — had to grow a thread that slept and
+// rechecked. agentty had two: the ACP server's tool wait (50 ms) and the
+// subagent stream's parent-cancel bridge (20 ms). token() hands out a real
+// std::stop_token, so those become stop_callbacks and condition-variable
+// waits that wake the instant cancel() is called.
+//
+// The cost is nothing on the hot path. is_cancelled() is the same single
+// acquire load it was (stop_requested() is one atomic read in every
+// implementation), and the I/O loop keeps calling it exactly as before.
 class CancelToken {
 public:
-    void cancel() noexcept { flag_.store(true, std::memory_order_release); }
+    CancelToken() = default;
+    // Shared between threads through a pointer; swapping the whole source
+    // under a watcher would be a race, so it can't be assigned or copied.
+    CancelToken(const CancelToken&)            = delete;
+    CancelToken& operator=(const CancelToken&) = delete;
+
+    void cancel() noexcept { src_.request_stop(); }
     [[nodiscard]] bool is_cancelled() const noexcept {
-        return flag_.load(std::memory_order_acquire);
+        return src_.stop_requested();
+    }
+    /// The same signal as a std::stop_token: register a stop_callback on it,
+    /// or hand it to maya::delay_for, instead of polling.
+    [[nodiscard]] std::stop_token token() const noexcept {
+        return src_.get_token();
     }
 private:
-    std::atomic<bool> flag_{false};
+    std::stop_source src_;
 };
 using CancelTokenPtr = std::shared_ptr<CancelToken>;
 
@@ -56,6 +83,27 @@ struct Header {
     std::string value;
 };
 using Headers = std::vector<Header>;
+
+// The SSE anti-buffering directive trio. Corporate/endpoint-security gateways
+// commonly buffer or compress an event stream until a large body accumulates,
+// so short replies arrive in one burst and long turns trip the stall watchdog
+// ("no events for 120s"). These three headers ask every hop to pass frames
+// through incrementally and uncompressed. Every streaming transport (Anthropic,
+// OpenAI-Chat, Codex/Responses) needs the exact same trio — hoisted here so the
+// set can't drift between wires. See docs/website/proxies.md.
+[[nodiscard]] inline Headers sse_no_buffer_headers() {
+    return {
+        {"cache-control",   "no-cache, no-transform"},
+        {"pragma",          "no-cache"},
+        {"accept-encoding", "identity"},
+    };
+}
+
+// Append the trio to an existing header list (for transports that build headers
+// incrementally with push_back).
+inline void append_sse_no_buffer(Headers& h) {
+    for (auto& kv : sse_no_buffer_headers()) h.push_back(std::move(kv));
+}
 
 // Strongly-typed HTTP method. The wire spelling lives in one place
 // (`wire_name`) and the runtime never sees a free-form string at this
@@ -109,6 +157,19 @@ struct Request {
     // Streaming responses (Client::stream) bypass this entirely — each
     // SSE chunk flows through the on_chunk callback without buffering.
     std::size_t max_body_bytes = 16ull * 1024 * 1024;
+
+    // SSRF guard on the RESOLVED address. When true, the dialer re-checks
+    // every IP getaddrinfo() returns against the private/loopback/link-local/
+    // cloud-metadata ranges and REFUSES to connect to any of them (typed
+    // HttpError::connect "blocked address (SSRF guard)"). This closes DNS
+    // rebinding: a public hostname that passed a name-based filter but
+    // resolves to 169.254.169.254 / 127.0.0.1 / an RFC1918 host is caught at
+    // the socket, where the target is authoritative and unspoofable.
+    //
+    // Default false so provider traffic and LOCAL model servers (Ollama /
+    // llama.cpp on 127.0.0.1) are untouched — only the web tools (web_fetch /
+    // web_search), which dial arbitrary model-supplied URLs, set it true.
+    bool ssrf_guard = false;
 };
 
 // Parsed env-var-driven dial override.  Format: "host" or "host:port" —
@@ -124,6 +185,16 @@ struct DialOverride {
     uint16_t    port = 0;
     [[nodiscard]] bool active() const noexcept { return !host.empty(); }
 };
+
+// SSRF range check on a numeric IP LITERAL (dotted-quad "127.0.0.1" or a v6
+// literal, optionally bracketed). Returns true if the address is loopback /
+// RFC1918 private / link-local (incl. 169.254.169.254 metadata) / CGNAT /
+// ULA / multicast — i.e. a target an untrusted web URL must not reach. A
+// non-numeric or unparseable input returns true (fail closed). This is the
+// same predicate the dialer applies to each RESOLVED address when
+// Request::ssrf_guard is set; exported so the ranges are unit-testable
+// without a live DNS resolve.
+[[nodiscard]] bool ssrf_ip_blocked(std::string_view ip_literal) noexcept;
 
 // Override for requests to `api.anthropic.com` (chat completions, model
 // listing).  Driven by `AGENTTY_API_HOST`.
@@ -191,6 +262,9 @@ struct HttpError {
     HttpErrorKind kind        = HttpErrorKind::Unknown;
     int           http_status = 0;       // valid iff kind == Status
     std::string   detail;                // human-readable
+    // True once a non-idempotent request received a successful response head.
+    // Automatic retry could duplicate accepted server-side work.
+    bool          non_replayable = false;
 
     // "[h2 timeout] no bytes for 45s" — the UI's default stringification
     // when it doesn't care to branch on kind. Layered errors call this
@@ -233,12 +307,16 @@ struct HttpError {
 using HttpResult       = std::expected<Response, HttpError>;
 using HttpStreamResult = std::expected<void,     HttpError>;
 
-// Callbacks for a streaming request. on_headers fires once when the :status
-// frame arrives; on_chunk fires for every DATA frame slab. Returning false
-// from on_chunk aborts the stream (equivalent to cancelling the token).
+// Streaming callbacks. on_headers fires once when response headers arrive;
+// on_chunk fires for every DATA/body slab. Returning false from on_chunk
+// aborts the stream. on_activity is a throttled liveness signal for actual
+// inbound wire bytes. on_buffered_wait reports the explicit bounded state
+// where an HTTP intermediary is alive but withholding response DATA.
 struct StreamHandler {
     std::function<void(int status, const Headers&)>     on_headers;
     std::function<bool(std::string_view body_chunk)>    on_chunk;
+    std::function<void()>                               on_activity;
+    std::function<void()>                               on_buffered_wait;
 };
 
 // ---------------------------------------------------------------------------
@@ -265,6 +343,9 @@ struct Timeouts {
     std::chrono::milliseconds total  {0};
     std::chrono::milliseconds idle   {0};
     std::chrono::milliseconds ping   {0};
+    // Internal end-to-end cap shared by connect, TLS, retries, and body read.
+    // Client::stream populates it from total; callers normally leave it empty.
+    std::optional<std::chrono::steady_clock::time_point> absolute_deadline;
 };
 
 // ---------------------------------------------------------------------------
@@ -274,6 +355,11 @@ struct Timeouts {
 // Build-time version, baked from CMakeLists.txt's PROJECT_VERSION via
 // -DAGENTTY_VERSION. The fallback exists only for hand-invoked compiler
 // runs that bypass our CMake — keep the binary self-describing.
+//
+// This macro is the raw build input for the User-Agent strings. agentty's
+// identity as a remote service RECORDS it — product name and homepage URL —
+// lives in util/identity.hpp, which is what app attribution sends (see
+// ProviderDescriptor::attribution).
 #ifndef AGENTTY_VERSION
 #define AGENTTY_VERSION "0.0.0-dev"
 #endif
@@ -322,13 +408,40 @@ public:
     void prewarm(std::string host, uint16_t port = 443,
                  std::string dial_host = "", uint16_t dial_port = 0);
 
+    // Signal every outstanding prewarm() thread to abort its dial and JOIN
+    // them. MUST be called before process exit: the detached-thread model of
+    // prewarm() otherwise leaves a thread mid-SSL_connect while the CRT /
+    // OpenSSL static state is torn down under it — a data race that surfaces as
+    // heap corruption (Windows STATUS_HEAP_CORRUPTION 0xC0000374) when the app
+    // exits within milliseconds of launch (e.g. immediate pipe-stdin EOF).
+    // Idempotent; safe to call with no prewarm in flight. Joins: `unlocked`.
+    void join_prewarm(const maya::unlocked& cap) noexcept;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
 // Process-wide default client — lazy, constructed on first access, shared
-// across all call sites. Equivalent to Zed's `GlobalHttpClient`.
-[[nodiscard]] Client& default_client();
+// across all call sites. Equivalent to Zed's `GlobalHttpClient`. Dialing out
+// is IO, so getting it takes an Io.
+[[nodiscard]] Client& default_client(Io);
+
+namespace test {
+// Pure incremental HTTP/1 chunk decoder seam used by framing regressions.
+[[nodiscard]] std::expected<std::string, std::string>
+decode_chunked(const std::vector<std::string>& fragments);
+[[nodiscard]] std::expected<bool, std::string>
+is_chunked(const Headers& headers);
+} // namespace test
 
 } // namespace agentty::http
+
+// CancelToken is a shared mutable object, and Sendable refuses shared_ptr by
+// default for that reason. Sharing is the point here: one side trips it (Esc,
+// a new turn, session/cancel) while a worker watches it. It holds only a
+// std::stop_source, which is built for exactly that, so the pointer may cross.
+MAYA_SENDABLE(agentty::http::CancelTokenPtr);
+// And for the same reason it is Sync: one std::stop_source, used only through
+// its thread-safe calls, and the class has no assignment that swaps it.
+MAYA_SYNC(agentty::http::CancelToken);

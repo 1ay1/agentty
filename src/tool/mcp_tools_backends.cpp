@@ -13,36 +13,60 @@
 //
 //   Built + installed by build_mcp_tool_defs() (mcp_tools_bridge.cpp).
 
+#include "agentty/util/user_root.hpp"
 #include "agentty/tool/mcp_tools_backends.hpp"
+#include "agentty/runtime/app/wire_audit.hpp"
+#include "agentty/util/home_dir.hpp"
 
+#include "agentty/scope/scope.hpp"
+#include "agentty/config/inventory.hpp"   // kAgentsLayout — the one declaration
 #include "agentty/tool/memory_store.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/subagent.hpp"
-#include "agentty/tool/registry.hpp"   // tools::progress::emit
+#include "agentty/tool/registry.hpp"   // CallContext
 #include "agentty/tool/tool.hpp"       // tool::DynamicDispatch, ToolUse, Message …
+#include "agentty/tool/util/partial_json.hpp"   // args salvage for truncated tool JSON
+#include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
 
+#include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
+#include "agentty/provider/error_class.hpp"
 #include "agentty/provider/provider.hpp"
+#include "agentty/provider/selection.hpp"
+#include "agentty/provider/credentials.hpp"
+#include "agentty/provider/wire.hpp"
 
-#include "agentty/rag/rag.hpp"
-#include "agentty/rag/rerank.hpp"
-#include "agentty/rag/expand.hpp"
-#include "agentty/rag/knowledge.hpp"
+#include "agentty/rag/rag_adapter.hpp"
+#include "agentty/rag/embed_secret.hpp"
+#include <thread>
+#include "agentty/io/persistence.hpp"
+#include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/store/store.hpp"
 
 #include "agentty/mcp/client.hpp"   // mcp_resources / mcp_read_resource seams
+#include "agentty/util/background.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/logx.hpp"
 
 #include <mcp/tools/host.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <filesystem>
+#include <fstream>
+#include <future>
 #include <memory>
-#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -55,6 +79,123 @@ namespace {
 namespace mt  = ::mcp::tools;
 namespace fs  = std::filesystem;
 using json    = nlohmann::json;
+
+// Machine-readable event stream for headless runs, enabled by
+// `agentty run --events jsonl` (and the older AGENTTY_TRACE_TOOLS=1,
+// which now selects the same stream).
+//
+// WHY THIS EXISTS. A benchmark harness driving `agentty run` needs to
+// know which tools were called and whether they worked. Until this, the
+// only machine-visible signal was a Unicode gear glyph in the rendered
+// Activity view — and that glyph is only emitted on the SUBAGENT path,
+// never by a plain `run`. At least one external harness grepped for it,
+// got nothing, and recorded its tool-call columns as "NA" rather than a
+// misleading zero. The data existed (tool.exec, with timings) but only
+// in the log file, which a sandboxed run throws away on teardown.
+//
+// So: one JSON object per line, on STDERR. stderr because run/acp/
+// mcp-serve keep stdout for the report itself, and a harness that merges
+// the two streams still gets both.
+//
+//   {"ev":"tool","seq":3,"tool":"read","ms":12,"ok":true,
+//    "args_sha":"a3f1c09d"}
+//   {"ev":"tool","seq":4,"tool":"edit","ms":4,"ok":false,
+//    "err":"invalid_args: no such file","args_sha":"77b2e410"}
+//
+// args_sha, not args: a repeat-detector needs to know two calls were
+// IDENTICAL, not what they contained. Tool arguments carry paths, env
+// values and command lines, and the harnesses that want this run agentty
+// sandboxed precisely to keep that data in. A hash answers the question
+// without being a leak, and needs no AGENTTY_LOG_BODIES-style gate.
+enum class EventFormat { Off, Jsonl };
+
+[[nodiscard]] EventFormat event_format() {
+    static const EventFormat fmt = [] {
+        // --events jsonl wins; AGENTTY_TRACE_TOOLS is the older spelling.
+        if (const char* e = std::getenv("AGENTTY_EVENTS");
+            e && e[0] && std::string_view{e} == "jsonl")
+            return EventFormat::Jsonl;
+        const char* v = std::getenv("AGENTTY_TRACE_TOOLS");
+        const bool on = v && v[0] && v[0] != '0' && v[0] != 'f' && v[0] != 'F'
+                          && v[0] != 'n' && v[0] != 'N';
+        return on ? EventFormat::Jsonl : EventFormat::Off;
+    }();
+    return fmt;
+}
+
+// FNV-1a over the argument JSON. Short, stable across runs and
+// processes, and not reversible into the arguments it stands for.
+[[nodiscard]] std::string args_digest(std::string_view args) {
+    std::uint32_t h = 2166136261u;
+    for (unsigned char c : args) { h ^= c; h *= 16777619u; }
+    char buf[9];
+    std::snprintf(buf, sizeof(buf), "%08x", h);
+    return std::string{buf};
+}
+
+// One event line. Never throws: a diagnostic stream must not be able to
+// take down the run it is describing.
+void emit_event(nlohmann::json j) noexcept {
+    if (event_format() == EventFormat::Off) return;
+    try {
+        static std::atomic<unsigned long long> seq{0};
+        j["seq"] = seq.fetch_add(1, std::memory_order_relaxed);
+        const std::string line = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+        std::fprintf(stderr, "%s\n", line.c_str());
+    } catch (...) {
+        // Out of memory formatting a diagnostic line: drop the line.
+    }
+}
+
+void emit_tool_event(std::string_view tool, long long ms, bool ok,
+                     std::string_view err, std::string_view args) noexcept {
+    if (event_format() == EventFormat::Off) return;
+    try {
+        nlohmann::json j{
+            {"ev",   "tool"},
+            {"tool", tool},
+            {"ms",   ms},
+            {"ok",   ok},
+            {"args_sha", args_digest(args)},
+        };
+        if (!ok && !err.empty()) j["err"] = err;
+        emit_event(std::move(j));
+    } catch (...) {}
+}
+
+// Model output for `agentty run --events jsonl`: reasoning and answer text as
+// it streams, batched per line so a harness isn't flooded with one-char
+// events. Only the top-level run emits these, not nested subagents.
+class TextEvents {
+public:
+    explicit TextEvents(bool on, int turn) : on_(on), turn_(turn) {}
+    TextEvents(const TextEvents&) = delete;
+    TextEvents& operator=(const TextEvents&) = delete;
+    ~TextEvents() { flush(); }
+    void reasoning(std::string_view s) { add(Kind::Reasoning, s); }
+    void text(std::string_view s)      { add(Kind::Text, s); }
+    void flush() noexcept {
+        if (!on_ || buf_.empty()) return;
+        try {
+            emit_event({{"ev", kind_ == Kind::Reasoning ? "reasoning" : "text"},
+                        {"turn", turn_}, {"text", buf_}});
+        } catch (...) {}
+        buf_.clear();
+    }
+private:
+    enum class Kind { Reasoning, Text };
+    void add(Kind k, std::string_view s) {
+        if (!on_ || s.empty()) return;
+        if (k != kind_) { flush(); kind_ = k; }
+        buf_ += s;
+        // A line per paragraph or ~2 KiB, whichever comes first.
+        if (buf_.size() >= 2048 || buf_.find('\n') != std::string::npos) flush();
+    }
+    bool on_;
+    int turn_;
+    Kind kind_ = Kind::Text;
+    std::string buf_;
+};
 
 // ── MemoryStore ────────────────────────────────────────────────────────
 //   Backs remember / forget / wipe. The shell owns the schema + dedup/pin/
@@ -72,10 +213,34 @@ static_assert(sizeof(memory::AppendResult) == sizeof(mt::MemoryAppendResult),
               "AppendResult / MemoryAppendResult drifted — update both structs "
               "and the field mapping in AgenttyMemoryStore::append()");
 
+// Lock order: mcp-cpp's MemoryStore interface hands these methods no Call, so
+// the tool worker's capability can't ride the context to them. Each method
+// re-states it at this one boundary (`mem_root`, tests/lint/allowlist.txt):
+// they are called only by mcp-cpp's memory tool from a tool body on a tool
+// worker, which holds no agentty lock, and they take only the memory store
+// lane (ranked below every leaf) and its file IO.
+template <class F>
+auto mem_root(F&& f) -> decltype(maya::thread_root(std::forward<F>(f))) {
+    return maya::thread_root(std::forward<F>(f));
+}
+
 class AgenttyMemoryStore final : public mt::MemoryStore {
 public:
+    // scopes()[0] is the DEFAULT scope the shell uses when the model omits
+    // `scope`. We only advertise "project" (and only make it the default)
+    // when project storage is actually WRITABLE here. In a workspace whose
+    // root is "/" or otherwise unwritable, path_for(Project) is empty and a
+    // project append would fail — so offering "project" as the default made
+    // the model's very first remember() call fail every time, forcing a
+    // retry with scope="user". Dropping the unavailable scope from the
+    // vocabulary makes the default "user", which always succeeds, WITHOUT
+    // silently promoting an explicit project fact to user scope (append()
+    // still refuses an explicit unavailable-project write — no cross-
+    // workspace memory bleed).
     std::vector<std::string> scopes() const override {
-        return {"project", "user"};   // scopes()[0] == default
+        if (!memory::path_for(memory::Scope::Project).empty())
+            return {"project", "user"};   // project writable → normal order
+        return {"user"};                   // project unavailable → user is default
     }
 
     mt::MemoryAppendResult append(const mt::MemoryAppendRequest& req) override {
@@ -83,37 +248,59 @@ public:
         if (!scope)
             return mt::MemoryAppendResult{.error = "unknown scope '" + req.scope + "'"};
 
+        // Smart scope: the shell defaults an omitted `scope` to scopes()[0]
+        // ("project" when writable), so a fact that's plainly about the HUMAN
+        // — "my name is…", "I use fish" — lands in project by default and then
+        // bleeds into every repo. suggest_scope() reads the fact text; on a
+        // CONFIDENT user signal against a project write we correct it and say
+        // so in the note. We only ever redirect project→user this way (never
+        // the reverse, and never when project was genuinely intended for a
+        // codebase fact): the risk is one-directional — a personal fact
+        // escaping into shared project memory is the harm; a project fact in
+        // user memory is merely narrow. An UNAVAILABLE user scope is left
+        // alone (append's own guard handles reachability).
+        std::string smart_note;
+        if (*scope == memory::Scope::Project) {
+            const auto hint = memory::suggest_scope(req.text);
+            if (hint.confident() && hint.scope == memory::Scope::User
+                && !memory::path_for(memory::Scope::User).empty()) {
+                *scope = memory::Scope::User;
+                smart_note = "scope→user (" + hint.reason + ")";
+            }
+        }
+
         memory::AppendOptions opts;
         opts.pinned        = req.pinned;
         opts.tags          = req.tags;
         opts.supersedes_id = req.supersedes_id;
-        const auto r = memory::append(*scope, req.text, opts);
+        const auto r = mem_root([&](const maya::unlocked& cap) {
+            return memory::append(cap, *scope, req.text, opts);
+        });
 
         // Bridge the agentty result onto the mcp result. Named designated
         // initialisers so a renamed/removed field is a compile error rather
         // than a silent miscopy; the static_assert above catches size drift.
+        std::string note = r.note;
+        if (!smart_note.empty())
+            note = note.empty() ? smart_note : (smart_note + "; " + note);
         return mt::MemoryAppendResult{
             .id      = r.id,
             .error   = r.error,
-            .note    = r.note,
+            .note    = note,
             .rolled  = r.rolled,
             .deduped = r.deduped,
         };
     }
 
     std::size_t forget_by_id(const std::string& id) override {
-        return memory::forget_by_id(id);
+        return mem_root([&](const maya::unlocked& cap) { return memory::forget_by_id(cap, id); });
     }
     std::size_t forget_by_substring(const std::string& needle) override {
-        return memory::forget_by_substring(needle);
+        return mem_root([&](const maya::unlocked& cap) { return memory::forget_by_substring(cap, needle); });
     }
     std::vector<mt::MemoryRecord> preview_forget(const std::string& needle) override {
         std::vector<mt::MemoryRecord> out;
-        // The wipe shell calls preview_forget("") to enumerate a scope; the
-        // native forget refused an empty needle. Treat empty as "no preview"
-        // (the wipe shell only uses the call's existence, not its contents).
-        if (needle.empty()) return out;
-        for (const auto& r : memory::preview_forget_by_substring(needle)) {
+        for (const auto& r : mem_root([&](const maya::unlocked& cap) { return memory::preview_forget_by_substring(cap, needle); })) {
             mt::MemoryRecord m;
             m.id     = r.id;
             m.text   = r.text;
@@ -127,12 +314,26 @@ public:
         return out;
     }
 
+    std::optional<std::size_t> preview_wipe(const std::string& scope) override {
+        auto s = memory::parse_scope(scope);
+        if (!s || memory::path_for(*s).empty()) return std::nullopt;
+        return mem_root([&](const maya::unlocked& cap) { return memory::load_all(cap, *s).size(); });
+    }
+
     std::optional<std::size_t> wipe(const std::string& scope) override {
         auto s = memory::parse_scope(scope);
         if (!s) return std::nullopt;
-        return memory::wipe(*s);
+        return mem_root([&](const maya::unlocked& cap) { return memory::wipe(cap, *s); });
     }
 };
+
+// The agentty CallContext the dispatcher put in cap::Request::host, handed
+// back by mcp-cpp in Call::host. A call that did not come through
+// DynamicDispatch (an MCP client over mcp-serve) has none: an empty one.
+const CallContext& context_of(const mt::Call& call) {
+    static const CallContext kNone{};
+    return call.host ? *static_cast<const CallContext*>(call.host) : kNone;
+}
 
 // ── SkillResolver ──────────────────────────────────────────────────────
 //   Backs the skill tool. The shell returns whatever string load() yields
@@ -144,12 +345,14 @@ public:
 //   with the available-skills recovery hint.
 class AgenttySkillResolver final : public mt::SkillResolver {
 public:
-    std::optional<std::string> load(const std::string& name, std::string& err) override {
-        const auto* s = skills::find(name);
+    std::optional<std::string> load(const mt::Call& call, const std::string& name,
+                                    std::string& err) override {
+        const Io io = IoAccess::grant();   // a tool body, on a tool worker
+        const auto s = skills::find(io, name);
         if (!s) {
             std::ostringstream avail;
             bool first = true;
-            for (const auto& sk : skills::all()) {
+            for (const auto& sk : skills::all(io)) {
                 avail << (first ? "" : ", ") << sk.name;
                 first = false;
             }
@@ -158,233 +361,257 @@ public:
             else        err += " — no skills are installed in this workspace";
             return std::nullopt;
         }
-        if (!skills::note_activated(s->name)) {
+        // "Already active" comes from the set the dispatch derived from the
+        // visible transcript (skills::active::Scope, installed by run_tool)
+        // — this runs on a worker and has no Thread of its own. Derived, not
+        // remembered: a body /compact summarised away is not active, so the
+        // model gets it again instead of being pointed at a tool_result that
+        // is no longer there.
+        if (context_of(call).skill_active(s->name)) {
             return "Skill '" + s->name + "' is already active in this "
                    "session — its instructions are in an earlier tool_result. "
                    "Refer to that instead of re-loading.";
         }
-        return skills::activation_payload(*s);
+        return skills::activation_payload(io, *s);
     }
 };
 
-// ── DocRetriever ───────────────────────────────────────────────────────
-//   Backs search_docs. Runs agentty's full SOTA RAG pipeline (hybrid
-//   BM25+dense fused, wide-pool rerank, compress, optional RAG-Fusion query
-//   expansion) and returns flat passages. The `mode` string carries the
-//   rich provenance the native tool printed in its header (root path,
-//   reranked, +N query variants) so no signal is lost when the shell
-//   renders the result.
+// ── DocRetriever ───────────────────────────────────────────────
+//   Backs search_docs. Runs agentty's full RAG pipeline (rag-cpp) and returns
+//   flat passages. The funnel, as actually wired in src/rag/adapter.cpp:
+//
+//     sources:  docs folder + skills + memory, with MCP resources opt-in
+//     retrieve: BM25 plus probed Ollama dense retrieval, weighted RRF fusion
+//     optional: PRF, GraphRAG, CRAG, HyDE, and multi-query are explicit modes
+//     rerank:   deterministic feature rerank + MMR + adjacent-hit stitch
+//     compress: query-focused spans under one aggregate output budget
+//     persist:  validated manifest + incremental docs/code refresh
+//
+//   The `mode` string carries the rich provenance (root path, mode,
+//   reranked, +N variants, confidence) so no signal is lost when the
+//   shell renders the result.
+// Map a persisted store::RagConfig onto a live rag::Config, preserving the
+// infra fields the picker never exposes (docs root) from the given base
+// (env-derived) config.
+static ::agentty::rag::Config rag_config_from_settings(
+        const store::RagConfig& s, ::agentty::rag::Config base) {
+    base.skills          = s.skills;
+    base.memory          = s.memory;
+    base.mcp_resources   = s.mcp_resources;
+    base.contextual      = s.contextual;
+    base.dedup           = s.dedup;
+    base.mmr             = s.mmr;
+    base.stitch          = s.stitch;
+    base.autocut         = s.autocut;
+    base.mmr_lambda          = s.mmr_lambda;
+    base.dedup_threshold     = s.dedup_threshold;
+    base.autocut_sensitivity = s.autocut_sensitivity;
+    base.dense_weight        = s.dense_weight;
+    base.bm25_weight         = s.bm25_weight;
+    base.prf             = s.prf;
+    base.corrective      = s.corrective;
+    base.graph           = s.graph;
+    base.expand          = s.expand;
+    base.hyde            = s.hyde;
+    base.fusion          = s.fusion;
+    base.adaptive_fusion = s.adaptive_fusion;
+    base.persist         = s.persist;
+    base.learn           = s.learn;
+    base.trace           = s.trace;
+    base.proactive          = s.proactive;
+    base.proactive_min_conf = s.proactive_min_conf;
+    base.proactive_bytes    = s.proactive_bytes;
+
+    // Embeddings. An empty backend id means the user never opened the pane,
+    // so the env-derived embed config stands untouched.
+    if (!s.embed_backend.empty()) {
+        namespace eb = ::agentty::rag::embed;
+        auto& e = base.embed;
+        e.backend = eb::backend_from_id(s.embed_backend);
+        if (!s.embed_model.empty())      e.model          = s.embed_model;
+        if (!s.embed_host.empty())       e.host           = s.embed_host;
+        if (s.embed_port != 0)           e.port           = s.embed_port;
+        e.tls            = s.embed_tls;
+        e.path           = s.embed_path;
+        e.model_path     = s.embed_model_path;
+        e.tokenizer_path = s.embed_tokenizer_path;
+        e.dim            = s.embed_dim;
+        // The credential never round-trips through settings.json; it is
+        // fetched from the keystore/sealed store keyed by endpoint.
+        if (eb::needs_api_key(e.backend)) {
+            if (auto key = eb::load_key(eb::endpoint_key(e)); !key.empty())
+                e.api_key = std::move(key);
+        }
+    }
+    return base;
+}
+
+// A single process-wide Retriever backs both the search_docs tool and the
+// proactive pre-turn path. Function-local static ⇒ constructed on first use
+// (after the app has set cwd / env), destroyed at exit. On first construction
+// we fold in any persisted RAG settings (the RAG picker) so the user's saved
+// config wins over the env-derived defaults; if the user has never touched the
+// picker (configured=false) the env config stands.
+static ::agentty::rag::Retriever& shared_retriever() {
+    static ::agentty::rag::Retriever r;
+    // Fold in persisted RAG picker settings exactly once, on first use.
+    static const bool configured_once = [] {
+        try {
+            // First use is always on a tool or retriever worker.
+            auto s = persistence::load_settings(IoAccess::grant());
+            if (s.rag.configured)
+                r.apply_config(rag_config_from_settings(s.rag, r.snapshot_config()));
+        } catch (...) { /* best-effort; env config stands */ }
+        return true;
+    }();
+    (void)configured_once;
+    return r;
+}
+
+} // namespace (anonymous)
+
+// Live-apply a RagConfig to the process-wide retriever. SYNCHRONOUS: it takes
+// the retriever's mutex, may re-probe the embedder (a network dial) and
+// cold-rebuilds the engines. Never call it from a reducer — the TUI reaches it
+// only through cmd::apply_rag_settings, which runs it as an effect on the
+// kernel's isolated pool, so update stays pure and the kernel owns the thread.
+void rag_apply_settings_now(const store::RagConfig& s) {
+    auto& r = shared_retriever();
+    r.apply_config(rag_config_from_settings(s, r.snapshot_config()));
+}
+
+RagEmbedStatus rag_embed_status(Io) {
+    RagEmbedStatus out;
+    try {
+        const auto s = shared_retriever().embed_status();
+        using S = ::agentty::rag::Retriever::EmbedStatus::State;
+        out.state = s.state == S::Ready       ? RagEmbedStatus::State::Ready
+                  : s.state == S::Unavailable ? RagEmbedStatus::State::Unavailable
+                                              : RagEmbedStatus::State::Unprobed;
+        out.dim        = s.dim;
+        out.latency_ms = s.latency_ms;
+        out.reason     = s.reason;
+        out.describe   = s.describe;
+    } catch (...) {
+        out.state  = RagEmbedStatus::State::Unavailable;
+        out.reason = "retriever unavailable";
+    }
+    return out;
+}
+
+RagProbeOutcome rag_probe_embedder(const store::RagConfig& s, const std::string& api_key) {
+    namespace eb = ::agentty::rag::embed;
+    RagProbeOutcome out;
+    try {
+        // Build the candidate config WITHOUT touching the live retriever: the
+        // user is testing a config they have not committed, and a failed probe
+        // must not degrade the retrieval they currently have working.
+        ::agentty::rag::Config base;
+        eb::apply_env(IoAccess::grant(), base.embed);
+        auto cfg = rag_config_from_settings(s, base);
+        if (!api_key.empty()) cfg.embed.api_key = api_key;
+        // Never trust a carried-over dimension: measuring it is the point.
+        cfg.embed.dim = 0;
+
+        auto r = eb::probe(cfg.embed);
+        if (const auto* ok = std::get_if<eb::ProbeOk>(&r)) {
+            out.ok         = true;
+            out.dim        = ok->dim;
+            out.latency_ms = ok->latency_ms;
+        } else {
+            out.error = std::get<eb::ProbeErr>(r).why;
+        }
+    } catch (const std::exception& e) {
+        out.error = e.what();
+    } catch (...) {
+        out.error = "unknown error while probing";
+    }
+    return out;
+}
+
+// Prompt teardown of the retriever's background warm. Without this the warm
+// worker is only stopped when the function-local `static Retriever` is
+// destroyed at process exit (after main returns), which blocked ^C for 4–10 s
+// while an in-flight embed pass finished. Called early in main()'s teardown.
+void rag_shutdown() {
+    try { shared_retriever().shutdown(); } catch (...) { /* best-effort */ }
+}
+
+
+namespace {
+
 class AgenttyDocRetriever final : public mt::DocRetriever {
 public:
     std::vector<mt::DocPassage>
     retrieve(const mt::DocQuery& q, std::string& mode, std::string& err) override {
-        std::vector<mt::DocPassage> out;
-        try {
-            auto root = resolve_docs_root();
-            if (root.empty()) {
-                err = "no knowledge directory configured. Set AGENTTY_DOCS_DIR "
-                      "to a folder of documents (markdown/text/etc.) to enable "
-                      "search_docs, or create ./docs.";
-                return out;
-            }
-
-            const rag::EmbedConfig embed = embed_config_from_env();
-            std::string root_str = root.string();
-
-            static std::mutex mu;
-            static rag::Corpus corpus;
-            static std::string indexed_root;
-
-            std::lock_guard<std::mutex> lock(mu);
-            if (indexed_root != root_str) {
-                corpus.build(root, embed);
-                indexed_root = root_str;
-            }
-
-            rag::CorpusSource docs_source("docs", corpus, embed);
-            rag::KnowledgeRouter router;
-            router.add(std::shared_ptr<rag::KnowledgeSource>(
-                &docs_source, [](rag::KnowledgeSource*) {}));
-
-            // OPT-IN second source: index this session's MCP `resources/*`
-            // and fuse them with the docs folder. Built once (process-wide,
-            // lazy) and reused. Enabled by AGENTTY_RAG_MCP=1; with no MCP
-            // configured the source self-indexes to empty and costs nothing.
-            std::shared_ptr<rag::McpResourceSource> mcp_source;
-            if (mcp_resources_enabled()) {
-                mcp_source = mcp_resource_source(embed);
-                if (mcp_source)
-                    router.add(std::shared_ptr<rag::KnowledgeSource>(
-                        mcp_source, mcp_source.get()));  // aliasing: shares ownership
-            }
-
-            const std::size_t pool_k =
-                std::max<std::size_t>(static_cast<std::size_t>(q.k) * 5, 30);
-
-            std::size_t variant_count = 0;
-            rag::Context ctx;
-            ctx.query = q.query;
-            if (expand_enabled()) {
-                rag::ExpandConfig ecfg = expand_config_from_env(embed);
-                auto queries = rag::expand_query(ecfg, q.query);
-                if (queries.size() > 1) variant_count = queries.size() - 1;
-                // Multi-query fusion over the docs corpus. When an MCP source
-                // is active, fold its best-of hits in via the router so the
-                // two sources still fuse (the docs side keeps RAG-Fusion).
-                auto fused = docs_source.retrieve_fused(queries, pool_k);
-                if (mcp_source) {
-                    auto extra = mcp_source->retrieve(q.query, pool_k);
-                    fused.insert(fused.end(), extra.begin(), extra.end());
-                }
-                ctx = rag::Context::from_hits(q.query, std::move(fused));
-            } else {
-                ctx = rag::Context::from_hits(
-                    q.query, router.retrieve(q.query, pool_k));
-            }
-
-            rag::Pipeline pipe;
-            pipe.add(std::make_shared<rag::RerankStage>(static_cast<std::size_t>(q.k)))
-                .add(std::make_shared<rag::CompressStage>(/*target_chars=*/600));
-            ctx = pipe.run(std::move(ctx));
-
-            std::string mode_str = corpus.has_embeddings() ? "hybrid" : "BM25-only";
-            mode_str += ", reranked";
-            if (variant_count > 0)
-                mode_str += ", +" + std::to_string(variant_count) + " query variants";
-            mode_str += " from " + root_str;
-            mode = std::move(mode_str);
-
-            for (const auto& c : ctx.chunks) {
-                if (!c.hit.chunk) continue;
-                mt::DocPassage p;
-                p.source = c.hit.source ? std::string{c.hit.source->name()}
-                                        : std::string{"docs"};
-                p.path       = c.hit.chunk->path;
-                p.line_start = c.hit.chunk->line_start;
-                p.line_end   = c.hit.chunk->line_end;
-                p.score      = c.hit.score;
-                p.text       = std::string{c.text()};
-                out.push_back(std::move(p));
-            }
-            return out;
-        } catch (const std::exception& e) {
-            err = std::string{"search_docs failed: "} + e.what();
-            return {};
-        } catch (...) {
-            err = "search_docs failed";
-            return {};
-        }
+        return run_(q, mode, err);
     }
 
 private:
-    static fs::path resolve_docs_root() {
-        if (const char* env = std::getenv("AGENTTY_DOCS_DIR"))
-            if (env[0] != '\0') return fs::path{env};
-        std::error_code ec;
-        auto cwd = fs::current_path(ec);
-        if (ec) return {};
-        auto docs = cwd / "docs";
-        if (fs::is_directory(docs, ec)) return docs;
-        auto kb = cwd / ".agentty" / "knowledge";
-        if (fs::is_directory(kb, ec)) return kb;
-        return {};
-    }
-
-    static rag::EmbedConfig embed_config_from_env() {
-        rag::EmbedConfig cfg;
-        if (const char* m = std::getenv("AGENTTY_EMBED_MODEL"); m && m[0] != '\0')
-            cfg.model = m;
-        else
-            cfg.model = "nomic-embed-text";
-        if (const char* h = std::getenv("AGENTTY_OLLAMA_HOST"); h && h[0] != '\0') {
-            std::string hs{h};
-            if (auto colon = hs.rfind(':'); colon != std::string::npos) {
-                cfg.host = hs.substr(0, colon);
-                try {
-                    int p = std::stoi(hs.substr(colon + 1));
-                    if (p > 0 && p <= 65535) cfg.port = static_cast<std::uint16_t>(p);
-                } catch (const std::exception& e) { util::dbglog("rag.embed_endpoint.port", e.what()); /* keep default port */ }
-                catch (...) { util::dbglog("rag.embed_endpoint.port", "non-std exception"); }
-            } else {
-                cfg.host = hs;
-            }
+    static std::vector<mt::DocPassage>
+    run_(const mt::DocQuery& q, std::string& mode, std::string& err) {
+        std::vector<mt::DocPassage> out;
+        auto res = shared_retriever().retrieve(q.query, q.k);
+        if (!res.error.empty()) { err = res.error; return out; }
+        mode = res.mode;
+        // A successful search that matched NOTHING is not a failure — but a
+        // bare empty result makes "corpus is irrelevant" indistinguishable
+        // from "index empty / Ollama down / no docs configured". Fold a short
+        // reason into the MODE label (which the shell renders as context, not
+        // as an error) so the model/user can tell why. err is left empty: a
+        // genuine failure already comes back via res.error above.
+        if (res.passages.empty()) {
+            mode = res.mode.empty()
+                 ? "no matches (no docs indexed — set AGENTTY_DOCS_DIR, or none "
+                   "of your skills/memory matched)"
+                 : ("no matches (" + res.mode + ")");
+            return out;
         }
-        return cfg;
-    }
-
-    static bool expand_enabled() {
-        const char* v = std::getenv("AGENTTY_RAG_EXPAND");
-        if (!v || v[0] == '\0') return false;
-        std::string s{v};
-        return s != "0" && s != "false" && s != "FALSE" && s != "False";
-    }
-
-    // OPT-IN: fold MCP `resources/*` into the search_docs corpus. Off unless
-    // AGENTTY_RAG_MCP is truthy AND an MCP config is present (cheap probe).
-    static bool mcp_resources_enabled() {
-        const char* v = std::getenv("AGENTTY_RAG_MCP");
-        if (!v || v[0] == '\0') return false;
-        std::string s{v};
-        if (s == "0" || s == "false" || s == "FALSE" || s == "False") return false;
-        return mcp::mcp_config_present();
-    }
-
-    // Process-wide, lazily-built MCP resource source. The list/read seams are
-    // bound to the mcp:: free functions; the RAG layer itself stays MCP-free.
-    // Rebuilt when the server's tool/resource generation changes.
-    static std::shared_ptr<rag::McpResourceSource>
-    mcp_resource_source(const rag::EmbedConfig& embed) {
-        static std::mutex mu;
-        static std::shared_ptr<rag::McpResourceSource> src;
-        static unsigned long built_gen = ~0UL;
-
-        std::lock_guard<std::mutex> lock(mu);
-        unsigned long gen = mcp::mcp_generation();
-        if (!src) {
-            auto list_fn = [] {
-                std::vector<rag::McpResourceSource::ResourceRef> refs;
-                for (auto& r : mcp::mcp_resources()) {
-                    std::string label = !r.title.empty() ? r.title
-                                      : !r.name.empty()  ? r.name : r.uri;
-                    refs.push_back({r.uri, std::move(label)});
-                }
-                return refs;
-            };
-            auto read_fn = [](const std::string& uri) -> std::optional<std::string> {
-                std::string err;
-                return mcp::mcp_read_resource(uri, err);
-            };
-            src = std::make_shared<rag::McpResourceSource>(
-                "mcp", std::move(list_fn), std::move(read_fn), embed);
-            built_gen = gen;
-        } else if (gen != built_gen) {
-            src->refresh();          // resource set changed → reindex on next use
-            built_gen = gen;
+        out.reserve(res.passages.size());
+        for (auto& p : res.passages) {
+            mt::DocPassage d;
+            d.source     = std::move(p.source);
+            d.path       = std::move(p.path);
+            d.line_start = p.line_start;
+            d.line_end   = p.line_end;
+            d.score      = p.score;
+            d.text       = std::move(p.text);
+            out.push_back(std::move(d));
         }
-        return src;
+        return out;
     }
+};
 
-    static rag::ExpandConfig expand_config_from_env(const rag::EmbedConfig& embed) {
-        rag::ExpandConfig cfg;
-        cfg.host = embed.host;
-        cfg.port = embed.port;
-        if (const char* m = std::getenv("AGENTTY_RAG_EXPAND_MODEL"); m && m[0])
-            cfg.model = m;
-        else if (const char* gm = std::getenv("AGENTTY_MODEL"); gm && gm[0])
-            cfg.model = gm;
-        else
-            cfg.model = "llama3.2";
-        cfg.n = 4;
-        if (const char* ns = std::getenv("AGENTTY_RAG_EXPAND_N"); ns && ns[0]) {
-            try {
-                int n = std::stoi(ns);
-                if (n < 1) n = 1;
-                if (n > 8) n = 8;
-                cfg.n = static_cast<std::size_t>(n);
-            } catch (const std::exception& e) { util::dbglog("rag.expand_n.env", e.what()); /* keep default */ }
-            catch (...) { util::dbglog("rag.expand_n.env", "non-std exception"); }
+
+// ── CodeRetriever ──────────────────────────────────────────
+//   definition-aware source chunks; BM25 is always available and a bounded
+//   Ollama probe enables dense retrieval. A pruned 4,000-file manifest detects
+//   drift, and small edit sets update only changed files.
+class AgenttyCodeRetriever final : public mt::DocRetriever {
+public:
+    // Opportunistic queries (structural zero-hit leads, over-budget ordering)
+    // must never trigger a cold code-index build — only explicit search_code
+    // calls pay that. Warm ⇔ index live in memory or persisted on disk.
+    bool warm() const override { return shared_retriever().code_warm(); }
+
+    std::vector<mt::DocPassage>
+    retrieve(const mt::DocQuery& q, std::string& mode, std::string& err) override {
+        std::vector<mt::DocPassage> out;
+        auto res = shared_retriever().retrieve_code(q.query, q.k);
+        if (!res.error.empty()) { err = res.error; return out; }
+        mode = res.mode;
+        out.reserve(res.passages.size());
+        for (auto& p : res.passages) {
+            mt::DocPassage d;
+            d.source     = std::move(p.source);
+            d.path       = std::move(p.path);
+            d.line_start = p.line_start;
+            d.line_end   = p.line_end;
+            d.score      = p.score;
+            d.text       = std::move(p.text);
+            out.push_back(std::move(d));
         }
-        return cfg;
+        return out;
     }
 };
 
@@ -398,14 +625,230 @@ private:
 //   The native task tool's `display_description` arg is UI-only and stays in
 //   the shell's schema; run() never needs it.
 
+// Where an agent persona came from — the provenance the task card surfaces
+// so a repo-injected agent is never invisible (transparency, not a gate).
+enum class AgentOrigin : std::uint8_t { Builtin, User, Project };
+
 struct AgentType {
     std::string_view              name;
     bool                          read_only;
     std::string_view              role;
     std::vector<std::string_view> allow;   // empty ⇒ all (minus task)
+    smart::ModelRole              model_role = smart::ModelRole::Utility;
+    // Where this persona came from. Built-ins and the user's OWN
+    // ~/.agentty/agents are trusted-by-authorship; a PROJECT-scoped agent
+    // rode in on the workspace (a clone could inject its role prompt), so the
+    // task card surfaces "project agent" — not a block, just so an injected
+    // persona is never invisible. Mirrors the plugins picker's scope badge.
+    AgentOrigin                   origin = AgentOrigin::Builtin;
 };
 
+// ── User-defined agents (.agentty/agents/*.md) ─────────────────────
+// A user agent is a markdown file whose BODY becomes the role prompt and
+// whose frontmatter configures the sandbox:
+//
+//     ---
+//     description: Reviews SQL migrations for safety.   # for the catalog
+//     tools: read grep glob list_dir                     # allowlist (opt)
+//     read-only: true                                    # effect gate (opt)
+//     ---
+//     Your role: MIGRATION REVIEWER. Check every migration for …
+//
+// Roots (project first, then user; first name wins — mirrors commands/
+// skills): .agentty/agents, .agents/agents, .claude/agents, then the same
+// three under ~. Built-in types always win over a user agent of the same
+// name (a user file can't silently replace `general`).
+//
+// Storage note: AgentType's fields are string_views into `owned`. A
+// generation is immutable once published and never freed: a subagent holds
+// a `const AgentType&` across its whole (minutes-long) run, so each
+// generation keeps the one it replaced alive through `prev`. Bounded in
+// practice by how often the agent files change on disk.
+struct UserAgentStore {
+    std::vector<std::unique_ptr<AgentType>> types;   // stable addresses
+    std::deque<std::string>                 owned;   // element-stable backing
+    std::string                             sig = "\x01uninit";
+    std::shared_ptr<const UserAgentStore>   prev;
+};
+
+// Leaked on purpose, like the generations it holds.
+maya::published<const UserAgentStore>& user_agent_gen() {
+    static auto* g = new maya::published<const UserAgentStore>;
+    return *g;
+}
+
+// Frontmatter subset parser (same lenient rules as commands/skills).
+void parse_user_agent(const std::string& raw, const std::string& slug,
+                      AgentOrigin origin, UserAgentStore& store) {
+    auto trim = [](std::string_view v) -> std::string {
+        std::size_t b = 0, e = v.size();
+        while (b < e && std::isspace(static_cast<unsigned char>(v[b]))) ++b;
+        while (e > b && std::isspace(static_cast<unsigned char>(v[e-1]))) --e;
+        return std::string{v.substr(b, e - b)};
+    };
+
+    std::string body = raw, tools_line;
+    bool read_only = false;
+    std::istringstream in(raw);
+    std::string line;
+    if (std::getline(in, line) && trim(line) == "---") {
+        std::streampos body_start{-1};
+        while (std::getline(in, line)) {
+            if (trim(line) == "---") { body_start = in.tellg(); break; }
+            auto colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string k = trim(line.substr(0, colon));
+            std::string v = trim(line.substr(colon + 1));
+            if      (k == "tools")     tools_line = v;
+            else if (k == "read-only") read_only = (v == "true" || v == "1" || v == "yes");
+            // description consumed by extra_agent_types' caller via the
+            // task-tool description; not needed in the AgentType itself.
+        }
+        if (body_start != std::streampos(-1))
+            body = trim(raw.substr(static_cast<std::size_t>(body_start)));
+    }
+    body = trim(body);
+    if (body.empty()) return;
+
+    auto at = std::make_unique<AgentType>();
+    store.owned.push_back(slug);
+    at->name = store.owned.back();
+    store.owned.push_back(std::move(body));
+    at->role = store.owned.back();
+    at->read_only = read_only;
+    at->model_role = read_only ? smart::ModelRole::Utility
+                               : smart::ModelRole::Implementation;
+    at->origin = origin;
+    // Whitespace-split tools allowlist — each token stored owned.
+    std::istringstream ts(tools_line);
+    std::string tok;
+    while (ts >> tok) {
+        store.owned.push_back(tok);
+        at->allow.push_back(store.owned.back());
+    }
+    store.types.push_back(std::move(at));
+}
+
+// Scan the six roots; publish a new generation when the mtime signature
+// moves. Returns the current generation.
+std::shared_ptr<const UserAgentStore> user_agents() {
+    namespace fs = std::filesystem;
+    std::string sig;
+    auto scan_root = [&](const fs::path& root) {
+        std::error_code ec;
+        if (!fs::is_directory(root, ec) || ec) return;
+        auto mt = fs::last_write_time(root, ec);
+        if (!ec)
+            sig += std::to_string(static_cast<long long>(
+                       mt.time_since_epoch().count())) + ";";
+        std::vector<fs::path> files;
+        for (fs::directory_iterator it(root, ec), end; !ec && it != end;
+             it.increment(ec))
+            if (it->path().extension() == ".md") files.push_back(it->path());
+        std::sort(files.begin(), files.end());
+        for (const auto& p : files) {
+            std::error_code fec;
+            auto fmt = fs::last_write_time(p, fec);
+            if (!fec)
+                sig += std::to_string(static_cast<long long>(
+                           fmt.time_since_epoch().count())) + ";";
+        }
+    };
+    auto home = agentty::util::home_dir_or_empty();
+    // Root ladder from scope::plan (Locus-major, Dialect-minor): project
+    // .agentty ▷ .agents ▷ .claude ▷ the same three under ~. Same order the
+    // hand-written array had; project stays cwd-relative. Built-ins still win
+    // over any user agent of the same name (enforced in the load loop below).
+    // Each root carries its scope origin so the task card can surface a
+    // "project agent" tag (a repo-shipped persona is never invisible).
+    std::vector<std::pair<fs::path, AgentOrigin>> roots;
+    {
+        scope::Env env;
+        env.home             = home;
+        env.user_native_base = ::agentty::util::user_root();
+        env.project_root     = fs::path{"."};
+        env.project_writable = true;
+        const scope::Layout& layout = ::agentty::config::kAgentsLayout;
+        for (const scope::Source& src : scope::plan(layout, env)) {
+            const AgentOrigin org = src.locus == scope::Locus::User
+                ? AgentOrigin::User : AgentOrigin::Project;
+            roots.emplace_back(src.base / layout.leaf, org);
+        }
+    }
+    for (const auto& [r, org] : roots) if (!r.empty()) scan_root(r);
+
+    auto cur = user_agent_gen().current();
+    if (cur && cur->sig == sig) return cur;
+    auto next = std::make_shared<UserAgentStore>();
+    next->sig  = sig;
+    next->prev = cur;
+    UserAgentStore& store = *next;
+    // std::deque never moves existing elements on push_back, so the
+    // string_views taken into owned.back() stay valid even for SSO-small
+    // strings (a vector would move the inline bytes on reallocation).
+    constexpr std::size_t kMaxUserAgents = 32;
+    constexpr std::size_t kMaxAgentBytes = 32 * 1024;
+    static const char* kBuiltins[] = {"explorer","reviewer","tester",
+                                      "coder","general"};
+    for (const auto& [r, org] : roots) {
+        if (r.empty()) continue;
+        std::error_code ec;
+        if (!fs::is_directory(r, ec) || ec) continue;
+        std::vector<fs::path> files;
+        for (fs::directory_iterator it(r, ec), end; !ec && it != end;
+             it.increment(ec))
+            if (it->path().extension() == ".md") files.push_back(it->path());
+        std::sort(files.begin(), files.end());
+        for (const auto& p : files) {
+            if (store.types.size() >= kMaxUserAgents) break;
+            const std::string slug = p.stem().string();
+            if (slug.empty() || slug[0] == '.') continue;
+            bool taken = false;
+            for (auto* b : kBuiltins) if (slug == b) { taken = true; break; }
+            for (const auto& t : store.types)
+                if (t->name == slug) { taken = true; break; }
+            if (taken) continue;
+            std::error_code sec;
+            auto sz = fs::file_size(p, sec);
+            if (sec || sz == 0 || sz > kMaxAgentBytes) continue;
+            std::ifstream f(p, std::ios::binary);
+            if (!f) continue;
+            std::string raw(static_cast<std::size_t>(sz), '\0');
+            f.read(raw.data(), static_cast<std::streamsize>(sz));
+            raw.resize(static_cast<std::size_t>(f.gcount()));
+            parse_user_agent(raw, slug, org, store);
+        }
+        if (store.types.size() >= kMaxUserAgents) break;
+    }
+    std::shared_ptr<const UserAgentStore> out = std::move(next);
+    // Lost a race to another scan: theirs saw the same files, use it.
+    if (!user_agent_gen().publish_if(cur, out))
+        if (auto won = user_agent_gen().current()) return won;
+    return out;
+}
+
+// Names of the discovered user agents (for the task tool's enum).
+std::vector<std::string> user_agent_names() {
+    const auto store = user_agents();
+    std::vector<std::string> out;
+    out.reserve(store->types.size());
+    for (const auto& t : store->types) out.emplace_back(t->name);
+    return out;
+}
+
+} // namespace (anonymous)
+
+std::vector<std::string> project_agent_names() {
+    std::vector<std::string> out;
+    for (const auto& t : user_agents()->types)
+        if (t->origin == AgentOrigin::Project) out.emplace_back(t->name);
+    return out;
+}
+
+namespace {
+
 const AgentType& resolve_agent_type(std::string_view t) {
+    using MR = smart::ModelRole;
     static const std::vector<AgentType> kTypes = {
         {"explorer", true,
          "Your role: EXPLORER. Map and explain the codebase region the task "
@@ -413,43 +856,98 @@ const AgentType& resolve_agent_type(std::string_view t) {
          "precise map: the key files, the functions/types involved, how they "
          "connect, and any gotchas. Cite exact file paths and line numbers. "
          "You are READ-ONLY \xe2\x80\x94 never modify anything.",
-         {"read", "grep", "glob", "list_dir", "find_definition", "web_search",
-          "web_fetch"}},
+         {"read", "grep", "glob", "list_dir", "find_definition", "repo_map",
+          "web_search", "web_fetch"}, MR::Utility},
         {"reviewer", true,
          "Your role: REVIEWER. Critically review the code or change the task "
          "names. Look for bugs, edge cases, race conditions, security issues, "
          "and deviations from the surrounding conventions. Return findings as "
          "a prioritised list (blocker / major / minor / nit), each with the "
          "exact file:line and a concrete fix suggestion. You are READ-ONLY.",
-         {"read", "grep", "glob", "list_dir", "find_definition", "git_diff",
-          "git_log", "git_status"}},
+         {"read", "grep", "glob", "list_dir", "find_definition", "repo_map",
+          "git_diff", "git_log", "git_status"}, MR::Strategic},
         {"tester", false,
          "Your role: TESTER. Reproduce, run, and diagnose. Build/run the "
          "relevant tests or commands the task names, read the failures, and "
          "report the root cause with the exact failing assertion and the "
          "file:line that produced it. Prefer running over guessing. Do NOT "
          "rewrite production code \xe2\x80\x94 only run, read, and diagnose.",
-         {"read", "grep", "glob", "list_dir", "find_definition", "bash",
-          "diagnostics", "git_diff", "git_status"}},
+         {"read", "grep", "glob", "list_dir", "find_definition", "repo_map",
+          "shell", "diagnostics", "git_diff", "git_status"}, MR::Implementation},
         {"coder", false,
          "Your role: CODER. Implement the change the task names end-to-end: "
          "read the relevant code first, make the edits, and verify they build/"
          "compile if a build command is obvious. Follow the surrounding "
          "conventions exactly. Report what you changed (files + a one-line "
          "summary each) and whether it built.",
-         {}},
+         {}, MR::Implementation},
         {"general", false,
          "Your role: GENERAL. Complete the delegated task end-to-end using "
          "whatever tools fit, then report the outcome.",
-         {}},
+         {}, MR::Implementation},
     };
     for (const auto& a : kTypes)
         if (a.name == t) return a;
+    // User-defined agents (.agentty/agents/*.md): consulted after the
+    // built-ins so a user file can never shadow `general` etc. The
+    // returned reference points into a generation that is never freed (see
+    // UserAgentStore) so it outlives the whole subagent run.
+    for (const auto& ua : user_agents()->types)
+        if (ua->name == t) return *ua;
     return kTypes.back();
 }
 
-std::string subagent_system_prompt(const AgentType& type) {
-    std::string base = provider::anthropic::default_system_prompt();
+// Did the subagent's OWN report say it failed?
+//
+// The exit path can't always tell. An agent that burns its turn budget, or
+// decides mid-way that it can't proceed, often still returns a well-formed
+// final message — and that message says, in plain words, that it did not do
+// the work. Reporting that as a success is worse than useless: the caller
+// (a model or a human skimming a ✓) acts on an outcome that never happened.
+// This was observed exactly once and was enough: a coder subagent reported
+// "Task NOT completed … made zero edits", and the UI rendered ✓ DONE.
+//
+// Deliberately CONSERVATIVE — a false positive downgrades a good run to a
+// warning, so we only match unambiguous self-declarations, anchored near the
+// start of the report where a verdict lives. Prose like "the previous
+// approach did not work, so I fixed it" must NOT trip this, which is why
+// there is no bare "did not work" / "failed" pattern.
+[[nodiscard]] bool subagent_self_reported_failure(const std::string& report) {
+    // Only inspect the opening of the report: a verdict is stated up front
+    // (an "## OUTCOME" header, a first line). Scanning the whole body would
+    // match narration of intermediate failures that were later fixed.
+    constexpr std::size_t kVerdictWindow = 400;
+    std::string head = report.substr(0, std::min(report.size(), kVerdictWindow));
+    for (auto& c : head) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // Strip markdown emphasis so "**Task NOT completed**" matches too.
+    std::string flat;
+    flat.reserve(head.size());
+    for (char c : head)
+        if (c != '*' && c != '_' && c != '`') flat.push_back(c);
+
+    static constexpr std::string_view kVerdicts[] = {
+        "task not completed",
+        "task was not completed",
+        "not completed",
+        "task incomplete",
+        "i was unable to complete",
+        "unable to complete the task",
+        "i could not complete",
+        "could not complete the task",
+        "no files were created or modified",
+        "made zero edits",
+        "zero edits",
+        "i made no changes",
+        "no changes were made",
+        "i did not make any changes",
+    };
+    for (auto v : kVerdicts)
+        if (flat.find(v) != std::string_view::npos) return true;
+    return false;
+}
+
+std::string subagent_system_prompt(Io io, const AgentType& type) {
+    std::string base = provider::default_system_prompt(io, /*lean=*/true);
     base += "\n\n<subagent>\n";
     base += std::string{type.role};
     base +=
@@ -458,16 +956,24 @@ std::string subagent_system_prompt(const AgentType& type) {
         "questions \xe2\x80\x94 work fully autonomously from the task prompt alone. "
         "Use your tools to investigate and act, then STOP calling tools and "
         "write your final report as plain text.\n\n"
+        "DECIDE, DON'T STALL: if a detail is ambiguous, make the most "
+        "reasonable assumption, proceed, and NOTE the assumption in your report "
+        "\xe2\x80\x94 do not abort a whole delegation over a minor gap. Only stop early if "
+        "the task is genuinely impossible or self-contradictory.\n\n"
         "Your final message is the ONLY thing the parent receives \xe2\x80\x94 not your "
-        "transcript, not your tool output. So the report must stand alone. "
-        "Structure it as:\n"
+        "transcript, not your tool output. So the report must stand alone and be "
+        "TIGHT \xe2\x80\x94 the parent is paying context for every line. No preamble, no "
+        "recap of what you were asked, no narration of your steps. Structure it "
+        "as:\n"
         "  \xe2\x80\xa2 A one-line OUTCOME (what you found / did).\n"
-        "  \xe2\x80\xa2 The key details the parent needs to act, with exact file:line "
-        "references where relevant.\n"
-        "  \xe2\x80\xa2 Anything you could NOT determine, stated plainly.\n"
-        "Be concrete and cite evidence (paths, line numbers, command output). "
-        "Do not pad. If the task is impossible or underspecified, say so and "
-        "explain what's missing rather than guessing.";
+        "  \xe2\x80\xa2 Only the details the parent needs to ACT, with exact file:line "
+        "references where relevant \xe2\x80\x94 evidence, not prose.\n"
+        "  \xe2\x80\xa2 Any assumption you made, and anything you could NOT determine, "
+        "stated plainly.\n"
+        "Cite evidence (paths, line numbers, command output); never invent a "
+        "path or line you didn't see. Do not pad or hedge. If the task is "
+        "impossible or underspecified beyond a reasonable assumption, say so and "
+        "explain exactly what's missing rather than guessing.";
     if (type.read_only)
         base += "\n\nYou are READ-ONLY: you have no tools that modify files, "
                 "run commands, or reach the network. Investigate and report only.";
@@ -494,35 +1000,329 @@ std::string summarize_call(const ToolUse& tc) {
     return s;
 }
 
-StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
+// What one run did, for `agentty run`. The task tool passes none.
+struct RunStats {
+    std::string model;          // wire id of the last request
+    int  max_turns = 0;         // overrides the role's budget when > 0
+    std::optional<std::chrono::seconds> wall;   // overrides the wall clock
+    bool read_only  = false;    // drop write/exec/net tools, refuse them if called
+    bool no_network = false;    // drop net tools, refuse them if called
+    std::optional<Effort> effort;   // --effort; unset keeps subagents' default (off)
+    bool events = false;        // stream reasoning/text as --events jsonl lines
+    // Earlier conversation to continue (--resume). The new prompt is appended.
+    std::vector<Message> history;
+    // The whole conversation when the run ends, to save it.
+    Thread final_thread;
+    int  turns = 0;
+    int  tool_calls = 0;
+    int  tool_errors = 0;
+    long long input_tokens = 0;
+    long long output_tokens = 0;
+    long long last_input_tokens = 0;   // prompt size of the last request
+    long long context_window = 0;      // what the request was sized for
+    bool context_full = false;         // the window ran out
+    bool cancelled = false;
+    bool deadline_hit = false;
+    bool budget_exhausted = false;
+    bool doomed = false;
+    std::string last_error;     // provider/stream error, if the run ended on one
+    std::string answer;         // the model's final text, no banners
+};
+
+// Whether a run may use a tool. Used both for the list the model sees and
+// again when it calls one, so an unlisted tool can't run anyway.
+bool subagent_tool_allowed(const tools::ToolDef& t, const AgentType& type,
+                           const RunStats* stats) {
+    if (t.name.value == "task") return false;
+    if (!type.allow.empty()) {
+        bool listed = false;
+        for (auto n : type.allow)
+            if (n == t.name.value) { listed = true; break; }
+        if (!listed) return false;
+    }
+    const bool read_only  = type.read_only || (stats && stats->read_only);
+    const bool no_network = stats && stats->no_network;
+    if (read_only || no_network) {
+        tools::EffectSet eff = t.effects;
+        if (const auto* sp = tools::spec::lookup(t.name.value)) eff = sp->effects;
+        using tools::Effect;
+        if (read_only && (eff.has(Effect::WriteFs) || eff.has(Effect::Exec)))
+            return false;
+        if ((read_only || no_network) && eff.has(Effect::Net)) return false;
+    }
+    return true;
+}
+
+provider::StreamResult run_one_completion(Thread& thread,
+                              const subagent::Config& cfg,
                               const AgentType& type,
-                              std::string& log, std::string& err_out) {
-    namespace ap = provider::anthropic;
-    ap::Request req;
-    req.model         = cfg.model;
-    req.system_prompt = subagent_system_prompt(type);
-    req.auth          = auth::fresh_auth_header(cfg.auth);
-    req.max_tokens    = 32000;
+                              std::string& log,
+                              const CallContext& ctx,
+                              const subagent::RunRegistration* run_reg = nullptr,
+                              RunStats* stats = nullptr) {
+    // Provider-agnostic request — the generic shape every transport accepts.
+    // fresh_auth_header refreshes the ANTHROPIC OAuth token from disk; on any
+    // other backend it would CLOBBER the provider's key with Anthropic
+    // credentials, so gate it on the active provider kind.
+    provider::Request req;
+    // Model routing: read-only roles (explorer/reviewer) do grunt work —
+    // read/grep/map/summarise — a small model handles as well as a flagship
+    // for a fraction of the cost, so route them to a cheaper model the ACTIVE
+    // provider offers. Write-capable roles (coder/tester/general) keep the
+    // parent model, because their edits must match the parent's quality. The
+    // router never routes UP, so a single-model or Opus-only provider sees no
+    // change.
+    //
+    // It can now route ACROSS providers, but only for a slot the user pinned
+    // on another endpoint and only with cross_provider_roles on — see
+    // RoleConfig. Off (the default) it behaves exactly as it always did.
+    //
+    // Layer 3b: when Smart Mode subagent routing is on, resolve each worker's
+    // model by its ROLE (explorer→Utility, reviewer→Strategic, coder/tester/
+    // general→Implementation) through the shared resolver instead — honouring
+    // the user's pinned slots. Off ⇒ exactly the existing tier auto-router.
+    //
+    // The provider this delegation dispatches to, when it is NOT the active
+    // one. Empty is the normal case. Set by whichever branch resolves the
+    // role below, then validated once after both.
+    std::string route_provider;
+    if (cfg.smart.subagent_routing()) {
+        // resolve_subagent_role hard-clamps effort to the parent's (Effort::None
+        // here, so effort stays off — a worker never thinks harder than the
+        // turn that spawned it). Model routing is unchanged: explorer→Utility,
+        // reviewer→Strategic, coder/tester/general→Implementation.
+        smart::RoleProfile role_prof =
+            smart::resolve_subagent_role(type.model_role, cfg.model,
+                                         Effort::None, cfg.candidates,
+                                         cfg.smart, cfg.provider);
+        req.model  = role_prof.model;
+        // provider::Request.effort is the WIRE string; convert the clamped
+        // Effort through the resolved model's capabilities (None → "", i.e.
+        // effort off — which is the case today since parent_effort is None).
+        req.effort = std::string(effort_wire_for(
+            role_prof.effort, resolved_caps(role_prof.model)));
+        route_provider = role_prof.provider;
+    } else {
+        // Read-only roles are routed DOWN from the parent, but only to the
+        // Mid tier, not the cheapest thing on the provider.
+        //
+        // The floor used to be Cheap, which on Anthropic means every
+        // explorer ran on Haiku while the parent was Opus — tier 1 doing the
+        // investigation for tier 3. Exploring a codebase is not mechanical:
+        // it is deciding which of 40 grep hits matter, and a weaker model
+        // spends its turns reading the wrong files and then summarises them
+        // confidently. Zed does not downgrade at all; Mid is the middle
+        // position.
+        //
+        // Through role_target, so a pinned --model is honoured here too.
+        // This branch used to call cheapest_capable_model directly, which
+        // meant turning Smart Mode OFF did not stop routing -- it fell
+        // through to this router instead (#70).
+        if (type.read_only) {
+            auto t = smart::role_target(cfg.model, cfg.candidates, cfg.smart,
+                                        ModelCapabilities::Tier::Mid,
+                                        &cfg.smart.utility, cfg.provider);
+            req.model      = std::move(t.model);
+            route_provider = std::move(t.provider);
+        } else {
+            req.model = cfg.model;
+        }
+    }
+
+    // ONE place decides whether a cross-provider target is reachable.
+    //
+    // Both branches above can name a foreign provider, and a resolver that
+    // says "run on Groq" is only correct if something here can actually
+    // dispatch there -- otherwise it is a model id sent to an endpoint that
+    // never heard of it, which is a 404 on every delegation. Checking it
+    // once, after both branches, is why the two cannot disagree.
+    if (!route_provider.empty() && !cfg.stream_to) {
+        AGT_LOG(Smart, Debug, "route.cross_provider_unavailable",
+                "provider={} model={} falling back to active",
+                route_provider, req.model);
+        req.model = agentty::cheapest_capable_model(
+            agentty::wire_model_id(cfg.model), cfg.candidates,
+            ModelCapabilities::Tier::Mid);
+        route_provider.clear();
+    }
+    // A subagent NEVER needs the 1M/2M extended-context window: it does a
+    // bounded burst (8k output, tool results capped to 8 KiB, up to 24 turns)
+    // that comfortably fits the base 200K window. Carrying the parent's
+    // picker-only `[1m]`/`[2m]` marker here would make the transport send the
+    // entitlement-gated `context-1m-2025-08-07` beta, which 400s with
+    // "long context beta is not yet available for this ..." on accounts
+    // without the entitlement (or when the flagship parent's cheaper subagent
+    // model isn't 1M-eligible) — killing the whole fan-out. Strip the marker
+    // unconditionally: robust (never trips the beta) and economical (subagents
+    // pay for the window they actually use). cheapest_capable_model already
+    // returns a clean id when it finds a cheaper model; this also covers the
+    // "kept the parent" fallback and the write-role (cfg.model) path.
+    req.model         = agentty::wire_model_id(req.model);
+    // `agentty run --effort`: the user asked this run to think. Clamped to
+    // what the routed model takes; visible so --events can show it.
+    if (stats && stats->effort) {
+        req.effort = std::string(effort_wire_for(*stats->effort, resolved_caps(req.model)));
+        req.show_reasoning = !req.effort.empty();
+    }
+    // --events wants the reasoning a model produces even without --effort
+    // (deepseek-r1 and friends always think). Not on Anthropic: there it
+    // only means anything with effort on, which is handled above.
+    if (stats && stats->events && ctx.depth == 0
+        && provider::active().kind != provider::Kind::Anthropic)
+        req.show_reasoning = true;
+    // The model's real context window, from the SAME catalog the model was
+    // routed out of.
+    //
+    // AFTER wire_model_id(), deliberately. Catalog ids carry picker-only
+    // markers (`[1m]`/`[2m]`) that the wire id strips, so matching before
+    // the strip missed on exactly the rows that have a marker — and matching
+    // after means one id shape on both sides.
+    //
+    // This was never set here at all, so every subagent turn (and every
+    // `agentty run`, which is this same loop) dispatched with
+    // context_window=0: the Ollama transport then could not size
+    // options.num_ctx and fell back to the daemon's ~2k/4k default,
+    // truncating exactly the long runs headless exists for. The main reducer
+    // fills it at cmd_factory.cpp:954; two loops that both build requests
+    // must both fill them in, which is the asymmetry the comment below has
+    // been warning about.
+    for (const auto& mi : cfg.candidates) {
+        if (agentty::wire_model_id(mi.id.value) == req.model) {
+            req.context_window = mi.context_window;
+            break;
+        }
+    }
+    // A catalog MISS is not "unknown window", it is "this id is not in the
+    // list we happen to hold" — which is ordinary: the live catalog moves
+    // (a `-m claude-opus-4-5` pinned in settings outlives its row), a custom
+    // host may serve ids no catalog lists, and an offline run has only the
+    // bundled floor. Leaving 0 there pushes a WRONG answer downstream (the
+    // Ollama transport reads 0 as "use my tiny default"), so fall back to
+    // the model's own known window instead of a hole.
+    if (req.context_window <= 0)
+        req.context_window = agentty::catalog_context_window_for(req.model);
+    req.system_prompt = subagent_system_prompt(IoAccess::grant(), type);   // subagent runs on a tool worker
+    // Smart-channel telemetry, the delegation half of the trace. Without this
+    // a debug log showed ONLY the Strategic turn: subagents dispatch on a
+    // worker thread through the same transport, so their requests appeared
+    // (if at all) as anonymous wire traffic with no role, no parent, and no
+    // indication they were delegations at all. One line per worker launch,
+    // naming the role, the model the router actually chose, and whether
+    // Layer 3b or the tier auto-router chose it.
+    AGT_LOG(Smart, Debug, "route.subagent",
+            "agent={} role_routing={} pinned={} read_only={} candidates={} "
+            "parent_model={} model={} route_provider={}",
+            type.name,
+            cfg.smart.subagent_routing() ? 1 : 0,
+            cfg.smart.pinned_model ? 1 : 0,
+            type.read_only ? 1 : 0,
+            cfg.candidates.size(),
+            cfg.model,
+            req.model,
+            route_provider.empty() ? "active" : route_provider);
+    // Resolve auth LIVE from the ACTIVE provider through the central
+    // credential layer — the same discipline as launch_stream's
+    // auth_snapshot(). cfg.auth is a snapshot taken at the last
+    // update_auth/switch_provider; a background OAuth refresh or an
+    // in-picker account switch between then and this subagent's launch
+    // would ship a stale (or the WRONG provider's) credential — the exact
+    // 401 class fixed on the main turn path. cfg.auth remains the fallback
+    // for oauth_native/local providers whose transports own their own tokens
+    // (resolve returns empty there).
+    //
+    // SKIPPED when route_provider is set: this resolves the ACTIVE
+    // provider's credential, which is the wrong one for a delegation going
+    // somewhere else. stream_to resolves the target's own auth — one
+    // credential lookup per request, done by whoever knows the destination.
+    if (route_provider.empty()) {
+        const auto sel = provider::active();
+        const std::string pid =
+            sel.kind == provider::Kind::OpenAI
+                ? sel.openai_endpoint.label
+                : std::string{provider::default_provider_id()};
+        auth::AuthHeader live = provider::credentials::resolve(IoAccess::grant(), pid);   // subagent, on a tool worker
+        const bool live_real = !auth::bearer_token(live).empty()
+            || std::holds_alternative<auth::BearerHeader>(live);
+        req.auth = live_real
+                 ? (sel.kind == provider::Kind::Anthropic
+                        ? auth::fresh_auth_header(IoAccess::grant(), ctx.capability(), live)
+                        : std::move(live))
+                 : (sel.kind == provider::Kind::Anthropic
+                        ? auth::fresh_auth_header(IoAccess::grant(), ctx.capability(), cfg.auth)
+                        : cfg.auth);
+    }
+    // A subagent's job is to investigate and return a CONCISE standalone
+    // report — not to emit a 32k-token essay. The parent's default is 16k;
+    // 8k is ample for a report yet caps the per-turn output cost of a
+    // fan-out of parallel subagents (each turn otherwise billed at the full
+    // ceiling). The wrap-up nudge already forces a tight final report.
+    req.max_tokens    = 8192;
     req.messages      = thread.messages;
+    // Same preflight the main loop runs. The subagent assembles its own
+    // request — its own thread, its own tool advertisement, its own
+    // trimming — so a defect here is invisible to cmd_factory's audit.
+    //
+    // That asymmetry is the class this codebase keeps relearning: the
+    // reasoning toggle honoured by 3 transports of 4, `args={}` seeded by
+    // the main reducer and not the subagent loop. Two loops that both
+    // build requests must both check them, or the one nobody watches is
+    // where the malformed payload comes from.
+    {
+        const auto audit = app::cmd::audit_wire(req.messages);
+        AGT_LOG(Model, Debug, "wire.shape",
+                "loop=subagent messages={} tool_calls={} tool_results={} "
+                "images={} last_role={} defects={}",
+                audit.message_count, audit.tool_call_count,
+                audit.tool_result_count, audit.image_part_count,
+                audit.last_role == Role::User ? "user" : "assistant",
+                audit.defects.size());
+        for (const auto& d : audit.defects) {
+            AGT_LOG(Model, Warn, "wire.defect",
+                    "loop=subagent kind={} message_index={} detail={}",
+                    app::cmd::describe(d.kind), d.message_index,
+                    d.detail.empty() ? "-" : d.detail);
+        }
+    }
+    req.cancel        = std::make_shared<http::CancelToken>();
+    // Stable per-subagent conversation identity so the shared prefix
+    // (heavy system prompt + tool schemas + accumulated tool results) is
+    // PROMPT-CACHED across this subagent's whole run instead of being
+    // re-encoded from scratch every turn. Keyed on the agent role + the task
+    // prompt so each spawned subagent gets its own stable cache lane and a
+    // fan-out of parallel explorers doesn't collide. Without this the single
+    // biggest subagent cost — re-sending the same large prefix every turn —
+    // pays full price on every one of those turns.
+    {
+        std::string key = "subagent:";
+        key += type.name;
+        key += ':';
+        // A short stable digest of the task prompt (FNV-1a) keeps the key
+        // bounded and distinct per delegated task.
+        std::uint64_t h = 0xcbf29ce484222325ULL;
+        for (unsigned char c : thread.messages.empty()
+                                   ? std::string_view{}
+                                   : std::string_view{thread.messages.front().text}) {
+            h ^= c; h *= 0x00000100000001B3ULL;
+        }
+        char buf[17];
+        std::snprintf(buf, sizeof(buf), "%016llx",
+                      static_cast<unsigned long long>(h));
+        key += buf;
+        req.session_key = std::move(key);
+    }
 
     auto allowed = [&](const tools::ToolDef& t) -> bool {
-        if (t.name.value == "task") return false;
-        if (!type.allow.empty()) {
-            bool listed = false;
-            for (auto n : type.allow)
-                if (n == t.name.value) { listed = true; break; }
-            if (!listed) return false;
-        }
-        if (type.read_only) {
-            tools::EffectSet eff = t.effects;
-            if (const auto* sp = tools::spec::lookup(t.name.value)) eff = sp->effects;
-            using tools::Effect;
-            if (eff.has(Effect::WriteFs) || eff.has(Effect::Exec) || eff.has(Effect::Net))
-                return false;
-        }
-        return true;
+        return subagent_tool_allowed(t, type, stats);
     };
-    for (const auto& t : tools::wire_tools()) {
+    std::string_view newest_user;
+    for (auto it = req.messages.rbegin(); it != req.messages.rend(); ++it) {
+        if (it->role == Role::User && !it->is_proactive_context()) {
+            newest_user = it->text;
+            break;
+        }
+    }
+    for (const auto* tool : tools::select_wire_tools(newest_user)) {
+        const auto& t = *tool;
         if (!allowed(t)) continue;
         req.tools.push_back({t.name.value, t.description, t.input_schema,
                              t.eager_input_streaming});
@@ -531,96 +1331,301 @@ StopReason run_one_completion(Thread& thread, const subagent::Config& cfg,
     Message asst;
     asst.role = Role::Assistant;
     StopReason stop = StopReason::Unspecified;
-    std::string cur_tool_json;
+    // Usage can arrive more than once per request (start + delta), each one
+    // cumulative, so keep the biggest and add it once at the end.
+    long long req_in = 0, req_out = 0;
+    if (stats) stats->model = req.model;
+    std::unordered_map<std::string, std::string> tool_json;
+    // A StreamError that arrives MID-STREAM, after a 200 and some content.
+    //
+    // The transport-level error paths (non-2xx status, connection failure)
+    // are reported by StreamResult, but a provider can also answer 200 OK,
+    // stream a few deltas, and then emit `{"error": {...}}` in place of a
+    // finish_reason. The decoder handles that shape correctly — and this
+    // loop's StreamError arm was EMPTY, so the message was decoded and
+    // thrown away. The turn then returned whatever partial text had arrived
+    // as if it had completed normally.
+    //
+    // Captured here and folded into last_error after the stream, so the
+    // subagent reports a failure instead of a truncated success.
+    std::string stream_error;
 
-    auto pump = [&] {
+    auto find_tool = [&](const ToolCallId& id) -> ToolUse* {
+        auto it = std::find_if(asst.tool_calls.begin(), asst.tool_calls.end(),
+            [&](const ToolUse& tc) { return tc.id == id; });
+        return it == asst.tool_calls.end() ? nullptr : &*it;
+    };
+
+    // Throttled feed pump: a fast model streams hundreds of text deltas
+    // per second, and every progress::emit crosses a thread boundary as a
+    // ToolExecProgress Msg. ~12 fps is indistinguishable on the card and
+    // keeps a parallel fan-out of subagents from flooding the UI queue.
+    auto last_pump = std::chrono::steady_clock::now()
+                   - std::chrono::milliseconds(100);
+    auto pump = [&](bool force = false) {
+        auto now = std::chrono::steady_clock::now();
+        if (!force && now - last_pump < std::chrono::milliseconds(80)) return;
+        last_pump = now;
         std::string snap = log;
         if (!asst.text.empty()) {
             snap += "\n  \xe2\x96\xb8 ";
             snap += asst.text;
         }
-        progress::emit(snap);
+        ctx.emit(snap);
     };
 
-    ap::run_stream_sync(std::move(req),
-        [&](Msg m) {
+    // Reasoning and answer text as --events lines; top-level run only.
+    TextEvents text_events(stats && stats->events && ctx.depth == 0,
+                           stats ? stats->turns + 1 : 0);
+    auto sink = [&](Msg m) {
             auto* sm = std::get_if<msg::StreamMsg>(&m);
             if (!sm) return;
             std::visit([&](auto&& e) {
                 using T = std::decay_t<decltype(e)>;
                 if constexpr (std::same_as<T, StreamTextDelta>) {
                     asst.text += e.text;
+                    text_events.text(e.text);
                     pump();
+                } else if constexpr (std::same_as<T, StreamThinkingDelta>) {
+                    text_events.reasoning(e.text);
                 } else if constexpr (std::same_as<T, StreamToolUseStart>) {
                     ToolUse tc;
                     tc.id     = e.id;
                     tc.name   = e.name;
+                    // Seed `{}`, same as the main reducer. A tool with no
+                    // required arguments (`ls`, `git_status`) streams zero
+                    // argument deltas on every OpenAI-compatible wire, so
+                    // `args` stayed null and the dispatcher below read that
+                    // as "args failed to parse" — a working call reported to
+                    // the model as malformed. Absent arguments are an empty
+                    // object; only a FAILED parse may leave args null.
+                    tc.args   = json::object();
                     tc.status = ToolUse::Pending{std::chrono::steady_clock::now()};
                     asst.tool_calls.push_back(std::move(tc));
-                    cur_tool_json.clear();
+                    tool_json[e.id.value].clear();
                 } else if constexpr (std::same_as<T, StreamToolUseDelta>) {
-                    cur_tool_json += e.partial_json;
+                    tool_json[e.id.value] += e.partial_json;
                 } else if constexpr (std::same_as<T, StreamToolUseEnd>) {
-                    if (!asst.tool_calls.empty() && !cur_tool_json.empty()) {
+                    ToolUse* tc = find_tool(e.id);
+                    auto json_it = tool_json.find(e.id.value);
+                    const std::string partial = json_it == tool_json.end()
+                                              ? std::string{} : json_it->second;
+                    // An empty or whitespace-only buffer means the model sent
+                    // no arguments at all — `args` keeps the `{}` seeded at
+                    // Start. Providers also send a literal "" for this; treat
+                    // both the same way rather than parsing "" and failing.
+                    const bool blank =
+                        partial.find_first_not_of(" \t\r\n") == std::string::npos;
+                    if (tc && !blank) {
                         try {
-                            asst.tool_calls.back().args = json::parse(cur_tool_json);
-                        } catch (const std::exception& ex) {
-                            util::dbglog("subagent.tool_args.parse", ex.what());
-                            /* leave null; marked failed below */
+                            tc->args = json::parse(partial);
                         } catch (...) {
-                            util::dbglog("subagent.tool_args.parse", "non-std exception");
+                            // Truncated/unbalanced args JSON (stream cut, weak
+                            // model). Salvage by synthesising the missing
+                            // closers — but NEVER when the cut landed inside a
+                            // string VALUE: the repaired JSON would parse fine
+                            // and silently run a tool with a half-written body.
+                            if (!util::ended_inside_string(partial)) {
+                                try {
+                                    tc->args = json::parse(
+                                        util::close_partial_json(partial));
+                                    ::agentty::util::dbglog("subagent.tool_args.repaired",
+                                                 partial);
+                                } catch (...) {
+                                    ::agentty::util::dbglog("subagent.tool_args.parse",
+                                                 partial);
+                                }
+                            } else {
+                                ::agentty::util::dbglog("subagent.tool_args.mid_string",
+                                             partial);
+                            }
                         }
+                        // `cmd` → `command` etc. for the subagent's dispatcher
+                        // too — it funnels through the same ArgReader, but the
+                        // permission card and output panel read the canonical
+                        // key. (Laguna S 2.1 `cmd` finding.)
+                        if (tc) (void)::agentty::app::detail::canonify_tool_args(
+                                   tc->name.value, tc->args);
                     }
-                    cur_tool_json.clear();
-                    if (!asst.tool_calls.empty()) {
-                        log += "\n  \xe2\x9a\x99 ";
-                        log += summarize_call(asst.tool_calls.back());
-                        pump();
+                    tool_json.erase(e.id.value);
+                    if (tc) {
+                        log += "\n  ⚙ ";
+                        log += summarize_call(*tc);
+                        pump(/*force=*/true);
                     }
                 } else if constexpr (std::same_as<T, StreamFinished>) {
                     stop = e.stop_reason;
+                } else if constexpr (std::same_as<T, StreamUsage>) {
+                    const long long in = static_cast<long long>(e.input_tokens)
+                        + e.cache_read_input_tokens + e.cache_creation_input_tokens;
+                    req_in  = std::max(req_in, in);
+                    req_out = std::max(req_out, static_cast<long long>(e.output_tokens));
                 } else if constexpr (std::same_as<T, StreamError>) {
-                    err_out = e.message;
-                    log += "\n  \xe2\x9a\xa0 error: " + e.message;
-                    pump();
+                    // StreamResult is authoritative for TRANSPORT failures
+                    // (non-2xx, dropped connection) — but it cannot see an
+                    // error the provider streams INSIDE a 200 in place of a
+                    // finish_reason. That shape used to land here and be
+                    // dropped, so the turn returned its partial text as if
+                    // it had completed. First error wins: a provider that
+                    // emits several while unwinding is best described by
+                    // whatever broke first.
+                    if (stream_error.empty()) stream_error = e.message;
                 }
             }, *sm);
-        });
+        };
+
+    // Route through the SAME provider dispatch the parent uses (installed
+    // at startup); fall back to the Anthropic transport when no seam is
+    // wired (tests that install only auth+model).
+    provider::StreamResult result;
+    auto cancel = req.cancel;
+    // Every source that can stop this stream, as callbacks. Zero threads,
+    // zero wakeups, and each fires the instant its source asks rather than at
+    // the next tick of a poll.
+    //
+    //   run_reg   this specific run was asked to stop by
+    //             subagent::shutdown_running(), which then WAITS for it.
+    //             That is what closes the crash window rather than just
+    //             narrowing it: without something that waits, main() can
+    //             unwind while this thread is still inside cfg.stream(),
+    //             which holds the provider objects by reference.
+    //   parent    the user pressed escape, or the app is shutting down —
+    //             whatever the enclosing tool run published.
+    //
+    // This used to be a jthread polling both every 20 ms. A probe can only be
+    // polled; the tool layer publishes its cancellation as stop_tokens now,
+    // so there is nothing left to poll. If an enclosing caller ever installs
+    // a bare probe with no tokens behind it, that source is simply not
+    // watched mid-stream — the turn loop still checks it between turns.
+    using StopCb = std::stop_callback<std::function<void()>>;
+    std::vector<std::unique_ptr<StopCb>> stop_cbs;
+    const auto trip = std::function<void()>{[cancel] { cancel->cancel(); }};
+    if (run_reg) stop_cbs.push_back(std::make_unique<StopCb>(run_reg->token(), trip));
+    for (const auto& t : ctx.cancel)
+        stop_cbs.push_back(std::make_unique<StopCb>(t, trip));
+    if (ctx.cancelled()
+        || (run_reg && run_reg->cancelled())) cancel->cancel();
+    if (!route_provider.empty() && cfg.stream_to) {
+        // A role pinned on another endpoint. stream_to resolves that
+        // provider's own credential before dispatching — see the auth block
+        // above for why this path skips the active-provider lookup.
+        result = cfg.stream_to(ctx.capability(), route_provider, std::move(req), sink);
+    } else if (cfg.stream) {
+        result = cfg.stream(ctx.capability(), std::move(req), sink);
+    } else {
+        provider::anthropic::AnthropicProvider p;
+        result = p.stream(ctx.capability(), std::move(req), sink);
+    }
+    // Deregister before anything else runs: the callbacks capture `cancel`,
+    // and a late stop must not trip it once the stream has already settled.
+    // stop_callback's destructor blocks until a callback already in flight on
+    // another thread has returned, so this is race-free by the standard.
+    stop_cbs.clear();
+    pump(/*force=*/true);   // flush the throttled tail
+    text_events.flush();
+    if (stats) {
+        stats->input_tokens  += req_in;
+        stats->output_tokens += req_out;
+        if (req_in > 0) stats->last_input_tokens = req_in;
+        stats->context_window = req.context_window;
+    }
+
+    // A provider that answered 200, streamed some deltas, then emitted
+    // `{"error": …}` instead of a finish_reason leaves `result` OK — the
+    // transport saw a clean 200 and a closed stream. Only the decoded event
+    // knows better, so promote it here, alongside the other post-stream
+    // corrections below.
+    //
+    // Without this the turn returned its partial text as a successful
+    // answer: the user sees a truncated reply with no indication anything
+    // went wrong, which is the worst possible reading of a failed request.
+    if (result.ok() && !stream_error.empty())
+        result = provider::StreamResult::failed(stream_error);
+
+    // An empty successful close is a transient transport failure. A max-token
+    // turn is also incomplete: partial prose/tool JSON is not a final report.
+    if (result.ok() && asst.text.empty() && asst.tool_calls.empty())
+        result = provider::StreamResult::failed(
+            "provider returned an empty completion");
+    if (result.ok() && (result.stop == StopReason::MaxTokens
+                        || stop == StopReason::MaxTokens)) {
+        // Cut off. Either the reply hit max_tokens, or prompt + reply ran
+        // into the context window (llama.cpp reports both as "length").
+        const long long used = req_in + req_out;
+        const bool window_full = req.context_window > 0
+            && req_out < req.max_tokens
+            && used >= static_cast<long long>(req.context_window) * 95 / 100;
+        if (window_full && stats) stats->context_full = true;
+        result = provider::StreamResult::failed(
+            window_full
+                ? "context window full: " + std::to_string(used) + " of "
+                      + std::to_string(req.context_window) + " tokens used, reply cut off"
+                : "reply cut off at the " + std::to_string(req.max_tokens)
+                      + "-token output limit");
+        result.stop = StopReason::MaxTokens;
+    }
 
     thread.messages.push_back(std::move(asst));
-    return stop;
+    return result;
 }
 
 class AgenttySubagentRunner final : public mt::SubagentRunner {
 public:
-    bool available() const override {
-        auto cfg = subagent::current();
-        if (!cfg.installed || cfg.model.empty() || auth::is_empty(cfg.auth))
-            return false;
-        if (subagent::current_depth() >= subagent::kMaxDepth)
-            return false;
-        return true;
+    std::vector<std::string> extra_agent_types() const override {
+        // User-authored .agentty/agents/*.md — discoverable in the task
+        // tool's agent_type enum. Names only; bodies load at resolve time.
+        return user_agent_names();
     }
 
-    std::string run(const mt::SubagentRequest& sreq, bool& is_error) override {
-        is_error = false;
+    std::string unavailable_reason(const mt::Call& call) const override {
+        const auto& ctx = context_of(call);
         auto cfg = subagent::current();
-        if (!cfg.installed || cfg.model.empty() || auth::is_empty(cfg.auth)) {
+        if (!cfg.installed)
+            return "subagent runtime was not installed; restart agentty with the current executable";
+        if (cfg.model.empty())
+            return "no model is selected for the active provider";
+        // Runtime dispatch is credential-aware itself: ChatGPT resolves its
+        // native OAuth store per request and local providers need no auth at
+        // all. Only the legacy direct-Anthropic fallback requires a non-empty
+        // header here.
+        if (!cfg.stream && auth::is_empty(cfg.auth))
+            return "no provider stream or fallback Anthropic credential is configured";
+        if (ctx.depth >= subagent::kMaxDepth)
+            return "subagent nesting depth limit reached (maximum "
+                 + std::to_string(subagent::kMaxDepth) + ")";
+        if (ctx.cancelled())
+            return "cancelled before the subagent started";
+        return {};
+    }
+
+    std::string run(const mt::Call& call, const mt::SubagentRequest& sreq,
+                    bool& is_error) override {
+        return run_with_stats(call, sreq, is_error, nullptr);
+    }
+
+    std::string run_with_stats(const mt::Call& call, const mt::SubagentRequest& sreq,
+                               bool& is_error, RunStats* stats) {
+        is_error = false;
+        // The enclosing call's context: its progress card, cancel and the
+        // depth/deadline of the subagents around it.
+        const CallContext& ctx = context_of(call);
+        auto cfg = subagent::current();
+        if (!cfg.installed || cfg.model.empty()
+            || (!cfg.stream && auth::is_empty(cfg.auth))) {
             is_error = true;
-            return "subagents are unavailable in this context (no model/auth wired)";
+            return "subagents are unavailable in this context (no model/stream wired)";
         }
-        if (subagent::current_depth() >= subagent::kMaxDepth) {
+        if (ctx.depth >= subagent::kMaxDepth) {
             is_error = true;
             return "subagent depth limit reached — a subagent cannot spawn "
                    "further subagents at this nesting level";
         }
 
-        subagent::push_depth();
-        struct DepthGuard { ~DepthGuard() { subagent::pop_depth(); } } depth_guard;
 
         const AgentType& type = resolve_agent_type(sreq.agent_type);
 
         Thread thread;
+        if (stats) thread.messages = stats->history;
         {
             Message user;
             user.role = Role::User;
@@ -629,67 +1634,538 @@ public:
         }
 
         int turns = 0;
-        std::string log = "\xe2\x97\x86 " + std::string{type.name} + " subagent\n";
+        std::string log = "\xe2\x97\x86 " + std::string{type.name} + " agent";
         std::string last_error;
-        while (turns < subagent::kMaxTurns) {
+        // Give this subagent its OWN read-dedup context for the whole run.
+        //
+        // `read` answers a repeat of the same (path, range) with "refer to
+        // the earlier tool_result" — true only for the context that received
+        // those bytes. Its memory is keyed by reader, so without this scope a
+        // subagent inherits the PARENT's entries and is refused files it has
+        // never seen. That is not theoretical: a coder subagent spent all 23
+        // of its turns re-requesting one file, got the sentinel every time,
+        // and made zero edits. RAII-restored so nesting can't leak the id.
+        //
+        // The id is a PROCESS-WIDE COUNTER, not `&thread`. A stack address
+        // looks unique and is not: subagents run on isolated worker threads,
+        // and sequential runs of the same role reuse the same stack, so
+        // `&thread` came out byte-identical every time (measured: six
+        // sequential threads, one address). Two explorers in a row therefore
+        // shared a context and the second was refused every file the first
+        // had read — reintroducing, for the sequential case, exactly the bug
+        // this scope exists to prevent.
+        static std::atomic<std::uint64_t> subagent_run_seq{0};
+        const std::string run_reader = "subagent:" + std::string{type.name} + ":"
+            + std::to_string(subagent_run_seq.fetch_add(1, std::memory_order_relaxed));
+        // Transient stream failures (429/529 brown-out, TLS reset, transport
+        // hiccup) are RETRIED with backoff instead of aborting the whole
+        // subagent — "task fails a lot" was mostly one flaky completion
+        // killing an otherwise healthy loop. Consecutive counter: any
+        // successful completion resets it.
+        constexpr int kMaxStreamRetries = 3;
+        int stream_failures = 0;
+        // Wall-clock ceiling for the WHOLE run, independent of turns.
+        //
+        // kMaxTurns bounds how many completions a subagent may take; it
+        // bounds nothing about how long each one takes. The per-stream
+        // budget is 30 min total with a 90 s idle timeout, and idle only
+        // fires on true silence — a gateway that dribbles a keepalive every
+        // 60 s and never finishes is "healthy" to every layer below. Stack
+        // the ladder up and the loop's real ceiling was 80 turns x 3 retries
+        // x 30 min, i.e. days. What the user sees is a `task` card that
+        // never comes back and a parent turn wedged behind it.
+        //
+        // 15 minutes is chosen against the work, not the transport: the
+        // per-role budgets assume an explorer converges in a handful of
+        // turns and a coder runs several build/fix cycles. A subagent still
+        // going at 15 minutes is not thorough, it is stuck — the same
+        // argument kMaxTurnsReadOnly makes about turn 40. Like the turn cap
+        // this is a CEILING, not a quota: a run that finishes in 20 s costs
+        // nothing, and only runs that would otherwise have hung pay it.
+        //
+        // On expiry the loop STOPS and reports what it has, exactly as the
+        // turn cap does — partial findings beat a hang, and the is_error
+        // flag below keeps it from rendering as a green success.
+        //
+        // Overridable by AGENTTY_SUBAGENT_MAX_SECONDS so the behaviour is
+        // TESTABLE. A 15-minute constant cannot be exercised by a test
+        // suite, and an untested stop path is one that quietly stops
+        // working — which is how the read-context scope regressed. The env
+        // var is read once per run; unset or unparseable means the default.
+        const auto max_wall_clock = [stats] {
+            if (stats && stats->wall) return *stats->wall;
+            if (const char* s = std::getenv("AGENTTY_SUBAGENT_MAX_SECONDS")) {
+                char* end = nullptr;
+                const long v = std::strtol(s, &end, 10);
+                if (end != s && v > 0 && v < 86'400)
+                    return std::chrono::seconds(v);
+            }
+            return std::chrono::seconds(15 * 60);
+        }();
+        // NESTED runs inherit the enclosing deadline rather than starting a
+        // fresh one — see subagent::DeadlineScope for why (kMaxDepth is 2, so
+        // a per-run clock would make the real bound depth x the advertised
+        // one). The thread-local itself lives in subagent.cpp, which is the
+        // TU allowed to hold it.
+        const auto own_deadline =
+            subagent::RunClock::now() + max_wall_clock;
+        const auto run_deadline =
+            ctx.deadline ? std::min(*ctx.deadline, own_deadline) : own_deadline;
+        // Publish this run so teardown can find it. Without this, shutdown
+        // asks the TOOL thread to stop (run_tool's probe) but nothing waits
+        // for the provider stream to unwind, and main() can return while
+        // this loop is still inside cfg.stream() — which holds the provider
+        // objects by reference off main's stack. The registration's
+        // destructor latches "done", which is what shutdown_running() waits
+        // on. See subagent::RunRegistration.
+        const subagent::RunRegistration run_reg;
+        // The context this run's own tool calls get: one level deeper, its
+        // own reader, the tighter deadline, and cancelled when either the
+        // parent call or this run is.
+        CallContext child = ctx;
+        // Copying a context drops its capability on purpose (a copy could
+        // outlive or out-travel the call). `child` does neither: it lives on
+        // this frame, inside the very call that proved the capability, on
+        // the same thread — so carry it over explicitly. Without this every
+        // provider/auth callback below throws "tool callback outside a
+        // dispatched call" and the subagent can never run.
+        child.cap.set(ctx.cap.get());
+        child.depth    = ctx.depth + 1;
+        child.reader   = run_reader;
+        child.deadline = run_deadline;
+        child.active_skills.clear();
+        child.cancel.push_back(run_reg.token());
+        bool deadline_hit = false;
+        // Repeat-failure breaker (same rule as the parent's doom-loop
+        // breaker): the identical tool call failing 3× means the loop is
+        // stuck — stop burning turns and report what we have.
+        std::unordered_map<std::string, int> failed_calls;
+        // The mirror of failed_calls: a tool that keeps SUCCEEDING with
+        // byte-identical arguments is looping too, and that case had no cap
+        // at all. Measured against a local model behind a private gateway:
+        // 80 identical successful `read` calls before the turn budget ran
+        // out — on a 22GB resident that is minutes of GPU time spent
+        // re-deriving an answer it already had.
+        //
+        // Threshold is higher than the failure one: a repeat that WORKS is
+        // weaker evidence (re-reading a file after an edit is normal), but
+        // six in a row without a text answer is not a strategy.
+        std::unordered_map<std::string, int> repeated_ok_calls;
+        bool doomed = false;
+        // Set once we've told the model it's out of budget and must write its
+        // final report NOW. Prevents a thorough agent from exploring straight
+        // into the turn cap and never emitting a report (the loop below then
+        // salvages a stale early narration line instead of a real answer).
+        bool wrapup_nudged = false;
+
+        // Turn budget for THIS role. A read-only sweep converges quickly; an
+        // implementation loop (edit → build → read errors → fix → re-run) is
+        // structurally longer, and starving it produces the "ran out of
+        // turns, made zero edits" report rather than the work.
+        const int max_turns = (stats && stats->max_turns > 0)
+                                  ? stats->max_turns
+                                  : subagent::max_turns_for(type.read_only);
+
+        while (turns < max_turns && !doomed) {
+            // Wall-clock stop, checked at the top of every turn. Placed here
+            // rather than in the while() condition so `deadline_hit` is set
+            // before the loop exits and the report below can say WHICH
+            // ceiling ended the run — "out of turns" and "out of time" call
+            // for different fixes from whoever reads it.
+            if (std::chrono::steady_clock::now() >= run_deadline) {
+                deadline_hit = true;
+                break;
+            }
+            // Shutdown asked us to stop. Checked here as well as inside the
+            // stream (via the cancel bridge) so a run between turns — not
+            // holding a stream at all — still leaves promptly instead of
+            // starting one more completion that teardown then waits on.
+            if (run_reg.cancelled()) break;
             ++turns;
-            log += (turns == 1 ? "" : "\n");
-            log += "\xe2\x80\xa2 turn " + std::to_string(turns);
-            progress::emit(log);
-            std::string err;
-            StopReason stop = run_one_completion(thread, cfg, type, log, err);
-            if (!err.empty()) last_error = err;
+            if (stats) {
+                stats->turns = turns - 1;   // completed so far; the next is turns
+                if (stats->events && ctx.depth == 0)
+                    emit_event({{"ev", "turn"}, {"turn", turns}});
+            }
+
+            // FINAL-TURN NUDGE: when the remaining budget is nearly spent,
+            // inject a synthetic user message ordering the model to stop
+            // running tools and write its report. Without this the agent
+            // spends its last completion on yet another tool call, hits the
+            // cap mid-investigation, and returns no final text at all.
+            //
+            // The lead time scales with the budget: one turn's warning is
+            // enough for a short read sweep, but a write role deep in an
+            // edit→build→fix cycle needs room to land what it started (finish
+            // the current edit, re-run the build) before summarising. Too
+            // early wastes budget; too late produces the very "ran out of
+            // turns with nothing to show" report this exists to prevent.
+            //
+            // The same nudge also fires on TIME. A subagent can be at turn 6
+            // of 80 and still out of budget — a few slow builds or a
+            // dribbling gateway is all it takes — and without this it hits
+            // the deadline mid-tool-call and returns no report at all, which
+            // is exactly the failure the turn-based nudge prevents. Two
+            // minutes is the same shape of lead: enough to land the current
+            // step and summarise, not enough to start something new.
+            const bool near_deadline =
+                std::chrono::steady_clock::now() + std::chrono::minutes(2)
+                    >= run_deadline;
+            const int wrapup_lead = max_turns >= 48 ? 3 : 1;
+            if (!wrapup_nudged
+                && (turns >= max_turns - wrapup_lead || near_deadline)
+                && !thread.messages.empty()
+                && thread.messages.back().role != Role::User) {
+                Message nudge;
+                nudge.role = Role::User;
+                nudge.text =
+                    "You are almost out of turn budget. Finish or abandon the "
+                    "step you are on — do not start anything new — then write "
+                    "your FINAL report as a plain text message: a complete, "
+                    "self-contained answer to the task using everything you "
+                    "have gathered so far. If you did not complete the task, "
+                    "say so plainly and state exactly what remains.";
+                thread.messages.push_back(std::move(nudge));
+                wrapup_nudged = true;
+            }
+
+            provider::StreamResult stream_result =
+                run_one_completion(thread, cfg, type, log, ctx, &run_reg, stats);
+
+            if (!stream_result.ok()) {
+                const std::string err = stream_result.error.value_or("stream failed");
+                last_error = err;
+                if (stats && provider::is_context_overflow(err)) stats->context_full = true;
+                const auto error_class = stream_result.cancelled()
+                    ? provider::ErrorClass::Cancelled
+                    : provider::classify_stream_error(err,
+                                                       stream_result.http_status);
+                const bool empty_completion =
+                    err == "provider returned an empty completion";
+                const bool retryable = !stream_result.non_replayable
+                    && (empty_completion
+                        || error_class == provider::ErrorClass::Transient
+                        || error_class == provider::ErrorClass::RateLimit);
+                // A partial assistant message can contain unpaired tool calls
+                // and must never be replayed on retry or reported as complete.
+                if (!thread.messages.empty()
+                    && thread.messages.back().role == Role::Assistant)
+                    thread.messages.pop_back();
+                if (!retryable || error_class == provider::ErrorClass::Cancelled
+                    || ctx.cancelled()) {
+                    is_error = true;
+                    if (error_class == provider::ErrorClass::Cancelled
+                        || ctx.cancelled())
+                        last_error = "subagent cancelled: " + err;
+                    break;
+                }
+                ++stream_failures;
+                if (stream_failures > kMaxStreamRetries) {
+                    log += "\n  ⚠ stream failed "
+                         + std::to_string(stream_failures) + "× — giving up: "
+                         + err;
+                    ctx.emit(log);
+                    break;
+                }
+                // A RETRY-AFTER MEASURED IN HOURS IS A QUOTA, NOT A BURST
+                // LIMIT. A burst limit clears in seconds and retrying is
+                // right; a plan quota does not clear until it resets, so
+                // every attempt is guaranteed to fail with the message the
+                // FIRST response already carried.
+                //
+                // Measured: Yolo-Auto's free tier answers
+                // `retry-after: 29410` (8h, to 00:00 UTC) with
+                // type=insufficient_quota. Clamping that to 30s turned "you
+                // are out until midnight" into three pointless waits and 95
+                // seconds of wall clock before giving up with the same text.
+                // Same reasoning as the interactive reducer — see
+                // kRetryAfterTerminalSeconds in provider/error_class.hpp.
+                if (stream_result.retry_after
+                    && stream_result.retry_after->count()
+                           > provider::kRetryAfterTerminalSeconds) {
+                    log += "\n  \xe2\x9a\xa0 " + err;
+                    ctx.emit(log);
+                    break;
+                }
+                // Honor server guidance, but cap it so a hostile/mistaken
+                // Retry-After cannot pin a task worker indefinitely.
+                constexpr auto kMaxRetryAfter = std::chrono::seconds{30};
+                auto wait = stream_result.retry_after
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::min(*stream_result.retry_after, kMaxRetryAfter))
+                    : provider::backoff_with_jitter(error_class,
+                                                    stream_failures - 1);
+                log += "\n  ↻ retry " + std::to_string(stream_failures)
+                     + "/" + std::to_string(kMaxStreamRetries)
+                     + " in " + std::to_string(wait.count()) + "ms (" + err + ")";
+                ctx.emit(log);
+                if (ctx.wait(wait, run_reg.token())) {
+                    is_error = true;
+                    if (stats) {
+                        stats->cancelled  = true;
+                        stats->turns      = turns;
+                        stats->last_error = err;
+                    }
+                    return "subagent cancelled while waiting to retry: " + err;
+                }
+                --turns;
+                continue;
+            }
+            stream_failures = 0;
+            last_error.clear();
 
             Message& asst = thread.messages.back();
             bool ran_a_tool = false;
             if (!asst.tool_calls.empty()) {
                 const auto now = std::chrono::steady_clock::now();
                 for (auto& tc : asst.tool_calls) {
+                    if (child.cancelled()) {
+                        is_error = true;
+                        last_error = "subagent cancelled before local tool execution";
+                        if (stats) stats->cancelled = true;
+                        doomed = true;
+                        break;
+                    }
                     if (tc.args.is_null()) {
+                        if (stats) { ++stats->tool_calls; ++stats->tool_errors; }
                         tc.status = ToolUse::Failed{now, now,
-                            "subagent tool args failed to parse"};
+                            "tool args failed to parse \xe2\x80\x94 re-emit the call "
+                            "with complete, valid JSON arguments"};
                         log += "\n    \xe2\x9c\x97 " + tc.name.value + ": bad args";
-                        progress::emit(log);
+                        ctx.emit(log);
+                        // A parse failure still counts as a tool ROUND-TRIP:
+                        // the model sees the error tool_result and can
+                        // re-emit. Without this the loop broke out on the
+                        // first bad-args call and the whole task died.
+                        ran_a_tool = true;
+                        continue;
+                    }
+                    // Only tools this run was offered may run. A model can
+                    // still name one it wasn't given (read-only, --no-network).
+                    if (const auto* def = tools::find(tc.name.value);
+                        def && !subagent_tool_allowed(*def, type, stats)) {
+                        if (stats) { ++stats->tool_calls; ++stats->tool_errors; }
+                        tc.status = ToolUse::Failed{now, now,
+                            "tool '" + tc.name.value + "' is not available in this run"};
+                        log += "\n    \xe2\x9c\x97 " + tc.name.value + ": not allowed";
+                        ctx.emit(log);
+                        emit_tool_event(tc.name.value, 0, false, "not allowed in this run",
+                                        tc.args.dump());
+                        ran_a_tool = true;
                         continue;
                     }
                     ran_a_tool = true;
-                    auto res = tool::DynamicDispatch::execute(tc.name.value, tc.args);
+                    const auto t_start = std::chrono::steady_clock::now();
+                    // The subagent's own context: deeper, its own reader and
+                    // deadline, the parent's card for live output (as before).
+                    CallContext tool_ctx = child;
+                    tool_ctx.active_skills = skills::active_in(::agentty::visible_text(thread));
+                    auto res = tool::DynamicDispatch::execute(child.capability(), tc.name.value, tc.args, tool_ctx);
+                    // Same tool.exec record the main loop emits, so a headless
+                    // `agentty run` and a subagent turn are as diagnosable as
+                    // an interactive one. A failing tool is Warn (and therefore
+                    // in the crash flight recorder) with the args that caused
+                    // it — the evidence that was missing while Copilot's tool
+                    // calls were arriving empty.
+                    //
+                    // No seq= here, unlike the reducer's copy: exec_seq is
+                    // minted by cmd::next_tool_exec_seq() to let the reducer
+                    // drop results from a superseded turn, and this path has no
+                    // reducer and no turn to supersede — it runs each call to
+                    // completion in order. Matching on name+args is enough.
+                    const auto t_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t_start).count();
+                    const std::string err_text =
+                        res ? std::string{"-"}
+                            : std::string{tools::to_string(res.error().kind)}
+                                  + ": " + res.error().detail;
+                    // Args go through logx::body(), which bounds them to a
+                    // 4 KB head unless AGENTTY_LOG_BODIES is set — same
+                    // treatment the wire channel and the reducer's
+                    // tool.dispatch/tool.exec pair give user data. It is a SIZE
+                    // bound, not a redaction: a short args blob still appears in
+                    // full, which is what you want when diagnosing a tool call.
+                    // What it prevents is one edit tool call with a 2 MB payload
+                    // becoming 2 MB of log. This line used to pass the dump
+                    // straight through with no bound at all.
+                    AGT_LOGL(Tool, res ? ::agentty::logx::Level::Debug
+                                       : ::agentty::logx::Level::Warn,
+                             "tool.exec", "name={} ms={} ok={} err={} args={}",
+                             tc.name.value, t_ms, res ? 1 : 0, err_text,
+                             ::agentty::logx::body(tc.args.dump()));
+                    // The same facts as the log line above, but on stderr and
+                    // machine-readable — a sandboxed harness never sees the
+                    // log file. See emit_tool_event for why args are hashed.
+                    emit_tool_event(tc.name.value, t_ms, static_cast<bool>(res),
+                                    res ? std::string_view{}
+                                        : std::string_view{err_text},
+                                    tc.args.dump());
+                    if (stats) {
+                        ++stats->tool_calls;
+                        if (!res) ++stats->tool_errors;
+                    }
                     if (res) {
-                        tc.status = ToolUse::Done{now, now, std::move(res->text)};
-                        log += "\n    \xe2\x9c\x93 " + tc.name.value;
+                        // ECONOMY: a subagent is a focused, tool-heavy burst
+                        // (read/grep/repo_map outputs run to tens of KiB
+                        // each). Those results accumulate in the subagent's
+                        // OWN thread and replay on EVERY subsequent turn, so
+                        // the cost is quadratic in turns — and write roles now
+                        // get a budget measured in dozens of turns, which is
+                        // exactly when that bites. The parent's 64 KiB
+                        // newest-result budget is tuned for a long interactive
+                        // chat; for a subagent it's the dominant cost.
+                        // Cap each result to a tight head+tail the instant we
+                        // store it, so the working set the model reasons over
+                        // stays lean without losing the WHAT of any result.
+                        // (Transport aging still applies on top for old ones.)
+                        constexpr std::size_t kSubagentToolBudget = 8u * 1024u;
+                        std::string capped = provider::wire::cap_tool_result(
+                            res->text, kSubagentToolBudget);
+                        tc.status = ToolUse::Done{now, now, std::move(capped)};
+                        log += "\n    \xe2\x9c\x93 " + summarize_call(tc);
+                        // Identical SUCCEEDING call 6× → also stuck.
+                        std::string ok_key = tc.name.value + '\0'
+                            + (tc.args.is_null() ? std::string{} : tc.args.dump());
+                        if (++repeated_ok_calls[ok_key] >= 6) {
+                            doomed = true;
+                            log += "\n  \xe2\x9a\xa0 same call repeated 6\xc3\x97 "
+                                   "with identical args \xe2\x80\x94 stopping";
+                        }
                     } else {
                         tc.status = ToolUse::Failed{now, now, res.error().render()};
-                        log += "\n    \xe2\x9c\x97 " + tc.name.value + ": "
+                        log += "\n    \xe2\x9c\x97 " + summarize_call(tc) + "  \xe2\x80\x94 "
                              + res.error().render();
+                        // Identical failing call 3× → the loop is stuck.
+                        std::string key = tc.name.value + '\0'
+                            + (tc.args.is_null() ? std::string{} : tc.args.dump());
+                        if (++failed_calls[key] >= 3) {
+                            doomed = true;
+                            log += "\n  \xe2\x9a\xa0 same call failed 3\xc3\x97 \xe2\x80\x94 stopping";
+                        }
                     }
-                    progress::emit(log);
+                    ctx.emit(log);
                 }
             }
 
-            if (stop != StopReason::ToolUse && !ran_a_tool) break;
-            if (stop == StopReason::ToolUse && !ran_a_tool) break;
-            if (!err.empty() && !ran_a_tool) break;
+            if (!ran_a_tool) break;   // final text answer (or nothing left to do)
         }
 
+        // Extract the report. The AUTHORITATIVE report is the text of the
+        // FINAL assistant turn — the message the model wrote last, after all
+        // its tool work. We do NOT walk backward to the first non-empty text:
+        // an agent that explored straight into the turn cap has its last few
+        // turns as pure tool calls (empty .text), and a naive reverse-walk
+        // would resurrect its turn-1 narration ("I'll start by mapping...")
+        // and pass it off as a finished report. That was the real bug: a
+        // 24-turn run returning its opening sentence instead of an answer.
         std::string report;
-        for (auto it = thread.messages.rbegin(); it != thread.messages.rend(); ++it) {
-            if (it->role == Role::Assistant && !it->text.empty()) {
-                report = it->text;
-                break;
+        bool salvaged_stale = false;
+        if (ctx.on_subagent_done) {
+            try { ctx.on_subagent_done(thread); } catch (...) {}
+        }
+        if (!thread.messages.empty()
+            && thread.messages.back().role == Role::Assistant
+            && !thread.messages.back().text.empty()) {
+            // Clean finish: the model's last act was to write prose.
+            report = thread.messages.back().text;
+        } else {
+            // No final text (ran out of budget mid-tool, or last turn was
+            // tool-only). Salvage the most recent EARLIER assistant text as a
+            // partial, but mark it stale so the banner below tells the caller
+            // this is not a proper final report. Never reach into resumed
+            // history: that answer belongs to an earlier run.
+            const std::size_t first_new = stats ? stats->history.size() : 0;
+            for (std::size_t i = thread.messages.size(); i-- > first_new;) {
+                const auto& msg = thread.messages[i];
+                if (msg.role == Role::Assistant && !msg.text.empty()) {
+                    report = msg.text;
+                    salvaged_stale = true;
+                    break;
+                }
             }
         }
-        if (report.empty()) {
+
+        // Budget exhaustion is a FAILURE MODE even when the last turn
+        // happened to produce clean prose. The old gate here was
+        // `report.empty() || salvaged_stale`, so an agent that spent every
+        // turn and then wrote a tidy "## OUTCOME — Task NOT completed, I made
+        // zero edits" fell through all of it: no banner, is_error never set,
+        // and the UI rendered a green ✓ DONE over a self-declared failure.
+        // Observed exactly that. Treat hitting the cap as a reportable
+        // condition in its own right.
+        const bool budget_exhausted = turns >= max_turns || deadline_hit;
+        if (stats) {
+            const bool clean_finish = !report.empty() && !salvaged_stale;
+            stats->turns            = turns;
+            stats->deadline_hit     = deadline_hit && !clean_finish;
+            stats->budget_exhausted = turns >= max_turns && !clean_finish;
+            stats->doomed           = doomed;
+            stats->last_error       = last_error;
+            if (ctx.cancelled() || run_reg.cancelled()) stats->cancelled = true;
+            stats->answer = report;
+            stats->final_thread = thread;
+        }
+
+        if (report.empty() || salvaged_stale) {
             std::string why;
             if (!last_error.empty())
                 why = "[subagent failed: " + last_error + "]";
-            else if (turns >= subagent::kMaxTurns)
-                why = "[subagent hit its turn budget without producing a final report]";
+            else if (doomed)
+                why = "[subagent stopped: the same tool call failed 3\xc3\x97 "
+                      "in a row without converging]";
+            else if (deadline_hit)
+                // Named separately from the turn cap on purpose: "out of
+                // time" and "out of turns" point at different causes (a slow
+                // or stalling backend vs a task too big for the budget) and
+                // the reader can only act on the difference if we say which.
+                why = "[subagent hit its wall-clock limit without producing a "
+                      "final report \xe2\x80\x94 the summary below is incomplete]";
+            else if (budget_exhausted)
+                why = "[subagent hit its turn budget without producing a final "
+                      "report \xe2\x80\x94 the summary below is incomplete]";
             else
-                why = "[subagent finished without a text report]";
-            report = log.empty() ? why : (why + "\n\nActivity:\n" + log);
+                why = "[subagent finished without a final text report]";
+            if (salvaged_stale) {
+                // We have partial prose from an earlier turn: surface the
+                // banner, then the salvaged text, then the activity log.
+                report = why + "\n\nLast text the subagent produced (may be an "
+                             "early, incomplete note):\n" + report
+                       + (log.empty() ? std::string{}
+                                      : "\n\nActivity:\n" + log);
+            } else {
+                report = log.empty() ? why : (why + "\n\nActivity:\n" + log);
+            }
             // A bare error (no salvageable report) propagates as an error so
             // the shell tags the tool_result is_error.
             if (!last_error.empty()) is_error = true;
+            // Neither a doom-loop abort nor an exhausted budget produced the
+            // work that was asked for. Both are failures; say so.
+            if (doomed || budget_exhausted) is_error = true;
+        } else if (budget_exhausted) {
+            // Ran out of budget but signed off cleanly. The prose is worth
+            // keeping — it is the agent's own account of how far it got — but
+            // it must not be mistaken for success by the caller or the UI.
+            //
+            // Says WHICH budget for the same reason the empty-report branch
+            // above does. A run stopped by the clock while it happened to be
+            // writing prose used to land here and be labelled "turn budget",
+            // pointing whoever read it at the wrong fix.
+            report = (deadline_hit
+                          ? "[subagent hit its wall-clock limit \xe2\x80\x94 the task "
+                            "may be incomplete; verify before relying on it]"
+                          : "[subagent hit its turn budget \xe2\x80\x94 the task may "
+                            "be incomplete; verify before relying on it]")
+                   + std::string{"\n\n"} + report;
+            is_error = true;
+        }
+
+        // A subagent that NARRATES its own failure must not be reported as a
+        // success. The model is the authority on whether it did the work, and
+        // when it says it didn't, believing the exit path over the text is how
+        // a "zero edits made" report ends up rendered as ✓ DONE.
+        if (!is_error && subagent_self_reported_failure(report)) {
+            is_error = true;
         }
 
         std::ostringstream out;
@@ -705,10 +2181,467 @@ void install_host_backends(::mcp::tools::HostServices& svc) {
     svc.memory    = std::make_shared<AgenttyMemoryStore>();
     svc.skills    = std::make_shared<AgenttySkillResolver>();
     svc.retriever = std::make_shared<AgenttyDocRetriever>();
+    svc.code_retriever = std::make_shared<AgenttyCodeRetriever>();
     svc.subagent  = std::make_shared<AgenttySubagentRunner>();
     // svc.todo intentionally left null: the mcp todo shell renders identical
     // text to the native tool with no host state needed, and agentty's TUI
     // parses the rendered text — there is no structured sink to feed.
 }
+
+bool is_known_agent_type(std::string_view name) {
+    // resolve_agent_type() answers with `general` for anything it doesn't
+    // recognise, so "did it match" has to be asked by IDENTITY, not by
+    // whether a result came back. Comparing the returned name to the
+    // requested one is exactly that question, and it stays correct as
+    // built-ins and user agents come and go because it reuses the same
+    // resolver rather than a second copy of the list.
+    if (name.empty()) return false;
+    return resolve_agent_type(name).name == name;
+}
+
+std::string known_agent_types() {
+    std::string out;
+    for (std::string_view n :
+         {"general", "explorer", "reviewer", "tester", "coder"}) {
+        if (!out.empty()) out += ", ";
+        out.append(n);
+    }
+    // User-defined roles are real answers to --agent, so a user who wrote
+    // one should see it listed rather than be told their own agent is
+    // invalid-looking.
+    try {
+        for (const auto& ua : user_agents()->types) {
+            out += ", ";
+            out += ua->name;
+        }
+    } catch (...) {
+        // Listing user agents is a nicety; never fail an error message.
+    }
+    return out;
+}
+
+std::string_view status_name(OneShotResult::Status s) noexcept {
+    using S = OneShotResult::Status;
+    switch (s) {
+        case S::Ok:            return "ok";
+        case S::Failed:        return "failed";
+        case S::TurnLimit:     return "turn_limit";
+        case S::Timeout:       return "timeout";
+        case S::ProviderError: return "provider_error";
+        case S::Cancelled:     return "cancelled";
+        case S::Unavailable:   return "unavailable";
+        case S::NotFound:      return "not_found";
+        case S::ContextFull:   return "context_full";
+    }
+    return "failed";
+}
+
+OneShotResult run_one_shot(const maya::unlocked& cap, const OneShotOptions& opts) {
+    // Same loop as the task tool, driven from main() at depth 0.
+    using S = OneShotResult::Status;
+    const auto t0 = std::chrono::steady_clock::now();
+    OneShotResult out;
+    out.agent = opts.agent_type.empty() ? "general" : opts.agent_type;
+
+    CallContext ctx;
+    if (opts.cancel.stop_possible()) ctx.cancel.push_back(opts.cancel);
+    mt::Call top{};
+    top.host = &ctx;
+
+    AgenttySubagentRunner runner;
+    if (auto why = runner.unavailable_reason(top); !why.empty()) {
+        out.status = S::Unavailable;
+        out.error  = std::move(why);
+        return out;
+    }
+    RunStats st;
+    st.max_turns  = opts.max_turns;
+    if (opts.timeout.count() > 0) st.wall = opts.timeout;
+    st.read_only  = opts.read_only;
+    st.no_network = opts.no_network;
+    st.events     = opts.events;
+    if (!opts.effort.empty()) st.effort = effort_from_wire(opts.effort);
+
+    // --resume: continue a saved thread. "last" is the newest one.
+    Thread prior;
+    if (!opts.resume.empty()) {
+        const Io io = IoAccess::grant();
+        std::optional<Thread> got;
+        if (opts.resume == "last") {
+            auto all = persistence::load_all_threads(io, cap);
+            auto newest = std::max_element(all.begin(), all.end(),
+                [](const Thread& a, const Thread& b) { return a.updated_at < b.updated_at; });
+            if (newest != all.end()) got = persistence::load_thread_by_id(io, newest->id);
+        } else {
+            got = persistence::load_thread_by_id(io, ThreadId{opts.resume});
+        }
+        if (!got) {
+            out.status = S::NotFound;
+            out.error  = opts.resume == "last" ? "no saved thread to resume"
+                                                : "no thread with id " + opts.resume;
+            return out;
+        }
+        prior = std::move(*got);
+        st.history = prior.messages;
+        std::vector<std::string> transcripts;
+        for (const auto& msg : prior.messages)
+            if (msg.fork_note && !msg.fork_transcript.empty())
+                transcripts.push_back(msg.fork_transcript);
+        if (!transcripts.empty())
+            ::agentty::tools::util::allow_fork_transcripts(
+                IoAccess::grant(), persistence::threads_dir(), transcripts);
+    }
+
+    mt::SubagentRequest sreq;
+    sreq.prompt     = opts.prompt;
+    sreq.agent_type = out.agent;
+    bool is_error = false;
+    std::string report = runner.run_with_stats(top, sreq, is_error, &st);
+
+    // Save what happened so it can be resumed, or opened in the TUI. A run
+    // that never reached the model has nothing new to keep.
+    if ((opts.save || !opts.resume.empty())
+        && st.final_thread.messages.size() > st.history.size()) {
+        Thread t = std::move(prior);
+        if (t.id.value.empty()) {
+            t.id         = persistence::new_id();
+            t.title      = persistence::title_from_first_message(opts.prompt);
+            t.created_at = std::chrono::system_clock::now();
+        }
+        t.messages   = std::move(st.final_thread.messages);
+        t.updated_at = std::chrono::system_clock::now();
+        persistence::save_thread(IoAccess::grant(), cap, t);
+        out.thread_id = t.id.value;
+    }
+
+    out.model         = st.model;
+    out.turns         = st.turns;
+    out.tool_calls    = st.tool_calls;
+    out.tool_errors   = st.tool_errors;
+    out.input_tokens  = st.input_tokens;
+    out.output_tokens = st.output_tokens;
+    out.last_input_tokens = st.last_input_tokens;
+    out.context_window    = st.context_window;
+    out.text          = st.answer;
+    out.duration_ms   = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+
+    // Most specific cause first: a cancel shows up as an error too.
+    if (st.cancelled || opts.cancel.stop_requested()) {
+        out.status = S::Cancelled;
+        out.error  = "cancelled";
+    } else if (st.deadline_hit) {
+        out.status = S::Timeout;
+        out.error  = "hit the time limit before finishing";
+    } else if (st.context_full) {
+        out.status = S::ContextFull;
+        out.error  = "context window full";
+        if (st.context_window > 0)
+            out.error += " (" + std::to_string(st.context_window) + " tokens"
+                       + (st.last_input_tokens > 0
+                              ? ", last prompt " + std::to_string(st.last_input_tokens)
+                              : std::string{})
+                       + ")";
+        if (!st.last_error.empty()
+            && st.last_error.rfind("context window full", 0) != 0)
+            out.error += ": " + st.last_error;
+        out.error += ". give the model a bigger context, or a smaller task";
+    } else if (!st.last_error.empty()) {
+        out.status = S::ProviderError;
+        out.error  = st.last_error;
+    } else if (st.budget_exhausted) {
+        out.status = S::TurnLimit;
+        out.error  = "hit the turn limit (" + std::to_string(st.turns) + ") before finishing";
+    } else if (st.doomed) {
+        out.status = S::Failed;
+        out.error  = "the same tool call failed 3 times in a row";
+    } else if (is_error) {
+        out.status = S::Failed;
+        out.error  = "the agent said it did not finish the task (after "
+                   + std::to_string(st.turns) + " turns, "
+                   + std::to_string(st.tool_errors) + " of "
+                   + std::to_string(st.tool_calls) + " tool calls failed); its last "
+                     "message is on stdout";
+    } else if (out.text.empty()) {
+        // Not an error by the runner's rules, but a script gets nothing.
+        out.status = S::Failed;
+        out.error  = "finished without a text answer";
+    }
+    // A run that never got into the loop (bad config) only has the report.
+    if (!out.ok() && out.error.empty()) out.error = report;
+    return out;
+}
+
+// ── Proactive retrieval (SOTA active-RAG / FLARE / Self-RAG) ────────────
+namespace {
+
+// TRUE when the memory record behind `mem_path` ("memory://<scope>/<id>")
+// is ALREADY rendered in the system prompt's <learned-memory> block —
+// injecting it again via <retrieved-context> would spend context tokens on
+// bytes the model can already see. Mirrors the transport's selection
+// exactly (load_recent_* → select_for_prompt) and caches the id set,
+// invalidated by the same (size,mtime) stat the RAG epoch uses.
+bool memory_fact_in_prompt_(const std::string& mem_path) {
+    auto slash = mem_path.rfind('/');
+    if (slash == std::string::npos || slash + 1 >= mem_path.size()) return false;
+    const std::string id = mem_path.substr(slash + 1);
+
+    struct PromptIds { std::uint64_t stamp = ~0ULL; std::unordered_set<std::string> ids; };
+    // Replaced whole when the memory files change: a snapshot, no lock.
+    static maya::snapshot<PromptIds> cache;
+
+    std::uint64_t now_stamp = 1469598103934665603ULL;
+    auto mix = [&now_stamp](std::uint64_t v) {
+        now_stamp = (now_stamp ^ v) * 1099511628211ULL;
+    };
+    for (auto scope : {memory::Scope::User, memory::Scope::Project}) {
+        std::error_code ec;
+        auto p = memory::path_for(scope);
+        if (p.empty()) continue;
+        mix(static_cast<std::uint64_t>(
+            fs::exists(p, ec) ? fs::file_size(p, ec) : 0));
+        auto t = fs::last_write_time(p, ec);
+        mix(ec ? 0ULL
+               : static_cast<std::uint64_t>(t.time_since_epoch().count()));
+    }
+
+    // Fresh: answer from the cache. Stale: reload outside the lock.
+    if (const auto c = cache.load(); c->stamp == now_stamp) return c->ids.count(id) > 0;
+
+    std::unordered_set<std::string> ids;
+    for (auto load : {&memory::load_recent_user, &memory::load_recent_project}) {
+        auto picked = memory::select_for_prompt(load());
+        for (const auto& r : picked.records) ids.insert(r.id);
+    }
+    const bool in = ids.count(id) > 0;
+    cache.store(PromptIds{now_stamp, std::move(ids)});
+    return in;
+}
+
+// Cross-turn de-duplication for PROACTIVE injection. Without this, a stable
+// high-confidence corpus re-injects the SAME passages into <retrieved-context>
+// on every single turn of a thread — pure context-window spend for zero new
+// information (the model already saw them last turn). We remember the keys
+// (source:path:line) of recently-injected passages in a bounded FIFO and skip
+// any we've surfaced before, so proactive injection only ever spends tokens on
+// passages the model hasn't been shown yet this session.
+//
+// Bounded (kMax) so a long thread can't grow this without limit; once a key
+// ages out of the window it MAY be re-injected, which is the correct behaviour
+// (it's relevant again and long-since scrolled out of the model's attention).
+//
+// SPLIT into peek (proactive_seen_) and commit (proactive_mark_injected_):
+// proactive_retrieve builds candidate blocks on a WORKER that the caller may
+// ABANDON when it blows the latency budget. If the funnel both checked AND
+// recorded keys, an abandoned worker would mark passages "injected" that the
+// user never saw — permanently suppressing them. So the funnel only PEEKS,
+// and the caller commits the surviving keys ONLY when it actually returns the
+// hit to the wire. Both share one mutex/FIFO.
+namespace {
+struct ProactiveDedup {
+    std::unordered_set<std::string> seen;
+    std::deque<std::string>         fifo;
+};
+// A snapshot: peeked on every candidate passage, committed a few keys a
+// turn. Lock-free, so the abandoned-worker peek can never block a commit.
+maya::snapshot<ProactiveDedup>& proactive_dedup_() {
+    static maya::snapshot<ProactiveDedup> d;
+    return d;
+}
+constexpr std::size_t kProactiveDedupMax = 256;
+}
+
+// PEEK: true if `key` was already injected this session. Does NOT record it.
+bool proactive_seen_(const std::string& key) {
+    return proactive_dedup_().load()->seen.count(key) > 0;
+}
+
+// COMMIT: record `key` as injected (bounded FIFO eviction). Idempotent.
+void proactive_mark_injected_(const std::string& key) {
+    (void)proactive_dedup_().update([](const ProactiveDedup& cur, const std::string& k) {
+        if (cur.seen.count(k)) return cur;
+        ProactiveDedup d = cur;
+        d.seen.insert(k);
+        d.fifo.push_back(k);
+        while (d.fifo.size() > kProactiveDedupMax) {
+            d.seen.erase(d.fifo.front());
+            d.fifo.pop_front();
+        }
+        return d;
+    }, key);
+}
+
+} // namespace
+
+// Runs the SAME AgenttyDocRetriever the search_docs tool uses, but out of
+// band — before the model sees the turn — and only surfaces its result when
+// confidence clears a HIGH bar (higher than the tool's LOW floor: we're
+// spending the user's context-window tokens unprompted, so the hit must be
+// Read the confidence bar for UNPROMPTED injection. The tool's LOW floor is
+// 0.25; we inject only well above it. Tunable via AGENTTY_RAG_PROACTIVE_MIN.
+namespace {
+double proactive_min_conf_() {
+    // The confidence is now CRAG's CALIBRATED relevance grade (a real
+    // model-free evaluator), not the old raw fusion score. CRAG grades a
+    // genuinely-relevant retrieval in the ~0.3–0.6 band, so the unprompted
+    // injection bar defaults to 0.35 — high enough to skip noise, low enough
+    // that a solidly-relevant hit reaches the model.
+    //
+    // Source of truth is the retriever's LIVE config (which folds in the
+    // persisted RAG picker settings). An explicit AGENTTY_RAG_PROACTIVE_MIN
+    // still wins so a shell override is honoured for a one-off run.
+    double min_conf = 0.35;
+    try { min_conf = shared_retriever().snapshot_config().proactive_min_conf; }
+    catch (...) { /* keep default */ }
+    if (const char* mc = std::getenv("AGENTTY_RAG_PROACTIVE_MIN"); mc && mc[0]) {
+        // Any non-negative value is honoured; a bar above 1.0 is a
+        // legitimate "never inject" switch (confidence is clamped to [0,1]).
+        try { double v = std::stod(mc); if (v >= 0) min_conf = v; }
+        catch (...) { /* keep config/default */ }
+    }
+    return min_conf;
+}
+
+// The proactive retrieval funnel body: run the retriever, gate on confidence,
+// build the fenced <retrieved-context> block, PEEK the cross-turn dedup and
+// collect surviving keys on the hit. Does NOT commit the dedup keys — the
+// caller commits them only when it actually returns/injects the block, so an
+// abandoned or discarded run never suppresses a passage that was never shown.
+// Never throws (best-effort).
+std::optional<ProactiveHit>
+run_proactive_funnel_(const std::string& query, int k, double min_conf) {
+  try {
+    AgenttyDocRetriever r;
+    mt::DocQuery q;
+    q.query = query;
+    q.k     = k > 0 ? k : 3;
+    std::string mode, err;
+    // Proactive retrieval is explicit opt-in and already runs on an isolated
+    // worker, so use the complete index once. The old cold-index shortcut could
+    // silently search only skills/memory and miss the document that triggered
+    // the knowledge-shaped query.
+    auto passages = r.retrieve(q, mode, err);
+    if (!err.empty() || passages.empty()) return std::nullopt;
+
+    // Recover the confidence the pipeline computed (mode carries
+    // ", confidence 0.NN"). If we can't parse it, be conservative and
+    // don't inject.
+    double conf = -1.0;
+    if (auto p = mode.find("confidence "); p != std::string::npos) {
+        try { conf = std::stod(mode.substr(p + 11)); } catch (...) {}
+    }
+    if (conf < min_conf) return std::nullopt;
+
+    // Build the wire block. Fenced + provenance-labelled so the model
+    // treats it as retrieved reference, not the user's words. Bounded.
+    std::string block =
+        "<retrieved-context>\n"
+        "The following passages were auto-retrieved from the user's "
+        "knowledge base (docs/skills/memory) because they look relevant "
+        "to the request. Ground your answer in them where they apply; "
+        "ignore any that don't. Cite the source path when you use one.\n\n";
+    int n = 0;
+    std::vector<std::string> keys;
+    for (const auto& p : passages) {
+        // CONTEXT-ECONOMY: memory facts already rendered in the system
+        // prompt's <learned-memory> block would be pure double-spend —
+        // the model can see them. select_for_prompt() decides that
+        // rendering; mirror it here and drop any memory passage whose
+        // record made the prompt cut. (Docs/skills/MCP passages are
+        // never in the system prompt — always kept.)
+        if (p.source == "memory" && memory_fact_in_prompt_(p.path))
+            continue;
+
+        // CROSS-TURN DEDUP: don't re-inject a passage the model was
+        // already shown earlier this session — that's context spend for
+        // zero new signal. Key on source:path:line so distinct chunks of
+        // the same file are treated separately. PEEK only here — the caller
+        // commits the surviving keys once it actually injects the block.
+        std::string key = (p.source.empty() ? std::string{"docs"} : p.source)
+                        + ":" + p.path + ":" + std::to_string(p.line_start);
+        if (proactive_seen_(key))
+            continue;
+        keys.push_back(key);
+
+        block += "[" + (p.source.empty() ? std::string{"docs"} : p.source)
+               + ":" + p.path;
+        if (p.line_start > 0)
+            block += ":" + std::to_string(p.line_start);
+        block += "]\n";
+        block += p.text;
+        if (!p.text.empty() && p.text.back() != '\n') block += '\n';
+        block += '\n';
+        ++n;
+    }
+    block += "</retrieved-context>";
+
+    if (n == 0) return std::nullopt;   // everything deduped away
+
+    // Independent ceiling on UNPROMPTED spend. The user didn't ask for this
+    // block, so it must stay cheap even when the retriever returns rich
+    // passages. Cap the whole assembled block; default ~6KiB (~1.5k tok),
+    // roughly half the on-demand tool budget. Tunable via
+    // AGENTTY_RAG_PROACTIVE_BYTES.
+    {
+        std::size_t cap = 6 * 1024;
+        try {
+            int cfg_bytes = shared_retriever().snapshot_config().proactive_bytes;
+            if (cfg_bytes > 0)
+                cap = std::clamp<std::size_t>(static_cast<std::size_t>(cfg_bytes),
+                                              1024, 32 * 1024);
+        } catch (...) {}
+        if (const char* v = std::getenv("AGENTTY_RAG_PROACTIVE_BYTES"); v && v[0]) {
+            try { cap = std::clamp<std::size_t>(std::stoull(v), 1024, 32 * 1024); }
+            catch (...) {}
+        }
+        if (block.size() > cap) {
+            std::size_t cut = cap;
+            // Trim to a UTF-8 boundary, then re-close the fence cleanly.
+            while (cut > 0 && (static_cast<unsigned char>(block[cut]) & 0xc0) == 0x80)
+                --cut;
+            block.resize(cut);
+            block += "\n…\n</retrieved-context>";
+        }
+    }
+    return ProactiveHit{std::move(block), conf, n, std::move(keys)};
+  } catch (...) {
+    return std::nullopt;   // proactive retrieval is best-effort, never fatal
+  }
+}
+} // namespace
+
+// Compatibility entry point. Proactive retrieval is now opt-in and the submit
+// path always owns an isolated worker, so there is no reason to start a second
+// detached hedge. Execute the funnel exactly once.
+std::optional<ProactiveHit> proactive_retrieve(const std::string& query, int k) {
+    return proactive_retrieve_blocking(query, k);
+}
+
+// Full funnel for the isolated worker owned by the app. Commits dedup keys only
+// when a block is actually returned for injection.
+std::optional<ProactiveHit>
+proactive_retrieve_blocking(const std::string& query, int k) {
+    auto hit = run_proactive_funnel_(query, k, proactive_min_conf_());
+    if (hit)
+        for (const auto& key : hit->dedup_keys)
+            proactive_mark_injected_(key);
+    return hit;
+}
+
+namespace subagent {
+// Provenance query for the task card (declared in subagent.hpp). Resolves the
+// type through the SAME lookup the runner uses, then maps its origin to a
+// stable label. Unknown → "builtin" (no tag shown). Defined at end-of-TU so
+// it doesn't shadow the subagent::current() calls used earlier in the file.
+std::string_view agent_origin(Io, std::string_view name) noexcept {
+    const AgentType& t = resolve_agent_type(name);
+    switch (t.origin) {
+        case AgentOrigin::User:    return "user";
+        case AgentOrigin::Project: return "project";
+        case AgentOrigin::Builtin: break;
+    }
+    return "builtin";
+}
+}  // namespace subagent
 
 } // namespace agentty::tools

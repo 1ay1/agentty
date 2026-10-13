@@ -1,0 +1,68 @@
+---
+title: Tool Overview
+description: The full set of tools agentty can call, and how they render.
+nav_section: Tools
+nav_order: 10
+slug: tools
+---
+
+Each tool gets a purpose-built widget: diffs render as diffs with a real line-number gutter, search results group by file into a line-numbered table, file reads keep their true line numbers, bash and long-running processes show exit codes, todos become checklists.
+
+| Tool | Effect class | Description |
+|---|---|---|
+| `read` | Read | Read a file (or a line range). Large files return a symbol outline first. **`symbol="name"`** reads exactly one function/type's definition + body (resolved to its enclosing block) — no line math or `sed`. |
+| `write` | Write | Create a new file with atomic write semantics. |
+| `edit` | Write | Apply targeted text substitutions to an existing file; renders a diff. |
+| `move` | Write | Move or rename a file/directory without a shell. |
+| `remove` | Write | Delete a file or directory (recursive requires an explicit flag). |
+| `bash` | Shell | Run a shell command inside the sandbox; shows exit code + output. |
+| `process_start` / `process_poll` / `process_stop` | Shell | Start, poll, and stop a long-running background process (dev servers, watchers) without blocking the turn. Rendered as terminal output — tail-anchored, exit codes and test/compiler summaries lifted out. |
+| `grep` | Read | Regex search across files, rendered as a per-file table with true line numbers. Prefers ripgrep when installed; both backends skip generated trees (`build*`, `_deps`, `node_modules`, `vendor`, `.git`, …) so build artifacts never pollute the hits. **`word=true`** matches whole identifiers only (no `foo` inside `foobar`); **`context:"block"`** returns each hit's whole enclosing function/block so you rarely need a follow-up `read`. |
+| `glob` | Read | Find files by glob pattern. |
+| `list_dir` | Read | List a directory with type, size, and name. |
+| `repo_map` | Read | Token-budgeted, PageRank-ranked skeleton of the codebase — top files with definition signatures, personalizable with `focus`. The walk stops at any nested repo/submodule boundary and never leaves the workspace, so sibling projects can't leak into the map. THE tool to call first in a large or unfamiliar repo. |
+| `find_definition` | Read | Locate a symbol's definition across the codebase (curated per-language patterns). To find USES, use `grep` with `word=true`; for a ranked overview use `repo_map`. |
+| `search_structural` | Read | Structural (AST-shape) code search on a nested-document model (like Semgrep-generic / ast-grep) — the layer between `grep` (text) and `search_code` (meaning). **Never matches inside comments or string literals.** Metavariables: `$X` matches exactly **one node** (an atom or a balanced `(…)`/`[…]`/`{…}` group) and binds it; `$$$X` matches **many** nodes (arg lists, multi-token conditions). Recurses into nested groups. Dep-free (lexer + nested-tree matcher, no tree-sitter). e.g. `foo($$$)`, `if ($$$C) return $X;`, `catch ($$$) {}`, `$X = $X`. |
+| `web_fetch` | Network | Fetch a URL (capped output) for docs and APIs. |
+| `web_search` | Network | Search the web and return result snippets. In `Ctrl+K → Settings → Web Search` choose which services answer (first, second and last; free ones need no account, others take an API key stored encrypted), set it to auto (the model picks the result count), on (your count and ceiling apply) or off, and exclude sites ([details](/docs/configuration#web-search)). |
+| `todo` | Pure | Maintain a session todo / plan list, rendered as a checklist. |
+| `diagnostics` | Shell | Run the project's build/lint and surface errors and warnings. |
+| `test` | Shell | Run focused project tests (CTest/Cargo/Go/npm/Make auto-detected) with structured pass/fail output. |
+| `skill` | Pure | Load a named skill's full instructions from .agentty/skills/ before attempting a task it covers. |
+| `task` | Network | Spawn an autonomous subagent (explorer / reviewer / tester / coder / general) with its own context and tool budget; returns one condensed report. Read-only roles (explorer, reviewer) automatically route to the cheapest capable model on the active provider — tester/coder/general keep the parent model — so fan-out exploration costs a fraction of the main turn. |
+| `search_docs` | Network | Query your knowledge base — docs, installed skills, and learned memory — with agentty's hybrid BM25 + dense [retrieval engine](/docs/retrieval), reranked, diversified, and expanded over the corpus's [GraphRAG](/docs/retrieval#8-graphrag-expansion-retrieval-over-the-document-graph-default-on) document graph; returns the most relevant passages, source-tagged. Works with zero docs configured (skills + memory are always indexed). |
+| `search_code` | Read | Semantic search over source code by *meaning*, not literal text — finds the relevant function for a conceptual query ("where is retry backoff handled") even with zero shared keywords. See [Retrieval](/docs/retrieval). |
+| `git_status` | Read | Show branch, staged/unstaged changes, untracked files. |
+| `git_diff` | Read | Show a diff (unstaged, staged, or a ref range). |
+| `git_log` | Read | Show commit history. |
+| `git_show` | Read | Show a commit's metadata + patch, or a file's contents at a revision. |
+| `git_blame` | Read | Annotate a file or line range with the commit/author/date that last changed it. |
+| `git_commit` | Write | Stage files and create a commit. |
+| `remember / forget` | Pure | Persist or remove durable facts across sessions. |
+| `wipe_memory` | Pure | Clear every remembered fact in a scope (confirm-gated). |
+
+:::note
+The **effect class** determines which permission profile auto-runs the tool. *Pure* and *Read* tools run automatically in **Ask** and **Write**; *Write*, *Shell*, and *Network* are gated by [your profile](/docs/profiles). The **Minimal** profile prompts on *every* class, reads included.
+:::
+
+## Compile-time enforcement
+
+Each tool's effect set is declared at compile time and checked against the permission matrix via `static_assert`. A tool can't accidentally gain a side effect that the policy doesn't account for — the build catches it.
+
+## Parallel & speculative execution
+
+The effect classes above aren't just for permissions — they drive a scheduler that overlaps tool work to cut wall-clock time.
+
+- **Parallel batches.** When the model emits several tool calls in one turn, agentty runs the safe combinations *concurrently* and serializes only what genuinely conflicts. Two reads, a grep, and a web fetch all fire at once; a `write` waits for anything touching the same path, and a `bash` waits for exclusive access. The rule is a proven, effect- and path-aware invariant — a wide batch is never unsafe, so the model is encouraged to fan out.
+- **Speculative reads.** A pure *Read* tool starts the instant its arguments finish streaming — while the model is still writing the rest of the turn. Its I/O overlaps the remaining stream instead of waiting for the turn to finish, so a multi-tool turn hides seconds of file/search time inside the model's own generation. Read-only tools can't affect what the model is still saying, so this is always safe; anything that writes, executes, or hits the network waits for the normal end-of-turn scheduler.
+
+Neither behavior changes results — only when the work happens. You'll simply notice tool-heavy turns finishing faster.
+
+## Extending the toolset
+
+The native tools are the floor, not the ceiling. Four mechanisms extend what the agent can do:
+
+- **[Plugins](/docs/plugins)** — add external tools via MCP servers (a browser driver, a database client, a hosted API).
+- **[Subagents](/docs/subagents)** — delegate a self-contained task to an isolated agent with its own context window, via the `task` tool.
+- **[Slash commands](/docs/slash-commands)** — reusable prompt macros you invoke as `/name`.
+- **[Hooks](/docs/hooks)** — run your own shell commands around every tool call, to block or observe.

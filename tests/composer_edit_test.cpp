@@ -6,8 +6,9 @@
 // chip-aware boundary that removes a whole attachment token in one
 // stroke.
 
-#include <cstdio>
 #include <string>
+
+#include "agtest.hpp"
 
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
@@ -15,6 +16,7 @@
 #include "agentty/runtime/msg.hpp"
 
 using agentty::Model;
+using agentty::Cmd;
 using agentty::app::detail::composer_update;
 namespace msg = agentty::msg;
 // The composer message structs live in the agentty:: namespace; the
@@ -22,19 +24,20 @@ namespace msg = agentty::msg;
 using agentty::ComposerDeleteWordBack;
 using agentty::ComposerDeleteWordForward;
 using agentty::ComposerUndo;
+using agentty::ComposerCharInput;
+using agentty::ComposerCursorWordLeft;
+using agentty::ComposerCursorWordRight;
+using agentty::ComposerKillToEndOfLine;
 
 namespace {
-int failures = 0, total = 0;
 
-void check(const char* name, bool cond, const std::string& got = {}) {
-    ++total;
-    if (cond) std::printf("  ok   %s\n", name);
-    else { ++failures; std::printf("  FAIL %s — got: [%s]\n", name, got.c_str()); }
+void check_edit(const char* name, bool cond, const std::string& got = {}) {
+    CHECK_MESSAGE(cond, name << " — got: [" << got << "]");
 }
 
 // Run one ComposerMsg through the reducer, return the resulting model.
 Model step(Model m, msg::ComposerMsg cm) {
-    return composer_update(std::move(m), std::move(cm)).first;
+    return ::agentty::app::detail::step(::agentty::app::detail::composer_update, std::move(m), std::move(cm)).first;
 }
 
 Model with_text(std::string text, int cursor) {
@@ -45,36 +48,34 @@ Model with_text(std::string text, int cursor) {
 }
 } // namespace
 
-int main() {
-    std::printf("composer_edit_test — Ctrl+W / Alt+D word delete\n\n");
-
+TEST_CASE("composer_edit") {
     // ── Ctrl+W: delete word backward ──────────────────────────────────
     {
         // cursor at end → drop the last word ("baz") + its leading space.
         auto m = step(with_text("foo bar baz", 11), ComposerDeleteWordBack{});
-        check("ctrl-w drops trailing word", m.ui.composer.text == "foo bar ",
+        check_edit("ctrl-w drops trailing word", m.ui.composer.text == "foo bar ",
               m.ui.composer.text);
-        check("ctrl-w cursor follows", m.ui.composer.cursor == 8,
+        check_edit("ctrl-w cursor follows", m.ui.composer.cursor == 8,
               std::to_string(m.ui.composer.cursor));
     }
     {
         // cursor mid-buffer (after "bar ") → delete "bar " back to "foo ".
         auto m = step(with_text("foo bar baz", 8), ComposerDeleteWordBack{});
-        check("ctrl-w mid-buffer", m.ui.composer.text == "foo baz",
+        check_edit("ctrl-w mid-buffer", m.ui.composer.text == "foo baz",
               m.ui.composer.text);
-        check("ctrl-w mid cursor", m.ui.composer.cursor == 4,
+        check_edit("ctrl-w mid cursor", m.ui.composer.cursor == 4,
               std::to_string(m.ui.composer.cursor));
     }
     {
         // cursor at 0 → no-op, no crash.
         auto m = step(with_text("foo", 0), ComposerDeleteWordBack{});
-        check("ctrl-w at start no-op", m.ui.composer.text == "foo" &&
+        check_edit("ctrl-w at start no-op", m.ui.composer.text == "foo" &&
               m.ui.composer.cursor == 0, m.ui.composer.text);
     }
     {
         // empty buffer → no-op.
         auto m = step(with_text("", 0), ComposerDeleteWordBack{});
-        check("ctrl-w empty no-op", m.ui.composer.text.empty() &&
+        check_edit("ctrl-w empty no-op", m.ui.composer.text.empty() &&
               m.ui.composer.cursor == 0, m.ui.composer.text);
     }
 
@@ -82,15 +83,15 @@ int main() {
     {
         // cursor at 0 → drop the first word ("foo") + the gap after it.
         auto m = step(with_text("foo bar baz", 0), ComposerDeleteWordForward{});
-        check("alt-d drops leading word", m.ui.composer.text == "bar baz",
+        check_edit("alt-d drops leading word", m.ui.composer.text == "bar baz",
               m.ui.composer.text);
-        check("alt-d cursor stays", m.ui.composer.cursor == 0,
+        check_edit("alt-d cursor stays", m.ui.composer.cursor == 0,
               std::to_string(m.ui.composer.cursor));
     }
     {
         // cursor at end → no-op.
         auto m = step(with_text("foo bar", 7), ComposerDeleteWordForward{});
-        check("alt-d at end no-op", m.ui.composer.text == "foo bar" &&
+        check_edit("alt-d at end no-op", m.ui.composer.text == "foo bar" &&
               m.ui.composer.cursor == 7, m.ui.composer.text);
     }
 
@@ -103,7 +104,7 @@ int main() {
         att.kind       = agentty::Attachment::Kind::Paste;
         att.line_count = 3;
         att.byte_count = 42;
-        att.body       = "x\ny\nz";
+        att.body.set_bytes("x\ny\nz");
         m.ui.composer.attachments.push_back(std::move(att));
         std::string ph = agentty::attachment::make_placeholder(0);
         m.ui.composer.text   = "see " + ph;
@@ -113,17 +114,261 @@ int main() {
         // The chip token is gone; "see " (or "see") remains, chip removed.
         const bool chip_gone =
             m.ui.composer.text.find(static_cast<char>(0x01)) == std::string::npos;
-        check("ctrl-w removes whole chip token", chip_gone, m.ui.composer.text);
+        check_edit("ctrl-w removes whole chip token", chip_gone, m.ui.composer.text);
     }
 
-    // ── Undo integrates: Ctrl+W is a mutating edit, so Ctrl+Z restores. ─
+    // ── Undo restores ctrl-w. ─────────────────────────────────────────
     {
         auto m = step(with_text("foo bar baz", 11), ComposerDeleteWordBack{});
         m = step(std::move(m), ComposerUndo{});
-        check("undo restores ctrl-w", m.ui.composer.text == "foo bar baz",
+        check_edit("undo restores ctrl-w", m.ui.composer.text == "foo bar baz",
               m.ui.composer.text);
     }
 
-    std::printf("\n%d/%d checks passed\n", total - failures, total);
-    return failures == 0 ? 0 : 1;
+    // ── Undo coalescing: a run of typed chars is ONE undo unit; the
+    //    first whitespace starts a fresh unit so undo rewinds word by
+    //    word, not char by char. ───────────────────────────────────────
+    {
+        Model m;  // start empty
+        for (char c : std::string("hello"))
+            m = step(std::move(m), ComposerCharInput{static_cast<char32_t>(c)});
+        check_edit("typed run present", m.ui.composer.text == "hello",
+              m.ui.composer.text);
+        // One undo should wipe the WHOLE coalesced word, back to empty.
+        m = step(std::move(m), ComposerUndo{});
+        check_edit("one undo rewinds the whole typed word",
+              m.ui.composer.text.empty(), m.ui.composer.text);
+    }
+    {
+        // "foo bar": space breaks the run, so undo peels "bar", leaving
+        // "foo " (the space snapshot).
+        Model m;
+        for (char c : std::string("foo bar"))
+            m = step(std::move(m), ComposerCharInput{static_cast<char32_t>(c)});
+        m = step(std::move(m), ComposerUndo{});
+        check_edit("undo peels one word across a space boundary",
+              m.ui.composer.text == "foo ", m.ui.composer.text);
+    }
+
+    // ── Word motion consumes a RUN of punctuation as one unit. ─────────
+    {
+        // cursor after "))))" → word-left jumps the whole run at once.
+        auto m = step(with_text("a))))", 5), ComposerCursorWordLeft{});
+        check_edit("word-left eats punctuation run", m.ui.composer.cursor == 1,
+              std::to_string(m.ui.composer.cursor));
+    }
+    {
+        // cursor before "((((" → word-right jumps the whole run.
+        auto m = step(with_text("((((a", 0), ComposerCursorWordRight{});
+        check_edit("word-right eats punctuation run", m.ui.composer.cursor == 4,
+              std::to_string(m.ui.composer.cursor));
+    }
+
+    // ── Queue-peek reset: editing while peeking a queued slot must drop
+    //    the peek so submit doesn't delete the wrong queue entry. ───────
+    {
+        Model m;
+        m.ui.composer.queued.push_back({"queued msg", {}});
+        m.ui.composer.browsing = agentty::ComposerState::QueuePeek{0};   // pretend we Alt+↑'d
+        m.ui.composer.text = "queued msg";
+        m.ui.composer.cursor = 10;
+        m = step(std::move(m), ComposerCharInput{U'!'});
+        check_edit("typing while peeking returns the composer to Live",
+              m.ui.composer.is_live(),
+              m.ui.composer.queue_peek_index()
+                  ? "still peeking " + std::to_string(*m.ui.composer.queue_peek_index())
+                  : "history");
+    }
+
+    // ── Kill-to-end-of-line (Alt+K — reachable again after the Ctrl+K
+    //    global-palette clash). ───────────────────────────────────────
+    {
+        auto m = step(with_text("foo bar baz", 4), ComposerKillToEndOfLine{});
+        check_edit("kill-to-end deletes from cursor to EOL",
+              m.ui.composer.text == "foo ", m.ui.composer.text);
+    }
+    {
+        // Multi-line: kill-to-end stops at the newline, keeping it.
+        auto m = step(with_text("foo\nbar", 1), ComposerKillToEndOfLine{});
+        check_edit("kill-to-end stops at newline", m.ui.composer.text == "f\nbar",
+              m.ui.composer.text);
+    }
+    {
+        // At EOL already — no-op.
+        auto m = step(with_text("foo", 3), ComposerKillToEndOfLine{});
+        check_edit("kill-to-end at EOL is a no-op", m.ui.composer.text == "foo",
+              m.ui.composer.text);
+    }
+
+    // ── Loop mode (^B) ───────────────────────────────────────────────
+    // ARMING submits immediately (that's the point of ^B: "send this, and
+    // keep sending it"), which needs the deps() seam — out of scope for this
+    // pure-editing test. What IS pinned here is every transition the reducer
+    // owns without touching the network: the empty-payload refusal, and the
+    // disarm that must fully clear the snapshot.
+    {
+        // An EMPTY composer cannot arm a loop — a loop with no payload would
+        // never fire, so the state is refused rather than entered. (No submit
+        // happens on this path, so no deps() are needed.)
+        auto m = step(with_text("", 0), agentty::ComposerToggleLoop{});
+        check_edit("^B on an empty composer does not arm",
+                   !m.ui.composer.loop_armed, "armed with no payload");
+        check_edit("empty arm leaves looping() false",
+                   !m.ui.composer.looping(), "looping with no payload");
+    }
+    {
+        // Disarm clears EVERYTHING. A stale snapshot left behind would make
+        // a later re-arm silently repeat the wrong prompt, and a stale count
+        // would render ⟳ ×N for a loop that never ran.
+        Model m;
+        m.ui.composer.text            = "live text";
+        m.ui.composer.loop_armed      = true;
+        m.ui.composer.loop_text       = "run the tests";
+        m.ui.composer.loop_iterations = 3;
+        check_edit("precondition: looping", m.ui.composer.looping(), "not looping");
+
+        auto off = step(std::move(m), agentty::ComposerToggleLoop{});
+        check_edit("^B disarms", !off.ui.composer.loop_armed, "still armed");
+        check_edit("disarm clears the snapshot",
+                   off.ui.composer.loop_text.empty(), off.ui.composer.loop_text);
+        check_edit("disarm resets the counter",
+                   off.ui.composer.loop_iterations == 0,
+                   std::to_string(off.ui.composer.loop_iterations));
+        check_edit("disarm leaves looping() false",
+                   !off.ui.composer.looping(), "still looping");
+        check_edit("disarm does not touch the live composer text",
+                   off.ui.composer.text == "live text", off.ui.composer.text);
+    }
+    {
+        // While looping the composer is READ-ONLY: the box displays the
+        // prompt being re-sent, so a keystroke must not let the display
+        // diverge from loop_text (the user would read one thing while
+        // agentty sends another).
+        Model m;
+        m.ui.composer.text            = "run the tests";
+        m.ui.composer.cursor          = 13;
+        m.ui.composer.loop_armed      = true;
+        m.ui.composer.loop_text       = "run the tests";
+
+        auto typed = step(std::move(m), ComposerCharInput{U'X'});
+        check_edit("typing is ignored while looping",
+                   typed.ui.composer.text == "run the tests",
+                   typed.ui.composer.text);
+
+        auto bsp = step(std::move(typed), agentty::ComposerBackspace{});
+        check_edit("backspace is ignored while looping",
+                   bsp.ui.composer.text == "run the tests", bsp.ui.composer.text);
+
+        // ...but ^B still works, or the mode would be a trap.
+        auto out = step(std::move(bsp), agentty::ComposerToggleLoop{});
+        check_edit("^B still disarms from inside the locked state",
+                   !out.ui.composer.loop_armed, "still armed");
+        check_edit("the text survives the unlock",
+                   out.ui.composer.text == "run the tests", out.ui.composer.text);
+
+        // Once unlocked, editing works again.
+        auto edit_ok = step(std::move(out), ComposerCharInput{U'!'});
+        check_edit("editing resumes after disarm",
+                   edit_ok.ui.composer.text != "run the tests",
+                   edit_ok.ui.composer.text);
+    }
+
+    // ── Loop backoff ────────────────────────────────────────────
+    // The property that keeps a loop from turning into a DoS on the user's
+    // own rate limit: a failed iteration must never re-send immediately.
+    {
+        agentty::ComposerState c;
+        c.loop_armed = true;
+        c.loop_text  = "go";
+        const std::int64_t t0 = 1'000'000;
+
+        check_edit("a healthy loop is ready immediately",
+                   c.loop_ready(t0), "not ready");
+
+        // Transient failure → short backoff, and NOT ready right after.
+        c.loop_backoff(/*rank=*/0, /*retry_after=*/0, t0);
+        check_edit("a failed iteration is not ready immediately",
+                   !c.loop_ready(t0), "re-fired with no backoff");
+        check_edit("transient backoff is seconds, not minutes",
+                   c.loop_wait_secs(t0) > 0 && c.loop_wait_secs(t0) <= 10,
+                   std::to_string(c.loop_wait_secs(t0)));
+        check_edit("ready again once the deadline passes",
+                   c.loop_ready(t0 + 60'000), "still waiting");
+
+        // Consecutive failures escalate.
+        const int first = c.loop_wait_secs(t0);
+        c.loop_backoff(0, 0, t0);
+        check_edit("consecutive failures back off further",
+                   c.loop_wait_secs(t0) > first,
+                   std::to_string(c.loop_wait_secs(t0)));
+
+        // Success resets the streak so the next blip starts cheap again.
+        c.loop_note_success();
+        check_edit("success clears the wait", c.loop_ready(t0), "still waiting");
+        c.loop_backoff(0, 0, t0);
+        check_edit("success reset the escalation",
+                   c.loop_wait_secs(t0) == first,
+                   std::to_string(c.loop_wait_secs(t0)));
+    }
+    {
+        // A rate limit must back off HARDER than a transient blip — retrying
+        // a 429 quickly is what deepens it.
+        agentty::ComposerState a, b;
+        a.loop_armed = b.loop_armed = true;
+        a.loop_text  = b.loop_text  = "go";
+        const std::int64_t t0 = 1'000'000;
+        a.loop_backoff(/*rank=*/0, 0, t0);   // transient
+        b.loop_backoff(/*rank=*/1, 0, t0);   // rate limit / auth
+        check_edit("rate-limit backoff exceeds transient backoff",
+                   b.loop_wait_secs(t0) > a.loop_wait_secs(t0),
+                   std::to_string(b.loop_wait_secs(t0)) + " vs "
+                       + std::to_string(a.loop_wait_secs(t0)));
+    }
+    {
+        // The server's own Retry-After wins outright: it stated when to come
+        // back, and any guess of ours is either rude or needlessly slow.
+        agentty::ComposerState c;
+        c.loop_armed = true;
+        c.loop_text  = "go";
+        const std::int64_t t0 = 1'000'000;
+        c.loop_backoff(/*rank=*/1, /*retry_after=*/42, t0);
+        check_edit("Retry-After is honoured verbatim",
+                   c.loop_wait_secs(t0) == 42,
+                   std::to_string(c.loop_wait_secs(t0)));
+    }
+}
+
+// A paste that could be a dropped image path goes to a worker (the check reads
+// the file); anything else pastes in place. The reply is handled either way.
+TEST_CASE("composer paste: image paths are checked off the fold") {
+    using agentty::ComposerPaste;
+    using agentty::ImagePathSniffed;
+    {
+        Model m;
+        (void)composer_update(m, ComposerPaste{"hello world"});
+        REQUIRE(m.ui.composer.attachments.size() == 1);   // pasted in place
+        CHECK(m.ui.composer.attachments[0].kind
+              == agentty::Attachment::Kind::Paste);
+    }
+    {
+        Model m;
+        Cmd c = composer_update(m, ComposerPaste{"/tmp/shot.png"});
+        CHECK_FALSE(c.is_none());          // the sniff task
+        CHECK(m.ui.composer.attachments.empty());   // nothing pasted yet
+        // Not an image: the text goes in as an ordinary paste.
+        (void)composer_update(m, ImagePathSniffed{.text = "/tmp/shot.png"});
+        REQUIRE(m.ui.composer.attachments.size() == 1);
+        CHECK(m.ui.composer.attachments[0].kind
+              == agentty::Attachment::Kind::Paste);
+    }
+    {
+        Model m;
+        (void)composer_update(m, ImagePathSniffed{
+            .text = "/tmp/a.png", .path = "/tmp/a.png",
+            .media_type = "image/png", .body = "\x89PNG...."});
+        REQUIRE(m.ui.composer.attachments.size() == 1);
+        CHECK(m.ui.composer.attachments[0].kind
+              == agentty::Attachment::Kind::Image);
+        CHECK(m.ui.composer.attachments[0].media_type == "image/png");
+    }
 }

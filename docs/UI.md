@@ -2,7 +2,10 @@
 
 What every widget in agentty's UI accepts (Config schema) and what agentty
 fills in. Read this alongside [`RENDERING.md`](RENDERING.md), which
-walks the visual hierarchy and data flow.
+walks the visual hierarchy and data flow, and
+[`APPEARANCE.md`](APPEARANCE.md), which covers the user-facing settings
+that feed several of these Configs (density, motion, prose width, tool
+output, thinking, timestamps) and the forward-only rule they obey.
 
 The architectural rule:
 
@@ -74,7 +77,7 @@ grow the frame. See the `view.cpp` comments for the full rationale.
 
 ## 2. `maya::AppLayout` — top-level frame
 
-`maya/include/maya/widget/app_layout.hpp`
+`third_party/maya/include/maya/widget/app_layout.hpp`
 
 ```cpp
 struct AppLayout::Config {
@@ -99,7 +102,7 @@ point).
 
 ## 3. `maya::Thread` — conversation viewport
 
-`maya/include/maya/widget/thread.hpp`
+`third_party/maya/include/maya/widget/thread.hpp`
 
 ```cpp
 struct Thread::Config {
@@ -136,7 +139,7 @@ WelcomeScreen or Conversation. No element work, no rendering logic.
 
 ## 4. `maya::WelcomeScreen` — empty-thread splash
 
-`maya/include/maya/widget/welcome_screen.hpp`
+`third_party/maya/include/maya/widget/welcome_screen.hpp`
 
 ```cpp
 struct WelcomeScreen::Config {
@@ -165,7 +168,7 @@ Adapter: `thread/welcome_screen.cpp::welcome_screen_config(m)`.
 
 ## 5. `maya::Conversation` — turn list
 
-`maya/include/maya/widget/conversation.hpp`
+`third_party/maya/include/maya/widget/conversation.hpp`
 
 ```cpp
 struct Conversation::Config {
@@ -188,7 +191,7 @@ whether to show the bottom chip.
 
 ## 6. `maya::Turn` — single speaker turn
 
-`maya/include/maya/widget/turn.hpp`
+`third_party/maya/include/maya/widget/turn.hpp`
 
 ```cpp
 struct Turn::Config {
@@ -236,7 +239,7 @@ Adapter: `thread/turn/turn.cpp::turn_config(msg, idx, n, m)`.
 
 ## 7. `maya::AgentTimeline` — Actions panel for tool calls
 
-`maya/include/maya/widget/agent_timeline.hpp`
+`third_party/maya/include/maya/widget/agent_timeline.hpp`
 
 ```cpp
 struct AgentTimeline::Config {
@@ -272,7 +275,7 @@ colors, builds the events vector. Each event's body is filled via
 
 ## 8. `maya::ToolBodyPreview` — discriminated body content
 
-`maya/include/maya/widget/tool_body_preview.hpp`
+`third_party/maya/include/maya/widget/tool_body_preview.hpp`
 
 Drives the content under each timeline event's `│` stripe. Picks one
 of five renderers based on `kind`:
@@ -312,7 +315,7 @@ color/label, event status, timeline detail) and
 
 ## 9. `maya::Permission` — inline permission card
 
-`maya/include/maya/widget/permission.hpp`
+`third_party/maya/include/maya/widget/permission.hpp`
 
 ```cpp
 struct Permission::Config {
@@ -332,7 +335,7 @@ Adapter: `thread/turn/permission.cpp::inline_permission_config(pp, tc)`.
 
 ## 10. `maya::CheckpointDivider`
 
-`maya/include/maya/widget/checkpoint_divider.hpp`
+`third_party/maya/include/maya/widget/checkpoint_divider.hpp`
 
 ```cpp
 struct CheckpointDivider::Config {
@@ -350,7 +353,7 @@ the rail, above a turn. Triggered by `Turn::Config::checkpoint_above`
 
 ## 11. `maya::ActivityIndicator`
 
-`maya/include/maya/widget/activity_indicator.hpp`
+`third_party/maya/include/maya/widget/activity_indicator.hpp`
 
 ```cpp
 struct ActivityIndicator::Config {
@@ -372,7 +375,7 @@ collapses cleanly when nothing is in flight.
 
 ## 12. `maya::ChangesStrip` — pending edits banner
 
-`maya/include/maya/widget/changes_strip.hpp`
+`third_party/maya/include/maya/widget/changes_strip.hpp`
 
 ```cpp
 struct ChangesStrip::Config {
@@ -384,7 +387,7 @@ struct ChangesStrip::Config {
 };
 ```
 
-Header row (`Changes (N) … Ctrl+R review · A accept · X reject`) plus
+Header row (`Changes (N) … Ctrl+R review · Ctrl+A accept · Ctrl+X reject`) plus
 a `maya::FileChanges` body with the file list. When `changes` is
 empty, renders to an empty Element so the AppLayout slot collapses
 without a host-side `if`.
@@ -395,7 +398,7 @@ Adapter: `changes_strip.cpp::changes_strip_config(m)`.
 
 ## 13. `maya::Composer` — bordered input box
 
-`maya/include/maya/widget/composer.hpp`
+`third_party/maya/include/maya/widget/composer.hpp`
 
 ```cpp
 struct Composer::Config {
@@ -412,6 +415,19 @@ struct Composer::Config {
     Color       highlight_color = Color::cyan();      // queue chip
 
     std::size_t queued = 0;
+
+    // LOOP mode: the host re-sends one armed message after every completed
+    // turn until the user toggles it off (agentty: ^B). Paints a ⟳ chip and
+    // tints the border, so a session auto-sending on the user's behalf can
+    // never render as an idle one.
+    bool        loop = false;
+    int         loop_iterations = 0;   // ⟳ LOOP ×N once it has re-fired
+    int         loop_wait_secs  = 0;   // >0 → ⟳ RETRY 24s countdown
+    Color       loop_color = Color::cyan();
+
+    // Render the body as a READ-ONLY readout: dimmed text, parked caret.
+    bool        read_only = false;
+
     ProfileChip profile;        // { label, color }
 
     bool expanded = false;
@@ -420,15 +436,24 @@ struct Composer::Config {
 
 State drives:
 
-- Border + prompt color (idle/streaming/awaiting/has-text → muted/active/warn/accent)
+- Border + prompt color (idle/streaming/awaiting/has-text → muted/active/warn/accent).
+  `loop` outranks the idle colors but **not** the live-phase ones: while a turn
+  is actually streaming the phase color is the more urgent fact, and the ⟳ chip
+  already says the loop is armed.
 - Placeholder text ("type a message…" / "running tool — type to queue…")
 - Prompt boldness (active/has-text → bold; empty-idle → dim)
 - Height pin (during activity, height pins to `min_rows=3` to prevent
   vertical bobbing as layout reflows above)
 
 Hint row is width-adaptive (drops `expand` then `newline` keys on
-narrow widths). Right-side ambient indicators: queue depth, words /
-~tokens counters, profile chip.
+narrow widths). Right-side ambient indicators: the loop chip, queue depth,
+words / ~tokens counters, profile chip. Shed order runs counters → queued →
+loop → profile chip: the loop chip is the only optional segment reporting that
+the app will act on its own, so it outlives the others.
+
+`read_only` exists so a buffer the user cannot currently edit *looks* that way
+(agentty sets it while looping, where the box displays the prompt on repeat)
+rather than being discovered by pressing a key and watching nothing happen.
 
 Adapter: `composer.cpp::composer_config(m)`.
 
@@ -436,7 +461,7 @@ Adapter: `composer.cpp::composer_config(m)`.
 
 ## 14. `maya::StatusBar` — bottom panel
 
-`maya/include/maya/widget/status_bar.hpp`
+`third_party/maya/include/maya/widget/status_bar.hpp`
 
 Five fixed rows (always 5 — the status row never grows or shrinks, so
 the composer above never bobs vertically when a toast appears).
@@ -492,7 +517,7 @@ maya::StatusBar::Config status_bar_config(const Model& m) {
 
 ## 15. `maya::TitleChip` — leading-edge title chip
 
-`maya/include/maya/widget/title_chip.hpp`
+`third_party/maya/include/maya/widget/title_chip.hpp`
 
 ```cpp
 struct TitleChip::Config {
@@ -516,7 +541,7 @@ Adapter: `status_bar/title_chip.cpp::title_chip_config(m)`.
 
 ## 16. `maya::PhaseChip` — phase indicator
 
-`maya/include/maya/widget/phase_chip.hpp`
+`third_party/maya/include/maya/widget/phase_chip.hpp`
 
 ```cpp
 struct PhaseChip::Config {
@@ -544,7 +569,7 @@ them per-frame based on terminal width.
 
 ## 17. `maya::TokenStreamSparkline` — compact tok/s + sparkline
 
-`maya/include/maya/widget/token_stream_sparkline.hpp`
+`third_party/maya/include/maya/widget/token_stream_sparkline.hpp`
 
 ```cpp
 struct TokenStreamSparkline::Config {
@@ -576,7 +601,7 @@ only the current burst.
 
 ## 18. `maya::ContextGauge` — context-window fuel gauge
 
-`maya/include/maya/widget/context_gauge.hpp`
+`third_party/maya/include/maya/widget/context_gauge.hpp`
 
 ```cpp
 struct ContextGauge::Config {
@@ -599,7 +624,7 @@ Adapter: `status_bar/context_gauge.cpp::context_gauge_config(m)`.
 
 ## 19. `maya::StatusBanner` — transient toast row
 
-`maya/include/maya/widget/status_banner.hpp`
+`third_party/maya/include/maya/widget/status_banner.hpp`
 
 ```cpp
 struct StatusBanner::Config {
@@ -621,7 +646,7 @@ Adapter: `status_bar/status_banner.cpp::status_banner_config(m)`.
 
 ## 20. `maya::ShortcutRow` — width-adaptive hint row
 
-`maya/include/maya/widget/shortcut_row.hpp`
+`third_party/maya/include/maya/widget/shortcut_row.hpp`
 
 ```cpp
 struct ShortcutRow::Binding {
@@ -650,7 +675,7 @@ Adapter: `status_bar/shortcut_row.cpp::shortcut_row_config(m)`.
 
 ## 21. `maya::PhaseAccent` — soft horizontal rule
 
-`maya/include/maya/widget/phase_accent.hpp`
+`third_party/maya/include/maya/widget/phase_accent.hpp`
 
 ```cpp
 struct PhaseAccent::Config {
@@ -670,7 +695,7 @@ strips), driven by `StatusBar::Config::phase_color`.
 
 ## 22. `maya::ModelBadge` — colored model chip
 
-`maya/include/maya/widget/model_badge.hpp`
+`third_party/maya/include/maya/widget/model_badge.hpp`
 
 Compact `● Opus` / `● Sonnet` / `● Haiku` brand chip. Used in two
 places: WelcomeScreen's chip row and StatusBar's activity row.
@@ -684,7 +709,7 @@ reshape).
 
 ## 23. `maya::Overlay` — modal layer
 
-`maya/include/maya/widget/overlay.hpp`
+`third_party/maya/include/maya/widget/overlay.hpp`
 
 ```cpp
 struct Overlay::Config {
@@ -765,7 +790,7 @@ src/runtime/view/
 ├── changes_strip.cpp                 # ChangesStrip
 ├── composer.cpp                      # Composer
 ├── cache.cpp · helpers.cpp           # shared (not adapters)
-├── login.cpp · pickers.cpp · diff_review.cpp   # legacy modals (§26)
+├── login.cpp · panels/ · diff_review.cpp    # panel views — see docs/PANELS.md
 ├── thread/
 │   ├── thread.cpp                    # Thread
 │   ├── welcome_screen.cpp            # WelcomeScreen      (empty branch)
@@ -806,22 +831,35 @@ struct MessageMdCache {
     // … plus reveal-grace + multi-sub-turn concat bookkeeping
 };
 
-class ViewCache {                               // LRU-bounded, 32 entries default
+class ViewCache {                               // lifecycle-partitioned, no cap
 public:
-    MessageMdCache&  message_md (const ThreadId&, const MessageId&);
-    TurnConfigCache& turn_config(const ThreadId&, const MessageId&);
-    void retain_messages(const ThreadId&, const std::unordered_set<std::string>& live);
-    void set_capacity(std::size_t max_entries) noexcept;
+    MessageMdCache& message_md      (const ThreadId&, const MessageId&); // settled
+    MessageMdCache& message_md_live (const ThreadId&, const MessageId&); // pinned
+    const MessageMdCache* peek(const ThreadId&, const MessageId&) const; // no migrate
+    void drop (const ThreadId&, const MessageId&);   // free from both homes (at freeze)
+    void clear() noexcept;                           // drop all (thread swap)
 };
 ```
 
-The cache is an **LRU-bounded `ViewCache`** owned by the Model
+The cache is a **lifecycle-partitioned `ViewCache`** owned by the Model
 (`m.ui.view_cache`), not a process-global thread_local map. Entries are
 keyed on `(ThreadId, MessageId)` — a stable `MessageId`, **not** a
 message index (an index would alias across compaction / insert). Each
-entry pairs a `MessageMdCache` (the markdown render state) with a
-`TurnConfigCache` (reserved; empty today — settled assistant panels live
-in `m.ui.frozen`, not here).
+entry holds a `MessageMdCache` (the markdown render state).
+
+Two maps, split by lifecycle:
+
+- **pinned** — an entry holding load-bearing animation state (a live
+  `StreamingMarkdown` reveal widget or an active tool-panel defer
+  machine). NEVER evicted; evicting it mid-glide would stall the
+  typewriter. Reached via `message_md_live()`.
+- **settled** — a drained render memo, staged until its message freezes.
+  Reached via `message_md()`.
+
+An access declares which hat it wants; the entry migrates between maps as
+its message's lifecycle moves (live → settled). Read-only state probes
+use `peek()`, which reads from either home WITHOUT migrating (routing a
+probe through a mutating accessor would silently un-pin the live edge).
 
 Streaming messages hold a live `StreamingMarkdown` instance whose
 internal block-cache makes each delta `O(new_chars)`; once a message
@@ -829,12 +867,16 @@ settles, `last_settled_size`/`revealed_size` gate the per-frame
 `set_content()`/`finish()` round-trip so a fully-revealed turn returns
 its cached `build()` for free.
 
-Capacity defaults to **32 entries** (a single 100 KB `read` result can
-cost several MiB of Element nodes). There is no manual `evict_*` on
-thread switch — LRU pressure pushes stale entries out as the new thread's
-MessageIds access fresh keys — except `retain_messages()`, called once
-per compaction to drop entries for messages that didn't survive (so the
-pre-compact Element trees don't linger in the LRU on a quiet session).
+**No cap, no LRU.** A settled entry has a proven death instant — the
+frame its message freezes. Every settled-accessor call site reads a
+message in the live tail `[frozen_through, size())`; once `freeze_through`
+seals that message into `m.ui.frozen`, no code path reads its cache entry
+again (scroll-back is the terminal's native scrollback, never a rebuild).
+So `freeze_range()` calls `drop()` on every message it seals, and the
+settled map is self-emptying — bounded by the active turn, same as the
+pinned map. A wholesale conversation swap (NewThread / ThreadLoaded /
+CheckpointRestored) calls `clear()` to reclaim the leaving thread's
+entries, which would otherwise never freeze again.
 
 **Streaming-rate sparkline** (separate from this cache) lives in the
 phase `Active` context's `rate_history` ring buffer — a 16-slot buffer
@@ -845,16 +887,16 @@ accumulator resets on `StreamStarted`).
 
 ## 27. The DSL (for widget authors and overlay modals)
 
-`maya/include/maya/dsl.hpp`. agentty's main view files don't import it
+`third_party/maya/include/maya/dsl.hpp`. agentty's main view files don't import it
 anymore — they only build Configs. But:
 
-1. **Widget authors** use it inside `maya/include/maya/widget/*.hpp`
+1. **Widget authors** use it inside `third_party/maya/include/maya/widget/*.hpp`
    when implementing `build()`.
-2. **Overlay modals** in agentty (`login.cpp`, `pickers.cpp`,
+2. **Overlay modals** in agentty (`login.cpp`, `pickers/`,
    `diff_review.cpp`) still construct elements via DSL; they predate
    the controller-only refactor and will be widgetized next.
 
-Quick reference (full primer in `maya/include/maya/dsl.hpp` header
+Quick reference (full primer in `third_party/maya/include/maya/dsl.hpp` header
 comments):
 
 | Form                          | Returns                                         |
@@ -890,7 +932,11 @@ Three host files still build elements directly — overlay modals that
 predate the strict controller-only rule:
 
 - `src/runtime/view/login.cpp` — login modal
-- `src/runtime/view/pickers.cpp` — model picker, thread list, command palette, todo modal, code-block picker + run-result card (Ctrl+G — see `docs/RUN_CODE_BLOCK.md`)
+- `src/runtime/view/pickers/` — the overlay pickers, split by family over a shared `pickers_common.hpp` (viewport sizing, capability-tier hue, the reasoning footer, `section_header()`) and `pickers_prologue.hpp` (the common include block):
+  - `model_picker.cpp` — fused cross-provider model picker (`^/`, incl. provider scoping) + provider picker
+  - `nav_pickers.cpp` — thread list, Smart Mode overlay, command palette, `@`-mention and `#`-symbol palettes
+  - `tool_pickers.cpp` — code-block picker + run-result card (Ctrl+G — see `docs/RUN_CODE_BLOCK.md`), tool-output viewer
+  - `misc_pickers.cpp` — checkpoint rewind picker, todo modal
 - `src/runtime/view/diff_review.cpp` — pending-changes review modal
 
 Future widgets to absorb them:
