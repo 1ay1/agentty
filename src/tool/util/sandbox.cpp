@@ -10,6 +10,7 @@
 #include <memory>   // shared_ptr — the config snapshot
 
 #include <maya/runtime.hpp>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -373,8 +374,26 @@ constexpr const char* kHomeToolSubdirs[] = {
     if (cfg.handoff != sandbox_cfg::HandoffPolicy::Allow && !p.workspace.empty()) {
         auto snap = handoff::snapshot_trusted(p.workspace);
         p.handoff_ro.reserve(snap.entries.size());
-        for (auto& e : snap.entries)
-            if (e.existed) p.handoff_ro.push_back(std::move(e.path));
+        // Files under a .git/hooks or .git/info dir get one ro bind of that
+        // dir instead of one each. A checkout of many repos has thousands.
+        std::set<std::string> dirs;
+        for (auto& e : snap.entries) {
+            if (!e.existed) continue;
+            // A bind follows the link, so it can't protect it, and a link that
+            // points out of the tree makes claybin's confined open fail (EXDEV).
+            std::error_code lec;
+            if (fs::is_symlink(fs::symlink_status(e.path, lec))) continue;
+            const fs::path parent = fs::path{e.path}.parent_path();
+            const auto pname = parent.filename();
+            if ((pname == "hooks" || pname == "info")
+                && parent.parent_path().filename() == ".git"
+                && !fs::is_symlink(fs::symlink_status(parent, lec))) {
+                if (dirs.insert(parent.string()).second)
+                    p.handoff_ro.push_back(parent.string());
+                continue;
+            }
+            p.handoff_ro.push_back(std::move(e.path));
+        }
     }
 
     // ── network ──────────────────────────────────────────────────────────

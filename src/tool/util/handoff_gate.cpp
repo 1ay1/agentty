@@ -274,6 +274,16 @@ constexpr std::string_view kGitWatch[] = {"hooks", "info"};
     return std::ranges::find(kGitWatch, seg) == std::ranges::end(kGitWatch);
 }
 
+// agentty's own data under .agentty (threads, logs, ...). Nothing there gets
+// run by a host tool, and ~/.agentty/threads alone can hold thousands of files.
+constexpr std::string_view kAgenttyData[] = {"threads", "logs", "cache", "state", "sessions"};
+
+[[nodiscard]] bool agentty_noise(const fs::path& dir) {
+    if (dir.parent_path().filename() != ".agentty") return false;
+    const std::string name = dir.filename().string();
+    return std::ranges::find(kAgenttyData, name) != std::ranges::end(kAgenttyData);
+}
+
 // Depth cap. A trusted path matters because a HOST tool finds and runs it, and
 // the tools that do that (editors, git, direnv, build drivers) look near the
 // root. Eight levels covers every real case while keeping a pathological tree
@@ -356,7 +366,8 @@ ListingPtr list_dir(ListingWalk& walk, const fs::path& dir) {
         if (e.is_directory(tec)) {
             const fs::path& p = e.path();
             l->dirs.push_back({p.filename().string(), e.is_symlink(tec),
-                               git_noise(p, true), is_trusted_dir(p.string())});
+                               git_noise(p, true) || agentty_noise(p),
+                               is_trusted_dir(p.string())});
         } else {
             const fs::path& p = e.path();
             if (p.filename() == "CMakeCache.txt") l->has_cmake_cache = true;
@@ -402,8 +413,8 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
     ListingWalk walk;
 
     // Allow means "do not gate", so there is nothing to report and no reason to
-    // pay for the stats. Same early-out as check(): a user who turned this off
-    // did not opt into the cost either.
+    // pay for the stats. Same early-out as check(), including --sandbox off.
+    if (sandbox::requested_mode() == sandbox::Mode::Off) return snap;
     const auto cfg = sandbox::config_snapshot();
     if (cfg->handoff == sandbox_cfg::HandoffPolicy::Allow) return snap;
 
