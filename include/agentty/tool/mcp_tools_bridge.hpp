@@ -6,7 +6,7 @@
 //   list_dir, bash, grep/glob/find_definition, diagnostics, git_*, web_*).
 //   agentty consumes them through a cap::CapabilityProvider and re-wraps each
 //   advertised tool as a ToolDef whose execute() closure dispatches into the
-//   provider and decodes the `_mcp_tools` meta (effects + FileChange) back
+//   provider and reads the typed effects + FileChange off each Result back
 //   into agentty's ToolOutput. The diff-review UI, changes-strip, and
 //   permission policy keep seeing exactly the types they always did.
 //

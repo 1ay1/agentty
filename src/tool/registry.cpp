@@ -80,7 +80,7 @@ namespace {
 // Assemble the local tool set. The implementations live in mcp-cpp's
 // batteries-included toolset (mcp::tools::make_provider): build_mcp_tool_defs()
 // re-wraps each advertised tool as a ToolDef whose execute() dispatches into
-// the provider and decodes the `_mcp_tools` meta (effects + FileChange) back
+// the provider and reads the typed effects + FileChange off each Result back
 // into ToolOutput. The host-coupled SHELLS (remember/forget/wipe/todo/skill/
 // search_docs/task) are backed by agentty adapters injected via HostServices.
 // mcp-cpp is the SOLE source of truth for tools — there is no native path.

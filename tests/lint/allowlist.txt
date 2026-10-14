@@ -144,8 +144,7 @@ tool/skills.cpp: atomic
 # argument is how a body reaches data the lock does not cover.
 #
 # The reader's EOF is a field in PipeBuf now, waited on with wait_with_for.
-# Unique temp names for atomic writes, and a parallel directory walk.
-tool/util/fs_helpers.cpp: atomic
+# The sandbox mode and backend switches.
 tool/util/sandbox.cpp: atomic
 
 # ── Workspace scans ──────────────────────────────────────────────────

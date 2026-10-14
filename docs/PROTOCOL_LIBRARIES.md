@@ -96,8 +96,8 @@ a pipe, or blocks reading one. It parses bytes it is given and produces bytes
 to send. Spawning, reading and writing are agentty's (maya's
 `platform::process` and the poll reactor). The protocol libraries (jsonrpc-cpp,
 mcp-cpp, acp-cpp) do no file IO at all: mcp-cpp's tools reach the disk only
-through the `FileSystem` the host passes in (`HostServices::files`), and its
-ready-made `NativeFileSystem` lives in a separate opt-in target. The storage
+through the `FileSystem` the host passes in (`HostServices::files`), and it
+ships no disk implementation; agentty's is `tools::util::DiskFiles`. The storage
 library is the exception: rag-cpp may read and write the files its caller
 names (a document, its own index and WAL), synchronously, on the caller's
 thread, because that is its whole job. claybin is the one
@@ -371,15 +371,15 @@ string literals first, and have **no allowlist**:
 
 - **`submodule_purity`** — over every library's `src/` and `include/`:
   R1's primitives (threads, locks, atomics, `thread_local`, futures,
-  `stop_source`, latches, semaphores); R2 hooks (`set_runtime`,
+  `stop_source`, latches, semaphores, and including their headers); R2 hooks
+  (`set_runtime`,
   `set_executor`, a `Runtime`/`Executor` type); R3 mutable `static`s; R4
   clock reads; R5 sleeps, process spawning, sockets and environment reads;
   and file IO in jsonrpc-cpp, mcp-cpp and acp-cpp (fstreams,
   `std::filesystem` queries and changes, directory walks, `open`/`fsync`).
   claybin is exempt from R5's process and environ rules only, because
-  spawning a jailed child is what it is for. The file IO rule skips
-  mcp-cpp's `src/tools_native/` (the opt-in host FileSystem) and doesn't
-  apply to rag-cpp, a storage engine.
+  spawning a jailed child is what it is for. The file IO rule has no
+  exceptions in those three; it doesn't apply to rag-cpp, a storage engine.
 - **`no_duplication`** — fails if mcp-cpp or acp-cpp redefines a name the
   core exports (`Engine`, `Codec`, `RpcError`, `RequestId`, `Newtype` ...)
   or shares a 12-line run of code with another of the three.

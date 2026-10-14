@@ -86,7 +86,7 @@ function(_agentty_test_link_full name)
         target_link_libraries(${name} PRIVATE mcp::mcp)
     endif()
     if(TARGET mcp::tools)
-        target_link_libraries(${name} PRIVATE mcp::tools mcp::tools_native_files)
+        target_link_libraries(${name} PRIVATE mcp::tools)
     endif()
     # The claybin sandbox backend. Needed by every test binary, not just the
     # sandbox ones: the shared object set includes sandbox_claybin.cpp, so

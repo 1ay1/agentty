@@ -216,7 +216,7 @@ target_include_directories(sandbox_live_check PRIVATE
 target_link_libraries(sandbox_live_check PRIVATE
     claybin nlohmann_json::nlohmann_json Threads::Threads maya::app)
 if(TARGET mcp::tools)
-    target_link_libraries(sandbox_live_check PRIVATE mcp::tools mcp::tools_native_files)   # exec.cpp implements mcp-cpp's Exec
+    target_link_libraries(sandbox_live_check PRIVATE mcp::tools)   # exec.cpp implements mcp-cpp's Exec
 endif()
 if(TARGET maya::app)
     target_include_directories(sandbox_live_check SYSTEM PRIVATE
@@ -255,7 +255,7 @@ target_include_directories(ws_bind_probe PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(ws_bind_probe PRIVATE
     claybin nlohmann_json::nlohmann_json Threads::Threads maya::app)
 if(TARGET mcp::tools)
-    target_link_libraries(ws_bind_probe PRIVATE mcp::tools mcp::tools_native_files)   # exec.cpp implements mcp-cpp's Exec
+    target_link_libraries(ws_bind_probe PRIVATE mcp::tools)   # exec.cpp implements mcp-cpp's Exec
 endif()
 if(TARGET maya::app)
     target_include_directories(ws_bind_probe SYSTEM PRIVATE
@@ -303,7 +303,7 @@ target_include_directories(sandbox_audit PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(sandbox_audit PRIVATE claybin nlohmann_json::nlohmann_json
     Threads::Threads maya::app)
 if(TARGET mcp::tools)
-    target_link_libraries(sandbox_audit PRIVATE mcp::tools mcp::tools_native_files)   # exec.cpp implements mcp-cpp's Exec
+    target_link_libraries(sandbox_audit PRIVATE mcp::tools)   # exec.cpp implements mcp-cpp's Exec
 endif()
 if(TARGET maya::app)
     target_include_directories(sandbox_audit SYSTEM PRIVATE
@@ -633,7 +633,7 @@ target_include_directories(sandbox_config_race_test PRIVATE include)
 target_link_libraries(sandbox_config_race_test PRIVATE
     doctest::doctest nlohmann_json::nlohmann_json Threads::Threads claybin maya::app)
 if(TARGET mcp::tools)
-    target_link_libraries(sandbox_config_race_test PRIVATE mcp::tools mcp::tools_native_files)   # exec.cpp
+    target_link_libraries(sandbox_config_race_test PRIVATE mcp::tools)   # exec.cpp
 endif()
 # maya headers only (sandbox.cpp's transitive includes reach scroll_state /
 # anim_clock); no maya linking, so the TSan build stays small.
@@ -832,7 +832,8 @@ add_executable(dirs_test EXCLUDE_FROM_ALL
     src/util/user_root.cpp
     src/util/home_dir.cpp
     src/util/logx.cpp
-    src/tool/util/fs_helpers.cpp)
+    src/tool/util/fs_helpers.cpp
+    src/tool/util/disk_files.cpp)
 # The runtime's headers: dirs.cpp and user_root.cpp both use maya::guarded for
 # their warn-once sets. Without this the standalone target does not compile at
 # all (it is EXCLUDE_FROM_ALL, so a plain `ninja` never noticed).
@@ -843,7 +844,7 @@ target_include_directories(dirs_test PRIVATE include
 # mirror the workspace root into it.
 target_link_libraries(dirs_test PRIVATE maya::maya nlohmann_json::nlohmann_json)
 if(TARGET mcp::tools)
-    target_link_libraries(dirs_test PRIVATE mcp::tools mcp::tools_native_files)
+    target_link_libraries(dirs_test PRIVATE mcp::tools)
 endif()
 add_test(NAME dirs_test COMMAND dirs_test)
 set_tests_properties(dirs_test PROPERTIES TIMEOUT 30)

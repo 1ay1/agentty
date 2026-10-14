@@ -3,8 +3,8 @@
 // Adapts mcp-cpp's make_provider() toolset into agentty ToolDefs. The
 // provider owns each Tier-1 tool's implementation; this file owns the
 // thin re-wrap: build a ToolDef per advertised tool, dispatch execute()
-// into the provider, and decode the `_mcp_tools` meta (effects +
-// FileChange) back into agentty's ToolOutput.
+// into the provider, and read the typed effects and
+// FileChanges on its Result back into agentty's ToolOutput.
 
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include "agentty/tool/util/exec.hpp"   // the host's one way to run a program
@@ -18,16 +18,15 @@
 #include "agentty/tool/web_search_policy.hpp"   // web_search: Settings → Web Search
 #include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
 #include "agentty/tool/spec.hpp"       // spec catalog — effects authority
+#include "agentty/tool/util/disk_files.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/home_dir.hpp"   // agentty workspace_root()
 
-#include <mcp/tools/native_files.hpp>
 #include <mcp/tools/toolset.hpp>
 #include <mcp/tools/host.hpp>
 #include <maya/runtime.hpp>
 
 #include <cstdlib>   // std::getenv
-#include <mcp/tools/meta.hpp>
 #include <mcp/tools/util/fs_helpers.hpp>
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/util/handoff_gate.hpp"
@@ -358,7 +357,7 @@ ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
     //    request to see more ...]"
     // to bound the WIRE payload. For edit/write/apply_patch/replace the text
     // is a human-readable diff/confirmation AND the COMPLETE change is carried
-    // structurally (read_changes below, before/after), so the marker is
+    // structurally (r.changes below, before/after), so the marker is
     // redundant for the model and actively wrong in the review card (it was
     // rendering a grey "refine your request" line under the diff). For
     // read/grep/bash the marker is left intact — there the model genuinely
@@ -381,13 +380,10 @@ ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
         }
     }
 
-    // Decode EVERY file the tool changed — the single-file `change` (edit /
-    // write / apply_patch) and the multi-file `changes` array (replace). Each
-    // carries path/before/after but no hunks; rebuild the structured hunks the
-    // diff-review needs. All land in out.changes; out.change stays the
-    // first for any legacy single-file consumer.
-    auto raw = mt::read_changes(r);
-    for (const auto& ch : raw) {
+    // Every file the tool changed, with path/before/after; rebuild the
+    // structured hunks the diff-review needs. out.change stays the first for
+    // any single-file consumer.
+    for (const auto& ch : r.changes) {
         FileChange fc = diff::compute(ch.path, ch.before, ch.after);
         fc.original_contents = ch.before;
         fc.new_contents      = ch.after;
@@ -395,18 +391,28 @@ ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
     }
     if (!out.changes.empty()) out.change = out.changes.front();
 
-    // Images the tool surfaced (read on an image file): decode the base64 the
-    // tool body stashed in structured meta back to raw bytes and map onto the
-    // host ImageContent. These become image blocks in this call's tool_result
-    // for a vision model; a non-vision model just sees the [image ...] note in
-    // out.text, so nothing here needs a capability check — the wire layer drops
-    // them for models that can't see (see the vision gate at send time).
-    for (auto& im : mt::read_images(r))
-        out.images.push_back(ImageContent{std::move(im.media_type),
-                                          std::move(im.bytes)});
+    // Images the tool surfaced (read on an image file), raw bytes. They
+    // become image blocks in this call's tool_result for a vision model; a
+    // non-vision model just sees the [image ...] note in out.text, and the
+    // wire layer drops them for models that can't see.
+    for (auto& im : r.images)
+        out.images.push_back(ImageContent{std::move(im.media_type), std::move(im.bytes)});
 
     (void)tool_name;
     return out;
+}
+
+// mcp-cpp's effect set in agentty's terms. Spelled out per tag, so a tag
+// added on either side is a compile error here rather than a silent bit
+// mismatch.
+[[nodiscard]] EffectSet from_mcp(::mcp::cap::EffectSet m) noexcept {
+    using ME = ::mcp::cap::Effect;
+    EffectSet e;
+    if (m.has(ME::ReadFs))  e |= EffectSet{Effect::ReadFs};
+    if (m.has(ME::WriteFs)) e |= EffectSet{Effect::WriteFs};
+    if (m.has(ME::Net))     e |= EffectSet{Effect::Net};
+    if (m.has(ME::Exec))    e |= EffectSet{Effect::Exec};
+    return e;
 }
 
 // The mcp-cpp tools' memory between calls (read cache, file snapshots,
@@ -441,8 +447,12 @@ class GuardedToolState final : public mt::StateAccess {
   public:
     explicit GuardedToolState(std::filesystem::path home) {
         maya::thread_root([&](const maya::unlocked& cap) {
-            st_.with(cap, [](mt::ToolState& s, std::filesystem::path h) { s.home = std::move(h); },
-                     std::move(home));
+            st_.with(cap, [](mt::ToolState& s, std::filesystem::path h) {
+                s.home = std::move(h);
+                // agentty's own way to widen the boundary, for the refusal text.
+                s.widen_hint = "Restart agentty in a parent directory or pass "
+                               "--workspace <dir> to widen the scope.";
+            }, std::move(home));
         });
     }
     void with(const StateFn& f) override {
@@ -493,7 +503,7 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     svc.web_search_plan = tools::web_search_plan::make_plan_source();
     svc.exec = ka.exec;
     // Every file the tools touch: mcp-cpp does no IO itself, the host does.
-    svc.files = std::make_shared<mt::NativeFileSystem>();
+    svc.files = std::make_shared<util::DiskFiles>();
     // search / repo map fan out on maya::scope.
     svc.split = util::make_splitter();
     svc.state    = ka.state;
@@ -502,6 +512,13 @@ std::vector<ToolDef> build_mcp_tool_defs() {
     install_host_backends(svc);
 
     mt::ToolsetConfig cfg;   // all Tier-1 families on by default
+    // agentty's own steering. The library describes what each tool does;
+    // which tool agentty wants a model to reach for is agentty's call.
+    cfg.description_notes = {
+        {"shell", "Use for builds, tests, git, etc. Do NOT use for file IO — use "
+                  "the write/edit/read tools instead (no cat/echo/sed/heredoc "
+                  "to create or modify files)."},
+    };
     // AGENTTY_NO_TRANSFORMS=1 sheds the transform/aggregate/structured-data
     // family (extract/aggregate/replace/read_filter/json_query) — ~5 KB of
     // schema off every request — for a minimal or latency-sensitive profile,
@@ -544,8 +561,12 @@ std::vector<ToolDef> build_mcp_tool_defs() {
                 : sp->trunc_strategy == NativeTrunc::Tail
                     ? OutputTruncation::Tail
                     : OutputTruncation::HeadTail;
+        } else if (const auto fx = mt::effects_for_builtin(spec.name)) {
+            def.effects = from_mcp(*fx);
+            def.scheduling_effects = def.effects;
         } else {
-            def.effects = EffectSet{mt::effects_for_builtin(spec.name).bits()};
+            // Not a built-in: treat as a writer, like the scheduler does.
+            def.effects = EffectSet{Effect::WriteFs};
             def.scheduling_effects = def.effects;
         }
 

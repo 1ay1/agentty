@@ -26,8 +26,8 @@ EXTS = (".cpp", ".hpp", ".h", ".c", ".mm", ".cc")
 
 def relpath(path, start):
     """os.path.relpath with '/' separators on every OS. The prefix tables
-    below are written POSIX-style ("mcp-cpp/src/tools_native/"); on Windows
-    relpath returns backslashes and every allow-prefix silently missed."""
+    below are written POSIX-style; on Windows relpath returns backslashes and
+    every prefix silently missed."""
     return os.path.relpath(path, start).replace(os.sep, "/")
 
 # rule -> regex over stripped code. A leading space is added to every line so
@@ -38,6 +38,8 @@ RULES = {
     "R1 lock":    r"std::(shared_|recursive_|timed_|recursive_timed_)?mutex\b|condition_variable"
                   r"|std::(unique|scoped|shared)_lock\b",
     "R1 atomic":  r"std::atomic|\batomic_flag\b",
+    "R1 header":  r"#\s*include\s*<(thread|mutex|shared_mutex|future|condition_variable|atomic"
+                  r"|semaphore|latch|barrier)>",
     "R1 tls":     r"\bthread_local\b",
     "R1 wait":    r"std::(shared_)?future\b|std::promise\b|std::packaged_task\b|\bstop_source\b"
                   r"|std::latch\b|std::barrier\b|_semaphore\b",
@@ -64,11 +66,8 @@ FILE_IO = re.compile(
     # return type before it, as in `std::optional<Json> open(...)`).
     r"|(^|[;{(,=!&|?:]|\breturn)\s*(fopen|open|creat|unlink|mkdir|rmdir|fsync|opendir)\s*\("
     r"|(^|[^\w])::(open|unlink|mkdir|rmdir|fsync)\s*\("
-    r"|\bCreateFile[AW]?\b|\bFindFirstFile")
+    r"|\bCreateFile[AW]?\b|\bFindFirstFile|#\s*include\s*<fstream>")
 FILE_IO_LIBS = {"mcp-cpp", "acp-cpp", "jsonrpc-cpp"}
-# The ready-made host FileSystem: opt-in, its own target, and the one place
-# mcp-cpp's tree touches the disk.
-FILE_IO_ALLOWED = ("mcp-cpp/src/tools_native/",)
 
 # claybin's job is to fork/exec into a jail, handing the guest an environment:
 # R5's process rule (and passing environ to exec) is its purpose.
@@ -139,7 +138,7 @@ def purity(root):
                 for name, rx in rules.items():
                     if (lib, name) not in EXEMPT and rx.search(padded):
                         hits.append(f"{rel}:{no}: {name}: {line.strip()}")
-                if (lib in FILE_IO_LIBS and not rel.startswith(FILE_IO_ALLOWED)
+                if (lib in FILE_IO_LIBS
                         and FILE_IO.search(padded.replace(" fs::", " std::filesystem::"))):
                     hits.append(f"{rel}:{no}: R6 file io: {line.strip()}")
                 # R3: a mutable static anywhere on the line, statement by
