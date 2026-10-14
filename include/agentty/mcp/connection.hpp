@@ -113,8 +113,10 @@ private:
     maya::published<Live> live_;
     // One reconnect at a time (an atomic gate; see connection.cpp).
     std::atomic<bool>     reconnecting_{false};
-    // The host's list_changed callback, read from the peer's reader.
-    maya::published<const ListChangedFn> on_changed_;
+    // The host's list_changed callback, read from the peer's reader. Shared
+    // with the handlers, which can outlive this object (see handlers()).
+    std::shared_ptr<maya::published<const ListChangedFn>> on_changed_ =
+        std::make_shared<maya::published<const ListChangedFn>>();
 };
 
 }  // namespace agentty::mcp

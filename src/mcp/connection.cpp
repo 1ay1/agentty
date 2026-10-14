@@ -199,9 +199,13 @@ m::ClientHandlers Connection::handlers(std::weak_ptr<Live> weak) {
     // list_changed only marks the cache stale (and tells the host); the next
     // host-side read refreshes. Refreshing here, on the reader, would wait
     // for a reply only the reader can deliver.
-    auto changed = [this, weak](auto mark) {
+    //
+    // The host callback is reached through a shared copy of the slot, not
+    // `this`: a call in flight keeps Live (and so the reader) running past
+    // ~Connection, and a list_changed arriving then must not touch it.
+    auto changed = [slot = on_changed_, weak](auto mark) {
         if (auto l = weak.lock()) (void)l->lists.update(mark);
-        if (auto fn = on_changed_.current(); fn && *fn) (*fn)();
+        if (auto fn = slot->current(); fn && *fn) (*fn)();
     };
     h.on_tools_changed     = [changed] {
         changed([](const Lists& s) { Lists o = s; o.tools_stale = true; return o; });
@@ -305,12 +309,12 @@ Connection::ensure_live(const maya::unlocked& cap) {
     } catch (const std::exception& e) {
         return std::unexpected(std::string{"mcp reconnect failed: "} + e.what());
     }
-    if (auto fn = on_changed_.current(); fn && *fn) (*fn)();
+    if (auto fn = on_changed_->current(); fn && *fn) (*fn)();
     return live_.current();
 }
 
 void Connection::set_on_list_changed(ListChangedFn fn) {
-    on_changed_.publish(std::make_shared<const ListChangedFn>(std::move(fn)));
+    on_changed_->publish(std::make_shared<const ListChangedFn>(std::move(fn)));
 }
 
 // ── lists ───────────────────────────────────────────────────────────────────

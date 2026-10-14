@@ -1698,14 +1698,18 @@ a::InitializeResult AgentServer::on_initialize(const Cap&, const a::InitializePa
     client_elicit_url_.store(p.clientCapabilities.elicitUrl, std::memory_order_relaxed);
     // URL mode: MCP servers may ask for it, and their "done" goes to the editor.
     if (p.clientCapabilities.elicitUrl)
-        ::agentty::mcp::set_url_elicitation([this](const std::string& id) {
+        // Weak: the callback is a process-wide slot, and a server reader can
+        // take a copy of it just before ~AgentServer clears it.
+        ::agentty::mcp::set_url_elicitation([weak = weak_from_this()](const std::string& id) {
             // Called by the MCP bridge from a server's reader thread when a
             // URL elicitation completes. That thread holds no agentty lock
             // (it is mcp-cpp's transport loop), so the notify re-states it
             // here -- a reviewed root (tests/lint/allowlist.txt).
+            auto self = weak.lock();
+            if (!self) return;
             try {
                 maya::thread_root([&](const maya::unlocked& c) {
-                    peer_->notify_raw(c, "elicitation/complete", json{{"elicitationId", id}});
+                    self->peer_->notify_raw(c, "elicitation/complete", json{{"elicitationId", id}});
                 });
             } catch (...) {}
         });
@@ -3294,17 +3298,21 @@ bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool&
                 call_ctx.extra_roots.push_back(ctx.cwd);
         }
         for (const auto& r : ctx.extra_roots) call_ctx.extra_roots.push_back(r);
+        // The callbacks below co-own the server, not borrow it: a tool that is
+        // cancelled or times out is abandoned on the pool and can still call
+        // them after this turn (and its handle) are gone.
+        const auto self = maya::co_owned<AgentServer>::of(*this);
         // An MCP server asking the user something mid-call goes to the
         // editor's form UI, tied to this session and tool card.
         if (client_elicit_form_.load(std::memory_order_relaxed)
             || client_elicit_url_.load(std::memory_order_relaxed))
-            call_ctx.elicit = [this, sid = ctx.id, tid = tc.id.value,
+            call_ctx.elicit = [self, sid = ctx.id, tid = tc.id.value,
                                tok = ctx.cancel ? ctx.cancel->token() : std::stop_token{}](const json& mcp) {
                 // Called by the MCP bridge on the tool's call thread (an MCP
                 // server's request, relayed synchronously), which holds no
                 // agentty lock: a reviewed root (tests/lint/allowlist.txt).
                 return maya::thread_root([&](const maya::unlocked& c) {
-                    return elicit_via_client(c, sid, tid, mcp, tok);
+                    return self->elicit_via_client(c, sid, tid, mcp, tok);
                 });
             };
         // A subagent run is kept as its own session so Zed can show it
@@ -3329,10 +3337,10 @@ bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool&
             // Progress is reported from the tool's worker thread, which holds
             // no agentty lock; the notify (a leaf: the peer's outbox) re-states
             // it at this one callback (tests/lint/allowlist.txt).
-            call_ctx.progress = [this, sid = ctx.id, tid = tc.id.value, sent](std::string_view all) {
+            call_ctx.progress = [self, sid = ctx.id, tid = tc.id.value, sent](std::string_view all) {
                 if (all.size() <= *sent) return;
                 maya::thread_root([&](const maya::unlocked& c) {
-                    send_terminal_output(c, sid, tid, all.substr(*sent));
+                    self->send_terminal_output(c, sid, tid, all.substr(*sent));
                 });
                 *sent = all.size();
             };
@@ -3343,7 +3351,7 @@ bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool&
             // second; the final result replaces it when the tool settles.
             struct Throttle { std::chrono::steady_clock::time_point last{}; std::size_t sent = 0; };
             auto th = std::make_shared<Throttle>();
-            call_ctx.progress = [this, sid = ctx.id, tid = tc.id.value, th](std::string_view all) {
+            call_ctx.progress = [self, sid = ctx.id, tid = tc.id.value, th](std::string_view all) {
                 const auto now = std::chrono::steady_clock::now();
                 if (all.size() == th->sent || now - th->last < std::chrono::milliseconds(150)) return;
                 th->last = now;
@@ -3360,7 +3368,7 @@ bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool&
                     text_block("```\n" + tools::util::sanitize_utf8(tail) + "\n```"), json::object()}});
                 u.content = a::Just(std::move(c));
                 maya::thread_root([&](const maya::unlocked& rc) {   // tool worker: no lock held
-                    send_update(rc, sid, a::SU_ToolCallUpdate{std::move(u)});
+                    self->send_update(rc, sid, a::SU_ToolCallUpdate{std::move(u)});
                 });
             };
         }
