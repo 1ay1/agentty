@@ -28,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -120,6 +121,12 @@ struct ServerLaunch {
 // are O(1) and lock-guarded — safe to poll from the render/turn loop.
 [[nodiscard]] std::vector<tools::ToolDef> mcp_tools_live();
 [[nodiscard]] unsigned long mcp_generation() noexcept;
+
+// What the server says a tool does, from its annotations: true when it
+// changes things (not readOnlyHint), false when read-only, nullopt for a
+// name no connected server has. For labels only, never for permissions.
+// Lock-free; safe from the render thread.
+[[nodiscard]] std::optional<bool> mcp_tool_mutates(std::string_view name) noexcept;
 
 // Bump the generation WITHOUT touching the connection pool. Signals the
 // registry's wire cache to re-project the tool surface on next access

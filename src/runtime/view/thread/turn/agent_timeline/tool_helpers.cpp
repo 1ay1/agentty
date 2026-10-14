@@ -11,8 +11,17 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 #include "agentty/tool/util/utf8.hpp"
 #include "agentty/domain/ui_live.hpp"   // path_roots, project agents
+#include "agentty/mcp/client.hpp"        // mcp_tool_mutates
 
 namespace agentty::ui {
+
+namespace {
+// An MCP tool that changes things (no readOnlyHint) groups with edits.
+bool mcp_mutating(const std::string& n) {
+    if (!n.starts_with("mcp__")) return false;
+    return mcp::mcp_tool_mutates(n).value_or(false);
+}
+} // namespace
 
 // ── Display ─────────────────────────────────────────────────────────────
 
@@ -119,7 +128,7 @@ std::string tool_display_name(const std::string& n) {
 //   vcs     (git_*)                               → role_info (blue, "context-shift")
 //   plan    (todo)                                → status_warn (yellow, planning)
 maya::Color tool_category_color(const std::string& n) {
-    if (n == "edit" || n == "write" || n == "move" || n == "remove")
+    if (n == "edit" || n == "write" || n == "move" || n == "remove" || mcp_mutating(n))
         return role_brand;
     if (n == "shell" || n == "diagnostics" || n == "test"
         || n.rfind("process_", 0) == 0)
@@ -131,7 +140,7 @@ maya::Color tool_category_color(const std::string& n) {
 }
 
 std::string_view tool_category_label(const std::string& n) {
-    if (n == "edit" || n == "write" || n == "move" || n == "remove")
+    if (n == "edit" || n == "write" || n == "move" || n == "remove" || mcp_mutating(n))
         return "mutate";
     if (n == "shell" || n == "diagnostics" || n == "test"
         || n.rfind("process_", 0) == 0)
@@ -367,16 +376,35 @@ static std::string summarize_args(const ToolUse& tc) {
         }
         return out;
     }
-    // then up to two more short key: value pairs, so "table 2 · row: 3" reads
+    // then a few more short key: value pairs, so "table 2 · row: 3" reads.
+    // An object argument (setup, paragraph_format) shows its own pairs, and
+    // so does one the model sent as a JSON string.
+    auto as_object = [](const nlohmann::json& v) -> nlohmann::json {
+        if (v.is_object()) return v;
+        if (v.is_string()) {
+            const auto& s = v.get_ref<const std::string&>();
+            if (s.size() < 2 || s.front() != '{') return nullptr;
+            auto j = nlohmann::json::parse(s, nullptr, false);
+            if (j.is_object()) return j;
+        }
+        return nullptr;
+    };
     int extra = 0;
-    for (auto& [k, v] : tc.args.items()) {
-        if (k == lead_key || noise(k) || extra >= 2) continue;
-        auto s = scalar(v);
-        if (s.empty() || s.size() > 40) continue;
+    bool full = false;
+    auto add_pair = [&](const std::string& k, const std::string& s) {
+        if (full || s.empty() || s.size() > 40) return;
         std::string part = k + ": " + s;
-        if (out.size() + part.size() + 3 > kMax + 20) break;
+        if (extra >= 3 || out.size() + part.size() + 3 > kMax + 20) { full = true; return; }
         out += (out.empty() ? "" : " \xc2\xb7 ") + part;
         extra++;
+    };
+    for (auto& [k, v] : tc.args.items()) {
+        if (k == lead_key || noise(k)) continue;
+        if (auto o = as_object(v); o.is_object()) {
+            for (auto& [ik, iv] : o.items()) add_pair(ik, scalar(iv));
+            continue;
+        }
+        add_pair(k, scalar(v));
     }
     // Nothing to say but which document/session: say that rather than "…"
     // (read_document {doc}). A path-like handle shows as its file name.

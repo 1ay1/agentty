@@ -153,6 +153,18 @@ TEST_CASE("tool timeline adapter") {
     }
     check(U::tool_timeline_detail(make_tool("mcp__x__noargs", A::ToolUse::Done{{}, {}, "ok"})).empty(),
           "no args, no detail (the caller shows its state word)");
+    {
+        auto d = U::tool_timeline_detail(make_tool("mcp__docx__insert_paragraph", A::ToolUse::Running{},
+            {{"doc", "doc1"}, {"text", "Hello"}, {"paragraph_format", {{"alignment", "center"}}}, {"style", "Title"}}));
+        check(d.find("alignment: center") != std::string::npos && d.find('{') == std::string::npos,
+              "object arguments show their own key: value pairs, not JSON");
+        auto s = U::tool_timeline_detail(make_tool("mcp__docx__set_page_setup", A::ToolUse::Running{},
+            {{"doc", "doc1"}, {"setup", R"({"orientation": "landscape", "paper": "a4"})"}}));
+        check(s.find("orientation: landscape") != std::string::npos && s.find("paper: a4") != std::string::npos,
+              "an object sent as a JSON string reads the same");
+    }
+    check(U::tool_category_label("mcp__nobody__thing") == "inspect",
+          "an MCP tool no server reports stays inspect");
     check(U::tool_timeline_detail(make_tool("mcp__docx__read_document", A::ToolUse::Done{{}, {}, "{}"},
               {{"doc", "doc1"}})) == "doc1",
           "only a handle: show it rather than an ellipsis");

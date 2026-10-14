@@ -1246,6 +1246,13 @@ std::vector<tools::ToolDef> passthrough_tools() {
     return out;
 }
 
+// name -> mutates, read by the timeline to label cards. Not a trust input.
+using MutatesMap = std::unordered_map<std::string, bool>;
+maya::published<const MutatesMap>& g_mutates() {
+    static auto* m = new maya::published<const MutatesMap>;
+    return *m;
+}
+
 std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
     std::vector<tools::ToolDef> out;
     bool any_resources = false, any_prompts = false;
@@ -1264,8 +1271,12 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
         live_exclude_map();
 
     {
+        auto mutates = std::make_shared<MutatesMap>();
         for (auto& t : pool->registry.tools()) {
             const auto origin = mcp_origin_id(t.name);
+            const bool ro = t.annotations.has_value() && t.annotations->readOnlyHint.has_value() &&
+                            *t.annotations->readOnlyHint;
+            mutates->emplace(canonical_mcp_name(t.name), !ro);
             if (!tool_enabled(pool, t.name, live_excl)) continue;
             const auto policy_it = pool->policies.find(origin);
             const ServerPolicy fallback;
@@ -1273,6 +1284,7 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
                 ? fallback : policy_it->second;
             out.push_back(make_tool(pool, t, policy));
         }
+        g_mutates().publish(std::shared_ptr<const MutatesMap>(std::move(mutates)));
         any_resources = !pool->registry.resources().empty() ||
                         !pool->registry.resource_templates().empty();
         any_prompts   = !pool->registry.prompts().empty();
@@ -1655,6 +1667,13 @@ unsigned long mcp_generation() noexcept {
     auto pool = current_pool();
     if (!pool) return 0;
     return pool->generation.load(std::memory_order_relaxed);
+}
+
+std::optional<bool> mcp_tool_mutates(std::string_view name) noexcept {
+    auto m = g_mutates().current();
+    if (!m) return std::nullopt;
+    if (auto it = m->find(std::string{name}); it != m->end()) return it->second;
+    return std::nullopt;
 }
 
 void mcp_bump_generation() noexcept {
