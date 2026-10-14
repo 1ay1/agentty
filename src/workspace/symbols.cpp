@@ -266,12 +266,12 @@ std::vector<SymbolEntry> build_symbol_list(const maya::unlocked* fan, std::size_
                 }
     };
     if (fan) {
-        // maya::scope joins every helper before it returns (and on a throw),
+        // The group joins every helper before it goes away (and on a throw),
         // which is what makes the [&] captures of `partials` and `next` safe.
         maya::scope(*fan, stop, [&](maya::nursery& n) {
-            for (unsigned t = 0; t < nthreads; ++t) {
-                (void)n.spawn([&share, t] { share(t); });
-            }
+            n.spawn_n(nthreads, [&share](std::size_t t) {
+                share(static_cast<unsigned>(t));
+            }).join();
         });
     } else {
         for (unsigned t = 0; t < nthreads; ++t) share(t);

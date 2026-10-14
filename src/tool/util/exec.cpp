@@ -731,9 +731,9 @@ void scope_fan_out(std::size_t n, const std::function<void(std::size_t)>& fn) {
     if (n <= 1) { if (n) fn(0); return; }
     maya::thread_root([&](const maya::unlocked& cap) {
         maya::scope(cap, [&](maya::nursery& nur) {
-            for (std::size_t i = 1; i < n; ++i)
-                (void)nur.spawn([&fn, i] { fn(i); });   // joined by scope
+            auto rest = nur.spawn_n(n - 1, [&fn](std::size_t i) { fn(i + 1); });
             fn(0);   // the caller runs a share too
+            rest.join();
         });
     });
 }
