@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -170,7 +171,8 @@ struct SpawnResult {
 // message with quotes or a `$` in it must not be re-parsed on the way in.
 [[nodiscard]] SpawnResult spawn_argv(const Posture& p,
                                      const std::vector<std::string>& argv,
-                                     int stdout_fd, int stderr_fd);
+                                     int stdout_fd, int stderr_fd,
+                                     const std::vector<std::pair<std::string, std::string>>& env = {});
 
 // The same, with a shell in front: `/bin/sh -c shell_cmd`. Pipes, redirects
 // and globs are part of what a shell tool is for. Implemented as a call to

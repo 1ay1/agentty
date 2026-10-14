@@ -241,6 +241,20 @@ TEST_CASE("exec: the sandboxed path spawns, is watched, and still obeys the cloc
     CHECK_MESSAGE(elapsed < 15s, "reaped at its ceiling, not left spinning");
 }
 
+TEST_CASE("exec: the request's env reaches a sandboxed child") {
+    // Tools set env to keep children non-interactive (GIT_EDITOR=true,
+    // PAGER=cat, GIT_TERMINAL_PROMPT=0). The sandboxed spawn used to drop it.
+    namespace sb = agentty::tools::util::sandbox;
+    if (!sb::init(sb::Mode::On) || !sb::is_active()) return;
+    auto e = agentty::tools::util::make_exec();
+    auto r = e->run(mt::Call{}, {.program = {"/bin/sh", {"-c", "printf '%s|%s' \"$AGT_PROBE\" \"${PATH:+path}\""}},
+                                 .env = {{"AGT_PROBE", "from-request"}},
+                                 .budgets = {.idle = 10s, .wall = 20s}});
+    CHECK(r.ok());
+    // Layered on the parent's env, not instead of it: PATH survives.
+    CHECK_MESSAGE(r.output == "from-request|path", "child saw: " << r.output);
+}
+
 // A background session under the sandbox makes a brokered syscall (kill).
 // The kernel parks the guest until the supervisor answers, so a session
 // nobody services never gets past it.

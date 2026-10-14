@@ -977,7 +977,8 @@ SubprocessResult run_argv(const std::vector<std::string>& argv,
 claybin_backend::SpawnResult spawn_in_sandbox(
         const std::vector<std::string>& argv, std::string_view cwd, int out_fd,
         const std::vector<std::string>& extra_roots,
-        const handoff::TrustedSnapshot* trusted) {
+        const handoff::TrustedSnapshot* trusted,
+        const std::vector<std::pair<std::string, std::string>>& env) {
 #if defined(__linux__)
     if (detected_backend() == Backend::Claybin) {
         auto posture = build_claybin_posture(trusted);
@@ -986,10 +987,10 @@ claybin_backend::SpawnResult spawn_in_sandbox(
         // may write there too, like the workspace.
         for (const auto& r : extra_roots)
             if (!r.empty()) posture.write_paths.push_back(r);
-        return claybin_backend::spawn_argv(posture, argv, out_fd, out_fd);
+        return claybin_backend::spawn_argv(posture, argv, out_fd, out_fd, env);
     }
 #else
-    (void)argv; (void)cwd; (void)out_fd; (void)extra_roots; (void)trusted;
+    (void)argv; (void)cwd; (void)out_fd; (void)extra_roots; (void)trusted; (void)env;
 #endif
     claybin_backend::SpawnResult r;
     r.started = false;

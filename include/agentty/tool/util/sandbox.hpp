@@ -235,7 +235,8 @@ void reset_config_for_test() noexcept;
 [[nodiscard]] claybin_backend::SpawnResult spawn_in_sandbox(
     const std::vector<std::string>& argv, std::string_view cwd, int out_fd,
     const std::vector<std::string>& extra_roots = {},
-    const handoff::TrustedSnapshot* trusted = nullptr);
+    const handoff::TrustedSnapshot* trusted = nullptr,
+    const std::vector<std::pair<std::string, std::string>>& env = {});
 
 #if defined(__APPLE__)
 // macOS counterpart of spawn_in_sandbox for the jaal exec path. jaal cannot

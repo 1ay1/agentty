@@ -40,6 +40,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <sys/wait.h>
@@ -476,7 +478,8 @@ Report describe(const Posture& p) {
 }
 
 SpawnResult spawn_argv(const Posture& p, const std::vector<std::string>& argv_in,
-                       int stdout_fd, int stderr_fd) {
+                       int stdout_fd, int stderr_fd,
+                       const std::vector<std::pair<std::string, std::string>>& env) {
     SpawnResult out;
 
     if (argv_in.empty()) {
@@ -516,7 +519,24 @@ SpawnResult spawn_argv(const Posture& p, const std::vector<std::string>& argv_in
     // claybin calls execve, which does no PATH lookup, so a bare "git" came
     // back as exit 127. Resolve it here, in the parent, the way execvp would.
     const std::string program = resolve_on_path(argv_in.front());
-    Command cmd{program.c_str(), argv.data(), nullptr};
+    // The request's env, layered on ours, as a ready envp: the child can't
+    // build one (it may not allocate). Empty env: inherit ours unchanged.
+    std::vector<std::string> env_store;
+    std::vector<const char*> envp;
+    if (!env.empty()) {
+        for (char** e = ::environ; e && *e; ++e) {
+            const std::string_view kv{*e};
+            const auto key = kv.substr(0, kv.find('='));
+            bool overridden = false;
+            for (const auto& [k, v] : env) if (k == key) { overridden = true; break; }
+            if (!overridden) env_store.emplace_back(kv);
+        }
+        for (const auto& [k, v] : env) env_store.push_back(k + "=" + v);
+        envp.reserve(env_store.size() + 1);
+        for (const auto& s : env_store) envp.push_back(s.c_str());
+        envp.push_back(nullptr);
+    }
+    Command cmd{program.c_str(), argv.data(), env.empty() ? nullptr : envp.data()};
     // stdin from /dev/null explicitly rather than inherited -- a guest that can
     // read the user's terminal can prompt them, and nothing a tool runs should.
     cmd.stdin_fd = Command::kDevNull;
