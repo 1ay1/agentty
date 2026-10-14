@@ -22,6 +22,8 @@
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/sandbox.hpp"
+#include "agentty/domain/sandbox_config.hpp"
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -45,6 +47,16 @@ int main(int argc, char** argv) {
     ::setenv("AGENTTY_OLLAMA_HOST", "127.0.0.1:1", 1);
     ::unsetenv("AGENTTY_MCP_CONFIG");
     tools::util::set_workspace_root(::agentty::IoAccess::grant(), root);
+    // AGENTTY_BENCH_SANDBOX=1: measure under the default sandbox, as a user
+    // runs it (every program the tools start goes through claybin).
+    if (const char* s = std::getenv("AGENTTY_BENCH_SANDBOX"); s && *s == '1') {
+        namespace sb = tools::util::sandbox;
+        sandbox_cfg::Config cfg;
+        cfg.configured = true;
+        sb::set_config(cfg);
+        if (!sb::init(sb::Mode::On)) { std::puts("no sandbox backend"); return 1; }
+        std::printf("%s\n", sb::describe_state().c_str());
+    }
     (void)tools::registry();
 
     // Pick a real file in the tree for read/outline-style cases.

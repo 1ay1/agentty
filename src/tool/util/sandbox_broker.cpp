@@ -184,6 +184,41 @@ namespace {
     return false;
 }
 
+// The requester's own pid and pgid as IT sees them (innermost namespace),
+// from NSpid/NSpgid. A target the guest names is in that number space, so
+// "is this me / my group" must be asked there, not against host pids.
+// {-1, -1} when /proc can't say; callers then fall back to host values.
+struct NsIds { std::int32_t pid = -1, pgid = -1; };
+[[nodiscard]] NsIds ns_ids_of(std::uint32_t host_pid) noexcept {
+    NsIds out;
+    char path[64];
+    std::snprintf(path, sizeof path, "/proc/%u/status", host_pid);
+    const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return out;
+    std::string st;
+    char buf[4096];
+    for (;;) {
+        const auto n = ::read(fd, buf, sizeof buf);
+        if (n <= 0) break;
+        st.append(buf, static_cast<std::size_t>(n));
+        if (st.size() > 64 * 1024) break;
+    }
+    ::close(fd);
+    // "Key:\t<outer>\t...\t<innermost>": take the LAST field.
+    const auto last_field = [&](std::string_view key) -> std::int32_t {
+        const auto at = st.find(key);
+        if (at == std::string::npos) return -1;
+        const auto eol = st.find('\n', at + 1);
+        const std::string line = st.substr(at + 1, eol - at - 1);
+        const auto sp = line.find_last_of(" \t");
+        if (sp == std::string::npos) return -1;
+        return static_cast<std::int32_t>(std::strtol(line.c_str() + sp + 1, nullptr, 10));
+    };
+    out.pid  = last_field("\nNSpid:");
+    out.pgid = last_field("\nNSpgid:");
+    return out;
+}
+
 #endif  // __linux__
 
 }  // namespace
@@ -344,6 +379,9 @@ Verdict decide(std::uint32_t nr, const std::uint64_t args[6],
             return record("ptrace", std::move(detail), true);
         if (guest_pgid != 0 && target == guest_pgid)
             return record("ptrace", std::move(detail), true);
+        if (const auto me = ns_ids_of(guest_pid);
+            me.pid > 0 && static_cast<std::int32_t>(target) == me.pid)
+            return record("ptrace", std::move(detail), true);
         // ...and a DESCENDANT, which is the ordinary debugger case the
         // paragraph above describes ("a debugger attaching to its own child").
         // Equality alone could never express it: a child's pid is neither the
@@ -363,11 +401,18 @@ Verdict decide(std::uint32_t nr, const std::uint64_t args[6],
         // Self, and the own-group forms (0 = my group, negative = that group).
         // A build killing its own children is routine: `make` on failure,
         // `timeout`, a test runner reaping workers.
-        if (target == 0 || target == static_cast<std::int32_t>(guest_pid))
+        //
+        // The target is in the guest's pid namespace, so "is it me / my
+        // group" is asked in its numbers (NSpid/NSpgid). The host-pid tests
+        // stay for a guest with no pid namespace, where the two agree.
+        const auto me = ns_ids_of(guest_pid);
+        if (target == 0 || target == static_cast<std::int32_t>(guest_pid)
+            || (me.pid > 0 && target == me.pid))
             return record("kill", std::move(detail), true);
         if (target < 0) {
             const auto grp = static_cast<std::uint32_t>(-target);
-            if (grp == guest_pgid || grp == guest_pid)
+            if (grp == guest_pgid || grp == guest_pid
+                || (me.pgid > 0 && static_cast<std::int32_t>(grp) == me.pgid))
                 return record("kill", std::move(detail), true);
             // ...or a group LED BY one of our descendants. `timeout` does
             // exactly this: it putpgid()s the command into its own group and
@@ -386,6 +431,8 @@ Verdict decide(std::uint32_t nr, const std::uint64_t args[6],
             return record("kill", std::move(detail), false);
         }
         if (guest_pgid != 0 && static_cast<std::uint32_t>(target) == guest_pgid)
+            return record("kill", std::move(detail), true);
+        if (me.pgid > 0 && target == me.pgid)   // the group leader, by number
             return record("kill", std::move(detail), true);
         // A process in our own group -- i.e. one of our descendants. This is
         // the case the comment above promises and the equality tests could

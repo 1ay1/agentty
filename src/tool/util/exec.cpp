@@ -213,6 +213,23 @@ std::optional<std::chrono::seconds> env_wall_override() {
 class JaalSession;   // below
 
 namespace session_detail {
+// What the sandbox handed back with the child: the seccomp listener the pump
+// must answer, and cgroup.kill. Empty when there's no sandbox.
+struct SandboxHooks {
+    int                   supervisor_fd = -1;
+    std::function<bool()> service_broker;   // answer one notification
+    std::function<bool()> kill_tree;        // false = fall back to the group
+};
+}  // namespace session_detail
+}  // namespace
+}  // namespace agentty::tools::util
+// Moved once into the pump, never shared: the closures own what they
+// capture (the listener and the cgroup, by shared_ptr only they hold).
+MAYA_SENDABLE(agentty::tools::util::session_detail::SandboxHooks);
+namespace agentty::tools::util {
+namespace {
+
+namespace session_detail {
 // A background session's reactor, split by who may touch what:
 //   * adopt(): once, by the session's constructor, before the pump exists
 //     (so before any other thread can see it). Needs a PumpKey too.
@@ -273,7 +290,7 @@ namespace {
 /// a leaf lock is the only thing it touches.
 class JaalSession final : public mt::Session {
   public:
-    JaalSession(process_t p, std::size_t window) {
+    JaalSession(process_t p, std::size_t window, session_detail::SandboxHooks hooks = {}) {
         // Core owns the reactor: the handle and the pump both co-own Core,
         // so the reactor (and the eventfd behind its waker) lives until the
         // last of them is gone. stop() can never wake a closed fd. It is
@@ -295,10 +312,10 @@ class JaalSession final : public mt::Session {
         }
         ::agentty::util::run_isolated_detached("exec.session.pump",
             [](const maya::unlocked& c, std::stop_token st, process_t proc,
-               std::size_t win, core_t core) {
-                pump(c, std::move(st), std::move(proc), win, std::move(core));
+               std::size_t win, core_t core, session_detail::SandboxHooks hk) {
+                pump(c, std::move(st), std::move(proc), win, std::move(core), std::move(hk));
             },
-            std::move(p), window, core_);
+            std::move(p), window, core_, std::move(hooks));
     }
     ~JaalSession() override { stop(); }
 
@@ -402,16 +419,28 @@ class JaalSession final : public mt::Session {
     using core_t = maya::co_owned<Core>;
 
     static void pump(const maya::unlocked& cap, std::stop_token pool_stop, process_t proc,
-                     std::size_t window, core_t core) {
+                     std::size_t window, core_t core, session_detail::SandboxHooks hooks) {
         // The pump is the only thread that waits on or registers with the
         // reactor; Core owns it so the waker stays valid for stop().
         auto& reactor = core->reactor.drive(PumpKey{});
         core->s.with(cap, [](Stream& s, std::size_t w) { s.cap = w; }, window);
         auto exit_reg = reactor.watch(proc.exit_handle().get(), pf::interest::read, kExitToken);
-        std::optional<reactor_t::registration> out_reg;
+        std::optional<reactor_t::registration> out_reg, broker_reg;
         if (auto h = proc.stdout_handle())
             if (auto r = reactor.watch(h->get(), pf::interest::read, kOutToken))
                 out_reg = std::move(*r);
+        // The seccomp listener. The kernel parks a guest thread on every
+        // brokered syscall until it's answered, so this has to be watched
+        // for as long as the child lives, same as run_child does.
+        if (hooks.supervisor_fd >= 0 && hooks.service_broker)
+            if (auto r = reactor.watch(hooks.supervisor_fd, pf::interest::read, kBrokerToken))
+                broker_reg = std::move(*r);
+        // SIGKILL for the whole tree: cgroup.kill when the sandbox gave us
+        // one (a setsid() descendant can't leave it), else the group.
+        auto kill_all = [&] {
+            if (!(hooks.kill_tree && hooks.kill_tree()))
+                (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+        };
 
         constexpr auto kGrace = std::chrono::seconds{2};
         bool exited = false, eof = !out_reg;
@@ -428,7 +457,7 @@ class JaalSession final : public mt::Session {
                 kill_at = clock_t_::now() + kGrace;
             }
             if (kill_at && !exited && clock_t_::now() >= *kill_at) {
-                (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+                kill_all();
                 kill_at = clock_t_::time_point::max();   // once
             }
             if (exited && stopping && !give_up_eof)
@@ -460,6 +489,10 @@ class JaalSession final : public mt::Session {
                 } else if (r.token == kExitToken && (r.readable || r.hangup)) {
                     exited = true;
                     exit_reg = {};
+                } else if (r.token == kBrokerToken && (r.readable || r.hangup)) {
+                    // false: the listener is done (guest gone). Stop watching
+                    // it, or a hung-up fd wakes this loop forever.
+                    if (!hooks.service_broker()) broker_reg.reset();
                 }
             }
             if (exited && !eof) {
@@ -472,7 +505,7 @@ class JaalSession final : public mt::Session {
             // Reactor failure, or the EOF give-up with the child alive: make
             // sure it's dead, then give the kernel a moment to make it
             // reapable (reap() refuses rather than block).
-            (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+            kill_all();
             for (int i = 0; i < 100; ++i) {
                 publish_exit(cap, proc, core);
                 if (core->s.read(cap, [](const Stream& s) { return s.ended; })) break;
@@ -509,6 +542,27 @@ class JaalExec final : public mt::Exec {
   public:
     explicit JaalExec(ExecDefaults d) : d_(d) {}
 
+    // Put the sandbox on a child about to start, the same way for run and
+    // start. The call's extra roots (an editor session's folders) are
+    // writable inside the sandbox too. On darwin jaal can't adopt a foreign
+    // child (no pidfd), so the sandbox goes into the argv instead
+    // (sandbox-exec, same posture). Returns why it couldn't: fail closed, a
+    // profile we can't build must not become an unconfined run.
+    [[nodiscard]] static std::optional<std::string> confine(const mt::Call& call, ChildRun& run) {
+        std::vector<std::string> roots;
+        for (const auto& r : call.scope_extra_roots) roots.push_back(r.string());
+        run.spawn_adopted = sandbox_spawner(run.argv, run.cwd, roots);
+#if defined(__APPLE__)
+        namespace sb = agentty::tools::util::sandbox;
+        if (sb::is_active()) {
+            auto wrapped = sb::wrap_argv_for_exec(run.argv, run.cwd, roots);
+            if (!wrapped) return "sandbox: " + wrapped.error();
+            run.argv = std::move(*wrapped);
+        }
+#endif
+        return std::nullopt;
+    }
+
     [[nodiscard]] mt::ExecResult run(const mt::Call& call, const mt::ExecRequest& req) override {
         ChildRun run;
         run.argv.reserve(req.program.args.size() + 1);
@@ -528,28 +582,10 @@ class JaalExec final : public mt::Exec {
         run.max_output_bytes = req.max_output_bytes.value_or(d_.max_output_bytes);
         if (req.stop_when)
             run.stop_when = [&req](std::string_view so_far) { return req.stop_when(so_far); };
-        {
-            // The call's extra roots (an editor session's folders) are
-            // writable inside the sandbox too.
-            std::vector<std::string> roots;
-            for (const auto& r : call.scope_extra_roots) roots.push_back(r.string());
-            run.spawn_adopted = sandbox_spawner(run.argv, run.cwd, roots);
-#if defined(__APPLE__)
-            // darwin: jaal can't adopt a foreign child (no pidfd), so the
-            // sandbox goes into the argv instead -- sandbox-exec with the
-            // same compiled posture. Fail closed: a profile we can't build
-            // must not become an unconfined run.
-            namespace sb = agentty::tools::util::sandbox;
-            if (sb::is_active()) {
-                auto wrapped = sb::wrap_argv_for_exec(run.argv, run.cwd, roots);
-                if (!wrapped) {
-                    mt::ExecResult er;
-                    er.outcome = mt::StartFailed{"sandbox: " + wrapped.error()};
-                    return er;
-                }
-                run.argv = std::move(*wrapped);
-            }
-#endif
+        if (auto bad = confine(call, run)) {
+            mt::ExecResult er;
+            er.outcome = mt::StartFailed{std::move(*bad)};
+            return er;
         }
         // The tool call's live output and cancel: where its output goes and
         // whether its user hit Esc.
@@ -577,33 +613,25 @@ class JaalExec final : public mt::Exec {
     }
 
     [[nodiscard]] std::expected<std::shared_ptr<mt::Session>, std::string>
-    start(const mt::ExecRequest& req) override {
+    start(const mt::Call& call, const mt::ExecRequest& req) override {
         ChildRun run;
         run.argv.reserve(req.program.args.size() + 1);
         run.argv.push_back(req.program.exe);
         for (const auto& a : req.program.args) run.argv.push_back(a);
         run.cwd = req.cwd.value_or(std::string{});
         run.env = req.env;
-        run.spawn_adopted = sandbox_spawner(run.argv, run.cwd);
-#if defined(__APPLE__)
-        {
-            namespace sb = agentty::tools::util::sandbox;
-            if (sb::is_active()) {
-                auto wrapped = sb::wrap_argv_for_exec(run.argv, run.cwd);
-                if (!wrapped) return std::unexpected("sandbox: " + wrapped.error());
-                run.argv = std::move(*wrapped);
-            }
-        }
-#endif
+        if (auto bad = confine(call, run)) return std::unexpected(std::move(*bad));
 
         auto st = start_child(run);
         if (!st) return std::unexpected(st.error());
-        // The broker is not serviced for a session: nothing polls the
-        // listener between the caller's polls.
+        // The pump answers the broker and owns cgroup.kill, as run_child does.
+        session_detail::SandboxHooks hooks{st->supervisor_fd, std::move(st->service_broker),
+                                           std::move(st->kill_tree)};
         return std::static_pointer_cast<mt::Session>(
             std::make_shared<JaalSession>(std::move(st->proc),
                                           req.max_output_bytes.value_or(
-                                              d_.max_output_bytes)));
+                                              d_.max_output_bytes),
+                                          std::move(hooks)));
     }
 
     [[nodiscard]] bool stops_whole_tree() const noexcept override {

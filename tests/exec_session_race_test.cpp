@@ -103,7 +103,7 @@ mt::ExecRequest sh(const std::string& script) {
 // Start, read until it ends (or give up), stop, drop. The session's last
 // reference dies on whichever thread happens to hold it.
 void session_round(mt::Exec& exec, int i) {
-    auto s = exec.start(sh(i % 3 == 0 ? kS.quick : i % 3 == 1 ? kS.short_then_fail
+    auto s = exec.start(mt::Call{}, sh(i % 3 == 0 ? kS.quick : i % 3 == 1 ? kS.short_then_fail
                                                               : kS.burst));
     check(s.has_value(), "session starts");
     if (!s) return;
@@ -117,7 +117,7 @@ void session_round(mt::Exec& exec, int i) {
 
 // Stop while it is still running, from another thread than the reader.
 void stop_while_polled(mt::Exec& exec) {
-    auto s = exec.start(sh(kS.long_sleep));
+    auto s = exec.start(mt::Call{}, sh(kS.long_sleep));
     check(s.has_value(), "long session starts");
     if (!s) return;
     std::shared_ptr<mt::Session> sess = *s;
@@ -164,7 +164,7 @@ int main() {
     // not the thread that started them.
     std::vector<std::shared_ptr<mt::Session>> pile;
     for (int i = 0; i < 16; ++i)
-        if (auto s = exec->start(sh(kS.short_then_print))) pile.push_back(*s);
+        if (auto s = exec->start(mt::Call{}, sh(kS.short_then_print))) pile.push_back(*s);
     std::thread dropper([p = std::move(pile)]() mutable { p.clear(); });
     dropper.join();
 
@@ -178,7 +178,7 @@ int main() {
     // whole stream: the cursor moves inside the same lock that hands out
     // the bytes.
     {
-        auto s = exec->start(sh("i=0; while [ $i -lt 2000 ]; do echo $i; i=$((i+1)); done"));
+        auto s = exec->start(mt::Call{}, sh("i=0; while [ $i -lt 2000 ]; do echo $i; i=$((i+1)); done"));
         check(s.has_value(), "counting session starts");
         if (s) {
             auto sess = *s;
@@ -201,7 +201,7 @@ int main() {
     // stop() and dropping the last handle never block, even when the child
     // ignores SIGTERM and so takes the full grace to die.
     {
-        auto s = exec->start(sh("trap '' TERM; while :; do sleep 0.05; done"));
+        auto s = exec->start(mt::Call{}, sh("trap '' TERM; while :; do sleep 0.05; done"));
         check(s.has_value(), "stubborn session starts");
         if (s) {
             auto sess = *s;
@@ -218,7 +218,7 @@ int main() {
     // stop() wakes the pump: the child gets SIGTERM promptly, not on the next
     // poll tick.
     {
-        auto s = exec->start(sh(kS.long_sleep));
+        auto s = exec->start(mt::Call{}, sh(kS.long_sleep));
         check(s.has_value(), "sleeper starts");
         if (s) {
             auto sess = *s;

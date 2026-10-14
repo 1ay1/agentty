@@ -241,6 +241,44 @@ TEST_CASE("exec: the sandboxed path spawns, is watched, and still obeys the cloc
     CHECK_MESSAGE(elapsed < 15s, "reaped at its ceiling, not left spinning");
 }
 
+// A background session under the sandbox makes a brokered syscall (kill).
+// The kernel parks the guest until the supervisor answers, so a session
+// nobody services never gets past it.
+TEST_CASE("exec: a sandboxed background session gets its brokered syscalls answered") {
+    namespace sb = agentty::tools::util::sandbox;
+    if (!sb::init(sb::Mode::On) || !sb::is_active()) return;
+    if (sb::config_snapshot()->syscall_mode == agentty::sandbox_cfg::SyscallMode::Off)
+        return;   // no filter, so nothing is brokered
+
+    auto e = agentty::tools::util::make_exec();
+    // Signal 0 to itself and to its own child: the ordinary cases a build
+    // or `timeout` makes. The broker decides both from the guest's own pid
+    // namespace numbers, not the host pids.
+    const std::string cmd =
+        "python3 -c 'import os,subprocess; os.kill(os.getpid(), 0); "
+        "c = subprocess.Popen([\"sleep\", \"5\"]); os.kill(c.pid, 15); c.wait()' "
+        " && echo after-kill";
+    // Foreground first: the run loop services the broker.
+    auto fg = e->run(mt::Call{}, {.program = {"/bin/sh", {"-c", cmd}},
+                                  .budgets = {.idle = 10s, .wall = 20s}});
+    CHECK_MESSAGE(fg.output.find("after-kill") != std::string::npos, "foreground: " << fg.output);
+
+    auto s = e->start(mt::Call{}, {.program = {"/bin/sh", {"-c", cmd}}});
+    REQUIRE(s.has_value());
+
+    std::string out;
+    bool ended = false;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - t0 < 10s) {
+        auto r = (*s)->read(200ms, 64 * 1024);
+        out += r.output;
+        if (!r.running && r.eof) { ended = true; break; }
+    }
+    (*s)->stop();
+    CHECK_MESSAGE(out.find("after-kill") != std::string::npos, "the guest got past kill: " << out);
+    CHECK_MESSAGE(ended, "and exited on its own");
+}
+
 // ── a session: started here, polled later ───────────────────────────────
 //
 // process_start/poll/stop used to own a thread per session and spawn
