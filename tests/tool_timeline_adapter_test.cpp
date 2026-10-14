@@ -117,6 +117,56 @@ TEST_CASE("tool timeline adapter") {
                   == "mcp__browser__click",
           "MCP call broker identifies its target");
 
+    // MCP tools without display_description: "Server · Tool" title and a
+    // header made from the arguments, never a bare ellipsis.
+    check(U::tool_display_name("mcp__docx__insert_table") == "Docx \xc2\xb7 Insert Table",
+          "MCP title is server · tool");
+    check(U::tool_display_name("mcp__web__get__page") == "Web \xc2\xb7 Get Page",
+          "a tool name containing __ keeps the rest after the server");
+    check(U::tool_display_name("mcp__noserver") == "Mcp Noserver",
+          "a malformed mcp name falls back to title case");
+    check(U::tool_timeline_detail(make_tool("mcp__docx__help", A::ToolUse::Running{},
+              {{"topic", "insert_table, format_text"}})) == "insert_table, format_text",
+          "MCP header shows the lead argument");
+    {
+        auto d = U::tool_timeline_detail(make_tool("mcp__docx__set_cell", A::ToolUse::Done{{}, {}, "{}"},
+            {{"doc", "doc1"}, {"table", 2}, {"row", 3}, {"col", 1}, {"text", "Total"}}));
+        // lead value first, then two short key: values (handles like doc dropped)
+        check(d.starts_with("Total \xc2\xb7 ") && d.find("doc1") == std::string::npos &&
+                  d.find(": ") != std::string::npos,
+              "MCP header: text first, then short key: value, handles dropped");
+    }
+    check(U::tool_timeline_detail(make_tool("mcp__docx__run_tool", A::ToolUse::Running{},
+              {{"tool", "insert_caption"}, {"arguments", {{"doc", "doc1"}, {"text", "Sales chart"}}}}))
+              == "insert_caption \xc2\xb7 Sales chart",
+          "run_tool-style wrappers show the inner tool and its argument");
+    {
+        auto d = U::tool_timeline_detail(make_tool("mcp__img__upload", A::ToolUse::Running{},
+            {{"data_base64", std::string(4000, 'A')}, {"name", "logo.png"}}));
+        check(d == "logo.png", "MCP header skips blobs");
+    }
+    {
+        auto t = make_tool("mcp__docx__help", A::ToolUse::Running{});
+        t.args = nlohmann::json::object();
+        t.args_streaming = R"({"topic": "tables)";
+        check(U::tool_timeline_detail(t) == "tables", "MCP header goes live while the args stream");
+    }
+    check(U::tool_timeline_detail(make_tool("mcp__x__noargs", A::ToolUse::Done{{}, {}, "ok"})).empty(),
+          "no args, no detail (the caller shows its state word)");
+    {
+        auto body = U::tool_body_preview_config(make_tool("mcp__docx__read_table",
+            A::ToolUse::Done{{}, {}, R"({"columns": 2, "rows": [["a","b"],["c","d"]], "style": "TableGrid"})"}));
+        check(visible(body) && body.text.find('{') == std::string::npos && body.text.find("style: TableGrid") != std::string::npos,
+              "JSON results read as key: value lines");
+        auto list = U::tool_body_preview_config(make_tool("mcp__docx__list_comments",
+            A::ToolUse::Done{{}, {}, R"([{"id": "0", "author": "Ana", "text": "check this"}])"}));
+        check(list.text == "\xe2\x80\xa2 author: Ana \xc2\xb7 id: 0 \xc2\xb7 text: check this",
+              "a list of objects is one line each");
+        auto plain = U::tool_body_preview_config(make_tool("mcp__docx__help",
+            A::ToolUse::Done{{}, {}, "plain words\nsecond line"}));
+        check(plain.text == "plain words\nsecond line", "plain text results are left alone");
+    }
+
     auto invisible_live = make_tool("mcp__example__silent", A::ToolUse::Running{},
                                     {{"display_description", "Silent MCP wait"}});
     std::get<A::ToolUse::Running>(invisible_live.status).progress_text =

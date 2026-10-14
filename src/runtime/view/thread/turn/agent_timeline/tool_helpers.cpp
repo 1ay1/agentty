@@ -66,6 +66,16 @@ std::string tool_display_name(const std::string& n) {
     if (n == "search_code")     return "Code Search";
     if (n == "mcp_search_tools") return "MCP Tool Search";
     if (n == "mcp_call")         return "MCP Call";
+    // MCP tools (mcp__server__tool): "Server · Tool", the way the user
+    // configured them, instead of "Mcp Server Tool" mashed together.
+    if (n.starts_with("mcp__")) {
+        std::string_view rest{n};
+        rest.remove_prefix(5);
+        if (auto split = rest.find("__"); split != std::string_view::npos && split > 0 &&
+                                         split + 2 < rest.size())
+            return tool_display_name(std::string{rest.substr(0, split)}) + " \xc2\xb7 " +
+                   tool_display_name(std::string{rest.substr(split + 2)});
+    }
     // Fallback for any UNMAPPED tool name (MCP-provided tools, a raw name the
     // model emitted, future built-ins not yet in the table above): Title-Case
     // it so the timeline is visually consistent — no tool ever renders as a
@@ -278,6 +288,88 @@ static std::string tool_failure_reason(const ToolUse& tc) {
     std::string first = out.substr(0, out.find('\n'));
     if (first.size() > 48) first = first.substr(0, 47) + "\xe2\x80\xa6";
     return first;
+}
+
+// For a tool with no dedicated header (any MCP tool): what the model asked
+// for, from its arguments, the way Claude Code prints `tool(key: value)`.
+// Content first (a query, a text, a path), then the rest as key: value, with
+// noise dropped (session handles, flags, base64 blobs, nested objects).
+// Streaming-aware: before the args parse, the first string value that has
+// arrived on the wire is shown.
+static std::string summarize_args(const ToolUse& tc) {
+    constexpr std::size_t kMax = 80;
+    auto clip = [](std::string s, std::size_t max) {
+        for (auto& c : s) if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+        if (s.size() > max) {
+            s.resize(tools::util::safe_utf8_cut(s, max));
+            s += "\xe2\x80\xa6";
+        }
+        return s;
+    };
+    // keys whose value says what the call is about, best first
+    static constexpr const char* kLead[] = {
+        "query", "topic", "text", "prompt", "q", "pattern", "search", "url", "uri",
+        "path", "file", "file_path", "filename", "name", "title", "command", "code",
+        "equation", "tool", "match", "find", "target", "selector", "message", "subject"};
+    // handles and plumbing that don't tell the user anything
+    auto noise = [](std::string_view k) {
+        return k == "doc" || k == "session" || k == "session_id" || k == "id" || k == "handle" ||
+               k == "author" || k == "track" || k == "display_description" || k == "cursor" ||
+               k == "data_base64" || k == "data" || k == "content_base64" || k == "arguments";
+    };
+    auto scalar = [&](const nlohmann::json& v) -> std::string {
+        if (v.is_string()) {
+            auto s = v.get<std::string>();
+            if (s.size() > 512 && s.find(' ') == std::string::npos) return {};  // a blob, not prose
+            return s;
+        }
+        if (v.is_number_integer()) return std::to_string(v.get<long long>());
+        if (v.is_number()) return v.dump();
+        if (v.is_boolean()) return {};
+        if (v.is_array() && !v.empty() && v.size() <= 4) {
+            std::string s;
+            for (auto& e : v) {
+                if (!e.is_string() && !e.is_number()) return {};
+                s += (s.empty() ? "" : ", ") + (e.is_string() ? e.get<std::string>() : e.dump());
+            }
+            return s;
+        }
+        return {};
+    };
+    if (!tc.args.is_object() || tc.args.empty()) {
+        // nothing parsed yet: the first string value already on the wire
+        for (auto k : kLead)
+            if (auto s = pick_streaming_string(tc.args_streaming, k); !s.empty()) return clip(s, kMax);
+        return {};
+    }
+    std::string lead, lead_key;
+    for (auto k : kLead) {
+        auto it = tc.args.find(k);
+        if (it == tc.args.end()) continue;
+        if (auto s = scalar(*it); !s.empty()) { lead = s; lead_key = k; break; }
+    }
+    // run_tool-style wrappers: show the inner tool's own lead argument too
+    std::string out = lead.empty() ? std::string{} : clip(lead, kMax);
+    if (lead_key == "tool") {
+        if (auto it = tc.args.find("arguments"); it != tc.args.end() && it->is_object()) {
+            ToolUse inner;
+            inner.args = *it;
+            if (auto s = summarize_args(inner); !s.empty()) out += " \xc2\xb7 " + s;
+        }
+        return out;
+    }
+    // then up to two more short key: value pairs, so "table 2 · row: 3" reads
+    int extra = 0;
+    for (auto& [k, v] : tc.args.items()) {
+        if (k == lead_key || noise(k) || extra >= 2) continue;
+        auto s = scalar(v);
+        if (s.empty() || s.size() > 40) continue;
+        std::string part = k + ": " + s;
+        if (out.size() + part.size() + 3 > kMax + 20) break;
+        out += (out.empty() ? "" : " \xc2\xb7 ") + part;
+        extra++;
+    }
+    return out;
 }
 
 // The per-tool detail body (success-shaped). tool_timeline_detail wraps this
@@ -779,7 +871,8 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         }
         return detail;
     }
-    return safe_arg(tc.args, "display_description");
+    if (auto d = pick_arg(tc.args, {"display_description", "description"}); !d.empty()) return d;
+    return summarize_args(tc);
 }
 
 // Public entry: the success-shaped detail plus, for a Failed tool, a uniform

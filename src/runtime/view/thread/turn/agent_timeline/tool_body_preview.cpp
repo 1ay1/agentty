@@ -17,6 +17,9 @@
 #include "tool_body_common.hpp"
 
 #include <cctype>
+#include <functional>
+
+#include <nlohmann/json.hpp>
 
 #include "agentty/tool/util/utf8.hpp"
 
@@ -65,6 +68,98 @@ bool has_visible_body(const maya::ToolBodyPreview::Config& body) {
     case Kind::FileWrite: return !body.text.empty();
     default:              return text_is_visible(body.text);
     }
+}
+
+// A JSON tool result as readable lines: objects become "key: value" with
+// nested values indented, arrays of scalars join on one line, arrays of
+// objects become one entry each. "" when the text isn't a JSON object or
+// array (or is fenced/prefixed: then it's shown as-is). Bounded output.
+std::string json_as_lines(std::string_view text) {
+    auto a = text.find_first_not_of(" \t\r\n");
+    if (a == std::string_view::npos || (text[a] != '{' && text[a] != '[')) return {};
+    auto j = nlohmann::json::parse(text.substr(a), nullptr, false);
+    if (j.is_discarded() || (!j.is_object() && !j.is_array())) return {};
+    std::string out;
+    constexpr std::size_t kMaxOut = 16 * 1024;
+    auto scalar = [](const nlohmann::json& v) -> std::string {
+        if (v.is_string()) return v.get<std::string>();
+        if (v.is_null()) return "\xe2\x80\x94";
+        return v.dump();
+    };
+    auto all_scalar = [](const nlohmann::json& arr) {
+        for (auto& e : arr)
+            if (e.is_object() || e.is_array()) return false;
+        return true;
+    };
+    std::function<void(const nlohmann::json&, int)> walk = [&](const nlohmann::json& v, int depth) {
+        if (out.size() > kMaxOut) return;
+        std::string pad(static_cast<std::size_t>(depth) * 2, ' ');
+        if (v.is_object()) {
+            for (auto& [k, x] : v.items()) {
+                if (out.size() > kMaxOut) return;
+                if (x.is_object() && !x.empty()) {
+                    out += pad + k + ":\n";
+                    walk(x, depth + 1);
+                } else if (x.is_array() && !x.empty() && !all_scalar(x)) {
+                    out += pad + k + ": (" + std::to_string(x.size()) + ")\n";
+                    walk(x, depth + 1);
+                } else if (x.is_array()) {
+                    std::string s;
+                    for (auto& e : x) s += (s.empty() ? "" : ", ") + scalar(e);
+                    out += pad + k + ": " + (s.empty() ? "(none)" : s) + "\n";
+                } else if (x.is_object()) {
+                    out += pad + k + ": {}\n";
+                } else {
+                    auto s = scalar(x);
+                    // multi-line strings keep their lines, indented under the key
+                    if (s.find('\n') != std::string::npos) {
+                        out += pad + k + ":\n";
+                        std::size_t p = 0;
+                        while (p <= s.size() && out.size() <= kMaxOut) {
+                            auto e = s.find('\n', p);
+                            out += pad + "  " + s.substr(p, e == std::string::npos ? std::string::npos : e - p) + "\n";
+                            if (e == std::string::npos) break;
+                            p = e + 1;
+                        }
+                    } else {
+                        out += pad + k + ": " + s + "\n";
+                    }
+                }
+            }
+        } else if (v.is_array()) {
+            if (v.empty()) { out += pad + "(none)\n"; return; }
+            if (all_scalar(v)) {
+                for (auto& e : v) out += pad + "\xe2\x80\xa2 " + scalar(e) + "\n";
+                return;
+            }
+            for (auto& e : v) {
+                if (out.size() > kMaxOut) return;
+                if (e.is_object()) {
+                    // one entry per element: its fields on one line when short
+                    std::string line;
+                    bool flat = true;
+                    for (auto& [k, x] : e.items()) {
+                        if (x.is_object() || (x.is_array() && !all_scalar(x))) { flat = false; break; }
+                        std::string s = x.is_array() ? std::to_string(x.size()) + " items" : scalar(x);
+                        if (s.find('\n') != std::string::npos) { flat = false; break; }
+                        line += (line.empty() ? "" : " \xc2\xb7 ") + k + ": " + s;
+                    }
+                    if (flat && line.size() <= 160) {
+                        out += pad + "\xe2\x80\xa2 " + line + "\n";
+                    } else {
+                        out += pad + "\xe2\x80\xa2\n";
+                        walk(e, depth + 1);
+                    }
+                } else {
+                    walk(e, depth + 1);
+                }
+            }
+        }
+    };
+    walk(j, 0);
+    if (out.size() > kMaxOut) out += "\xe2\x80\xa6\n";
+    while (!out.empty() && out.back() == '\n') out.pop_back();
+    return out;
 }
 
 bool supports_generic_text_body(std::string_view name) {
@@ -120,7 +215,11 @@ void generic_lifecycle_body(const ToolUse& tc,
     }
     if (generic_text && tc.is_done() && text_is_visible(tc.output())) {
         out.kind = Kind::CodeBlock;
-        out.text = tc.output();
+        // MCP tools answer in JSON; the card shows it as "key: value" lines
+        // (what Claude Code and Zed do with structured results) rather than
+        // braces and quotes. The model still gets the exact JSON.
+        auto readable = json_as_lines(tc.output());
+        out.text = readable.empty() ? tc.output() : std::move(readable);
         // Settled output for the tools that land here (repo_map, outline,
         // read_filter, search_*, extract, json_query, MCP tools…) is
         // HEAD-heavy: the answer is at the top, the tail is pagination /

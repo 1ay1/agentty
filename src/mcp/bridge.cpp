@@ -40,6 +40,7 @@
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 #include "agentty/util/background.hpp"
+#include "agentty/util/base64.hpp"
 
 #include <maya/runtime.hpp>
 #include <mcp/cap/cap.hpp>
@@ -595,11 +596,19 @@ std::string render_result(const ::mcp::cap::Result& r) {
     }
 
     // Structured output (MCP structuredContent) — a typed payload alongside
-    // the human text. Emit it as a fenced JSON block so the model can parse it.
-    if (r.structured.is_object() && !r.structured.empty()) {
-        if (!out.empty() && out.back() != '\n') out += '\n';
-        out += "```json\n" + r.structured.dump(2) + "\n```\n";
-    } else if (!r.structured.is_object() && !r.structured.is_null()) {
+    // the human text. The spec has servers mirror it as a JSON text block, so
+    // when the text already parses to the same value it's said once, not
+    // twice (that doubled every result and buried cards in braces).
+    auto same_as_text = [&]() {
+        auto t = tools::util::to_valid_utf8(r.text);
+        auto a = t.find_first_not_of(" \t\r\n");
+        if (a == std::string::npos || (t[a] != '{' && t[a] != '[')) return false;
+        auto parsed = json::parse(t, nullptr, false);
+        return !parsed.is_discarded() && parsed == r.structured;
+    };
+    const bool has_structured = (r.structured.is_object() && !r.structured.empty()) ||
+                                (!r.structured.is_object() && !r.structured.is_null());
+    if (has_structured && !same_as_text()) {
         if (!out.empty() && out.back() != '\n') out += '\n';
         out += "```json\n" + r.structured.dump(2) + "\n```\n";
     }
@@ -611,6 +620,29 @@ std::string render_result(const ::mcp::cap::Result& r) {
     // next turn — poisoning the whole session, not just this call).
     return tools::util::to_valid_utf8(
         tools::util::strip_terminal_controls(out));
+}
+
+// The image content blocks of a result, decoded, for a vision model. Bounded
+// (an external server can send anything): known raster types only, at most 8
+// images and 8 MiB each; anything else stays a note in the text.
+std::vector<ImageContent> result_images(const ::mcp::cap::Result& r) {
+    std::vector<ImageContent> out;
+    if (!r.raw.is_array()) return out;
+    constexpr std::size_t kMaxImages = 8, kMaxBytes = 8u << 20;
+    for (const auto& b : r.raw) {
+        if (out.size() >= kMaxImages) break;
+        if (!b.is_object() || b.value("type", std::string{}) != "image") continue;
+        auto mime = b.value("mimeType", std::string{});
+        if (mime != "image/png" && mime != "image/jpeg" && mime != "image/gif" && mime != "image/webp") continue;
+        auto it = b.find("data");
+        if (it == b.end() || !it->is_string()) continue;
+        const auto& enc = it->get_ref<const std::string&>();
+        if (enc.size() / 4 * 3 > kMaxBytes) continue;
+        auto bytes = util::base64_decode(enc);
+        if (bytes.empty()) continue;
+        out.push_back(ImageContent{std::move(mime), std::move(bytes)});
+    }
+    return out;
 }
 
 std::string canonical_mcp_name(std::string_view exposed) {
@@ -695,7 +727,11 @@ tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t,
                                    : tools::util::to_valid_utf8(
                                          tools::util::strip_terminal_controls(r.text))));
             std::string text = render_result(r);
-            return tools::ToolOutput{text.empty() ? "(no output)" : text, std::nullopt};
+            tools::ToolOutput out{text.empty() ? "(no output)" : text, std::nullopt};
+            // image blocks (a rendered page, a screenshot, a chart) go to the
+            // model as images, not just the "[image ...]" note in the text
+            out.images = result_images(r);
+            return out;
         } catch (const std::exception& e) {
             return std::unexpected(tools::ToolError::subprocess(
                 std::string{"MCP call failed: "} + e.what()));
