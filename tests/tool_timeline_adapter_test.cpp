@@ -153,6 +153,12 @@ TEST_CASE("tool timeline adapter") {
     }
     check(U::tool_timeline_detail(make_tool("mcp__x__noargs", A::ToolUse::Done{{}, {}, "ok"})).empty(),
           "no args, no detail (the caller shows its state word)");
+    check(U::tool_timeline_detail(make_tool("mcp__docx__read_document", A::ToolUse::Done{{}, {}, "{}"},
+              {{"doc", "doc1"}})) == "doc1",
+          "only a handle: show it rather than an ellipsis");
+    check(U::tool_timeline_detail(make_tool("mcp__docx__open_document", A::ToolUse::Running{},
+              {{"path", "/srv/x/report.docx"}})).find("report.docx") != std::string::npos,
+          "paths show through pretty_path");
     {
         auto body = U::tool_body_preview_config(make_tool("mcp__docx__read_table",
             A::ToolUse::Done{{}, {}, R"({"columns": 2, "rows": [["a","b"],["c","d"]], "style": "TableGrid"})"}));

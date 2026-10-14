@@ -1303,22 +1303,14 @@ std::vector<tools::ToolDef> project_tools(PoolHandle pool) {
     if (any_resources) out.push_back(make_read_resource_tool(pool));
     if (any_prompts)   out.push_back(make_get_prompt_tool(pool));
 
-    // Budget enforcement: the wire must never carry more than the
-    // configured budget (AGENTTY_MCP_TOOL_BUDGET, default 100) total
-    // tools (native + MCP). Native tools are the core toolset and
-    // always ship; if native + these MCP tools exceed the cap, TRIM the MCP
-    // tail so the request stays within provider limits. The picker surfaces
-    // the same over-budget count (plugin_model) and lets the user disable
-    // some to make room — so a runaway plugin set degrades gracefully
-    // (fewer MCP tools) instead of failing the whole turn.
-    const std::size_t native = tools::native_registry().size();
-    const std::size_t budget = tool_budget();
-    // budget == 0 means "no cap" (same as the plugin_model guard below) —
-    // never trim, or env var 0 would silently drop every MCP tool.
-    if (budget > 0 && native + out.size() > budget) {
-        const std::size_t room = budget > native ? budget - native : 0;
-        if (out.size() > room) out.resize(room);
-    }
+    // Budget: AGENTTY_MCP_TOOL_BUDGET (default 100) bounds how many tools a
+    // request carries, and select_wire_tools enforces it per turn. It must
+    // NOT drop tools from the catalog: dispatch resolves names here, so a
+    // trimmed tool became "unknown tool" even when the model called it by
+    // the exact name a server's help or run_tool pointed it to, and the trim
+    // also cut mcp_search_tools / mcp_call (pushed last) so the long tail had
+    // no way in at all. Every tool stays callable; the per-turn selection
+    // decides what is advertised.
     // Passthrough tools ride OUTSIDE the budget trim: they are few,
     // user-declared one at a time, and mostly advertise=false (zero wire
     // cost — the proxy already put the schema on the wire).

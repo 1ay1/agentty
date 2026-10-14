@@ -145,14 +145,19 @@ int main() {
               "(flagged=" + std::to_string(flagged) + " clean="
               + std::to_string(clean) + ")");
 
-        // Wire view: the projection REALLY trimmed the MCP tail — native
-        // tools always ship, only one demo tool remains.
+        // Wire view: past the budget a tool is NOT dropped from the catalog.
+        // Dropping it made a tool the model called by its real name fail as
+        // "unknown tool". What a request carries is bounded per turn by
+        // select_wire_tools; every enabled tool stays callable.
         const std::size_t on_wire = demo_tools_on_wire();
-        check(on_wire == 1,
-              "wire projection trims MCP tools past the budget (demo tools "
-              "on wire=" + std::to_string(on_wire) + ", want 1)");
-        check(tools::wire_tools_snapshot().size() == native + on_wire,
-              "wire catalog stays native + room worth of MCP tools");
+        check(on_wire == kN,
+              "over-budget MCP tools stay callable (demo tools in catalog=" +
+              std::to_string(on_wire) + ", want " + std::to_string(kN) + ")");
+        std::size_t sent_mcp = 0;
+        for (const auto* t : tools::select_wire_tools("anything"))
+            if (t->origin != tools::ToolOrigin::Native) ++sent_mcp;
+        check(sent_mcp <= 16 + 4,
+              "a request still carries a bounded number of MCP tools (" + std::to_string(sent_mcp) + ")");
     }
 
     // ── 3. Budget 0 disables the cap — every advertised tool ships ────────

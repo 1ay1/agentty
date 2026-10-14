@@ -255,18 +255,48 @@ const std::vector<ToolDef>& registry() { return wire_tools(); }
 }
 
 std::string unknown_tool_error(std::string_view name) {
-    std::string msg = "unknown tool: " + std::string{name}
-        + ". This tool is not part of agentty's toolset — if a proxy or "
-          "gateway advertised it, call it through that channel, not here. "
-          "Available tools:";
-    for (const auto& td : wire_tools()) {
+    // The closest real name (a typo, a guessed verb) helps more than a wall of
+    // every tool name; the full list only when nothing is close.
+    auto dist = [](std::string_view a, std::string_view b) {
+        std::vector<std::size_t> prev(b.size() + 1), cur(b.size() + 1);
+        for (std::size_t j = 0; j <= b.size(); ++j) prev[j] = j;
+        for (std::size_t i = 1; i <= a.size(); ++i) {
+            cur[0] = i;
+            for (std::size_t j = 1; j <= b.size(); ++j)
+                cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] == b[j - 1] ? 0u : 1u)});
+            std::swap(prev, cur);
+        }
+        return prev[b.size()];
+    };
+    const auto& tools = wire_tools();
+    std::string best;
+    std::size_t best_d = std::max<std::size_t>(3, name.size() / 4) + 1;
+    for (const auto& td : tools) {
+        auto d = dist(name, td.name.value);
+        if (d < best_d) { best_d = d; best = td.name.value; }
+    }
+    std::string msg = "unknown tool: " + std::string{name} + ".";
+    if (!best.empty()) return msg + " Did you mean " + best + "?";
+    // an MCP-shaped name: say which server tools do exist
+    if (name.starts_with("mcp__")) {
+        auto rest = name.substr(5);
+        auto server = rest.substr(0, rest.find("__"));
+        std::string prefix = "mcp__" + std::string{server} + "__";
+        std::string have;
+        int n = 0;
+        for (const auto& td : tools)
+            if (td.name.value.starts_with(prefix) && n++ < 40) have += (have.empty() ? "" : ", ") + td.name.value.substr(prefix.size());
+        if (!have.empty()) return msg + " The " + std::string{server} + " server has: " + have + ".";
+        return msg + " No MCP server named " + std::string{server} + " is connected.";
+    }
+    msg += " Available tools:";
+    for (const auto& td : tools) {
         msg += ' ';
         msg += td.name.value;
         msg += ',';
     }
     if (msg.back() == ',') msg.pop_back();
-    msg += '.';
-    return msg;
+    return msg + '.';
 }
 
 const ToolDef* find(std::string_view name) {
@@ -303,9 +333,25 @@ bool withheld_by_policy(const ToolDef& tool) {
 
 std::vector<const ToolDef*> select_wire_tools(
     std::string_view query, std::size_t max_external) {
-    return select_wire_tools_from(wire_tools(), query, max_external,
-                                  web_search_cfg::mode(web_search_policy::current())
-                                      != web_search_cfg::Mode::Off);
+    auto selected = select_wire_tools_from(wire_tools(), query, max_external,
+                                           web_search_cfg::mode(web_search_policy::current())
+                                               != web_search_cfg::Mode::Off);
+    // AGENTTY_MCP_TOOL_BUDGET bounds what ONE request carries (the catalog
+    // keeps everything callable). Natives always ship; pinned and broker
+    // tools next; ranked MCP tools fill what's left.
+    if (const std::size_t budget = mcp::tool_budget(); budget > 0 && selected.size() > budget) {
+        std::vector<const ToolDef*> keep;
+        keep.reserve(budget);
+        for (const auto* t : selected)
+            if (t->origin == ToolOrigin::Native) keep.push_back(t);
+        for (const auto* t : selected)
+            if (t->origin != ToolOrigin::Native && t->always_expose && keep.size() < budget) keep.push_back(t);
+        for (const auto* t : selected)
+            if (t->origin != ToolOrigin::Native && !t->always_expose && keep.size() < budget) keep.push_back(t);
+        std::ranges::sort(keep, std::less<>{});  // catalog order: a stable prompt prefix
+        return keep;
+    }
+    return selected;
 }
 
 std::vector<const ToolDef*> select_wire_tools_from(

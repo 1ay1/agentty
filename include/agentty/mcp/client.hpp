@@ -48,6 +48,9 @@ namespace agentty::mcp {
 // swapping under a concurrent reload. Cheap: reads the live pool + config
 // once. The authoritative view the settings picker renders.
 [[nodiscard]] PluginModel plugin_model();
+// Most tools one request may carry (AGENTTY_MCP_TOOL_BUDGET, default 100;
+// 0 = no cap). Bounds what's advertised per turn, never what's callable.
+[[nodiscard]] std::size_t tool_budget();
 
 // Opaque, reference-counted handle keeping all connected MCP servers alive
 // for the lifetime of the process. The ToolDef execute() closures returned by

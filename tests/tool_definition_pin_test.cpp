@@ -151,6 +151,16 @@ TEST_CASE("definition pin: a matching hash runs the tool") {
                   "the failure comes from the tool itself");
 }
 
+TEST_CASE("unknown tool: names the closest real tool, not a wall of names") {
+    // the native catalog is always there: a near-miss of a real native name
+    const auto msg = agentty::tools::unknown_tool_error("raed");
+    CHECK(msg.find("Did you mean read?") != std::string::npos);
+    CHECK(msg.find("proxy") == std::string::npos);
+    // an MCP-shaped name for a server that isn't connected says so
+    const auto mcp = agentty::tools::unknown_tool_error("mcp__nosuchserver__frobnicate");
+    CHECK(mcp.find("No MCP server named nosuchserver") != std::string::npos);
+}
+
 TEST_CASE("definition pin: an unknown tool is not found, not silently allowed") {
     auto result = agentty::tool::DynamicDispatch::execute_approved(
         agtest::cap(), "no_such_tool_exists_here", json::object(), 0, agentty::tools::CallContext{});

@@ -348,6 +348,15 @@ static std::string summarize_args(const ToolUse& tc) {
         if (it == tc.args.end()) continue;
         if (auto s = scalar(*it); !s.empty()) { lead = s; lead_key = k; break; }
     }
+    // a path reads better as the file name (and the folder only if short)
+    auto pretty = [&](std::string s) {
+        if (s.find('/') == std::string::npos && s.find('\\') == std::string::npos) return s;
+        auto pp = pretty_path(s);
+        return pp.empty() ? s : pp;
+    };
+    if (lead_key == "path" || lead_key == "file" || lead_key == "file_path" || lead_key == "filename" ||
+        lead_key == "uri")
+        lead = pretty(lead);
     // run_tool-style wrappers: show the inner tool's own lead argument too
     std::string out = lead.empty() ? std::string{} : clip(lead, kMax);
     if (lead_key == "tool") {
@@ -369,6 +378,12 @@ static std::string summarize_args(const ToolUse& tc) {
         out += (out.empty() ? "" : " \xc2\xb7 ") + part;
         extra++;
     }
+    // Nothing to say but which document/session: say that rather than "…"
+    // (read_document {doc}). A path-like handle shows as its file name.
+    if (out.empty())
+        for (auto k : {"doc", "document", "session", "handle", "id"})
+            if (auto it = tc.args.find(k); it != tc.args.end())
+                if (auto s = scalar(*it); !s.empty()) return clip(pretty(s), kMax);
     return out;
 }
 
