@@ -4,6 +4,17 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.21] - 2026-10-14
+
+### Fixed
+- **0.9.20 shipped without macOS binaries.** The static macOS link failed
+  on undefined `iconv` symbols: one timestamp in the ACP server was
+  formatted with chrono `std::format`, which pulls libstdc++'s locale
+  encoding conversion, and macOS keeps iconv in its own system library. The
+  timestamp is now formatted without it, and the macOS build links the
+  system `libiconv` as a backstop. Homebrew on macOS failed to install
+  0.9.20 as a result; 0.9.21 restores it.
+
 ## [0.9.20] - 2026-10-14
 
 ### Added

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28...3.31)
 project(agentty
-    VERSION     0.9.20
+    VERSION     0.9.21
     DESCRIPTION "A fast terminal coding agent (TUI) in modern C++"
     LANGUAGES   CXX)
 
@@ -614,9 +614,15 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
     elseif(APPLE)
         # macOS doesn't allow truly-static system frameworks (libSystem
         # is required to be dynamic), but third-party libs can be static.
-        # OPENSSL_USE_STATIC_LIBS already handled OpenSSL above. Nothing
-        # else to add here — the resulting binary depends only on
-        # /usr/lib/libSystem.B.dylib which is on every macOS.
+        # OPENSSL_USE_STATIC_LIBS already handled OpenSSL above.
+        #
+        # -liconv: the release folds GCC's libstdc++ in statically, and its
+        # format.o (std::format/std::print with chrono or locale) calls
+        # iconv_open/iconv/iconv_close. libSystem does NOT export those on
+        # macOS -- they live in /usr/lib/libiconv.2.dylib, present on every
+        # macOS -- so without this the link fails (it broke the 0.9.20 mac
+        # release). Harmless when nothing references it.
+        target_link_libraries(agentty PRIVATE iconv)
     endif()
 endif()
 

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <ctime>
 #include <map>
 #include <cstdlib>
 #include <cstring>
@@ -102,9 +103,21 @@ std::vector<std::string> extra_roots_of(const a::Maybe<a::List<std::string>>& di
 }
 
 // Unix seconds as an ISO 8601 UTC timestamp, the format SessionInfo.updatedAt wants.
+// Not std::format("{:%FT%TZ}"): chrono formatting pulls libstdc++'s locale
+// encoding conversion, which needs iconv, and the static-libstdc++ macOS
+// release link has no iconv (libSystem doesn't export it) -- it broke the
+// 0.9.20 mac builds. gmtime + strftime is locale-free and identical here.
 std::string iso8601(std::int64_t unix_s) {
-    const auto tp = std::chrono::sys_seconds{std::chrono::seconds{unix_s}};
-    return std::format("{:%FT%TZ}", tp);
+    const std::time_t t = static_cast<std::time_t>(unix_s);
+    std::tm tm{};
+#if defined(_WIN32)
+    if (::gmtime_s(&tm, &t) != 0) return {};
+#else
+    if (!::gmtime_r(&t, &tm)) return {};
+#endif
+    char buf[32];
+    const std::size_t n = std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return std::string(buf, n);
 }
 
 // One exact git-style patch for a change, for JetBrains AIR's diffPatch.
