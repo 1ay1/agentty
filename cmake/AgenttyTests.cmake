@@ -660,6 +660,30 @@ if(TARGET mcp::tools)
     target_link_libraries(exec_session_race_test PRIVATE mcp::tools maya::runtime Threads::Threads)
     add_test(NAME exec_session_race_test COMMAND exec_session_race_test)
     set_tests_properties(exec_session_race_test PROPERTIES TIMEOUT 180 LABELS race)
+
+    # The same sessions under the real sandbox: the pump answers the seccomp
+    # broker and kills through cgroup.kill. Linux only (seccomp user-notify).
+    # Not a TSan target: claybin's setup child is a raw clone3 of the TSan
+    # runtime, which reports and stalls inside it. Run uninstrumented, it is
+    # what caught spawns hanging on glibc's abort lock (claybin spawn.cpp).
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT AGENTTY_SANITIZE_ALL)
+        agentty_test(exec_session_race_sandboxed MODE raw LABELS sandbox)
+        add_executable(exec_session_race_sandboxed EXCLUDE_FROM_ALL
+            tests/exec_session_race_test.cpp tests/sandbox_config_race_stubs.cpp
+            src/tool/util/exec.cpp src/tool/util/sandbox.cpp
+            src/tool/util/subprocess.cpp src/tool/util/sandbox_claybin.cpp
+            src/tool/util/sandbox_broker.cpp src/tool/util/handoff_gate.cpp
+            src/domain/sandbox_provenance.cpp src/tool/util/utf8.cpp
+            src/util/logx.cpp src/util/dbglog.cpp src/util/home_dir.cpp
+            src/util/user_root.cpp src/util/teardown.cpp)
+        target_compile_definitions(exec_session_race_sandboxed PRIVATE
+            EXEC_RACE_REAL_SANDBOX=1 AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
+        target_include_directories(exec_session_race_sandboxed PRIVATE include)
+        target_link_libraries(exec_session_race_sandboxed PRIVATE
+            mcp::tools claybin nlohmann_json::nlohmann_json maya::app Threads::Threads)
+        add_test(NAME exec_session_race_sandboxed COMMAND exec_session_race_sandboxed)
+        set_tests_properties(exec_session_race_sandboxed PROPERTIES TIMEOUT 180 LABELS sandbox)
+    endif()
 endif()
 
 # NOTE: seam_stress_test gets no narrow TSan target, on purpose.

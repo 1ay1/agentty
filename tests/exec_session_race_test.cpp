@@ -7,8 +7,10 @@
 // lock taken in the wrong order aborts (jaal lock_order_error); a data race
 // shows up under -fsanitize=thread; a self-join throws EDEADLK.
 //
-// Sandbox off: the four sandbox symbols are stubbed below so this links
-// exec.cpp alone, not claybin.
+// Sandbox off by default: the four sandbox symbols are stubbed below so this
+// links exec.cpp alone, not claybin. Built as exec_session_race_sandboxed
+// (EXEC_RACE_REAL_SANDBOX) it links the real sandbox instead and runs the
+// same sessions under claybin, with brokered syscalls.
 
 #include "agentty/tool/util/exec.hpp"
 #include "agentty/tool/util/sandbox.hpp"
@@ -27,6 +29,7 @@
 #include <variant>
 #include <vector>
 
+#if !defined(EXEC_RACE_REAL_SANDBOX)
 namespace agentty::tools::util::sandbox {
 Backend detected_backend() noexcept { return Backend::None; }
 bool is_active() noexcept { return false; }
@@ -43,6 +46,7 @@ wrap_argv_for_exec(const std::vector<std::string>& argv, std::string_view,
 }
 #endif
 }  // namespace agentty::tools::util::sandbox
+#endif  // !EXEC_RACE_REAL_SANDBOX
 
 namespace {
 namespace mt = ::mcp::tools;
@@ -85,7 +89,8 @@ mt::ExecRequest sh(const std::string& script) {
 #else
 constexpr Scripts kS{
     "echo x",
-    "sleep 0.05; echo y; exit 3",
+    // kill -0 on itself: a brokered syscall when the sandbox is on.
+    "sleep 0.05; kill -0 $$; echo y; exit 3",
     "yes | head -c 20000",
     "sleep 5",
     "printf a",
@@ -107,7 +112,7 @@ void session_round(mt::Exec& exec, int i) {
     auto s = exec.start(mt::Call{}, sh(i % 3 == 0 ? kS.quick : i % 3 == 1 ? kS.short_then_fail
                                                               : kS.burst));
     check(s.has_value(), "session starts");
-    if (!s) return;
+    if (!s) { std::fprintf(stderr, "  start error: %s\n", s.error().c_str()); return; }
     auto sess = *s;
     for (int k = 0; k < 40; ++k) {
         auto u = sess->read(std::chrono::milliseconds{i % 2 ? 0 : 20}, 1 << 20);
@@ -120,7 +125,7 @@ void session_round(mt::Exec& exec, int i) {
 void stop_while_polled(mt::Exec& exec) {
     auto s = exec.start(mt::Call{}, sh(kS.long_sleep));
     check(s.has_value(), "long session starts");
-    if (!s) return;
+    if (!s) { std::fprintf(stderr, "  start error: %s\n", s.error().c_str()); return; }
     std::shared_ptr<mt::Session> sess = *s;
     std::thread poller([sess] {
         for (int k = 0; k < 30; ++k) {
@@ -136,11 +141,25 @@ void stop_while_polled(mt::Exec& exec) {
 void foreground(mt::Exec& exec, const mt::Call& call, int i) {
     auto r = exec.run(call, sh(i % 2 ? kS.print_ok : kS.print_fail));
     check(!std::holds_alternative<mt::StartFailed>(r.outcome), "foreground run starts");
+    if (auto* f = std::get_if<mt::StartFailed>(&r.outcome))
+        std::fprintf(stderr, "  start error: %s\n", f->reason.c_str());
 }
 
 }  // namespace
 
 int main() {
+#if defined(EXEC_RACE_REAL_SANDBOX)
+    {
+        namespace sb = agentty::tools::util::sandbox;
+        agentty::sandbox_cfg::Config cfg;
+        cfg.configured = true;   // the default posture: filter + broker on
+        sb::set_config(cfg);
+        if (!sb::init(sb::Mode::On) || !sb::is_active()) {
+            std::puts("exec_session_race_sandboxed: no sandbox on this host, skipped");
+            return 0;
+        }
+    }
+#endif
     auto exec = agentty::tools::util::make_exec({});
     mt::Call call{};
 
