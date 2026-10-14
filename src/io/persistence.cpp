@@ -2272,11 +2272,20 @@ struct AsyncWriter {
         if (leftover) start_worker();
     }
 
-    // No flush here: a destructor can't be handed `unlocked`, and a static's
-    // destructor runs after main. main() calls flush_pending_saves(unlocked)
-    // after the loop returns; by the time this runs the worker is already
-    // taken and stopped. ~published releases nothing that joins.
-    ~AsyncWriter() = default;
+    // Normally main() has already called flush_pending_saves(unlocked) and
+    // the worker is gone. But any exit path that skips it (a test, an early
+    // return, an embedder) used to hang here forever: run() waits for
+    // "pending or stopping", nobody sets stopping, and ~WorkerGroup joins
+    // it. So stop it ourselves. A destructor can't be handed `unlocked`, so
+    // it takes the root: static destructors run on the exiting thread after
+    // main, and nothing in this file calls exit() from inside a lock body,
+    // so no agentty lock is held here (allowlisted: cap_mint).
+    ~AsyncWriter() {
+        if (!worker.current()) return;
+        maya::thread_root([this](const maya::unlocked& cap) {
+            flush_and_stop(cap, /*restartable=*/false);
+        });
+    }
 
 private:
     void start_worker() {

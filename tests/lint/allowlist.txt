@@ -224,7 +224,11 @@ runtime/app/cmd_factory.cpp: atomic
 #   io/http.cpp: the connection-pool slot state (CAS-claimed, see above).
 #   rpc/peer.cpp: the cancel flag a stop_callback raises from any thread.
 #   persistence.cpp: random_hex_id's seeded counter (every layer mints ids).
-io/persistence.cpp: atomic
+# Also cap_mint for ~AsyncWriter: a static destructor stops the drain worker
+# if no exit path flushed it (otherwise the worker waits forever and
+# ~WorkerGroup joins it). Runs on the exiting thread after main; nothing in
+# the file calls exit() from a lock body, so no agentty lock is held there.
+io/persistence.cpp: atomic cap_mint
 # codex_oauth: the login listener's wake fds + in-flight count, touched by
 # the cancel callback on whichever thread requests the stop.
 provider/chatgpt/codex_oauth.cpp: atomic

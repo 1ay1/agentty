@@ -2244,6 +2244,12 @@ OneShotResult run_one_shot(const maya::unlocked& cap, const OneShotOptions& opts
     out.agent = opts.agent_type.empty() ? "general" : opts.agent_type;
 
     CallContext ctx;
+    // `agentty run` drives the subagent loop straight from main(), not via
+    // DynamicDispatch, so nothing else sets the capability. Without it every
+    // provider/auth callback throws "tool callback outside a dispatched call"
+    // and the process aborts before the first request. `ctx` lives on this
+    // frame, on main's thread, inside the call that proved `cap`.
+    ctx.cap.set(std::addressof(cap));
     if (opts.cancel.stop_possible()) ctx.cancel.push_back(opts.cancel);
     mt::Call top{};
     top.host = &ctx;
