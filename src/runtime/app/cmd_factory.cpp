@@ -30,7 +30,7 @@
 #include "agentty/util/logx.hpp"
 
 #if AGENTTY_MCP
-#include <mcp/tools/util/bash_validate.hpp>
+#include <mcp/tools/util/shell_detour.hpp>
 #endif
 #include "agentty/util/dbglog.hpp"
 #include "agentty/tool/registry.hpp"

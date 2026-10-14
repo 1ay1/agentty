@@ -104,7 +104,7 @@ void clear_handoff_feed();
 //
 //   PARSE the command -- rejected as the mechanism. Catching `>` means also
 //     catching `tee`, `dd of=`, `sh -c`, `python -c`, heredocs, a path in a
-//     variable, base64-then-decode. mcp-cpp's bash_validate.hpp already
+//     variable, base64-then-decode. mcp-cpp's shell_detour.hpp already
 //     carries the scars: its first version matched `sed -i` and `cat > f` as
 //     READS. A sniffer is defence in depth, never the wall.
 //

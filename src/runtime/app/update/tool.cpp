@@ -27,7 +27,7 @@
 #include "agentty/util/logx.hpp"
 
 #if AGENTTY_MCP
-#include <mcp/tools/util/bash_validate.hpp>
+#include <mcp/tools/util/shell_detour.hpp>
 #endif
 
 namespace pn = agentty::ui::panel;
