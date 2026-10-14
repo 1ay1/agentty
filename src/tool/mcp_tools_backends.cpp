@@ -24,6 +24,7 @@
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/subagent.hpp"
 #include "agentty/tool/registry.hpp"   // CallContext
+#include "agentty/tool/host_call.hpp"
 #include "agentty/tool/tool.hpp"       // tool::DynamicDispatch, ToolUse, Message …
 #include "agentty/tool/util/partial_json.hpp"   // args salvage for truncated tool JSON
 #include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
@@ -327,12 +328,13 @@ public:
     }
 };
 
-// The agentty CallContext the dispatcher put in cap::Request::host, handed
-// back by mcp-cpp in Call::host. A call that did not come through
-// DynamicDispatch (an MCP client over mcp-serve) has none: an empty one.
+// The agentty CallContext behind a call (see HostCall). A call that did not
+// come through DynamicDispatch (an MCP client over mcp-serve) has none: an
+// empty one.
 const CallContext& context_of(const mt::Call& call) {
     static const CallContext kNone{};
-    return call.host ? *static_cast<const CallContext*>(call.host) : kNone;
+    const auto& h = host_call(call.host);
+    return h.ctx ? *h.ctx : kNone;
 }
 
 // ── SkillResolver ──────────────────────────────────────────────────────
@@ -2252,7 +2254,8 @@ OneShotResult run_one_shot(const maya::unlocked& cap, const OneShotOptions& opts
     ctx.cap.set(std::addressof(cap));
     if (opts.cancel.stop_possible()) ctx.cancel.push_back(opts.cancel);
     mt::Call top{};
-    top.host = &ctx;
+    const HostCall host{&ctx, nullptr};
+    top.host = &host;
 
     AgenttySubagentRunner runner;
     if (auto why = runner.unavailable_reason(top); !why.empty()) {

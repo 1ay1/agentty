@@ -686,11 +686,13 @@ std::vector<ToolDef> build_mcp_tool_defs() {
                                           : ctx.workspace);
 
             // The call's context rides along: mcp-cpp hands `host` back to
-            // agentty's Exec / SkillResolver / SubagentRunner untouched.
+            // agentty's Exec / SkillResolver / SubagentRunner untouched. The
+            // snapshot goes with it so the sandbox doesn't walk again.
+            const HostCall host{&ctx, watchable && !before.empty() ? &before : nullptr};
             ::mcp::cap::Request req{tool_name, args};
             req.progress = ctx.progress;
             req.reader   = ctx.reader;
-            req.host     = &ctx;
+            req.host     = &host;
             req.scope_workspace   = ctx.workspace;
             req.scope_extra_roots = ctx.extra_roots;
             req.scope_project     = ctx.project;

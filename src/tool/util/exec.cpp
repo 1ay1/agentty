@@ -23,6 +23,7 @@
 
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/util/sandbox_claybin.hpp"
+#include "agentty/tool/host_call.hpp"   // the dispatcher's per-call data
 
 #if !defined(_WIN32)
 #  include <fcntl.h>
@@ -54,12 +55,15 @@ constexpr std::uint64_t kInToken   = 4;
 /// same object with the same conformance suite behind it.
 [[nodiscard]] std::function<AdoptedChild(int)>
 sandbox_spawner(const std::vector<std::string>& argv, const std::string& cwd,
-                std::vector<std::string> extra_roots = {}) {
+                std::vector<std::string> extra_roots = {},
+                const handoff::TrustedSnapshot* trusted = nullptr) {
 #if defined(__linux__)
     namespace sb = agentty::tools::util::sandbox;
     if (sb::is_active() && sb::detected_backend() == sb::Backend::Claybin) {
-        return [argv, cwd, extra_roots](int out_fd) {
-            auto r = sb::spawn_in_sandbox(argv, cwd, out_fd, extra_roots);
+        // `trusted` is the dispatcher's, alive for the whole call; the spawn
+        // runs inside that call (start_child), never later.
+        return [argv, cwd, extra_roots, trusted](int out_fd) {
+            auto r = sb::spawn_in_sandbox(argv, cwd, out_fd, extra_roots, trusted);
             AdoptedChild c;
             if (!r.started) { c.error = r.start_error; return c; }
             c.pid            = r.pid;
@@ -551,7 +555,8 @@ class JaalExec final : public mt::Exec {
     [[nodiscard]] static std::optional<std::string> confine(const mt::Call& call, ChildRun& run) {
         std::vector<std::string> roots;
         for (const auto& r : call.scope_extra_roots) roots.push_back(r.string());
-        run.spawn_adopted = sandbox_spawner(run.argv, run.cwd, roots);
+        run.spawn_adopted = sandbox_spawner(run.argv, run.cwd, roots,
+                                            ::agentty::tools::host_call(call.host).trusted);
 #if defined(__APPLE__)
         namespace sb = agentty::tools::util::sandbox;
         if (sb::is_active()) {

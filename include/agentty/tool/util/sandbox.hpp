@@ -46,6 +46,8 @@
 #include "agentty/tool/util/sandbox_claybin.hpp"
 #include "agentty/tool/util/subprocess.hpp"
 
+namespace agentty::tools::util::handoff { struct TrustedSnapshot; }
+
 namespace agentty::tools::util::sandbox {
 
 enum class Mode : std::uint8_t {
@@ -227,10 +229,13 @@ void reset_config_for_test() noexcept;
 //
 // Returns started=false with a reason when no claybin backend is active.
 // `extra_roots` are writable on top of the workspace (an editor session's
-// additional folders).
+// additional folders). `trusted`, when the caller already took a snapshot of
+// the workspace's trusted paths, is reused for the read-only binds instead of
+// walking the tree again.
 [[nodiscard]] claybin_backend::SpawnResult spawn_in_sandbox(
     const std::vector<std::string>& argv, std::string_view cwd, int out_fd,
-    const std::vector<std::string>& extra_roots = {});
+    const std::vector<std::string>& extra_roots = {},
+    const handoff::TrustedSnapshot* trusted = nullptr);
 
 #if defined(__APPLE__)
 // macOS counterpart of spawn_in_sandbox for the jaal exec path. jaal cannot

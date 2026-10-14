@@ -277,7 +277,8 @@ constexpr const char* kHomeToolSubdirs[] = {
 #endif  // __linux__ (reopened below)
 
 #if defined(__linux__) || defined(__APPLE__)
-[[nodiscard]] claybin_backend::Posture build_claybin_posture() {
+[[nodiscard]] claybin_backend::Posture build_claybin_posture(
+        const handoff::TrustedSnapshot* trusted = nullptr) {
     claybin_backend::Posture p;
 
     // The user's saved policy, or the shipped default when they have never
@@ -372,12 +373,18 @@ constexpr const char* kHomeToolSubdirs[] = {
     // said these files are theirs to edit, and silently making them read-only
     // would be the config lying to them.
     if (cfg.handoff != sandbox_cfg::HandoffPolicy::Allow && !p.workspace.empty()) {
-        auto snap = handoff::snapshot_trusted(p.workspace);
+        // The dispatcher already walked the workspace for this call (to watch
+        // it); reuse that instead of walking again, when it walked this root.
+        if (trusted && (trusted->roots.empty() || trusted->roots.front() != p.workspace))
+            trusted = nullptr;
+        handoff::TrustedSnapshot walked;
+        if (!trusted) walked = handoff::snapshot_trusted(p.workspace);
+        const auto& snap = trusted ? *trusted : walked;
         p.handoff_ro.reserve(snap.entries.size());
         // Files under a .git/hooks or .git/info dir get one ro bind of that
         // dir instead of one each. A checkout of many repos has thousands.
         std::set<std::string> dirs;
-        for (auto& e : snap.entries) {
+        for (const auto& e : snap.entries) {
             if (!e.existed) continue;
             // A bind follows the link, so it can't protect it, and a link that
             // points out of the tree makes claybin's confined open fail (EXDEV).
@@ -392,7 +399,7 @@ constexpr const char* kHomeToolSubdirs[] = {
                     p.handoff_ro.push_back(parent.string());
                 continue;
             }
-            p.handoff_ro.push_back(std::move(e.path));
+            p.handoff_ro.push_back(e.path);
         }
     }
 
@@ -969,10 +976,11 @@ SubprocessResult run_argv(const std::vector<std::string>& argv,
 
 claybin_backend::SpawnResult spawn_in_sandbox(
         const std::vector<std::string>& argv, std::string_view cwd, int out_fd,
-        const std::vector<std::string>& extra_roots) {
+        const std::vector<std::string>& extra_roots,
+        const handoff::TrustedSnapshot* trusted) {
 #if defined(__linux__)
     if (detected_backend() == Backend::Claybin) {
-        auto posture = build_claybin_posture();
+        auto posture = build_claybin_posture(trusted);
         if (!cwd.empty()) posture.cwd = std::string{cwd};
         // A call scoped to more folders (an editor session's extra roots)
         // may write there too, like the workspace.
@@ -981,7 +989,7 @@ claybin_backend::SpawnResult spawn_in_sandbox(
         return claybin_backend::spawn_argv(posture, argv, out_fd, out_fd);
     }
 #else
-    (void)argv; (void)cwd; (void)out_fd; (void)extra_roots;
+    (void)argv; (void)cwd; (void)out_fd; (void)extra_roots; (void)trusted;
 #endif
     claybin_backend::SpawnResult r;
     r.started = false;

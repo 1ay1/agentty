@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "agentty/tool/registry.hpp"
+#include "agentty/tool/host_call.hpp"
 
 namespace agentty::tools {
 

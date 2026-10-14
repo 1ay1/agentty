@@ -105,6 +105,9 @@ TEST_CASE("handoff: the shell path is watched by observation, not parsing") {
         cfg.configured = true;
         cfg.handoff = sc::HandoffPolicy::Refuse;
         sb::set_config(cfg);
+        // The mode is process-wide and the "--sandbox off" case leaves it Off,
+        // under which snapshot_trusted() returns nothing. Say what we need.
+        (void)sb::init(sb::Mode::Auto);
     }
 
     g_root = fs::temp_directory_path() /
