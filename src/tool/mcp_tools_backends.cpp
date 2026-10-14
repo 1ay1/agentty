@@ -2024,7 +2024,7 @@ public:
                         constexpr std::size_t kSubagentToolBudget = 8u * 1024u;
                         std::string capped = provider::wire::cap_tool_result(
                             res->text, kSubagentToolBudget);
-                        tc.status = ToolUse::Done{now, now, std::move(capped)};
+                        tc.status = ToolUse::Done{now, now, std::move(capped), std::move(res->images)};
                         log += "\n    \xe2\x9c\x93 " + summarize_call(tc);
                         // Identical SUCCEEDING call 6× → also stuck.
                         std::string ok_key = tc.name.value + '\0'

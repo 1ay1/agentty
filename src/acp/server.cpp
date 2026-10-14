@@ -3495,6 +3495,12 @@ bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool&
             // The summary still rides in rawOutput for the model.
             if (!result->change && !result->text.empty())
                 content.push_back(result_content_block(tc, result->text));
+            // Images the tool returned (rendered pages, screenshots).
+            for (const auto& img : result->images)
+                content.push_back(a::ToolCallContent{a::TCC_Content{
+                    a::ContentBlock{a::ImageContent{img.base64(), img.media_type,
+                                                    a::Nothing, a::Nothing, json::object()}},
+                    json::object()}});
 
             upd.status    = a::Just(a::ToolCallStatus::Completed);
             upd.content   = a::Just(std::move(content));
@@ -3510,7 +3516,9 @@ bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool&
             // client. tool_start is stamped above at the pool submit that is
             // this path's actual dispatch, and the timeout branch already
             // uses it. The two terminal paths now agree.
-            settle_tool(cap, ctx, tc, ToolUse::Done{{}, {}, result->text}, tool_start);
+            settle_tool(cap, ctx, tc,
+                        ToolUse::Done{{}, {}, result->text, std::move(result->images)},
+                        tool_start);
         } else {
             std::string detail = result.error().render();
             a::List<a::ToolCallContent> content;

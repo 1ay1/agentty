@@ -390,7 +390,12 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         /*include_thinking=*/!req.effort.empty());
     if (!req.tools.empty()) {
         json tools_j = json::array();
-        for (const auto& t : req.tools) tools_j.push_back(tool_spec_to_json(t));
+        for (const auto& t : req.tools) {
+            // The subscription endpoint 400s on the MCP broker tools. Every
+            // turn path passes here; brokered tools stay callable by name.
+            if (is_oauth && (t.name == "mcp_search_tools" || t.name == "mcp_call")) continue;
+            tools_j.push_back(tool_spec_to_json(t));
+        }
         // Tools cache breakpoint goes on the LAST tool — the schema array is
         // serialized in order and Anthropic's edge caches the prefix up to
         // and including the marked block. Matches cli.js where the tool list
@@ -398,8 +403,10 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         // Tools are session-stable (same catalog every turn), so they get the
         // 1-hour TTL alongside the system prompt — together they form the
         // long-lived prefix that survives idle gaps.
-        tools_j.back()["cache_control"] = kCacheCtl1h;
-        body["tools"] = std::move(tools_j);
+        if (!tools_j.empty()) {
+            tools_j.back()["cache_control"] = kCacheCtl1h;
+            body["tools"] = std::move(tools_j);
+        }
     }
     body["metadata"] = json{{"user_id", make_user_id()}};
     // Reasoning effort + adaptive thinking. req.effort is pre-clamped to the
