@@ -256,12 +256,21 @@ std::shared_ptr<Connection::Live> Connection::connect(const maya::unlocked& cap)
     if (auto disc = l->peer->call<m::to_server::Discover>(cap, m::DiscoverParams{})) {
         caps_ = disc->capabilities;
     } else {
+        // A pre-2026 server. Speak its dialect all the way down: no modern
+        // per-request _meta, the legacy version in initialize, and (over
+        // HTTP) no MCP-Protocol-Version header until it answers -- a server
+        // that rejects 2026-07-28 rejects it there too (issue #95).
+        l->peer->set_request_meta(cap, m::Json::object());
+        if (link_.set_protocol_version) link_.set_protocol_version(l->holder, {});
         m::InitializeParams ip;
-        ip.protocolVersion = std::string(m::kProtocolVersion);
+        ip.protocolVersion = std::string(m::kLegacyProtocolVersion);
         ip.capabilities    = client_caps;
         ip.clientInfo      = cfg_.client_info;
         auto init = take(l->peer->call<m::to_server::Initialize>(cap, ip));
         caps_ = init.capabilities;
+        // The version the server picked goes on every later request.
+        if (link_.set_protocol_version)
+            link_.set_protocol_version(l->holder, init.protocolVersion);
         l->peer->notify<m::to_server::Initialized>(cap, m::Unit{});
     }
 

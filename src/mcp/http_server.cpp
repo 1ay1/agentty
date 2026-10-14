@@ -205,9 +205,11 @@ struct Conn {
         // This request's 401, if any. Per request: several POSTs run at once.
         bool        http_status_401_ = false;
         std::string resource_metadata_url_;
+        int         http_status = 0;
 
         http::StreamHandler handler;
         handler.on_headers = [&](int status, const http::Headers& hh) {
+            http_status = status;
             content_type = header_value(hh, "content-type");
             is_sse = content_type.find("text/event-stream") != std::string::npos;
             // Capture a freshly-issued session id (only on initialize, but the
@@ -284,6 +286,31 @@ struct Conn {
                 feed(cap, jsonrpc::dump_frame(err));
             }
             return;
+        }
+
+        // A non-2xx reply whose body isn't JSON-RPC ("Unsupported
+        // MCP-Protocol-Version", an nginx error page) used to be dropped as an
+        // unparseable frame, leaving the call waiting for its deadline. Answer
+        // it with an error now, carrying the status and the body.
+        if (http_status >= 400 && !is_sse && !http_status_401_ && expects_response) {
+            bool is_rpc = false;
+            try {
+                const auto j = json::parse(json_buf);
+                is_rpc = j.is_object() && (j.contains("error") || j.contains("result"));
+            } catch (...) {}
+            if (!is_rpc) {
+                std::string body = json_buf.substr(0, 300);
+                while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) body.pop_back();
+                json err = {
+                    {"jsonrpc", "2.0"},
+                    {"id", parsed.value("id", json(nullptr))},
+                    {"error", {{"code", -32003}, {"message",
+                        "HTTP " + std::to_string(http_status) + (body.empty() ? "" : ": " + body)},
+                        {"data", {{"httpStatus", http_status}}}}},
+                };
+                feed(cap, jsonrpc::dump_frame(err));
+                return;
+            }
         }
 
         if (is_sse) {
@@ -500,6 +527,9 @@ make_http_provider(const std::string& name, const HttpConfig& cfg, std::string& 
     };
     link.alive = [](const std::shared_ptr<void>& h) {
         return h && static_cast<HttpTransport*>(h.get())->alive();
+    };
+    link.set_protocol_version = [](const std::shared_ptr<void>& h, std::string v) {
+        if (h) static_cast<HttpTransport*>(h.get())->set_protocol_version(std::move(v));
     };
     try {
         return std::make_shared<Connection>(std::move(cc), std::move(link));

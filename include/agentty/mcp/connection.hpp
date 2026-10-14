@@ -42,6 +42,9 @@ struct Link {
     std::function<Opened()> open;
     // Is what backs the channel still up (child alive, HTTP not failed)?
     std::function<bool(const std::shared_ptr<void>& holder)> alive;
+    // Set the protocol version the transport advertises out of band (the
+    // HTTP MCP-Protocol-Version header). Empty: send none. Unset for stdio.
+    std::function<void(const std::shared_ptr<void>& holder, std::string version)> set_protocol_version;
 };
 
 // A server spawned as a child process, spoken to over its stdio.

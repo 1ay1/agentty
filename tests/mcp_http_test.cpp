@@ -35,6 +35,7 @@ int main() { std::printf("mcp_http_test: SKIP (POSIX-only)\n"); return 0; }
 using json = nlohmann::json;
 
 static int g_failures = 0;
+static std::vector<std::string> g_seen_versions;   // MCP-Protocol-Version headers received
 #define CHECK(cond)                                                            \
     do {                                                                       \
         if (!(cond)) {                                                         \
@@ -128,6 +129,32 @@ static void serve(int listen_fd, std::atomic<bool>& stop) {
         std::string body = (header_end != std::string::npos)
                                ? buf.substr(header_end + 4, content_len) : std::string{};
 
+        // Like the server in issue #95: a pre-2026 server that refuses any
+        // MCP-Protocol-Version it doesn't know with a plain-text 400.
+        std::string version_hdr;
+        if (header_end != std::string::npos) {
+            std::string head = buf.substr(0, header_end);
+            std::string low = head;
+            for (auto& c : low) c = (char)std::tolower(c);
+            if (auto at = low.find("mcp-protocol-version:"); at != std::string::npos) {
+                auto v = head.substr(at + 21, head.find("\r\n", at) - at - 21);
+                while (!v.empty() && v.front() == ' ') v.erase(v.begin());
+                version_hdr = v;
+            }
+        }
+        if (!version_hdr.empty())
+            g_seen_versions.push_back(version_hdr);
+        if (!version_hdr.empty() && version_hdr != "2025-11-25" && version_hdr != "2025-06-18"
+            && version_hdr != "2025-03-26") {
+            const std::string msg = "Unsupported MCP-Protocol-Version";
+            std::string out = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n"
+                              "Content-Type: application/json\r\nContent-Length: "
+                              + std::to_string(msg.size()) + "\r\n\r\n" + msg;
+            ::send(fd, out.data(), out.size(), 0);
+            ::close(fd);
+            continue;
+        }
+
         std::string out;
         try {
             json req = json::parse(body);
@@ -188,9 +215,16 @@ int main() {
     cfg.handshake_timeout = std::chrono::milliseconds(5000);
     cfg.call_timeout      = std::chrono::milliseconds(5000);
     std::string err;
+    const auto t0 = std::chrono::steady_clock::now();
     auto provider = agentty::mcp::make_http_provider("httpdemo", cfg, err);
     CHECK(static_cast<bool>(provider));
     if (!provider) std::fprintf(stderr, "  provider failed: %s\n", err.c_str());
+    // The 400 on server/discover must fail that call at once, not after the
+    // handshake timeout, and the fallback must not send 2026-07-28 again.
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(3000));
+    std::printf("mcp_http_test: versions seen:");
+    for (const auto& v : g_seen_versions) std::printf(" %s", v.c_str());
+    std::printf("\n");
 
     if (provider) {
         auto tools = provider->list();
