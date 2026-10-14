@@ -428,6 +428,12 @@ ExecResult decode_result(const std::string& tool_name, ::mcp::cap::Result r) {
 // only caller is mcp-cpp tool code, which holds no lock of ours: every
 // agentty lock body is a captureless function over its own value and can't
 // reach a tool body.
+//
+// Nothing in ToolState can block or lock when destroyed under this lock: a
+// process entry is a shared_ptr<const Proc>, and the last reference to a
+// Session only runs Session::stop() (an atomic and an eventfd write; see
+// JaalSession in tool/util/exec.cpp). So erasing an entry inside with() is
+// safe even when it drops the session.
 using StateFn    = std::function<void(mt::ToolState&)>;
 using StateFnRef = tool_state::FnRef;
 

@@ -266,12 +266,11 @@ std::vector<SymbolEntry> build_symbol_list(const maya::unlocked* fan, std::size_
                 }
     };
     if (fan) {
-        // The group joins every helper before it goes away (and on a throw),
-        // which is what makes the [&] captures of `partials` and `next` safe.
-        maya::scope(*fan, stop, [&](maya::nursery& n) {
-            n.spawn_n(nthreads, [&share](std::size_t t) {
-                share(static_cast<unsigned>(t));
-            }).join();
+        // parallel_for joins every share before it returns, so `share` and
+        // what it reaches (partials, next, src) outlive every use. Each
+        // share writes only its own partials[t].
+        maya::parallel_for(*fan, nthreads, nthreads, [&share](std::size_t t) {
+            share(static_cast<unsigned>(t));
         });
     } else {
         for (unsigned t = 0; t < nthreads; ++t) share(t);

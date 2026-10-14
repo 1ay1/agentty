@@ -477,14 +477,19 @@ static void run_block_body(const maya::unlocked& cap, maya::Sink<Msg> out, std::
         long                          secs = 0;
     };
 
-    auto outcome = maya::scope(cap, stop, [&](maya::nursery& n) {
-        std::stop_source done;
+    // What the heartbeat shares with this thread: one stop flag. Sync
+    // (const stop_source), held by a co_owned so neither side can free it
+    // under the other.
+    struct Beat { const std::stop_source done; };
+    auto beat_state = maya::co_owned<Beat>::make();
 
+    auto outcome = maya::scope(cap, stop, [&](maya::nursery& n) {
         // The helper's own token comes from the scope's, so Esc reaches the
         // spinner too; the callback folds it into `done`.
-        auto beat = n.spawn([&done, &label, con](std::stop_token st) {
+        auto beat = n.spawn([](std::stop_token st, maya::co_owned<Beat> b, std::string label,
+                               bool con) {
             if (!con) return;
-            const std::stop_callback on_stop(st, [&done] { done.request_stop(); });
+            const std::stop_callback on_stop(st, [&b] { b->done.request_stop(); });
             static constexpr const char* kSpin[] =
                 {"⣷","⣯","⣟","⡿","⣾","⣽","⣻","⣷"};
             int spin = 0;
@@ -498,8 +503,15 @@ static void run_block_body(const maya::unlocked& cap, maya::Sink<Msg> out, std::
                 s += "\r\x1b[2K\x1b[2m" + std::string(kSpin[spin++ % 8])
                    + " running\u2026 " + std::to_string(secs) + "s\x1b[0m";
                 std::fputs(s.c_str(), stdout); std::fflush(stdout);
-            } while (!maya::delay_for(done.get_token(), std::chrono::milliseconds(250)));
-        });
+            } while (!maya::delay_for(b->done.get_token(), std::chrono::milliseconds(250)));
+        }, beat_state, label, con);
+
+        // However the command ends (or throws), stop the spinner before the
+        // handle joins it.
+        struct StopBeat {
+            const Beat& b;
+            ~StopBeat() { b.done.request_stop(); }
+        } stop_beat{*beat_state};
 
         const auto start = std::chrono::steady_clock::now();
         Outcome o;
@@ -508,7 +520,7 @@ static void run_block_body(const maya::unlocked& cap, maya::Sink<Msg> out, std::
             std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start).count());
 
-        done.request_stop();
+        beat_state->done.request_stop();
         beat.join();          // explicit, so a throwing helper surfaces here
         return o;
     });

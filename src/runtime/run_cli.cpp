@@ -9,9 +9,11 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <optional>
 #include <stop_token>
@@ -87,6 +89,62 @@ bool write_file(const std::string& path, const std::string& body) {
     return static_cast<bool>(f.flush());
 }
 
+// What the run and its watcher share: stop flags, the deadline result and
+// the signal that came in. Every field is Sync (const or atomic), so both
+// threads use it at once without a lock.
+struct Watch {
+    const std::stop_source       cancel;      // stop the agent run
+    const std::stop_source       done;        // stop the watcher
+    std::atomic<bool>            timed_out{false};
+    std::atomic<int>             got{-1};     // the first maya::sig, -1 = none
+    std::atomic<bool>            ready{false};
+    std::atomic<bool>            failed{false};
+};
+
+// The watcher: owns its reactor and signal source (both stay on this one
+// thread), waits for Ctrl-C / SIGTERM / SIGHUP and the deadline, and stops
+// the run through `w`. It checks `done` every 20 ms instead of taking a
+// waker from the owner: the reactor (and its wake fd) dies with this thread,
+// so a wake sent after it returns could land on a recycled fd.
+void watch_signals(std::stop_token, maya::co_owned<Watch> w,
+                   std::optional<std::chrono::steady_clock::time_point> deadline) {
+    using clock = std::chrono::steady_clock;
+    auto sigs = pf::native_signals::install(
+        {maya::sig::interrupt, maya::sig::terminate, maya::sig::hangup});
+    auto reactor = pf::native_reactor::create();
+    if (!sigs || !reactor) { w->failed = true; w->ready = true; w->ready.notify_all(); return; }
+    constexpr std::uint64_t kSigToken = 1;
+    auto reg = reactor->watch(sigs->handle(), pf::interest::read, kSigToken);
+    w->ready = true;
+    w->ready.notify_all();
+    int seen = 0;
+    while (!w->done.stop_requested()) {
+        std::chrono::milliseconds wait{20};
+        if (deadline && !w->cancel.stop_requested()) {
+            const auto left = std::chrono::ceil<std::chrono::milliseconds>(*deadline - clock::now());
+            wait = std::clamp(left, std::chrono::milliseconds{0}, wait);
+        }
+        if (!reactor->wait(wait)) break;
+        if (deadline && !w->cancel.stop_requested() && clock::now() >= *deadline) {
+            w->timed_out = true;
+            w->cancel.request_stop();
+        }
+        for (auto s : sigs->take()) {
+            if (++seen == 1) {
+                w->got = static_cast<int>(s);
+                std::fputs("\nagentty run: stopping (again to force)\n", stderr);
+                w->cancel.request_stop();
+            } else {
+                std::fputs("agentty run: forced exit\n", stderr);
+                std::fflush(stderr);
+                std::_Exit(exit_code_for(Status::Cancelled,
+                                         static_cast<maya::sig>(w->got.load())));
+            }
+        }
+    }
+    (void)reg;
+}
+
 // Runs the agent on this thread while a helper waits for Ctrl-C, SIGTERM or
 // SIGHUP, and for --timeout. The loop only checks its clock between turns, so
 // the helper cancels a long tool or a stuck stream when time is up. A second
@@ -96,63 +154,20 @@ tools::OneShotResult run_with_signals(const maya::unlocked& cap, const Options& 
     using clock = std::chrono::steady_clock;
     const auto deadline = o.timeout.count() > 0
         ? std::optional<clock::time_point>(clock::now() + o.timeout) : std::nullopt;
-    auto sigs = pf::native_signals::install(
-        {maya::sig::interrupt, maya::sig::terminate, maya::sig::hangup});
-    auto reactor = pf::native_reactor::create();
-    if (!sigs || !reactor)
-        return tools::run_one_shot(cap, to_one_shot(o, {}));
-    constexpr std::uint64_t kSigToken = 1;
-    auto reg = reactor->watch(sigs->handle(), pf::interest::read, kSigToken);
-    const auto waker = reactor->waker();
-
-    std::stop_source cancel;
-    std::stop_source done;
-    bool timed_out = false;   // written by the helper, read after join
-    tools::OneShotResult result;
-    maya::scope(cap, [&](maya::nursery& n) {
-        auto watcher = n.spawn([&] {
-            int seen = 0;
-            while (!done.stop_requested()) {
-                std::optional<std::chrono::milliseconds> wait;
-                if (deadline && !cancel.stop_requested()) {
-                    const auto left = *deadline - clock::now();
-                    wait = std::max(std::chrono::milliseconds{0},
-                                    std::chrono::ceil<std::chrono::milliseconds>(left));
-                }
-                auto w = reactor->wait(wait);
-                if (!w || done.stop_requested()) break;
-                if (deadline && !cancel.stop_requested() && clock::now() >= *deadline) {
-                    timed_out = true;
-                    cancel.request_stop();
-                }
-                for (auto s : sigs->take()) {
-                    if (++seen == 1) {
-                        got = s;
-                        std::fputs("\nagentty run: stopping (again to force)\n", stderr);
-                        cancel.request_stop();
-                    } else {
-                        std::fputs("agentty run: forced exit\n", stderr);
-                        std::fflush(stderr);
-                        std::_Exit(exit_code_for(Status::Cancelled, got));
-                    }
-                }
-            }
-        });
-        const auto opts = to_one_shot(o, cancel.get_token());
-        try {
-            result = tools::run_one_shot(cap, opts);
-        } catch (...) {
-            done.request_stop();
-            waker.wake();
-            throw;
-        }
-        done.request_stop();
-        waker.wake();
-        watcher.join();
+    auto w = maya::co_owned<Watch>::make();
+    tools::OneShotResult result = maya::scope(cap, [&](maya::nursery& n) {
+        auto watcher = n.spawn(watch_signals, w, deadline);
+        w->ready.wait(false);                 // signals are installed before the run
+        if (w->failed) return tools::run_one_shot(cap, to_one_shot(o, {}));
+        struct Stop {   // the watcher stops however the run ends
+            const Watch& w;
+            ~Stop() { w.done.request_stop(); }
+        } stop{*w};
+        return tools::run_one_shot(cap, to_one_shot(o, w->cancel.get_token()));
     });
-    (void)reg;
+    if (const int g = w->got.load(); g >= 0) got = static_cast<maya::sig>(g);
     // Our own deadline cancel is a timeout, unless a signal came first.
-    if (timed_out && !got && result.status == Status::Cancelled) {
+    if (w->timed_out && !got && result.status == Status::Cancelled) {
         result.status = Status::Timeout;
         result.error  = "hit the time limit before finishing";
     }

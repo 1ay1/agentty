@@ -17,7 +17,7 @@
 #include <vector>
 
 #include <maya/runtime.hpp>
-#include "agentty/util/background.hpp"   // util::WorkerGroup
+#include "agentty/util/background.hpp"   // util::WorkerGroup, run_isolated_detached
 
 #include <mcp/tools/util/utf8.hpp>
 
@@ -171,13 +171,15 @@ std::size_t write_ready(pf::borrowed_handle h, const char* buf, std::size_t len,
 
 /// Read everything currently available. Never blocks: the handles are
 /// non-blocking and we only get here because the reactor said ready.
+/// `closed` (optional) is set when the writer has closed the pipe.
 std::size_t drain_into(pf::borrowed_handle h, std::string& out, std::size_t cap,
-                       bool& truncated) {
+                       bool& truncated, bool* closed = nullptr) {
     char buf[64 * 1024];
     std::size_t got = 0;
     for (;;) {
         bool eof = false;
         const auto n = read_ready(h, buf, sizeof buf, eof);
+        if (eof && closed) *closed = true;
         if (n > 0) {
             got += n;
             // Past the cap we keep READING and discard. Stopping the drain
@@ -208,195 +210,299 @@ std::optional<std::chrono::seconds> env_wall_override() {
     return std::chrono::seconds{v};
 }
 
-/// A started program, polled for later.
+class JaalSession;   // below
+
+namespace session_detail {
+// A background session's reactor, split by who may touch what:
+//   * adopt(): once, by the session's constructor, before the pump exists
+//     (so before any other thread can see it). Needs a PumpKey too.
+//   * wake(): any thread, any time (the Reactor concept makes it
+//     thread-safe and async-signal-safe)
+//   * drive(): needs a PumpKey, and only JaalSession can make one, which
+//     it does in pump() alone. So registering and waiting happen on the
+//     pump's thread and nowhere else.
+// That split is what makes it Sync (the opt-in below the namespace).
+class PumpKey {
+    PumpKey() = default;
+    friend class ::agentty::tools::util::JaalSession;
+};
+class PumpReactor {
+  public:
+    PumpReactor() = default;
+    // Never copied or reseated.
+    PumpReactor(const PumpReactor&)            = delete;
+    PumpReactor& operator=(const PumpReactor&) = delete;
+    void adopt(PumpKey, reactor_t r) { r_.emplace(std::move(r)); }
+    void wake() const noexcept { if (r_) r_->waker().wake(); }
+    [[nodiscard]] bool valid() const noexcept { return r_.has_value(); }
+    reactor_t& drive(PumpKey) noexcept { return *r_; }
+  private:
+    std::optional<reactor_t> r_;
+};
+}  // namespace session_detail
+}  // namespace
+}  // namespace agentty::tools::util
+// wake() is thread-safe; drive() is reachable only from the pump (PumpKey).
+MAYA_SYNC(agentty::tools::util::session_detail::PumpReactor);
+namespace agentty::tools::util {
+namespace {
+
+/// A started program, polled for later: an actor.
 ///
-/// The drain runs on its own worker, and that is deliberate rather than
-/// reluctant: a pipe nobody reads fills at 64 KiB and then BLOCKS the child.
-/// Polls are seconds apart by nature -- a caller checks a dev server when it
-/// wants to, not on a schedule -- so draining only inside poll() would stall
-/// exactly the chatty servers this tool exists for. It is a jaal worker
-/// (util::WorkerGroup): stop_token to wind it up, joined on destruction.
+/// ONE thread, the pump, owns the child, the pipe and the reactor. It is the
+/// only writer of the output. The handle (this class) and the pump share one
+/// `Core`: a guarded Stream (the only copy of the output, plus the read
+/// cursor and the end state), a stop flag, and the reactor's waker. Core is
+/// co_owned and Sync, so the handle and the pump can each outlive the other
+/// and nothing is freed under either.
 ///
-/// Lock order: the shared state is a LEAF whose bodies only move bytes and
-/// flags. The pump gets its `unlocked` at job entry. poll() and stop() are
-/// mcp-cpp Session virtuals whose signatures the library fixes, and the
-/// destructor can't be handed a capability either; each re-states it at that
-/// one entry (`session_root`, listed in tests/lint/allowlist.txt). Sound
-/// because they are called only by mcp-cpp's process tools from a tool body
-/// on a tool worker, which holds no agentty lock.
+///   * read(): one exclusive section takes what's new and moves the cursor,
+///     so concurrent reads get disjoint bytes.
+///   * stop(): sets the flag and wakes the pump through the waker. Never
+///     blocks. The pump sends SIGTERM, then SIGKILL after a grace.
+///   * destruction: stop(), and that's all. The pump finishes the kill, keeps
+///     draining to EOF, reaps, and exits on its own. It runs as an isolated
+///     background job, so it never ties up a pool worker, and agentty's
+///     teardown bounds it at exit.
+///
+/// Lock order: the Stream is a LEAF whose bodies only move bytes and flags.
+/// read() is an mcp-cpp virtual whose signature the library fixes, so it
+/// re-states `unlocked` with thread_root at that one entry (listed in
+/// tests/lint/allowlist.txt); sound because mcp-cpp calls it only from a
+/// tool body, outside every agentty lock. stop() takes no capability at all:
+/// a leaf lock is the only thing it touches.
 class JaalSession final : public mt::Session {
   public:
-    // The process moves into the pump: from here on nothing else can reach
-    // it, so a stop() racing the pump's reap() can't happen by construction.
-    JaalSession(process_t p, std::size_t cap) : started_(clock_t_::now()) {
-        drain_.post([](const maya::unlocked& c, std::stop_token st, process_t proc, std::size_t cap,
-                       state_t state) { pump(c, st, std::move(proc), cap, state); },
-                    std::move(p), cap, st_);
+    JaalSession(process_t p, std::size_t window) {
+        // Core owns the reactor: the handle and the pump both co-own Core,
+        // so the reactor (and the eventfd behind its waker) lives until the
+        // last of them is gone. stop() can never wake a closed fd. It is
+        // handed in here, before the pump exists, so nothing races it.
+        if (auto r = reactor_t::create()) core_->reactor.adopt(PumpKey{}, std::move(*r));
+        if (!core_->reactor.valid()) {
+            // No reactor: nothing can watch the child. Kill it and report
+            // the end straight away, so a caller isn't left polling forever.
+            (void)p.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+            mt::ExecOutcome oc = mt::StartFailed{"no reactor"};
+            if (auto st = p.reap()) oc = mt::Signalled{st->code};
+            maya::thread_root([&](const maya::unlocked& c) {
+                core_->s.with(c, [](Stream& s, mt::ExecOutcome o) {
+                    s.end(std::move(o));
+                    s.eof = true;
+                }, std::move(oc));
+            });
+            return;
+        }
+        ::agentty::util::run_isolated_detached("exec.session.pump",
+            [](const maya::unlocked& c, std::stop_token st, process_t proc,
+               std::size_t win, core_t core) {
+                pump(c, std::move(st), std::move(proc), win, std::move(core));
+            },
+            std::move(p), window, core_);
     }
-    ~JaalSession() override {
-        session_root([this](const maya::unlocked& c) {
-            stop_with(c);
-            drain_.stop(c);   // requests stop on the pump's token, then joins
+    ~JaalSession() override { stop(); }
+
+    [[nodiscard]] Read read(std::chrono::milliseconds wait, std::size_t max) override {
+        return maya::thread_root([&](const maya::unlocked& c) {
+            auto [t, _] = core_->s.wait_with_for(c, wait,
+                [](const Stream& s, std::size_t) { return s.fresh() || s.ended; },
+                [](Stream& s, std::size_t m) { return s.take(m); }, max);
+            Read r;
+            r.output  = std::move(t.output);
+            r.dropped = t.dropped;
+            r.running = t.running;
+            r.eof     = t.eof;
+            r.outcome = std::move(t.outcome);
+            r.uptime  = std::chrono::duration_cast<std::chrono::seconds>(
+                (t.running ? clock_t_::now() : t.ended_at) - core_->started);
+            return r;
         });
     }
 
-    [[nodiscard]] Update poll(std::chrono::milliseconds wait) override {
-        return session_root([&](const maya::unlocked& c) { return poll_with(c, wait); });
-    }
-
-    void stop() override {
-        session_root([this](const maya::unlocked& c) { stop_with(c); });
+    void stop() noexcept override {
+        // One atomic flag and one eventfd write: both are safe from any
+        // thread, under any lock, at any time. That's why stop and the
+        // destructor never block.
+        if (core_->stop.exchange(true)) return;
+        core_->reactor.wake();
     }
 
   private:
-    template <class F>
-    static auto session_root(F&& f) -> decltype(maya::thread_root(std::forward<F>(f))) {
-        return maya::thread_root(std::forward<F>(f));
-    }
+    // The pump's reactor: see PumpReactor above the class.
+    using PumpKey = session_detail::PumpKey;
+    using PumpReactor = session_detail::PumpReactor;
 
-    [[nodiscard]] Update poll_with(const maya::unlocked& cap, std::chrono::milliseconds wait) {
-        // Wait for something to report rather than returning empty
-        // immediately: a caller that polls in a loop should not spin, and one
-        // that asks for 5s of news should get 5s of news.
-        // Wakes the instant the pump writes news or the child ends. One
-        // exclusive section that both drains and decides; returning a struct
-        // by value is the only way out of the guarded state.
-        auto [u, news] = st_->wait_with_for(cap, wait,
-            [](const Shared& s) { return !s.pending.empty() || !s.alive; },
-            [](Shared& s) {
-            Update u;
-            u.output    = std::exchange(s.pending, {});
-            u.truncated = std::exchange(s.truncated, false);
-            u.running   = s.alive;
-            if (!s.alive && !s.reported) {
-                s.reported = true;
-                u.outcome  = s.outcome;
+    // The output, the cursor, and the end: everything read() and the pump
+    // both touch. guarded<T>: reachable only inside a lock body, nothing
+    // escapes but owned values.
+    struct Stream {
+        std::string  window;            // the newest `cap` bytes
+        std::size_t  base = 0;          // absolute offset of window[0]
+        std::size_t  seen = 0;          // absolute offset read() has handed out
+        std::size_t  cap  = 128 * 1024;
+        bool         eof   = false;     // pipe closed: no more output
+        bool         ended = false;     // child reaped
+        mt::ExecOutcome outcome = mt::Exited{0};
+        clock_t_::time_point ended_at{};
+
+        [[nodiscard]] bool fresh() const noexcept { return base + window.size() > seen; }
+
+        void append(std::string_view bytes) {
+            window.append(bytes);
+            if (window.size() > cap) {
+                const auto cut = window.size() - cap;
+                window.erase(0, cut);
+                base += cut;
             }
-            return u;
-        });
-        (void)news;
-        u.uptime = std::chrono::duration_cast<std::chrono::seconds>(clock_t_::now() - started_);
-        return u;
-    }
+        }
+        void end(mt::ExecOutcome o) {
+            ended    = true;
+            outcome  = std::move(o);
+            ended_at = clock_t_::now();
+        }
 
-    void stop_with(const maya::below<maya::leaf>& cap) {
-        // The pump owns the process, so this just asks; the pump sees it
-        // within its 100ms wait and sends SIGTERM.
-        st_->with(cap, [](Shared& s, clock_t_::time_point at) {
-            if (!s.alive || s.stopping) return;
-            s.stopping = true;
-            s.stop_at  = at;
-        }, clock_t_::now() + std::chrono::seconds{2});
-    }
+        // What read() takes: plain owned values.
+        struct Taken {
+            std::string  output;
+            std::size_t  dropped = 0;
+            bool         running = true;
+            bool         eof = false;
+            std::optional<mt::ExecOutcome> outcome;
+            clock_t_::time_point ended_at{};
+        };
 
-    struct Shared;
-    using state_t = maya::co_owned<maya::guarded<Shared>>;
+        Taken take(std::size_t max) {
+            Taken r;
+            const auto end = base + window.size();
+            auto from = std::max(seen, base);
+            r.dropped = from - seen;                      // scrolled out unseen
+            if (end - from > max) { r.dropped += (end - from) - max; from = end - max; }
+            r.output  = window.substr(from - base, end - from);
+            seen      = end;
+            r.running = !ended;
+            r.eof     = eof;
+            if (ended) r.outcome = outcome;
+            r.ended_at = ended_at;
+            return r;
+        }
+    };
 
-    static void pump(const maya::unlocked& cap, std::stop_token st, process_t proc_,
-                     std::size_t cap_, state_t state) {
-        auto& st_ = *state;
-        auto reactor = reactor_t::create();
-        if (!reactor) return;
-        auto exit_reg = reactor->watch(proc_.exit_handle().get(),
-                                       pf::interest::read, kExitToken);
+    // What the handle and the pump share, co_owned by both, and Sync:
+    //   s        the output stream: guarded, a leaf
+    //   stop     set by the handle, read by the pump
+    //   reactor  the pump's reactor, owned HERE so the eventfd behind its
+    //            waker lives as long as anyone can call stop()
+    // An aggregate, so jaal walks it and checks every field is Sync.
+    struct Core {
+        maya::guarded<Stream>              s;
+        std::atomic<bool>                  stop{false};
+        const clock_t_::time_point         started = clock_t_::now();
+        PumpReactor                        reactor;
+    };
+    using core_t = maya::co_owned<Core>;
+
+    static void pump(const maya::unlocked& cap, std::stop_token pool_stop, process_t proc,
+                     std::size_t window, core_t core) {
+        // The pump is the only thread that waits on or registers with the
+        // reactor; Core owns it so the waker stays valid for stop().
+        auto& reactor = core->reactor.drive(PumpKey{});
+        core->s.with(cap, [](Stream& s, std::size_t w) { s.cap = w; }, window);
+        auto exit_reg = reactor.watch(proc.exit_handle().get(), pf::interest::read, kExitToken);
         std::optional<reactor_t::registration> out_reg;
-        if (auto h = proc_.stdout_handle())
-            if (auto r = reactor->watch(h->get(), pf::interest::read, kOutToken))
+        if (auto h = proc.stdout_handle())
+            if (auto r = reactor.watch(h->get(), pf::interest::read, kOutToken))
                 out_reg = std::move(*r);
 
-        bool exited = false;
-        bool term_sent = false;
-        while (!st.stop_requested()) {
-            auto res = reactor->wait(std::chrono::milliseconds{100});
+        constexpr auto kGrace = std::chrono::seconds{2};
+        bool exited = false, eof = !out_reg;
+        std::optional<clock_t_::time_point> kill_at;
+        // After a stop, the pipe can stay open forever if a descendant left
+        // the process group. Stop waiting for EOF this long after the exit.
+        std::optional<clock_t_::time_point> give_up_eof;
+
+        while (!(exited && eof)) {
+            // Stop: asked by the handle, or the process is shutting down.
+            const bool stopping = core->stop.load() || pool_stop.stop_requested();
+            if (stopping && !kill_at && !exited) {
+                (void)proc.stop(pf::stop_mode::graceful, pf::stop_scope::tree);
+                kill_at = clock_t_::now() + kGrace;
+            }
+            if (kill_at && !exited && clock_t_::now() >= *kill_at) {
+                (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+                kill_at = clock_t_::time_point::max();   // once
+            }
+            if (exited && stopping && !give_up_eof)
+                give_up_eof = clock_t_::now() + std::chrono::milliseconds{500};
+            if (give_up_eof && clock_t_::now() >= *give_up_eof) break;
+
+            std::optional<std::chrono::milliseconds> wait;   // none: until an event
+            if (kill_at && *kill_at != clock_t_::time_point::max())
+                wait = std::chrono::ceil<std::chrono::milliseconds>(*kill_at - clock_t_::now());
+            if (give_up_eof)
+                wait = std::chrono::ceil<std::chrono::milliseconds>(*give_up_eof - clock_t_::now());
+            if (wait && wait->count() < 0) wait = std::chrono::milliseconds{0};
+
+            auto res = reactor.wait(wait);
             if (!res) break;
             for (std::uint8_t i = 0; i < res->count; ++i) {
                 const auto& r = res->ready[i];
                 if (r.token == kOutToken && (r.readable || r.hangup)) {
                     std::string chunk;
-                    bool        lost = false;
-                    if (auto h = proc_.stdout_handle())
-                        drain_into(*h, chunk, cap_, lost);
-                    // Hung up and drained: stop watching, or the reactor
+                    bool lost = false, closed = false;
+                    if (auto h = proc.stdout_handle())
+                        drain_into(*h, chunk, std::numeric_limits<std::size_t>::max(), lost, &closed);
+                    if (!chunk.empty())
+                        core->s.with(cap, [](Stream& s, std::string c) { s.append(c); },
+                                     std::move(chunk));
+                    // Drained and closed: stop watching, or the reactor
                     // reports the hangup on every wait and the loop spins.
-                    if (r.hangup && chunk.empty()) out_reg.reset();
-                    if (!chunk.empty() || lost)
-                        st_.with(cap, [](Shared& s, std::string c, bool l,
-                                    std::size_t cap) {
-                            if (s.pending.size() < cap) s.pending += c;
-                            else                        s.truncated = true;
-                            if (l) s.truncated = true;
-                        }, std::move(chunk), lost, cap_);
+                    if (closed) { out_reg.reset(); eof = true; }
                 } else if (r.token == kExitToken && (r.readable || r.hangup)) {
                     exited = true;
+                    exit_reg = {};
                 }
             }
-            if (!exited) {
-                const auto [stopping, overdue] = st_.read(cap,
-                    [](const Shared& s, clock_t_::time_point now) {
-                        return std::pair{s.stopping, s.stopping && now >= s.stop_at};
-                    }, clock_t_::now());
-                if (stopping && !term_sent) {
-                    (void)proc_.stop(pf::stop_mode::graceful, pf::stop_scope::tree);
-                    term_sent = true;
-                }
-                if (overdue)
-                    (void)proc_.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+            if (exited && !eof) {
+                // Publish the end now; output may keep coming from a child
+                // that inherited the pipe, and read() reports both.
+                publish_exit(cap, proc, core);
             }
-            if (exited) break;
         }
-        // Stopped by the owner while the child ran: kill it, then wait for
-        // the exit before reaping. Reaping straight after the kill fails
-        // (it hasn't died yet) and leaves a zombie.
         if (!exited) {
-            (void)proc_.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
-            for (int i = 0; i < 20 && !exited; ++i) {
-                auto res = reactor->wait(std::chrono::milliseconds{100});
-                if (!res) break;
-                for (std::uint8_t k = 0; k < res->count; ++k)
-                    if (res->ready[k].token == kExitToken) exited = true;
+            // Reactor failure, or the EOF give-up with the child alive: make
+            // sure it's dead, then give the kernel a moment to make it
+            // reapable (reap() refuses rather than block).
+            (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+            for (int i = 0; i < 100; ++i) {
+                publish_exit(cap, proc, core);
+                if (core->s.read(cap, [](const Stream& s) { return s.ended; })) break;
+                (void)maya::delay_for(std::stop_token{}, std::chrono::milliseconds{20});
             }
         }
-        // Whatever was written before the end is still in the pipe.
-        std::string tail;
-        bool        lost = false;
-        if (auto h = proc_.stdout_handle())
-            drain_into(*h, tail, cap_, lost);
+        publish_exit(cap, proc, core);
+        core->s.with(cap, [](Stream& s) {
+            s.eof = true;
+            // Still not reapable after 2 s of SIGKILL: report it ended
+            // anyway, so no caller waits on it forever.
+            if (!s.ended) s.end(mt::ExecOutcome{mt::Signalled{9}});
+        });
+    }
 
+    // Reap once and publish the outcome. Idempotent.
+    static void publish_exit(const maya::unlocked& cap, process_t& proc, const core_t& core) {
+        if (core->s.read(cap, [](const Stream& s) { return s.ended; })) return;
         mt::ExecOutcome oc = mt::Signalled{0};
-        if (auto s = proc_.reap())
+        if (auto s = proc.reap())
             oc = (s->how == pf::exit_status::kind::exited)
                      ? mt::ExecOutcome{mt::Exited{s->code}}
                      : mt::ExecOutcome{mt::Signalled{s->code}};
-
-        st_.with(cap, [](Shared& s, std::string t, bool l, mt::ExecOutcome o) {
-            if (!t.empty()) s.pending += t;
-            if (l) s.truncated = true;
-            s.outcome = o;
-            s.alive   = false;
-        }, std::move(tail), lost, oc);
+        else
+            return;   // not reapable yet
+        core->s.with(cap, [](Stream& s, mt::ExecOutcome o) { s.end(std::move(o)); },
+                     std::move(oc));
     }
 
-    /// Everything two threads touch, in one place, reachable only while the
-    /// lock is held. guarded<T> makes the unsafe forms unwriteable rather
-    /// than merely wrong: there is no get(), nothing escapes (results must
-    /// be Sendable), and no second lock can be NAMED inside with() because
-    /// the function is captureless. agentty had 44 raw std::mutex and zero
-    /// of these; this is the first, and a drain thread feeding a poller is
-    /// exactly the shape it is for.
-    struct Shared {
-        std::string     pending;
-        bool            truncated = false;
-        bool            reported  = false;
-        bool            alive     = true;
-        bool            stopping  = false;
-        clock_t_::time_point stop_at{};   // SIGKILL after this, once stopping
-        mt::ExecOutcome outcome   = mt::Exited{0};
-    };
-
-    clock_t_::time_point started_;
-    state_t              st_ = state_t::make();
-    // Last member: destroyed (joined) first.
-    ::agentty::util::WorkerGroup drain_{"exec.session.drain"};
+    core_t core_ = core_t::make();
 };
 
 class JaalExec final : public mt::Exec {
@@ -730,11 +836,7 @@ ChildResult run_child(const ChildRun& run) {
 void scope_fan_out(std::size_t n, const std::function<void(std::size_t)>& fn) {
     if (n <= 1) { if (n) fn(0); return; }
     maya::thread_root([&](const maya::unlocked& cap) {
-        maya::scope(cap, [&](maya::nursery& nur) {
-            auto rest = nur.spawn_n(n - 1, [&fn](std::size_t i) { fn(i + 1); });
-            fn(0);   // the caller runs a share too
-            rest.join();
-        });
+        maya::parallel_for(cap, n, n, fn);   // joins every share before returning
     });
 }
 

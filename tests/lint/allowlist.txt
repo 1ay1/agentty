@@ -38,10 +38,13 @@ mcp/connection.cpp: atomic cap_mint
 # checked against this one root.
 # mcp-cpp's MemoryStore interface (no Call is passed to it).
 # mcp-cpp's StateAccess::with (the tool state gate) -- a library virtual.
-# exec.cpp: mcp-cpp's Session poll/stop virtuals, run_child's feeder join,
+# exec.cpp: mcp-cpp's Session read virtual, run_child's feeder join,
 # and the scan Splitter mcp-cpp / rag-cpp call.
-tool/util/exec.cpp: cap_mint
+tool/util/exec.cpp: cap_mint atomic
 tool/mcp_tools_bridge.cpp: cap_mint
+# exec.cpp's atomic: JaalSession::Core::stop, the one flag a session's stop()
+# sets without taking a lock, so stop and the destructor never block. Core
+# is co_owned, so it must be Sync; an atomic<bool> is.
 #
 # Each entry names the primitives that file may use, so a file allowed
 # std::mutex still cannot sneak in a .detach(). Adding a line is a
@@ -184,6 +187,9 @@ util/logx.cpp: atomic
 # next_tool_exec_seq(): a static atomic counter minted per dispatch, echoed by
 # the worker so the reducer can drop stale results from a superseded turn.
 runtime/app/cmd_factory.cpp: atomic
+# run_cli: the signal watcher and the run share one co_owned<Watch>; its
+# flags are atomics because co_owned requires Sync (no plain writable field).
+runtime/run_cli.cpp: atomic
 # acp/server.cpp has NO entry: its tool dispatch moved to pool.submit_isolated
 # and waits on a stop_token (delay_for) instead of the standard async helper
 # plus a 50 ms poll, so it uses none of the banned primitives.

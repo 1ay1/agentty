@@ -20,6 +20,7 @@
 #include <barrier>
 #include <chrono>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <thread>
@@ -99,7 +100,7 @@ mt::ExecRequest sh(const std::string& script) {
 }
 #endif
 
-// Start, poll until it ends (or give up), stop, drop. The session's last
+// Start, read until it ends (or give up), stop, drop. The session's last
 // reference dies on whichever thread happens to hold it.
 void session_round(mt::Exec& exec, int i) {
     auto s = exec.start(sh(i % 3 == 0 ? kS.quick : i % 3 == 1 ? kS.short_then_fail
@@ -108,13 +109,13 @@ void session_round(mt::Exec& exec, int i) {
     if (!s) return;
     auto sess = *s;
     for (int k = 0; k < 40; ++k) {
-        auto u = sess->poll(std::chrono::milliseconds{i % 2 ? 0 : 20});
+        auto u = sess->read(std::chrono::milliseconds{i % 2 ? 0 : 20}, 1 << 20);
         if (!u.running && u.outcome) break;
     }
     if (i % 4 == 0) sess->stop();   // stop a finished one: must be a no-op
 }
 
-// Stop while it is still running, from another thread than the poller.
+// Stop while it is still running, from another thread than the reader.
 void stop_while_polled(mt::Exec& exec) {
     auto s = exec.start(sh(kS.long_sleep));
     check(s.has_value(), "long session starts");
@@ -122,7 +123,7 @@ void stop_while_polled(mt::Exec& exec) {
     std::shared_ptr<mt::Session> sess = *s;
     std::thread poller([sess] {
         for (int k = 0; k < 30; ++k) {
-            auto u = sess->poll(std::chrono::milliseconds{10});
+            auto u = sess->read(std::chrono::milliseconds{10}, 1 << 20);
             if (!u.running) break;
         }
     });
@@ -166,6 +167,72 @@ int main() {
         if (auto s = exec->start(sh(kS.short_then_print))) pile.push_back(*s);
     std::thread dropper([p = std::move(pile)]() mutable { p.clear(); });
     dropper.join();
+
+#if !defined(_WIN32)
+    using clk = std::chrono::steady_clock;
+    const auto ms_since = [](clk::time_point t0) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(clk::now() - t0).count();
+    };
+
+    // Two readers on one session get disjoint bytes that add up to the
+    // whole stream: the cursor moves inside the same lock that hands out
+    // the bytes.
+    {
+        auto s = exec->start(sh("i=0; while [ $i -lt 2000 ]; do echo $i; i=$((i+1)); done"));
+        check(s.has_value(), "counting session starts");
+        if (s) {
+            auto sess = *s;
+            std::string a, b;
+            auto reader = [&sess](std::string& out) {
+                for (;;) {
+                    auto r = sess->read(std::chrono::milliseconds{20}, 1 << 20);
+                    out += r.output;
+                    if (!r.running && r.eof) { out += sess->read(std::chrono::milliseconds{0}, 1 << 20).output; return; }
+                }
+            };
+            std::thread ta(reader, std::ref(a)), tb(reader, std::ref(b));
+            ta.join(); tb.join();
+            std::size_t expect = 0;
+            for (int i = 0; i < 2000; ++i) expect += std::to_string(i).size() + 1;
+            check(a.size() + b.size() == expect, "concurrent readers split the stream exactly");
+        }
+    }
+
+    // stop() and dropping the last handle never block, even when the child
+    // ignores SIGTERM and so takes the full grace to die.
+    {
+        auto s = exec->start(sh("trap '' TERM; while :; do sleep 0.05; done"));
+        check(s.has_value(), "stubborn session starts");
+        if (s) {
+            auto sess = *s;
+            (void)sess->read(std::chrono::milliseconds{100}, 0);   // let the trap install
+            auto t0 = clk::now();
+            sess->stop();
+            check(ms_since(t0) < 50, "stop() returns at once");
+            t0 = clk::now();
+            sess.reset();   // last handle: the pump carries on alone
+            check(ms_since(t0) < 50, "dropping the last handle never blocks");
+        }
+    }
+
+    // stop() wakes the pump: the child gets SIGTERM promptly, not on the next
+    // poll tick.
+    {
+        auto s = exec->start(sh(kS.long_sleep));
+        check(s.has_value(), "sleeper starts");
+        if (s) {
+            auto sess = *s;
+            (void)sess->read(std::chrono::milliseconds{50}, 0);
+            const auto t0 = clk::now();
+            sess->stop();
+            for (;;) {
+                auto r = sess->read(std::chrono::milliseconds{50}, 0);
+                if (!r.running || ms_since(t0) > 3000) break;
+            }
+            check(ms_since(t0) < 1000, "stop reaches the child promptly");
+        }
+    }
+#endif
 
     if (failures.load()) {
         std::fprintf(stderr, "exec_session_race_test: %d failure(s)\n", failures.load());
