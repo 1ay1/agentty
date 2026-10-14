@@ -20,6 +20,7 @@
 // alone and would prove nothing about the half that was missing.
 
 #include "agentty/io/shared_file.hpp"
+#include <thread>
 #include "agtest_cap.hpp"
 
 #include <chrono>
@@ -117,17 +118,24 @@ int main() {
                 if (::pipe(pipefd) != 0) return -2;
                 const pid_t pid = ::fork();
                 if (pid == 0) {
-                    // Lock order is checked at compile time now (jaal typed
-                    // locks), so there is no per-thread held-lock record to
-                    // reset in the child.
                     ::close(pipefd[0]);
                     const auto t0 = std::chrono::steady_clock::now();
-                    // Our copy of the lane is inherited locked; the child
-                    // needs its own.
+                    // Our copy of the lane is inherited locked, and so is
+                    // this thread's held-lock record (jaal's thread-local
+                    // rank). Contend from a fresh thread with its own lane:
+                    // it starts holding nothing, like any real second process.
                     static sf::Lane child_lane;
-                    sf::with_shared_file(agtest::cap(), child_lane, fs::path{t}, [](const maya::held<agentty::lock_levels::file_lane>&, sf::Held) {});
-                    long long v = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - t0).count();
+                    long long v = -1;
+                    std::thread([&] {
+                        try {
+                            sf::with_shared_file(agtest::cap(), child_lane, fs::path{t},
+                                [](const maya::held<agentty::lock_levels::file_lane>&, sf::Held) {});
+                            v = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - t0).count();
+                        } catch (const std::exception& e) {
+                            std::fprintf(stderr, "  child threw: %s\n", e.what());
+                        }
+                    }).join();
                     (void)!::write(pipefd[1], &v, sizeof(v));
                     ::close(pipefd[1]);
                     ::_exit(0);
@@ -148,6 +156,10 @@ int main() {
             ::close(rd);
             int status = 0;
             while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+            if (waited < 0)
+                std::printf("  info: child status: %s %d\n",
+                            WIFSIGNALED(status) ? "signal" : "exit",
+                            WIFSIGNALED(status) ? WTERMSIG(status) : WEXITSTATUS(status));
             std::printf("  info: child waited %lld ms (parent held ~400 ms)\n", waited);
             CHECK(waited >= 200, "a second PROCESS blocked until we released");
         }
