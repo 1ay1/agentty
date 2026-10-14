@@ -1220,7 +1220,7 @@ struct CheckpointDiffLoaded {
 struct RepoProbed { bool in_repo = false; };
 // The on-disk library (skills, approvals, commands, hooks), read on a worker.
 struct LibraryLoaded { Library library; };
-// Terminal window focus changed (?1004 CSI I/O via maya Sub::on_focus).
+// Terminal window focus changed (?1004 CSI I/O, AgenttyApp::on(FocusEvent)).
 // Gates the hardware caret: an unfocused agentty parks + hides the real
 // cursor instead of leaving a blinking bar in an inactive pane.
 struct TerminalFocus { bool focused = true; };

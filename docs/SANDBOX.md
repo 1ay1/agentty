@@ -523,9 +523,6 @@ rules that matter most:
   nothing for months, and the two feed types that existed before their producers.
 - **A new pane row needs an entry in the per-backend table and a lock reason.** A
   row with no honest answer for one backend is not ready.
-- **A new form pane goes in *both* `subscribe()` and `subs_key()`.** Present in
-  one and not the other leaves the key router closed over a stale focus snapshot:
-  input silently vanishes. This has been hit twice.
 - **Anything written in the present tense derives from `HostFacts`, never from
   `Config`.** The config is what the user *wants*; only `HostFacts` knows what
   they *have*.

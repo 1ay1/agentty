@@ -23,7 +23,7 @@
 
 #include <maya/runtime.hpp>
 #include <maya/host/effects.hpp>
-#include <maya/host/sources.hpp>   // maya::on_key / on_paste / on_resize
+#include <maya/host/sources.hpp>   // maya::KeyEvent / PasteEvent / ...
 
 #include <string>
 #include <string_view>
@@ -51,7 +51,8 @@
 // provider::Selection is opted in next to its definition (selection.hpp).
 
 // ── the message tree, as jaal routes it ───────────────────────────────
-// Msg is a variant of 23 DOMAIN variants, not 231 leaves — agentty grouped
+// Msg is a variant of 24 DOMAIN variants, not one flat list of leaves.
+// agentty grouped
 // them because a flat Msg pinned sizeof(Msg) to the heaviest leaf and cost
 // ~19 s to rebuild after touching one. jaal's D36 is that shape, measured on
 // this app: one domain TU rebuilds in 1.19 s, the loop TU went 6.9 s -> 1.77 s.
@@ -93,9 +94,22 @@ AGENTTY_MSG_GROUP(SmartModeMsg)
 AGENTTY_MSG_GROUP(WebSearchMsg)
 AGENTTY_MSG_GROUP(PluginEditMsg)
 AGENTTY_MSG_GROUP(AppearanceMsg)
+AGENTTY_MSG_GROUP(SandboxMsg)
 AGENTTY_MSG_GROUP(MetaMsg)
 
 #undef AGENTTY_MSG_GROUP
+
+// Every top-level domain must be a declared group. A missed one still
+// compiles (jaal descends and each leaf converts back up to the domain
+// handler), which is how SandboxMsg went unregistered unnoticed.
+namespace agentty::msg_groups {
+template <class V> struct all_domains_grouped;
+template <class... Ds> struct all_domains_grouped<std::variant<Ds...>> {
+    static constexpr bool value = (maya::handled_as_group<Ds> && ...);
+};
+static_assert(all_domains_grouped<::agentty::Msg>::value,
+              "a Msg domain is missing its AGENTTY_MSG_GROUP line above");
+} // namespace agentty::msg_groups
 
 namespace agentty {
 
@@ -135,25 +149,10 @@ using Cmd = maya::Cmd<Msg,
     account_op
 >;
 
-/// Every event source an agentty subscription may name.
-///
-/// The mirror of the Cmd row, for the input side (jaal D2): a program says
-/// which sources it listens to, and a host that can't produce one won't
-/// compile against it. jaal's core sources — `every` and `stream` — are
-/// always in and need no naming; these are maya's, the things only a
-/// TERMINAL reports.
-///
-// agentty names four. The omission that matters is on_mouse: there is no
-// mouse handler anywhere in the runtime and main.cpp never sets
-// Options::mouse, so it stays out. That isn't cosmetic — the row is the
-// difference between "this program needs a mouse" and "this program would
-// run on a host that has none".
-using Sub = maya::Sub<Msg,
-    maya::on_key,      // the composer and every panel's keymap
-    maya::on_paste,    // bracketed paste, and the OSC 52 clipboard reply
-    maya::on_focus,    // ?1004; gates the hardware caret when unfocused
-    maya::on_resize    // relayout; the inline frame's width changed
->;
+/// agentty's subscriptions: only jaal's core sources (every, stream).
+/// Terminal input isn't a subscription any more (jaal D43); it arrives
+/// through AgenttyApp::on(model, event), see app/program.hpp.
+using Sub = maya::Sub<Msg>;
 
 // ── spelling the terminal effects ──────────────────────────────────────
 // jaal builds an effect by handing its PAYLOAD to the Cmd: `Cmd(SetTitle{s})`.

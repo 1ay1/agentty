@@ -1,36 +1,15 @@
-// key_routing_test — a keypress is routed by the CURRENT model, not a stale
-// snapshot of it.
+// key_routing_test: a keypress is routed by the CURRENT model.
 //
-// ── The gap this fills ──────────────────────────────────────────────────
+// Most tests dispatch Msg values straight into update(), which skips the
+// half of the input path that decides WHICH handler a key reaches. These
+// drive it: route a key through AgenttyApp::on (what jaal calls, with the
+// live model), apply the result, route the next key.
 //
-// Every other test in this suite dispatches Msg values straight into
-// update(). That skips subscribe(), which is the half of the input path
-// that decides WHICH handler a key reaches — and it is the half that can
-// go stale.
-//
-// subscribe() captures its routing facts BY VALUE into the key lambda:
-//
-//     bool appearance_picking = false;
-//     if (const auto* o = m.ui.panel.get<pn::Appearance>())
-//         appearance_picking = o->pane.picking;
-//     auto key_sub = Sub<Msg>::on_key([=](const KeyEvent& ev) { ... });
-//
-// That is correct and deliberate — the alternative is a deep copy of every
-// pane's rows on the input path. But it means a Sub built from model N
-// cannot route a key that model N+1 should own. maya re-fetches the sub
-// after every drained message for exactly this reason (app.hpp: "Re-route
-// BETWEEN events, not just between reads"), and the contract only holds if
-// subscribe() is actually re-run.
-//
-// The user-visible symptom when it is not: open the theme browser with
-// Enter, press ↓, nothing happens. Press ↓ again and it works — because by
-// then the sub has been rebuilt. "The input doesn't register until you hit
-// it another time."
-//
-// So this test drives the REAL loop shape: build a sub from the model,
-// route a key through it, apply the resulting message, REBUILD the sub, and
-// route the next key. If a message changes which surface owns the keyboard,
-// the very next key must land on the new surface.
+// Routing used to be a router closed over a snapshot built by subscribe(),
+// and a message that changed which surface owned the keyboard left the
+// next key routed against the old one ("the input doesn't register until
+// you hit it again"). jaal D43 removed routers, so this can't go stale any
+// more; these tests keep it that way.
 #include "agtest.hpp"
 
 #include <optional>
@@ -38,41 +17,26 @@
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
+#include "agentty/runtime/app/program.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/subscribe.hpp"
 #include "agentty/runtime/panel/appearance.hpp"
 #include "agentty/runtime/app/deps.hpp"
 
-#include <maya/host/sources.hpp>   // maya::on_key
-
 using namespace agentty;
 namespace pn = agentty::ui::panel;
 
 namespace {
 
-// Route one key through a sub built from THIS model, exactly as the runtime
-// does, and return the message it produced (if any).
-//
-// maya::detail::dispatch_through_sub is gone with the old run loop: routing
-// now belongs to jaal, where a Sub is a tree of leaf subscriptions and each
-// router descriptor knows how to turn an event into a Msg. So walk the leaves
-// (for_each flattens batches, in subscribe() order) and ask the on_key router
-// to route; the first leaf that answers wins, which is the kernel's rule too.
+// Route one key the way the kernel does: the program's on() for KeyEvent,
+// called with the model as it is now.
 std::optional<Msg> route(const Model& m, const maya::KeyEvent& ev) {
-    const auto sub = agentty::app::subscribe(m);
-    std::optional<Msg> out;
-    sub.for_each([&](const auto& leaf) {
-        if (out) return;                       // first match wins
-        using L = std::remove_cvref_t<decltype(leaf)>;
-        if constexpr (std::same_as<L, maya::payload_t<maya::on_key, Msg>>)
-            out = maya::on_key::route(leaf, ev);
-    });
-    return out;
+    return app::AgenttyApp::on(m, ev);
 }
 
 // Press a key: route it against the current model, then apply whatever it
-// produced. This is the loop's per-event step, sub rebuild included.
+// produced.
 [[nodiscard]] bool press(Model& m, const maya::KeyEvent& ev) {
     auto msg = route(m, ev);
     if (!msg) return false;
@@ -170,4 +134,35 @@ TEST_CASE("routing: Escape leaves the browser and the next key hits the form") {
           "the first arrow after closing the browser did not move the form");
     CHECK(after->pane.picker.picker.index() == idx_before,
           "the arrow still reached the closed browser");
+}
+
+// ^A/^X once shipped with their arming gate captured by the router and
+// missing from SubsKey, so they were dead for a frame after edits landed and
+// stale-live after the queue cleared. Routing reads the live model now.
+TEST_CASE("routing: the changes-strip chords follow the live model") {
+    install_stub_deps();
+    Model m;
+    m.d.show_changes_strip = true;
+    const auto ctrl_x = [] {
+        maya::KeyEvent k{};
+        k.key = maya::CharKey{U'x'};
+        k.mods.ctrl = true;
+        return k;
+    }();
+    const auto is_reject = [](const std::optional<Msg>& msg) {
+        const auto* dr = msg ? std::get_if<msg::DiffReviewMsg>(&*msg) : nullptr;
+        return dr && std::holds_alternative<RejectAllChanges>(*dr);
+    };
+
+    CHECK_FALSE(is_reject(route(m, ctrl_x)));   // nothing queued: not armed
+
+    FileChange fc;
+    fc.path = "src/main.cpp";
+    m.d.pending_changes.push_back(fc);
+    CHECK_MESSAGE(is_reject(route(m, ctrl_x)),
+                  "queued changes arm ^X on the very next key");
+
+    m.d.show_changes_strip = false;
+    CHECK_MESSAGE(!is_reject(route(m, ctrl_x)),
+                  "hiding the strip disarms ^X on the very next key");
 }

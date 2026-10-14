@@ -31,12 +31,8 @@
 using namespace agentty;
 using P = app::AgenttyApp;
 
-// agentty's subscribe() routes maya's input events, and the kernel checks a
-// program's routers against the host's event_type — so the sim has to name
-// them even though it never produces one (it drives with messages).
-using Ev = std::variant<maya::KeyEvent, maya::MouseEvent, maya::PasteEvent,
-                        maya::FocusEvent, maya::ResizeEvent>;
-using Sim = maya::sim<P, Ev>;
+// The sim drives with messages; it takes the program's declared Event.
+using Sim = maya::sim<P>;
 
 namespace {
 
@@ -127,7 +123,7 @@ TEST_CASE("sim: the turn machine holds under a scripted interleaving") {
 
     maya::sim_options opt;
     opt.max_steps = 2'000;
-    maya::sim<P, Ev> s(0xA9E77C0Dull, opt);
+    Sim s(0xA9E77C0Dull, opt);
     arm_invariants(s);
 
     // A plausible session: type, submit, a tool asks, the user answers,
@@ -158,7 +154,7 @@ TEST_CASE("sim: the turn machine holds across 200 seeds") {
     // A late result is the interesting case, so let latency vary widely.
     opt.task_latency_max = std::chrono::milliseconds{40};
 
-    auto out = maya::explore<P, Ev>(1, 200, opt, [](Sim& s) {
+    auto out = maya::explore<P>(1, 200, opt, [](Sim& s) {
         arm_invariants(s);
         s.at(std::chrono::milliseconds{0},  Msg{msg::ComposerMsg{ComposerCharInput{U'x'}}});
         s.at(std::chrono::milliseconds{1},  Msg{msg::ComposerMsg{ComposerSubmit{}}});
@@ -184,7 +180,7 @@ TEST_CASE("sim: a lost or crashing task leaves the machine consistent") {
     opt.task_crash = 0.15;   // the body throws
     opt.task_lose  = 0.15;   // the body never finishes
 
-    auto out = maya::explore<P, Ev>(1, 100, opt, [](Sim& s) {
+    auto out = maya::explore<P>(1, 100, opt, [](Sim& s) {
         arm_invariants(s);
         s.at(std::chrono::milliseconds{0}, Msg{msg::ComposerMsg{ComposerCharInput{U'q'}}});
         s.at(std::chrono::milliseconds{1}, Msg{msg::ComposerMsg{ComposerSubmit{}}});

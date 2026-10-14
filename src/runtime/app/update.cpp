@@ -1,23 +1,9 @@
-// agentty::app::update — pure (Model, Msg) -> (Model, Cmd) reducer.
+// agentty::app::update — the per-domain reducer entry points.
 //
-// Top-level orchestrator: a single 10-arm std::visit that dispatches on
-// the domain (msg::ComposerMsg / msg::StreamMsg / …) and forwards to
-// the matching per-domain reducer in update/<domain>.cpp.
-//
-// The previous version of this file inlined all 79 leaf arms in one
-// overload{} — sizeof(Msg) was pinned by the heaviest leaf no matter
-// which path was active, the std::visit instantiated a 79×N dispatch
-// table, and any leaf change forced this whole TU to rebuild (~19 s on
-// modest hardware). v2 splits the work: leaves are grouped into 10
-// domain sub-variants in msg.hpp; each domain has its own visit in its
-// own TU, so:
-//
-//   • this file's std::visit is 10 arms, one tiny dispatch table.
-//   • update/<domain>.cpp recompiles only when its own leaves change.
-//   • call sites still construct Msg via `Msg{ComposerEnter{}}` /
-//     `dispatch(StreamTextDelta{...})` — std::variant's converting
-//     constructor walks each domain alternative; only the matching
-//     domain accepts a given leaf, so the wrap is unambiguous.
+// jaal walks the Msg tree and calls update(Model&, DomainMsg) for each of
+// the 24 domains (AGENTTY_DOMAIN_UPDATE below); each forwards to its
+// reducer in update/<domain>.cpp, so a leaf edit rebuilds one TU.
+// update(Model, Msg) further down is the whole-Msg entry tests use.
 
 #include "agentty/runtime/app/update.hpp"
 
@@ -215,7 +201,7 @@ void clear_warmup_unless_thread_load(Model& m, const Domain& d) {
 // Each is now a direct call: the reducers are all `Cmd(Model&, DomainMsg)`,
 // so there is no model to hand back and forth.
 //
-// Done as a macro because 23 identical bodies written out is 23 chances to
+// Done as a macro because 24 identical bodies written out is 24 chances to
 // typo one of them, and a typo here routes a whole domain to the wrong
 // reducer — a bug the compiler cannot see, since every reducer has the same
 // shape. The macro is undefined immediately after.

@@ -741,16 +741,9 @@ TEST_CASE("form: an empty form still answers Esc") {
 }
 
 TEST_CASE("form: the key router depends only on focus, not on the rows") {
-    // Regression (input lag, twice). `subscribe()` rebuilds its key handler
-    // EVERY FRAME. A router that needs the Form makes each frame deep-copy
-    // every row's strings on the input path — which is what made the settings
-    // pane feel laggy the moment it grew past a handful of rows.
-    //
     // The flags overload is the contract: TWO bools decide the whole key
-    // map (editing, choosing — focus-shaped facts, not rows). If someone
-    // reintroduces a Form-shaped dependency, this stops compiling rather
-    // than quietly costing a copy per keystroke (or, worse, going stale
-    // mid-batch and dropping keys).
+    // map (editing, choosing: focus-shaped facts, not rows). A router that
+    // peeked at the row once went stale mid-batch and dropped keys.
     const auto esc = key(maya::SpecialKey::Escape);
     const auto j   = chr(U'j');
 

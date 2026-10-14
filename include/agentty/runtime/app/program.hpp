@@ -6,6 +6,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
+#include <variant>
 
 #include <maya/maya.hpp>
 
@@ -69,14 +71,14 @@ struct AgenttyApp {
     }
 
     // jaal calls P::update(Model&, T) for whatever it lands on as it walks the
-    // Msg tree, so the 23 domain reducers are static members here. Each
+    // Msg tree, so the 24 domain reducers are static members here. Each
     // forwards to the free function of the same name in its own TU, which is
     // what keeps a one-leaf edit to a ~1.2 s rebuild.
     //
     // The domains are declared groups (handled_as_group in runtime/cmd.hpp),
     // and these are the handlers that declaration CLAIMS exist — jaal only
     // honours a group when it finds one, so without these it correctly keeps
-    // descending and asks for all 231 leaves instead.
+    // descending and asks for every leaf instead.
 #define AGENTTY_FWD_UPDATE(DomainMsg)                                    \
     static Cmd update(Model& m, msg::DomainMsg d, Clock::time_point now) { \
         m.now = now;   /* the fold's time: see Model::now */             \
@@ -127,6 +129,25 @@ struct AgenttyApp {
         auto s = ::agentty::app::subscribe(m);
         ::agentty::app::note_slow("subscribe", t0);
         return s;
+    }
+
+    // Terminal input (jaal D43). jaal calls these with the model as it is
+    // when the event arrives. Event lists what agentty takes; jaal checks
+    // each has an on(), and maya checks the terminal can send it. No
+    // MouseEvent: agentty never turns the mouse on.
+    using Event = std::variant<maya::KeyEvent, maya::PasteEvent,
+                               maya::FocusEvent, maya::ResizeEvent>;
+    static std::optional<Msg> on(const Model& m, const maya::KeyEvent& k) {
+        return ::agentty::app::on_key(m, k);
+    }
+    static Msg on(const Model& m, const maya::PasteEvent& p) {
+        return ::agentty::app::on_paste(m, p);
+    }
+    static Msg on(const Model&, const maya::FocusEvent& f) {
+        return ::agentty::app::on_focus(f);
+    }
+    static Msg on(const Model&, const maya::ResizeEvent& r) {
+        return ::agentty::app::on_resize(r);
     }
 
     // Optional Program hook (jaal core/program.hpp — HasSubsKey). jaal

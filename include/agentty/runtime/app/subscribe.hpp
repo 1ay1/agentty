@@ -1,10 +1,15 @@
 #pragma once
-// agentty::app::subscribe — input → Msg routing.
+// agentty::app::subscribe — timers and workers, plus input → Msg routing.
 //
-// Pure function of Model: snapshots which modal (if any) owns the keyboard,
-// then routes keys / paste / tick into the right Msg.
+// subscribe(m) asks for the Tick timer and the login worker. Terminal input
+// goes through on_key / on_paste / on_focus / on_resize, which jaal calls with the model as it is
+// when the event arrives (jaal D43), so routing can't read a stale copy.
 
 #include <chrono>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <utility>
 
 #include <maya/maya.hpp>
 
@@ -78,77 +83,31 @@ streaming_tick_period(const Model::Env& env) noexcept;
 // gate 1; gates 2 and 3 consume its terms via the predicates above.
 [[nodiscard]] bool animation_demand(const Model& m) noexcept;
 
+// Whether ^A/^X (accept/reject all changes) are live on the main screen.
+[[nodiscard]] bool strip_chords_armed(const Model& m) noexcept;
+
 [[nodiscard]] Sub subscribe(const Model& m);
+
+// Terminal input. Each reads the live model; nullopt drops the event.
+[[nodiscard]] std::optional<Msg> on_key(const Model& m, const maya::KeyEvent& ev);
+[[nodiscard]] Msg on_paste(const Model& m, const maya::PasteEvent& pe);
+[[nodiscard]] Msg on_focus(const maya::FocusEvent& fe) noexcept;
+[[nodiscard]] Msg on_resize(const maya::ResizeEvent& re) noexcept;
 
 // ── The fields subscribe() reads ───────────────────────────────────────
 //
-// jaal calls subscribe() again only when this value CHANGES (the optional
-// `subs_key` hook — core/program.hpp). Without it the kernel rebuilds and
-// re-diffs the whole subscription tree after every single message: every
-// keystroke, every SSE delta, every 30 fps tick. subscribe() is not cheap
-// here — it walks the message list twice and snapshots four form panes — so
-// that is real work on the input path, which is exactly the lag the
-// FormFocus/optional<login::State> snapshots were introduced to avoid.
-//
-// A VALUE, not a hash: a collision would silently keep a stale subscription
-// (a timer that should have stopped, a router closed over old text), and
-// equality cannot be wrong in that direction.
-//
-// THE RULE: this must cover everything subscribe() reads AND everything its
-// routers CAPTURE. The key router captures by `[=]`, so every local computed
-// in subscribe() before it is part of the dependency — that is the half that
-// bites, because a captured copy going stale is invisible until a key routes
-// against last frame's state.
+// jaal re-runs subscribe() only when this value changes (subs_key hook,
+// jaal core/program.hpp), and debug builds check it covers subscribe().
+// Input routing is not in here: on_key and friends read the live model.
+// A value, not a hash, so a collision can't keep a stale timer or worker.
 struct SubsKey {
-    // Which overlay owns the keyboard, and the per-pane modes the routers
-    // close over.
-    int  active_panel      = 0;
-    bool settings_adding   = false;
-    bool appearance_picking = false;
-    // focus_of() per form-backed pane: open/editing/choosing, packed.
-    // 3 bits each, in the order subs_key() packs them: rag, smart, plugin,
-    // appearance, sandbox. A pane added to subscribe() and NOT here keeps
-    // the router closed over last frame's focus -- which presents as a
-    // dropdown that will not move and keystrokes that sometimes do not
-    // arrive, because the router is still translating against a focus the
-    // pane has left.
-    unsigned form_modes    = 0;
-
-    // Gates on the turn.
-    bool streaming         = false;
-    bool turn_active       = false;
-    bool animation_demand  = false;
-
-    // strip_chords_armed() — whether ^A/^X are live on the main screen.
-    // The router CAPTURES this one, and it flips on changes the rest of this
-    // key does not see: pending_changes going empty <-> non-empty as a turn
-    // lands, or the strip being toggled in the palette. Without it here the
-    // memo never invalidates, so the chords are dead for a frame after the
-    // edits arrive and stale-live after the queue clears.
-    bool strip_chords      = false;
-
-    // Composer-derived predicates the router branches on.
-    bool text_empty        = true;
-    bool has_queued        = false;
-    bool in_history        = false;
-    bool has_history       = false;
-    bool peeking_queue     = false;
-
-    // The Ctrl+U target, and the login payload's IDENTITY.
-    //
-    // login::State is a variant of up to a dozen strings; it has no
-    // operator== and copying it per frame is what the optional snapshot
-    // exists to avoid. The router only reads the ALTERNATIVE INDEX plus
-    // "is the OAuth code box empty", so those two are the whole dependency
-    // — carrying them is both correct and cheap.
-    std::optional<MessageId> live_retrieved_id;
-    int  login_alt         = -1;    // -1 = login doesn't own the keyboard
-    bool login_code_empty  = true;
-
-    // The login worker's SOURCE key: (attempt, provider). subscribe()
-    // returns a keyed stream while a login is waiting, so unlike everything
-    // above this doesn't just feed a capture — it decides whether a
-    // background poll loop RUNS. Empty when no login is in flight.
+    // Arms the Tick timer.
+    bool animation_demand = false;
+    // The tick period is read from m.env, which init() sets once; keyed
+    // anyway so a future change to it can't leave the timer at the old rate.
+    std::chrono::milliseconds tick_period{0};
+    // The login worker's source key: (attempt, provider). Empty when no
+    // login is in flight.
     std::optional<std::pair<std::uint64_t, std::string>> login_worker;
 
     [[nodiscard]] bool operator==(const SubsKey&) const = default;

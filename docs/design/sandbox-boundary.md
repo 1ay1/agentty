@@ -1123,11 +1123,6 @@ change broke what.
   it.
 - A new pane row needs an entry in the §6 table and a lock reason. A row with
   no honest answer for one backend is not ready.
-- A new form pane goes in **both** `subscribe()` and `subs_key()`. Present in
-  one and not the other leaves the key router closed over a stale focus
-  snapshot: dropdowns stop moving and input intermittently vanishes. Not a
-  crash — a stale captured copy, which is the hazard `SubsKey`'s own header
-  warns about.
 - Prove enforcement in the child, not in the table (§10).
 
 ---

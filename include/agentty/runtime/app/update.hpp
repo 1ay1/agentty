@@ -4,7 +4,7 @@
 // jaal dispatches by OVERLOAD, not by a visit we write: it walks the Msg tree
 // itself and calls `update(Model&, T)` for whatever it lands on (D36). A
 // domain declared with handled_as_group (runtime/cmd.hpp) is one of those
-// landings, so there is one overload per domain — 23, not 231.
+// landings, so there is one overload per domain (24).
 //
 // The shape is jaal's: mutate the model in place, return only the effect.
 //
