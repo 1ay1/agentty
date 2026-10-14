@@ -8,6 +8,7 @@
 // commands write marker files so execution (or its absence) is observable.
 
 #include "agentty/tool/hooks.hpp"
+#include "agentty/tool/util/sandbox.hpp"
 #include "agentty/auth/auth.hpp"
 
 #include "agtest.hpp"
@@ -217,6 +218,10 @@ TEST_CASE("hooks_gate") {
     _putenv_s("USERPROFILE", home.string().c_str());
 #endif
     ::unsetenv("AGENTTY_HOME");   // fall back to home_dir()/.agentty
+    // Hooks run through the sandbox, whose mode and workspace are process-wide
+    // and may be left set by an earlier test case (with a workspace that is
+    // not this temp dir). This test is about the consent gate, not the walls.
+    (void)agentty::tools::util::sandbox::init(agentty::tools::util::sandbox::Mode::Off);
 
     std::println("=== hooks_gate_test ===");
     unapproved_never_runs(sandbox);
