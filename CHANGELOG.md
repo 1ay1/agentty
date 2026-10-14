@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.20] - 2026-10-14
+
 ### Added
 - **Zed / JetBrains: pick model and thinking per session.** The model
   dropdown lists every model on every signed-in provider, grouped by
@@ -171,6 +173,13 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   a log file gets the box drawing without the escape bytes.
 
 ### Fixed
+- **`agentty run` crashed before its first request** (abort, exit 134):
+  the one-shot loop never handed its lock-order capability to the tool
+  context, so the first provider call threw "tool callback outside a
+  dispatched call".
+- **Exiting could hang forever** when a code path skipped the final save
+  flush: the background thread writer waited for work nobody would send, and
+  its owner waited for it. It now stops itself at exit.
 - **Groq and Gemini rejected every request** with HTTP 400 over
   `prompt_cache_key`. The field is now sent only to hosts known to take it
   (OpenAI, OpenRouter), and if any OpenAI-compatible host rejects an optional
