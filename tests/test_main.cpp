@@ -75,6 +75,7 @@ int main(int argc, char** argv) {
         _putenv_s("AGENTTY_HOME", sandbox.string().c_str());
         _putenv_s("AGENTTY_UNDER_TEST", "1");
         _putenv_s("AGENTTY_NO_PREWARM", "1");
+        _putenv_s("AGENTTY_NO_UPDATE_CHECK", "1");
 #else
         ::setenv("AGENTTY_HOME", sandbox.string().c_str(), 1);
         ::setenv("AGENTTY_UNDER_TEST", "1", 1);
@@ -83,6 +84,10 @@ int main(int argc, char** argv) {
         // atexit teardown (SIGSEGV in OBJ_sn2nid). The standalone harness
         // already opts out.
         ::setenv("AGENTTY_NO_PREWARM", "1", 1);
+        // init() queues a real release check, and a newer tag than
+        // PROJECT_VERSION makes it auto-download and rename a release over
+        // self_exe_path(), which here is the test binary.
+        ::setenv("AGENTTY_NO_UPDATE_CHECK", "1", 1);
 #endif
     }
     // Sweep anything an EARLIER run abandoned (a crash or a SIGKILL skips the

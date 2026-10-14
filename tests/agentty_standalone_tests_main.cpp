@@ -109,8 +109,11 @@ int main(int argc, char** argv) {
     // (e.g. fork_test's ForkThread reducer). Tests don't need the latency win.
 #if defined(_WIN32)
     _putenv_s("AGENTTY_NO_PREWARM", "1");
+    _putenv_s("AGENTTY_NO_UPDATE_CHECK", "1");
 #else
     ::setenv("AGENTTY_NO_PREWARM", "1", 1);
+    // Never let init()'s release check replace this binary.
+    ::setenv("AGENTTY_NO_UPDATE_CHECK", "1", 1);
     // Tests' own temp dirs go inside the sandbox, so cleanup takes them too.
     {
         const fs::path tmp = sandbox / "tmp";

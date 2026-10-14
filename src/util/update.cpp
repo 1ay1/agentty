@@ -225,6 +225,12 @@ bool self_update_possible(std::string& reason) {
         return false;
     }
     std::string p = self.string();
+    // Once the binary is replaced, /proc/self/exe reads "<path> (deleted)".
+    // Writing there creates a stray file instead of updating anything.
+    if (p.ends_with(" (deleted)")) {
+        reason = "the running binary was replaced on disk; restart agentty first";
+        return false;
+    }
     // Package-manager territory: overwriting under /usr (except /usr/local
     // hand-installs) fights rpm/pacman/portage — tell the user to use them.
     if (p.starts_with("/usr/") && !p.starts_with("/usr/local/")) {
