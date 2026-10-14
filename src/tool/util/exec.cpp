@@ -758,6 +758,8 @@ ChildResult run_child(const ChildRun& run) {
 
     bool stopping = false;   // SIGTERM sent
     std::optional<clock_t_::time_point> kill_at;
+    std::optional<clock_t_::time_point> give_up_at;   // after SIGKILL
+    constexpr std::chrono::seconds kAfterKill{5};
     bool exited = false;
 
     for (;;) {
@@ -766,6 +768,7 @@ ChildResult run_child(const ChildRun& run) {
         if (has_idle && !stopping) next = std::min(next, idle_at);
         if (has_wall && !stopping) next = std::min(next, wall_at);
         if (kill_at) next = std::min(next, *kill_at);
+        if (give_up_at) next = std::min(next, *give_up_at);
         if (run.stop_requested && !stopping) next = std::min(next, now + kCancelTick);
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             next > now ? next - now : std::chrono::milliseconds::zero());
@@ -825,6 +828,14 @@ ChildResult run_child(const ChildRun& run) {
             if (!(st->kill_tree && st->kill_tree()))
                 (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
             kill_at.reset();
+            // SIGKILL is sent; the exit should follow at once. If it doesn't
+            // (a task in D state, a kill that didn't land), stop waiting
+            // rather than sleep in the reactor with no deadline at all.
+            give_up_at = t + kAfterKill;
+        }
+        if (give_up_at && t >= *give_up_at) {
+            (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+            break;
         }
     }
 
