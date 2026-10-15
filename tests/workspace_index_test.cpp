@@ -151,6 +151,25 @@ TEST_CASE("filter_files: git-dirty files lead the working set") {
     fs::remove_all(repo, ec);
 }
 
+TEST_CASE("symbol matcher: one declaration per language, comments skipped") {
+    using agentty::symbol_on_line;
+    CHECK(symbol_on_line("class Foo {") == "Foo");
+    CHECK(symbol_on_line("  enum class Color : int {") == "Color");
+    CHECK(symbol_on_line("namespace agentty {") == "agentty");
+    CHECK(symbol_on_line("typedef unsigned long u64;") == "u64");
+    CHECK(symbol_on_line("static int helper(int a, int b) {") == "helper");
+    CHECK(symbol_on_line("std::string name() const") == "");    // tail isn't `{` or EOL
+    CHECK(symbol_on_line("void run()") == "run");
+    CHECK(symbol_on_line("def handle(self, x):") == "handle");
+    CHECK(symbol_on_line("export async function load() {") == "load");
+    CHECK(symbol_on_line("func (s *Server) Serve() error {") == "Serve");
+    CHECK(symbol_on_line("type Handler interface {") == "Handler");
+    CHECK(symbol_on_line("pub(crate) fn parse(input: &str) -> Ast {") == "parse");
+    CHECK(symbol_on_line("    // fn not_this()") == "");
+    CHECK(symbol_on_line("x = f(1);") == "");
+    CHECK(symbol_on_line(std::string(600, 'a') + " f() {") == "");   // minified
+}
+
 TEST_CASE("prewarm walk bails promptly when cancelled") {
     namespace fs = std::filesystem;
     // A directory with enough files that an uncancelled full scan is

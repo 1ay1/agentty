@@ -49,6 +49,10 @@ void prewarm_workspace_symbols(const maya::unlocked& cap, std::stop_token stop =
 // `#` picker INSTANTLY and shows "indexing…" until this returns true.
 [[nodiscard]] bool symbols_ready();
 
+// The definition a single source line declares, or empty. Pure: exposed so
+// the matcher can be tested without a file tree.
+[[nodiscard]] std::string_view symbol_on_line(std::string_view line) noexcept;
+
 // Case-insensitive substring filter on the symbol NAME (not path).
 // Returns indices into `entries` so the dispatcher resolves the
 // cursor → (name, path, line) using the same view the picker

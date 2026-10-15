@@ -9,7 +9,6 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
-#include <regex>
 #include <stop_token>
 #include <string_view>
 #include <system_error>
@@ -43,35 +42,9 @@ bool is_source_ext(std::string_view ext) noexcept {
     return false;
 }
 
-// One regex per language family. Captures the symbol name in group 1.
-// Pre-built once at first use so we don't recompile per file.
-const std::vector<std::regex>& symbol_patterns() {
-    // std::regex compilation is non-trivial; do it once.
-    static const std::vector<std::regex> kPatterns = []{
-        std::vector<std::regex> v;
-        // C / C++: class/struct/enum/union/namespace/typedef declarations.
-        v.emplace_back(R"(^\s*(?:class|struct|enum(?:\s+class)?|union|namespace)\s+(\w+))",
-                       std::regex::optimize);
-        // C / C++: typedef name (last identifier before ;)
-        v.emplace_back(R"(^\s*typedef\s+.+?\s+(\w+)\s*;)", std::regex::optimize);
-        // C / C++ function: very loose — return type then identifier(... at start of line.
-        v.emplace_back(R"(^[\w:][\w\s\*\&<>:]*?\s(\w+)\s*\([^;]*?(?:\)\s*\{|\)\s*$))",
-                       std::regex::optimize);
-        // Python: def / class.
-        v.emplace_back(R"(^\s*(?:def|class)\s+(\w+))", std::regex::optimize);
-        // JS / TS: function / class / const / let / var / type / interface, optionally export.
-        v.emplace_back(R"(^\s*(?:export\s+)?(?:async\s+)?(?:function|class|const|let|var|type|interface)\s+(\w+))",
-                       std::regex::optimize);
-        // Go: func (with or without receiver), type.
-        v.emplace_back(R"(^func(?:\s+\([^)]*\))?\s+(\w+))", std::regex::optimize);
-        v.emplace_back(R"(^type\s+(\w+))", std::regex::optimize);
-        // Rust: fn / struct / enum / trait / type / mod / const / static.
-        v.emplace_back(R"(^\s*(?:pub(?:\([^)]*\))?\s+)?(?:fn|struct|enum|trait|type|mod|const|static)\s+(\w+))",
-                       std::regex::optimize);
-        return v;
-    }();
-    return kPatterns;
-}
+// Symbol extraction per line: symbol_on_line (symbol_match.cpp), a
+// hand-written matcher equivalent to the old std::regex set without the
+// backtracking engine that made the scan cost seconds of CPU per workspace.
 
 bool scan_file(const fs::path& root, const fs::path& file,
                std::vector<SymbolEntry>& out, std::size_t cap) {
@@ -90,33 +63,16 @@ bool scan_file(const fs::path& root, const fs::path& file,
 
     std::string line;
     int lineno = 0;
-    const auto& pats = symbol_patterns();
     while (std::getline(in, line)) {
         ++lineno;
-        // Skip comment-only lines for the regex pass — saves work and
-        // avoids matching `// fn foo()` examples.
-        std::string_view sv{line};
-        // Find first non-whitespace.
-        std::size_t i = 0;
-        while (i < sv.size() && (sv[i] == ' ' || sv[i] == '\t')) ++i;
-        if (i + 1 < sv.size() && sv[i] == '/' && sv[i+1] == '/') continue;
-        if (i < sv.size() && sv[i] == '#' && !line.starts_with("#define")
-            && !line.starts_with("#include")) {
-            // Python uses '#'; keep scanning for python's def/class
-            // (matched above by pat[3], which uses ^\s*).
-        }
-        std::smatch m;
-        for (const auto& re : pats) {
-            if (std::regex_search(line, m, re) && m.size() >= 2) {
-                SymbolEntry e;
-                e.name = m[1].str();
-                e.path = path_str;
-                e.line_number = lineno;
-                out.push_back(std::move(e));
-                if (out.size() >= cap) return false;
-                break;  // One match per line is enough.
-            }
-        }
+        const std::string_view name = symbol_on_line(line);
+        if (name.empty()) continue;
+        SymbolEntry e;
+        e.name = std::string{name};
+        e.path = path_str;
+        e.line_number = lineno;
+        out.push_back(std::move(e));
+        if (out.size() >= cap) return false;
     }
     return true;
 }
@@ -124,9 +80,11 @@ bool scan_file(const fs::path& root, const fs::path& file,
 } // namespace
 
 // ── Cache + async prewarm (mirrors files.cpp) ─────────────────────
-// The symbol scan is the expensive one: std::regex across every line of up
-// to 5000 source files. Running that on the `#` keystroke froze the UI for
-// seconds on a large repo, so it moved to a background pool at startup.
+// The symbol scan reads every line of up to 5000 source files. It used
+// std::regex per line, which cost seconds of CPU per workspace and froze
+// the UI when run on the `#` keystroke, so it moved to a background pool at
+// startup. The matcher is now hand-written (symbol_match.cpp) and the scan
+// is mostly I/O.
 //
 // But "background" was only true of the THREAD, not of the COST. The pool
 // took min(hardware_concurrency, 12) workers and ran them flat out, so
@@ -227,8 +185,7 @@ std::vector<SymbolEntry> build_symbol_list(const maya::unlocked* fan, std::size_
     if (src.empty()) return out;
 
     // 2. Scan files in parallel — each worker builds a local vector, then
-    //    we merge. The regex pass is CPU-bound; fanning it out across cores
-    //    turns a multi-second cold scan into a fraction of it.
+    //    we merge.
     //
     //    HALF the cores, capped at 4. This used to be min(cores, 12), which
     //    on any modern laptop meant "all of them": measured 1129% CPU for
@@ -307,12 +264,15 @@ void prewarm_workspace_symbols(const maya::unlocked& lk, std::stop_token stop, s
     // refresh ship with a bare detached thread and no single-flight at all.
     // There is one mechanism now, and it is maya's.
     //
-    // Honouring `stop` matters more here than for the file walk: the scan
-    // reads symbol_patterns(), a function-local static vector<std::regex>,
-    // and jaal's shutdown waits for us only if we return.
+    // Honouring `stop` matters: jaal's shutdown waits for us only if we
+    // return.
     if (g_symbols.has_value()) return;
     bool expected = false;
     if (!sym_building().compare_exchange_strong(expected, true)) return;
+    // Released on every exit, including a throw from the scan (the task
+    // runner swallows it); a stuck latch would leave `#` on "indexing…"
+    // for the rest of the session.
+    struct Release { ~Release() { sym_building().store(false); } } release;
 
     // The directory walk before the pool is single-threaded but still
     // thousands of stat() calls; it gets the same treatment so the whole
@@ -320,7 +280,6 @@ void prewarm_workspace_symbols(const maya::unlocked& lk, std::stop_token stop, s
     deprioritize_prewarm_thread();
     auto syms = build_symbol_list(std::addressof(lk), cap, stop);
     if (!stop.stop_requested()) g_symbols.store(std::move(syms));
-    sym_building() = false;
 }
 
 bool symbols_ready() {

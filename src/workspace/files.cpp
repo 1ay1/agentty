@@ -414,6 +414,10 @@ void prewarm_workspace_files(std::stop_token stop, std::size_t cap) {
     if (g_files.has_value()) return;   // already warm
     bool expected = false;
     if (!files_building().compare_exchange_strong(expected, true)) return;
+    // Released on every exit, including a throw from the walk (the task
+    // runner swallows it); a stuck latch would leave `@` on "indexing…"
+    // for the rest of the session.
+    struct Release { ~Release() { files_building().store(false); } } release;
 
     // Speculative: the `@` picker may never open, so this must lose every
     // race against real work (see the header).
@@ -424,7 +428,6 @@ void prewarm_workspace_files(std::stop_token stop, std::size_t cap) {
     build_git_signals();
     auto files = build_file_list(cap, stop);
     if (!stop.stop_requested()) g_files.store(std::move(files));
-    files_building() = false;
 }
 
 void deprioritize_prewarm_thread() noexcept {
