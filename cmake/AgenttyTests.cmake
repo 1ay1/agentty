@@ -347,6 +347,9 @@ agentty_fold_test(streaming_markdown_lifetime_test TIMEOUT 60)
 # the point is running it BY HAND against ~/.agentty/threads/<id>.json when
 # a user reports a render crash the synthetic bench doesn't reproduce.
 agentty_fold_test(real_thread_render_probe TIMEOUT 60 ARGS)
+# Per-frame view()+paint cost on a REAL thread, run by hand: the synthetic
+# long_session_bench doesn't reproduce the cost of a real 700+ message one.
+agentty_fold_test(real_thread_frame_probe TIMEOUT 60 ARGS)
 # Round-trips every REAL thread in ~/.agentty/threads through ThreadLog.
 # ARGS + no-op when the corpus is absent, so CI passes trivially; the value
 # is running it BY HAND before trusting the migration with history.
