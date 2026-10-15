@@ -138,19 +138,12 @@ void reprice(pn::Sandbox& o) {
 // Rebuild the rows from a config, keeping the user's place in the list --
 // where the cursor sits is not part of what changed.
 void reproject(pn::Sandbox& o, const sandbox_cfg::Config& cfg) {
-    const int cursor = o.pane.form.cursor;
-    auto focus = o.pane.form.focus;
     o.pane.working = cfg;
     // Re-measure and STORE. The view needs these to answer "will this work on
     // restart" and must not probe for itself -- a uid_map fork mid-render is
     // not something a pure view may do.
     o.pane.facts = host_facts_here();
-    o.pane.form = pn::build_sandbox_form(cfg, o.pane.facts);
-    o.pane.form.cursor = std::clamp(cursor, 0,
-        std::max(0, static_cast<int>(o.pane.form.fields.size()) - 1));
-    // An open edit doesn't survive a rebuild: the new row has no draft.
-    o.pane.form.focus = std::holds_alternative<form::focus::Editing>(focus)
-                      ? form::FormFocus{form::focus::Browsing{}} : focus;
+    form::rebuild(o.pane.form, pn::build_sandbox_form(cfg, o.pane.facts));
     reprice(o);
 }
 
@@ -201,14 +194,6 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 m.d.persisted.sandbox.configured &&
                 !(m.d.persisted.sandbox == sb::config());
 
-            // Land on the first real setting, not a section header -- a
-            // cursor parked on a row that does nothing reads as broken for
-            // the one keystroke it takes to notice.
-            for (int i = 0; i < static_cast<int>(o.pane.form.fields.size()); ++i)
-                if (!o.pane.form.fields[static_cast<std::size_t>(i)].is_header()) {
-                    o.pane.form.cursor = i;
-                    break;
-                }
             (void)form::focus_row(o.pane.form, e.focus);
             reprice(o);
             m.ui.panel.descend(std::move(o));
@@ -534,14 +519,14 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 const int i = ed->pane.form.cursor;
                 const int last = static_cast<int>(ed->pane.form.fields.size()) - 1;
                 if (i >= 0 && i < last) {
+                    form::end_edit(ed->pane.form);
                     ed->pane.form.fields.erase(
                         ed->pane.form.fields.begin() + i);
-                    ed->pane.form.cursor = std::clamp(
-                        i, 0,
-                        std::max(0, static_cast<int>(ed->pane.form.fields.size()) - 1));
-                    ed->pane.form.focus = form::focus::Browsing{};
                     ed->pane.completing = false;
                     pn::renumber_sandbox_list(ed->pane);
+                    // Same place, never on a header or past the end.
+                    ed->pane.form.cursor = i;
+                    form::settle_cursor(ed->pane.form);
                 }
                 return Cmd::none();
             }

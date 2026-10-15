@@ -30,7 +30,7 @@ set(_AGENTTY_CONSOLIDATED
     program_hooks_test login_cancel_test subs_key_test reducer_effects_test
     sim_turn_test view_purity_test
     update_check_test update_ux_test mcp_result_type_test
-    workspace_index_test modelsdev_parse_test
+    workspace_index_test modelsdev_parse_test form_fuzz_test
     teardown_test
     snapshot_picker_test
     dup_tool_call_id_test salvage_dedup_test compaction_wire_test shell_detour_streak_test wire_tool_order_test

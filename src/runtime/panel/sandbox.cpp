@@ -519,6 +519,9 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
          "the write happens and is recorded in the feed below",
          "no gate \xc2\xb7 the shape every escape in Pillar's 2026 series used"}));
 
+    // Built by hand, not by form::Builder, so apply the same start rule
+    // build() does: the cursor begins on a real row, never a header.
+    form::settle_cursor(form);
     return form;
 }
 

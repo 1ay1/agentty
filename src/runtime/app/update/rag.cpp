@@ -97,18 +97,8 @@ void write_embed_into(store::RagConfig& r, const eb::EmbedConfig& c) {
 // the next time any field changed the row set.
 void resync_rows(rs::EmbedForm& f, const store::Settings& settings,
                  const Model::Env& env, store::RagMode mode, bool advanced) {
-    const auto* focused = f.form.focused();
-    const std::string focused_id = focused ? focused->id : std::string{};
     f.cfg = rs::config_from_form(f.cfg, f.form);
-
-    const bool was_dirty = f.form.dirty;
-    f.form = rs::build_form(f.cfg, mode, settings, env.settings, advanced);
-    f.form.dirty = was_dirty;
-    for (std::size_t i = 0; i < f.form.fields.size(); ++i)
-        if (f.form.fields[i].id == focused_id) {
-            f.form.cursor = static_cast<int>(i);
-            break;
-        }
+    form::rebuild(f.form, rs::build_form(f.cfg, mode, settings, env.settings, advanced));
 }
 
 // Pull edits out of the rows and back into cfg (without rebuilding rows).
@@ -250,13 +240,9 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             // toggle does not also move the selection out from under the user.
             if (auto* o = m.ui.panel.get<pn::Rag>()) {
                 o->advanced = !o->advanced;
-                const int cursor = o->embed.form.cursor;
-                o->embed.form = rs::build_form(o->embed.cfg, o->cursor,
-                                               m.d.persisted, m.env.settings,
-                                               o->advanced);
-                // Clamp: hiding rows can leave the cursor past the end.
-                const int n = static_cast<int>(o->embed.form.fields.size());
-                o->embed.form.cursor = n > 0 ? std::min(cursor, n - 1) : 0;
+                form::rebuild(o->embed.form,
+                              rs::build_form(o->embed.cfg, o->cursor, m.d.persisted,
+                                             m.env.settings, o->advanced));
             }
             return Cmd::none();
         },
@@ -461,10 +447,9 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
                 return Cmd::none();
             f->cfg.api_key = std::move(e.key);
             auto* o = m.ui.panel.get<pn::Rag>();
-            const int cursor = f->form.cursor;
-            f->form = rs::build_form(f->cfg, o ? o->cursor : store::RagMode::On,
-                                     m.d.persisted, m.env.settings, o && o->advanced);
-            f->form.cursor = cursor;
+            form::rebuild(f->form, rs::build_form(f->cfg, o ? o->cursor : store::RagMode::On,
+                                                  m.d.persisted, m.env.settings,
+                                                  o && o->advanced));
             refresh_status(*f);
             return Cmd::none();
         },

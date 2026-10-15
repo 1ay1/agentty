@@ -166,10 +166,7 @@ void rebuild_add_form(pn::PluginEdit& o, const std::string& kind) {
     in.tools    = text_of(o.form, pf::kTools);
     in.advertise= toggle_of(o.form, pf::kAdvertise);
     in.project  = toggle_of(o.form, pf::kScopeProject);
-    const int cursor = o.form.cursor;
-    o.form = pf::build_form(in);
-    o.form.cursor = std::min(cursor,
-        std::max(0, static_cast<int>(o.form.fields.size()) - 1));
+    form::rebuild(o.form, pf::build_form(in));
     o.built_kind = kind;
 }
 

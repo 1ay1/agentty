@@ -51,33 +51,6 @@ using maya::overload;
 
 namespace {
 
-// Put the cursor back where it was after a rebuild: on the SAME ROW (by id)
-// when it still exists, else at the same index, never on a header row and
-// never past the end. A header under the cursor reads as a frozen pane:
-// nothing on it reacts.
-//
-// By id because a rebuild can now add and remove rows: choosing a service for
-// a slot replaces the dial and key rows under it, and storing a key adds a
-// "Remove key" row. Keeping only the index would leave the cursor on whatever
-// row slid into that position — after picking Exa for Primary, on Exa's
-// "Mode" row instead of on Primary.
-void restore_cursor(form::Form& f, int cursor, std::string_view id = {}) {
-    const int n = static_cast<int>(f.fields.size());
-    if (n == 0) { f.cursor = 0; return; }
-    if (!id.empty())
-        for (int i = 0; i < n; ++i)
-            if (f.fields[static_cast<std::size_t>(i)].id == id) { f.cursor = i; return; }
-    f.cursor = std::clamp(cursor, 0, n - 1);
-    if (f.fields[static_cast<std::size_t>(f.cursor)].is_header())
-        form::move_edge(f, /*last=*/false);
-}
-
-// The id of the focused row, copied (the form is about to be replaced).
-[[nodiscard]] std::string focused_id(const form::Form& f) {
-    const auto* row = f.focused();
-    return row ? row->id : std::string{};
-}
-
 // The pane's view of where each key comes from, as last read off the UI
 // thread. Until the first read answers, every key row says so.
 [[nodiscard]] web_search_form::KeyOrigin key_origin(const pn::WebSearch& o) {
@@ -91,13 +64,14 @@ void restore_cursor(form::Form& f, int cursor, std::string_view id = {}) {
 }
 
 // Rebuild the rows from the Model, the cursor kept on the same row (a rebuild
-// can add and remove rows, see restore_cursor).
+// can add and remove rows: choosing a service for a slot replaces the rows
+// under it), or on `prefer_id` when given.
 void rebuild(const Model& m, pn::WebSearch& o, std::string_view prefer_id = {}) {
     o.rows_stale = false;
-    const int cursor = o.form.cursor;
-    const std::string id = prefer_id.empty() ? focused_id(o.form) : std::string{prefer_id};
-    o.form = web_search_form::build_form(m.d.persisted.web_search, m.env.settings, key_origin(o));
-    restore_cursor(o.form, cursor, id);
+    form::rebuild(o.form,
+                  web_search_form::build_form(m.d.persisted.web_search, m.env.settings,
+                                              key_origin(o)),
+                  prefer_id);
 }
 
 // Ask a worker which services have a key, and from where. Every keyed service
@@ -176,7 +150,7 @@ void rebuild(const Model& m, pn::WebSearch& o, std::string_view prefer_id = {}) 
 }
 
 // Persist `cfg` and rebuild the pane around it, the cursor kept on the same
-// row (a rebuild can add and remove rows, see restore_cursor).
+// row (a rebuild can add and remove rows; form::rebuild keeps the place).
 [[nodiscard]] Cmd commit(Model& m, pn::WebSearch& o, web_search_cfg::Config cfg) {
     const auto was = web_search_cfg::mode(m.d.persisted.web_search);
     m.d.persisted.web_search = cfg;
@@ -211,9 +185,9 @@ Cmd web_search_update(Model& m, msg::WebSearchMsg wm) {
             // form to act on); the key rows say "checking…" until the read
             // below answers.
             o.form = web_search_form::build_form(m.d.persisted.web_search, m.env.settings, key_origin(o));
-            // Open on the master switch, not on the group header above it,
-            // unless a search asked for a row.
-            if (!form::focus_row(o.form, e.focus)) restore_cursor(o.form, 0);
+            // Opens on the first real row (build() puts it there), unless a
+            // search asked for a row.
+            (void)form::focus_row(o.form, e.focus);
             m.ui.panel.descend(std::move(o));
             return read_key_origins(*m.ui.panel.get<pn::WebSearch>());
         },

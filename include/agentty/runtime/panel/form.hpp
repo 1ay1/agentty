@@ -407,7 +407,13 @@ public:
     // Provenance for the row just added ("default", "settings.json", "env: X").
     Builder& origin(std::string where);
 
-    [[nodiscard]] Form build() { return std::move(form_); }
+    // A built form's cursor starts on its first real row, never a header:
+    // a cursor parked on a row that does nothing reads as a frozen pane.
+    [[nodiscard]] Form build() {
+        for (int i = 0; i < static_cast<int>(form_.fields.size()); ++i)
+            if (!form_.fields[static_cast<std::size_t>(i)].is_header()) { form_.cursor = i; break; }
+        return std::move(form_);
+    }
 
 private:
     Form form_;
@@ -522,6 +528,18 @@ void move(Form& f, int delta);
 // commits the draft into the value.
 void begin_edit(Form& f);
 void end_edit(Form& f);
+
+// Replace a form's rows with `next`, keeping the user's place: the cursor
+// stays on the row with the same id if it still exists, else on the nearest
+// real row at the same position; never on a header. An open edit or dropdown
+// is closed (its row may not exist any more), and `dirty` is kept.
+// Every pane that rebuilds its rows must use this rather than patching the
+// cursor by hand. `prefer` lands on that row instead (when it exists), for a
+// rebuild that should move the cursor to a row it just added.
+void rebuild(Form& f, Form next, std::string_view prefer = {});
+// Put the cursor back on a real row after rows were added or removed in
+// place: same index if valid, else the nearest non-header row.
+void settle_cursor(Form& f);
 // Home/End: jump to the first/last non-header field WITHOUT wrapping.
 void move_edge(Form& f, bool last);
 // PgUp/PgDn: header-skipping stride that CLAMPS at the edges (no wrap).

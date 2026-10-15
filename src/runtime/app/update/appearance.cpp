@@ -70,14 +70,7 @@ namespace {
 void reproject(Model& m) {
     auto* o = m.ui.panel.get<pn::Appearance>();
     if (!o) return;
-    const int cursor = o->pane.form.cursor;
-    auto focus = o->pane.form.focus;
-    o->pane.form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
-    o->pane.form.cursor = std::clamp(cursor, 0,
-                                std::max(0, static_cast<int>(o->pane.form.fields.size()) - 1));
-    // An open edit doesn't survive a rebuild: the new row has no draft.
-    o->pane.form.focus = std::holds_alternative<form::focus::Editing>(focus)
-                       ? form::FormFocus{form::focus::Browsing{}} : focus;
+    form::rebuild(o->pane.form, pn::build_appearance_form(m.d.ui(), m.env.terminal));
 }
 
 // Rebuild the sealed transcript so a theme change reaches it.
@@ -370,14 +363,6 @@ Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
         [&](OpenAppearance& e) -> Cmd {
             pn::Appearance o;
             o.pane.form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
-            // Land on the first real setting, not the "Theme" section
-            // header — a cursor parked on a row that does nothing reads as
-            // a broken pane for the one keystroke it takes to notice.
-            for (int i = 0; i < static_cast<int>(o.pane.form.fields.size()); ++i)
-                if (!o.pane.form.fields[static_cast<std::size_t>(i)].is_header()) {
-                    o.pane.form.cursor = i;
-                    break;
-                }
             (void)form::focus_row(o.pane.form, e.focus);
             m.ui.panel.descend(std::move(o));
             m.ui.appearance_scroll.y = 0;

@@ -69,8 +69,47 @@ void encode_utf8(std::string& out, char32_t ch) {
     }
 }
 
+// Can this code point be typed into a single-line field? Control characters
+// (C0, DEL, C1) would land raw in a saved config value, and surrogates or
+// anything past U+10FFFF have no valid UTF-8 encoding at all.
+[[nodiscard]] bool typeable(char32_t ch) noexcept {
+    if (ch < 0x20 || ch == 0x7F) return false;            // C0 + DEL
+    if (ch >= 0x80 && ch <= 0x9F) return false;          // C1
+    if (ch >= 0xD800 && ch <= 0xDFFF) return false;      // surrogates
+    return ch <= 0x10FFFF;
+}
+
+// A paste reduced to what could have been typed: decoded as UTF-8, with
+// invalid or overlong sequences, surrogates and control characters dropped.
+// Newlines and tabs go too, since every form field is single-line. Same rule
+// as typeable(), so a paste can't put in anything a key couldn't.
+std::string clean_paste(std::string_view text) {
+    std::string clean;
+    clean.reserve(text.size());
+    for (std::size_t i = 0; i < text.size();) {
+        const auto c = static_cast<unsigned char>(text[i]);
+        const std::size_t n = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3
+                            : (c >> 3) == 0x1E ? 4 : 0;
+        if (n == 0 || i + n > text.size()) { ++i; continue; }
+        char32_t cp = n == 1 ? c : n == 2 ? (c & 0x1Fu) : n == 3 ? (c & 0x0Fu) : (c & 0x07u);
+        bool ok = true;
+        for (std::size_t k = 1; k < n; ++k) {
+            const auto cc = static_cast<unsigned char>(text[i + k]);
+            if ((cc & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (cc & 0x3Fu);
+        }
+        const bool overlong = (n == 2 && cp < 0x80) || (n == 3 && cp < 0x800)
+                           || (n == 4 && cp < 0x10000);
+        if (!ok || overlong) { ++i; continue; }
+        if (typeable(cp)) encode_utf8(clean, cp);
+        i += n;
+    }
+    return clean;
+}
+
 // Shared bodies for the (value, cursor) pair Text/Secret/Path all carry.
 void insert_at(std::string& value, std::size_t& cursor, char32_t ch) {
+    if (!typeable(ch)) return;
     if (cursor > value.size()) cursor = value.size();
     std::string enc;
     encode_utf8(enc, ch);
@@ -287,10 +326,7 @@ void paste(FieldValue& v, std::string_view text) {
     // Strip newlines/tabs: these are single-line fields, and a pasted newline
     // used to submit the surrounding form by accident in the hand-rolled
     // inputs this replaces.
-    std::string clean;
-    clean.reserve(text.size());
-    for (char c : text)
-        if (c != '\n' && c != '\r' && c != '\t') clean.push_back(c);
+    const std::string clean = clean_paste(text);
 
     std::visit([&](auto& f) {
         using T = std::decay_t<decltype(f)>;
@@ -331,10 +367,10 @@ bool paste_into_focused(Form& f, std::string_view text) {
     // no-op instead of leaving the row in an edit session with nothing typed
     // (the half-state type-to-edit refuses for a letter on a Number row).
     const bool numeric = std::holds_alternative<field::Number>(row->value);
-    const bool lands = std::any_of(text.begin(), text.end(), [&](char c) {
-        return numeric ? (c >= '0' && c <= '9')
-                       : (c != '\n' && c != '\r' && c != '\t');
-    });
+    const std::string clean = clean_paste(text);
+    const bool lands = numeric
+        ? std::any_of(clean.begin(), clean.end(), [](char c) { return c >= '0' && c <= '9'; })
+        : !clean.empty();
     if (!lands) return false;
     begin_edit(f);
     // A paste replaces a Number's saved value, as the first typed digit does.
@@ -517,6 +553,43 @@ void end_edit(Form& f) {
     if (auto* row = f.focused())
         if (auto* n = std::get_if<field::Number>(&row->value)) number_commit(*n);
     f.focus = focus::Browsing{};
+}
+
+void rebuild(Form& f, Form next, std::string_view prefer) {
+    const Field* was = f.focused();
+    const std::string id = !prefer.empty() ? std::string{prefer}
+                         : was ? was->id : std::string{};
+    const int at = f.cursor;
+    const bool dirty = f.dirty;
+    f = std::move(next);
+    f.dirty = dirty;
+    f.focus = focus::Browsing{};   // an edit or dropdown can't outlive its row
+    const int n = static_cast<int>(f.fields.size());
+    if (n == 0) { f.cursor = 0; return; }
+    // Same row by id, if it survived the rebuild.
+    if (!id.empty())
+        for (int i = 0; i < n; ++i)
+            if (f.fields[static_cast<std::size_t>(i)].id == id
+                && !f.fields[static_cast<std::size_t>(i)].is_header()) {
+                f.cursor = i;
+                return;
+            }
+    f.cursor = at;
+    settle_cursor(f);
+}
+
+void settle_cursor(Form& f) {
+    const int n = static_cast<int>(f.fields.size());
+    if (n == 0) { f.cursor = 0; return; }
+    // The nearest real row at the same position, looking down first.
+    const int start = std::clamp(f.cursor, 0, n - 1);
+    for (int d = 0; d < n; ++d)
+        for (const int i : {start + d, start - d})
+            if (i >= 0 && i < n && !f.fields[static_cast<std::size_t>(i)].is_header()) {
+                f.cursor = i;
+                return;
+            }
+    f.cursor = start;   // every row is a header: nothing better exists
 }
 
 bool escape(Form& f) {
