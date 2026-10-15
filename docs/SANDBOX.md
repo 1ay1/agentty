@@ -49,47 +49,25 @@ Settings persist as you edit and apply **on the next launch** — see
 
 | backend | platform | selected |
 |---|---|---|
-| `claybin` | Linux | **default** |
-| `bwrap` (bubblewrap) | Linux | fallback |
+| `claybin` | Linux | only engine |
 | `claybin` | macOS | **default** |
 | `sandbox-exec` | macOS | fallback |
 | — | Windows | none (documented gap) |
 
-### Why claybin is the default
+### Why claybin is the only Linux engine
 
-Because the difference is measured, not argued. agentty's bwrap path emits no
-`--seccomp`, no cgroup limits and no landlock:
+bwrap was removed. agentty's bwrap path emitted no seccomp, no cgroup limits
+and no landlock, so it only ever gave the mount walls. The case for keeping it
+as a fallback was hosts where claybin can't run, but claybin needs only
+landlock **or** seccomp, and seccomp (Linux 3.5) predates the unprivileged
+user namespaces bwrap needs (3.8). Every host that could run bwrap can run
+claybin.
 
-| capability | claybin | agentty's bwrap path |
-|---|---|---|
-| filesystem read/write | strong (mount ns) | strong (mount ns) |
-| filesystem exec | strong (landlock) | partial (binds only) |
-| network isolation | strong (netns) | none (`--share-net`) |
-| syscall filter | **strong** (seccomp-bpf) | **none** |
-| memory / cpu / pids caps | **strong** (cgroup2) | **none** |
-| privilege drop | strong | strong |
-| ptrace + kill brokering | yes (seccomp-notify) | **none** |
+If claybin can't start on a host, the pane says so and commands run
+unconfined; `--sandbox on` refuses to start instead.
 
-There is no capability where bwrap wins. bubblewrap *can* take a seccomp program
-on an fd; agentty does not give it one, because writing a BPF compiler to feed it
-would be rebuilding claybin inside the bwrap path.
-
-### Why bwrap is still here
-
-The two fail on **different hosts**, so this is a fallback, not legacy:
-
-- **bwrap dies** where unprivileged user namespaces are denied — Ubuntu 24.04's
-  AppArmor profile blocks the `uid_map` write. That host is why claybin exists.
-- **claybin dies** where its walls do not exist. Landlock landed in 5.13, so a
-  RHEL/CentOS kernel older than that has none of it.
-
-Deleting bwrap would not leave those users with claybin — it would leave them
-with `Backend::None`. Trading a weaker boundary for **no** boundary, on the
-machines least equipped to notice, is issue #21 wearing a different hat.
-
-Asking for claybin on a host that cannot run it yields bwrap, never nothing.
-
-Override with `--sandbox-backend bwrap|claybin`, or the Backend row in the pane.
+`--sandbox-backend bwrap` still parses and runs claybin, so old scripts keep
+working. The pane has no Backend row.
 
 ### claybin on macOS
 
@@ -457,7 +435,7 @@ what the rows describe:
 |---|---|
 | clean | `applies on restart, verified against this host` |
 | will not compile | `will NOT apply on restart · <reason>` |
-| engine refused | `claybin cannot start on this host · restart falls back to bwrap…` |
+| engine refused | `claybin cannot start on this host · commands will run unconfined` |
 | degraded | `applies on restart, but this host cannot enforce: …` |
 
 ---

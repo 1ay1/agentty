@@ -841,9 +841,8 @@ struct Args {
     std::string cli_model;
     std::string cli_workspace;
     std::string cli_sandbox;   // "auto" | "on" | "off"; empty = auto default
-    // "bwrap" (default) | "claybin". Linux only. Both backends are always
-    // linked -- claybin is a required submodule -- so this is a pure runtime
-    // choice, and it OVERRIDES the backend saved in the Sandbox pane.
+    // Only "claybin" means anything now; "bwrap" still parses and runs
+    // claybin with a note. Linux only.
     std::string cli_sandbox_backend;
     // UI language for THIS run, as a BCP-47 tag ("de", "pt-BR", "zh-CN").
     // Beats the saved setting and the environment, like every other flag:
