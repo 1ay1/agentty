@@ -207,7 +207,7 @@ Cmd plugin_edit_update(Model& m, msg::PluginEditMsg pm) {
 
         [&](PluginEditPaste& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::PluginEdit>();
-            if (o) form::paste_into(o->form, e.text);   // SSOT guard inside
+            if (o) (void)form::paste_into_focused(o->form, e.text);   // starts the edit like typing
             return Cmd::none();
         },
 

@@ -22,7 +22,7 @@ set(_AGENTTY_CONSOLIDATED
     image_dims_test
     quit_cancels_stream_test
     midrun_freeze_test smart_mode_test stream_liveness_test wire_golden_test
-    smart_tuning_settings_test smart_routing_card_test settings_nav_test
+    smart_tuning_settings_test smart_routing_card_test settings_nav_test settings_rows_input_test
     effort_auto_test settings_multiproc_test
     wire_shared_test complexity_test copilot_token_test kimi_token_test
     chatgpt_bundled_models_test settings_default_test
@@ -486,6 +486,8 @@ agentty_test(stats_visual            MODE standalone NO_TEST)
 # NO_TEST too: it prints timings for a human. An assertion on microseconds
 # would be a flaky test of the machine it runs on, not of the code.
 agentty_test(stats_refresh_bench     MODE standalone NO_TEST)
+# Keystroke latency on every settings pane, for a human (prints timings).
+agentty_test(settings_input_bench    MODE standalone NO_TEST)
 
 
 # ── Narrow-source sanitizer tests (raw: must NOT link the full shared set) ──

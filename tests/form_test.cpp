@@ -14,6 +14,7 @@
 #include <doctest/doctest.h>
 
 #include <maya/print.hpp>
+#include <maya/widget/panel/caret.hpp>
 
 #include "agentty/runtime/panel/form.hpp"
 #include "agentty/runtime/panel/form_keys.hpp"
@@ -780,14 +781,23 @@ TEST_CASE("form: the key router depends only on focus, not on the rows") {
     }
 }
 
-TEST_CASE("form: caret is reported in characters, not bytes") {
-    // maya renders characters; the model stores bytes. A multi-byte value
-    // would draw its caret in the wrong column if this were confused.
+TEST_CASE("form: caret offset lands after multi-byte text") {
+    // maya splices the caret by byte offset. A character index here put the
+    // caret between é and 漢 instead of after 漢.
     auto f = Builder{"UTF"}.text("t", "T", "").build();
     f.cursor = 0;
     press(f, key(maya::SpecialKey::Enter));
     press(f, chr(U'é'));
     press(f, chr(U'漢'));
-    CHECK(std::get<field::Text>(f.find("t")->value).value.size() == 5);  // bytes
-    CHECK(caret_chars(f.find("t")->value, true) == 2);                   // chars
+    const auto& v = std::get<field::Text>(f.find("t")->value).value;
+    CHECK(v.size() == 5);
+    const auto at = caret_offset(f.find("t")->value, true);
+    CHECK(at == 5);
+    CHECK(maya::panel::detail::with_caret(v, at) == v + "\xe2\x96\x88");
+}
+
+TEST_CASE("form: a Number row being edited has a caret") {
+    auto f = Builder{"N"}.number("n", "N", 42, 0, 999).build();
+    CHECK(caret_offset(f.find("n")->value, false) == std::string::npos);
+    CHECK(caret_offset(f.find("n")->value, true) == 2);
 }

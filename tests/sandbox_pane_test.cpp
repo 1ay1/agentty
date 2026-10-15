@@ -1718,7 +1718,6 @@ TEST_CASE("sandbox render: the pane paints its rows, values and footer") {
     // which is what stops one section running into the next in a long form.
     // Asserting the source-case label would pass on a pane that never painted
     // a header at all.
-    CHECK(out.find("ENGINE") != std::string::npos);
     CHECK(out.find("FILESYSTEM") != std::string::npos);
     CHECK(out.find("Preset") != std::string::npos);
 

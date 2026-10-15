@@ -68,7 +68,6 @@ namespace agentty::ui::panel {
 // id for a row that must not exist is an invitation to wire it up "for
 // consistency", so it is not here to be found. See docs/design/
 // sandbox-boundary.md §3.
-inline constexpr std::string_view kSbBackend     = "backend";
 inline constexpr std::string_view kSbPosture     = "posture";
 inline constexpr std::string_view kSbFsScope     = "fs_scope";
 inline constexpr std::string_view kSbReadPaths   = "read_paths";

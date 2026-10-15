@@ -155,8 +155,29 @@ struct SpawnResult {
 };
 
 // Can this host actually build the sandbox? Forks and attempts the uid_map
-// write, so it predicts spawn() rather than guessing from sysctls.
+// write, so it predicts spawn() rather than guessing from sysctls. Probed once.
 [[nodiscard]] bool available();
+
+// Landlock ABI of this host, 0 when absent. Same cached probe as available().
+[[nodiscard]] std::uint32_t landlock_abi();
+
+}  // namespace agentty::tools::util::sandbox::claybin_backend
+
+// The host's capabilities, probed once per process (probing forks). For the
+// preview and pickers; the spawn path probes live.
+#if defined(__APPLE__)
+#include "claybin/macos/backend.hpp"
+namespace agentty::tools::util::sandbox::claybin_backend {
+[[nodiscard]] const ::clay::macos::HostCapabilities& host();
+}
+#elif defined(__linux__)
+#include "claybin/plan/compile.hpp"
+namespace agentty::tools::util::sandbox::claybin_backend {
+[[nodiscard]] const ::clay::HostCapabilities& host();
+}
+#endif
+
+namespace agentty::tools::util::sandbox::claybin_backend {
 
 // Compile the posture and report which walls it yields, without running
 // anything.

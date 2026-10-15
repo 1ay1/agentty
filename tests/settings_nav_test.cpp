@@ -22,6 +22,8 @@
 #include "agentty/runtime/panel/form_keys.hpp"
 #include "agentty/runtime/panel/settings/categories.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"   // items_for, Action
+#include "agentty/runtime/panel/rag.hpp"
+#include "agentty/runtime/settings_registry.hpp"
 #include "agentty/runtime/view/palette.hpp"   // ui::palette_context
 
 #include <string>
@@ -196,6 +198,99 @@ TEST_CASE("settings nav: settings list → pane → Esc returns to the list") {
     {
         auto [m, idx] = descend(settings::Action::OpenRag);
         REQUIRE(m.ui.panel.is<pn::Rag>());
+        m = press_escape(std::move(m));
+        REQUIRE(m.ui.panel.is<pn::SettingsList>());
+        CHECK(m.ui.panel.get<pn::SettingsList>()->concern
+              == settings::Category::General);
+        CHECK(m.ui.panel.get<pn::SettingsList>()->index == idx);
+    }
+}
+
+namespace {
+
+// Put the cursor on `id` in a form; REQUIREs it exists.
+void focus_row(form::Form& f, std::string_view id) {
+    for (int i = 0; i < static_cast<int>(f.fields.size()); ++i)
+        if (f.fields[static_cast<std::size_t>(i)].id == id) { f.cursor = i; return; }
+    FAIL("no row " << std::string{id});
+}
+
+form::keys::Action intent(form::keys::Intent i) { return form::keys::Action{i}; }
+form::keys::Action digit(char32_t c) {
+    form::keys::Action a{form::keys::Intent::Insert};
+    a.ch = c;
+    return a;
+}
+
+} // namespace
+
+TEST_CASE("settings fields: a RAG pipeline toggle saves on its own") {
+    // Toggles never set left_field, and only left_field used to save, so
+    // every pipeline switch reverted on reopen.
+    install_stub_deps();
+    g_settings = {};
+    Model m;
+    m.d.persisted.rag.dedup = true;
+    m = app::update(std::move(m), Msg{OpenRag{}}).first;
+    auto* rag = m.ui.panel.get<pn::Rag>();
+    REQUIRE(rag != nullptr);
+    auto* f = &rag->embed.form;
+    focus_row(*f, "rag.dedup");
+    auto next = app::update(std::move(m),
+                    Msg{RagEmbedKey{intent(form::keys::Intent::AdjustUp)}}).first;
+    CHECK(next.d.persisted.rag.dedup == false);
+    CHECK(next.d.persisted.rag.configured);
+}
+
+TEST_CASE("settings fields: typing a Smart Mode number keeps the edit, commits on leave") {
+    // Each digit used to rebuild the form, which ended the edit after one key.
+    install_stub_deps();
+    Model m;
+    m = app::update(std::move(m), Msg{OpenSmartMode{}}).first;
+    m = app::update(std::move(m), Msg{SmartModeAdvanced{}}).first;
+    auto* o = m.ui.panel.get<pn::SmartMode>();
+    REQUIRE(o != nullptr);
+    focus_row(o->form, "smart.deep_margin");
+    const auto* d = settings::registry::find("smart.deep_margin");
+    REQUIRE(d != nullptr);
+    const auto want = static_cast<int>(d->max);
+    REQUIRE(want != m.d.smart.deep_margin);
+
+    // Enter, Backspace, digit, Enter: several keystrokes inside one edit.
+    m = app::update(std::move(m), Msg{SmartModeKey{intent(form::keys::Intent::Activate)}}).first;
+    m = app::update(std::move(m), Msg{SmartModeKey{intent(form::keys::Intent::Backspace)}}).first;
+    m = app::update(std::move(m),
+                    Msg{SmartModeKey{digit(static_cast<char32_t>('0' + want))}}).first;
+    o = m.ui.panel.get<pn::SmartMode>();
+    REQUIRE(o != nullptr);
+    CHECK(o->form.editing());
+    // Enter while editing translates to LeaveField.
+    m = app::update(std::move(m), Msg{SmartModeKey{intent(form::keys::Intent::LeaveField)}}).first;
+    CHECK(m.d.smart.deep_margin == want);
+}
+
+TEST_CASE("settings nav: every list is reachable from Settings") {
+    // Plugins, Commands, Subagents and Hooks lost their only way in when
+    // the palette rows went. Each must have a door on the hub, and Esc from
+    // the list must land back on that door.
+    install_stub_deps();
+    for (auto want : {settings::Category::Plugins, settings::Category::Commands,
+                      settings::Category::Agents, settings::Category::Hooks}) {
+        Model m;
+        m = app::update(std::move(m),
+                        Msg{OpenSettingsList{settings::Category::General}}).first;
+        const auto rows = settings::items_for(m, settings::Category::General);
+        int idx = -1;
+        for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+            const auto& r = rows[static_cast<std::size_t>(i)];
+            if (r.action == settings::Action::OpenList && r.target == want) idx = i;
+        }
+        REQUIRE(idx >= 0);
+        m.ui.panel.get<pn::SettingsList>()->index = idx;
+        m = app::update(std::move(m), Msg{SettingsListActivate{}}).first;
+        REQUIRE(m.ui.panel.is<pn::SettingsList>());
+        CHECK(m.ui.panel.get<pn::SettingsList>()->concern == want);
+
         m = press_escape(std::move(m));
         REQUIRE(m.ui.panel.is<pn::SettingsList>());
         CHECK(m.ui.panel.get<pn::SettingsList>()->concern

@@ -385,6 +385,12 @@ Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
             return Cmd::none();
         },
 
+        [&](AppearancePaste& e) -> Cmd {
+            // Lands in the focused row like typing; commits when the edit ends.
+            if (auto* o = m.ui.panel.get<pn::Appearance>(); o && !o->pane.picking)
+                (void)form::paste_into_focused(o->pane.form, e.text);
+            return Cmd::none();
+        },
         [&](AppearanceKey& e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Appearance>();
             if (!o) return Cmd::none();
@@ -402,16 +408,15 @@ Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
             if (applied.hand_off)
                 return appearance_update(m, msg::AppearanceMsg{AppearancePickTheme{}});
 
-            // Everything else: read the focused row back onto the prefs and
-            // write through. `changed` covers ←/→ in place and a dropdown
-            // commit; `left_field` covers finishing a number edit.
-            // Only a real change saves; the arm still has to return a Cmd
-            // either way, so the save starts empty.
+            // Read the focused row back and write through once the value
+            // settles: an in-place change (←/→, dropdown, toggle) or the end
+            // of a typed edit. Reprojecting mid-edit rebuilt the form under
+            // the number being typed.
             Cmd save = Cmd::none();
-            if (applied.changed || applied.left_field) {
+            if (applied.settled >= 0) {
                 bool rebuild = false;
-                if (const auto* row = o->pane.form.focused())
-                    rebuild = pull_field(m, *row);
+                rebuild = pull_field(m, o->pane.form.fields[
+                    static_cast<std::size_t>(applied.settled)]);
                 // tier / polarity / syntax change the CONTENT of an
                 // already-built Element, not just which colour its slots
                 // resolve to — a quantisation, a different resolved theme,

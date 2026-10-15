@@ -209,36 +209,9 @@ form::Form build_form(const web_search_cfg::Config& c, const reg::EnvSnapshot& e
     return f;
 }
 
-namespace {
-
-void write_row(const form::Field& row, const reg::SettingDef& d,
-               web_search_cfg::Config& c) {
-    std::visit([&](const auto& v) {
-        using T = std::decay_t<decltype(v)>;
-        if constexpr (std::is_same_v<T, form::field::Toggle>)
-            (void)reg::set(c, d, v.on ? "true" : "false");
-        else if constexpr (std::is_same_v<T, form::field::Number>)
-            (void)reg::set(c, d, std::to_string(v.value));
-        else if constexpr (std::is_same_v<T, form::field::Slider>)
-            (void)reg::set(c, d, std::to_string(v.value));
-        else if constexpr (std::is_same_v<T, form::field::Choice>)
-            (void)reg::set(c, d, std::string{v.id()});
-        else if constexpr (std::is_same_v<T, form::field::Text>)
-            (void)reg::set(c, d, v.value);
-    }, row.value);
-}
-
-} // namespace
 
 void apply_form(const form::Form& f, web_search_cfg::Config& c) {
-    // Walk the SAME rows build_form emitted, so a row cannot be written that
-    // was never shown, and a row added to the table is picked up both ways.
-    for (const auto& d : reg::kSettings) {
-        if (d.owner() != reg::Owner::WebSearch) continue;
-        const auto* row = f.find(d.id);
-        if (!row || row->locked) continue;
-        write_row(*row, d, c);
-    }
+    reg::read_rows(c, f, reg::Owner::WebSearch);
     // Dial rows. They are not registry rows (which dials exist depends on the
     // services chosen), so they are found by their id prefix. A dial set back
     // to the service's own default is erased, not stored as "".

@@ -429,9 +429,9 @@ struct Options {
 // never given the plaintext at all.
 [[nodiscard]] std::size_t secret_filled(const field::Secret& s) noexcept;
 
-// Caret as a CHARACTER index (maya renders in characters, the model stores
-// bytes). npos when the field is not being edited.
-[[nodiscard]] std::size_t caret_chars(const FieldValue& v, bool editing) noexcept;
+// Caret as a BYTE offset into the value, which is how maya's with_caret
+// splices it. npos when the field is not being edited.
+[[nodiscard]] std::size_t caret_offset(const FieldValue& v, bool editing) noexcept;
 
 // ── Editing (pure mutations) ─────────────────────────────────────────────
 // Each is a no-op on a kind it doesn't apply to, so call sites never switch

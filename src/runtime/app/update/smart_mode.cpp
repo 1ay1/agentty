@@ -54,8 +54,10 @@ Cmd smart_mode_update(Model& m, msg::SmartModeMsg sm) {
             return Cmd::none();
         },
         [&](SmartModePaste& e) -> Cmd {
+            // A paste lands in an edit session; it commits when that edit
+            // ends, the same as typed digits.
             auto* o = m.ui.panel.get<pn::SmartMode>();
-            if (o) form::paste_into(o->form, e.text);   // SSOT: guard + dirty
+            if (o) form::paste_into_focused(o->form, e.text);
             return Cmd::none();
         },
         [&](SmartModeKey& e) -> Cmd {
@@ -78,39 +80,25 @@ Cmd smart_mode_update(Model& m, msg::SmartModeMsg sm) {
                 return smart_mode_update(m, msg::SmartModeMsg{CloseSmartMode{}});
             }
 
-            // The master toggle. A locked row is never `changed`, so the env
-            // pin is enforced by the form rather than by a toast after the
-            // fact — the row renders read-only and names the variable.
-            if (applied.changed && !role) {
-                // A registry row (routing or tuning) — edit the config and hand
-                // it to apply_smart, which persists it, installs it on the UI
-                // thread and pushes it to the subagent router. The registry
-                // clamps on the way in.
-                if (const auto* d = settings::registry::find(row_id)) {
+            // Commit once a value settles (in-place change, or the end of a
+            // typed edit). Committing on every digit rebuilt the form mid-edit
+            // and threw the edit away.
+            const std::string settled_id = applied.settled >= 0
+                ? o->form.fields[static_cast<std::size_t>(applied.settled)].id
+                : std::string{};
+            const auto settled_role = smart_form::role_of_field(settled_id);
+            if (!settled_id.empty() && !settled_role) {
+                if (const auto* d = settings::registry::find(settled_id)) {
                     smart::RoleConfig cfg = m.d.smart;
-                    if (const auto* f = o->form.find(row_id))
-                        std::visit([&](const auto& v) {
-                            using T = std::decay_t<decltype(v)>;
-                            if constexpr (std::is_same_v<T, form::field::Toggle>)
-                                (void)settings::registry::set(
-                                    cfg, *d, v.on ? "true" : "false");
-                            else if constexpr (std::is_same_v<T, form::field::Number>)
-                                (void)settings::registry::set(
-                                    cfg, *d, std::to_string(v.value));
-                            else if constexpr (std::is_same_v<T, form::field::Slider>)
-                                (void)settings::registry::set(
-                                    cfg, *d, std::to_string(v.value));
-                            else if constexpr (std::is_same_v<T, form::field::Choice>)
-                                (void)settings::registry::set(
-                                    cfg, *d, std::string{v.id()});
-                        }, f->value);
+                    if (const auto* f = o->form.find(settled_id))
+                        (void)settings::registry::read_row(cfg, *d, *f);
                     auto save = apply_smart(m, std::move(cfg));
                     const int cursor = o->form.cursor;
                     o->form = build_smart_form(m, o->advanced);
                     o->form.cursor = cursor;
                     return save;
                 }
-
+                if (settled_id != smart_form::kFieldEnabled) return Cmd::none();
                 // The master toggle. Routed through apply_smart like every
                 // other config change, so the subagent router is pushed too —
                 // turning Smart Mode on while a `task` was queued used to leave

@@ -201,34 +201,8 @@ store::RagMode mode_from_form(const form::Form& f, store::RagMode fallback) {
 }
 
 void apply_form_to_settings(const form::Form& f, store::Settings& settings) {
-    namespace reg = settings::registry;
-
-    // Walks the SAME table build_form walked, so a row cannot be written that
-    // was never read, and a knob added to the table is picked up by both
-    // directions at once. Each row is written through its OWN config struct;
-    // a locked row (an env override) is skipped, so a shell export is never
-    // silently overwritten by the value the UI happened to be showing.
-    const auto write = [&](const auto& d, auto& target) {
-        const auto* row = f.find(d.id);
-        if (!row || row->locked) return;
-        std::visit([&](const auto& v) {
-            using T = std::decay_t<decltype(v)>;
-            if constexpr (std::is_same_v<T, form::field::Toggle>)
-                (void)reg::set(target, d, v.on ? "true" : "false");
-            else if constexpr (std::is_same_v<T, form::field::Slider>)
-                (void)reg::set(target, d, std::to_string(v.value));
-            else if constexpr (std::is_same_v<T, form::field::Number>)
-                (void)reg::set(target, d, std::to_string(v.value));
-            else if constexpr (std::is_same_v<T, form::field::Choice>)
-                (void)reg::set(target, d, std::string{v.id()});
-        }, row->value);
-    };
-
-    // Only the Rag-owned rows. The Smart Mode rows are rendered and written by
-    // the Smart Mode pane, which owns that config — this pane never held them,
-    // so there is nothing here to keep in step.
-    for (const auto& d : reg::kSettings)
-        if (d.owner() == reg::Owner::Rag) write(d, settings.rag);
+    // Only the Rag-owned rows; Smart Mode rows belong to the Smart pane.
+    settings::registry::read_rows(settings.rag, f, settings::registry::Owner::Rag);
 }
 
 } // namespace agentty::rag_settings

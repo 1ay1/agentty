@@ -32,6 +32,7 @@
 #if defined(__APPLE__)
 #include "claybin/macos/backend.hpp"
 #endif
+#include "agentty/tool/util/sandbox_claybin.hpp"   // host(): the cached probe
 #endif
 
 namespace agentty::ui::panel {
@@ -197,8 +198,8 @@ std::string restart_outcome(const sandbox_cfg::Config& cfg,
     //    but the promise has to name the fallback rather than imply the walls
     //    below will be up.
     if (engine_status(cfg, facts) == EngineStatus::CannotStart)
-        return "claybin cannot start on this host \xc2\xb7 restart falls back to "
-               "bwrap, which enforces only the mount walls";
+        return "claybin cannot start on this host \xc2\xb7 commands will run "
+               "unconfined";
 
     // 3. It compiles and starts, but something comes out weaker than asked.
     //    This is the quiet case and the reason the function exists: the rows
@@ -227,10 +228,8 @@ std::string describe_running(const HostFacts& facts) {
         return "sandboxing is OFF (--sandbox off) \xc2\xb7 nothing below is enforced";
     if (!facts.sandbox_active)
         return "no sandbox \xc2\xb7 commands run unconfined";
-    if (facts.running == sandbox_cfg::LinuxBackend::Claybin)
-        return "claybin \xc2\xb7 landlock abi " + std::to_string(facts.landlock_abi) +
-               " \xc2\xb7 seccomp \xc2\xb7 cgroup2";
-    return "bwrap \xc2\xb7 mount namespaces only";
+    return "claybin \xc2\xb7 landlock abi " + std::to_string(facts.landlock_abi) +
+           " \xc2\xb7 seccomp \xc2\xb7 cgroup2";
 }
 
 form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
@@ -240,54 +239,10 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     form::Form form;
     form.title = "Sandbox";
 
-    // Which engine is being configured. FIRST row, because it decides what
-    // every row below can mean: bwrap confines with mount namespaces and
-    // nothing else, so the syscall profile, per-port network, W^X and the
-    // cgroup caps have no bwrap spelling at all. Putting the choice at the
-    // bottom would let someone tune ten rows before learning that eight of
-    // them were inert.
-    //
-    // Both options always exist -- claybin is a required submodule, not a
-    // build flag -- so this is purely a runtime choice.
-    const bool on_claybin = cfg.backend == sandbox_cfg::LinuxBackend::Claybin;
-    form.fields.push_back(header("Engine"));
-    form.fields.push_back(choice(
-        kSbBackend, "Backend",
-        "which engine builds the walls. claybin is stronger; bwrap is the "
-        "fallback for hosts it cannot run on.",
-        {"bwrap", "claybin"},
-        static_cast<int>(cfg.backend),
-        {"mount namespaces only \xc2\xb7 filesystem and masks work; the syscall "
-         "filter, resource limits and per-port network do NOT",
-         "every row below works \xc2\xb7 seccomp + landlock + cgroup2, needs "
-         "unprivileged user namespaces"}));
-    // Asking for claybin on a host that cannot build a sandbox is worth
-    // saying here rather than at spawn time. The probe actually forks and
-    // attempts the uid_map write, so this is a real answer, not a guess.
-    // The row stays SETTABLE -- the choice is legitimate, the host just
-    // cannot honour it, and locking it would strand anyone who set it on a
-    // machine where it worked.
-    if (!claybin_available && on_claybin)
-        form.fields.back().help =
-            "claybin cannot start on this host (no user namespaces) "
-            "\xc2\xb7 falling back to bwrap";
-
-    // Every row below is enforceable only when claybin is BOTH selected and
-    // usable. One predicate, used everywhere, so a row cannot disagree with
-    // the engine row about what it does.
-    //
-    // NOTE this is about what a SAVE would enforce, not about what is running.
-    // Those are different questions and conflating them is what made the
-    // subtitle lie -- see HostFacts. A row locked here is one that would do
-    // nothing even after a restart; a row that is merely not-yet-in-force is
-    // handled by the status line, not by locking.
-    const bool claybin_live = on_claybin && claybin_available;
-    // The reason a row is locked, phrased for whichever of the two cases
-    // applies -- "needs the claybin backend" is wrong and confusing when the
-    // user has already selected claybin and the host is what refused.
-    const std::string why_locked =
-        !on_claybin ? std::string{"bwrap cannot express this \xc2\xb7 switch Backend to claybin"}
-                    : std::string{"claybin cannot start on this host"};
+    // One engine: claybin. Every row below works only when the host can
+    // start it.
+    const bool claybin_live = claybin_available;
+    const std::string why_locked{"claybin cannot start on this host"};
 
     // The subtitle is the one-line answer to "what am I protected by RIGHT
     // NOW", which is the question the pane exists for -- and the question it
@@ -588,12 +543,8 @@ sandbox_cfg::Config read_sandbox_form(const form::Form& f,
         return fallback;
     };
 
-    // The engine first, matching the form order. A locked row still reads
-    // back its current value, so switching to bwrap and saving keeps the
-    // claybin-only numbers in the config rather than zeroing them -- the
-    // user's settings survive a round trip through the other backend.
-    cfg.backend = static_cast<sandbox_cfg::LinuxBackend>(
-        choice_of(kSbBackend, static_cast<int>(base.backend)));
+    // One engine, so nothing to read back for it.
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
 
     cfg.fs_scope = static_cast<sandbox_cfg::FsScope>(
         choice_of(kSbFsScope, static_cast<int>(base.fs_scope)));
@@ -902,9 +853,12 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
     ::clay::macos::Options mopts;
     mopts.profile_name = "agentty";
     auto compiled = ::clay::macos::compile(std::move(d).seal(),
-                                           ::clay::macos::probe_host(), mopts);
+                                           tools::util::sandbox::claybin_backend::host(),
+                                           mopts);
 #else
-    auto compiled = compile(std::move(d).seal(), probe_host());
+    // The cached probe: this runs on every key in the pane, and probing forks.
+    auto compiled = compile(std::move(d).seal(),
+                            tools::util::sandbox::claybin_backend::host());
 #endif
     if (!compiled) {
         out.compiled = false;
@@ -934,53 +888,6 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
             (id == CapId::cpu_limit && cfg.cpu_percent == 0) ||
             (id == CapId::pid_limit && cfg.max_procs == 0);
         out.walls.push_back(std::move(w));
-    }
-
-    // On the FALLBACK backend the report above describes a wall claybin would
-    // build and the fallback will not. Saying "filesystem.write: strong via
-    // landlock abi 10" while the command actually runs under a bwrap bind is
-    // precisely the lie this pane exists to prevent -- a stronger lie than
-    // saying nothing, because it comes with a receipt.
-    //
-    // So the compile still runs (it is how we know the policy is coherent at
-    // all, and the error above is worth having either way), but the walls it
-    // predicts are replaced by what the fallback actually gives.
-    if (cfg.backend != sandbox_cfg::LinuxBackend::Claybin) {
-#if defined(__APPLE__)
-        // sandbox-exec is seatbelt too, so the filesystem walls are real --
-        // but they come from ONE FIXED PROFILE in sandbox.cpp, not from this
-        // policy. So the strength is honest and the mechanism says where it
-        // actually came from, which is the part the user needs in order to
-        // understand why their settings above changed nothing.
-        for (auto& w : out.walls) {
-            const bool via_profile = w.name.starts_with("filesystem");
-            if (via_profile) {
-                w.strength  = "partial";
-                w.mechanism = "sandbox-exec fixed profile";
-            } else {
-                w.strength  = "none";
-                w.mechanism = "sandbox-exec cannot express this";
-            }
-        }
-#else
-        for (auto& w : out.walls) {
-            // The three capabilities a bwrap bind genuinely delivers. Every
-            // other CapId is seccomp, landlock or cgroup2, none of which
-            // agentty hands bwrap.
-            const bool via_mounts =
-                w.name.starts_with("filesystem") || w.name.starts_with("mount");
-            if (via_mounts) {
-                w.strength  = "partial";
-                w.mechanism = "bwrap bind mounts";
-            } else {
-                w.strength  = "none";
-                w.mechanism = "bwrap cannot express this";
-            }
-        }
-#endif
-        out.unenforceable.push_back(
-            "most of this policy needs the claybin backend \xc2\xb7 "
-            "switch Backend above");
     }
     return out;
 }

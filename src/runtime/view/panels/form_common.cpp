@@ -37,7 +37,7 @@ namespace ff = agentty::form::field;
 
 [[nodiscard]] maya::PanelControl control_for(const agentty::form::Field& f,
                                             bool editing_this_row) {
-    const std::size_t caret = agentty::form::caret_chars(f.value, editing_this_row);
+    const std::size_t caret = agentty::form::caret_offset(f.value, editing_this_row);
 
     return std::visit([&](const auto& v) -> maya::PanelControl {
         using T = std::decay_t<decltype(v)>;
@@ -49,7 +49,7 @@ namespace ff = agentty::form::field;
             return maya::panel::Choice{std::string{v.label()}};
         }
         else if constexpr (std::is_same_v<T, ff::Number>) {
-            return maya::panel::Number{v.value};
+            return maya::panel::Number{v.value, caret};
         }
         else if constexpr (std::is_same_v<T, ff::Slider>) {
             return maya::panel::Slider{v.value, v.min, v.max, v.decimals};

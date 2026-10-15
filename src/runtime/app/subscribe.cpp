@@ -1359,10 +1359,6 @@ std::optional<Msg> on_key(const Model& m, const KeyEvent& ev) {
 
 Msg on_paste(const Model& m, const maya::PasteEvent& pe) {
     const auto active_panel = ui::panel::top(m);
-    const auto editing = [](const form::Form* f) { return f && focus_of(*f).editing; };
-    const auto* rag    = m.ui.panel.get<ui::panel::Rag>();
-    const auto* smart  = m.ui.panel.get<ui::panel::SmartMode>();
-    const auto* plugin = m.ui.panel.get<ui::panel::PluginEdit>();
     const auto* so     = m.ui.panel.get<pn::SettingsList>();
     const bool filter_open = active_panel == ui::panel::Kind::Palette
                           || active_panel == ui::panel::Kind::Models
@@ -1370,20 +1366,20 @@ Msg on_paste(const Model& m, const maya::PasteEvent& pe) {
                           || active_panel == ui::panel::Kind::Mention
                           || active_panel == ui::panel::Kind::Symbol;
     std::string s = pe.content;
-    // Route a bracketed paste to whatever modal currently owns text
-    // input, so it lands in that field's buffer, not the composer:
-    //   • login modal open       → its code/key fields
-    //   • settings-list add mode → the inline prompt
-    //   • a form field being edited (Retrieval / Smart Mode / Plugin)
-    //   • the Web Search pane open, editing or not → the focused text row
-    //   • a filter panel open    → its query
-    //   • otherwise              → the composer
+    // A paste goes to whatever owns text input: the login modal, the settings
+    // list add prompt, the focused row of an open form pane (each pane starts
+    // an edit for it, like typing), a filter query, or else the composer.
+    // Every form pane is here: a pane left out used to paste into the
+    // composer hidden behind it.
     if (active_panel == ui::panel::Kind::Login) return LoginPaste{std::move(s)};
     if (so && so->input_active)                 return SettingsListPaste{std::move(s)};
-    if (editing(rag ? &rag->embed.form : nullptr)) return RagEmbedPaste{std::move(s)};
-    if (editing(smart ? &smart->form : nullptr))   return SmartModePaste{std::move(s)};
-    if (m.ui.panel.get<ui::panel::WebSearch>())    return WebSearchPaste{std::move(s)};
-    if (editing(plugin ? &plugin->form : nullptr)) return PluginEditPaste{std::move(s)};
+    if (m.ui.panel.get<ui::panel::Rag>())         return RagEmbedPaste{std::move(s)};
+    if (m.ui.panel.get<ui::panel::SmartMode>())   return SmartModePaste{std::move(s)};
+    if (m.ui.panel.get<ui::panel::WebSearch>())   return WebSearchPaste{std::move(s)};
+    if (m.ui.panel.get<ui::panel::PluginEdit>())  return PluginEditPaste{std::move(s)};
+    if (m.ui.panel.get<ui::panel::Appearance>())  return AppearancePaste{std::move(s)};
+    if (m.ui.panel.get<ui::panel::SandboxList>()) return SandboxListPaste{std::move(s)};
+    if (m.ui.panel.get<ui::panel::Sandbox>())     return SandboxPaste{std::move(s)};
     if (filter_open) return PanelFilterPaste{std::move(s)};
     return ComposerPaste{std::move(s)};
 }

@@ -147,6 +147,7 @@ std::optional<Action> translate(bool editing, bool choosing, const KeyEvent& ev)
 Applied apply(Form& f, Action a) {
     Applied out;
     Field* row = f.focused();
+    const int row_at = f.cursor;
 
     // End the current edit session (if any) and record commit-on-exit:
     // leaving a field whose value changed IS the save signal. One helper so
@@ -155,7 +156,11 @@ Applied apply(Form& f, Action a) {
     auto leave_edit = [&] {
         if (!f.editing()) return;
         (void)escape(f);
-        if (f.edit_dirty) { out.left_field = true; f.edit_dirty = false; }
+        if (f.edit_dirty) {
+            out.left_field = true;
+            out.settled = row_at;
+            f.edit_dirty = false;
+        }
     };
 
     switch (a.intent) {
@@ -336,6 +341,8 @@ Applied apply(Form& f, Action a) {
     }
 
     if (out.changed) f.dirty = true;
+    // An in-place change settles at once; a typed one settles on leave_edit.
+    if (out.changed && !f.editing() && out.settled < 0) out.settled = row_at;
     return out;
 }
 

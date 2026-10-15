@@ -290,8 +290,7 @@ Cmd web_search_update(Model& m, msg::WebSearchMsg wm) {
                 return Cmd::none();
             }
 
-            const bool settled = applied.left_field
-                              || (applied.changed && !o->form.editing());
+            const bool settled = applied.settled >= 0;
             // Mid-edit keystrokes (Insert, Backspace, Delete, caret moves)
             // report `changed` while the field is still EDITING. They must
             // return here and leave the form alone: rebuilding would reset

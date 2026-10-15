@@ -273,8 +273,11 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             if (!f) return Cmd::none();
 
             const auto* before = f->form.focused();
-            const bool on_backend = before && before->id == rs::kFieldBackend;
-            const bool on_mode    = before && before->id == rs::kFieldMode;
+            const std::string before_id = before ? before->id : std::string{};
+            const bool on_backend = before_id == rs::kFieldBackend;
+            const bool on_mode    = before_id == rs::kFieldMode;
+            const auto* def       = settings::registry::find(before_id);
+            const bool on_pipeline = def && def->owner() == settings::registry::Owner::Rag;
 
             const auto applied = form::keys::apply(f->form, e.action);
 
@@ -289,7 +292,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
                         o->active = o->cursor;
                         mode_save = commit_mode(m, o->cursor);
                     }
-                } else {
+                } else if (!on_pipeline) {
                     invalidate_probe(*f);
                     if (on_backend) {
                         auto* o = m.ui.panel.get<pn::Rag>();
@@ -306,11 +309,22 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
                 return Cmd::batch(
                     std::move(mode_save),
                     Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedTest{}}));
-            // Leaving an edited field IS the save (commit-on-exit — the
-            // form-layer contract; there is no ^S). RagEmbedSave validates
-            // first, so a bad half-config surfaces as the probe's Failed
-            // note rather than a write.
-            if (applied.left_field)
+            // A value settles when an in-place change lands (toggle, ←/→,
+            // dropdown) or a typed edit ends; that is the save.
+            const bool settled = applied.settled >= 0;
+            if (settled && on_pipeline) {
+                // Retrieval knobs don't depend on the embedder, so they save
+                // on their own and never wait for an embedder that validates.
+                rs::apply_form_to_settings(f->form, m.d.persisted);
+                m.d.persisted.rag.configured = true;
+                const auto rag = m.d.persisted.rag;   // persist_settings may rewrite it
+                auto save = persist_settings(m);
+                return Cmd::batch(std::move(mode_save), std::move(save),
+                                  cmd::apply_rag_settings(rag));
+            }
+            // Embedder rows: RagEmbedSave validates first, so a half-typed
+            // config surfaces as the probe's Failed note rather than a write.
+            if (settled && !on_mode)
                 return Cmd::batch(
                     std::move(mode_save),
                     Cmd::after(std::chrono::milliseconds{0}, Msg{RagEmbedSave{}}));
@@ -326,7 +340,7 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             if (!f) return Cmd::none();
             // SSOT guard + dirty live in paste_into; only the pane-specific
             // consequence (a changed field invalidates the probe) stays here.
-            if (form::paste_into(f->form, e.text)) {
+            if (form::paste_into_focused(f->form, e.text)) {
                 invalidate_probe(*f);
                 refresh_status(*f);
             }

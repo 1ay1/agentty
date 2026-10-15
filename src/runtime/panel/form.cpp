@@ -170,14 +170,19 @@ std::size_t secret_filled(const field::Secret& s) noexcept {
     return char_count(s.value);
 }
 
-std::size_t caret_chars(const FieldValue& v, bool editing) noexcept {
+std::size_t caret_offset(const FieldValue& v, bool editing) noexcept {
     if (!editing) return std::string::npos;
     return std::visit([](const auto& f) -> std::size_t {
         using T = std::decay_t<decltype(f)>;
+        // A BYTE offset: maya splices the caret with substr on the value.
         if constexpr (std::is_same_v<T, field::Text>
-                   || std::is_same_v<T, field::Secret>
                    || std::is_same_v<T, field::Path>)
+            return std::min(f.cursor, f.value.size());
+        // Secret draws dots, never the value; any non-npos means "editing".
+        else if constexpr (std::is_same_v<T, field::Secret>)
             return chars_before(f.value, f.cursor);
+        else if constexpr (std::is_same_v<T, field::Number>)
+            return std::to_string(f.value).size();   // digits append at the end
         else
             return std::string::npos;
     }, v);

@@ -739,6 +739,7 @@ struct PluginEditPaste { std::string text; };
 struct OpenAppearance {};
 struct CloseAppearance {};
 struct AppearanceKey { form::keys::Action action; };
+struct AppearancePaste { std::string text; };
 // The theme browser, floating over the pane. Its own messages because it is
 // a real picker (57 schemes and growing, fuzzy-searched) rather than a
 // dropdown — see form.hpp's Pick-vs-Choice rule.
@@ -762,6 +763,7 @@ struct AppearanceThemeCancel {};      // Esc: restore the theme we came in on
 struct OpenSandbox {};
 struct CloseSandbox {};
 struct SandboxKey { form::keys::Action action; };
+struct SandboxPaste { std::string text; };
 // Recompile the preview from the current form. The reducer raises this after
 // any edit, so the wall report can never describe a config the rows no
 // longer say.
@@ -783,6 +785,7 @@ struct SandboxSave {};
 // commits, so Esc is a true cancel.
 struct SandboxEditList { std::string row_id; };   // open the editor for a row
 struct SandboxListKey  { form::keys::Action action; };
+struct SandboxListPaste { std::string text; };
 struct SandboxListClose {};                       // commit back into the row
 
 // ── In-app login modal ───────────────────────────────────────────────────
@@ -1435,15 +1438,15 @@ using PluginEditMsg = std::variant<
 // ── Appearance (theme / density / motion) ──────────────────────
 // ── Appearance (theme / density / motion) ─────────────
 using AppearanceMsg = std::variant<
-    OpenAppearance, CloseAppearance, AppearanceKey, AppearancePickTheme,
+    OpenAppearance, CloseAppearance, AppearanceKey, AppearancePaste, AppearancePickTheme,
     AppearanceThemeMove, AppearanceThemeQuery, AppearanceThemeCommit,
     AppearanceThemeCancel>;
 
 // ── Sandbox (filesystem / network / syscalls / limits) ─────
 using SandboxMsg = std::variant<
-    OpenSandbox, CloseSandbox, SandboxKey, SandboxRefreshPreview,
+    OpenSandbox, CloseSandbox, SandboxKey, SandboxPaste, SandboxRefreshPreview,
     SandboxSave,
-    SandboxEditList, SandboxListKey, SandboxListClose>;
+    SandboxEditList, SandboxListKey, SandboxListPaste, SandboxListClose>;
 
 using MetaMsg = std::variant<
     CompactContext, CycleProfile, ToggleChangesStrip,

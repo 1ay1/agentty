@@ -52,9 +52,6 @@
 #include "agentty/runtime/panel/sandbox.hpp"
 #include "agentty/runtime/panel/form_keys.hpp"
 #include "agentty/tool/util/sandbox_claybin.hpp"
-#if defined(__linux__)
-#include <claybin/plan/compile.hpp>   // probe_host() -> HostCapabilities
-#endif
 
 namespace pn = agentty::ui::panel;
 
@@ -90,7 +87,7 @@ namespace sb = agentty::tools::util::sandbox;
 
 [[nodiscard]] std::uint32_t landlock_abi_here() {
 #if defined(__linux__)
-    return ::clay::probe_host().landlock_abi;   // 0 = absent
+    return sb::claybin_backend::landlock_abi();   // 0 = absent, probed once
 #else
     return 0;
 #endif
@@ -237,18 +234,6 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             if (applied.close)
                 return sandbox_update(m, msg::SandboxMsg{CloseSandbox{}});
 
-            // Changing the ENGINE changes which rows can mean anything, so
-            // it reprojects rather than just repricing: the locks and their
-            // reasons are computed at build time. Without this you could
-            // switch to claybin and the syscall row would still say "bwrap
-            // cannot express this" until the pane was reopened.
-            if (applied.changed && row_id == pn::kSbBackend) {
-                reproject(*o, pn::read_sandbox_form(o->pane.form, o->pane.working));
-                // ...and PERSIST, same as every other row. See the posture
-                // branch below for why returning early here was a bug.
-                return sandbox_update(m, msg::SandboxMsg{SandboxSave{}});
-            }
-
             // The POSTURE row is the only one that writes OTHER rows, and it is
             // applied HERE rather than in readback because it is an ACTION, not
             // a value.
@@ -313,26 +298,13 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             // half-typed value never rewrites config). Narrower than this and
             // the wall report describes a config the rows no longer say --
             // which is the whole thing this pane exists to prevent.
-            if (applied.changed || applied.left_field) {
-                reprice(*o);
-                // AUTOSAVE.
-                //
-                // There is no ^S any more, and dropping it does not weaken the
-                // seal. Two different things were being conflated:
-                //
-                //   persisting   writing the policy to disk
-                //   applying     installing it as the live boundary
-                //
-                // Only the SECOND is dangerous mid-session (a boundary that
-                // moves under a running command), and it still never happens --
-                // set_config() stays sealed and this path never calls it. The
-                // first is just a file write, and making the user remember a
-                // chord for it only ever produced lost edits: every other pane
-                // in agentty persists as you go.
-                //
-                // The footer already says the policy applies on restart, so
-                // what the user sees is unchanged except that it is now true
-                // without a keystroke.
+            // Reprice on every change so the wall report tracks the rows,
+            // but save (which reprojects the form) only once a value settles:
+            // saving mid-edit rebuilt the form under the text being typed.
+            if (applied.changed || applied.left_field) reprice(*o);
+            if (applied.settled >= 0) {
+                // Autosave. This persists the policy for the next launch; it
+                // never installs it live (set_config stays sealed).
                 return sandbox_update(m, msg::SandboxMsg{SandboxSave{}});
             }
             return Cmd::none();
@@ -433,6 +405,17 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
             return Cmd::none();
         },
 
+        [&](SandboxPaste& e) -> Cmd {
+            // Lands in the focused row like typing; commits when the edit ends.
+            if (auto* o = m.ui.panel.get<pn::Sandbox>())
+                if (form::paste_into_focused(o->pane.form, e.text)) reprice(*o);
+            return Cmd::none();
+        },
+        [&](SandboxListPaste& e) -> Cmd {
+            if (auto* ed = m.ui.panel.get<pn::SandboxList>())
+                (void)form::paste_into_focused(ed->pane.form, e.text);
+            return Cmd::none();
+        },
         [&](SandboxListKey& e) -> Cmd {
             auto* ed = m.ui.panel.get<pn::SandboxList>();
             if (!ed) return Cmd::none();

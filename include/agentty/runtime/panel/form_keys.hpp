@@ -103,6 +103,10 @@ struct Applied {
     // save key. Exit without a change stays false, so cursoring through
     // fields never rewrites config (obligation #4 in PANELS.md).
     bool left_field = false;
+    // The row whose value settled this keystroke, or -1. Set for an in-place
+    // change and for the end of a typed edit. Arrows move the cursor in the
+    // same keystroke, so panes commit THIS row, never form.focused().
+    int settled = -1;
 };
 Applied apply(Form& f, Action a);
 

@@ -656,6 +656,38 @@ inline void add_row(form::Builder& b, const C& cfg, const EnvSnapshot& env, cons
 
 // ── Rows ───────────────────────────────────────────────────
 //
+// The inverse of add_row: write a form row's value back into `cfg` through
+// the table. Every pane commits through this, so a field kind is converted to
+// a setting string in exactly one place. A locked row (env override) is
+// skipped so a shell export is never overwritten.
+template <class C>
+inline bool read_row(C& cfg, const SettingDef& d, const form::Field& row) {
+    if (row.locked) return false;
+    return std::visit([&](const auto& v) -> bool {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, form::field::Toggle>)
+            return set(cfg, d, v.on ? "true" : "false");
+        else if constexpr (std::is_same_v<T, form::field::Number>
+                        || std::is_same_v<T, form::field::Slider>)
+            return set(cfg, d, std::to_string(v.value));
+        else if constexpr (std::is_same_v<T, form::field::Choice>)
+            return set(cfg, d, std::string{v.id()});
+        else if constexpr (std::is_same_v<T, form::field::Text>)
+            return set(cfg, d, v.value);
+        else
+            return false;
+    }, row.value);
+}
+
+// Write every row of `owner` that the form holds back into `cfg`.
+template <class C>
+inline void read_rows(C& cfg, const form::Form& f, Owner owner) {
+    for (const auto& d : kSettings) {
+        if (d.owner() != owner) continue;
+        if (const auto* row = f.find(d.id)) (void)read_row(cfg, d, *row);
+    }
+}
+
 // Project this table's rows onto a form. THE way a pane renders settings —
 // label, help, control kind, range, group header, env lock and provenance all
 // come from the row, so a pane contributes only WHICH rows it owns.

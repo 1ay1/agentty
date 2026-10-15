@@ -295,6 +295,22 @@ std::string resolve_on_path(const std::string& name) {
 
 }  // namespace
 
+// The host's sandbox capabilities. Probed once (it forks), then reused: they
+// don't change while agentty runs, and the Sandbox pane asks on every key.
+#if defined(__APPLE__)
+const ::clay::macos::HostCapabilities& host() {
+    static const ::clay::macos::HostCapabilities h = ::clay::macos::probe_host();
+    return h;
+}
+std::uint32_t landlock_abi() { return 0; }
+#else
+const ::clay::HostCapabilities& host() {
+    static const ::clay::HostCapabilities h = ::clay::probe_host();
+    return h;
+}
+std::uint32_t landlock_abi() { return host().landlock_abi; }
+#endif
+
 #if defined(__APPLE__)
 
 // ─────────────────────────── macOS ────────────────────────────────────
@@ -313,13 +329,13 @@ bool available() {
     // In-process probing is not an option here. A seatbelt profile is
     // IRREVERSIBLE -- once entered, a process cannot leave it -- so a probe
     // that applied one would confine agentty itself.
-    return ::clay::macos::probe_host().seatbelt;
+    return host().seatbelt;
 }
 
 Report describe(const Posture& p) {
     Report r;
     auto sealed = build_policy(p);
-    auto compiled = ::clay::macos::compile(sealed, ::clay::macos::probe_host());
+    auto compiled = ::clay::macos::compile(sealed, host());
     if (!compiled) {
         r.ok = false;
         r.detail = std::string{compiled.error().mechanism};
@@ -351,6 +367,7 @@ SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdo
     auto sealed = build_policy(p);
     ::clay::macos::Options opts;
     opts.profile_name = "agentty";
+    // Live probe at spawn: what this command gets must match the kernel now.
     auto compiled = ::clay::macos::compile(sealed, ::clay::macos::probe_host(), opts);
     if (!compiled) {
         out.start_error =
@@ -392,7 +409,7 @@ std::string compile_profile(const Posture& p, std::string& error) {
     auto sealed = build_policy(p);
     ::clay::macos::Options opts;
     opts.profile_name = "agentty";
-    auto compiled = ::clay::macos::compile(sealed, ::clay::macos::probe_host(), opts);
+    auto compiled = ::clay::macos::compile(sealed, host(), opts);
     if (!compiled) {
         error = "claybin: compile failed: " + std::string{compiled.error().mechanism};
         return {};
@@ -414,7 +431,7 @@ bool available() {
     // claybin's probe_host() forks and attempts the uid_map write rather than
     // reading sysctls -- so this is a faithful predictor of spawn(), not a
     // guess about the kernel's feature list.
-    auto host = probe_host();
+    const auto& host = claybin_backend::host();
 
     // NOT gated on user namespaces, and that is the whole reason claybin is
     // worth having as a second backend.
@@ -453,7 +470,7 @@ bool available() {
 Report describe(const Posture& p) {
     Report r;
     auto sealed = build_policy(p);
-    auto compiled = compile(sealed, probe_host());
+    auto compiled = compile(sealed, host());
     if (!compiled) {
         r.ok = false;
         r.detail = std::string{compiled.error().mechanism};
@@ -488,6 +505,7 @@ SpawnResult spawn_argv(const Posture& p, const std::vector<std::string>& argv_in
     }
 
     auto sealed = build_policy(p);
+    // Live probe at spawn: what this command gets must match the kernel now.
     auto compiled = compile(sealed, probe_host());
     if (!compiled) {
         out.start_error = "claybin: compile failed: " + std::string{compiled.error().mechanism};
