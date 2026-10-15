@@ -479,7 +479,9 @@ static void run_block_body(const maya::unlocked& cap, maya::Sink<Msg> out, std::
 
     // What the heartbeat shares with this thread: one stop flag. Sync
     // (const stop_source), held by a co_owned so neither side can free it
-    // under the other.
+    // under the other. request_stop() is non-const in the standard (only
+    // libstdc++ marks it const), so it goes through a copy: copies share the
+    // stop state, and copying a const source is allowed from any thread.
     struct Beat { const std::stop_source done; };
     auto beat_state = maya::co_owned<Beat>::make();
 
@@ -489,7 +491,7 @@ static void run_block_body(const maya::unlocked& cap, maya::Sink<Msg> out, std::
         auto beat = n.spawn([](std::stop_token st, maya::co_owned<Beat> b, std::string label,
                                bool con) {
             if (!con) return;
-            const std::stop_callback on_stop(st, [&b] { b->done.request_stop(); });
+            const std::stop_callback on_stop(st, [&b] { std::stop_source(b->done).request_stop(); });
             static constexpr const char* kSpin[] =
                 {"⣷","⣯","⣟","⡿","⣾","⣽","⣻","⣷"};
             int spin = 0;
@@ -510,7 +512,7 @@ static void run_block_body(const maya::unlocked& cap, maya::Sink<Msg> out, std::
         // handle joins it.
         struct StopBeat {
             const Beat& b;
-            ~StopBeat() { b.done.request_stop(); }
+            ~StopBeat() { std::stop_source(b.done).request_stop(); }
         } stop_beat{*beat_state};
 
         const auto start = std::chrono::steady_clock::now();
@@ -520,7 +522,7 @@ static void run_block_body(const maya::unlocked& cap, maya::Sink<Msg> out, std::
             std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - start).count());
 
-        beat_state->done.request_stop();
+        std::stop_source(beat_state->done).request_stop();
         beat.join();          // explicit, so a throwing helper surfaces here
         return o;
     });

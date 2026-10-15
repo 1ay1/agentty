@@ -91,7 +91,9 @@ bool write_file(const std::string& path, const std::string& body) {
 
 // What the run and its watcher share: stop flags, the deadline result and
 // the signal that came in. Every field is Sync (const or atomic), so both
-// threads use it at once without a lock.
+// threads use it at once without a lock. request_stop() is non-const in the
+// standard (only libstdc++ marks it const; MSVC rejects the call), so the
+// sources are stopped through a copy, which shares their stop state.
 struct Watch {
     const std::stop_source       cancel;      // stop the agent run
     const std::stop_source       done;        // stop the watcher
@@ -127,13 +129,13 @@ void watch_signals(std::stop_token, maya::co_owned<Watch> w,
         if (!reactor->wait(wait)) break;
         if (deadline && !w->cancel.stop_requested() && clock::now() >= *deadline) {
             w->timed_out = true;
-            w->cancel.request_stop();
+            std::stop_source(w->cancel).request_stop();
         }
         for (auto s : sigs->take()) {
             if (++seen == 1) {
                 w->got = static_cast<int>(s);
                 std::fputs("\nagentty run: stopping (again to force)\n", stderr);
-                w->cancel.request_stop();
+                std::stop_source(w->cancel).request_stop();
             } else {
                 std::fputs("agentty run: forced exit\n", stderr);
                 std::fflush(stderr);
@@ -161,7 +163,7 @@ tools::OneShotResult run_with_signals(const maya::unlocked& cap, const Options& 
         if (w->failed) return tools::run_one_shot(cap, to_one_shot(o, {}));
         struct Stop {   // the watcher stops however the run ends
             const Watch& w;
-            ~Stop() { w.done.request_stop(); }
+            ~Stop() { std::stop_source(w.done).request_stop(); }
         } stop{*w};
         return tools::run_one_shot(cap, to_one_shot(o, w->cancel.get_token()));
     });
