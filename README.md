@@ -11,6 +11,7 @@
   <a href="https://github.com/1ay1/agentty/releases"><img src="https://img.shields.io/github/downloads/1ay1/agentty/total?style=flat-square&color=brightgreen" alt="Downloads" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" /></a>
   <a href="https://discord.gg/qhb9AZ8f3c"><img src="https://img.shields.io/badge/Discord-join%20chat-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" /></a>
+  <a href="https://web.libera.chat/#agentty"><img src="https://img.shields.io/badge/IRC-%23agentty-555555?style=flat-square&logo=libera.chat&logoColor=white" alt="IRC" /></a>
 </p>
 
 <p align="center">
@@ -466,6 +467,8 @@ to the release. `--dry-run` previews without writing anything.
 ## Community
 
 Join the [**Discord**](https://discord.gg/qhb9AZ8f3c) to ask questions, share sessions, and get help. The server has an AI helper bot that answers agentty questions using the real agent — `@mention` it, DM it, or use `/ask`.
+
+Prefer IRC? Come hang out in [**#agentty on Libera.Chat**](https://web.libera.chat/#agentty) (`irc.libera.chat`, port 6697, TLS). Matrix users can join `#agentty:libera.chat`.
 
 ## License
 

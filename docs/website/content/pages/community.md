@@ -8,9 +8,12 @@ agentty is built in the open. Whether you write C++, file good bug reports, or h
 
 **Join the Discord** to ask questions, share sessions, and get help — the server has an **AI helper bot** that answers agentty questions using the real agent. [discord.gg/agentty →](https://discord.gg/qhb9AZ8f3c)
 
+Prefer IRC? Join **#agentty on Libera.Chat** (`irc.libera.chat`, port 6697, TLS) or use the [web client](https://web.libera.chat/#agentty). Matrix users can join `#agentty:libera.chat`.
+
 ## Ways to get involved
 
 - **Join the [Discord](https://discord.gg/qhb9AZ8f3c)** — chat, get help, and ask the AI helper bot anything.
+- **Join [#agentty on Libera.Chat](https://web.libera.chat/#agentty)** — the IRC channel.
 - **Star & watch** the [repository](https://github.com/1ay1/agentty) to follow releases.
 - **Report bugs** on the [issue tracker](https://github.com/1ay1/agentty/issues) — include `$TERM`, emulator, version, and a screenshot.
 - **Open a PR** — read the [contributing guide](/contributing) first.
@@ -27,6 +30,7 @@ agentty is built in the open. Whether you write C++, file good bug reports, or h
 ## Project links
 
 - [Discord](https://discord.gg/qhb9AZ8f3c) — the community chat, with an AI helper bot.
+- [#agentty on Libera.Chat](https://web.libera.chat/#agentty) — the IRC channel.
 - [Source code](https://github.com/1ay1/agentty) — the agentty repository.
 - [Releases](https://github.com/1ay1/agentty/releases/latest) — prebuilt binaries and packages.
 - [maya](https://github.com/1ay1/maya) — the sister TUI engine agentty renders through.
