@@ -134,10 +134,10 @@ Element settings_list_panel(const Model& m) {
         const std::string shown = maya::panel::detail::with_caret(
             o->input, static_cast<std::size_t>(std::max(0, o->cursor)),
             panel_detail::panel_terminal_cols() - 12, &at);
-        // Same caret as every panel field: a blinking block hardware cursor
-        // on the █ cell, in the edit colour.
-        const auto caret = Style{}.with_fg(highlight).with_caret_anchor()
-                                  .with_caret_shape(1);
+        // Same caret as every panel field: the terminal's blinking block
+        // cursor on a blank cell, coloured via OSC 12.
+        const auto caret = Style{}.with_fg(highlight).with_conceal()
+                                  .with_caret_anchor().with_caret_shape(1);
         cfg.header.push_back(h(
             text("  \xe2\x9c\x8e  ", fg_of(highlight)),         // ✎ pencil
             text(shown.substr(0, at), fg_bold(fg)),
