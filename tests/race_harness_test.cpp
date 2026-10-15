@@ -23,6 +23,7 @@
 // republished — rather than being generic smoke tests.
 
 #include "agentty/util/snapshot.hpp"
+#include "agentty/domain/catalog.hpp"   // the real catalog registries (header-only)
 #include "agtest_cap.hpp"
 #include "agentty/util/teardown.hpp"
 
@@ -335,6 +336,63 @@ void connection_pool_race() {
 
 } // namespace
 
+// ── 6. Catalog: bulk commits racing readers and single setters ────────────
+//
+// The REAL registries (catalog.hpp is header-only). A models.dev-sized batch
+// commits while readers resolve on the render path and a live-catalog thread
+// writes single facts. Every published fact must be readable whole, the
+// batch must land all-or-nothing for a reader, and no write may be lost.
+namespace {
+void catalog_batch_race() {
+    using namespace agentty;
+    std::atomic<bool> stop{false};
+    std::atomic<long> reads{0}, torn{0};
+    std::barrier start(kThreads + 2);
+
+    std::thread batcher([&] {
+        start.arrive_and_wait();
+        for (int round = 0; round < 20; ++round) {
+            CatalogBatch b;
+            for (int i = 0; i < 2000; ++i) {
+                const std::string id = "racebatch/m" + std::to_string(i);
+                b.set_reasoning(id, true);
+                b.set_context_window(id, 1000 + i);
+            }
+            // A sentinel in the same batch: if a reader sees it, it must
+            // also see every other fact of the batch.
+            b.set_reasoning("racebatch/sentinel", true);
+            b.commit();
+        }
+    });
+    std::thread single([&] {
+        start.arrive_and_wait();
+        for (int i = 0; i < kIters; ++i)
+            set_catalog_reasoning("racesingle/m" + std::to_string(i % 50), (i & 1) != 0);
+    });
+    std::vector<std::thread> readers;
+    for (int t = 0; t < kThreads; ++t)
+        readers.emplace_back([&] {
+            start.arrive_and_wait();
+            while (!stop.load(std::memory_order_relaxed)) {
+                if (catalog_reasoning_for("sentinel", "racebatch") == 1
+                    && catalog_context_window_for("m1999", "racebatch") != 2999)
+                    torn.fetch_add(1);
+                (void)catalog_reasoning_for("m7", "racesingle");
+                reads.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    batcher.join();
+    single.join();
+    stop = true;
+    for (auto& r : readers) r.join();
+
+    check(torn.load() == 0, "a reader saw half a catalog batch");
+    check(catalog_context_window_for("m0", "racebatch") == 1000, "batch fact lost");
+    check(catalog_reasoning_for("m49", "racesingle") != -1, "single-setter fact lost");
+    std::printf("  %ld reads, %ld torn\n", reads.load(), torn.load());
+}
+} // namespace
+
 int main() {
     std::printf("=== race_harness_test (run me under TSan) ===\n");
 
@@ -352,6 +410,9 @@ int main() {
 
     std::printf("--- connection pool acquire/release race ---\n");
     connection_pool_race();
+
+    std::printf("--- catalog batch commit vs readers and single setters ---\n");
+    catalog_batch_race();
 
     if (failures == 0) {
         std::printf("PASS (no races, no torn reads)\n");

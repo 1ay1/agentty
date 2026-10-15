@@ -1097,10 +1097,12 @@ inline std::atomic<std::uint64_t>& counter() {
 }
 } // namespace caps_epoch_detail
 [[nodiscard]] inline std::uint64_t caps_epoch() noexcept {
-    return caps_epoch_detail::counter().load(std::memory_order_relaxed);
+    // acquire pairs with the release bump: a reader that sees a new epoch
+    // also sees every registry swap that happened before it.
+    return caps_epoch_detail::counter().load(std::memory_order_acquire);
 }
 inline void bump_caps_epoch() noexcept {
-    caps_epoch_detail::counter().fetch_add(1, std::memory_order_relaxed);
+    caps_epoch_detail::counter().fetch_add(1, std::memory_order_release);
 }
 
 
@@ -1468,13 +1470,20 @@ struct CatalogBatch {
     }
 
     // Publish everything: one copy + one atomic swap per registry.
+    //
+    // The registries are separate snapshots, so a reader can observe some of
+    // a batch's registries before others. Publish the facts a reader looks
+    // up AFTER deciding (windows, effort sets, endpoint windows) first, and
+    // reasoning — what resolved_caps checks to decide — last, so a reader
+    // that sees a new model as reasoning also sees the rest of its facts.
+    // caps_epoch moves last of all: a cache keyed on it rebuilds only once
+    // everything is in place.
     void commit() {
         const bool any = !reasoning.empty() || !effort.empty()
                       || !context.empty() || !endpoints.empty();
         if (!any) return;
-        catalog_reasoning_detail::reg().commit(std::move(reasoning));
-        catalog_effort_detail::reg().commit(std::move(effort));
         catalog_context_detail::reg().commit(std::move(context));
+        catalog_effort_detail::reg().commit(std::move(effort));
         if (!endpoints.empty())
             (void)catalog_endpoint_detail::hosts().update(
                 [](const catalog_endpoint_detail::Hosts& hs, const auto& eps) {
@@ -1482,8 +1491,8 @@ struct CatalogBatch {
                     for (const auto& [h, mid, e] : eps) out[h][mid] = e;
                     return out;
                 }, std::move(endpoints));
-        bump_caps_epoch();   // after the swap, so a reader that sees the new
-                             // epoch also sees the new facts
+        catalog_reasoning_detail::reg().commit(std::move(reasoning));
+        bump_caps_epoch();
     }
 };
 

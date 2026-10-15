@@ -161,14 +161,16 @@ std::shared_ptr<const Snapshot> refresh_wire_cache() {
     }();
     if (claim == Claim::Busy) return native_only();
     if (claim == Claim::Mine) {
-        std::vector<ToolDef> ext;
+        // Back to Idle on ANY throw between the claim and Connected (the
+        // connect or the publish), or no later call would ever connect.
         try {
-            ext = connect_initial_mcp();
+            auto ext = connect_initial_mcp();
+            initial_mcp().publish(
+                std::make_shared<const std::vector<ToolDef>>(std::move(ext)));
         } catch (...) {
             connect_phase().store(Phase::Idle);
             throw;
         }
-        initial_mcp().publish(std::make_shared<const std::vector<ToolDef>>(std::move(ext)));
         connect_phase().store(Phase::Connected);
     }
 

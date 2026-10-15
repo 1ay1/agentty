@@ -550,6 +550,8 @@ target_include_directories(race_harness_test PRIVATE include)
 # logx.cpp uses maya::guarded for its rotation lock: headers only.
 target_include_directories(race_harness_test PRIVATE
     $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
+# The catalog case includes the real (header-only) catalog.hpp.
+target_link_libraries(race_harness_test PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME race_harness_test COMMAND race_harness_test)
 set_tests_properties(race_harness_test PROPERTIES TIMEOUT 120 LABELS "sanitizer;race")
 
