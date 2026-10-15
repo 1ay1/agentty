@@ -5,10 +5,12 @@
 // until the tool_use block closes. Two utilities cover the common needs:
 //
 //   close_partial_json(raw)
-//     Walks the buffer and emits a string nlohmann::json can parse. Closes
-//     open strings, fills `"key":` with `null`, strips trailing `,`, and
-//     closes unbalanced `{` / `[`. C++ equivalent of Zed's
-//     `partial-json-fixer` crate.
+//     Closes any prefix of a JSON value into JSON nlohmann::json can parse.
+//     Complete members are kept; the one being written when the stream cut
+//     (a half key, a key with no value yet, a half literal or number) is
+//     dropped, except a value string cut mid-text, which keeps its text
+//     (minus a half escape or half UTF-8 character) so a live preview shows
+//     it. Fuzzed over every prefix in tests/partial_json_fuzz_test.cpp.
 //
 //   sniff_string(raw, key)
 //     Hand-walks the buffer for `"key": "<value>"`. Returns the decoded
