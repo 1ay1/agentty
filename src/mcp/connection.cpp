@@ -459,7 +459,11 @@ m::cap::Result Connection::execute_impl(const maya::unlocked& cap, const m::cap:
             auto c = l->peer->call_raw(cap, m::to_server::CallTool::name, params, o);
             if (!c.outcome) {
                 if (req.stop.stop_requested()) return m::cap::Result::error("cancelled");
-                return m::cap::Result::error(std::string{"mcp call failed: "} + c.outcome.error().what());
+                // No reply in time: the server is wedged or still busy, and every
+                // later call would queue behind it. Start fresh on the next call.
+                l->poisoned.store(true, std::memory_order_release);
+                return m::cap::Result::error(std::string{"mcp call failed: "} + c.outcome.error().what() +
+                                             " (the server was restarted; open documents must be reopened)");
             }
             auto retry = m::mrtr_retry(params, *c.outcome, mrtr);
             if (!retry) return m::cap::result_from_call(m::from_json<m::CallToolResult>(*c.outcome));
