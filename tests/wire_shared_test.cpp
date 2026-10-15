@@ -157,15 +157,26 @@ TEST_CASE("usage extractors") {
     using nlohmann::json;
     namespace usage = agentty::provider::usage;
 
-    // OpenAI /v1/chat/completions shape, incl. cached-token detail.
+    // OpenAI /v1/chat/completions shape. cached_tokens is PART of
+    // prompt_tokens, so it moves out of input: input + cache_read is still
+    // the 100-token prompt, not 164 (#96).
     {
         auto u = json::parse(R"({"prompt_tokens":100,"completion_tokens":40,
             "prompt_tokens_details":{"cached_tokens":64}})");
         auto su = usage::from_openai(u);
         CHECK(su.has_value());
-        CHECK(su->input_tokens == 100);
+        CHECK(su->input_tokens == 36);
         CHECK(su->output_tokens == 40);
         CHECK(su->cache_read_input_tokens == 64);
+        CHECK(su->input_tokens + su->cache_read_input_tokens == 100);
+    }
+    // A server that reports more cached than prompt is clamped, never negative.
+    {
+        auto su = usage::from_openai(json::parse(R"({"prompt_tokens":10,
+            "prompt_tokens_details":{"cached_tokens":50}})"));
+        CHECK(su.has_value());
+        CHECK(su->input_tokens == 0);
+        CHECK(su->cache_read_input_tokens == 10);
     }
     // reasoning_tokens under completion_tokens_details (o-series / gpt-5 /
     // compat reasoning). Surfaced separately; already inside completion_tokens.
@@ -194,16 +205,25 @@ TEST_CASE("usage extractors") {
     // Non-object → nullopt, no throw.
     CHECK(!usage::from_openai(json("not-an-object")).has_value());
 
-    // Responses / Codex shape: input_tokens / output_tokens +
-    // input_tokens_details.cached_tokens.
+    // Responses / Codex shape: input_tokens is the WHOLE prompt here too;
+    // cached and written tokens are parts of it.
     {
         auto u = json::parse(R"({"input_tokens":200,"output_tokens":50,
             "input_tokens_details":{"cached_tokens":128}})");
         auto su = usage::from_responses(u);
         CHECK(su.has_value());
-        CHECK(su->input_tokens == 200);
+        CHECK(su->input_tokens == 72);
         CHECK(su->output_tokens == 50);
         CHECK(su->cache_read_input_tokens == 128);
+    }
+    {
+        auto u = json::parse(R"({"input_tokens":200,
+            "input_tokens_details":{"cached_tokens":120,"cache_write_tokens":30}})");
+        auto su = usage::from_responses(u);
+        CHECK(su.has_value());
+        CHECK(su->input_tokens == 50);
+        CHECK(su->cache_read_input_tokens == 120);
+        CHECK(su->cache_creation_input_tokens == 30);
     }
     // reasoning_tokens under output_tokens_details (Responses/Codex).
     {

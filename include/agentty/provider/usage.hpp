@@ -24,6 +24,7 @@
 // direct `.value()` read with no translation, so a helper would only add
 // indirection.
 
+#include <algorithm>
 #include <optional>
 
 #include <nlohmann/json.hpp>
@@ -44,19 +45,24 @@ using json = nlohmann::json;
 // OpenAI /v1/chat/completions `usage` object:
 //   {"prompt_tokens":N, "completion_tokens":N,
 //    "prompt_tokens_details":{"cached_tokens":N}}
-// prompt_tokens_details.cached_tokens ≈ Anthropic's cache_read — surface it so
-// the context gauge reflects cache hits. Used by the whole OpenAI-compat
-// family (OpenAI/Groq/OpenRouter/Together/Cerebras/llama.cpp).
+// prompt_tokens INCLUDES cached_tokens (OpenAI, vLLM, Strata, Codex all agree:
+// cached is a subset). StreamUsage follows Anthropic, where input_tokens
+// excludes the cache, so the cached part moves out of input here. Adding
+// them back up then gives the real prompt size instead of counting the cache
+// twice (#96).
 [[nodiscard]] inline std::optional<StreamUsage> from_openai(const json& u) {
     if (!u.is_object()) return std::nullopt;
     StreamUsage su;
-    su.input_tokens  = u.value("prompt_tokens", 0);
+    const int prompt = u.value("prompt_tokens", 0);
     su.output_tokens = u.value("completion_tokens", 0);
+    int cached = 0;
     if (u.contains("prompt_tokens_details")
         && u["prompt_tokens_details"].is_object()) {
-        su.cache_read_input_tokens =
-            u["prompt_tokens_details"].value("cached_tokens", 0);
+        cached = u["prompt_tokens_details"].value("cached_tokens", 0);
     }
+    cached = std::clamp(cached, 0, std::max(prompt, 0));
+    su.input_tokens            = prompt - cached;
+    su.cache_read_input_tokens = cached;
     // reasoning_tokens is nested under completion_tokens_details on the Chat
     // wire (o-series / gpt-5 / compat reasoning models). Already counted in
     // completion_tokens — surfaced for display only.
@@ -70,19 +76,27 @@ using json = nlohmann::json;
 
 // OpenAI Responses API `usage` object (ChatGPT/Codex path):
 //   {"input_tokens":N, "output_tokens":N,
-//    "input_tokens_details":{"cached_tokens":N}}
-// Same semantics as the chat shape but the field names match Anthropic's
-// input/output naming; the cached-token detail lives under input_tokens_details.
+//    "input_tokens_details":{"cached_tokens":N, "cache_write_tokens":N}}
+// Named like Anthropic's but counted like OpenAI's: input_tokens is the whole
+// prompt, cached/written tokens are parts of it (codex-rs non_cached_input()).
+// Split them out the same way as from_openai.
 [[nodiscard]] inline std::optional<StreamUsage> from_responses(const json& u) {
     if (!u.is_object()) return std::nullopt;
     StreamUsage su;
-    su.input_tokens  = u.value("input_tokens", 0);
+    const int prompt = u.value("input_tokens", 0);
     su.output_tokens = u.value("output_tokens", 0);
+    int cached = 0, written = 0;
     if (u.contains("input_tokens_details")
         && u["input_tokens_details"].is_object()) {
-        su.cache_read_input_tokens =
-            u["input_tokens_details"].value("cached_tokens", 0);
+        const auto& d = u["input_tokens_details"];
+        cached  = d.value("cached_tokens", 0);
+        written = d.value("cache_write_tokens", 0);
     }
+    cached  = std::clamp(cached, 0, std::max(prompt, 0));
+    written = std::clamp(written, 0, std::max(prompt, 0) - cached);
+    su.input_tokens                = prompt - cached - written;
+    su.cache_read_input_tokens     = cached;
+    su.cache_creation_input_tokens = written;
     // reasoning_tokens is nested under output_tokens_details on the Responses
     // wire. Already counted in output_tokens — surfaced for display only.
     if (u.contains("output_tokens_details")

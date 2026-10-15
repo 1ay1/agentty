@@ -183,7 +183,7 @@ TEST_CASE("sse text and usage") {
         if (auto* f = leaf<StreamFinished>(m)) { finished = true; stop = f->stop_reason; }
         if (auto* u = leaf<StreamUsage>(m)) {
             saw_usage = true;
-            CHECK(u->input_tokens == 12);
+            CHECK(u->input_tokens == 4);      // 12-token prompt, 8 of it cached
             CHECK(u->output_tokens == 5);
             CHECK(u->cache_read_input_tokens == 8);
         }
