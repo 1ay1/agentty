@@ -3619,6 +3619,9 @@ std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth, const Endpoint
     }
     if (!resp || resp->status != 200) return result;
 
+    // Capability facts for the whole list go in one batch and are published
+    // once: per-model setters copy the full registry each time.
+    CatalogBatch caps;
     try {
         auto j = json::parse(resp->body);
         if (endpoint.native_api && !fell_back_to_v1) {
@@ -3653,14 +3656,14 @@ std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth, const Endpoint
                 // low|medium|high, so declare exactly that ladder; the
                 // encode side folds minimal/xhigh/max inward to match.
                 if (probe.supports_thinking.value_or(false)) {
-                    set_catalog_reasoning(endpoint.label + "/" + id, true);
-                    set_catalog_effort_set(
+                    caps.set_reasoning(endpoint.label + "/" + id, true);
+                    caps.set_effort_set(
                         endpoint.label + "/" + id,
                         static_cast<std::uint8_t>(
                             effort_bit(Effort::Low) | effort_bit(Effort::Medium)
                             | effort_bit(Effort::High)));
                 } else if (probe.supports_thinking.has_value()) {
-                    set_catalog_reasoning(endpoint.label + "/" + id, false);
+                    caps.set_reasoning(endpoint.label + "/" + id, false);
                 }
                 result.push_back(std::move(info));
             }
@@ -3697,7 +3700,7 @@ std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth, const Endpoint
                     // contract, so never let one host's declaration bleed.
                     const std::string scoped = endpoint.label + "/" + id;
                     if (const auto reasons = dialect::declared_reasoning()(*ci))
-                        set_catalog_reasoning(scoped, *reasons);
+                        caps.set_reasoning(scoped, *reasons);
                 }
                 result.push_back(ModelInfo{
                     .id           = ModelId{id},
@@ -3790,7 +3793,7 @@ std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth, const Endpoint
                         // to id inference, which reads a GGUF path and
                         // guesses — so the effort ladder appeared or vanished
                         // based on what the file happened to be named.
-                        set_catalog_reasoning(scoped, *e);
+                        caps.set_reasoning(scoped, *e);
                     }
                     if (const auto t = pick(probe.tool_calls, probe.tool_calls_wide)) {
                         // Only ever WITHHOLD on an explicit false. Unknown
@@ -3835,6 +3838,7 @@ std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth, const Endpoint
     } catch (...) {
         util::dbglog("openai.list_models.parse", "non-std exception");
     }
+    caps.commit();   // whatever was gathered, published once
 
     return result;
 }

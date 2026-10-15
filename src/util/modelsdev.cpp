@@ -72,7 +72,8 @@ std::uint8_t bit_of(std::string_view v) {
 // inference. (Your requesty-vs-openrouter disagreement on mistral-medium-
 // 3-5 now poisons the bare key, and id inference's effort_high_only
 // correctly yields the {off, high} ladder.)
-void register_model(const std::string& dev_provider,
+void register_model(CatalogBatch& out,
+                    const std::string& dev_provider,
                     const std::string& dev_env0,
                     const std::string& dev_api,
                     const std::string& mid, const json& m) {
@@ -136,40 +137,42 @@ void register_model(const std::string& dev_provider,
         }
     }
 
-    set_catalog_reasoning(scope + "/" + mid, reasoning->get<bool>());
-    if (dev_ctx > 0) set_catalog_context_window(scope + "/" + mid, dev_ctx);
+    const bool reasons = reasoning->get<bool>();
+    out.set_reasoning(scope + "/" + mid, reasons);
+    if (dev_ctx > 0) out.set_context_window(scope + "/" + mid, dev_ctx);
     if (set >= 0)
-        set_catalog_effort_set(scope + "/" + mid,
-                               static_cast<std::uint8_t>(set));
+        out.set_effort_set(scope + "/" + mid, static_cast<std::uint8_t>(set));
     // CUSTOM-HOST seam: index the declaration under the entry's api ORIGIN
     // as well, so a live localhost / custom-host catalog whose URL matches
     // can claim the figure (the provider-scoped key above can never reach a
     // custom host, whose provider id IS its endpoint spec). The provider-
     // scoped write stays the primary channel for presets.
     if (dev_ctx > 0 && !dev_api.empty())
-        merge_endpoint_context_window(dev_api, mid, dev_ctx);
+        out.merge_endpoint_context_window(dev_api, mid, dev_ctx);
     const std::string tail = capkey::norm_tail(mid);
     if (tail != capkey::norm_model(mid)) {
-        set_catalog_reasoning(scope + "/" + tail, reasoning->get<bool>());
-        if (dev_ctx > 0) set_catalog_context_window(scope + "/" + tail, dev_ctx);
+        out.set_reasoning(scope + "/" + tail, reasons);
+        if (dev_ctx > 0) out.set_context_window(scope + "/" + tail, dev_ctx);
         if (set >= 0)
-            set_catalog_effort_set(scope + "/" + tail,
-                                   static_cast<std::uint8_t>(set));
+            out.set_effort_set(scope + "/" + tail, static_cast<std::uint8_t>(set));
     }
 
     // Bare key: SHARED across every provider — merge-or-poison only
     // (agree → keep, disagree → no-info; RULE 3 in capkey.hpp).
     if (!tail.empty()) {
-        merge_catalog_reasoning(tail, reasoning->get<bool>());
-        if (dev_ctx > 0) merge_catalog_context_window(tail, dev_ctx);
+        out.merge_reasoning(tail, reasons);
+        if (dev_ctx > 0) out.merge_context_window(tail, dev_ctx);
         if (set >= 0)
-            merge_catalog_effort_set(tail, static_cast<std::uint8_t>(set));
+            out.merge_effort_set(tail, static_cast<std::uint8_t>(set));
     }
 }
 
-// Parse a full api.json document; returns models registered.
+// Parse a full api.json document; returns models registered. Every fact goes
+// into one batch that is published once at the end, so a reader never sees
+// half a document and the load is linear, not quadratic.
 int load_document(const std::string& body) {
     int n = 0;
+    CatalogBatch batch;
     try {
         json j = json::parse(body);
         if (!j.is_object()) return 0;
@@ -186,7 +189,7 @@ int load_document(const std::string& body) {
                 env0 = (*e)[0].get<std::string>();
             const std::string api = provider.value("api", std::string{});
             for (const auto& [mid, m] : models->items()) {
-                register_model(pid, env0, api, mid, m);
+                register_model(batch, pid, env0, api, mid, m);
                 ++n;
             }
         }
@@ -196,6 +199,7 @@ int load_document(const std::string& body) {
     } catch (...) {
         return 0;
     }
+    batch.commit();
     return n;
 }
 
@@ -218,15 +222,9 @@ void load_cached() {
 }
 
 int refresh() {
-    if (cache_fresh()) {
-        // Fresh on disk — (re)load in case this process hasn't yet.
-        std::ifstream ifs(cache_path(), std::ios::binary);
-        if (ifs) {
-            std::ostringstream ss;
-            ss << ifs.rdbuf();
-            return load_document(ss.str());
-        }
-    }
+    // A fresh cache is already loaded (start_background_refresh loads it
+    // first); parsing the same 5 MB twice was pure waste.
+    if (cache_fresh()) return 0;
     http::Request req;
     req.method = http::HttpMethod::Get;
     req.host   = "models.dev";
@@ -241,11 +239,8 @@ int refresh() {
     tos.connect = std::chrono::milliseconds(8'000);
     tos.total   = std::chrono::milliseconds(60'000);
     auto resp = http::default_client(::agentty::IoAccess::grant()).send(req, tos);
-    if (!resp || resp->status != 200 || resp->body.empty()) {
-        // Network down / endpoint moved: fall back to whatever is cached.
-        load_cached();
-        return 0;
-    }
+    if (!resp || resp->status != 200 || resp->body.empty())
+        return 0;   // network down / moved: the cached load already stands
     const int n = load_document(resp->body);
     if (n > 0) {
         // Atomic-ish write: tmp + rename, matching the rest of the config dir.

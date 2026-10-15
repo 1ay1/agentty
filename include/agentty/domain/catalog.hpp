@@ -12,6 +12,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include <maya/runtime.hpp>
@@ -1119,10 +1120,11 @@ inline void bump_caps_epoch() noexcept {
 // poisoned by disagreeing sources, held in a jaal::snapshot.
 //
 // These are read on the per-frame render path and from every streaming turn
-// (resolved_caps) and written a handful of times a session (a catalog
-// refresh, a settings hydrate, a user override). That is a snapshot's shape
-// exactly: readers take one atomic load and never a lock, writers build a
-// new map and swap it in. With no lock there is no rank and no capability,
+// (resolved_caps) and written rarely, but in BULK: a models.dev load is ~80k
+// facts. That is a snapshot's shape: readers take one atomic load and never
+// a lock, writers build a new map and swap it in. Because every write copies
+// the whole map, bulk sources must use CatalogBatch (one copy per load), not
+// the per-fact setters, or the load goes quadratic. With no lock there is no rank and no capability,
 // so a view, a reducer and a lock body can all read caps freely, and none of
 // them can be half of a deadlock.
 template <class V>
@@ -1133,6 +1135,24 @@ struct Facts {
 template <class V>
 struct Registry {
     maya::snapshot<Facts<V>> facts;
+
+    // A batch of writes, applied to ONE copy and published once. A snapshot
+    // write copies the whole map, so writing N facts one at a time is O(N^2);
+    // a models.dev load is ~80k writes. Build a Batch, then commit() it.
+    struct Batch {
+        std::vector<std::pair<std::string, V>> sets;
+        std::vector<std::pair<std::string, V>> merges;   // agree-or-poison
+        [[nodiscard]] bool empty() const noexcept { return sets.empty() && merges.empty(); }
+    };
+    void commit(Batch b) {
+        if (b.empty()) return;
+        (void)facts.update([](const Facts<V>& f, const Batch& batch) {
+            Facts<V> out = f;
+            for (const auto& [k, v] : batch.sets) out.map[k] = v;
+            for (const auto& [k, v] : batch.merges) merge_into(out, k, v);
+            return out;
+        }, std::move(b));
+    }
 
     // Record a fact for an exact key.
     void set(std::string key, V v) {
@@ -1147,11 +1167,7 @@ struct Registry {
         (void)facts.update([](const Facts<V>& f, const std::string& k, const V& val) {
             if (f.poisoned.count(k)) return f;
             Facts<V> out = f;
-            if (auto it = out.map.find(k); it != out.map.end()) {
-                if (it->second != val) { out.map.erase(it); out.poisoned.insert(k); }
-                return out;
-            }
-            out.map[k] = val;
+            merge_into(out, k, val);
             return out;
         }, std::move(key), v);
     }
@@ -1178,6 +1194,16 @@ struct Registry {
     }
     [[nodiscard]] std::map<std::string, V> snapshot() const { return facts.load()->map; }
     [[nodiscard]] bool any() const { return !facts.load()->map.empty(); }
+
+    // The agree-or-poison rule, in one place for merge() and commit().
+    static void merge_into(Facts<V>& f, const std::string& k, const V& val) {
+        if (f.poisoned.count(k)) return;
+        if (auto it = f.map.find(k); it != f.map.end()) {
+            if (it->second != val) { f.map.erase(it); f.poisoned.insert(k); }
+            return;
+        }
+        f.map[k] = val;
+    }
 };
 
 namespace catalog_reasoning_detail {
@@ -1395,6 +1421,71 @@ inline void merge_endpoint_context_window(std::string_view api_url,
         },
         host, model_id, catalog_endpoint_detail::Entry{tokens, port});
 }
+
+// ── Bulk loads ──────────────────────────────────────────────────────────────
+// Every catalog write publishes a fresh copy of its whole map, so calling the
+// setters above once per fact is quadratic: a models.dev load (~9k models,
+// ~80k facts) spent minutes of CPU re-copying ever-larger maps. A bulk
+// source fills a CatalogBatch with the SAME calls and commits once: each
+// registry is copied and published a single time. Keys are normalised here
+// exactly as the single setters do it.
+struct CatalogBatch {
+    Registry<bool>::Batch         reasoning;
+    Registry<std::uint8_t>::Batch effort;
+    Registry<int>::Batch          context;
+    std::vector<std::tuple<std::string, std::string, catalog_endpoint_detail::Entry>> endpoints;
+
+    void set_reasoning(std::string id, bool r) {
+        reasoning.sets.emplace_back(norm_caps_key(id), r);
+    }
+    void merge_reasoning(const std::string& raw_id, bool r) {
+        reasoning.merges.emplace_back(norm_caps_key(raw_id), r);
+    }
+    void set_effort_set(std::string id, std::uint8_t s) {
+        effort.sets.emplace_back(norm_caps_key(id), s);
+    }
+    void merge_effort_set(const std::string& raw_id, std::uint8_t s) {
+        effort.merges.emplace_back(norm_caps_key(raw_id), s);
+    }
+    void set_context_window(std::string id, int tokens) {
+        if (tokens > 0) context.sets.emplace_back(norm_caps_key(id), tokens);
+    }
+    void merge_context_window(const std::string& raw_id, int tokens) {
+        if (tokens <= 0) return;
+        std::string key{capkey::norm_tail(raw_id)};
+        if (!key.empty()) context.merges.emplace_back(std::move(key), tokens);
+    }
+    void merge_endpoint_context_window(std::string_view api_url,
+                                       const std::string& raw_id, int tokens) {
+        if (tokens <= 0) return;
+        std::uint16_t port = 0;
+        std::string host = context_endpoint_origin(api_url, port);
+        if (host.empty()) return;
+        std::string mid = norm_caps_key(raw_id);
+        if (mid.empty()) return;
+        endpoints.emplace_back(std::move(host), std::move(mid),
+                               catalog_endpoint_detail::Entry{tokens, port});
+    }
+
+    // Publish everything: one copy + one atomic swap per registry.
+    void commit() {
+        const bool any = !reasoning.empty() || !effort.empty()
+                      || !context.empty() || !endpoints.empty();
+        if (!any) return;
+        catalog_reasoning_detail::reg().commit(std::move(reasoning));
+        catalog_effort_detail::reg().commit(std::move(effort));
+        catalog_context_detail::reg().commit(std::move(context));
+        if (!endpoints.empty())
+            (void)catalog_endpoint_detail::hosts().update(
+                [](const catalog_endpoint_detail::Hosts& hs, const auto& eps) {
+                    auto out = hs;
+                    for (const auto& [h, mid, e] : eps) out[h][mid] = e;
+                    return out;
+                }, std::move(endpoints));
+        bump_caps_epoch();   // after the swap, so a reader that sees the new
+                             // epoch also sees the new facts
+    }
+};
 
 // 0 = no declaration; else the window a models.dev entry serving this
 // ENDPOINT declares for the model. Tiers, strongest first:

@@ -5,6 +5,7 @@
 // flip a hosted/strong model into degraded mode (or vice-versa).
 
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,6 +23,52 @@ using namespace agentty;
 
 
 static bool weak(std::string_view id) { return is_weak_model(id); }
+
+TEST_CASE("catalog batch: same facts as the per-fact setters, published once") {
+    // Unique ids so this test can't collide with others in the process.
+    CatalogBatch b;
+    b.set_reasoning("batchprov/batch-model-a", true);
+    b.set_effort_set("batchprov/batch-model-a", 0b0110);
+    b.set_context_window("batchprov/batch-model-a", 128000);
+    b.set_context_window("batchprov/batch-model-z", 0);       // ignored, like the setter
+    // Bare key: two sources agree, a third bare key disagrees → poisoned.
+    b.merge_reasoning("batch-model-agree", true);
+    b.merge_reasoning("batch-model-agree", true);
+    b.merge_reasoning("batch-model-clash", true);
+    b.merge_reasoning("batch-model-clash", false);
+    b.merge_context_window("batch-model-agree", 32000);
+    b.merge_endpoint_context_window("http://localhost:5199/v1", "batch-local", 8192);
+
+    const auto epoch = caps_epoch();
+    CHECK(catalog_reasoning_for("batch-model-a", "batchprov") == -1);   // nothing yet
+    b.commit();
+    CHECK(caps_epoch() != epoch);                // caches see the change
+
+    CHECK(catalog_reasoning_for("batch-model-a", "batchprov") == 1);
+    CHECK(catalog_effort_set_for("batch-model-a", "batchprov") == 0b0110);
+    CHECK(catalog_context_window_for("batch-model-a", "batchprov") == 128000);
+    CHECK(catalog_context_window_for("batch-model-z", "batchprov") == 0);
+    CHECK(catalog_reasoning_for("batch-model-agree") == 1);
+    CHECK(catalog_reasoning_for("batch-model-clash") == -1);   // poisoned
+    CHECK(catalog_context_window_for("batch-model-agree") == 32000);
+    CHECK(endpoint_context_window_for("batch-local", "127.0.0.1", 5199) == 8192);
+}
+
+TEST_CASE("catalog batch: an 80k-fact load is linear, not quadratic") {
+    // The models.dev load used to copy the whole registry per fact, which
+    // pinned a core for minutes on startup. A batch copies once.
+    CatalogBatch b;
+    for (int i = 0; i < 80000; ++i)
+        b.set_reasoning("bulkprov/bulk-model-" + std::to_string(i), (i & 1) != 0);
+    const auto t0 = std::chrono::steady_clock::now();   // stopwatch: perf guard
+    b.commit();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    CHECK(catalog_reasoning_for("bulk-model-79999", "bulkprov") == 1);
+    CHECK(catalog_reasoning_for("bulk-model-0", "bulkprov") == 0);
+    // Generous for Debug/sanitizers; quadratic was minutes.
+    CHECK_MESSAGE(ms < 5000, "80k-fact commit took " << ms << " ms");
+}
 
 TEST_CASE("claude never weak") {
     // Every hosted Claude family is strong, all generations.

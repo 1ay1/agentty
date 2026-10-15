@@ -2044,12 +2044,12 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
         // never entitled to. The extended window is opt-in per turn, not a
         // property of the id.
         const auto seed_windows = [](const std::vector<ModelInfo>& rows) {
+            agentty::CatalogBatch batch;   // one publish, not one per model
             for (const auto& mi : rows) {
                 if (mi.id.value != agentty::wire_model_id(mi.id.value)) continue;
-                if (mi.context_window > 0)
-                    agentty::set_catalog_context_window(mi.id.value,
-                                                        mi.context_window);
+                batch.set_context_window(mi.id.value, mi.context_window);
             }
+            batch.commit();
         };
         seed_windows(catalog::bundled(
             provider::parse_selection(provider_spec).provider_id()));
