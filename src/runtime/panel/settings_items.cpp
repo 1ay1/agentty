@@ -157,6 +157,45 @@ std::vector<Item> general(const Model& m) {
         i.action = Action::OpenWebSearch;
         out.push_back(std::move(i));
     }
+
+    // Doors to the lists. Each summary answers "anything here?" without
+    // opening it.
+    const auto door = [&](Category c, std::string secondary) {
+        Item i;
+        i.primary   = label(c);
+        i.secondary = std::move(secondary);
+        i.hint      = "Enter: open";
+        i.action    = Action::OpenList;
+        i.target    = c;
+        out.push_back(std::move(i));
+    };
+    {
+        const auto& pm = m.ui.plugins;
+        std::size_t live = 0;
+        for (const auto& s : pm.servers) if (s.connected) ++live;
+        std::string s;
+        if (m.ui.plugins_loading)    s = "connecting\xe2\x80\xa6";
+        else if (pm.servers.empty()) s = "none \xc2\xb7 MCP servers";
+        else s = std::to_string(pm.servers.size()) + " MCP servers \xc2\xb7 "
+               + std::to_string(live) + " connected";
+        door(Category::Plugins, std::move(s));
+    }
+    {
+        const auto n = m.ui.library.commands.size();
+        door(Category::Commands, n == 0 ? std::string("none \xc2\xb7 slash commands")
+                                        : std::to_string(n) + " slash commands");
+    }
+    {
+        const auto n = m.ui.library.project_agents.size();
+        door(Category::Agents, n == 0 ? std::string("built-ins only")
+                                      : "built-ins + " + std::to_string(n) + " project");
+    }
+    {
+        const auto& lib = m.ui.library;
+        door(Category::Hooks, lib.hooks_file.empty() ? std::string("none")
+                            : lib.hooks_pending      ? std::string("not approved \xc2\xb7 hooks will not run")
+                                                     : std::string("approved \xc2\xb7 active"));
+    }
     return out;
 }
 
@@ -305,13 +344,19 @@ std::vector<Item> commands(const Library& lib) {
     return out;
 }
 
-std::vector<Item> agents() {
+std::vector<Item> agents(const Library& lib) {
     std::vector<Item> out;
-    // Built-ins first (always available), then user agents.
+    // Built-ins first (always available), then this project's own.
     for (const char* b : {"explorer", "reviewer", "tester", "coder", "general"}) {
         Item i;
         i.primary   = b;
         i.secondary = "built-in";
+        out.push_back(std::move(i));
+    }
+    for (const auto& a : lib.project_agents) {
+        Item i;
+        i.primary   = a;
+        i.secondary = "project \xc2\xb7 .agentty/agents/" + a + ".md";
         out.push_back(std::move(i));
     }
     // User agents are discovered by the task backend; surface the authoring
@@ -360,16 +405,9 @@ std::vector<Item> hooks(const Library& lib) {
 std::vector<Item> items_for(const Model& m, Category cat) {
     switch (cat) {
         case Category::General:  return general(m);
-        // Appearance is a form pane (panel/appearance.hpp), never a flat
-        // list — the General category carries the single door row that opens
-        // it. Return empty rather than leaving the enum unhandled.
-        case Category::Appearance: return {};
-        // Sandbox is a form pane too (panel/sandbox.hpp), for the same reason:
-        // the General category carries the door row that opens it.
-        case Category::Sandbox: return {};
         case Category::Plugins:  return plugins(m.ui.plugins, m.ui.plugins_loading);
         case Category::Commands: return commands(m.ui.library);
-        case Category::Agents:   return agents();
+        case Category::Agents:   return agents(m.ui.library);
         case Category::Hooks:    return hooks(m.ui.library);
     }
     return {};

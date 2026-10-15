@@ -664,14 +664,14 @@ TEST_CASE("settings: a toggle survives a later whole-record save") {
     CHECK(g_saved.show_changes_strip == true);
 }
 
-TEST_CASE("appearance: Esc steps back, it does not close everything") {
+TEST_CASE("settings: Esc steps back, it does not close everything") {
     install_stub_deps();
-    // Reached the way a user reaches it: Ctrl+K, then the Appearance row.
+    // Reached the way a user reaches it: Ctrl+K, then the Settings row.
     auto [m1, _1] = app::update(Model{}, Msg{OpenPalette{}});
     REQUIRE(m1.ui.panel.get<ui::panel::Palette>() != nullptr);
 
     auto [m2, _2] = app::update(std::move(m1),
-                                Msg{OpenSettingsList{agentty::settings::Category::Appearance}});
+                                Msg{OpenSettingsList{agentty::settings::Category::General}});
     REQUIRE(m2.ui.panel.get<ui::panel::SettingsList>() != nullptr);
 
     // Esc must land back on the palette — the step we came from — and only

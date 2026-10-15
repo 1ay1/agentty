@@ -103,7 +103,14 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
             // Esc dropped the user on the thread. descend() stashes the
             // parent at the open site, which is the one place that always
             // knows what it is replacing.
-            m.ui.panel.descend(pn::SettingsList{{e.concern, start}});
+            // A different list opened from a list (the hub's doors) is a step
+            // down, so Esc returns to the hub; reopening the same list is a
+            // rebuild.
+            const auto* cur = m.ui.panel.get<pn::SettingsList>();
+            if (cur && cur->concern != e.concern)
+                m.ui.panel.push(pn::SettingsList{{e.concern, start}});
+            else
+                m.ui.panel.descend(pn::SettingsList{{e.concern, start}});
             // A fresh open starts at the top — don't inherit the scroll
             // offset of the last visit (the widget's keep-selection-in-view
             // would fight the stale offset for a frame). PR #34.
@@ -254,6 +261,9 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                 case se::Action::OpenWebSearch: {
                     return reenter(m, Msg{OpenWebSearch{}});
                 }
+                case se::Action::OpenList:
+                    // OpenSettingsList descends, so Esc comes back here.
+                    return reenter(m, Msg{OpenSettingsList{row.target}});
                 case se::Action::ToggleChangesStrip: {
                     return reenter(m, Msg{ToggleChangesStrip{}});
                 }

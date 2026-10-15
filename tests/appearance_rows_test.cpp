@@ -291,6 +291,7 @@ TEST_CASE("settings: every row that opens a pane shows the door arrow") {
     CHECK(se::opens_pane(se::Action::OpenSmart));
     CHECK(se::opens_pane(se::Action::OpenSandbox));
     CHECK(se::opens_pane(se::Action::OpenWebSearch));
+    CHECK(se::opens_pane(se::Action::OpenList));
 
     // Cycling a value in place is not a door — it changes something HERE,
     // and gets its own glyph rather than the one meaning "leads away".

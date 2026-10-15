@@ -39,6 +39,7 @@ enum class Action : std::uint8_t {
     OpenSmart,     // General: open Smart Mode config
     OpenSandbox,   // General: open the Sandbox pane (walls, syscalls, limits)
     OpenWebSearch, // General: open Web Search (web_search policy and services)
+    OpenList,      // General: open another settings list (Item::target)
 
     ToggleChangesStrip, // General: show/hide the persistent "N changes" banner
     // (No RemovePlugin: removal is the two-step `d` → SettingsListRemove
@@ -74,7 +75,7 @@ enum class Action : std::uint8_t {
 // went wrong before: Appearance was added to the enum, wired to a reducer,
 // given a row, and left out of the one switch that paints the handle.
 [[nodiscard]] constexpr bool opens_pane(Action a) noexcept {
-    return a >= Action::OpenRag && a <= Action::OpenWebSearch;
+    return a >= Action::OpenRag && a <= Action::OpenList;
 }
 
 struct Item {
@@ -97,6 +98,7 @@ struct Item {
     Status      status = Status::Neutral;
     std::string arg;        // action payload (plugin/server name)
     std::string arg2;       // secondary payload (e.g. bare tool name)
+    Category    target = Category::General;  // the list an OpenList row opens
     bool        indented = false;  // render as a sub-row (a plugin's tool)
     bool        on = true;         // toggle state (for ToggleTool rows)
     // Effectively inactive though PRESENT: a tool under a DISABLED (or not-

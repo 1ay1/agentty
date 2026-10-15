@@ -1,6 +1,6 @@
-// settings_list_view.cpp — the settings pickers (Ctrl+K →
-// Plugins/Commands/Agents/Hooks). One list overlay, built on the house
-// Picker widget so it frames/scrolls exactly like every other picker.
+// settings_list_view.cpp — the settings lists (Ctrl+K → Settings, and the
+// Plugins/Commands/Subagents/Hooks lists it opens). One list overlay, built
+// on the house Picker widget so it frames/scrolls like every other picker.
 //
 // Two modes, both rendered here:
 //   • list  — rows from settings::items_for(concern), each led by a HEALTH
@@ -129,13 +129,19 @@ Element settings_list_panel(const Model& m) {
         cfg.header.push_back(h(
             text("  "), text(add_prompt(o->concern), fg_dim(muted))
         ).build());
+        std::size_t at = std::string::npos;
+        const std::string shown = maya::panel::detail::with_caret(
+            o->input, static_cast<std::size_t>(std::max(0, o->cursor)),
+            panel_detail::panel_terminal_cols() - 12, &at);
+        // Same caret as every panel field: a blinking block hardware cursor
+        // on the █ cell, in the edit colour.
+        const auto caret = Style{}.with_fg(highlight).with_caret_anchor()
+                                  .with_caret_shape(1);
         cfg.header.push_back(h(
             text("  \xe2\x9c\x8e  ", fg_of(highlight)),         // ✎ pencil
-            text(maya::panel::detail::with_caret(
-                     o->input,
-                     static_cast<std::size_t>(std::max(0, o->cursor)),
-                     panel_detail::panel_terminal_cols() - 12),
-                 fg_bold(fg))
+            text(shown.substr(0, at), fg_bold(fg)),
+            text(shown.substr(at, 3), caret),
+            text(shown.substr(at + 3), fg_bold(fg))
         ).build());
     } else {
         cfg.header.push_back(h(

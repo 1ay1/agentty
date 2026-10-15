@@ -38,9 +38,8 @@ int main(int argc, char** argv) {
 
     pn::SettingsList o;
     o.concern = settings::Category::Plugins;
-    if (arg == "--general" || arg == "--appearance") {
-        o.concern = arg == "--general" ? settings::Category::General
-                                       : settings::Category::Appearance;
+    if (arg == "--general") {
+        o.concern = settings::Category::General;
         o.index  = argc > 2 ? std::atoi(argv[2]) : 0;
         if (const char* sw = std::getenv("PROBE_SMART"); sw && *sw == '1')
             m.d.smart.enabled = true;

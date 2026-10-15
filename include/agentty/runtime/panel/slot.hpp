@@ -344,6 +344,17 @@ public:
         v_ = std::move(k);
     }
 
+    // DOWN into K even when K is what's open: the current panel becomes the
+    // parent. For a panel that opens another instance of its own kind, like
+    // the Settings hub opening the Plugins list. descend() would treat that
+    // as a rebuild and Esc would skip the hub.
+    template <Alternative K>
+    void push(K k) {
+        if (!std::holds_alternative<None>(v_))
+            k.from = From::of(Snapshot{std::move(v_)});
+        v_ = std::move(k);
+    }
+
     // SIDEWAYS: swap the open panel for K, keeping ITS parent.
     //
     // A hop between siblings — ^P from the model picker to the provider
