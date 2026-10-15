@@ -12,7 +12,7 @@
 
 #include <maya/runtime.hpp>
 
-#include <nlohmann/json.hpp>
+#include <simdjson.h>
 
 #include "agentty/util/user_root.hpp"    // user_cache_dir()
 #include <limits>
@@ -25,7 +25,6 @@ namespace agentty::modelsdev {
 
 namespace {
 
-using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 fs::path cache_path() { return util::user_cache_dir() / "modelsdev.json"; }
@@ -76,26 +75,26 @@ void register_model(CatalogBatch& out,
                     const std::string& dev_provider,
                     const std::string& dev_env0,
                     const std::string& dev_api,
-                    const std::string& mid, const json& m) {
-    if (!m.is_object()) return;
-    const auto reasoning = m.find("reasoning");
-    if (reasoning == m.end() || !reasoning->is_boolean()) return;
+                    const std::string& mid, simdjson::dom::element m) {
+    bool reasons = false;
+    if (m["reasoning"].get_bool().get(reasons)) return;   // absent or not a bool
 
     // Effort enum: reasoning_options entries of type "effort" carry the
     // exact value list. A reasoning model WITHOUT an effort option reasons
     // natively with no control — declared reasoning true but effort set 0
     // would hide the (harmless, display-only) toggle, so only record a set
-    // when values are actually named.
+    // when values are actually named. An oddly typed entry is skipped: one
+    // bad field must not cost the rest of the document.
     int set = -1;
-    if (auto ro = m.find("reasoning_options");
-        ro != m.end() && ro->is_array()) {
-        for (const auto& opt : *ro) {
-            if (!opt.is_object()) continue;
-            const std::string type = opt.value("type", std::string{});
+    if (simdjson::dom::array ro; !m["reasoning_options"].get_array().get(ro)) {
+        for (const simdjson::dom::element opt : ro) {
+            std::string_view type;
+            if (opt["type"].get_string().get(type)) continue;
             if (type == "effort") {
                 std::uint8_t bits = 0;
-                for (const auto& v : opt.value("values", json::array()))
-                    if (v.is_string()) bits |= bit_of(v.get<std::string>());
+                if (simdjson::dom::array vals; !opt["values"].get_array().get(vals))
+                    for (const simdjson::dom::element v : vals)
+                        if (std::string_view s; !v.get_string().get(s)) bits |= bit_of(s);
                 if (bits != 0) set = bits;
             } else if (type == "toggle" && set < 0) {
                 // Toggle-only reasoning (Kimi k2.5, some Qwen): on/off with
@@ -127,17 +126,13 @@ void register_model(CatalogBatch& out,
     // limit is "not declared", and recording 0 would be indistinguishable
     // from a declaration of nothing.
     int dev_ctx = 0;
-    if (const auto lim = m.find("limit");
-        lim != m.end() && lim->is_object()) {
-        if (const auto c = lim->find("context");
-            c != lim->end() && c->is_number_integer()) {
-            const auto v = c->get<long long>();
-            if (v > 0 && v <= std::numeric_limits<int>::max())
-                dev_ctx = static_cast<int>(v);
-        }
+    // Signed or unsigned integer, positive and in int range. A float, string
+    // or out-of-range value is "not declared".
+    if (std::int64_t v = 0; !m["limit"]["context"].get_int64().get(v)) {
+        if (v > 0 && v <= std::numeric_limits<int>::max())
+            dev_ctx = static_cast<int>(v);
     }
 
-    const bool reasons = reasoning->get<bool>();
     out.set_reasoning(scope + "/" + mid, reasons);
     if (dev_ctx > 0) out.set_context_window(scope + "/" + mid, dev_ctx);
     if (set >= 0)
@@ -167,39 +162,46 @@ void register_model(CatalogBatch& out,
     }
 }
 
-// Parse a full api.json document; returns models registered. Every fact goes
-// into one batch that is published once at the end, so a reader never sees
-// half a document and the load is linear, not quadratic.
-int load_document(const std::string& body) {
-    int n = 0;
-    CatalogBatch batch;
-    try {
-        json j = json::parse(body);
-        if (!j.is_object()) return 0;
-        for (const auto& [pid, provider] : j.items()) {
-            if (!provider.is_object()) continue;
-            auto models = provider.find("models");
-            if (models == provider.end() || !models->is_object()) continue;
-            // Identity anchors for capkey::dev_scope (see capkey.hpp): the
-            // entry's FIRST env var + api URL, empty when absent.
-            std::string env0;
-            if (auto e = provider.find("env");
-                e != provider.end() && e->is_array() && !e->empty()
-                && (*e)[0].is_string())
-                env0 = (*e)[0].get<std::string>();
-            const std::string api = provider.value("api", std::string{});
-            for (const auto& [mid, m] : models->items()) {
-                register_model(batch, pid, env0, api, mid, m);
-                ++n;
-            }
-        }
-    } catch (const std::exception& e) {
-        util::dbglog("modelsdev.parse", e.what());
-        return 0;
-    } catch (...) {
+// Parse a full api.json document into `batch`; returns models registered.
+// The caller publishes the batch once, so a reader never sees half a
+// document and the load is linear, not quadratic.
+//
+// simdjson, not nlohmann: building the 5+ MB document as a std::map tree was
+// most of the remaining startup CPU. Every field is read by type and an
+// oddly typed one is skipped. nlohmann threw on those (a numeric option
+// "type" or provider "api") and the catch discarded the WHOLE document, so
+// one malformed upstream entry silently cost every model.
+int parse_document(std::string_view body, CatalogBatch& batch) {
+    simdjson::dom::parser parser;
+    const simdjson::padded_string padded{body};
+    simdjson::dom::object root;
+    if (const auto err = parser.parse(padded).get_object().get(root)) {
+        util::dbglog("modelsdev.parse", simdjson::error_message(err));
         return 0;
     }
-    batch.commit();
+    int n = 0;
+    for (const auto provider : root) {
+        simdjson::dom::object models;
+        if (provider.value["models"].get_object().get(models)) continue;
+        // Identity anchors for capkey::dev_scope (see capkey.hpp): the
+        // entry's FIRST env var + api URL, empty when absent or not text.
+        std::string env0;
+        if (std::string_view s; !provider.value["env"].at(0).get_string().get(s)) env0 = s;
+        std::string api;
+        if (std::string_view s; !provider.value["api"].get_string().get(s)) api = s;
+        const std::string pid{provider.key};
+        for (const auto model : models) {
+            register_model(batch, pid, env0, api, std::string{model.key}, model.value);
+            ++n;
+        }
+    }
+    return n;
+}
+
+int load_document(std::string_view body) {
+    CatalogBatch batch;
+    const int n = parse_document(body, batch);
+    if (n > 0) batch.commit();
     return n;
 }
 
@@ -212,6 +214,10 @@ bool cache_fresh() {
 }
 
 } // namespace
+
+int parse_into(std::string_view body, CatalogBatch& out) {
+    return parse_document(body, out);
+}
 
 void load_cached() {
     std::ifstream ifs(cache_path(), std::ios::binary);

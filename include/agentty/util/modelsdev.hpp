@@ -24,6 +24,7 @@
 // (a metadata refresh must never surface as an error).
 
 #include <string>
+#include <string_view>
 
 #include <maya/runtime.hpp>
 
@@ -48,4 +49,12 @@ void start_background_refresh(bool no_net = false);
 // Cancel and join. Idempotent, no-op if start never ran. Joins: `unlocked`.
 void join_background_refresh(const maya::unlocked& cap) noexcept;
 
+} // namespace agentty::modelsdev
+
+namespace agentty { struct CatalogBatch; }
+namespace agentty::modelsdev {
+// Parse an api.json document into `out` without publishing it. For tests:
+// lets the parsed facts be compared without touching the global registries.
+// Returns models registered.
+int parse_into(std::string_view body, CatalogBatch& out);
 } // namespace agentty::modelsdev
