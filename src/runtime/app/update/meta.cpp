@@ -19,6 +19,7 @@
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/provider/selection.hpp"   // provider::active (stall watchdog)
 #include "agentty/provider/ollama/transport.hpp"  // effective_num_ctx
+#include "agentty/provider/openai/transport.hpp"  // endpoint_speaks_native_cached
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"      // ascend(): revalidate a restored list
@@ -107,7 +108,15 @@ int resolved_context_max(const Model& m, std::string_view provider_id) {
     // every layer was individually correct.
     //
     // One function answers it for both.
-    if (provider_id == "ollama")
+    //
+    // Only when the host really speaks Ollama's protocol, though. llama.cpp
+    // can serve on 11434 under the "ollama" row (#73); then requests go to
+    // /v1, no num_ctx is sent, and the window is whatever the server was
+    // started with. Clamping that to 32k showed a 131k server as 32k. A host
+    // not asked yet counts as Ollama, matching dispatch.
+    if (provider_id == "ollama"
+        && provider::openai::endpoint_speaks_native_cached(
+               m.d.selection.openai_endpoint).value_or(true))
         return provider::ollama::effective_num_ctx(resolved);
     return resolved;
 }

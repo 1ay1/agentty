@@ -384,12 +384,19 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         m.s.compaction_ceiling = 0;
         m.s.phase         = phase::Idle{};
         // The last reported prompt is the pre-compaction one, so the gauge
-        // would keep showing the full size until the next turn. Show the
-        // calibrated estimate of the compacted prompt instead; the next
-        // StreamUsage replaces it with the real number.
-        if (const int after = m.d.current.compactions.back().tokens_after; after > 0)
-            m.s.tokens_in = std::min(m.s.tokens_in,
-                static_cast<int>(after * m.s.est_calibration));
+        // would keep showing the full size until the next turn. Take off what
+        // the compaction reclaimed instead. The estimates only cover the
+        // conversation, not the system prompt and tools, so subtracting the
+        // difference keeps that fixed part; the next StreamUsage replaces it.
+        {
+            const auto& rec = m.d.current.compactions.back();
+            const auto reclaimed = rec.reclaimed();
+            if (reclaimed && *reclaimed > 0) {
+                const int floor = static_cast<int>(rec.tokens_after * m.s.est_calibration);
+                m.s.tokens_in = std::max(floor, m.s.tokens_in
+                    - static_cast<int>(*reclaimed * m.s.est_calibration));
+            }
+        }
         // Smooth UX: when a user message is queued behind compaction,
         // it's about to fire below — the user will immediately see
         // their request go out, so a "context compacted" toast is

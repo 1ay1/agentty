@@ -1639,14 +1639,38 @@ void feed_ndjson(StreamCtx& ctx, const char* data, size_t len) {
 
 // Does this endpoint really speak Ollama's native /api/* protocol? See the
 // header. Unreachable counts as native so a busy daemon is not downgraded.
+namespace {
+using NativeCache = std::map<std::string, bool, std::less<>>;
+maya::snapshot<NativeCache>& native_cache() {
+    static maya::snapshot<NativeCache> c;
+    return c;
+}
+std::string native_key(const Endpoint& ep) {
+    return ep.host + ":" + std::to_string(ep.port);
+}
+} // namespace
+
+std::optional<bool> endpoint_speaks_native_cached(const Endpoint& ep) {
+    if (!ep.native_api) return false;
+    auto snap = native_cache().load();
+    if (const auto it = snap->find(native_key(ep)); it != snap->end())
+        return it->second;
+    return std::nullopt;
+}
+
+void set_speaks_native_for_test(const Endpoint& ep, bool native) {
+    native_cache().update([](const NativeCache& m, const std::string& k, const bool& v) {
+        NativeCache next = m;
+        next.insert_or_assign(k, v);
+        return next;
+    }, native_key(ep), native);
+}
+
 bool endpoint_speaks_native(Io io, const Endpoint& ep) {
     if (!ep.native_api) return false;
-
-    using Cache = std::map<std::string, bool, std::less<>>;
-    static maya::snapshot<Cache> cache;
-    const std::string key = ep.host + ":" + std::to_string(ep.port);
-    if (auto snap = cache.load(); snap->contains(key))
-        return snap->find(key)->second;
+    if (const auto known = endpoint_speaks_native_cached(ep)) return *known;
+    auto& cache = native_cache();
+    const std::string key = native_key(ep);
 
     http::Request probe;
     probe.method    = http::HttpMethod::Get;
@@ -1665,8 +1689,8 @@ bool endpoint_speaks_native(Io io, const Endpoint& ep) {
                 "{}:{} has no /api/tags — treating it as OpenAI-compatible",
                 ep.host, ep.port);
 
-    cache.update([](const Cache& m, const std::string& k, const bool& v) {
-        Cache next = m;
+    cache.update([](const NativeCache& m, const std::string& k, const bool& v) {
+        NativeCache next = m;
         next.insert_or_assign(k, v);
         return next;
     }, key, native);

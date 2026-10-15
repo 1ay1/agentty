@@ -227,6 +227,43 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         # /api/show is a POST in ollama's API.
         path = self.path.split("?")[0]
+        if MODE == "llama131k":
+            if path not in ("/v1/chat/completions", "/chat/completions"):
+                return self._send({"error": "not found"}, 404)
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n) or b"{}")
+            usage = {"prompt_tokens": 20000, "completion_tokens": 1,
+                     "prompt_tokens_details": {"cached_tokens": 0}}
+            if not body.get("stream"):
+                return self._send({"id": "x", "object": "chat.completion",
+                                   "model": body.get("model", ""),
+                                   "choices": [{"index": 0, "finish_reason": "stop",
+                                                "message": {"role": "assistant", "content": "ok"}}],
+                                   "usage": usage})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for frame in ({"choices": [{"index": 0, "delta": {"content": "ok"}}]},
+                          {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+                          {"choices": [], "usage": usage}):
+                self.wfile.write(b"data: " + json.dumps(frame).encode() + b"\n\n")
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            return
+        if MODE == "ollama" and path == "/api/chat":
+            n = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(n) or b"{}")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            model = body.get("model", "")
+            for frame in ({"model": model, "message": {"role": "assistant", "content": "ok"}, "done": False},
+                          {"model": model, "message": {"role": "assistant", "content": ""},
+                           "done": True, "done_reason": "stop",
+                           "prompt_eval_count": 20000, "eval_count": 1}):
+                self.wfile.write(json.dumps(frame).encode() + b"\n")
+            self.wfile.flush()
+            return
         if MODE == "ollama" and path == "/api/show":
             n = int(self.headers.get("Content-Length") or 0)
             if n:
@@ -247,6 +284,23 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        if MODE == "llama131k":
+            # llama.cpp started with -c 131072 on Ollama's port (#73): no
+            # /api/tags, a 131k served window, n_ctx_train larger still.
+            if path == "/props":
+                return self._send({
+                    "default_generation_settings": {"n_ctx": 131072},
+                    "total_slots": 1,
+                    "model_alias": "qwen2.5-coder-7b",
+                    "chat_template_caps": LLAMA_TEMPLATE_CAPS,
+                })
+            if path in ("/v1/models", "/models"):
+                rows = json.loads(json.dumps(LLAMA_MODELS))
+                rows["data"][0]["meta"]["n_ctx_train"] = 262144
+                return self._send(rows)
+            if path == "/health":
+                return self._send({"status": "ok"})
+            return self._send({"error": "not found"}, 404)
         if MODE == "llama":
             if path == "/props":
                 return self._send({

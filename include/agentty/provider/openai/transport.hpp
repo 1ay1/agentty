@@ -194,6 +194,11 @@ void install_probe_hosts(std::set<std::string> hosts);
 // host:port. Unreachable counts as native, so a busy daemon is not
 // downgraded.
 [[nodiscard]] bool endpoint_speaks_native(Io io, const Endpoint& ep);
+// The answer endpoint_speaks_native already found for this host, without
+// asking it: nullopt when it hasn't been asked yet.
+[[nodiscard]] std::optional<bool> endpoint_speaks_native_cached(const Endpoint& ep);
+// Tests: record what endpoint_speaks_native would have found for this host.
+void set_speaks_native_for_test(const Endpoint& ep, bool native);
 
 // ── Custom-host dialect probe ───────────────────────────────────
 // One call answers "what is actually running at this endpoint?" before a

@@ -1187,9 +1187,12 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
                     mi.context_window = e.window;
                     changed = true;
                 }
-            if (!changed) return Cmd::none();
+            // Recompute even when the number didn't move: what we know about
+            // the host may have (the first turn finds out an "ollama" row is
+            // really llama.cpp, #73), and that changes how the window is read.
             if (m.d.model_id.value == e.model_id)
                 m.s.context_max = resolved_context_max(m, e.provider_id);
+            if (!changed) return Cmd::none();
             if (auto* c = m.ui.panel.get<pn::Models>()) {
                 rebuild_fused_rows(m);
                 const int n = static_cast<int>(m.d.fused_rows.size());

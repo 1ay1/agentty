@@ -2319,6 +2319,28 @@ TEST_CASE("live: force_probe asks even when the address says otherwise") {
         CHECK(with[i].context_window >= without[i].context_window);
 }
 
+TEST_CASE("live: the Ollama row on a llama.cpp server reports its served window (#73)") {
+    // python3 tests/fake_local_server.py llama131k 18434 &
+    // AGENTTY_LIVE_OLLAMA_ROW_PORT=18434 ./agentty_tests
+    const char* port_s = std::getenv("AGENTTY_LIVE_OLLAMA_ROW_PORT");
+    if (!port_s) return;   // not opted in
+
+    namespace oai = agentty::provider::openai;
+    // The real Ollama registry row, moved to the stub's port: llama.cpp
+    // started with -c 131072 on the port Ollama normally uses.
+    auto ep = oai::Endpoint::from_spec("ollama");
+    REQUIRE(ep.native_api);
+    ep.host = "127.0.0.1";
+    ep.port = static_cast<std::uint16_t>(std::atoi(port_s));
+
+    CHECK_FALSE(oai::endpoint_speaks_native(::agentty::IoAccess::grant(), ep));
+    CHECK(oai::endpoint_speaks_native_cached(ep) == std::optional<bool>{false});
+
+    auto models = oai::list_models(::agentty::IoAccess::grant(), auth::AuthHeader{}, ep, false);
+    REQUIRE(models.size() == 1u);
+    CHECK(models[0].context_window == 131072);
+}
+
 TEST_CASE("live: a local server's RUNTIME window reaches ModelInfo") {
     const char* port_s = std::getenv("AGENTTY_LIVE_LOCAL_PORT");
     const char* mode   = std::getenv("AGENTTY_LIVE_LOCAL_MODE");

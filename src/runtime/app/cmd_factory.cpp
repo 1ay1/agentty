@@ -2391,6 +2391,11 @@ Cmd fetch_models(provider::Selection sel,
            provider::Selection sel, std::string for_provider) {
             const auto auth = auth_snapshot(io, sel);
             try {
+                // Settle whether an "ollama" row really speaks Ollama before
+                // the catalog lands, so the window is read right from the
+                // start instead of after the first turn (#73). Cached per host.
+                if (sel.kind == provider::Kind::OpenAI)
+                    (void)provider::openai::endpoint_speaks_native(io, sel.openai_endpoint);
                 // ONE model-list router (provider/selection.cpp), dispatched
                 // on the same axes as the stream path. No
                 // is_chatgpt/OpenAI/Anthropic ladder here — a new provider
@@ -2448,9 +2453,11 @@ Cmd fetch_models(provider::Selection sel,
 Cmd probe_model_window(const Model& m, std::string model_id) {
     const auto& sel = m.d.selection;
     // Only a local OpenAI-compatible host has a window that can change under
-    // us (a router swapping models). Ollama's native api isn't this route.
+    // us (a router swapping models). A real Ollama daemon isn't this route,
+    // but llama.cpp serving under the "ollama" row is (#73).
     if (model_id.empty() || sel.kind != provider::Kind::OpenAI
-        || sel.openai_endpoint.native_api
+        || provider::openai::endpoint_speaks_native_cached(sel.openai_endpoint)
+               .value_or(sel.openai_endpoint.native_api)
         || !provider::openai::detail::is_local_endpoint(sel.openai_endpoint))
         return Cmd::none();
     return cmd::io_task(

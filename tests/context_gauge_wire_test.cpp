@@ -22,6 +22,8 @@
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/provider/responses/responses.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
+#include "agentty/provider/selection.hpp"
+#include "agentty/runtime/app/update/internal.hpp"
 
 using namespace agentty;
 
@@ -208,4 +210,29 @@ TEST_CASE("gauge: a finished compaction drops the gauge to the compacted size") 
     CHECK(!m.d.current.compactions.empty());
     CHECK(m.s.tokens_in > 0);
     CHECK(m.s.tokens_in < 60000);
+}
+
+TEST_CASE("window: the ollama row clamps to num_ctx only on a real Ollama (#73)") {
+    install_stub_deps();
+    namespace oai = provider::openai;
+    Model m;
+    // A port nobody else uses, so this test owns its cache entry.
+    m.d.selection = provider::parse_selection("ollama");
+    m.d.selection.openai_endpoint.port = 18999;
+    m.d.model_id = ModelId{"qwen2.5-coder-7b"};
+    ModelInfo mi;
+    mi.id = m.d.model_id;
+    mi.context_window = 131072;     // what the server reported
+    m.d.available_models.push_back(mi);
+
+    // Not asked yet: treated as Ollama, which serves at most its num_ctx.
+    CHECK(app::detail::resolved_context_max(m, "ollama") < 131072);
+
+    // Asked, and it is a real Ollama daemon: still clamped.
+    oai::set_speaks_native_for_test(m.d.selection.openai_endpoint, true);
+    CHECK(app::detail::resolved_context_max(m, "ollama") < 131072);
+
+    // Asked, and it is llama.cpp on that port: the window it serves.
+    oai::set_speaks_native_for_test(m.d.selection.openai_endpoint, false);
+    CHECK(app::detail::resolved_context_max(m, "ollama") == 131072);
 }
