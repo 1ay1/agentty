@@ -4,6 +4,24 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.24] - 2026-10-16
+
+### Fixed
+- **Reading a file by symbol no longer breaks later reads of it.** A
+  `read symbol=X` was remembered as if it covered the whole file, so every
+  later line-range read returned the symbol's body as `[cached]` instead of
+  the lines asked for, and the model fell back to `sed`.
+- **Sandboxed commands can signal themselves.** Under the sandbox a command
+  ran as pid 1 of its own namespace, which ignores signals it has no handler
+  for, so `kill -9 $$` was ignored and a script that killed itself reported
+  success. It now runs behind a small parent like bubblewrap does, and a
+  sandboxed command can no longer read agentty's own command line.
+- **`process_poll` keeps the newest output.** On a busy process the reply was
+  cut from the end to fit its size limit, dropping the latest lines.
+- **Streamed tool arguments always parse.** A stream cut mid-key, mid-word,
+  mid-number or mid-character produced JSON nothing could read, so the live
+  tool card lost its fields.
+
 ## [0.9.23] - 2026-10-16
 
 ### Added
