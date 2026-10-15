@@ -1590,7 +1590,21 @@ jobs:
               # So regenerate from the PUBLISHED PKGBUILD with the real
               # makepkg and diff. This is the check that was missing; nothing
               # compared content, which is why a user had to report it.
-              si=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=agentty-bin" 2>/dev/null || true)
+              #
+              # Same mirror lag as the PKGBUILD above, and cgit caches each
+              # FILE separately: a fresh PKGBUILD says nothing about whether
+              # .SRCINFO has caught up. Read once, 30 s after the push, it was
+              # still the previous release's on v0.9.21 and v0.9.22, and the
+              # diff (old pkgver/sources vs new) failed both releases although
+              # the AUR was already correct. So wait for .SRCINFO to name this
+              # version too. If it never does, the diff below reports it,
+              # which is right: then it really is stale.
+              si=""
+              for attempt in 1 2 3 4 5 6 7 8; do
+                si=$(curl -fsSL "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=agentty-bin&_=$(date +%s)" 2>/dev/null || true)
+                printf '%s\n' "$si" | grep -qE "^[[:space:]]*pkgver = ${V}$" && break
+                [ "$attempt" -lt 8 ] && sleep 15
+              done
               if [ -z "$si" ]; then
                 echo "::warning::could not fetch AUR .SRCINFO — skipping the content check"
               else
