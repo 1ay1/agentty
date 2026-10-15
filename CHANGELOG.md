@@ -4,6 +4,45 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.23] - 2026-10-16
+
+### Added
+- **Favorites lead the model picker.** Starred models sit in their own
+  section at the top, across every provider, ahead of recents and in search
+  too. ([#99](https://github.com/1ay1/agentty/issues/99))
+- **Search every setting from the Settings hub.** Type to find a setting in
+  RAG, Smart Mode, Appearance, Sandbox or Web Search; Enter opens that pane on
+  that row.
+- **Threads can be filtered by title.** Letters now type into the filter, so
+  new and delete are `^N` and `^D`.
+- **Plugins, Commands, Subagents and Hooks are reachable again** from the
+  Settings hub.
+
+### Fixed
+- **Context gauge on OpenAI-style servers and Codex.** Cached tokens were
+  counted twice, so a warm 33k prompt on Strata, llama.cpp, vLLM or
+  ChatGPT/Codex read as 65k. The gauge also shows the right number after
+  switching or forking a thread and after a compaction.
+  ([#96](https://github.com/1ay1/agentty/issues/96))
+- **llama.cpp picked as Ollama shows its real context window.** A server
+  started with 131k read as Ollama's 32k cap.
+  ([#73](https://github.com/1ay1/agentty/issues/73))
+- **Number fields take any number.** Clearing a 1–65535 port and typing 8080
+  gave 18080, because the value was clamped on every key. It is now clamped
+  once, when the edit ends. ([#97](https://github.com/1ay1/agentty/issues/97))
+- **The caret shows in Konsole.** The cursor vanished while typing until the
+  window was clicked. Form fields' caret now blinks too.
+  ([#82](https://github.com/1ay1/agentty/issues/82))
+- **Starring a model sticks.** A new favorite was dropped the next time
+  settings saved.
+- **Settings save and paste works.** RAG toggles, sliders and choices never
+  saved; Smart Mode, Appearance and Sandbox ended an edit after one key; paste
+  went to the hidden composer. Typing and paste now drop control characters
+  and broken UTF-8, and a form's cursor never lands on a section header.
+- **Every list wraps the same way:** ↓ on the last row goes to the first.
+- **The models.dev load no longer pins a core** at startup, and a bad field
+  in it no longer drops the whole catalog.
+
 ## [0.9.22] - 2026-10-15
 
 ### Fixed
