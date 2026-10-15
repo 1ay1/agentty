@@ -664,6 +664,10 @@ if(TARGET mcp::tools)
         tests/exec_session_race_test.cpp src/tool/util/exec.cpp
         src/util/teardown.cpp src/util/dbglog.cpp src/util/logx.cpp)
     target_include_directories(exec_session_race_test PRIVATE include)
+    # sandbox.hpp names claybin types, so its headers are needed even though
+    # this build stubs the sandbox out and links none of claybin's code.
+    target_include_directories(exec_session_race_test PRIVATE
+        $<TARGET_PROPERTY:claybin,INTERFACE_INCLUDE_DIRECTORIES>)
     target_link_libraries(exec_session_race_test PRIVATE mcp::tools maya::runtime Threads::Threads)
     add_test(NAME exec_session_race_test COMMAND exec_session_race_test)
     set_tests_properties(exec_session_race_test PROPERTIES TIMEOUT 180 LABELS race)
