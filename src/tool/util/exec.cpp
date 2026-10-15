@@ -436,10 +436,13 @@ class JaalSession final : public mt::Session {
                 out_reg = std::move(*r);
         // The seccomp listener. The kernel parks a guest thread on every
         // brokered syscall until it's answered, so this has to be watched
-        // for as long as the child lives, same as run_child does.
+        // for as long as the child lives, same as run_child does. A POSIX fd:
+        // Windows has no broker, and its reactor watches HANDLEs, not ints.
+#if !defined(_WIN32)
         if (hooks.supervisor_fd >= 0 && hooks.service_broker)
             if (auto r = reactor.watch(hooks.supervisor_fd, pf::interest::read, kBrokerToken))
                 broker_reg = std::move(*r);
+#endif
         // SIGKILL for the whole tree: cgroup.kill when the sandbox gave us
         // one (a setsid() descendant can't leave it), else the group.
         auto kill_all = [&] {
