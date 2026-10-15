@@ -4,6 +4,44 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Sandboxed commands get the environment the tool asked for.** Under
+  claybin (the default) a tool's env never reached the child, which ran with
+  agentty's own instead. Every non-interactive setting the tools rely on
+  (`GIT_EDITOR=true`, `PAGER=cat`, `GIT_TERMINAL_PROMPT=0`, `NO_COLOR`, the
+  shell tool's `env` argument) was silently dropped, so git could open an
+  editor or a pager and hang.
+- **Killing a process you started works in the sandbox.** On macOS a
+  sandboxed command could only signal itself, so `timeout`, `kill %1` and
+  builds that cancel jobs failed with "Operation not permitted". On Linux
+  `kill` of the command's own process was refused and background sessions
+  (`process_start`) failed brokered syscalls outright. Signals to anything
+  outside the sandbox are still denied.
+- **MCP: older HTTP servers connect again.** A server that rejects the
+  2026-07-28 protocol with a plain-text 400 made the connection hang until
+  the handshake timed out. agentty now fails over at once and connects with
+  2025-11-25. ([#95](https://github.com/1ay1/agentty/pull/95))
+- **Background processes:** concurrent `process_poll` calls get disjoint
+  output, stopping or dropping a session never blocks, and a child that
+  survives SIGKILL is given up on after 5 s instead of waiting up to a day.
+- **Use-after-free fixes** on MCP and ACP callback threads, when a
+  `list_changed`, progress or elicitation callback arrived after its
+  connection or server was gone.
+- **A memory corruption in the streaming markdown view** that crashed on
+  exit with clang builds: after the view moved, its redraw flag was written
+  through a stale pointer into freed stack memory.
+- **Sandboxed spawns no longer hang for 30 s** on glibc 2.41+, and spawn setup
+  is no longer quadratic in the number of protected paths.
+- **mcp-cpp tool fixes:** crashes on huge regex arguments, CRLF corruption in
+  `apply_patch`, edit count-mismatch reporting, git option injection, and
+  editor hangs.
+
+### Performance
+- **Faster shell calls in large workspaces:** the protected-path walk runs
+  once per call instead of twice, skips agentty's own data dirs and
+  symlinks, and binds `.git/hooks` as one directory. With about 4000
+  protected paths a shell call went from 808 ms to 500 ms.
+
 ## [0.9.21] - 2026-10-14
 
 ### Fixed
