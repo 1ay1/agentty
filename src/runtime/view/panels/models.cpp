@@ -139,18 +139,20 @@ Element models_panel(const Model& m) {
     // Section dividers: RECENT vs ALL PROVIDERS, plus a query-gated SIGN IN
     // section — an un-authed provider whose name matches the query renders as
     // one dim actionable row so searching for it is never a dead end.
-    enum class Section { Recent, Others, SignIn };
+    enum class Section { Favorites, Recent, Others, SignIn };
     auto section_of = [](const FusedRow& r) {
         if (r.is_signin_offer()) return Section::SignIn;
+        if (r.favorite_section) return Section::Favorites;
         if (r.recent) return Section::Recent;
         return Section::Others;
     };
     std::optional<Section> cur;
     int visual_selected = 0;
     // Per-section sizes, for the right-aligned count shown in each header.
-    int recent_count = 0, all_count = 0, signin_count = 0;
+    int fav_count = 0, recent_count = 0, all_count = 0, signin_count = 0;
     for (const auto& r : rows) {
         switch (section_of(r)) {
+            case Section::Favorites: ++fav_count; break;
             case Section::Recent: ++recent_count; break;
             case Section::Others: ++all_count;    break;
             case Section::SignIn: ++signin_count;  break;
@@ -196,15 +198,18 @@ Element models_panel(const Model& m) {
             // Uniform section divider — label + hue + right-pinned count. See
             // panel_detail::section_header (shared by every grouped picker).
             SectionHeader sh;
-            sh.label = sec == Section::Recent ? "recent"
-                     : sec == Section::Others ? others_label
-                                              : "not signed in";
-            sh.hue   = sec == Section::Recent ? info
-                     : sec == Section::Others ? accent
-                                              : warn;
-            sh.count = sec == Section::Recent ? recent_count
-                     : sec == Section::Others ? all_count
-                                              : signin_count;
+            sh.label = sec == Section::Favorites ? "favorites"
+                     : sec == Section::Recent    ? "recent"
+                     : sec == Section::Others    ? others_label
+                                                 : "not signed in";
+            sh.hue   = sec == Section::Favorites ? highlight
+                     : sec == Section::Recent    ? info
+                     : sec == Section::Others    ? accent
+                                                 : warn;
+            sh.count = sec == Section::Favorites ? fav_count
+                     : sec == Section::Recent    ? recent_count
+                     : sec == Section::Others    ? all_count
+                                                 : signin_count;
             cfg.items.push_back(section_header(std::move(sh)));
         }
         if (i == picker->index)

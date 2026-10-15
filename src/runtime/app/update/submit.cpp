@@ -727,21 +727,9 @@ void reset_composer_draft(ComposerState& c) {
     // not the provider itself — every restart fell back to the default.
     if (const std::string pid = active_provider_id(m); !pid.empty())
         s.provider = pid;
-    // MERGE favorites, don't rebuild: `favorite_models` is one GLOBAL list
-    // spanning every provider, but m.d.available_models only holds the
-    // catalog of the provider loaded right now. Rebuilding the list from
-    // that vector alone would silently erase every favorite belonging to
-    // another backend (favorite Claude models → switch to Ollama → quit
-    // persists → Anthropic favorites gone). So: reconcile only the ids
-    // present in the live catalog; keep the rest untouched on disk.
-    for (const auto& mi : m.d.available_models) {
-        auto it = std::find(s.favorite_models.begin(),
-                            s.favorite_models.end(), mi.id);
-        if (mi.favorite && it == s.favorite_models.end())
-            s.favorite_models.push_back(mi.id);
-        else if (!mi.favorite && it != s.favorite_models.end())
-            s.favorite_models.erase(it);
-    }
+    // favorite_models is the one source of truth: ^F edits it directly and
+    // every row's star is read from it. Nothing here rewrites it from row
+    // flags, which went stale and erased a fresh favorite on the next save.
     // Record this model as the active provider's last-used selection so a
     // later switch back to it restores exactly this model.
     if (!m.d.model_id.empty())

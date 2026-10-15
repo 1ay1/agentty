@@ -6,6 +6,7 @@
 #include "agentty/domain/capkey.hpp"
 
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <filesystem>
 
@@ -184,7 +185,65 @@ TEST_CASE("fused: favorites float above equal-scoring peers") {
     auto rows = build_fused_rows(in);
     REQUIRE(rows.size() == 2);
     CHECK(rows[0].model.favorite);
+    CHECK(rows[0].favorite_section);
     CHECK(rows[0].model.id.value == "gpt-5");
+}
+
+TEST_CASE("fused: every favorite leads the list, across providers and ahead of recents (#99)") {
+    std::vector<ProviderCatalog> cats = {
+        cat("anthropic", "Anthropic",
+            {mk("claude-opus", "Opus", "anthropic"),
+             mk("claude-haiku", "Haiku", "anthropic")}),
+        cat("openai", "OpenAI",
+            {mk("gpt-4o", "gpt-4o", "openai"),
+             mk("gpt-5", "gpt-5", "openai")}),
+    };
+    // Stars live in settings, not on the catalog rows: a non-active
+    // provider's catalog never carried the flag.
+    std::vector<ModelId> favs = {ModelId{"gpt-5"}, ModelId{"claude-haiku"}};
+    std::vector<ModelRef> recents = {ModelRef{"anthropic", "claude-opus"},
+                                     ModelRef{"openai", "gpt-5"}};
+    FusedInputs in;
+    in.catalogs  = &cats;
+    in.favorites = &favs;
+    in.recents   = &recents;
+    in.active    = ModelRef{"anthropic", "claude-opus"};
+    auto rows = build_fused_rows(in);
+
+    REQUIRE(rows.size() == 4);
+    CHECK(rows[0].favorite_section);
+    CHECK(rows[1].favorite_section);
+    CHECK(rows[0].model.favorite);
+    CHECK(rows[1].model.favorite);
+    // Both favorites, whichever provider they belong to, come first.
+    std::set<std::string> top = {rows[0].model.id.value, rows[1].model.id.value};
+    CHECK(top == std::set<std::string>{"gpt-5", "claude-haiku"});
+    // Recent comes next, and a starred recent isn't listed twice.
+    CHECK(rows[2].recent);
+    CHECK(rows[2].model.id.value == "claude-opus");
+    CHECK(rows[2].active);
+    CHECK_FALSE(rows[2].model.favorite);
+    CHECK(rows[3].model.id.value == "gpt-4o");
+    std::size_t gpt5 = 0;
+    for (const auto& r : rows) gpt5 += r.model.id.value == "gpt-5";
+    CHECK(gpt5 == 1u);
+}
+
+TEST_CASE("fused: a search keeps matching favorites on top (#99)") {
+    std::vector<ProviderCatalog> cats = {
+        cat("openai", "OpenAI",
+            {mk("gpt-4o", "gpt-4o", "openai"),
+             mk("gpt-4o-mini", "gpt-4o-mini", "openai")}),
+    };
+    std::vector<ModelId> favs = {ModelId{"gpt-4o-mini"}};
+    FusedInputs in;
+    in.catalogs  = &cats;
+    in.favorites = &favs;
+    in.query     = "gpt-4o";
+    auto rows = build_fused_rows(in);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].model.id.value == "gpt-4o-mini");
+    CHECK(rows[0].favorite_section);
 }
 
 TEST_CASE("fused: a recent whose model left the catalog is dropped") {

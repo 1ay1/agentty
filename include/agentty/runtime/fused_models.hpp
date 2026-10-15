@@ -11,16 +11,22 @@
 // agree by construction (the SSOT discipline the pickers hold).
 //
 // Ordering:
+//   0. FAVORITES — every starred model, in every provider, first (#99).
+//                 Filtered by the query like the rest; in search they
+//                 still lead, ranked among themselves by relevance.
 //   1. RECENT   — MRU (provider,model) the user actually toggles between,
 //                 most-recent first, active pinned at the top with `active`.
 //   2. all providers — every authed catalog, fuzzy-ranked by the query;
-//                 ties break favorite → provider order → context window.
+//                 ties break provider order → context window.
 //   3. sign in to … — un-authed provider offers (only when the query is
 //                 empty or fuzzy-matches the provider name), dim, at the end.
 //
-// Section boundaries are conveyed by `FusedRow::recent` (section 1) and
-// `FusedRow::is_signin_offer()` (section 3); everything else is section 2.
-// The view inserts a header when the section changes between adjacent rows.
+// A model appears once: a favorite is shown in FAVORITES, not again in
+// RECENT or below. The active model is still marked wherever it lands.
+//
+// Section boundaries are conveyed by `FusedRow::favorite_section`,
+// `FusedRow::recent` and `FusedRow::is_signin_offer()`; everything else is
+// section 2. The view inserts a header when the section changes.
 
 #include <algorithm>
 #include <string>
@@ -39,6 +45,10 @@ struct FusedInputs {
     const std::vector<ProviderCatalog>* catalogs = nullptr;  // authed providers
     const std::vector<SigninOffer>*     offers   = nullptr;  // un-authed
     const std::vector<ModelRef>*        recents  = nullptr;  // MRU, newest first
+    // The user's starred model ids (settings favorite_models). The one source
+    // of truth for the star and the FAVORITES section: catalogs that never
+    // passed through the active-provider load don't carry the flag.
+    const std::vector<ModelId>*         favorites = nullptr;
     ModelRef    active;                                       // current prov+model
     std::string query;
     int         recent_cap = 6;
@@ -124,6 +134,13 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     const auto& catalogs = in.catalogs ? *in.catalogs : kNoCatalogs;
     const auto& offers   = in.offers   ? *in.offers   : kNoOffers;
     const auto& recents  = in.recents  ? *in.recents  : kNoRecents;
+    // Starred? From the settings list when given, else the row's own flag
+    // (unit tests that build catalogs by hand).
+    auto is_fav = [&](const ModelInfo& mi) {
+        if (!in.favorites) return mi.favorite;
+        return std::find(in.favorites->begin(), in.favorites->end(), mi.id)
+            != in.favorites->end();
+    };
 
     const std::string& q = in.query;
     const bool no_query = q.empty();
@@ -218,11 +235,13 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
         if (!c) return false;                              // provider signed out
         const ModelInfo* mi = find_model(*c, r.model_id);
         if (!mi) return false;                             // model gone from catalog
+        if (is_fav(*mi)) return false;                     // shown in FAVORITES
         if (!matches(c->label, *mi)) return false;
         FusedRow row;
         row.provider_id = r.provider_id;
         row.label       = c->label;
         row.model       = *mi;
+        row.model.favorite = false;
         row.model_label = name_of(*mi);
         row.authed      = true;
         row.active      = (r == in.active);
@@ -382,11 +401,13 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             row.provider_id = c.provider_id;
             row.label       = c.label;
             row.model       = mi;
+            row.model.favorite = is_fav(mi);
             row.model_label = model_label;
             row.authed      = true;
             row.active      = (c.provider_id == in.active.provider_id
                                && mi.id.value == in.active.model_id);
             row.recent      = false;
+            row.favorite_section = row.model.favorite;
             // Prefer the catalog's MEMOISED reasoning flag (built once per
             // catalog/capability change); resolve live only when the cache
             // isn't populated (unit tests calling build_fused_rows raw).
@@ -421,9 +442,10 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
     }
     std::stable_sort(scored.begin(), scored.end(),
         [no_query](const Scored& a, const Scored& b) {
-            // Pinned favourites always come first, regardless of mode.
-            if (a.row.model.favorite != b.row.model.favorite)
-                return a.row.model.favorite;
+            // FAVORITES lead every mode (#99): starred models are the ones
+            // the user picks between, so they sit above everything else.
+            if (a.row.favorite_section != b.row.favorite_section)
+                return a.row.favorite_section;
             // CAN'T-DO-THE-JOB SINKS. A model the provider says has no tool
             // support cannot drive the agent at all, so it must never
             // outrank a model that can — ranking is about "what should I
@@ -444,7 +466,15 @@ find_catalog(const std::vector<ProviderCatalog>& cats, std::string_view pid) {
             if (a.prov_ord != b.prov_ord) return a.prov_ord < b.prov_ord;
             return a.row.model.context_window > b.row.model.context_window;
         });
-    for (auto& s : scored) out.push_back(std::move(s.row));
+    // FAVORITES go first, ahead of RECENT (#99); the rest follow the recents.
+    auto fav_end = std::stable_partition(scored.begin(), scored.end(),
+        [](const Scored& s) { return s.row.favorite_section; });
+    std::vector<FusedRow> favs;
+    favs.reserve(static_cast<std::size_t>(fav_end - scored.begin()));
+    for (auto it = scored.begin(); it != fav_end; ++it) favs.push_back(std::move(it->row));
+    out.insert(out.begin(), std::make_move_iterator(favs.begin()),
+               std::make_move_iterator(favs.end()));
+    for (auto it = fav_end; it != scored.end(); ++it) out.push_back(std::move(it->row));
 
     // ── Section 3: sign-in offers (un-authed providers) ────────────────────
     // QUERY-GATED: with no query the browse view stays clean (no "sign in"

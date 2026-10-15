@@ -281,6 +281,7 @@ std::vector<FusedRow> fused_rows_for_model(const Model& m) {
     in.catalogs   = &m.d.provider_catalogs;
     in.offers     = &m.d.fused_offers;
     in.recents    = &m.d.recent_models;
+    in.favorites  = &m.d.persisted.favorite_models;
     in.active     = ModelRef{active_provider_id(m), m.d.model_id.value};
     in.recent_cap = kRecentCap;
     // The canonical, provider-uniform label so the fused rows read AND
@@ -719,10 +720,13 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             if (now_fav) s.favorite_models.push_back(mid);
             else         s.favorite_models.erase(it);
             auto save = save_record(m);
-            // Live feedback: flip the star on every cached row for this model
-            // (no re-sort — keep the cursor where it is).
-            for (auto& r : m.d.fused_rows)
-                if (r.model.id == mid) r.model.favorite = now_fav;
+            for (auto& mi : m.d.available_models)
+                if (mi.id == mid) mi.favorite = now_fav;
+            // Starring moves the model into (or out of) FAVORITES at the top.
+            // rebuild_fused_rows keeps the cursor on the same (provider,
+            // model), so it follows the row you just starred.
+            rebuild_fused_rows(m, /*sync_sources=*/false);
+            clamp_cursor(m);
             return save;
         },
         [&](ModelsCycleEffort e) -> Cmd {
@@ -1225,9 +1229,9 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // (row is now dangling once rebuild_fused_rows reallocates the
             // vector — pid/label are copies, so we no longer touch it.)
             c->provider_scope = pid;
-            // Scoping shrinks the list — the old cursor may now point past the
-            // end. Land on the first row so the selection is always valid.
-            c->index = 0;
+            // rebuild_fused_rows re-finds the highlighted model by identity,
+            // and it is always in its own provider's list, so the cursor
+            // stays on it instead of jumping to the top.
             rebuild_fused_rows(m);
             clamp_cursor(m);
             auto toast = set_status_toast(

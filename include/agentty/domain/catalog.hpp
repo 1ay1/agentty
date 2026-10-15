@@ -214,6 +214,7 @@ struct FusedRow {
     bool        authed = true;
     bool        active = false;           // == current provider + model
     bool        recent = false;           // belongs in the RECENT section
+    bool        favorite_section = false; // belongs in the FAVORITES section
     bool        reasons = false;          // model can reason (precomputed at
                                           // build so the view never decodes
     // Capability tier, precomputed alongside `reasons` for the same reason:
