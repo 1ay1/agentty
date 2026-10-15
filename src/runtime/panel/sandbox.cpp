@@ -539,7 +539,7 @@ sandbox_cfg::Config read_sandbox_form(const form::Form& f,
     };
     auto num_of = [&](std::string_view id, std::int64_t fallback) -> std::int64_t {
         if (const auto* fld = f.find(id))
-            if (const auto* n = std::get_if<form::field::Number>(&fld->value)) return n->value;
+            if (const auto* n = std::get_if<form::field::Number>(&fld->value)) return form::number_value(*n);
         return fallback;
     };
 

@@ -148,7 +148,9 @@ void reproject(pn::Sandbox& o, const sandbox_cfg::Config& cfg) {
     o.pane.form = pn::build_sandbox_form(cfg, o.pane.facts);
     o.pane.form.cursor = std::clamp(cursor, 0,
         std::max(0, static_cast<int>(o.pane.form.fields.size()) - 1));
-    o.pane.form.focus = focus;
+    // An open edit doesn't survive a rebuild: the new row has no draft.
+    o.pane.form.focus = std::holds_alternative<form::focus::Editing>(focus)
+                      ? form::FormFocus{form::focus::Browsing{}} : focus;
     reprice(o);
 }
 
@@ -596,8 +598,7 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                 if (auto* row = ed->pane.form.focused())
                     if (auto* t = std::get_if<form::field::Text>(&row->value);
                         t && !t->value.empty()) {
-                        ed->pane.form.focus = form::focus::Editing{};
-                        ed->pane.form.edit_dirty = false;
+                        form::begin_edit(ed->pane.form);
                         // Caret to the END first: a browsing row has whatever
                         // cursor it was built with, and deleting from position
                         // 0 would silently do nothing on a non-empty value.

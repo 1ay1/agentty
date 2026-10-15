@@ -328,7 +328,7 @@ std::int64_t number_of(const Model& m, std::string_view id) {
     REQUIRE(f != nullptr);
     const auto* n = std::get_if<form::field::Number>(&f->value);
     REQUIRE(n != nullptr);
-    return n->value;
+    return form::number_value(*n);
 }
 
 std::string text_of(const Model& m, std::string_view id) {

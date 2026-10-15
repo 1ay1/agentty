@@ -49,6 +49,12 @@ namespace ff = agentty::form::field;
             return maya::panel::Choice{std::string{v.label()}};
         }
         else if constexpr (std::is_same_v<T, ff::Number>) {
+            // While editing, show exactly what was typed (it may be empty:
+            // a cleared port reads as an empty field, not as its minimum).
+            if (editing_this_row)
+                return maya::panel::Text{agentty::form::number_text(v), caret,
+                                         std::to_string(v.min) + "\xe2\x80\x93"
+                                             + std::to_string(v.max)};
             return maya::panel::Number{v.value, caret};
         }
         else if constexpr (std::is_same_v<T, ff::Slider>) {

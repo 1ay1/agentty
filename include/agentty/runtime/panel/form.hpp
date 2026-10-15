@@ -99,12 +99,20 @@ struct Choice {
     }
 };
 
-// A bounded integer, edited digit-by-digit. Clamped on every mutation, so the
-// field can never HOLD a value the validator would later reject.
+// A bounded integer, edited digit-by-digit.
+//
+// While an edit is open the row holds what was typed (`draft`), digits only,
+// and the value is clamped once when the edit ends. Clamping on every key
+// made the row untypable whenever min > 0: cleared, the value snapped to
+// min, so on a 1-65535 port every digit typed after a clear was appended to
+// that 1 (#97). `value` is always in range; `draft` is only meaningful while
+// `editing`.
 struct Number {
     std::int64_t value = 0;
     std::int64_t min   = 0;
     std::int64_t max   = 65535;
+    std::string  draft;            // digits typed so far, may be empty
+    bool         editing = false;  // draft is live
 };
 
 // A bounded real, stepped with ←/→ and drawn as a bar. Distinct from Number
@@ -433,6 +441,14 @@ struct Options {
 // splices it. npos when the field is not being edited.
 [[nodiscard]] std::size_t caret_offset(const FieldValue& v, bool editing) noexcept;
 
+// A Number row's text: the digits typed so far while editing (may be
+// empty), else the value.
+[[nodiscard]] std::string number_text(const field::Number& n);
+// A Number row's value as it stands: mid-edit, the typed digits clamped into
+// range (empty keeps the saved value); otherwise the value. Read Number rows
+// through this, never `.value`, which only updates when the edit ends.
+[[nodiscard]] std::int64_t number_value(const field::Number& n);
+
 // ── Editing (pure mutations) ─────────────────────────────────────────────
 // Each is a no-op on a kind it doesn't apply to, so call sites never switch
 // on the alternative. All of them clamp; none can leave a field invalid.
@@ -499,6 +515,13 @@ void adjust(FieldValue& v, int dir);
 // Move the row cursor (wraps). No-op while a dropdown is open — that mode
 // owns the highlight.
 void move(Form& f, int delta);
+
+// Start / end an edit session on the focused row. EVERY path that enters or
+// leaves Editing goes through these, so a field kind with session state (a
+// Number's digit draft) can't be skipped by one entry point. end_edit
+// commits the draft into the value.
+void begin_edit(Form& f);
+void end_edit(Form& f);
 // Home/End: jump to the first/last non-header field WITHOUT wrapping.
 void move_edge(Form& f, bool last);
 // PgUp/PgDn: header-skipping stride that CLAMPS at the edges (no wrap).

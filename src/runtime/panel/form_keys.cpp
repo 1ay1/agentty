@@ -264,8 +264,7 @@ Applied apply(Form& f, Action a) {
                     std::holds_alternative<field::Number>(row->value);
                 if (numeric_row && (a.ch < U'0' || a.ch > U'9')) break;
 
-                f.focus = focus::Editing{};
-                f.edit_dirty = false;
+                begin_edit(f);
                 // Unambiguously the first keystroke of the session, so a
                 // Number row takes this digit as the whole value rather than
                 // appending it to the saved one.

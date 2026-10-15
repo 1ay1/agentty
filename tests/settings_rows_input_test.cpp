@@ -9,6 +9,7 @@
 #include "agtest.hpp"
 
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/app/program.hpp"   // AgenttyApp::visual_hash (the render gate)
 #include "agentty/runtime/app/subscribe.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/panel/form.hpp"
@@ -63,7 +64,7 @@ std::string show(const form::FieldValue& v) {
         using T = std::decay_t<decltype(x)>;
         if constexpr (std::is_same_v<T, form::field::Toggle>) return x.on ? "on" : "off";
         else if constexpr (std::is_same_v<T, form::field::Choice>) return std::to_string(x.index);
-        else if constexpr (std::is_same_v<T, form::field::Number>) return std::to_string(x.value);
+        else if constexpr (std::is_same_v<T, form::field::Number>) return std::to_string(form::number_value(x));
         else if constexpr (std::is_same_v<T, form::field::Slider>) return std::to_string(x.value);
         else if constexpr (requires { x.value; }) return std::string{x.value};
         else return "";
@@ -363,6 +364,39 @@ TEST_CASE("threads: paste goes into the filter") {
     REQUIRE(m.ui.panel.get<pn::ThreadList>() != nullptr);
     CHECK(m.ui.panel.get<pn::ThreadList>()->query == "alp");
     CHECK(m.ui.composer.text.empty());
+}
+
+TEST_CASE("settings rows: a cleared Embeddings port takes any number (#97)") {
+    // The report: RAG > Embeddings > Port, Backspace to empty, then type a
+    // number. Only numbers starting with 1 went in. Through the real pane,
+    // real keys, and the render gate: every keystroke must also repaint.
+    install_stub_deps();
+    Model start;
+    start.d.persisted.rag.embed_backend = "ollama";   // has a Port row
+    Model m = app::update(std::move(start),
+                          Msg{OpenRag{std::string{rag_settings::kFieldPort}}}).first;
+    auto* rag = m.ui.panel.get<pn::Rag>();
+    REQUIRE(rag != nullptr);
+    auto* row = rag->embed.form.focused();
+    REQUIRE(row != nullptr);
+    REQUIRE(row->id == rag_settings::kFieldPort);
+
+    auto h = app::AgenttyApp::visual_hash(m);
+    const auto step = [&](const maya::KeyEvent& ev, const char* what) {
+        m = press(std::move(m), ev);
+        const auto h2 = app::AgenttyApp::visual_hash(m);
+        CHECK_MESSAGE(h2 != h, what << " did not repaint");
+        h = h2;
+    };
+    step(sk(maya::SpecialKey::Enter), "Enter");
+    for (int i = 0; i < 5; ++i) step(sk(maya::SpecialKey::Backspace), "Backspace");
+    for (char32_t c : std::u32string{U"8080"}) step(ch(c), "digit");
+    m = press(std::move(m), sk(maya::SpecialKey::Enter));
+    rag = m.ui.panel.get<pn::Rag>();
+    REQUIRE(rag != nullptr);
+    const auto* port = rag->embed.form.find(rag_settings::kFieldPort);
+    REQUIRE(port != nullptr);
+    CHECK(form::number_value(std::get<form::field::Number>(port->value)) == 8080);
 }
 
 TEST_CASE("settings rows: every Appearance row takes input") {

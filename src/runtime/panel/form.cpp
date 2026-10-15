@@ -98,32 +98,57 @@ void move_at(const std::string& value, std::size_t& cursor, int delta) {
     while (delta > 0 && cursor < value.size()) { cursor = next_boundary(value, cursor); --delta; }
 }
 
-// Digits-only editing with clamping, expressed as decimal arithmetic rather
-// than string surgery: the field can then never HOLD a value outside its
-// range -- validation by construction instead of validate-later.
+// Digits-only editing on a draft string, clamped once when the edit ends.
 //
 // `fresh` means this is the FIRST digit of an edit session, and it replaces
-// rather than appends. Without it a Number row reads as broken, which is
-// exactly how it was reported:
+// rather than appends: the value on screen when editing starts is the SAVED
+// one, not something the user typed, so "type 8 into a row showing 4096"
+// means 8, and 4-0-9-6 still types 4096.
 //
-//   Secret scan depth is 3, range 0-8. You type 5 wanting 5. Append gives
-//   3*10+5 = 35, which clamps to 8 -- and because the row is now AT max,
-//   every subsequent digit also clamps to 8. The field is dead to typing and
-//   nothing on screen says why.
-//
-// Appending is only ever right when the user can see what they are extending,
-// which is true of the second digit and never of the first: the value on
-// screen when editing starts is the SAVED one, not something they typed. So
-// "type 8 into a row showing 4096" means 8, the way every other settings field
-// in the world behaves, and 4-0-9-6 still types 4096.
+// The draft is NOT clamped per key. Clamping per key was the bug: on a
+// row whose min is above 0 (a 1-65535 port) a cleared value snapped to the
+// min, every later digit was appended to it, and nothing but numbers
+// starting with that digit could be entered (#97). On a 0-8 row it pinned
+// at max and went deaf. The draft only caps its length, so it can't
+// overflow; range is enforced in number_commit.
+constexpr std::size_t kNumberMaxDigits = 18;   // fits int64
+
 void number_insert(field::Number& n, char32_t ch, bool fresh) {
     if (ch < U'0' || ch > U'9') return;
-    const std::int64_t digit = static_cast<std::int64_t>(ch - U'0');
-    const std::int64_t base = fresh ? 0 : n.value;
-    // Overflow guard BEFORE the multiply, on the same base the result uses.
-    if (n.max > 0 && base > (n.max - digit) / 10) { n.value = n.max; return; }
-    n.value = std::clamp(base * 10 + digit, n.min, n.max);
+    if (!n.editing) { n.editing = true; n.draft = std::to_string(n.value); }
+    if (fresh) n.draft.clear();
+    if (n.draft == "0") n.draft.clear();          // no leading zeros
+    if (n.draft.size() >= kNumberMaxDigits) return;
+    n.draft.push_back(static_cast<char>(ch));
 }
+
+// The value a draft means: empty is "nothing typed", which keeps the old
+// value; otherwise the number, clamped into range.
+std::int64_t number_from_draft(const field::Number& n) {
+    if (n.draft.empty()) return n.value;
+    std::int64_t v = 0;
+    for (char c : n.draft) v = v * 10 + (c - '0');
+    return std::clamp(v, n.min, n.max);
+}
+
+void number_commit(field::Number& n) {
+    if (!n.editing) return;
+    n.value = number_from_draft(n);
+    n.draft.clear();
+    n.editing = false;
+}
+
+}  // namespace
+
+std::string number_text(const field::Number& n) {
+    return n.editing ? n.draft : std::to_string(n.value);
+}
+
+std::int64_t number_value(const field::Number& n) {
+    return n.editing ? number_from_draft(n) : n.value;
+}
+
+namespace {
 
 // Keep the highlight inside the list, and the scroll window near it.
 //
@@ -182,7 +207,7 @@ std::size_t caret_offset(const FieldValue& v, bool editing) noexcept {
         else if constexpr (std::is_same_v<T, field::Secret>)
             return chars_before(f.value, f.cursor);
         else if constexpr (std::is_same_v<T, field::Number>)
-            return std::to_string(f.value).size();   // digits append at the end
+            return number_text(f).size();   // digits append at the end
         else
             return std::string::npos;
     }, v);
@@ -209,8 +234,12 @@ void backspace(FieldValue& v) {
                    || std::is_same_v<T, field::Secret>
                    || std::is_same_v<T, field::Path>)
             backspace_at(f.value, f.cursor);
-        else if constexpr (std::is_same_v<T, field::Number>)
-            f.value = std::clamp<std::int64_t>(f.value / 10, f.min, f.max);
+        else if constexpr (std::is_same_v<T, field::Number>) {
+            // On the draft: Backspace removes the last typed digit and can
+            // empty the field, so a cleared row takes any number next.
+            if (!f.editing) { f.editing = true; f.draft = std::to_string(f.value); }
+            if (!f.draft.empty()) f.draft.pop_back();
+        }
     }, v);
 }
 
@@ -272,15 +301,12 @@ void paste(FieldValue& v, std::string_view text) {
             f.value.insert(f.cursor, clean);
             f.cursor += clean.size();
         } else if constexpr (std::is_same_v<T, field::Number>) {
-            // Pasting "4096" means 4096, not "append 4096 to what is there".
-            // Only the FIRST digit replaces; the rest build the number, which
-            // is the same fresh-vs-continuing rule typing uses.
-            bool first = true;
+            // Digits append to the draft like typing. A paste that OPENS the
+            // edit starts from an empty draft (paste_into_focused), so
+            // pasting "4096" means 4096; mid-edit it extends what's typed.
             for (char c : clean)
-                if (c >= '0' && c <= '9') {
-                    number_insert(f, static_cast<char32_t>(c), first);
-                    first = false;
-                }
+                if (c >= '0' && c <= '9')
+                    number_insert(f, static_cast<char32_t>(c), /*fresh=*/false);
         }
     }, v);
 }
@@ -310,8 +336,9 @@ bool paste_into_focused(Form& f, std::string_view text) {
                        : (c != '\n' && c != '\r' && c != '\t');
     });
     if (!lands) return false;
-    f.focus = focus::Editing{};
-    f.edit_dirty = false;   // fresh session, as on the first typed key
+    begin_edit(f);
+    // A paste replaces a Number's saved value, as the first typed digit does.
+    if (auto* n = std::get_if<field::Number>(&row->value)) n->draft.clear();
     return paste_into(f, text);
 }
 
@@ -348,7 +375,10 @@ void clear(FieldValue& v) {
             f.value.clear();
             f.cursor = 0;
         } else if constexpr (std::is_same_v<T, field::Number>) {
-            f.value = f.min;
+            // Mid-edit ^U empties the draft (the next digit starts fresh);
+            // a clear outside an edit resets to the minimum.
+            if (f.editing) f.draft.clear();
+            else           f.value = f.min;
         } else if constexpr (std::is_same_v<T, field::Slider>) {
             f.value = f.min;
         }
@@ -464,8 +494,7 @@ Activated activate(Form& f) {
     }
 
     if (row->is_text_like()) {
-        f.focus = focus::Editing{};
-        f.edit_dirty = false;   // fresh session — commit-on-exit arms on first change
+        begin_edit(f);
         return Activated::StartedEditing;
     }
 
@@ -474,9 +503,25 @@ Activated activate(Form& f) {
     return Activated::Changed;
 }
 
+void begin_edit(Form& f) {
+    f.focus = focus::Editing{};
+    f.edit_dirty = false;   // fresh session — commit-on-exit arms on first change
+    if (auto* row = f.focused())
+        if (auto* n = std::get_if<field::Number>(&row->value)) {
+            n->editing = true;
+            n->draft = std::to_string(n->value);
+        }
+}
+
+void end_edit(Form& f) {
+    if (auto* row = f.focused())
+        if (auto* n = std::get_if<field::Number>(&row->value)) number_commit(*n);
+    f.focus = focus::Browsing{};
+}
+
 bool escape(Form& f) {
     if (f.choosing()) { f.focus = focus::Browsing{}; return false; }   // cancel
-    if (f.editing())  { f.focus = focus::Browsing{}; return false; }   // leave field
+    if (f.editing())  { end_edit(f); return false; }                   // leave field
     return true;                                                       // close form
 }
 

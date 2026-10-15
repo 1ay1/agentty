@@ -75,7 +75,9 @@ void reproject(Model& m) {
     o->pane.form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
     o->pane.form.cursor = std::clamp(cursor, 0,
                                 std::max(0, static_cast<int>(o->pane.form.fields.size()) - 1));
-    o->pane.form.focus = focus;
+    // An open edit doesn't survive a rebuild: the new row has no draft.
+    o->pane.form.focus = std::holds_alternative<form::focus::Editing>(focus)
+                       ? form::FormFocus{form::focus::Browsing{}} : focus;
 }
 
 // Rebuild the sealed transcript so a theme change reaches it.
@@ -299,7 +301,7 @@ namespace {
     else if (f.id == pn::kApCompact)    p.compact_turns = on();
     else if (f.id == pn::kApProseWidth) {
         if (const auto* n = std::get_if<form::field::Number>(&f.value))
-            p.prose_width = static_cast<int>(n->value);
+            p.prose_width = static_cast<int>(form::number_value(*n));
     }
     return false;
 }

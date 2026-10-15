@@ -184,7 +184,7 @@ eb::EmbedConfig config_from_form(const eb::EmbedConfig& base, const form::Form& 
 
     if (const auto* row = readable(kFieldPort))
         if (const auto* n = std::get_if<form::field::Number>(&row->value))
-            c.port = static_cast<std::uint16_t>(std::clamp<std::int64_t>(n->value, 1, 65535));
+            c.port = static_cast<std::uint16_t>(std::clamp<std::int64_t>(form::number_value(*n), 1, 65535));
 
     return c;
 }

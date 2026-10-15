@@ -667,8 +667,9 @@ inline bool read_row(C& cfg, const SettingDef& d, const form::Field& row) {
         using T = std::decay_t<decltype(v)>;
         if constexpr (std::is_same_v<T, form::field::Toggle>)
             return set(cfg, d, v.on ? "true" : "false");
-        else if constexpr (std::is_same_v<T, form::field::Number>
-                        || std::is_same_v<T, form::field::Slider>)
+        else if constexpr (std::is_same_v<T, form::field::Number>)
+            return set(cfg, d, std::to_string(form::number_value(v)));
+        else if constexpr (std::is_same_v<T, form::field::Slider>)
             return set(cfg, d, std::to_string(v.value));
         else if constexpr (std::is_same_v<T, form::field::Choice>)
             return set(cfg, d, std::string{v.id()});

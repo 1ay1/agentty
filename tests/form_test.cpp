@@ -205,24 +205,24 @@ TEST_CASE("form: a letter on a number row is a true no-op") {
     // makes it a no-op rather than a half-entered session.
     auto f = demo();
     f.cursor = 2;                               // port, a Number row
-    const auto before = std::get<field::Number>(f.find("port")->value).value;
+    const auto before = number_value(std::get<field::Number>(f.find("port")->value));
 
     press(f, chr(U'x'));
     CHECK_FALSE(f.editing());                   // no session started
     CHECK_FALSE(f.dirty);                       // nothing marked changed
-    CHECK(std::get<field::Number>(f.find("port")->value).value == before);
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == before);
 
     // And a digit still works right after, so the guard did not wedge the row.
     press(f, chr(U'7'));
     CHECK(f.editing());
-    CHECK(std::get<field::Number>(f.find("port")->value).value == 7);
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 7);
 
     // Mid-session too: a letter among digits is ignored rather than ending or
     // corrupting the edit.
     press(f, chr(U'z'));
-    CHECK(std::get<field::Number>(f.find("port")->value).value == 7);
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 7);
     press(f, chr(U'9'));
-    CHECK(std::get<field::Number>(f.find("port")->value).value == 79);
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 79);
 }
 
 TEST_CASE("form: the first digit typed REPLACES, it does not append") {
@@ -243,14 +243,14 @@ TEST_CASE("form: the first digit typed REPLACES, it does not append") {
 
     // Type-to-edit: the first printable starts the session.
     press(f, chr(U'8'));
-    CHECK(std::get<field::Number>(f.find("port")->value).value == 8);
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 8);
 
     // And the SECOND digit still appends -- 4-0-9-6 must type 4096, so this is
     // a fresh-vs-continuing distinction rather than "replace always".
     press(f, chr(U'0'));
-    CHECK(std::get<field::Number>(f.find("port")->value).value == 80);
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 80);
     press(f, chr(U'8'));
-    CHECK(std::get<field::Number>(f.find("port")->value).value == 808);
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 808);
 }
 
 TEST_CASE("form: Enter-then-type replaces too") {
@@ -261,7 +261,46 @@ TEST_CASE("form: Enter-then-type replaces too") {
     f.cursor = 2;
     press(f, key(maya::SpecialKey::Enter));
     press(f, chr(U'7'));
-    CHECK(std::get<field::Number>(f.find("port")->value).value == 7);
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 7);
+}
+
+TEST_CASE("form: a Number row cleared with Backspace takes any number (#97)") {
+    // Port, range 1-65535. Backspace to empty, then type 8080. The value was
+    // an int clamped on every key, so "empty" became 1 (the minimum) and
+    // every digit appended to that 1.
+    auto f = demo();
+    f.cursor = 2;                               // port, 11434
+    press(f, key(maya::SpecialKey::Enter));
+    for (int i = 0; i < 6; ++i) press(f, key(maya::SpecialKey::Backspace));
+    for (char32_t c : std::u32string{U"8080"}) press(f, chr(c));
+    press(f, key(maya::SpecialKey::Enter));
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 8080);
+
+    // Same after ^U, and when the number typed starts below the minimum.
+    press(f, key(maya::SpecialKey::Enter));
+    press(f, chr(U'u', /*ctrl=*/true));
+    for (char32_t c : std::u32string{U"0443"}) press(f, chr(c));
+    press(f, key(maya::SpecialKey::Enter));
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 443);
+}
+
+TEST_CASE("form: a number edit clamps once, when it ends") {
+    // Above max clamps to max; an emptied field keeps its saved value; and
+    // mid-edit the row shows exactly what was typed, empty included.
+    auto f = demo();
+    f.cursor = 2;                               // port 11434, 1-65535
+    press(f, key(maya::SpecialKey::Enter));
+    for (int i = 0; i < 6; ++i) press(f, key(maya::SpecialKey::Backspace));
+    const auto& n = std::get<field::Number>(f.find("port")->value);
+    CHECK(number_text(n).empty());              // cleared shows empty, not "1"
+    press(f, key(maya::SpecialKey::Enter));
+    CHECK(n.value == 11434);                    // nothing typed: unchanged
+
+    press(f, key(maya::SpecialKey::Enter));
+    for (char32_t c : std::u32string{U"999999"}) press(f, chr(c));
+    CHECK(number_text(n) == "999999");          // typed as-is, not clamped per key
+    press(f, key(maya::SpecialKey::Enter));
+    CHECK(n.value == 65535);                    // clamped once, on commit
 }
 
 TEST_CASE("form: a small-range number row never goes deaf to typing") {
@@ -274,18 +313,18 @@ TEST_CASE("form: a small-range number row never goes deaf to typing") {
     f.cursor = 0;
 
     press(f, chr(U'5'));
-    CHECK(std::get<field::Number>(f.find("depth")->value).value == 5);
+    CHECK(number_value(std::get<field::Number>(f.find("depth")->value)) == 5);
 
     // Leave and come back, then type a different digit. The row must answer
     // again rather than being stuck at whatever it latched to.
     press(f, key(maya::SpecialKey::Escape));
     press(f, chr(U'2'));
-    CHECK(std::get<field::Number>(f.find("depth")->value).value == 2);
+    CHECK(number_value(std::get<field::Number>(f.find("depth")->value)) == 2);
 
     // Including 0, which append could never produce from a non-zero start.
     press(f, key(maya::SpecialKey::Escape));
     press(f, chr(U'0'));
-    CHECK(std::get<field::Number>(f.find("depth")->value).value == 0);
+    CHECK(number_value(std::get<field::Number>(f.find("depth")->value)) == 0);
 }
 
 TEST_CASE("form: number and slider clamp on every mutation") {
@@ -293,7 +332,7 @@ TEST_CASE("form: number and slider clamp on every mutation") {
     f.cursor = 2;                               // port
     press(f, key(maya::SpecialKey::Enter));
     for (char32_t c : {U'9', U'9', U'9', U'9', U'9', U'9'}) press(f, chr(c));
-    CHECK(std::get<field::Number>(f.find("port")->value).value == 65535);
+    CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 65535);
 
     press(f, key(maya::SpecialKey::Escape));
     f.cursor = 3;                               // weight slider
@@ -687,7 +726,7 @@ TEST_CASE("form: paste_into_focused pastes the way typing types") {
         f.cursor = 2;   // Port
         CHECK_FALSE(paste_into_focused(f, "abc"));
         CHECK_FALSE(f.editing());
-        CHECK(std::get<field::Number>(f.find("port")->value).value == 11434);
+        CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 11434);
         f.cursor = 1;   // Host
         CHECK_FALSE(paste_into_focused(f, "\n"));
         CHECK_FALSE(f.editing());
@@ -697,7 +736,7 @@ TEST_CASE("form: paste_into_focused pastes the way typing types") {
         auto f = demo();
         f.cursor = 2;
         CHECK(paste_into_focused(f, "8080"));
-        CHECK(std::get<field::Number>(f.find("port")->value).value == 8080);
+        CHECK(number_value(std::get<field::Number>(f.find("port")->value)) == 8080);
     }
 }
 
