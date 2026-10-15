@@ -18,6 +18,7 @@
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/panel/settings/list.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"
+#include "agentty/runtime/fuzzy.hpp"   // search hit highlight
 
 #include <maya/widget/panel.hpp>
 #include <maya/widget/panel/caret.hpp>
@@ -143,12 +144,58 @@ Element settings_list_panel(const Model& m) {
             text(shown.substr(at, 3), caret),
             text(shown.substr(at + 3), fg_bold(fg))
         ).build());
+    } else if (o->concern == se::Category::General) {
+        // The hub searches every setting: the filter line is the header.
+        cfg.header.push_back(filter_header(o->query, "every setting", highlight));
     } else {
         cfg.header.push_back(h(
             text("  "), text(se::subtitle(o->concern), fg_dim(muted))
         ).build());
     }
     cfg.header.push_back(text(""));
+
+    // ── Search results (hub with a query) ─────────────────────────────
+    if (se::is_search(*o)) {
+        const auto hits = se::search(o->index_rows, o->query);
+        if (hits.empty()) {
+            cfg.prebuilt.push_back(text(
+                "  no setting matches \"" + o->query + "\"", fg_italic(muted)));
+        }
+        for (int k = 0; k < static_cast<int>(hits.size()); ++k) {
+            const auto& hit = o->index_rows[static_cast<std::size_t>(hits[static_cast<std::size_t>(k)])];
+            Panel::Item row;
+            row.badge       = "\xe2\x86\x92";   // → opens a pane
+            row.badge_style = fg_of(highlight);
+            row.leading       = hit.label;
+            row.leading_style = fg_of(fg);
+            // Highlight each typed word where it hits the label.
+            row.highlight     = se::label_match(hit.label, o->query);
+            row.highlight_fg  = highlight;
+            // The current value stands out; where it lives stays quiet.
+            std::string where = se::pane_label(hit.pane);
+            if (!hit.section.empty()) where += " \xc2\xb7 " + hit.section;
+            if (!hit.value.empty()) {
+                row.trailing       = hit.value;
+                row.trailing_style = fg_of(info);
+                row.origin         = where;
+            } else {
+                row.trailing       = where;
+                row.trailing_style = fg_dim(muted);
+            }
+            row.help = hit.help;   // the widget shows it on the selected row only
+            cfg.items.push_back(std::move(row));
+        }
+        cfg.selected = hits.empty() ? -1 : o->index;
+        cfg.footer.push_back(text(""));
+        if (!hits.empty())
+            cfg.footer.push_back(text(
+                "  " + std::to_string(o->index + 1) + "/" + std::to_string(hits.size())
+                    + " settings", fg_dim(muted)));
+        cfg.footer.push_back(key_hints({{"\xe2\x86\x91\xe2\x86\x93", "move", 5},
+                                        {"\xe2\x86\xb5", "open", 5},
+                                        {"esc", "clear", 5}}));
+        return Panel{std::move(cfg)}.build();
+    }
 
     // ── Rows (dimmed while adding, to focus the prompt) ──────────
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
@@ -242,6 +289,7 @@ Element settings_list_panel(const Model& m) {
         // the helper exists to prevent. Conditional verbs stay conditional.
         std::vector<Hint> keys{{"\xe2\x86\x91\xe2\x86\x93", "move", 5},
                                {"\xe2\x86\xb5", "act", 5}};
+        if (o->concern == se::Category::General) keys.push_back({"type", "search", 4});
         if (can_add(o->concern))                     keys.push_back({"a", "add", 2, success});
         if (o->concern == se::Category::Plugins) {
             keys.push_back({"e", "edit", 3});

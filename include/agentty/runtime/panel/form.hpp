@@ -503,6 +503,9 @@ void move(Form& f, int delta);
 void move_edge(Form& f, bool last);
 // PgUp/PgDn: header-skipping stride that CLAMPS at the edges (no wrap).
 void move_page(Form& f, int delta);
+// Put the cursor on the row with this id. False (cursor unchanged) when the
+// form has no such row.
+bool focus_row(Form& f, std::string_view id);
 
 // Enter on the focused row: engage a text field, open a Choice's dropdown,
 // flip a Toggle, hand a Pick off to its picker, or report that an Action

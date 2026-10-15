@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "agentty/runtime/panel/settings/categories.hpp"
+#include "agentty/runtime/panel/settings/list.hpp"
+#include "agentty/runtime/panel/form.hpp"
 #include <maya/runtime.hpp>
 #include "agentty/util/io.hpp"
 
@@ -123,6 +125,32 @@ struct Item {
 // The rows for one category, live. `m` supplies profile/RAG/Smart state
 // for the General category; the rest come from the tools:: loaders.
 [[nodiscard]] std::vector<Item> items_for(const Model& m, Category cat);
+
+// ── Settings search ─────────────────────────────────────────────────
+// The index (every row of every form pane) is built by the reducer when the
+// hub opens, from each pane's own form builder. These are the pure halves.
+
+// Turn one pane's form into hits: every non-header row, with the header it
+// sits under.
+void index_form(std::vector<ListOpen::Hit>& out, const form::Form& f,
+                ListOpen::Pane pane);
+
+// Indices into `index` that match `query`, best first. Matches on label,
+// then section, pane name and help.
+[[nodiscard]] std::vector<int> search(const std::vector<ListOpen::Hit>& index,
+                                      std::string_view query);
+
+[[nodiscard]] const char* pane_label(ListOpen::Pane p) noexcept;
+
+// Byte offsets in `label` where the query's words match, for highlighting.
+[[nodiscard]] std::vector<int> label_match(std::string_view label, std::string_view query);
+
+// Is this list showing search results? Only the hub searches, and a query
+// of just spaces isn't a search.
+[[nodiscard]] inline bool is_search(const ListOpen& o) noexcept {
+    return o.concern == Category::General
+        && o.query.find_first_not_of(' ') != std::string::npos;
+}
 
 // ── In-TUI add flows ────────────────────────────────────────────────
 // Result of an add attempt: a human-readable message for the status toast

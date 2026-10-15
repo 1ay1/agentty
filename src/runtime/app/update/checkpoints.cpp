@@ -158,7 +158,7 @@ Cmd checkpoint_update(Model& m, msg::CheckpointMsg cm) {
             auto* o = m.ui.panel.get<pn::Checkpoints>();
             if (!o || o->entries.empty()) return Cmd::none();
             const int n = static_cast<int>(o->entries.size());
-            o->index = (o->index + e.delta % n + n) % n;
+            o->index = ui::step(o->index, e.delta, n);
             return Cmd::none();
         },
         [&](LibraryLoaded& e) -> Cmd {

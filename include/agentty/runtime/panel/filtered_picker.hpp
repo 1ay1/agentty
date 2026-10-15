@@ -48,6 +48,7 @@
 #include <utility>
 #include <vector>
 
+#include "agentty/runtime/panel/step.hpp"
 #include "agentty/runtime/visual.hpp"
 #include "agentty/util/snapshot.hpp"
 
@@ -126,13 +127,10 @@ public:
     // longer move the cursor against a stale or unfiltered size.
 
     void move(int delta) const {
-        const auto n = static_cast<int>(filtered().size());
-        if (n <= 0) { index_ = 0; return; }
-        index_ = std::clamp(index_ + delta, 0, n - 1);
+        index_ = step(index_, delta, static_cast<int>(filtered().size()));
     }
 
-    // Wrapping variant, for the pickers whose lists are long enough that
-    // walking back to the top should not take N keystrokes.
+    // Wraps for every step size, for the theme browser's paging.
     void move_wrapping(int delta) const {
         const auto n = static_cast<int>(filtered().size());
         if (n <= 0) { index_ = 0; return; }

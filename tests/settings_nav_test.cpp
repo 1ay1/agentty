@@ -208,11 +208,9 @@ TEST_CASE("settings nav: settings list → pane → Esc returns to the list") {
 
 namespace {
 
-// Put the cursor on `id` in a form; REQUIREs it exists.
-void focus_row(form::Form& f, std::string_view id) {
-    for (int i = 0; i < static_cast<int>(f.fields.size()); ++i)
-        if (f.fields[static_cast<std::size_t>(i)].id == id) { f.cursor = i; return; }
-    FAIL("no row " << std::string{id});
+// Put the cursor on `id`; REQUIREs the row exists.
+void focus_on(form::Form& f, std::string_view id) {
+    REQUIRE_MESSAGE(form::focus_row(f, id), "no row " << std::string{id});
 }
 
 form::keys::Action intent(form::keys::Intent i) { return form::keys::Action{i}; }
@@ -235,7 +233,7 @@ TEST_CASE("settings fields: a RAG pipeline toggle saves on its own") {
     auto* rag = m.ui.panel.get<pn::Rag>();
     REQUIRE(rag != nullptr);
     auto* f = &rag->embed.form;
-    focus_row(*f, "rag.dedup");
+    focus_on(*f, "rag.dedup");
     auto next = app::update(std::move(m),
                     Msg{RagEmbedKey{intent(form::keys::Intent::AdjustUp)}}).first;
     CHECK(next.d.persisted.rag.dedup == false);
@@ -250,7 +248,7 @@ TEST_CASE("settings fields: typing a Smart Mode number keeps the edit, commits o
     m = app::update(std::move(m), Msg{SmartModeAdvanced{}}).first;
     auto* o = m.ui.panel.get<pn::SmartMode>();
     REQUIRE(o != nullptr);
-    focus_row(o->form, "smart.deep_margin");
+    focus_on(o->form, "smart.deep_margin");
     const auto* d = settings::registry::find("smart.deep_margin");
     REQUIRE(d != nullptr);
     const auto want = static_cast<int>(d->max);

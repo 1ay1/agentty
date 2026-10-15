@@ -198,16 +198,22 @@ void rebuild(const Model& m, pn::WebSearch& o, std::string_view prefer_id = {}) 
 
 } // namespace
 
+form::Form web_search_form_for_search(const Model& m) {
+    // No key origins: building them reads the keystore. Key rows still index.
+    return web_search_form::build_form(m.d.persisted.web_search, m.env.settings);
+}
+
 Cmd web_search_update(Model& m, msg::WebSearchMsg wm) {
     return std::visit(overload{
-        [&](OpenWebSearch) -> Cmd {
+        [&](OpenWebSearch& e) -> Cmd {
             pn::WebSearch o;
             // Built synchronously (a pane must never own the keyboard with no
             // form to act on); the key rows say "checking…" until the read
             // below answers.
             o.form = web_search_form::build_form(m.d.persisted.web_search, m.env.settings, key_origin(o));
-            // Open on the master switch, not on the group header above it.
-            restore_cursor(o.form, 0);
+            // Open on the master switch, not on the group header above it,
+            // unless a search asked for a row.
+            if (!form::focus_row(o.form, e.focus)) restore_cursor(o.form, 0);
             m.ui.panel.descend(std::move(o));
             return read_key_origins(*m.ui.panel.get<pn::WebSearch>());
         },

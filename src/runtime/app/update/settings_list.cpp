@@ -17,6 +17,7 @@
 #include <maya/core/overload.hpp>
 
 #include "agentty/runtime/panel/settings/items.hpp"
+#include "agentty/runtime/panel/step.hpp"
 #include "agentty/runtime/view/helpers.hpp"   // utf8_encode / utf8_prev
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/registry.hpp"   // reload_mcp_plugins
@@ -82,7 +83,33 @@ namespace {
             return i;
     return start;
 }
+
+// Open the pane a search hit lives in, on that row. Descends, so Esc comes
+// back to the search with its query.
+[[nodiscard]] Msg open_hit(const se::ListOpen::Hit& h) {
+    using P = se::ListOpen::Pane;
+    switch (h.pane) {
+        case P::Rag:        return Msg{OpenRag{h.row}};
+        case P::Smart:      return Msg{OpenSmartMode{h.row}};
+        case P::Appearance: return Msg{OpenAppearance{h.row}};
+        case P::Sandbox:    return Msg{OpenSandbox{h.row}};
+        case P::WebSearch:  return Msg{OpenWebSearch{h.row}};
+    }
+    return Msg{OpenRag{h.row}};
+}
 }  // namespace
+
+// Every setting in every form pane, from each pane's own form builder.
+std::vector<se::ListOpen::Hit> settings_search_index(const Model& m) {
+    using P = se::ListOpen::Pane;
+    std::vector<se::ListOpen::Hit> out;
+    se::index_form(out, rag_form_for_search(m),        P::Rag);
+    se::index_form(out, build_smart_form(m, true),     P::Smart);
+    se::index_form(out, appearance_form_for_search(m), P::Appearance);
+    se::index_form(out, sandbox_form_for_search(m),    P::Sandbox);
+    se::index_form(out, web_search_form_for_search(m), P::WebSearch);
+    return out;
+}
 
 Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
     return std::visit(overload{
@@ -115,6 +142,9 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
             // offset of the last visit (the widget's keep-selection-in-view
             // would fight the stale offset for a frame). PR #34.
             m.ui.settings_list_scroll.y = 0;
+            if (e.concern == se::Category::General)
+                if (auto* hub = m.ui.panel.get<pn::SettingsList>())
+                    hub->index_rows = settings_search_index(m);
             // Opening the Plugins panel is what CONNECTS the servers (and
             // refreshes the snapshot): the connection is driven by the update
             // loop, not a lazy side effect of the first tool call. Without
@@ -193,47 +223,38 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
             auto* o = m.ui.panel.get<pn::SettingsList>();
             if (!o) return Cmd::none();
             o->confirm_remove.clear();   // moving off a row disarms a pending ^D
+            if (se::is_search(*o)) {
+                const int hits = static_cast<int>(se::search(o->index_rows, o->query).size());
+                o->index = ui::step(o->index, e.delta, hits);
+                return Cmd::none();
+            }
             auto rows = se::items_for(m, o->concern);
             const int n = static_cast<int>(rows.size());
             if (n <= 0) { o->index = 0; return Cmd::none(); }
 
-            // Seamless nav: hop OVER purely informational rows (Action::None
-            // — the plugins "N tools on the wire" header, the agents built-in
-            // list, empty-state placeholders) so ↑↓ lands only on rows the
-            // user can actually act on. Each unit of delta advances one
-            // ACTIONABLE row via the shared first_actionable SSOT; when no
-            // actionable row remains that way we take a plain clamped step so
-            // an all-informational pane still scrolls and never gets stuck.
-            const int dir = e.delta > 0 ? 1 : (e.delta < 0 ? -1 : 0);
-            const int steps = dir == 0 ? 0 : std::abs(e.delta);
-            int idx = std::clamp(o->index, 0, n - 1);
-            const bool on_actionable = actionable_at(rows, idx);
-            for (int s = 0; s < steps; ++s) {
-                const int probe = idx + dir;
-                if (probe < 0 || probe >= n) break;   // at the edge
-                const int landed = first_actionable(rows, probe, dir);
-                if (actionable_at(rows, landed)) {
-                    idx = landed;                     // hopped onto a real row
-                } else if (on_actionable) {
-                    // We started on an actionable row and there's nothing
-                    // actionable ahead (only a header/footer). DON'T slide
-                    // onto that dead row — hold position; that's the seamless
-                    // feel (↑ at the top row is a no-op, not a jump to a
-                    // non-interactive header).
-                    break;
-                } else {
-                    // Started on an informational row (wholly-inert pane):
-                    // plain-step so the user can still scroll through it.
-                    idx = std::clamp(idx + dir, 0, n - 1);
-                }
-            }
-            o->index = idx;
+            // Land only on rows you can act on, and wrap at the ends like
+            // every list. A pane with no actionable row still scrolls.
+            const int idx = std::clamp(o->index, 0, n - 1);
+            bool any = false;
+            for (int i = 0; i < n; ++i) any = any || actionable_at(rows, i);
+            o->index = any
+                ? ui::step_over(idx, e.delta, n,
+                                [&](int i) { return !actionable_at(rows, i); })
+                : ui::step(idx, e.delta, n);
             return Cmd::none();
         },
         [&](SettingsListActivate) -> Cmd {
             auto* o = m.ui.panel.get<pn::SettingsList>();
             if (!o) return Cmd::none();
             o->confirm_remove.clear();   // any Enter action disarms a pending ^D
+            if (se::is_search(*o)) {
+                const auto hits = se::search(o->index_rows, o->query);
+                if (o->index < 0 || o->index >= static_cast<int>(hits.size()))
+                    return Cmd::none();
+                const auto& h = o->index_rows[static_cast<std::size_t>(
+                    hits[static_cast<std::size_t>(o->index)])];
+                return reenter(m, open_hit(h));
+            }
             auto rows = se::items_for(m, o->concern);
             if (o->index < 0 || o->index >= static_cast<int>(rows.size()))
                 return Cmd::none();
@@ -511,6 +532,36 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                 clean += (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
             o->input.insert(static_cast<std::size_t>(o->cursor), clean);
             o->cursor += static_cast<int>(clean.size());
+            return Cmd::none();
+        },
+        [&](SettingsSearchInput& e) -> Cmd {
+            auto* o = m.ui.panel.get<pn::SettingsList>();
+            if (!o || o->concern != se::Category::General) return Cmd::none();
+            if (o->query.empty() && e.ch == U' ') return Cmd::none();   // no leading space
+            o->query += ui::utf8_encode(e.ch);
+            o->index = 0;                  // best match first
+            m.ui.settings_list_scroll.y = 0;
+            return Cmd::none();
+        },
+        [&](SettingsSearchClear) -> Cmd {
+            auto* o = m.ui.panel.get<pn::SettingsList>();
+            if (!o) return Cmd::none();
+            o->query.clear();
+            o->index = first_actionable(se::items_for(m, o->concern), 0, +1);
+            m.ui.settings_list_scroll.y = 0;
+            return Cmd::none();
+        },
+        [&](SettingsSearchBackspace) -> Cmd {
+            auto* o = m.ui.panel.get<pn::SettingsList>();
+            if (!o || o->query.empty()) return Cmd::none();
+            o->query.erase(static_cast<std::size_t>(
+                ui::utf8_prev(o->query, static_cast<int>(o->query.size()))));
+            // Back to the hub rows once the search is blank: land on the
+            // first one you can act on.
+            if (!se::is_search(*o)) o->query.clear();
+            o->index = o->query.empty()
+                ? first_actionable(se::items_for(m, o->concern), 0, +1) : 0;
+            m.ui.settings_list_scroll.y = 0;
             return Cmd::none();
         },
         [&](SettingsListBackspace) -> Cmd {

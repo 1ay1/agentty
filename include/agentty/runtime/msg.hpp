@@ -548,6 +548,9 @@ struct ThreadListMove { int delta; };
 // Absolute-jump nav for long thread histories. See ModelsJump.
 struct ThreadListJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
 struct ThreadListSelect {};
+// Type to filter the thread list by title.
+struct ThreadListFilterInput     { char32_t ch; };
+struct ThreadListFilterBackspace {};
 // `d` / `D` in the thread picker — two-press delete with confirm_remove.
 // Mirrors the established SettingsListRemove / AccountRemove pattern:
 // first press marks the focused thread as pending-delete (⚠ badge),
@@ -676,7 +679,9 @@ struct CloseTodoModal {};
 // ONE key message, like the Retrieval pane: navigation, the master toggle and
 // the picker hand-off are all resolved by the shared form layer, so this pane
 // cannot drift from that one.
-struct OpenSmartMode {};
+// `focus`: open with the cursor on this row id (settings search). Empty =
+// the usual first row.
+struct OpenSmartMode { std::string focus; };
 struct CloseSmartMode {};
 struct SmartModeKey { form::keys::Action action; };
 // Bracketed paste while a Smart Mode field is being edited — lands in the
@@ -695,7 +700,7 @@ struct SmartModeClearSlot {};     // 'x' on a slot row: reset it to auto
 //
 // ONE key message like Smart Mode and Retrieval: navigation, toggles and
 // text editing all come from the shared form layer.
-struct OpenWebSearch {};
+struct OpenWebSearch { std::string focus; };   // focus: row id, as OpenSmartMode
 struct CloseWebSearch {};
 struct WebSearchKey { form::keys::Action action; };
 // Bracketed paste while the Web Search pane is open. The reducer lands it on
@@ -736,7 +741,7 @@ struct PluginEditPaste { std::string text; };
 // the user store and the next frame is painted with it. A settings screen
 // for appearance cannot have an apply step: a theme is judged by LOOKING at
 // it, and between choosing and seeing there must not be a restart.
-struct OpenAppearance {};
+struct OpenAppearance { std::string focus; };  // focus: row id, as OpenSmartMode
 struct CloseAppearance {};
 struct AppearanceKey { form::keys::Action action; };
 struct AppearancePaste { std::string text; };
@@ -760,7 +765,7 @@ struct AppearanceThemeCancel {};      // Esc: restore the theme we came in on
 // commits the whole config at once. That is also why there is a Save message
 // here and none in Appearance: a theme is judged by looking, a sandbox by
 // reading what it promises before you trust it.
-struct OpenSandbox {};
+struct OpenSandbox { std::string focus; };     // focus: row id, as OpenSmartMode
 struct CloseSandbox {};
 struct SandboxKey { form::keys::Action action; };
 struct SandboxPaste { std::string text; };
@@ -1008,7 +1013,7 @@ struct StatsScroll { int delta = +1; };
 // ── RAG mode picker ────────────────────────────────────────────────
 // One decision: how proactive (pre-turn) retrieval behaves — On / First turn
 // only / Off. Selecting commits the mode (persist + live-apply) and closes.
-struct OpenRag {};
+struct OpenRag { std::string focus; };         // focus: row id, as OpenSmartMode
 struct CloseRag {};
 // Reveal/hide the Tier::Advanced rows (^A). The pane rebuilds its form; the
 // flag is view state, not config, so it is not persisted.
@@ -1116,6 +1121,10 @@ struct PluginEdited {
     bool        parse_error    = false;
 };
 struct SettingsListBackspace  {};
+// Settings hub search: type to search every setting, Backspace to trim.
+struct SettingsSearchInput     { char32_t ch; };
+struct SettingsSearchBackspace {};
+struct SettingsSearchClear     {};   // Esc with a query: clear it, stay open
 struct SettingsListSubmitInput{};              // Enter in add-mode → create
 struct SettingsListCancelInput{};              // Esc in add-mode → back to list
 // The add-mode create (a plugin into mcp.json, or a starter command/agent
@@ -1356,6 +1365,7 @@ using ModelsMsg = std::variant<
 
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,
+    ThreadListFilterInput, ThreadListFilterBackspace,
     ThreadListSelect, ThreadListDelete, ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded>;
 
 using PaletteMsg = std::variant<
@@ -1395,6 +1405,7 @@ using StatsMsg = std::variant<
 
 using SettingsListMsg = std::variant<
     OpenSettingsList, CloseSettingsList, SettingsListMove,
+    SettingsSearchInput, SettingsSearchBackspace, SettingsSearchClear,
     SettingsListActivate, SettingsListAddStart, SettingsListRemove,
     SettingsListEditOpen,
     SettingsListChar, SettingsListPaste, PluginsUpdated, PluginEdited,

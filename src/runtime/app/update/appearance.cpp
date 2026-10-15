@@ -358,10 +358,14 @@ void move_highlight(Model& m, int delta) {
 
 }  // namespace
 
+form::Form appearance_form_for_search(const Model& m) {
+    return pn::build_appearance_form(m.d.ui(), m.env.terminal);
+}
+
 Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
     return std::visit(overload{
 
-        [&](OpenAppearance&) -> Cmd {
+        [&](OpenAppearance& e) -> Cmd {
             pn::Appearance o;
             o.pane.form = pn::build_appearance_form(m.d.ui(), m.env.terminal);
             // Land on the first real setting, not the "Theme" section
@@ -372,6 +376,7 @@ Cmd appearance_update(Model& m, msg::AppearanceMsg am) {
                     o.pane.form.cursor = i;
                     break;
                 }
+            (void)form::focus_row(o.pane.form, e.focus);
             m.ui.panel.descend(std::move(o));
             m.ui.appearance_scroll.y = 0;
             return Cmd::none();

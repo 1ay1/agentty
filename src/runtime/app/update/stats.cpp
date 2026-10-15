@@ -127,14 +127,8 @@ Cmd stats_update(Model& m, msg::StatsMsg sm) {
         [&](SkillsMove e) -> Cmd {
             auto* o = m.ui.panel.get<pn::Skills>();
             if (!o || o->rows.empty()) return Cmd::none();
-            // Clamp rather than wrap. The list is ordered worst-first, so
-            // wrapping from the last row back to a flagged skill at the
-            // top would read as the panel jumping on its own.
-            const int n = static_cast<int>(o->rows.size());
-            int next = o->index + e.delta;
-            if (next < 0)  next = 0;
-            if (next >= n) next = n - 1;
-            o->index = next;
+            // Wraps like every list (single steps); pages stop at the ends.
+            o->index = ui::step(o->index, e.delta, static_cast<int>(o->rows.size()));
             // A new selection means a new detail footer; start it at the
             // top for the same reason StatsTab does.
             o->scroll.scroll_to_origin();

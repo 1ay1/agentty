@@ -4,6 +4,7 @@
 // owns every chrome decision. Shared scaffolding: panels_prologue.hpp.
 
 #include "panels_prologue.hpp"
+#include "agentty/runtime/panel/thread_filter.hpp"   // visible_threads + fuzzy
 
 namespace agentty::ui {
 
@@ -12,6 +13,7 @@ namespace agentty::ui {
 Element thread_list_panel(const Model& m) {
     auto* picker = m.ui.panel.get<pn::ThreadList>();
     if (!picker) return nothing();
+    const auto visible = ui::visible_threads(m.d.threads, picker->query);
 
     Panel::Config cfg;
     cfg.title      = " Threads ";
@@ -19,16 +21,24 @@ Element thread_list_panel(const Model& m) {
     cfg.min_width  = kPanelStandard;
     cfg.viewport_h = panel_viewport_h();
     cfg.scroll     = &m.ui.thread_list_scroll;
-    cfg.selected   = picker->index;
+    cfg.selected   = visible.empty() ? -1 : picker->index;
+    if (!m.d.threads.empty()) {
+        cfg.header.push_back(filter_header(picker->query, "threads"));
+        cfg.header.push_back(sep);
+    }
 
     if (m.d.threads.empty()) {
         cfg.prebuilt.push_back(text(
             m.s.threads_loading ? "  Loading conversations…"
                                 : "  No threads yet.",
             fg_italic(muted)));
+    } else if (visible.empty()) {
+        cfg.prebuilt.push_back(text(
+            "  no thread matches \"" + picker->query + "\"", fg_italic(muted)));
     } else {
-        cfg.items.reserve(m.d.threads.size());
-        for (const auto& t : m.d.threads) {
+        cfg.items.reserve(visible.size());
+        for (const int vi : visible) {
+            const auto& t = m.d.threads[static_cast<std::size_t>(vi)];
             const bool is_current = (t.id == m.d.current.id);
             const bool confirming = (picker->confirm_remove == t.id.value);
             Panel::Item row;
@@ -40,11 +50,20 @@ Element thread_list_panel(const Model& m) {
             // Thread TITLES are what you are choosing between — full
             // foreground. Same hierarchy rule as the model/provider pickers.
             row.leading_style  = is_current ? fg_bold(info) : fg_of(fg);
+            // Show why a row matched. Offsets shift by the 2-byte gutter /
+            // 4-byte ● marker in front of the title.
+            if (!picker->query.empty() && !t.title.empty())
+                if (auto fm = fuzzy::score(t.title, picker->query); fm.matched()) {
+                    const int shift = is_current ? 4 : 2;
+                    for (int& p : fm.positions) p += shift;
+                    row.highlight    = std::move(fm.positions);
+                    row.highlight_fg = info;
+                }
             if (confirming) {
                 row.badge       = "\xe2\x9a\xa0";           // ⚠
                 row.badge_style = fg_of(warn);
                 row.leading_style = fg_bold(warn);
-                row.trailing       = "press d again to confirm";
+                row.trailing       = "press ^D again to confirm";
                 row.trailing_style = fg_of(warn);
             } else {
                 row.trailing       = timestamp_full(t.updated_at);
@@ -60,25 +79,27 @@ Element thread_list_panel(const Model& m) {
     cfg.footer.push_back(text(""));
     // Positional readout — same "k/N" the ^←→ / Alt+←→ toast shows, so
     // the two navigation surfaces speak one coordinate system.
-    if (!m.d.threads.empty()) {
+    if (!visible.empty()) {
         cfg.footer.push_back(text(
             "  " + std::to_string(picker->index + 1) + "/"
-                + std::to_string(m.d.threads.size()),
+                + std::to_string(visible.size())
+                + (picker->query.empty() ? std::string{}
+                       : " of " + std::to_string(m.d.threads.size())),
             fg_dim(muted)));
     }
     // Armed delete is a MODE: hint it in the note line, exactly like the
     // account list and the settings add-prompt, so every two-step confirm
     // in the app reads the same way.
     if (!picker->confirm_remove.empty())
-        cfg.note = "d confirm delete \xc2\xb7 any other key cancels";
+        cfg.note = "^D confirm delete \xc2\xb7 any other key cancels";
     cfg.footer.push_back(key_hints({
+        {"type", "filter", 5},
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-        {"PgUp/PgDn", "page", 2},
         {"Enter", "open", 5},
-        {"n", "new", 3},
-        {"d", picker->confirm_remove.empty() ? "remove" : "confirm", 3},
+        {"^N", "new", 3},
+        {"^D", picker->confirm_remove.empty() ? "remove" : "confirm", 3},
         {"^/Alt+\xe2\x86\x90\xe2\x86\x92", "cycle", 1},   // ^←→ / Alt+←→
-        {"Esc", "close", 4},
+        {"Esc", picker->query.empty() ? "close" : "clear", 4},
     }));
 
     return Panel{std::move(cfg)}.build();

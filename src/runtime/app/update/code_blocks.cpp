@@ -145,7 +145,7 @@ Cmd codeblock_update(Model& m, msg::CodeBlockMsg cm) {
             if (auto* o = m.ui.panel.get<pn::CodeBlocks>()) {
                 int sz = static_cast<int>(o->blocks.size());
                 if (sz <= 0) return Cmd::none();
-                o->index = std::clamp(o->index + e.delta, 0, sz - 1);
+                o->index = ui::step(o->index, e.delta, sz);
                 return Cmd::none();
             }
             if (m.ui.panel.get<pn::CodeBlockResult>()) {

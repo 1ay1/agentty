@@ -20,6 +20,7 @@
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/mem.hpp"
 #include "agentty/runtime/panel/common.hpp"
+#include "agentty/runtime/panel/thread_filter.hpp"
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/skills.hpp"
@@ -31,6 +32,22 @@ namespace agentty::app::detail {
 
 namespace pick = agentty::ui::pick;
 using maya::overload;
+
+namespace {
+
+// The thread under the picker cursor, after the filter. -1 when none.
+[[nodiscard]] int picked_thread(const Model& m, const pn::ThreadList& p) {
+    const auto vis = ui::visible_threads(m.d.threads, p.query);
+    if (vis.empty()) return -1;
+    return vis[static_cast<std::size_t>(
+        std::clamp(p.index, 0, static_cast<int>(vis.size()) - 1))];
+}
+
+[[nodiscard]] int visible_count(const Model& m, const pn::ThreadList& p) {
+    return static_cast<int>(ui::visible_threads(m.d.threads, p.query).size());
+}
+
+}  // namespace
 // ── Fresh-thread reset ────────────────────────────────────────────────────
 // Swap the model over to a brand-new empty thread and return the terminal
 // reset that wipes the departing thread's rendered turns off-screen.
@@ -123,24 +140,48 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             return cmd;
         },
         [&](CloseThreadList) -> Cmd {
+            // Esc with a filter clears it first, so a typo never closes the list.
+            if (auto* p = m.ui.panel.get<pn::ThreadList>(); p && !p->query.empty()) {
+                const int was = picked_thread(m, *p);
+                p->query.clear();
+                p->index = std::max(0, was);   // stay on the same thread
+                return Cmd::none();
+            }
             ascend(m);   // Esc: back to whatever opened this, or close
             return Cmd::none();
         },
+        [&](ThreadListFilterInput& e) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p) return Cmd::none();
+            p->confirm_remove.clear();
+            p->query += ui::utf8_encode(e.ch);
+            p->index = 0;                    // best (most recent) match first
+            m.ui.thread_list_scroll.y = 0;
+            return Cmd::none();
+        },
+        [&](ThreadListFilterBackspace) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p || p->query.empty()) return Cmd::none();
+            p->confirm_remove.clear();
+            p->query.erase(static_cast<std::size_t>(
+                ui::utf8_prev(p->query, static_cast<int>(p->query.size()))));
+            p->index = 0;
+            m.ui.thread_list_scroll.y = 0;
+            return Cmd::none();
+        },
         [&](ThreadListMove& e) -> Cmd {
-            if (m.d.threads.empty()) return Cmd::none();
             auto* p = m.ui.panel.get<pn::ThreadList>();
             if (!p) return Cmd::none();
             p->confirm_remove.clear();   // moving disarms a pending `d`
-            int sz = static_cast<int>(m.d.threads.size());
-            p->index = (p->index + e.delta + sz) % sz;
+            p->index = ui::step(p->index, e.delta, visible_count(m, *p));
             return Cmd::none();
         },
         [&](ThreadListJump& e) -> Cmd {
-            if (m.d.threads.empty()) return Cmd::none();
             auto* p = m.ui.panel.get<pn::ThreadList>();
             if (!p) return Cmd::none();
+            const int sz = visible_count(m, *p);
+            if (sz == 0) return Cmd::none();
             p->confirm_remove.clear();   // jumping disarms a pending `d`
-            int sz = static_cast<int>(m.d.threads.size());
             using W = ThreadListJump::Where;
             constexpr int kPage = 14;  // matches kViewportH in pickers.cpp
             switch (e.where) {
@@ -198,11 +239,9 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             Cmd cmd = Cmd::none();
             if (p) p->confirm_remove.clear();   // selecting disarms a pending `d`
             if (p && !m.d.threads.empty() && !m.s.thread_loading) {
-                // Re-clamp: p->index can be stale if an async refresh shrank
-                // the list since the last navigation (see ThreadListDelete).
-                p->index = std::clamp(p->index, 0,
-                                      static_cast<int>(m.d.threads.size()) - 1);
-                const Thread& meta = m.d.threads[static_cast<std::size_t>(p->index)];
+                const int at = picked_thread(m, *p);
+                if (at < 0) return Cmd::none();   // the filter matches nothing
+                const Thread& meta = m.d.threads[static_cast<std::size_t>(at)];
                 // Same-thread re-select — closing the picker is the
                 // only useful action. No async load: would just
                 // reparse the same bytes and flash.
@@ -229,16 +268,11 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // Any move/jump/select/new/close disarms the pending state.
             auto* p = m.ui.panel.get<pn::ThreadList>();
             if (!p || m.d.threads.empty()) return Cmd::none();
-            // Bounds-guard the cursor before indexing. Navigation handlers
-            // clamp p->index on every move, but the thread list can be
-            // mutated out from under the picker by an async refresh (or a
-            // prior delete) that shrinks it, leaving a stale index that
-            // points past the new end. Reading m.d.threads[idx] then is an
-            // out-of-bounds access; the erase(begin()+idx) below would
-            // compound it. Re-clamp into range instead of trusting p->index.
-            const int sz_now = static_cast<int>(m.d.threads.size());
-            const int idx = std::clamp(p->index, 0, sz_now - 1);
-            p->index = idx;
+            // The cursor is a position in the FILTERED list; picked_thread
+            // maps it back and clamps it, so a list shrunk by an async
+            // refresh can't index past the end.
+            const int idx = picked_thread(m, *p);
+            if (idx < 0) return Cmd::none();
             const Thread& target = m.d.threads[static_cast<std::size_t>(idx)];
             // Use the thread id as the confirm key — stable across title edits.
             const std::string key = target.id.value;
@@ -261,7 +295,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             Cmd del = Cmd(DeleteThread{target_id});
             m.d.threads.erase(m.d.threads.begin() + idx);
             // Clamp the cursor so it stays valid after removal.
-            const int sz = static_cast<int>(m.d.threads.size());
+            const int sz = visible_count(m, *p);
             if (sz == 0) {
                 p->index = 0;
             } else if (p->index >= sz) {
@@ -367,7 +401,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // end of the freshly-loaded (possibly shorter) list. Re-clamp so
             // the view and every ThreadList* handler index safely.
             if (auto* p = m.ui.panel.get<pn::ThreadList>()) {
-                const int sz = static_cast<int>(m.d.threads.size());
+                const int sz = visible_count(m, *p);
                 p->index = sz > 0 ? std::clamp(p->index, 0, sz - 1) : 0;
             }
             return Cmd::none();

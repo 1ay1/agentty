@@ -126,7 +126,7 @@ Cmd providers_update(Model& m, msg::ProvidersMsg pm) {
             auto* p = m.ui.panel.get<pn::Providers>();
             if (!p || n == 0) return Cmd::none();
             p->confirm_remove.clear();   // navigating disarms a pending delete
-            p->index = (p->index + e.delta + n) % n;
+            p->index = ui::step(p->index, e.delta, n);
             return Cmd::none();
         },
         [&](ProvidersJump& e) -> Cmd {

@@ -15,7 +15,9 @@
 // view/settings_list_view.cpp.
 
 #include <cstdint>
+#include <string>
 #include <variant>
+#include <vector>
 
 #include "agentty/runtime/panel/settings/categories.hpp"   // settings::Category
 
@@ -42,6 +44,22 @@ struct ListOpen {
     // commits. Any move/other action disarms it. A stray keystroke can never
     // delete a hand-tuned mcp.json entry with no undo.
     std::string confirm_remove;
+    // Settings hub only: typed search across every setting. Empty = the
+    // normal hub rows. `index_rows` holds one row per setting, taken from each
+    // pane's own form when the hub opens, so search never lists a setting
+    // twice or misses one a pane gained.
+    std::string query;
+    // Which form pane a search hit lives in.
+    enum class Pane : std::uint8_t { Rag, Smart, Appearance, Sandbox, WebSearch };
+    struct Hit {
+        std::string label;      // the row's label, as the pane shows it
+        std::string help;
+        std::string value;      // current value, as text
+        std::string section;    // the header it sits under, if any
+        Pane        pane = Pane::Rag;
+        std::string row;        // the row id the pane opens on
+    };
+    std::vector<Hit> index_rows;
 };
 
 } // namespace settings

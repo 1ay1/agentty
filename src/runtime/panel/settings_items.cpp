@@ -15,7 +15,11 @@
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/util/sandbox.hpp"   // is_active/describe_state/config_enforceable
 
+#include "agentty/runtime/fuzzy.hpp"      // settings search scoring
+
 #include <algorithm>
+#include <climits>
+#include <cstdio>
 #include <filesystem>
 #include <cctype>
 #include <cstdlib>
@@ -411,6 +415,130 @@ std::vector<Item> items_for(const Model& m, Category cat) {
         case Category::Hooks:    return hooks(m.ui.library);
     }
     return {};
+}
+
+const char* pane_label(ListOpen::Pane p) noexcept {
+    switch (p) {
+        case ListOpen::Pane::Rag:        return "Retrieval";
+        case ListOpen::Pane::Smart:      return "Smart Mode";
+        case ListOpen::Pane::Appearance: return "Appearance";
+        case ListOpen::Pane::Sandbox:    return "Sandbox";
+        case ListOpen::Pane::WebSearch:  return "Web Search";
+    }
+    return "";
+}
+
+namespace {
+
+// A row's current value as short text, the way the pane would show it.
+std::string value_text(const form::FieldValue& v) {
+    namespace ff = form::field;
+    return std::visit([](const auto& x) -> std::string {
+        using T = std::decay_t<decltype(x)>;
+        if constexpr (std::is_same_v<T, ff::Toggle>) return x.on ? "on" : "off";
+        else if constexpr (std::is_same_v<T, ff::Choice>) return std::string{x.label()};
+        else if constexpr (std::is_same_v<T, ff::Number>) return std::to_string(x.value);
+        else if constexpr (std::is_same_v<T, ff::Slider>) {
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%.*f", x.decimals, x.value);
+            return buf;
+        }
+        else if constexpr (std::is_same_v<T, ff::Text> || std::is_same_v<T, ff::Path>)
+            return x.value;
+        else if constexpr (std::is_same_v<T, ff::Secret>)
+            return x.value.empty() ? std::string{} : std::string{"set"};   // never the value
+        else if constexpr (std::is_same_v<T, ff::Pick>) return x.label;
+        else return {};
+    }, v);
+}
+
+std::string trim(std::string s) {
+    const auto b = s.find_first_not_of(' ');
+    return b == std::string::npos ? std::string{} : s.substr(b);
+}
+
+bool contains_ci(std::string_view hay, std::string_view needle) {
+    const auto lc = [](char c) { return (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c; };
+    return std::search(hay.begin(), hay.end(), needle.begin(), needle.end(),
+                       [&](char a, char b) { return lc(a) == lc(b); }) != hay.end();
+}
+
+// The query's words. Every word must match for a row to count.
+std::vector<std::string_view> words_of(std::string_view query) {
+    std::vector<std::string_view> words;
+    for (std::size_t i = 0; i < query.size();) {
+        while (i < query.size() && query[i] == ' ') ++i;
+        const auto j = query.find(' ', i);
+        const auto end = j == std::string_view::npos ? query.size() : j;
+        if (end > i) words.push_back(query.substr(i, end - i));
+        i = end;
+    }
+    return words;
+}
+
+}  // namespace
+
+std::vector<int> label_match(std::string_view label, std::string_view query) {
+    std::vector<int> out;
+    for (const auto w : words_of(query))
+        if (auto fm = fuzzy::score(label, w); fm.matched())
+            out.insert(out.end(), fm.positions.begin(), fm.positions.end());
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+void index_form(std::vector<ListOpen::Hit>& out, const form::Form& f,
+                ListOpen::Pane pane) {
+    std::string section;
+    for (const auto& row : f.fields) {
+        if (row.is_header()) { section = trim(row.label); continue; }
+        if (row.is_action()) continue;   // buttons ("Test", "Save") aren't settings
+        ListOpen::Hit h;
+        h.label   = trim(row.label);
+        h.help    = row.help;
+        h.value   = value_text(row.value);
+        h.section = section;
+        h.pane    = pane;
+        h.row     = row.id;
+        out.push_back(std::move(h));
+    }
+}
+
+std::vector<int> search(const std::vector<ListOpen::Hit>& index,
+                        std::string_view query) {
+    // Each word of the query must match somewhere in the row; the label
+    // counts most, so "port" ranks a Port row above one that only mentions
+    // ports in its help.
+    const auto words = words_of(query);
+    if (words.empty()) return {};
+    std::vector<std::pair<int, int>> scored;   // (score, index)
+    for (int i = 0; i < static_cast<int>(index.size()); ++i) {
+        const auto& h = index[static_cast<std::size_t>(i)];
+        const std::string where = std::string{pane_label(h.pane)} + " " + h.section;
+        int total = 0;
+        bool all = true;
+        for (const auto w : words) {
+            const auto l = fuzzy::score(h.label, w);
+            const auto s = fuzzy::score(where, w);
+            // Help only counts as a plain substring: fuzzy over a sentence
+            // matches nearly anything.
+            const bool in_help = contains_ci(h.help, w);
+            int best = INT_MIN;
+            if (l.matched()) best = l.score * 3;
+            if (s.matched()) best = std::max(best, s.score);
+            if (in_help)     best = std::max(best, 1);
+            if (best == INT_MIN) { all = false; break; }
+            total += best;
+        }
+        if (all) scored.emplace_back(total, i);
+    }
+    std::stable_sort(scored.begin(), scored.end(),
+                     [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::vector<int> out;
+    out.reserve(scored.size());
+    for (const auto& [s, i] : scored) out.push_back(i);
+    return out;
 }
 
 namespace {

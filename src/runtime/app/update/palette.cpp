@@ -172,6 +172,8 @@ Cmd palette_update(Model& m, msg::PaletteMsg pm) {
                   : m.ui.panel.is<pn::Providers>() ? Msg{ProvidersFilterInput{ch}}
                   : m.ui.panel.is<pn::Mention>()   ? Msg{MentionInput{ch}}
                   : m.ui.panel.is<pn::Symbol>()    ? Msg{SymbolInput{ch}}
+                  : m.ui.panel.is<pn::ThreadList>() ? Msg{ThreadListFilterInput{ch}}
+                  : m.ui.panel.is<pn::SettingsList>() ? Msg{SettingsSearchInput{ch}}
                                                    : Msg{NoOp{}};
                 auto [next, cmd] = agentty::app::update(std::move(m),
                                                         std::move(per_char));
@@ -209,7 +211,7 @@ Cmd palette_update(Model& m, msg::PaletteMsg pm) {
             int sz = static_cast<int>(filtered_commands(
                 o->query, ui::palette_context(m)).size());
             if (sz <= 0) { o->index = 0; return Cmd::none(); }
-            o->index = std::clamp(o->index + e.delta, 0, sz - 1);
+            o->index = ui::step(o->index, e.delta, sz);
             return Cmd::none();
         },
         [&](PaletteSelect) -> Cmd {

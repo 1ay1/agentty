@@ -15,6 +15,8 @@
 #include "agentty/runtime/panel/rag.hpp"
 #include "agentty/runtime/panel/settings/categories.hpp"
 #include "agentty/runtime/panel/settings/items.hpp"
+#include "agentty/runtime/panel/step.hpp"
+#include "agentty/runtime/panel/thread_filter.hpp"
 #include "agentty/runtime/panel/top.hpp"
 
 #include <maya/terminal/input.hpp>
@@ -204,6 +206,163 @@ TEST_CASE("settings rows: a paste lands in the open pane, never the composer") {
     CHECK_MESSAGE(composer_after(Msg{OpenSmartMode{}}), "Smart Mode");
     CHECK_MESSAGE(composer_after(Msg{OpenRag{}}), "RAG");
     CHECK_MESSAGE(composer_after(Msg{OpenWebSearch{}}), "Web Search");
+}
+
+TEST_CASE("lists: a single step wraps, a page step stops at the end") {
+    CHECK(ui::step(4, +1, 5) == 0);    // ↓ on the last row → first
+    CHECK(ui::step(0, -1, 5) == 4);    // ↑ on the first row → last
+    CHECK(ui::step(2, +10, 5) == 4);   // PgDn stops at the bottom
+    CHECK(ui::step(2, -10, 5) == 0);
+    CHECK(ui::step(0, +1, 0) == 0);    // empty list
+    // Skipping headers still wraps.
+    const auto hdr = [](int i) { return i == 0 || i == 3; };
+    CHECK(ui::step_over(4, +1, 5, hdr) == 1);
+    CHECK(ui::step_over(1, -1, 5, hdr) == 4);
+}
+
+TEST_CASE("settings search: finds a setting in any pane and opens it on that row") {
+    install_stub_deps();
+    Model m = app::update(Model{}, Msg{OpenSettingsList{settings::Category::General}}).first;
+    auto* hub = m.ui.panel.get<pn::SettingsList>();
+    REQUIRE(hub != nullptr);
+    REQUIRE_FALSE(hub->index_rows.empty());
+
+    // Typing goes into the search, not to row shortcuts.
+    for (char32_t c : std::u32string{U"prose"}) m = press(std::move(m), ch(c));
+    hub = m.ui.panel.get<pn::SettingsList>();
+    REQUIRE(hub != nullptr);
+    CHECK(hub->query == "prose");
+    const auto hits = settings::search(hub->index_rows, hub->query);
+    REQUIRE_FALSE(hits.empty());
+    const auto& top = hub->index_rows[static_cast<std::size_t>(hits.front())];
+    CHECK(top.pane == settings::ListOpen::Pane::Appearance);
+
+    // Enter opens that pane with the cursor on the matched row.
+    m = press(std::move(m), sk(maya::SpecialKey::Enter));
+    auto* ap = m.ui.panel.get<pn::Appearance>();
+    REQUIRE(ap != nullptr);
+    REQUIRE(ap->pane.form.focused() != nullptr);
+    CHECK(ap->pane.form.focused()->id == top.row);
+
+    // Esc comes back to the search, query intact; Esc again clears it;
+    // a third Esc closes.
+    m = press(std::move(m), sk(maya::SpecialKey::Escape));
+    hub = m.ui.panel.get<pn::SettingsList>();
+    REQUIRE(hub != nullptr);
+    CHECK(hub->query == "prose");
+    m = press(std::move(m), sk(maya::SpecialKey::Escape));
+    hub = m.ui.panel.get<pn::SettingsList>();
+    REQUIRE(hub != nullptr);
+    CHECK(hub->query.empty());
+    m = press(std::move(m), sk(maya::SpecialKey::Escape));
+    CHECK(m.ui.panel.get<pn::SettingsList>() == nullptr);
+}
+
+TEST_CASE("settings search: an advanced row opens with advanced rows shown") {
+    install_stub_deps();
+    Model m = app::update(Model{}, Msg{OpenSmartMode{"smart.deep_margin"}}).first;
+    auto* o = m.ui.panel.get<pn::SmartMode>();
+    REQUIRE(o != nullptr);
+    CHECK(o->advanced);
+    REQUIRE(o->form.focused() != nullptr);
+    CHECK(o->form.focused()->id == "smart.deep_margin");
+}
+
+TEST_CASE("settings search: every indexed row exists in the pane it names") {
+    // The index is built from the panes' own forms, so each hit must open on
+    // a real row. Catches a pane whose open path builds a different form.
+    install_stub_deps();
+    Model base = app::update(Model{}, Msg{OpenSettingsList{settings::Category::General}}).first;
+    const auto rows = base.ui.panel.get<pn::SettingsList>()->index_rows;
+    for (const auto& h : rows) {
+        Model m = app::update(Model{}, Msg{OpenSettingsList{settings::Category::General}}).first;
+        using P = settings::ListOpen::Pane;
+        Msg open = h.pane == P::Rag        ? Msg{OpenRag{h.row}}
+                 : h.pane == P::Smart      ? Msg{OpenSmartMode{h.row}}
+                 : h.pane == P::Appearance ? Msg{OpenAppearance{h.row}}
+                 : h.pane == P::Sandbox    ? Msg{OpenSandbox{h.row}}
+                                           : Msg{OpenWebSearch{h.row}};
+        m = app::update(std::move(m), std::move(open)).first;
+        const form::Form* f = nullptr;
+        if (auto* x = m.ui.panel.get<pn::Rag>())        f = &x->embed.form;
+        if (auto* x = m.ui.panel.get<pn::SmartMode>())  f = &x->form;
+        if (auto* x = m.ui.panel.get<pn::Appearance>()) f = &x->pane.form;
+        if (auto* x = m.ui.panel.get<pn::Sandbox>())    f = &x->pane.form;
+        if (auto* x = m.ui.panel.get<pn::WebSearch>())  f = &x->form;
+        REQUIRE(f != nullptr);
+        REQUIRE(f->focused() != nullptr);
+        CHECK_MESSAGE(f->focused()->id == h.row,
+                      settings::pane_label(h.pane) << " / " << h.row);
+    }
+}
+
+TEST_CASE("threads: typing filters by title, Enter opens the filtered row") {
+    install_stub_deps();
+    Model m;
+    for (const char* t : {"fix login bug", "settings search", "refactor login"}) {
+        Thread th;
+        th.id = ThreadId{t};
+        th.title = t;
+        m.d.threads.push_back(th);
+    }
+    m = app::update(std::move(m), Msg{OpenThreadList{}}).first;
+    REQUIRE(m.ui.panel.get<pn::ThreadList>() != nullptr);
+    for (char32_t c : std::u32string{U"login"}) m = press(std::move(m), ch(c));
+    const auto* p = m.ui.panel.get<pn::ThreadList>();
+    REQUIRE(p != nullptr);
+    CHECK(p->query == "login");
+    const auto vis = ui::visible_threads(m.d.threads, p->query);
+    REQUIRE(vis.size() == 2);
+    // ↓ then ↓ wraps back to the first match.
+    m = press(std::move(m), sk(maya::SpecialKey::Down));
+    m = press(std::move(m), sk(maya::SpecialKey::Down));
+    CHECK(m.ui.panel.get<pn::ThreadList>()->index == 0);
+    // Esc clears the filter but stays open.
+    m = press(std::move(m), sk(maya::SpecialKey::Escape));
+    p = m.ui.panel.get<pn::ThreadList>();
+    REQUIRE(p != nullptr);
+    CHECK(p->query.empty());
+}
+
+TEST_CASE("settings search: blank, backspace and paste behave") {
+    install_stub_deps();
+    Model m = app::update(Model{}, Msg{OpenSettingsList{settings::Category::General}}).first;
+    const int hub_rows = static_cast<int>(settings::items_for(m, settings::Category::General).size());
+    // A leading space is ignored, so the hub rows stay.
+    m = press(std::move(m), ch(U' '));
+    CHECK(m.ui.panel.get<pn::SettingsList>()->query.empty());
+    // Paste lands in the search, not the composer.
+    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{"port\n"})).first;
+    auto* hub = m.ui.panel.get<pn::SettingsList>();
+    REQUIRE(hub != nullptr);
+    CHECK(hub->query == "port");
+    CHECK(m.ui.composer.text.empty());
+    CHECK_FALSE(settings::search(hub->index_rows, hub->query).empty());
+    // Backspace to empty returns to the hub on a row you can act on.
+    for (int i = 0; i < 4; ++i) m = press(std::move(m), sk(maya::SpecialKey::Backspace));
+    hub = m.ui.panel.get<pn::SettingsList>();
+    REQUIRE(hub != nullptr);
+    CHECK(hub->query.empty());
+    CHECK(hub->index >= 0);
+    CHECK(hub->index < hub_rows);
+    // No match: Enter does nothing and the hub stays open.
+    for (char32_t c : std::u32string{U"zzqqxx"}) m = press(std::move(m), ch(c));
+    m = press(std::move(m), sk(maya::SpecialKey::Enter));
+    CHECK(m.ui.panel.get<pn::SettingsList>() != nullptr);
+}
+
+TEST_CASE("threads: paste goes into the filter") {
+    install_stub_deps();
+    Model m;
+    Thread t;
+    t.id = ThreadId{"a"};
+    t.title = "alpha";
+    m.d.threads.push_back(t);
+    m = app::update(std::move(m), Msg{OpenThreadList{}}).first;
+    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{"alp"})).first;
+    REQUIRE(m.ui.panel.get<pn::ThreadList>() != nullptr);
+    CHECK(m.ui.panel.get<pn::ThreadList>()->query == "alp");
+    CHECK(m.ui.composer.text.empty());
 }
 
 TEST_CASE("settings rows: every Appearance row takes input") {

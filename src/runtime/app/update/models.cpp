@@ -616,10 +616,9 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             return save;
         },
         [&](ModelsMove e) -> Cmd {
-            if (auto* c = m.ui.panel.get<pn::Models>()) {
-                c->index += e.delta;
-                clamp_cursor(m);
-            }
+            if (auto* c = m.ui.panel.get<pn::Models>())
+                c->index = ui::step(c->index, e.delta,
+                                    static_cast<int>(m.d.fused_rows.size()));
             return Cmd::none();
         },
         [&](ModelsJump e) -> Cmd {

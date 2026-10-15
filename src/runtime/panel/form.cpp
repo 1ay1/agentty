@@ -396,6 +396,13 @@ void move(Form& f, int delta) {
     }
 }
 
+bool focus_row(Form& f, std::string_view id) {
+    if (id.empty()) return false;
+    for (int i = 0; i < static_cast<int>(f.fields.size()); ++i)
+        if (f.fields[static_cast<std::size_t>(i)].id == id) { f.cursor = i; return true; }
+    return false;
+}
+
 void move_edge(Form& f, bool last) {
     // Home/End: the first/last non-header field. A plain scan, not move()—
     // the walk must not WRAP (End from the last row stays put rather than

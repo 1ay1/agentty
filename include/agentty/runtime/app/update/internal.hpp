@@ -17,6 +17,7 @@
 #include "agentty/runtime/model.hpp"
 #include "agentty/domain/entitlement.hpp"
 #include "agentty/runtime/msg.hpp"
+#include "agentty/runtime/panel/step.hpp"   // ui::step: the list cursor rule
 
 namespace agentty::app {
 
@@ -543,6 +544,15 @@ void ascend(Model& m);
 // Shared with picker.cpp, which reopens the pane after a slot assignment —
 // one builder means the reopened pane cannot differ from the original.
 [[nodiscard]] form::Form build_smart_form(const Model& m, bool advanced = false);
+
+// Each settings pane's full form, built exactly as the pane builds it, for
+// the Settings search index. Advanced rows included.
+[[nodiscard]] form::Form rag_form_for_search(const Model& m);
+[[nodiscard]] form::Form sandbox_form_for_search(const Model& m);
+[[nodiscard]] form::Form web_search_form_for_search(const Model& m);
+[[nodiscard]] form::Form appearance_form_for_search(const Model& m);
+// All of the above, as the Settings hub's search index.
+[[nodiscard]] std::vector<settings::ListOpen::Hit> settings_search_index(const Model& m);
 
 // ── THE Smart Mode config entry point ───────────────────────────────
 //

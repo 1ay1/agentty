@@ -26,11 +26,15 @@ using maya::overload;
 
 Cmd smart_mode_update(Model& m, msg::SmartModeMsg sm) {
     return std::visit(overload{
-        [&](OpenSmartMode) -> Cmd {
+        [&](OpenSmartMode& e) -> Cmd {
             // descend(): whatever is open right now (palette, settings list,
             // nothing) becomes this pane's Esc target automatically — no
-            // caller stamps an origin any more.
-            m.ui.panel.descend(pn::SmartMode{{}, build_smart_form(m), false});
+            // caller stamps an origin any more. A search hit on an advanced
+            // row opens with those rows shown.
+            const auto* d = settings::registry::find(e.focus);
+            const bool advanced = d && d->tier == settings::registry::Tier::Advanced;
+            m.ui.panel.descend(pn::SmartMode{{}, build_smart_form(m, advanced), advanced});
+            (void)form::focus_row(m.ui.panel.get<pn::SmartMode>()->form, e.focus);
             return Cmd::none();
         },
         [&](SmartModeAdvanced) -> Cmd {

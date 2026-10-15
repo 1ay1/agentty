@@ -194,9 +194,15 @@ void refresh_status(rs::EmbedForm& f) {
 
 } // namespace
 
+form::Form rag_form_for_search(const Model& m) {
+    const auto& st = m.d.persisted;
+    const auto mode = st.rag.configured ? st.rag.mode : store::RagMode::On;
+    return make_embed_form(m.env, st, mode, /*advanced=*/true).form;
+}
+
 Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
     return std::visit(overload{
-        [&](OpenRag) -> Cmd {
+        [&](OpenRag& e) -> Cmd {
             // ONE pane. The overlay used to open a three-row mode list, with
             // the embedder settings hidden behind a second keypress that
             // nothing advertised. Mode and embedder are two halves of one
@@ -210,8 +216,13 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             // the keyboard but cannot act on it.
             const auto& st = m.d.persisted;
             const auto mode = st.rag.configured ? st.rag.mode : store::RagMode::On;
-            m.ui.panel.descend(
-                pn::Rag{{mode, mode, make_embed_form(m.env, m.d.persisted, mode)}});
+            // A search hit on an advanced row opens with those rows shown.
+            const auto* d = settings::registry::find(e.focus);
+            const bool advanced = d && d->tier == settings::registry::Tier::Advanced;
+            pn::Rag open{{mode, mode, make_embed_form(m.env, m.d.persisted, mode, advanced)}};
+            open.advanced = advanced;
+            (void)form::focus_row(open.embed.form, e.focus);
+            m.ui.panel.descend(std::move(open));
             // What the live retriever already knows, read on a worker (it is
             // shared with tool threads) and folded in by RagEmbedStatusRead.
             Cmd status = cmd::read_rag_embed_status(m.ui.panel.get<pn::Rag>()->embed.probe_gen);

@@ -379,13 +379,26 @@ std::optional<Msg> on_rag_settings(const FormFocus& f, const KeyEvent& ev) {
 //   list mode — shared grammar + vim nav, `a` add, `d` remove, Space act.
 //   add mode  — a one-line text prompt: every printable is LITERAL text,
 //               so the nav shortcuts are suppressed entirely.
-std::optional<Msg> on_settings_list(const KeyEvent& ev, bool input_active) {
+std::optional<Msg> on_settings_list(const KeyEvent& ev, bool input_active,
+                                   bool hub, bool has_query) {
     if (input_active) {
         nav::NavSpec s;
         s.close     = [] { return Msg{SettingsListCancelInput{}}; };
         s.select    = [] { return Msg{SettingsListSubmitInput{}}; };
         s.filter_bs = [] { return Msg{SettingsListBackspace{}}; };
         s.filter_ch = [](char32_t c) { return Msg{SettingsListChar{c}}; };
+        return nav::translate(s, ev);
+    }
+    if (hub) {
+        // The Settings hub: type to search every setting. Esc clears a
+        // search before it closes, so a typo never throws you out.
+        nav::NavSpec s;
+        s.close     = has_query ? std::function<Msg()>{[] { return Msg{SettingsSearchClear{}}; }}
+                                : std::function<Msg()>{[] { return Msg{CloseSettingsList{}}; }};
+        s.select    = [] { return Msg{SettingsListActivate{}}; };
+        s.move      = [](int d) { return Msg{SettingsListMove{d}}; };
+        s.filter_bs = [] { return Msg{SettingsSearchBackspace{}}; };
+        s.filter_ch = [](char32_t c) { return Msg{SettingsSearchInput{c}}; };
         return nav::translate(s, ev);
     }
     nav::NavSpec s;
@@ -536,13 +549,15 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
     return nav::translate(s, ev);
 }
 
-// Thread list: shared grammar + vim nav; n = new thread, d = delete
-// (two-press confirm).
+// Thread list: shared grammar + type to filter by title. Actions are chords
+// (^N new, ^D delete, two-press) so letters are free for the filter.
 std::optional<Msg> on_thread_list(const KeyEvent& ev) {
     nav::NavSpec s;
     s.close   = [] { return Msg{CloseThreadList{}}; };
     s.select  = [] { return Msg{ThreadListSelect{}}; };
     s.move    = [](int d) { return Msg{ThreadListMove{d}}; };
+    s.filter_bs = [] { return Msg{ThreadListFilterBackspace{}}; };
+    s.filter_ch = [](char32_t c) { return Msg{ThreadListFilterInput{c}}; };
     s.jump    = [](nav::Jump j) {
         using W = ThreadListJump::Where;
         return Msg{ThreadListJump{j == nav::Jump::Home ? W::Home
@@ -561,10 +576,6 @@ std::optional<Msg> on_thread_list(const KeyEvent& ev) {
             case U'd': return Msg{ThreadListDelete{}};
             default:   return std::nullopt;
         }
-    };
-    s.letter_verbs = {
-        {U'n', [] { return Msg{NewThread{}}; }},
-        {U'd', [] { return Msg{ThreadListDelete{}}; }},
     };
     return nav::translate(s, ev);
 }
@@ -1242,8 +1253,12 @@ std::optional<Msg> on_key(const Model& m, const KeyEvent& ev) {
                     case OK::Rag:    return on_rag_settings(rag_form, ev);
                     case OK::Stats:          return on_stats_viewer(ev);
                     case OK::Skills:         return on_skills_viewer(ev);
-                    case OK::SettingsList:
-                        return on_settings_list(ev, settings_list_adding);
+                    case OK::SettingsList: {
+                        const auto* so = m.ui.panel.get<pn::SettingsList>();
+                        const bool hub = so && so->concern == settings::Category::General;
+                        return on_settings_list(ev, settings_list_adding, hub,
+                                                so && !so->query.empty());
+                    }
                     case OK::Fork:           return on_fork_picker(ev);
                     case OK::Models:    return on_fused_picker(ev);
                     case OK::Providers: return on_provider_picker(ev);
@@ -1364,7 +1379,9 @@ Msg on_paste(const Model& m, const maya::PasteEvent& pe) {
                           || active_panel == ui::panel::Kind::Models
                           || active_panel == ui::panel::Kind::Providers
                           || active_panel == ui::panel::Kind::Mention
-                          || active_panel == ui::panel::Kind::Symbol;
+                          || active_panel == ui::panel::Kind::Symbol
+                          || active_panel == ui::panel::Kind::ThreadList
+                          || (so && so->concern == settings::Category::General);
     std::string s = pe.content;
     // A paste goes to whatever owns text input: the login modal, the settings
     // list add prompt, the focused row of an open form pane (each pane starts
@@ -1373,6 +1390,7 @@ Msg on_paste(const Model& m, const maya::PasteEvent& pe) {
     // composer hidden behind it.
     if (active_panel == ui::panel::Kind::Login) return LoginPaste{std::move(s)};
     if (so && so->input_active)                 return SettingsListPaste{std::move(s)};
+    if (filter_open) return PanelFilterPaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::Rag>())         return RagEmbedPaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::SmartMode>())   return SmartModePaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::WebSearch>())   return WebSearchPaste{std::move(s)};

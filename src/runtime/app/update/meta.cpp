@@ -1051,10 +1051,15 @@ void ascend(Model& m) {
     } else if (auto* s = m.ui.panel.get<pn::SettingsList>()) {
         // Rows derive from live model state (a plugin may have connected or
         // been removed while the child pane was open); clamp the restored
-        // cursor into today's list. Same policy as the old reopen path,
-        // which also carried a bare index.
-        const int rows = static_cast<int>(
-            settings::items_for(m, s->concern).size());
+        // cursor into today's list. The search index is rebuilt so a value
+        // just changed in a pane shows its new value here.
+        int rows = 0;
+        if (s->concern == settings::Category::General)
+            s->index_rows = settings_search_index(m);
+        if (settings::is_search(*s))
+            rows = static_cast<int>(settings::search(s->index_rows, s->query).size());
+        else
+            rows = static_cast<int>(settings::items_for(m, s->concern).size());
         s->index = rows <= 0 ? 0 : std::clamp(s->index, 0, rows - 1);
     } else if (auto* sm = m.ui.panel.get<pn::SmartMode>()) {
         // The form snapshot may predate a config change made in the child

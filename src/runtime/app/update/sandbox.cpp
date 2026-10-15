@@ -154,10 +154,16 @@ void reproject(pn::Sandbox& o, const sandbox_cfg::Config& cfg) {
 
 }  // namespace
 
+form::Form sandbox_form_for_search(const Model& m) {
+    const auto& seed = m.d.persisted.sandbox.configured ? m.d.persisted.sandbox
+                                                         : sb::config();
+    return pn::build_sandbox_form(seed, host_facts_here());
+}
+
 Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
     return std::visit(overload{
 
-        [&](OpenSandbox&) -> Cmd {
+        [&](OpenSandbox& e) -> Cmd {
             pn::Sandbox o;
             const auto facts = host_facts_here();
             o.pane.facts = facts;
@@ -201,6 +207,7 @@ Cmd sandbox_update(Model& m, msg::SandboxMsg sm) {
                     o.pane.form.cursor = i;
                     break;
                 }
+            (void)form::focus_row(o.pane.form, e.focus);
             reprice(o);
             m.ui.panel.descend(std::move(o));
             m.ui.sandbox_scroll.y = 0;
