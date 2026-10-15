@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.22] - 2026-10-15
+
 ### Fixed
 - **Sandboxed commands get the environment the tool asked for.** Under
   claybin (the default) a tool's env never reached the child, which ran with
