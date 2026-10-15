@@ -484,6 +484,18 @@ struct StreamState {
     double cache_hit_ratio = -1.0;
     int    cache_read_tokens     = 0;
     int    cache_creation_tokens = 0;
+
+    // Called whenever the current thread is swapped for another. Usage
+    // numbers belong to the thread that produced them; `prompt` is the new
+    // thread's last reported prompt (0 for a fresh one).
+    void reset_usage_for_thread(int prompt) noexcept {
+        tokens_in             = prompt;
+        tokens_out            = 0;
+        reasoning_tokens      = 0;
+        cache_hit_ratio       = -1.0;
+        cache_read_tokens     = 0;
+        cache_creation_tokens = 0;
+    }
     int context_max = 200000;
     // Self-calibrating correction for the local byte-based token estimate.
     //

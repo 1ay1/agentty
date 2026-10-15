@@ -44,25 +44,29 @@ using json = nlohmann::json;
 
 // OpenAI /v1/chat/completions `usage` object:
 //   {"prompt_tokens":N, "completion_tokens":N,
-//    "prompt_tokens_details":{"cached_tokens":N}}
-// prompt_tokens INCLUDES cached_tokens (OpenAI, vLLM, Strata, Codex all agree:
-// cached is a subset). StreamUsage follows Anthropic, where input_tokens
-// excludes the cache, so the cached part moves out of input here. Adding
-// them back up then gives the real prompt size instead of counting the cache
-// twice (#96).
+//    "prompt_tokens_details":{"cached_tokens":N, "cache_write_tokens":N}}
+// prompt_tokens INCLUDES cached_tokens (OpenAI, DeepSeek, OpenRouter, vLLM,
+// llama.cpp, Strata all agree: cached is a subset) and OpenRouter's
+// cache_write_tokens. StreamUsage follows Anthropic, where input_tokens
+// excludes the cache, so those parts move out of input here. Adding them back
+// up then gives the real prompt size instead of counting the cache twice (#96).
 [[nodiscard]] inline std::optional<StreamUsage> from_openai(const json& u) {
     if (!u.is_object()) return std::nullopt;
     StreamUsage su;
-    const int prompt = u.value("prompt_tokens", 0);
+    const int prompt = std::max(u.value("prompt_tokens", 0), 0);
     su.output_tokens = u.value("completion_tokens", 0);
-    int cached = 0;
+    int cached = 0, written = 0;
     if (u.contains("prompt_tokens_details")
         && u["prompt_tokens_details"].is_object()) {
-        cached = u["prompt_tokens_details"].value("cached_tokens", 0);
+        const auto& d = u["prompt_tokens_details"];
+        cached  = d.value("cached_tokens", 0);
+        written = d.value("cache_write_tokens", 0);
     }
-    cached = std::clamp(cached, 0, std::max(prompt, 0));
-    su.input_tokens            = prompt - cached;
-    su.cache_read_input_tokens = cached;
+    cached  = std::clamp(cached, 0, prompt);
+    written = std::clamp(written, 0, prompt - cached);
+    su.input_tokens                = prompt - cached - written;
+    su.cache_read_input_tokens     = cached;
+    su.cache_creation_input_tokens = written;
     // reasoning_tokens is nested under completion_tokens_details on the Chat
     // wire (o-series / gpt-5 / compat reasoning models). Already counted in
     // completion_tokens — surfaced for display only.
@@ -83,7 +87,7 @@ using json = nlohmann::json;
 [[nodiscard]] inline std::optional<StreamUsage> from_responses(const json& u) {
     if (!u.is_object()) return std::nullopt;
     StreamUsage su;
-    const int prompt = u.value("input_tokens", 0);
+    const int prompt = std::max(u.value("input_tokens", 0), 0);
     su.output_tokens = u.value("output_tokens", 0);
     int cached = 0, written = 0;
     if (u.contains("input_tokens_details")
@@ -92,8 +96,8 @@ using json = nlohmann::json;
         cached  = d.value("cached_tokens", 0);
         written = d.value("cache_write_tokens", 0);
     }
-    cached  = std::clamp(cached, 0, std::max(prompt, 0));
-    written = std::clamp(written, 0, std::max(prompt, 0) - cached);
+    cached  = std::clamp(cached, 0, prompt);
+    written = std::clamp(written, 0, prompt - cached);
     su.input_tokens                = prompt - cached - written;
     su.cache_read_input_tokens     = cached;
     su.cache_creation_input_tokens = written;

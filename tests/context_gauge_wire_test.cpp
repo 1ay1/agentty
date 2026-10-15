@@ -103,3 +103,109 @@ TEST_CASE("gauge: Anthropic usage keeps adding the cache, which it reports besid
     };
     CHECK(gauge_after(provider::anthropic::parse_sse_for_test(sse)) == 33000);
 }
+
+namespace {
+
+Message measured_turn(std::uint32_t input, std::uint32_t cache_read) {
+    Message a;
+    a.role = Role::Assistant;
+    a.text = "ok";
+    Message::Telemetry t;
+    t.input_tokens = input;
+    t.cache_read   = cache_read;
+    a.telemetry    = t;
+    return a;
+}
+
+Model model_with_gauge(int used) {
+    Model m;
+    m.s.context_max = 65536;
+    m.s.tokens_in   = used;
+    return m;
+}
+
+} // namespace
+
+TEST_CASE("gauge: opening a thread shows that thread's last prompt, not the old one") {
+    install_stub_deps();
+    Thread t;
+    t.id = ThreadId{"other"};
+    Message u; u.role = Role::User; u.text = "hi";
+    t.messages.push_back(u);
+    t.messages.push_back(measured_turn(1000, 11000));   // 12k prompt
+    t.messages.push_back(u);
+    Message tail; tail.role = Role::Assistant; tail.text = "unmeasured";
+    t.messages.push_back(tail);                        // newest turn has no usage
+
+    auto [m, _] = app::update(model_with_gauge(60000), Msg{ThreadLoaded{std::move(t)}});
+    CHECK(m.s.tokens_in == 12000);
+}
+
+TEST_CASE("gauge: a new thread starts at zero") {
+    install_stub_deps();
+    auto [m, _] = app::update(model_with_gauge(60000), Msg{NewThread{}});
+    CHECK(m.s.tokens_in == 0);
+}
+
+TEST_CASE("gauge: a reading from before the latest compaction is not reused") {
+    Thread t;
+    Message u; u.role = Role::User; u.text = "hi";
+    t.messages.push_back(u);
+    t.messages.push_back(measured_turn(50000, 0));
+    t.messages.push_back(u);
+    Thread::CompactionRecord rec;
+    rec.up_to_index = 2;   // the measured turn is now summarised away
+    t.compactions.push_back(rec);
+    CHECK(last_reported_prompt(t) == 0);
+
+    t.messages.push_back(measured_turn(3000, 1000));
+    CHECK(last_reported_prompt(t) == 4000);
+}
+
+TEST_CASE("gauge: per-turn usage takes a frame's input and cache parts together") {
+    install_stub_deps();
+    // Anthropic-style: message_start says cache_read 30k, the final frame
+    // says the whole prompt was read fresh. The turn must not keep the 30k.
+    Model m;
+    Message user; user.role = Role::User; user.text = "hi";
+    m.d.current.messages.push_back(user);
+    Message asst; asst.role = Role::Assistant;
+    m.d.current.messages.push_back(asst);
+    StreamUsage first;  first.input_tokens = 2000;  first.cache_read_input_tokens = 30000;
+    StreamUsage last;   last.input_tokens  = 32000; last.output_tokens = 5;
+    for (const auto& su : {first, last}) {
+        auto [next, _] = app::update(std::move(m), Msg{su});
+        m = std::move(next);
+    }
+    CHECK(m.s.tokens_in == 32000);
+    const auto& tm = m.d.current.messages.back().telemetry;
+    CHECK(tm.has_value());
+    CHECK(tm->input_tokens == 32000);
+    CHECK(tm->cache_read == 0);
+}
+
+TEST_CASE("gauge: a finished compaction drops the gauge to the compacted size") {
+    install_stub_deps();
+    Model m;
+    m.s.context_max = 65536;
+    // A long thread whose last turn reported a 60k prompt.
+    const std::string big(40000, 'x');
+    for (int i = 0; i < 6; ++i) {
+        Message u; u.role = Role::User; u.text = big;
+        m.d.current.messages.push_back(u);
+        m.d.current.messages.push_back(measured_turn(60000, 0));
+    }
+    m.s.tokens_in = 60000;
+    auto step = [&](Msg msg) {
+        auto [next, _] = app::update(std::move(m), std::move(msg));
+        m = std::move(next);
+    };
+    step(Msg{CompactContext{}});
+    CHECK(m.s.compacting);
+    step(Msg{StreamTextDelta{"<summary>short</summary>"}});
+    step(Msg{StreamFinished{StopReason::EndTurn}});
+    CHECK_FALSE(m.s.compacting);
+    CHECK(!m.d.current.compactions.empty());
+    CHECK(m.s.tokens_in > 0);
+    CHECK(m.s.tokens_in < 60000);
+}

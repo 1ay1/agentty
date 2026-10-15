@@ -190,6 +190,7 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             //    composer.
             m.ui.view_cache.clear();
             m.d.current = std::move(fork);
+            m.s.reset_usage_for_thread(last_reported_prompt(m.d.current));
             Cmd save_fork = Cmd(SaveThread{m.d.current});
             m.ui.panel.close<pn::ThreadList>();
             rehydrate_frozen(m);

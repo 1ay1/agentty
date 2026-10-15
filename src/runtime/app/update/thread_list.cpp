@@ -74,6 +74,7 @@ namespace {
     m.d.current.id = persistence::new_id();
     m.d.current.created_at = m.d.current.updated_at =
         m.wall_now();
+    m.s.reset_usage_for_thread(0);
     clear_frozen(m);
     // Close every modal that framed the OLD thread: the picker we acted
     // from, plus the palette / code-block picker whose contents belonged to
@@ -434,6 +435,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                         tag, dt);
             };
             m.d.current = std::move(e.thread);
+            m.s.reset_usage_for_thread(last_reported_prompt(m.d.current));
             // The loaded thread has no live turn, so any run state still
             // standing belongs to the thread we just left. Dropping it is
             // not housekeeping — it is a crash fix.

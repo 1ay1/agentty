@@ -383,12 +383,13 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         m.s.compacting    = false;
         m.s.compaction_ceiling = 0;
         m.s.phase         = phase::Idle{};
-        // tokens_in / tokens_out are intentionally NOT touched: the
-        // StreamUsage handler skipped writes during compaction, so
-        // these still hold the values from the last real (non-
-        // compaction) turn. Resetting them to 0 would produce a
-        // visible flicker on the context gauge between this point
-        // and the next StreamUsage event.
+        // The last reported prompt is the pre-compaction one, so the gauge
+        // would keep showing the full size until the next turn. Show the
+        // calibrated estimate of the compacted prompt instead; the next
+        // StreamUsage replaces it with the real number.
+        if (const int after = m.d.current.compactions.back().tokens_after; after > 0)
+            m.s.tokens_in = std::min(m.s.tokens_in,
+                static_cast<int>(after * m.s.est_calibration));
         // Smooth UX: when a user message is queued behind compaction,
         // it's about to fire below — the user will immediately see
         // their request go out, so a "context compacted" toast is
@@ -1821,19 +1822,22 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // the fuller note at the other telemetry site above.
                     if (!last.telemetry) last.telemetry = Message::Telemetry{};
                     auto& t = *last.telemetry;
-                    if (e.input_tokens)
+                    // A frame that reports the prompt reports all of it: take
+                    // input and both cache parts together, so a later frame
+                    // with no cache hit can't leave an earlier cache count.
+                    if (e.input_tokens || e.cache_read_input_tokens
+                        || e.cache_creation_input_tokens) {
                         t.input_tokens = static_cast<std::uint32_t>(e.input_tokens);
+                        t.cache_read =
+                            static_cast<std::uint32_t>(e.cache_read_input_tokens);
+                        t.cache_creation =
+                            static_cast<std::uint32_t>(e.cache_creation_input_tokens);
+                    }
                     if (e.output_tokens)
                         t.output_tokens = static_cast<std::uint32_t>(e.output_tokens);
                     if (e.reasoning_output_tokens)
                         t.reasoning_tokens =
                             static_cast<std::uint32_t>(e.reasoning_output_tokens);
-                    if (e.cache_read_input_tokens)
-                        t.cache_read =
-                            static_cast<std::uint32_t>(e.cache_read_input_tokens);
-                    if (e.cache_creation_input_tokens)
-                        t.cache_creation =
-                            static_cast<std::uint32_t>(e.cache_creation_input_tokens);
                 }
             }
             return Cmd::none();

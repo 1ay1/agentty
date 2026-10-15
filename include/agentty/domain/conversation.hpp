@@ -1080,6 +1080,25 @@ struct Thread {
     return from_bytes + images * kTokensPerImage;
 }
 
+// The prompt size the provider reported for the newest measured turn
+// (input + both cache parts), or 0 when no turn was measured or the thread
+// was compacted after it (that reading is for the longer, pre-compaction
+// prompt). Seeds the context gauge when a thread is opened, so it shows this
+// thread's usage and not the last one's.
+[[nodiscard]] inline int last_reported_prompt(const Thread& t) noexcept {
+    const std::size_t cut = t.compactions.empty() ? 0 : t.compactions.back().up_to_index;
+    for (std::size_t i = t.messages.size(); i-- > 0;) {
+        const auto& msg = t.messages[i];
+        if (!msg.telemetry) continue;
+        if (i < cut) return 0;
+        const auto& tm = *msg.telemetry;
+        const std::uint64_t n = std::uint64_t{tm.input_tokens}
+                              + tm.cache_read + tm.cache_creation;
+        if (n) return n > 0x7fffffffu ? 0x7fffffff : static_cast<int>(n);
+    }
+    return 0;
+}
+
 // The TEXT the model can currently see, as views into the Thread — no copy.
 //
 // The visibility rule is compaction's: the latest CompactionRecord drops
