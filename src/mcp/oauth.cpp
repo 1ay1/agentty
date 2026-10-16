@@ -218,6 +218,7 @@ std::string query_param(std::string_view target, std::string_view key) {
 }
 
 // Accept one request on `srv`, extract code/state/iss, reply with a page.
+// Borrows `srv`: the caller's SockGuard closes it on every path.
 CallbackResult wait_for_callback(sock_t srv, int timeout_s) {
     CallbackResult out;
 #if defined(_WIN32)
@@ -231,7 +232,6 @@ CallbackResult wait_for_callback(sock_t srv, int timeout_s) {
     for (;;) {
         const auto left = deadline - std::chrono::steady_clock::now();
         if (left <= std::chrono::steady_clock::duration::zero()) {
-            close_sock(srv);
             out.error = "login timed out";
             return out;
         }
@@ -292,7 +292,6 @@ CallbackResult wait_for_callback(sock_t srv, int timeout_s) {
                          + "\r\nConnection: close\r\n\r\n" + page;
         (void)::send(cli, resp.data(), static_cast<int>(resp.size()), 0);
         close_sock(cli);
-        close_sock(srv);
         if (!ok) out.error = err.empty() ? "no authorization code in callback"
                                          : ("authorization denied: " + err);
         return out;
@@ -493,6 +492,22 @@ LoginResult login(Io io, const std::string& server_name, const std::string& endp
 #else
     if (srv < 0) { r.message = sockerr; return r; }
 #endif
+    // Every return below used to leak the listener (registration failure,
+    // bad CIMD id, a throw from random_urlsafe...) and keep its port bound
+    // for the life of the process. Own it here; wait_for_callback borrows it.
+    struct SockGuard {
+        sock_t s;
+        explicit SockGuard(sock_t v) : s(v) {}
+        ~SockGuard() {
+#if defined(_WIN32)
+            closesocket(s);
+#else
+            ::close(s);
+#endif
+        }
+        SockGuard(const SockGuard&)            = delete;
+        SockGuard& operator=(const SockGuard&) = delete;
+    } srv_guard{srv};
     const std::string redirect_uri = "http://127.0.0.1:" + std::to_string(port) + "/callback";
 
     // 5. Register the client. Preferred order per 2026-07-28: a caller-supplied

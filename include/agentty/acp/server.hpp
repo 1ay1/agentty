@@ -181,6 +181,8 @@ private:
     // Trip these cancel handles, then wake anyone waiting in acquire_turn.
     void cancel_tokens(const maya::below<maya::leaf>& cap,
                        std::vector<std::shared_ptr<http::CancelToken>> toks);
+    // Erase a session and cancel its running + queued turns (close/delete).
+    void drop_session(const Cap& cap, const std::string& sid);
 
     StopReason stream_completion(Io io, const Cap& cap, const std::string& session_id,
                                  bool& out_cancelled, std::string& out_error,

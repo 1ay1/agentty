@@ -199,28 +199,55 @@ fs::path credentials_path() { return config_dir() / "credentials.json"; }
 // a re-read after the lock is held, the losers adopt the winner's freshly-
 // saved token. Best-effort: if the lock can't be taken, held() is false and
 // the caller proceeds unlocked (no worse than before).
+//
+// BOUNDED. A blocking flock(LOCK_EX) waited forever, so one agentty stopped
+// mid-refresh (^Z, a debugger, a wedged NFS home) froze every other instance's
+// refresh, along with whatever held the in-process refresh lane around it.
+// A refresh is one HTTPS round-trip capped at 30 s, so a holder past that is
+// not coming back soon: try non-blocking in short steps and, at the bound,
+// go ahead unlocked. That only means a rare double refresh, which is what
+// held()==false already allowed for.
+namespace {
+constexpr auto kXlockWait = std::chrono::seconds(35);
+constexpr auto kXlockStep = std::chrono::milliseconds(50);
+} // namespace
+
 CrossProcessFileLock::CrossProcessFileLock(const fs::path& guarded_file) {
     fs::path lp = guarded_file;
     lp += ".lock";
+    const auto give_up = std::chrono::steady_clock::now() + kXlockWait;
 #ifdef _WIN32
     h_ = ::CreateFileA(lp.string().c_str(), GENERIC_READ | GENERIC_WRITE,
                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h_ != INVALID_HANDLE_VALUE) {
-        OVERLAPPED ov{};
-        if (::LockFileEx(h_, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &ov))
-            held_ = true;
+        for (;;) {
+            OVERLAPPED ov{};
+            if (::LockFileEx(h_, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                             0, 1, 0, &ov)) { held_ = true; break; }
+            if (::GetLastError() != ERROR_LOCK_VIOLATION) break;
+            if (std::chrono::steady_clock::now() >= give_up) break;
+            (void)maya::delay_for(std::stop_token{}, kXlockStep);
+        }
     }
 #else
     // 0600 — the lock file lives next to the credentials and shouldn't be
     // more permissive than they are.
     fd_ = ::open(lp.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
     if (fd_ >= 0) {
-        int rc;
-        do { rc = ::flock(fd_, LOCK_EX); } while (rc < 0 && errno == EINTR);
-        held_ = (rc == 0);
+        for (;;) {
+            if (::flock(fd_, LOCK_EX | LOCK_NB) == 0) { held_ = true; break; }
+            if (errno == EINTR) continue;
+            if (errno != EWOULDBLOCK) break;
+            if (std::chrono::steady_clock::now() >= give_up) break;
+            (void)maya::delay_for(std::stop_token{}, kXlockStep);
+        }
     }
 #endif
+    if (!held_)
+        AGT_LOG(Auth, Warn, "auth.xlock",
+                "could not lock {} (held by a stalled peer?); refreshing unlocked",
+                lp.string());
 }
 
 CrossProcessFileLock::~CrossProcessFileLock() {

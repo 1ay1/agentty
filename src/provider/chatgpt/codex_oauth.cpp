@@ -434,9 +434,15 @@ CallbackResult wait_for_callback_impl(int timeout_s, const CodexCancelProbe& can
     }
     if (::listen(srv, 1) != 0) { close_sock(srv); out.error = "listen failed"; return out; }
 
-    // Wait for the browser up to the deadline. A cancel shuts the sockets
-    // down, which wakes select() at once, so the waits can run to the deadline
-    // instead of waking every second to check.
+    // Wait for the browser up to the deadline. A cancel shuts the client
+    // socket down, which wakes its select() at once. The LISTENER is another
+    // matter: shutdown() on a listening socket only wakes select() on Linux.
+    // On darwin/BSD it fails with ENOTCONN and wakes nothing (verified), and
+    // Winsock behaves the same way, so a cancelled login would keep its
+    // stream thread and port 1455 until the 15-minute deadline (and a retry
+    // would see "port 1455 is busy"). So the listener waits in short slices
+    // and re-checks the token; the shutdown still makes Linux instant.
+    constexpr auto kListenSlice = std::chrono::milliseconds(200);
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::seconds(timeout_s);
     const auto drain = [&wake] {
@@ -475,6 +481,12 @@ CallbackResult wait_for_callback_impl(int timeout_s, const CodexCancelProbe& can
         FD_ZERO(&rfds);
         FD_SET(srv, &rfds);
         timeval tv = until_deadline();
+        if (std::chrono::seconds(tv.tv_sec) + std::chrono::microseconds(tv.tv_usec)
+            > kListenSlice) {
+            tv.tv_sec  = 0;
+            tv.tv_usec = static_cast<decltype(tv.tv_usec)>(
+                std::chrono::microseconds(kListenSlice).count());
+        }
         const int ready = ::select(static_cast<int>(srv + 1), &rfds, nullptr, nullptr, &tv);
         if (ready <= 0) continue;
 

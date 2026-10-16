@@ -2125,6 +2125,11 @@ struct WriterState {
     std::unordered_map<std::string, LogState> known;
     // Last (title, updated_at) written to index.json per thread.
     std::unordered_map<std::string, std::string> indexed;
+    // A thread deleted while its save was mid-write. delete_thread() drops a
+    // queued save outright, but one already writing would land its files
+    // after the removal and bring the thread back; the worker undoes it when
+    // it finishes. A save queued AFTER the delete is a new save and lands.
+    std::string undo;
     std::string in_flight;
     bool        stopping = false;
     bool        started  = false;
@@ -2135,6 +2140,10 @@ WriterStateLock& async_writer_state() {
     static WriterStateLock s;
     return s;
 }
+
+// Defined after the writer: delete_thread() and the writer's undo of a save
+// that raced a delete both remove a thread's files and index row through it.
+void remove_thread_files(const lock_levels::below_file_lane& cap, const ThreadId& id);
 
 struct AsyncWriter {
     // Reached in the constructor, so the state static is built first and
@@ -2244,6 +2253,17 @@ struct AsyncWriter {
 
     void forget(const maya::below<maya::leaf>& cap, const std::string& key) {
         st.with(cap, [](WriterState& s, std::string k) { s.known.erase(k); }, key);
+    }
+
+    // The thread is being deleted: drop its queued save, and have the worker
+    // undo the one it is writing right now, if any.
+    void cancel_saves(const maya::below<maya::leaf>& cap, const std::string& key) {
+        st.with(cap, [](WriterState& s, std::string k) {
+            s.known.erase(k);
+            s.indexed.erase(k);
+            s.pending.erase(k);
+            if (s.in_flight == k) s.undo = std::move(k);
+        }, key);
     }
 
     // Saved or queued by this process: a thread someone has open.
@@ -2398,13 +2418,22 @@ void AsyncWriter::run(const maya::unlocked& cap) {
 
         std::optional<std::string> idx;
         if (ok && next.full) idx = index_key(next.full->title, next.full->updated_at);
-        st.with(cap, [](WriterState& s, std::string k, bool good,
+        const bool undo = st.with(cap, [](WriterState& s, std::string k, bool good,
                    std::vector<std::uint64_t> fps, std::optional<std::string> ik) {
             s.in_flight.clear();
+            // Deleted while this save was writing: the files it just wrote
+            // must not outlive the delete.
+            if (!s.undo.empty() && s.undo == k) { s.undo.clear(); return true; }
             if (!good) s.known.erase(k);
             else       s.known[k].fps = std::move(fps);
             if (ik) s.indexed[k] = std::move(*ik);
+            return false;
         }, key, ok, std::move(next.fps), std::move(idx));
+        if (undo) {
+            AGT_LOG(Persist, Info, "thread.save",
+                    "id={} deleted mid-save; removing what the save wrote", key);
+            remove_thread_files(cap, ThreadId{key});
+        }
     }
 }
 
@@ -2413,13 +2442,23 @@ void save_thread(Io, const maya::below<maya::leaf>& cap, const Thread& t) {
     async_writer().enqueue(cap, t);
 }
 
-namespace {
-// Test/diagnostic hook, internal linkage: drop what the writer knows so
-// the next save of `id` is full. Used by delete_thread.
-void forget_log_state(const maya::below<maya::leaf>& cap, const ThreadId& id) {
-    async_writer().forget(cap, id.value);
+// The files a thread owns on disk, and its index row. Shared by
+// delete_thread() and the async writer's undo of a save that raced a delete.
+void remove_thread_files(const lock_levels::below_file_lane& cap, const ThreadId& id) {
+    std::error_code ec;
+    fs::remove(threads_dir() / (id.value + ".json"), ec);
+    fs::remove(threads_dir() / (id.value + ".transcript.md"), ec);
+    // The log format: .jsonl, .ofs, .meta.json.
+    if (auto log = ThreadLog::open(id)) log->remove();
+    // Blobs are shared between threads (content-addressed), so they are
+    // left for blob gc's mark-and-sweep. The index entry goes now, under
+    // its lock, so the picker shows no ghost row.
+    with_thread_index(cap, [](const maya::held<lock_levels::file_lane>&, persistence::Held,
+                              std::string key) {
+        auto idx = read_thread_index_locked();
+        if (idx.erase(key) > 0) write_thread_index_locked(idx);
+    }, id.value);
 }
-} // namespace
 
 void flush_pending_saves(Io, const maya::unlocked& cap) {
     async_writer().flush_and_stop(cap);
@@ -2500,20 +2539,11 @@ std::optional<Thread> load_thread_by_id(Io io, const ThreadId& id) {
 }
 
 void delete_thread(Io, const lock_levels::below_file_lane& cap, const ThreadId& id) {
-    forget_log_state(cap, id);
-    std::error_code ec;
-    fs::remove(threads_dir() / (id.value + ".json"), ec);
-    fs::remove(threads_dir() / (id.value + ".transcript.md"), ec);
-    // The log format: .jsonl, .ofs, .meta.json.
-    if (auto log = ThreadLog::open(id)) log->remove();
-    // Blobs are shared between threads (content-addressed), so they are
-    // left for blob gc's mark-and-sweep. The index entry goes now, under
-    // its lock, so the picker shows no ghost row.
-    with_thread_index(cap, [](const maya::held<lock_levels::file_lane>&, persistence::Held,
-                              std::string key) {
-        auto idx = read_thread_index_locked();
-        if (idx.erase(key) > 0) write_thread_index_locked(idx);
-    }, id.value);
+    // Cancel FIRST: a save queued before this delete is dropped, so it can't
+    // overwrite the removal below. One already mid-write is undone by the
+    // worker when it finishes.
+    async_writer().cancel_saves(cap, id.value);
+    remove_thread_files(cap, id);
 }
 
 ExpireStats expire_threads(Io io, const lock_levels::below_file_lane& cap, int keep_days,

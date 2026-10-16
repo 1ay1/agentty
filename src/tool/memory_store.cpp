@@ -14,6 +14,7 @@
 #include "agentty/util/user_root.hpp"
 #include "agentty/tool/memory_store.hpp"
 
+#include "agentty/auth/auth.hpp"          // CrossProcessFileLock
 #include "agentty/scope/scope.hpp"
 #include "agentty/config/inventory.hpp"   // kMemoryLayout — the one declaration
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -51,6 +52,15 @@ using json = nlohmann::json;
 // Every read-modify-write on either scope file runs inside store().with.
 // Contention is at most "the agent fired remember + forget back-to-back".
 // Helpers that need the lock take the Files token, which only exists inside.
+//
+// store() covers THIS process only. The user-scope file is shared by every
+// agentty on the machine, and the project file by every agentty in the repo,
+// so two instances doing remember/forget at once each read the file, change
+// their copy and rename it over the other's: one change was lost, with both
+// reporting success. A rewrite therefore also holds the cross-process lock
+// on that file (auth::CrossProcessFileLock, the one settings and credentials
+// use; bounded, so a stalled peer can't wedge this). Taken INSIDE the body:
+// it is not a jaal lock and ranks with nothing, and the body is file IO.
 struct Files {};
 using StoreLock = maya::guarded<Files, locks::memory_store>;
 StoreLock& store() { static StoreLock f; return f; }
@@ -598,6 +608,19 @@ namespace {
 AppendResult append_locked(Files&, Scope actual_scope, std::string body,
                            std::vector<std::string> tags_norm, AppendOptions opts,
                            const fs::path& p, AppendResult res) {
+    // Other agentty processes: see the note on store(). A supersede may also
+    // rewrite the OTHER scope's file, so when it's asked for, both files are
+    // locked up front in one fixed order (user, then project) -- a fixed
+    // order is what keeps two processes from each holding one and waiting
+    // for the other.
+    std::optional<auth::CrossProcessFileLock> lock_user, lock_project;
+    {
+        const fs::path pu = actual_scope == Scope::User ? p : path_for(Scope::User);
+        const fs::path pp = actual_scope == Scope::Project ? p : path_for(Scope::Project);
+        const bool both = !trim(opts.supersedes_id).empty();
+        if ((both || actual_scope == Scope::User) && !pu.empty())    lock_user.emplace(pu);
+        if ((both || actual_scope == Scope::Project) && !pp.empty()) lock_project.emplace(pp);
+    }
     auto existing = read_records(p);
 
     // ── Dedup pass ───────────────────────────────────────────────────
@@ -848,6 +871,7 @@ std::size_t remove_where(Files&, Pred pred) {
     for (auto s : {Scope::User, Scope::Project}) {
         const auto p = path_for(s);
         if (p.empty()) continue;
+        const auth::CrossProcessFileLock xlock(p);   // see the note on store()
         auto recs = read_records(p);
         const std::size_t before = recs.size();
         std::erase_if(recs, pred);
@@ -943,6 +967,7 @@ std::optional<std::size_t> wipe(const locks::below_memory_store& cap, Scope s) {
     // create_directories. write_records on an empty vector writes a
     // zero-byte file, which read_records / load_all both handle.
     const std::size_t n = store().with(cap, [](Files&, std::string path) {
+        const auth::CrossProcessFileLock xlock(fs::path{path});
         const std::size_t count = read_records(path).size();
         (void)write_records(path, {});
         return count;

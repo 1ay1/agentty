@@ -511,10 +511,12 @@ std::pair<Model, Cmd> init() {
             [](maya::Sink<Msg>, std::stop_token) { auth::prewarm_anthropic(); }));
 
     // Copilot's first turn is the "weirdly hangs for a second" case: the
-    // reducer thread blocks on fresh_token() (ghu_ -> proxy-token exchange,
-    // a cold TLS round-trip to api.github.com) and then auto_session()
-    // (another cold round-trip to /models/session) before the first token
-    // streams. Both cache their result, so priming them here — off the
+    // turn's stream worker blocks on fresh_token() (ghu_ -> proxy-token
+    // exchange, a cold TLS round-trip to api.github.com) and then
+    // auto_session() (another cold round-trip to /models/session) before the
+    // first token streams. (Never the reducer: every caller is a worker, and
+    // both single-flight under a lock whose network calls are capped at 30 s.)
+    // Both cache their result, so priming them here — off the
     // reducer thread, while the user is still typing — means the first real
     // submit finds a warm proxy token + Auto session instead of paying two
     // serial handshakes on the turn's critical path. Guarded to the copilot

@@ -2415,12 +2415,28 @@ a::ResumeSessionResult AgentServer::on_resume_session(const Cap& cap, const a::R
     return on_load_session(cap, p);   // restore + replay; same result shape
 }
 
+// Drop a session and cancel every turn it owns (the running one and any
+// queued behind it). Erasing it alone left a running turn streaming and
+// running tools until its next step boundary noticed the session was gone,
+// and session/delete's file removal then raced that turn's saves.
+void AgentServer::drop_session(const Cap& cap, const std::string& sid) {
+    auto toks = sessions_.with(cap, [](Sessions& ss, std::string id) {
+        std::vector<std::shared_ptr<http::CancelToken>> out;
+        auto it = ss.by_id.find(id);
+        if (it == ss.by_id.end()) return out;
+        for (const auto& [rid, tok] : it->second.queued) out.push_back(tok);
+        ss.by_id.erase(it);
+        return out;
+    }, sid);
+    cancel_tokens(cap, std::move(toks));
+}
+
 void AgentServer::on_close_session(const Cap& cap, const a::CloseSessionParams& p) {
-    sessions_.with(cap, [](Sessions& ss, std::string id) { ss.by_id.erase(id); }, p.sessionId.value);
+    drop_session(cap, p.sessionId.value);
 }
 
 void AgentServer::on_delete_session(const Cap& cap, const a::DeleteSessionParams& p) {
-    sessions_.with(cap, [](Sessions& ss, std::string id) { ss.by_id.erase(id); }, p.sessionId.value);
+    drop_session(cap, p.sessionId.value);
     persistence::delete_thread(IoAccess::grant(), cap, ThreadId{p.sessionId.value});
     unindex_session(cap, p.sessionId.value);
 }
@@ -3386,14 +3402,24 @@ bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool&
             };
         }
         // The job gets its own copy of the definition it was gated against.
+        // `abandon` stops the tool itself when this loop gives up on it at
+        // the deadline. Without it a timed-out shell/process kept running
+        // after its result was thrown away, and since ACP runs tools in
+        // order, the NEXT tool (an edit, another shell) ran concurrently with
+        // it on the same files, against the strictly-serial contract below.
+        std::stop_source abandon;
+        call_ctx.cancel.push_back(abandon.get_token());
         auto fut = util::background_pool().submit_isolated(
-            [](const maya::unlocked& job_cap, std::stop_token, std::optional<tools::ToolDef> def,
+            [](const maya::unlocked& job_cap, std::stop_token pool_stop,
+               std::optional<tools::ToolDef> def,
                std::string name, nlohmann::json args, std::stop_source wake,
                tools::CallContext call_ctx) {
                 struct Signal {
                     std::stop_source& s;
                     ~Signal() { s.request_stop(); }
                 } on_exit{wake};
+                // Process teardown stops the pool: the tool must see it too.
+                call_ctx.cancel.push_back(std::move(pool_stop));
                 return tool::DynamicDispatch::execute_with(job_cap, def ? &*def : nullptr,
                                                            name, args, call_ctx);
             },
@@ -3425,8 +3451,11 @@ bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool&
         const bool tool_timed_out = !finished && !woke;
 
         if (tool_cancelled || tool_timed_out) {
-            // Just drop the future. The job keeps running on the pool and is
-            // waited for at teardown; its late result is discarded.
+            // Drop the future, but stop the tool first: the job keeps running
+            // on the pool until it notices (a shell is killed, a fetch
+            // aborted), is waited for at teardown, and its late result is
+            // discarded. A cancel already reached it via ctx.cancel.
+            abandon.request_stop();
             const char* why = tool_timed_out ? "timed out" : "cancelled";
             if (tool_timed_out) util::dbglog("acp.run_tools.timeout", tc.name.value);
             settle_tool(cap, ctx, tc, ToolUse::Failed{{}, {}, why}, tool_start);
