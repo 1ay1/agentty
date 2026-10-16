@@ -4,6 +4,31 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Tools work like Zed's agent.** `read` numbers every line (`cat -n`
+  style), so the model can point at lines and won't mistake the numbers for
+  file text; `edit` strips them if a model pastes them into `old_text`.
+  Tools no longer echo `display_description` back as the first line of
+  their output, which wasted tokens on every call.
+- **Waits run one at a time.** Several `process_poll` or `shell … sleep`
+  calls in one batch used to start together, so the sleeps didn't add up,
+  and a poll could run before the `process_start` it was checking on.
+
+### Fixed
+- **`.env`, keys and tokens can't be read by the file tools.** The sandbox
+  masked them for commands, but `read` returned them in full. `read`,
+  `outline`, `read_filter`, `json_query` and a `grep` on that path now refuse
+  them.
+- **Tool cards show true numbers.** A ranged read says `131–135 of 349`
+  instead of `349 lines`; a cached read no longer shifts every line number by
+  one; grep's card shows the lines that matched, not the top of the context
+  block; read_filter, extract, aggregate and a capped glob report their real
+  counts; git_status names the branch on a repo with no commits.
+- **Edits sent as a JSON string still apply**, and an edit whose first line
+  lost its indent (copied from mid-line) is reindented correctly.
+- **Builds on Termux / Android.** The sandbox and the event loop now build
+  their Linux code there too.
+
 ## [0.9.24] - 2026-10-16
 
 ### Fixed
