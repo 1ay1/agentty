@@ -9,6 +9,7 @@
 
 #include "agentty/runtime/app/settings_cache.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -41,6 +42,9 @@ struct State {
 
     bool writing    = false;   // a write is in flight right now
     bool stopping   = false;
+    // Bumped by invalidate(). A disk load that started before a bump read
+    // the old file and must not publish it.
+    std::uint64_t gen = 0;
     bool started    = false;   // the drain worker has been posted
     bool registered = false;   // the teardown hook is installed
 };
@@ -137,7 +141,10 @@ Seam wrap(const maya::unlocked& cap, std::function<store::Settings()> load_from_
     Seam out;
 
     out.load = [](const maya::below<maya::leaf>& c) {
-        if (auto hit = state().read(c, [](const State& s) { return s.cached; })) return *hit;
+        auto [hit, gen] = state().read(c, [](const State& s) {
+            return std::pair{s.cached, s.gen};
+        });
+        if (hit) return *hit;
 
         // First read: fault in from disk with the lock released, then publish.
         store::Settings fresh;
@@ -145,11 +152,13 @@ Seam wrap(const maya::unlocked& cap, std::function<store::Settings()> load_from_
             if (auto d = disk().current(); d && d->load) fresh = d->load();
         } catch (...) { /* defaults stand */ }
         // Another thread may have seeded (or a save may have published a
-        // newer value) meanwhile — theirs wins, being at least as new.
-        return state().with(c, [](State& s, store::Settings f) {
-            if (!s.cached) s.cached = std::move(f);
-            return *s.cached;
-        }, std::move(fresh));
+        // newer value) meanwhile; theirs wins. If an invalidate ran, our read
+        // may predate the write it announced, so return it without caching.
+        return state().with(c, [](State& s, store::Settings f, std::uint64_t g) {
+            if (s.cached) return *s.cached;
+            if (s.gen == g) s.cached = f;
+            return f;
+        }, std::move(fresh), gen);
     };
 
     out.save = [](const maya::below<maya::leaf>& c, const store::Settings& value) {
@@ -192,7 +201,10 @@ void invalidate(const maya::unlocked& cap) noexcept {
     // write we are being told about; letting it land afterwards would undo
     // that write on disk, which is the exact failure this exists to stop.
     flush(cap);
-    state().with(cap, [](State& s) { s.cached.reset(); });
+    state().with(cap, [](State& s) {
+        s.cached.reset();
+        ++s.gen;
+    });
 }
 
 void shutdown(const maya::unlocked& cap) noexcept {
