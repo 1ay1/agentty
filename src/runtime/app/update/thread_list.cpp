@@ -96,7 +96,7 @@ namespace {
     // A fresh empty thread has no live turn — drop any streaming phase and
     // hand the kernel back so a mid-stream swap can't leave the wire running
     // against a thread that no longer exists.
-    m.s.phase = phase::Idle{};
+    end_turn(m.s.phase);
     // Smart-Mode per-THREAD routing state must not leak into the new thread:
     // complexity momentum (classify_score_with_context inherits a tier from
     // the PREVIOUS turn), the session cascade bias, and the last turn's
@@ -465,7 +465,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // Order matters: hand the kernel back BEFORE the transcript is
             // rehydrated so a late delta can't land against a half-swapped
             // model.
-            m.s.phase = phase::Idle{};
+            end_turn(m.s.phase);
             m.d.pending_permission.reset();
             // Modals framed the OLD thread's content (the palette and
             // code-block pickers hold indices into the departing thread's

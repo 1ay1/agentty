@@ -1251,7 +1251,7 @@ Cmd token_refreshed(Model& m, auth::TokenResult result) {
                     m.d.current.messages.pop_back();
                 }
             }
-            m.s.phase = phase::Idle{};
+            end_turn(m.s.phase);
         }
 
         auto cmd = set_status_toast(m, std::move(text),

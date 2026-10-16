@@ -3154,3 +3154,10 @@ Cmd refresh_oauth(std::string refresh_token) {
 }
 
 } // namespace agentty::app::cmd
+
+namespace agentty {
+void end_turn(Phase& p) noexcept {
+    if (auto* a = active_ctx(p); a && a->cancel) a->cancel->cancel();
+    p = phase::Idle{};
+}
+} // namespace agentty

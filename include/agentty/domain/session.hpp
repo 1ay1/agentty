@@ -220,6 +220,11 @@ using Phase = std::variant<phase::Idle, phase::Streaming,
     }, std::move(p));
 }
 
+// Drop to Idle and cancel the turn's stream on the way. Just assigning Idle
+// leaves the worker running with a live token, and its late events reach
+// whatever turn starts next. Defined in cmd_factory.cpp (needs http.hpp).
+void end_turn(Phase& p) noexcept;
+
 // ── Reschedule combinator ───────────────────────────────────
 // The retry sites all perform the same dance: pull the ctx out of the
 // phase, bump its retry bookkeeping, and re-enter Streaming with the
