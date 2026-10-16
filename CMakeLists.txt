@@ -581,13 +581,15 @@ if(AGENTTY_STANDALONE AND NOT MSVC)
             # AND have a musl toolchain whose -static-pie truly links libc
             # statically (the POST_BUILD guard enforces it either way).
             if(AGENTTY_STATIC_PIE)
-                target_compile_options(agentty PRIVATE -static-pie)
+                target_compile_options(agentty PRIVATE -fPIE)
                 target_link_options(agentty PRIVATE -static-pie)
             else()
-                # -no-pie must reach BOTH compile and link so the driver
-                # selects the non-PIE static CRT consistently and emits
-                # ET_EXEC (not a half-PIE that keeps a NEEDED).
-                target_compile_options(agentty PRIVATE -no-pie)
+                # Non-PIE needs a flag at each stage, and they are different
+                # flags: -fno-pie makes the compiler emit non-PIC code, and
+                # -no-pie makes the linker emit ET_EXEC (not a half-PIE that
+                # keeps a NEEDED). -no-pie at compile time does nothing
+                # (clang says so: -Wunused-command-line-argument).
+                target_compile_options(agentty PRIVATE -fno-pie)
                 target_link_options(agentty PRIVATE -static -no-pie)
             endif()
             # musl's default new-thread stack is 128 KiB, vs glibc's 8 MiB.
@@ -688,13 +690,16 @@ if(MSVC)
     )
 endif()
 
-# nghttp2.h is a C header whose multi-line function signatures trip MSVC's
-# conforming preprocessor (/Zc:preprocessor). Revert to the legacy
-# preprocessor for just this TU; the rest of the build keeps /Zc:preprocessor.
+# nghttp2 is linked statically from vcpkg on MSVC; without NGHTTP2_STATICLIB
+# its header marks every symbol __declspec(dllimport). http.cpp used to be
+# compiled with /Zc:preprocessor- as well, but that fought the global
+# /Zc:preprocessor (D9025) and put maya's DSL headers, which need the
+# conforming preprocessor, under the legacy one. What nghttp2.h actually
+# lacked on MSVC was ssize_t, which http.cpp now defines before the include.
 # Applied directory-wide so the io OBJECT library's http.cpp gets it too.
 if(MSVC)
-    set_source_files_properties(src/io/http.cpp PROPERTIES
-        COMPILE_FLAGS "/Zc:preprocessor- /DNGHTTP2_STATICLIB")
+    set_property(SOURCE src/io/http.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS NGHTTP2_STATICLIB)
 endif()
 # Opt-in sanitizer build: `cmake -B build-san -DAGENTTY_SANITIZE=address,undefined`.
 # Separate from CMAKE_BUILD_TYPE so CI / contributors can flip it without

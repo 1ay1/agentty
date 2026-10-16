@@ -2663,6 +2663,12 @@ namespace {
 // inspected by another thread is invisible for those microseconds, and the
 // caller dials fresh instead: harmless for a cache.
 class Pool {
+    // A slot hands its connection to whichever thread claims it next. That
+    // is the cross-thread move MAYA_SENDABLE(Connection) above vouches for;
+    // check it here, where it is relied on, so the claim cannot rot.
+    static_assert(maya::Sendable<PooledConn>,
+                  "a pooled connection crosses threads; it must be Sendable");
+
     enum : int { kEmpty = 0, kBusy = 1, kFull = 2 };
     // Per-endpoint cap is kMaxPoolEntriesPerEndpoint; agentty talks to a
     // handful of endpoints, so 64 slots never constrain real use. If they

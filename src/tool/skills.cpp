@@ -477,9 +477,9 @@ void scan_root(Io io, const fs::path& root, const std::string& source,
         // Shadow: earlier roots (project before user, native before
         // interop) — and earlier visit order (shallower before deeper)
         // — win on name collision.
-        if (const auto it = std::ranges::find_if(
+        if (const auto winner = std::ranges::find_if(
                 out, [&](const Skill& e){ return e.name == s.name; });
-            it != out.end()) {
+            winner != out.end()) {
             // Record it rather than dropping it silently. The losing copy
             // is NOT loaded — it cannot reach the model — but a skill
             // sitting on disk invisible to `list`, `approve` and the panel
@@ -493,7 +493,7 @@ void scan_root(Io io, const fs::path& root, const std::string& source,
                 .dir         = (sec ? md.parent_path() : sdir).string(),
                 .source      = source,
                 .effects     = s.effects,
-                .winner_dir  = it->dir.string(),
+                .winner_dir  = winner->dir.string(),
             });
             continue;
         }

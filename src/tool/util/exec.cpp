@@ -47,7 +47,10 @@ constexpr std::uint64_t kBrokerToken = 3;
 constexpr std::uint64_t kInToken   = 4;
 
 
-/// The sandbox's way in, or empty when no sandbox is active.
+#if defined(__linux__)
+/// The sandbox's way in, or empty when no sandbox is active. Linux-only:
+/// adopting a foreign child needs a pidfd. Darwin confines by wrapping the
+/// argv instead (see JaalExec::confine).
 ///
 /// claybin clones with namespace flags, installs a seccomp filter and enters
 /// a cgroup -- none of it expressible as "fork then exec" -- so it spawns,
@@ -58,7 +61,6 @@ sandbox_spawner(const std::vector<std::string>& argv, const std::string& cwd,
                 std::vector<std::string> extra_roots = {},
                 const handoff::TrustedSnapshot* trusted = nullptr,
                 std::vector<std::pair<std::string, std::string>> env = {}) {
-#if defined(__linux__)
     namespace sb = agentty::tools::util::sandbox;
     if (sb::is_active() && sb::detected_backend() == sb::Backend::Claybin) {
         // `trusted` is the dispatcher's, alive for the whole call; the spawn
@@ -75,11 +77,9 @@ sandbox_spawner(const std::vector<std::string>& argv, const std::string& cwd,
             return c;
         };
     }
-#else
-    (void)argv; (void)cwd;
-#endif
     return {};
 }
+#endif
 
 struct started {
     process_t            proc;
@@ -559,10 +559,11 @@ class JaalExec final : public mt::Exec {
     [[nodiscard]] static std::optional<std::string> confine(const mt::Call& call, ChildRun& run) {
         std::vector<std::string> roots;
         for (const auto& r : call.scope_extra_roots) roots.push_back(r.string());
+#if defined(__linux__)
         run.spawn_adopted = sandbox_spawner(run.argv, run.cwd, roots,
                                             ::agentty::tools::host_call(call.host).trusted,
                                             run.env);
-#if defined(__APPLE__)
+#elif defined(__APPLE__)
         namespace sb = agentty::tools::util::sandbox;
         if (sb::is_active()) {
             auto wrapped = sb::wrap_argv_for_exec(run.argv, run.cwd, roots);

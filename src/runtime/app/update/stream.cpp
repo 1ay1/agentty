@@ -389,10 +389,10 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         // conversation, not the system prompt and tools, so subtracting the
         // difference keeps that fixed part; the next StreamUsage replaces it.
         {
-            const auto& rec = m.d.current.compactions.back();
-            const auto reclaimed = rec.reclaimed();
+            const auto& last = m.d.current.compactions.back();
+            const auto reclaimed = last.reclaimed();
             if (reclaimed && *reclaimed > 0) {
-                const int floor = static_cast<int>(rec.tokens_after * m.s.est_calibration);
+                const int floor = static_cast<int>(last.tokens_after * m.s.est_calibration);
                 m.s.tokens_in = std::max(floor, m.s.tokens_in
                     - static_cast<int>(*reclaimed * m.s.est_calibration));
             }

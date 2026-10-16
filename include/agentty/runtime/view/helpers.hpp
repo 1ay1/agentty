@@ -289,13 +289,13 @@ void bake_context_window(ModelInfo& row,
 // cosmetics, so tmux's copy-mode cursor lands on blank padding rather
 // than mid-content (see maya's emit_caret_epilogue). One code path,
 // one look, everywhere.
-[[nodiscard]] inline auto query_caret(maya::Color accent) {
+[[nodiscard]] inline auto query_caret(maya::Color tint) {
     return maya::dsl::text("\xe2\x96\x88",
                            maya::Style{}
                                .with_conceal()
                                .with_caret_anchor()
                                .with_caret_shape(1)   // blinking block
-                               .with_fg(accent));
+                               .with_fg(tint));
 }
 
 } // namespace agentty::ui

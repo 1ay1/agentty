@@ -54,13 +54,6 @@ namespace hue {
     return maya::theme::series(maya::theme::live(), i);
 }
 [[nodiscard]] inline maya::Color cyan()   { return at(0); }
-[[nodiscard]] inline maya::Color blue()   { return at(1); }
-[[nodiscard]] inline maya::Color amber()  { return at(2); }
-[[nodiscard]] inline maya::Color green()  { return at(3); }
-[[nodiscard]] inline maya::Color violet() { return at(4); }
-[[nodiscard]] inline maya::Color teal()   { return at(5); }
-[[nodiscard]] inline maya::Color red()    { return at(6); }
-[[nodiscard]] inline maya::Color pink()   { return at(7); }
 [[nodiscard]] inline maya::Color dim()    {
     return maya::theme::series_other(maya::theme::live());
 }
@@ -93,12 +86,12 @@ namespace hue {
 // Each card carries its OWN accent, cycling the ramp, so a grid of them
 // reads as distinct panels rather than one wall of the same colour — the
 // thing that makes the example's dashboard legible at a glance.
-[[nodiscard]] Element card(std::string_view heading, maya::Color accent,
+[[nodiscard]] Element card(std::string_view heading, maya::Color tint,
                            std::vector<Element> body) {
     std::vector<Element> rows;
     rows.reserve(body.size() + 2);
     if (!heading.empty()) {
-        rows.push_back(text(std::string{heading}, fg_bold(accent)));
+        rows.push_back(text(std::string{heading}, fg_bold(tint)));
         rows.push_back(blank());
     }
     for (auto& e : body) rows.push_back(std::move(e));
@@ -373,7 +366,7 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
     sec.extract(f, scratch);
 
     const std::size_t slot = out.size();
-    const maya::Color accent = series_hue(0, slot);
+    const maya::Color tint = series_hue(0, slot);
 
     // ── scalar kinds: one GROUP of lines, dealt into a column later ───
     if (sec.viz == stats::Viz::Kv || sec.viz == stats::Viz::Hero) {
@@ -381,12 +374,12 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
         std::vector<Element> group;
         group.reserve(scratch.size() * 4 + 2);
         if (!sec.heading.empty()) {
-            group.push_back(text(std::string{sec.heading}, fg_bold(accent)));
+            group.push_back(text(std::string{sec.heading}, fg_bold(tint)));
             group.push_back(blank());
         }
         for (std::size_t i = 0; i < scratch.size(); ++i) {
             const auto& mt = scratch[i];
-            group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+            group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(tint)));
             if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim())));
             if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim())));
             if (i + 1 < scratch.size()) group.push_back(blank());
@@ -396,7 +389,7 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
     }
 
     if (scratch.empty()) {
-        out.push_back(card(sec.heading, accent, {empty_placeholder()}));
+        out.push_back(card(sec.heading, tint, {empty_placeholder()}));
         tall.push_back(false);
         titles.push_back(std::string{sec.heading});
         return;
@@ -421,7 +414,7 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
             std::vector<stats::Metric> one{mt};
             auto one_body = build_sparks(one, nullptr);
             if (one_body.empty()) continue;
-            out.push_back(card(mt.label, accent, std::move(one_body)));
+            out.push_back(card(mt.label, tint, std::move(one_body)));
             tall.push_back(false);
             titles.push_back(mt.label);
         }
@@ -430,7 +423,7 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
             group.reserve(figures.size() * 4);
             for (std::size_t i = 0; i < figures.size(); ++i) {
                 const auto& mt = figures[i];
-                group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+                group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(tint)));
                 if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim())));
                 if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim())));
                 if (i + 1 < figures.size()) group.push_back(blank());
@@ -458,7 +451,7 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
         group.reserve(figures.size() * 4);
         for (std::size_t i = 0; i < figures.size(); ++i) {
             const auto& mt = figures[i];
-            group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(accent)));
+            group.push_back(text(stats::format(mt.unit, mt.value), fg_bold(tint)));
             if (!mt.label.empty())  group.push_back(text(mt.label, fg_dim(hue::dim())));
             if (!mt.detail.empty()) group.push_back(text(mt.detail, fg_dim(hue::dim())));
             if (i + 1 < figures.size()) group.push_back(blank());
@@ -470,7 +463,7 @@ void build_cards(const stats::Section& sec, const stats::Facts& f,
     if (body.empty() && !figures.empty()) return;
 
     if (body.empty()) body.push_back(empty_placeholder());
-    out.push_back(card(sec.heading, accent, std::move(body)));
+    out.push_back(card(sec.heading, tint, std::move(body)));
     tall.push_back(sec.viz == stats::Viz::Donut);
     titles.push_back(std::string{sec.heading});
 }

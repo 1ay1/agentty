@@ -197,7 +197,7 @@ jobs:
           done
       - name: Upload to release + stash for packaging
         run: gh release upload "$TAG" agentty-linux-x86_64 --clobber
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-linux-x86_64
           path: agentty-linux-x86_64
@@ -301,7 +301,7 @@ jobs:
           done
       - name: Upload to release + stash for packaging
         run: gh release upload "$TAG" agentty-linux-aarch64 aarch64.diag.txt --clobber
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-linux-aarch64
           path: agentty-linux-aarch64
@@ -412,9 +412,18 @@ jobs:
           & "$env:VCPKG_INSTALLATION_ROOT\bootstrap-vcpkg.bat"
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install openssl nghttp2 --triplet x64-windows-static
       - name: MSVC dev environment
-        uses: ilammy/msvc-dev-cmd@v1.13.0
-        with:
-          arch: x64
+        # vcvarsall via vswhere, exported to GITHUB_ENV: what
+        # ilammy/msvc-dev-cmd did, without its deprecated Node 20 runtime.
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "no Visual Studio with the x64 C++ toolset" }
+          $before = @{}; Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" x64 >nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$' -and $before[$matches[1]] -ne $matches[2]) {
+              "$($matches[1])=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            }
+          }
       - name: Configure + build
         shell: pwsh
         run: |
@@ -641,7 +650,7 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bin-linux-x86_64
           path: bins
@@ -693,7 +702,7 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bin-linux-aarch64
           path: bins
@@ -804,7 +813,7 @@ jobs:
       TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bin-linux-x86_64
           path: bins

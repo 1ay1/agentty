@@ -833,9 +833,9 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // The catalog the fused rows actually read. Mutate the row's OWN
             // provider catalog so the picker's ctx column moves immediately
             // regardless of which host the highlighted row belongs to.
-            for (auto& c : m.d.provider_catalogs) {
-                if (c.provider_id != row_provider) continue;
-                for (auto& mi : c.models)
+            for (auto& cat : m.d.provider_catalogs) {
+                if (cat.provider_id != row_provider) continue;
+                for (auto& mi : cat.models)
                     if (mi.id == row_model) { apply_to(mi); break; }
                 break;
             }

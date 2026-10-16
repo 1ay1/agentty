@@ -274,9 +274,11 @@ using namespace ::clay::literals;
     return std::move(d).seal();
 }
 
+#if defined(__linux__)
 // execvp's lookup, done before the spawn: claybin's guest calls execve. A
 // name with a slash is a path already; anything not found stays as given,
-// so the guest's execve reports the real error.
+// so the guest's execve reports the real error. Linux-only: the macOS
+// backend spawns through posix_spawnp, which searches PATH itself.
 std::string resolve_on_path(const std::string& name) {
     if (name.empty() || name.find('/') != std::string::npos) return name;
     const char* path = std::getenv("PATH");
@@ -292,6 +294,7 @@ std::string resolve_on_path(const std::string& name) {
     }
     return name;
 }
+#endif
 
 }  // namespace
 

@@ -266,21 +266,21 @@ std::string provider_display_name(const Selection& s) {
     // round-trip assertion still see the full spec.
     if (lbl.starts_with("https://") || lbl.starts_with("http://")) {
         const bool tls = lbl.starts_with("https://");
-        std::string_view s = lbl;
-        s.remove_prefix(tls ? 8 : 7);   // "https://" = 8, "http://" = 7
+        std::string_view auth = lbl;
+        auth.remove_prefix(tls ? 8 : 7);   // "https://" = 8, "http://" = 7
         // Strip path at first '/' (everything after the authority).
-        if (auto slash = s.find('/'); slash != std::string_view::npos)
-            s = s.substr(0, slash);
+        if (auto slash = auth.find('/'); slash != std::string_view::npos)
+            auth = auth.substr(0, slash);
         std::string out;
         std::uint16_t port = tls ? 443 : 80;
         // IPv6 literals are bracketed ("[::1]" / "[::1]:8080") — the port colon
         // is the one after "]", and the brackets are kept in the label so it
         // round-trips as a valid authority.
-        if (!s.empty() && s.front() == '[') {
-            auto close = s.find(']');
+        if (!auth.empty() && auth.front() == '[') {
+            auto close = auth.find(']');
             if (close != std::string_view::npos) {
-                out = std::string{s.substr(0, close + 1)};   // keep [ ... ]
-                auto rest = s.substr(close + 1);
+                out = std::string{auth.substr(0, close + 1)};   // keep [ ... ]
+                auto rest = auth.substr(close + 1);
                 if (rest.size() > 1 && rest.front() == ':') {
                     try {
                         int p = std::stoi(std::string{rest.substr(1)});
@@ -288,16 +288,16 @@ std::string provider_display_name(const Selection& s) {
                     } catch (...) {}
                 }
             } else {
-                out = std::string{s};
+                out = std::string{auth};
             }
-        } else if (auto colon = s.rfind(':'); colon != std::string_view::npos) {
-            out = std::string{s.substr(0, colon)};
+        } else if (auto colon = auth.rfind(':'); colon != std::string_view::npos) {
+            out = std::string{auth.substr(0, colon)};
             try {
-                int p = std::stoi(std::string{s.substr(colon + 1)});
+                int p = std::stoi(std::string{auth.substr(colon + 1)});
                 if (p > 0 && p <= 65535) port = static_cast<std::uint16_t>(p);
             } catch (...) {}
         } else {
-            out = std::string{s};
+            out = std::string{auth};
         }
         // Omit the port when it's the scheme default.
         if (port != (tls ? 443 : 80)) out += ":" + std::to_string(port);
