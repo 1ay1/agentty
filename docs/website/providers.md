@@ -183,6 +183,30 @@ agentty --provider deepseek -m deepseek-reasoner    # reasoning model (thinking)
 
 DeepSeek's endpoints live at the API root (no `/v1` prefix) — agentty handles that automatically. Both the chat and reasoner families are recognized as native tool-callers, and **reasoning streams live**: on a reasoning model agentty renders DeepSeek's chain-of-thought exactly like Claude's thinking, and the effort control (cycle it in the model picker) maps straight to the wire. Selecting DeepSeek in `^P` before you've set a key still shows its models (a small bundled list) so you can pick one immediately; the live catalog replaces it once your key is set.
 
+## Google Gemini
+
+Gemini uses an **API key** from [Google AI Studio](https://aistudio.google.com/apikey). Set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), pass `-k`, or paste it into the in-app prompt. Keys starting with `AIzaSy` or `AQ.` are recognised as Gemini keys when pasted.
+
+```bash
+export GEMINI_API_KEY=AIza…
+agentty --provider gemini -m gemini-2.5-pro
+```
+
+agentty talks to Google's OpenAI-compatible endpoint (`generativelanguage.googleapis.com/v1beta/openai`).
+
+:::note
+There is **no Google sign-in**, so a Google AI Pro subscription can't be used here. As far as we know that plan doesn't add Gemini API quota either. The API key gets the API's own quota: the free tier, or pay-as-you-go once billing is on for the key's Google Cloud project.
+:::
+
+### Quota errors
+
+On the free tier some models have a quota of zero, and the others have small per-minute and per-day limits. When you hit one, Google answers `429` and says how long to wait. agentty reads that wait:
+
+- **A short wait** (a per-minute limit) is retried automatically after the time Google asked for.
+- **A long wait** (over 15 minutes, usually the daily quota) is shown straight away instead of being retried, because retrying can't succeed until the quota resets.
+
+The message is Google's own, so it names the model and the quota you ran out of. `limit: 0` means the free tier gives that model no requests at all: turn on billing for the key's project, or pick another model with `^/`.
+
 ## Local models (Ollama)
 
 Point agentty at a model served by Ollama on `localhost:11434` — no key, no cloud, no data leaving your machine. agentty uses Ollama's native `/api/chat` protocol and salvages tool calls that weaker local models leak as raw JSON, so even smaller models can drive the full tool suite.
@@ -210,3 +234,14 @@ If prompts fail immediately (rather than after a long think), agentty now tells 
 - **A stale saved model** — if the model id recalled for a local host isn't in its live `/v1/models` list, agentty refuses cleanly (*“model X isn't served by this host — pick one (^/)”*) instead of 400-ing every prompt.
 
 When in doubt, `AGENTTY_LOG=wire=trace agentty` shows the exact request and response — see **[Logging & diagnostics](/docs/logging)**.
+
+### The prompt local models get
+
+A model on a server you run (loopback or your LAN, over plain HTTP) gets a short system prompt instead of the long hosted one. Small models follow a few firm rules better than pages of prose. It tells the model to:
+
+- do the work with tools: write files with `write`, change them with `edit`, run commands with the shell tool
+- never paste code into its reply instead of calling a tool
+- treat a big task as normal: work in many steps, one tool call at a time, and never refuse or apologise that a task is too large
+- only say a file changed when a tool reported it
+
+The main turn, [subagents](/docs/subagents) and [`agentty run`](/docs/cli#agentty-run) all get the same prompt. Even so, a small model (around 20B parameters or less) can still give up on a very large request, such as a long spec it must implement in full. Splitting the request into smaller steps, or using a bigger model, works better.

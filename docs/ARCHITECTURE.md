@@ -136,7 +136,10 @@ Responses) each own their provider-specific streaming/salvage logic, but every
 ingress concern that is genuinely SHARED lives in exactly one place so a fix
 can't drift into three copies of itself: `provider::finish_stream` +
 `wire::SseFramer`/`LineFramer` (byte-level framing + terminal-event epilogue),
-`provider::parse_retry_after` (Retry-After backoff), `wire::scrub_utf8`
+`provider::parse_retry_after` + `parse_retry_after_body` (the server's
+backoff, from the Retry-After header or, failing that, the error body, which
+is where Gemini puts it; read through `StreamScaffold::retry_after()`),
+`wire::scrub_utf8`
 (strict UTF-8 validation), `wire::could_be_tool_json` (the leaked-tool-call
 prefix sniffer weak local models need), `provider::usage::{from_openai,
 from_responses,from_ollama}` (the three token-usage wire shapes), and

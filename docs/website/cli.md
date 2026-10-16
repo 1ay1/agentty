@@ -104,7 +104,7 @@ jq -r 'select(.ev=="reasoning") | .text' events.jsonl
 | 0 | Finished with an answer. |
 | 1 | The agent failed or ran out of turns. Any partial answer is still printed. |
 | 2 | Bad usage (unknown flag, bad value, no prompt). |
-| 3 | Provider or auth problem. |
+| 3 | Provider or auth problem. Also a rate limit the provider says lasts more than 15 minutes (a daily or plan quota): that ends the run straight away instead of being retried. Shorter rate limits are retried (up to 3 times, at most 30 s apart). |
 | 4 | `--resume` found no such thread. |
 | 5 | The model's context window filled up. stderr says how big the window was and how big the last prompt got. |
 | 124 | Hit `--timeout`. |

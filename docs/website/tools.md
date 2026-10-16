@@ -10,11 +10,11 @@ Each tool gets a purpose-built widget: diffs render as diffs with a real line-nu
 
 | Tool | Effect class | Description |
 |---|---|---|
-| `read` | Read | Read a file (or a line range). Large files return a symbol outline first. **`symbol="name"`** reads exactly one function/type's definition + body (resolved to its enclosing block) — no line math or `sed`. |
+| `read` | Read | Read a file (or a line range). Large files return a symbol outline first. **`symbol="name"`** reads exactly one function/type's definition + body (resolved to its enclosing block) — no line math or `sed`. An image (PNG, JPEG, GIF or WebP, up to 8 MiB, detected by its contents, not its extension) is attached for a vision model to see. If the provider can't take it, agentty drops it and retries the turn. |
 | `write` | Write | Create a new file with atomic write semantics. |
 | `edit` | Write | Apply targeted text substitutions to an existing file; renders a diff. |
 | `move` | Write | Move or rename a file/directory without a shell. |
-| `remove` | Write | Delete a file or directory (recursive requires an explicit flag). |
+| `remove` | Write | Delete a file or directory (recursive requires an explicit flag). A path that's already gone counts as done, not as an error. |
 | `bash` | Shell | Run a shell command inside the sandbox; shows exit code + output. |
 | `process_start` / `process_poll` / `process_stop` | Shell | Start, poll, and stop a long-running background process (dev servers, watchers) without blocking the turn. Rendered as terminal output — tail-anchored, exit codes and test/compiler summaries lifted out. |
 | `grep` | Read | Regex search across files, rendered as a per-file table with true line numbers. Prefers ripgrep when installed; both backends skip generated trees (`build*`, `_deps`, `node_modules`, `vendor`, `.git`, …) so build artifacts never pollute the hits. **`word=true`** matches whole identifiers only (no `foo` inside `foobar`); **`context:"block"`** returns each hit's whole enclosing function/block so you rarely need a follow-up `read`. |

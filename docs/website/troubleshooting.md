@@ -45,6 +45,8 @@ W net  http.stream_hangup: host=api.anthropic.com:443 reused=1 idle_ms=61402 sta
 
 Fixed in current builds — a cancelled worker thread could null out a new turn's cancel token. Update to the latest release. If you still see it, restart the process and file a bug with your `git rev-parse HEAD` (or release version).
 
+Starting a new thread (`^N`) or switching threads while a reply is streaming stops that reply and any tools it was running. Nothing from it lands in the thread you switched to.
+
 ## Certificate / TLS verification errors
 
 You're likely behind a TLS-terminating proxy. Install the proxy's CA into the system trust store — see [Corporate Proxies](/docs/proxies). As a last resort, `AGENTTY_INSECURE=1` skips verification (not for shared use).
@@ -75,6 +77,31 @@ agentty now diagnoses this instead of looping. The usual causes:
 - **Slow, not stuck.** A big model can process the prompt silently for minutes; the phase chip reads *“processing…”* and the timeout is 10 minutes for local endpoints. That's expected — `Esc` cancels if you don't want to wait.
 
 See [Providers › Custom hosts](/docs/providers#custom-hosts) for the full model.
+
+## `HTTP 429` / “quota exceeded”
+
+A 429 means one of two things, and agentty tells them apart by how long the provider says to wait:
+
+- **A short wait** (a burst or per-minute limit): agentty waits the time the provider asked for and retries on its own. The status bar counts the attempts.
+- **A wait of more than 15 minutes** (a daily or plan quota): agentty shows the error straight away. Retrying can't work until the quota resets, so it doesn't make you sit through it.
+
+The wait comes from the `Retry-After` header, or from the error body when the provider puts it there instead. Google Gemini does the latter (`"retryDelay": "6043s"`, “Please retry in 1h40m”).
+
+To get going again, wait for the reset, add billing or credit with the provider, or switch model (`^/`) or provider (`^P`). On Gemini's free tier, `limit: 0` in the message means that model gets no free requests at all. See [Providers › Google Gemini](/docs/providers#google-gemini).
+
+## “this model can't read images — retried without them”
+
+The provider rejected a request because of an image in it: the model has no vision, the format isn't supported, there are too many images, or your organisation disabled image input. agentty removes the images from the request and sends the turn again, so you still get an answer about the text. This covers images you pasted and images a tool returned, such as `read` on a `.png`. Your transcript keeps the images; only the request loses them.
+
+If you need the image read, switch to a vision model (`^/`).
+
+## A local model refuses (“I can't do all of that in one reply”)
+
+Small local models sometimes refuse a big task instead of working through it. agentty's local prompt tells them to work step by step with tools and never refuse for size (see [Providers › The prompt local models get](/docs/providers#the-prompt-local-models-get)), but a model around 20B parameters can still give up on a long spec. Ask for one part at a time (“create the login screen”, then “add the settings screen”), or use a bigger model.
+
+## “wait for the thread to finish loading”
+
+You pressed Enter while a thread was still loading or a checkpoint rewind was running. agentty holds the message instead of sending it into the thread you're leaving. Your draft stays in the box; press Enter again once the load finishes.
 
 ## Turning on logs for a bug report
 

@@ -4,6 +4,57 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Gemini quota errors show at once (#102).** Google sends no
+  `Retry-After` header; the wait is in the error body (`retryDelay`, and
+  “Please retry in 1h40m” in the message). agentty only read the header,
+  so a daily quota looked like a short rate limit and was retried for about
+  two minutes before showing the same error. Every provider now falls back
+  to the body, and a wait over 15 minutes is shown straight away. Compaction
+  follows the same rule.
+- **Local models: subagents and `agentty run` get the local prompt (#91).**
+  The main turn already gave a self-hosted model the short prompt that says
+  to do the work with tools and never refuse a big task. Subagents and
+  `agentty run` used the hosted prompt and never got those rules, so a
+  small model there could still refuse. All three now share one rule for
+  which prompt a model gets, including Ollama's native API.
+- **“Could not process image” no longer kills the turn.** When a provider
+  rejects an image, agentty drops the images and retries. It only looked
+  at images you pasted, so a `.png` opened by the `read` tool was sent
+  again on every retry and the turn failed each time. Tool-result images
+  are now removed too.
+- **^C during a slow OAuth token refresh no longer crashes.** It aborted
+  with SIGABRT, seen on Termux.
+- **^C no longer hangs for 30 s+ with MCP servers configured.** Looking up
+  a tool could start every MCP server on the UI thread; only the startup
+  warm-up connects them now.
+- **Concurrency.** A set of races, each with a test:
+  - Starting a new thread (`^N`), switching threads, or a failed token
+    refresh now stops the reply that was streaming, and its tools. Before,
+    it kept running and could write into the next turn.
+  - A stream retry stops the previous attempt first.
+  - A thread that finishes loading after you pressed `^N` no longer
+    replaces the new thread.
+  - Pressing Enter while a thread loads or a checkpoint rewind runs keeps
+    your draft instead of sending it into the wrong place.
+  - The pre-turn context lookup only answers the turn that asked for it, so
+    Esc and a quick new prompt can't start two streams.
+  - Copilot and Kimi model lists fetched before a cache clear no longer
+    come back after it.
+  - A settings read that overlaps another agentty instance's save no longer
+    caches the old settings.
+  - Two ACP `session/load` calls for one session no longer drop the first.
+  - maya's tmux capability cache is locked; it was read on the UI thread
+    while the clipboard check refreshed it.
+- **The sandbox (claybin) builds on Termux/Android again** (`ioctl` is
+  overloaded on bionic).
+
+### Changed
+- Sleeping or waiting while holding a lock is now a compile error rather
+  than an abort at runtime.
+- Two new race tests run in the TSan CI job: `settings_cache_race_test` and
+  `gen_cache_race_test`.
+
 ## [0.9.26] - 2026-10-16
 
 ### Added
