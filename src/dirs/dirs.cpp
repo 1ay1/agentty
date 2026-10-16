@@ -24,6 +24,7 @@
 
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/logx.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/user_root.hpp"
 
 namespace agentty::dirs {
@@ -307,17 +308,16 @@ void warn_once(std::string_view env, const fs::path& bad,
     // part of .agentty (a shared skills/ dir is a real use) edits this file,
     // and a tool that rewrites it every launch would be a tool that argues.
     if (spec.root == Root::Project && !out.root.empty()) {
-        std::error_code gec;
+        // Created only if absent (an exclusive create, so two agentty
+        // starting together can't half-write it or clobber the user's).
         const fs::path ignore = out.root / ".gitignore";
-        if (!fs::exists(ignore, gec)) {
-            std::ofstream f(ignore);
-            if (f) f << "# agentty's project state. Derived data (retrieval"
-                        " indexes, caches)\n"
-                        "# lives here and should not be committed.\n"
-                        "# Delete a line to start tracking something; agentty"
-                        " won't rewrite this.\n"
-                        "*\n";
-        }
+        std::error_code gec;
+        if (!fs::exists(ignore, gec))
+            (void)persistence::detail::create_in_section(ignore.string(),
+                "# agentty's project state. Derived data (retrieval indexes, caches)\n"
+                "# lives here and should not be committed.\n"
+                "# Delete a line to start tracking something; agentty won't rewrite this.\n"
+                "*\n", 0644);
     }
 
     AGT_LOG(Persist, Debug, "dirs", "resolved {} -> {} ({})",

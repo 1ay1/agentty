@@ -11,6 +11,7 @@
 //   * dials and keys appear under the slot that uses them, and a free service
 //     adds no key row.
 
+#include "agtest_cap.hpp"
 #include "agtest.hpp"
 
 #include "agentty/auth/keystore.hpp"
@@ -272,7 +273,7 @@ TEST_CASE("web search secret: a key round-trips, sealed, and is never in plainte
     CHECK(!ss::has("exa-api"));
     CHECK(ss::origin("exa-api").empty());
 
-    REQUIRE(ss::store("exa-api", key));
+    REQUIRE(ss::store(::agentty::IoAccess::grant(), agtest::cap(), "exa-api", key));
     CHECK(ss::load("exa-api") == key);
     CHECK(ss::has("exa-api"));
     CHECK(ss::origin("exa-api") == "stored");
@@ -282,14 +283,14 @@ TEST_CASE("web search secret: a key round-trips, sealed, and is never in plainte
     // ...and another service does not see it.
     CHECK(!ss::has("serper-api"));
 
-    CHECK(ss::erase("exa-api"));
+    CHECK(ss::erase(::agentty::IoAccess::grant(), agtest::cap(), "exa-api"));
     CHECK(!ss::has("exa-api"));
 }
 
 TEST_CASE("web search secret: the environment beats the store and is named, not shown") {
     TmpHome home;
     if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
-    REQUIRE(ss::store("exa-api", "stored-key-0123456789"));
+    REQUIRE(ss::store(::agentty::IoAccess::grant(), agtest::cap(), "exa-api", "stored-key-0123456789"));
     ::setenv("AGENTTY_WEB_SEARCH_KEY_EXA_API", "env-key-9876543210", 1);
     CHECK(ss::load("exa-api") == "env-key-9876543210");
     CHECK(ss::origin("exa-api") == "env: AGENTTY_WEB_SEARCH_KEY_EXA_API");
@@ -301,7 +302,7 @@ TEST_CASE("web search secret: the environment beats the store and is named, not 
 TEST_CASE("web search secret: an unreadable key file is never overwritten") {
     TmpHome home;
     if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
-    REQUIRE(ss::store("exa-api", "exa-FIRST-0123456789"));
+    REQUIRE(ss::store(::agentty::IoAccess::grant(), agtest::cap(), "exa-api", "exa-FIRST-0123456789"));
     // Find the sealed file and damage it, as a disk error or a machine-id
     // change would: it exists but can no longer be opened.
     fs::path file;
@@ -312,7 +313,7 @@ TEST_CASE("web search secret: an unreadable key file is never overwritten") {
     { std::ofstream out(file, std::ios::binary | std::ios::trunc); out << "not a sealed envelope"; }
     // Storing another service's key must not replace the file (which would
     // lose exa-api's key for good if the damage is recoverable).
-    CHECK(!ss::store("serper-api", "serper-SECOND-0123456789"));
+    CHECK(!ss::store(::agentty::IoAccess::grant(), agtest::cap(), "serper-api", "serper-SECOND-0123456789"));
     CHECK(TmpHome::slurp(file) == "not a sealed envelope");
     CHECK(!ss::has("exa-api"));
 }
@@ -324,7 +325,7 @@ TEST_CASE("web search secret: implausible keys are refused before they are store
     CHECK(!ss::plausible("line\nbreak-0123456789"));
     CHECK(!ss::plausible(std::string(513, 'a')));
     CHECK(ss::plausible("tvly-0123456789abcdef"));
-    CHECK(!ss::store("exa-api", "two words here"));
+    CHECK(!ss::store(::agentty::IoAccess::grant(), agtest::cap(), "exa-api", "two words here"));
     CHECK(!ss::has("exa-api"));
 }
 
@@ -553,7 +554,7 @@ TEST_CASE("web search settings: dials and slots persist, and a key never does") 
     s.web_search.dials["exa-api.type"] = "fast";
     s.web_search.dials["brave-api.goggles"] =
         "https://raw.githubusercontent.com/brave/goggles-quickstart/main/goggles/tech_blogs.goggle";
-    REQUIRE(ss::store("exa-api", "exa-LEAKCHECK-0123456789"));
+    REQUIRE(ss::store(::agentty::IoAccess::grant(), agtest::cap(), "exa-api", "exa-LEAKCHECK-0123456789"));
     persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 
     const auto text = TmpHome::slurp(home.dir / "home" / "settings.json");

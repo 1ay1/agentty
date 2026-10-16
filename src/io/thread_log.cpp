@@ -3,6 +3,7 @@
 
 #include "agentty/io/thread_log.hpp"
 
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/logx.hpp"
 
 #include <nlohmann/json.hpp>
@@ -131,7 +132,10 @@ void put_u64_le(char* dst, std::uint64_t v) noexcept {
 // ── open ─────────────────────────────────────────────────────────────
 
 std::expected<ThreadLog, persistence::DeserializeError>
-ThreadLog::open_path(fs::path log_path) {
+ThreadLog::open_path(fs::path log_path) { return open_impl(std::move(log_path), true); }
+
+std::expected<ThreadLog, persistence::DeserializeError>
+ThreadLog::open_impl(fs::path log_path, bool read_meta) {
     ThreadLog t;
     t.log_ = std::move(log_path);
     t.idx_ = t.log_;
@@ -147,12 +151,9 @@ ThreadLog::open_path(fs::path log_path) {
     // unreadable sidecar leaves a default-constructed Thread rather than
     // failing the open — the messages are the irreplaceable part, and a
     // thread that comes back untitled beats one that won't open.
-    {
-        std::ifstream in(t.meta_, std::ios::binary);
-        if (in) {
-            std::string buf{std::istreambuf_iterator<char>(in),
-                            std::istreambuf_iterator<char>()};
-            json mj = json::parse(buf, nullptr, /*allow_exceptions=*/false);
+    if (read_meta) {
+        if (auto buf = persistence::read_file(::agentty::IoAccess::grant(), t.meta_)) {
+            json mj = json::parse(*buf, nullptr, /*allow_exceptions=*/false);
             if (!mj.is_discarded()) {
                 if (auto m = persistence::thread_meta_from_json(mj)) {
                     t.meta_thread_ = std::move(*m);
@@ -241,6 +242,14 @@ ThreadLog::open(const ThreadId& id) {
     return open_path(persistence::threads_dir() / (id.value + ".jsonl"));
 }
 
+std::expected<ThreadLog, persistence::DeserializeError>
+ThreadLog::open_for_write(const ThreadId& id) {
+    if (id.value.empty())
+        return std::unexpected(persistence::DeserializeError{
+            persistence::DeserializeErrorKind::InvalidValue, "id", "empty thread id"});
+    return open_impl(persistence::threads_dir() / (id.value + ".jsonl"), false);
+}
+
 // ── index maintenance ────────────────────────────────────────────────
 
 void ThreadLog::rebuild_index_() {
@@ -286,18 +295,13 @@ bool ThreadLog::write_index_() const {
 }
 
 bool ThreadLog::append_offset_(std::uint64_t at) const {
-    // 8 bytes, O_APPEND. Not atomic in the temp+rename sense, and it does
-    // not need to be: a partial write leaves the index a non-multiple of 8
-    // (or short against the log), which open() detects and repairs by
-    // rescanning. The index is a cache — it is allowed to be wrong, it is
-    // not allowed to be believed when it is.
+    // 8 bytes, one O_APPEND write. A crash can't tear it (a short index is
+    // a non-multiple of 8, which open() repairs by rescanning); the index is
+    // a cache, allowed to be wrong but never believed when it is.
     char b[kOffsetWidth];
     put_u64_le(b, at);
-    std::ofstream out(idx_, std::ios::binary | std::ios::app);
-    if (!out) return false;
-    out.write(b, static_cast<std::streamsize>(sizeof b));
-    out.flush();
-    return static_cast<bool>(out);
+    return persistence::append_atomic(::agentty::IoAccess::grant(), idx_,
+                                      std::string_view{b, sizeof b});
 }
 
 bool ThreadLog::set_meta(const Thread& t) {
@@ -306,8 +310,12 @@ bool ThreadLog::set_meta(const Thread& t) {
     meta_thread_ = t;
     meta_thread_.messages.clear();
     try {
-        return persistence::write_json_atomic(::agentty::IoAccess::grant(), 
-            meta_, persistence::thread_meta_to_json(meta_thread_).dump(2));
+        std::string bytes = persistence::thread_meta_to_json(meta_thread_).dump(2);
+        // Most saves change nothing here (it holds the title, timestamps and
+        // compaction history). Rewriting and fsyncing ~45 KB every turn was
+        // the bulk of a tail save's IO, so a same-bytes header isn't written.
+        if (const auto cur = persistence::peek_file(meta_); cur && *cur == bytes) return true;
+        return persistence::write_json_atomic(::agentty::IoAccess::grant(), meta_, bytes);
     } catch (const std::exception& e) {
         AGT_LOG(General, Error, "thread_log.meta",
                 "could not serialise metadata for {}: {}",
@@ -413,19 +421,18 @@ bool ThreadLog::append(const Message& m) {
         torn_tail_at_ = kNoTear;
     }
 
-    // Order is load-bearing: the log is made durable BEFORE the index
-    // grows to describe it. The reverse would let a crash leave an offset
-    // pointing past the end of the log — the one inconsistency that isn't
-    // self-correcting, since open() would have to distrust every index.
-    const std::uint64_t at = static_cast<std::uint64_t>(file_size_or_zero(log_));
-    {
-        std::ofstream out(log_, std::ios::binary | std::ios::app);
-        if (!out) return false;
-        out.write(line.data(), static_cast<std::streamsize>(line.size()));
-        out.put('\n');
-        out.flush();
-        if (!out) return false;
-    }
+    // The line and its '\n' go out in ONE write, so a crash or another
+    // writer can't split a message. The offset is read back from the same
+    // descriptor, so it's where the bytes actually landed. Log before index:
+    // an offset past the end of the log is the one inconsistency open()
+    // can't self-correct.
+    std::string rec;
+    rec.reserve(line.size() + 1);
+    rec += line;
+    rec += '\n';
+    const auto landed = persistence::append_record(::agentty::IoAccess::grant(), log_, rec);
+    if (!landed) return false;
+    const std::uint64_t at = *landed;
 
     offsets_.push_back(at);
 

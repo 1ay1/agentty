@@ -73,7 +73,7 @@ bool activate(Io, const maya::unlocked&, std::string_view provider_id, std::stri
 
 // Remove one saved account. When it was the active one, promotes the next (or
 // clears the live credential if none remain).
-bool remove(Io, std::string_view provider_id, std::string_view label);
+bool remove(Io, const maya::unlocked&, std::string_view provider_id, std::string_view label);
 
 // Wipe the provider's LIVE active credential entirely (its file, or its
 // provider_keys[spec] entry) — a full sign-out. Used when the last account is

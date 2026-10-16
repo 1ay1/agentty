@@ -16,6 +16,7 @@
 //
 // Driven through the REAL app::update reducer, no mocks of the reducer path.
 
+#include "agtest_cap.hpp"
 #include "agtest.hpp"
 #include "agtest_fx.hpp"
 
@@ -1268,11 +1269,11 @@ TEST_CASE("custom host supports multiple accounts") {
 
     // Account A active: snapshot it into the registry.
     set_key("sk-aaaa1111");
-    CHECK(acc::snapshot_active(::agentty::IoAccess::grant(), spec, "A"));
+    CHECK(acc::snapshot_active(::agentty::IoAccess::grant(), agtest::cap(), spec, "A"));
 
     // Switch the active key to B and snapshot that too.
     set_key("sk-bbbb2222");
-    CHECK(acc::snapshot_active(::agentty::IoAccess::grant(), spec, "B"));
+    CHECK(acc::snapshot_active(::agentty::IoAccess::grant(), agtest::cap(), spec, "B"));
 
     // Both accounts are listed for this host.
     CHECK(acc::list_for(::agentty::IoAccess::grant(), spec).size() == 2);

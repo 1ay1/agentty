@@ -21,6 +21,7 @@
 // and made it obvious agentty had no vocabulary for "this skill will run
 // programs and reach the network".
 
+#include "agtest_cap.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/scope/scope.hpp"
 
@@ -281,7 +282,7 @@ TEST_CASE("approval_store_follows_AGENTTY_HOME") {
         std::get<scope::Pending>(trust_of(skill, scope::Approvals{})).content_sha;
     scope::Approvals store;
     store.approve(sha);
-    CHECK(scope::save_approvals(leaf, store),
+    CHECK(scope::save_approvals(::agentty::IoAccess::grant(), agtest::cap(), leaf, store),
           "save_approvals succeeds against the relocated root");
 
     CHECK(fs::exists(redirected / "state" / leaf),

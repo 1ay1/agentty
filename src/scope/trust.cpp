@@ -15,17 +15,11 @@
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
 
-#include "agentty/auth/auth.hpp"   // auth::sha256_hex, CrossProcessFileLock
+#include "agentty/auth/auth.hpp"        // auth::sha256_hex
+#include "agentty/io/shared_file.hpp"
 
-#ifndef _WIN32
-#include <unistd.h>   // getpid
-#else
-#include <process.h>  // _getpid
-#define getpid _getpid
-#endif
-
+#include <algorithm>
 #include <cstdlib>
-#include <fstream>
 #include <system_error>
 
 #include <nlohmann/json.hpp>
@@ -49,7 +43,30 @@ namespace {
 // relocated run (each scratch run re-prompted and re-approved into /tmp).
 // The default resolves identically: user_root() is $HOME/.agentty. Empty
 // (fail-closed) when there is neither a real home nor $AGENTTY_HOME.
-[[nodiscard]] fs::path approvals_path(std::string_view leaf) {
+namespace {
+std::vector<std::string> parse_list(const std::optional<std::string>& bytes) {
+    std::vector<std::string> out;
+    if (!bytes) return out;
+    try {
+        auto doc = nlohmann::json::parse(*bytes, nullptr, /*throw=*/false);
+        if (doc.is_array())
+            for (const auto& v : doc)
+                if (v.is_string()) out.emplace_back(v.get<std::string>());
+    } catch (...) { out.clear(); }
+    return out;
+}
+
+void merge_into(std::vector<std::string>& into, std::vector<std::string> add) {
+    for (auto& s : add)
+        if (std::ranges::find(into, s) == into.end()) into.push_back(std::move(s));
+}
+}  // namespace
+
+// Where the store lives, and where it used to (the flat user root). Empty
+// paths when there's no safe home.
+struct ApprovalPaths { fs::path dest, legacy; };
+
+[[nodiscard]] ApprovalPaths approvals_paths(std::string_view leaf) {
     const char* override = std::getenv("AGENTTY_HOME");
     // Fail closed with no home and no override: util::user_root() would
     // otherwise fall back to $PWD/.agentty and drop approvals into whatever
@@ -61,114 +78,48 @@ namespace {
     if (root.empty()) return {};
 
     // state/ (or $AGENTTY_STATE_DIR): machine-written, never hand-edited.
-    std::error_code ec;
     const fs::path dir = util::user_state_dir();
     if (dir.empty()) return {};
-    const fs::path dest = dir / leaf;
-
-    // Adopt an approval list from the old flat location. Losing one means a
-    // skill or hook the user already vouched for silently reverts to
-    // pending, so this moves rather than orphans.
-    //
-    // The lock matters as much as the move. save_approvals locks the path
-    // this RETURNS, so a rename done here would sit outside it: two
-    // processes could both see the legacy file, both rename, and the loser
-    // clobbers the winner's merged list. Lock the destination first, then
-    // re-check -- whoever gets the lock second finds dest already there and
-    // does nothing.
-    const fs::path legacy = root / leaf;
-    if (fs::is_regular_file(legacy, ec) && !fs::exists(dest, ec)) {
-        auth::CrossProcessFileLock guard{dest};
-        if (!fs::exists(dest, ec)) {
-            std::error_code rec;
-            fs::rename(legacy, dest, rec);
-        }
-    }
-    return dest;
+    return {dir / leaf, root / leaf};
 }
 }  // namespace
 
 Approvals load_approvals(std::string_view leaf) noexcept {
+    // Lock-free: callers include lock bodies (an MCP connect round). The old
+    // flat file is read too, so approvals there still count until the next
+    // save folds them in.
     Approvals a;
-    const fs::path p = approvals_path(leaf);
-    if (p.empty()) return a;
-    std::ifstream in(p);
-    if (!in) return a;
+    const auto [dest, legacy] = approvals_paths(leaf);
+    if (dest.empty()) return a;
     // Fail CLOSED: any parse trouble → empty approvals → project config stays
     // Pending. Never throw out of this noexcept trust path.
     try {
-        nlohmann::json doc = nlohmann::json::parse(in, nullptr, /*throw=*/false);
-        if (doc.is_array())
-            for (const auto& v : doc)
-                if (v.is_string()) a.shas.emplace_back(v.get<std::string>());
+        a.shas = parse_list(persistence::peek_file(dest));
+        merge_into(a.shas, parse_list(persistence::peek_file(legacy)));
     } catch (...) { a.shas.clear(); }
     return a;
 }
 
-bool save_approvals(std::string_view leaf, const Approvals& a) noexcept {
-    const fs::path p = approvals_path(leaf);
-    if (p.empty()) return false;
-    std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
-
-    // Hold the file lock across the whole re-read + merge + write.
-    //
-    // Every caller here does load_approvals -> approve(x) -> save_approvals,
-    // which is a load->modify->store cycle on a file three independent
-    // subsystems share (skills, hooks, MCP plugins). Two agentty processes
-    // approving different things at once each wrote a list that had never
-    // seen the other's entry, so one approval silently vanished and the
-    // thing it vouched for went back to Pending. Measured before the fix:
-    // 4 concurrent approvals, 10 rounds, only 1 survived every time.
-    //
-    // Best-effort, like every other use of this lock: if it cannot be taken
-    // we still do the merge below, which is strictly better than the
-    // truncating write this replaced.
-    auth::CrossProcessFileLock guard{p};
-
+bool save_approvals(Io io, const lock_levels::below_file_lane& cap, std::string_view leaf,
+                    const Approvals& a) noexcept {
+    const auto [dest, legacy] = approvals_paths(leaf);
+    if (dest.empty()) return false;
+    // Re-read + merge + write in one section. Approvals are a grow-only set
+    // of content hashes (nothing revokes one), so union is the right merge:
+    // two processes approving different things at once both keep theirs.
+    // The old flat file is folded in and removed here, under the same lock.
     try {
-        // MERGE rather than replace. Approvals are a grow-only set of
-        // content hashes -- an entry means "a human vouched for these exact
-        // bytes" and nothing in the tree revokes one -- so union is the
-        // correct reconciliation, not last-writer-wins. That also makes the
-        // write idempotent under a lost lock.
-        std::vector<std::string> merged;
-        {
-            std::ifstream in(p);
-            if (in) {
-                nlohmann::json cur =
-                    nlohmann::json::parse(in, nullptr, /*throw=*/false);
-                if (cur.is_array())
-                    for (const auto& v : cur)
-                        if (v.is_string()) merged.push_back(v.get<std::string>());
-            }
-        }
-        for (const auto& s : a.shas)
-            if (std::find(merged.begin(), merged.end(), s) == merged.end())
-                merged.push_back(s);
-
-        nlohmann::json doc = nlohmann::json::array();
-        for (const auto& s : merged) doc.push_back(s);
-
-        // Write through a unique temp + atomic rename so a reader never sees
-        // a half-written list, and a crash mid-write cannot truncate the
-        // store to nothing. The old form opened the real path with trunc,
-        // which meant the file was momentarily EMPTY on every save -- and an
-        // empty approvals file fails closed, so a concurrent reader could
-        // see every project config as untrusted.
-        const fs::path tmp = p.parent_path()
-                           / (p.filename().string() + "."
-                              + std::to_string(static_cast<long long>(getpid()))
-                              + ".tmp");
-        {
-            std::ofstream out(tmp, std::ios::trunc);
-            if (!out) return false;
-            out << doc.dump(2);
-            if (!out) { fs::remove(tmp, ec); return false; }
-        }
-        fs::rename(tmp, p, ec);
-        if (ec) { fs::remove(tmp, ec); return false; }
-        return true;
+        return persistence::Update::Failed != persistence::update_shared(io, cap, dest,
+            {.durability = persistence::Durability::Durable},
+            [](std::optional<std::string> cur, std::vector<std::string> add, std::string old)
+                -> std::optional<std::string> {
+                auto merged = parse_list(cur);
+                merge_into(merged, std::move(add));
+                merge_into(merged, parse_list(persistence::peek_file(old)));
+                std::error_code rm;
+                fs::remove(old, rm);
+                return nlohmann::json(merged).dump(2);
+            }, a.shas, legacy.string());
     } catch (...) { return false; }
 }
 

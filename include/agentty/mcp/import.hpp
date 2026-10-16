@@ -52,6 +52,7 @@
 #include <nlohmann/json.hpp>
 #include <maya/runtime.hpp>
 #include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 namespace agentty::mcp::import_ {
 
@@ -143,7 +144,7 @@ struct Outcome {
 // tool config, so it is theirs, not the repo's — writing it into a project
 // file would commit someone's personal setup into version control, and would
 // also land it in the locus that needs vouching to run.
-[[nodiscard]] Outcome adopt(Io, const maya::below<maya::leaf>&, const std::vector<Found>&, const Options&);
+[[nodiscard]] Outcome adopt(Io, const lock_levels::below_file_lane&, const std::vector<Found>&, const Options&);
 
 // CLI: `agentty mcp import [--from <tool>] [--dry-run] [--force]`.
 // With no --from, scans every known tool and reports what it finds.

@@ -346,7 +346,7 @@ CopyResult copy_skill_tree(const fs::path& from, const fs::path& to) {
 
 // ── add ────────────────────────────────────────────────────────────────────
 
-int verb_add(const std::vector<std::string>& argv) {
+int verb_add(Io io, const maya::unlocked& cap, const std::vector<std::string>& argv) {
     if (argv.empty()) {
         std::fprintf(stderr, "usage: agentty skill add <github.com/user/repo | ./dir>\n");
         return 2;
@@ -561,9 +561,9 @@ int verb_add(const std::vector<std::string>& argv) {
                 s.name.c_str());
             return 1;
         }
-        auto store = load_approvals(IoAccess::grant());
+        auto store = load_approvals(io);
         store.approve(content_sha_of(*installed));
-        save_approvals(store);
+        save_approvals(io, cap, store);
     }
 
     std::printf("installed %s → %s\n", s.name.c_str(), dest.string().c_str());
@@ -674,7 +674,7 @@ int verb_remove(const std::vector<std::string>& argv) {
 
 // ── approve ────────────────────────────────────────────────────────────────
 
-int verb_approve(const std::vector<std::string>& argv) {
+int verb_approve(Io io, const maya::unlocked& cap, const std::vector<std::string>& argv) {
     if (argv.empty()) {
         std::fprintf(stderr, "usage: agentty skill approve <name>\n");
         return 2;
@@ -689,9 +689,9 @@ int verb_approve(const std::vector<std::string>& argv) {
         return 0;
     }
     print_consent(*s, screen_body(s->body));
-    auto store = load_approvals(IoAccess::grant());
+    auto store = load_approvals(io);
     store.approve(content_sha_of(*s));
-    save_approvals(store);
+    save_approvals(io, cap, store);
     std::printf("approved %s\n", argv[0].c_str());
     return 0;
 }
@@ -724,8 +724,8 @@ scope::Approvals load_approvals(Io) {
     return scope::load_approvals(kApprovalsLeaf);
 }
 
-void save_approvals(const scope::Approvals& a) {
-    (void)scope::save_approvals(kApprovalsLeaf, a);
+void save_approvals(Io io, const maya::unlocked& cap, const scope::Approvals& a) {
+    (void)scope::save_approvals(io, cap, kApprovalsLeaf, a);
 }
 
 std::string content_sha_of(const Skill& s) {
@@ -736,15 +736,15 @@ scope::Trust trust_of(Io io, const Skill& s) noexcept {
     return trust_of(s, load_approvals(io));
 }
 
-int cli(const std::vector<std::string>& argv) {
+int cli(Io io, const maya::unlocked& cap, const std::vector<std::string>& argv) {
     if (argv.empty()) { usage(); return 2; }
     const std::string verb = argv[0];
     const std::vector<std::string> tail(argv.begin() + 1, argv.end());
 
-    if (verb == "add")     return verb_add(tail);
+    if (verb == "add")     return verb_add(io, cap, tail);
     if (verb == "list")    return verb_list();
     if (verb == "remove")  return verb_remove(tail);
-    if (verb == "approve") return verb_approve(tail);
+    if (verb == "approve") return verb_approve(io, cap, tail);
 
     usage();
     return 2;

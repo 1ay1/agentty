@@ -33,6 +33,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/io/shared_file.hpp"
 
 #include <maya/runtime.hpp>
 
@@ -127,10 +128,12 @@ std::string device_id() {
     };
     std::string id = h(8) + "-" + h(4) + "-4" + h(3) + "-" +
                      std::string(1, "89ab"[gen() & 0x3]) + h(3) + "-" + h(12);
-    std::error_code ec;
-    fs::create_directories(path.parent_path(), ec);
-    std::ofstream ofs(path, std::ios::trunc);
-    if (ofs) ofs << id;
+    // Publish once: the first process to link the file wins and every other
+    // one (now or later) reads the winner, so the id never changes.
+    (void)persistence::create_exclusive(::agentty::IoAccess::grant(), path, id);
+    if (auto disk = persistence::read_file(::agentty::IoAccess::grant(), path);
+        disk && !disk->empty())
+        return *disk;
     return id;
 }
 
@@ -261,28 +264,10 @@ bool save_unlocked(const KimiToken& t) {
     std::string payload = j.dump();
     std::string to_write = payload;
     if (auto sealed = auth::crypt::seal(payload)) to_write = std::move(*sealed);
-
-    // Write atomically to a sibling temp file, tighten to owner-only 0600
-    // BEFORE it becomes the live credentials file, then rename into place.
-    // This matches the Copilot/Codex/auth stores: without the chmod the file
-    // inherits the umask (typically world-readable 0644), and on any seal()
-    // failure the fallback plaintext token would otherwise rest 0644 on disk.
-    std::error_code ec;
-    fs::create_directories(creds_path().parent_path(), ec);
-    fs::path tmp = creds_path();
-    tmp += ".tmp";
-    {
-        std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
-        if (!ofs) return false;
-        ofs.write(to_write.data(), static_cast<std::streamsize>(to_write.size()));
-        if (!ofs) return false;
-    }
-#ifndef _WIN32
-    ::chmod(tmp.c_str(), 0600);
-#endif
-    fs::rename(tmp, creds_path(), ec);
-    if (ec) { fs::remove(tmp, ec); return false; }
-    return true;
+    // Born 0600, so even a plaintext fallback is never world-readable.
+    return persistence::write_atomic(::agentty::IoAccess::grant(), creds_path(), to_write,
+                                     {.durability = persistence::Durability::Durable,
+                                      .mode = 0600});
 }
 
 std::atomic<bool> g_force_refresh{false};
@@ -501,6 +486,26 @@ std::optional<KimiToken> fresh_token(const locks::below_auth_refresh& cap) {
 }
 
 namespace {
+std::optional<KimiToken> refresh_in_section(const maya::held<locks::cred_file>& h,
+                                            bool cross, bool force, KimiToken cur) {
+    // Kimi rotates refresh tokens: a peer that refreshed while we waited has
+    // saved a new one, and ours is now dead. Adopt the peer's.
+    if (cross) {
+        auto disk = load_token(h);
+        if (!disk) return std::nullopt;
+        if (!force && !disk->expired(30'000)) return disk;
+        cur = std::move(*disk);
+    }
+    auto refreshed = refresh(cur);
+    if (!refreshed) {
+        // A transient blip with a still-valid token: use it, don't block the turn.
+        if (!force && cur.valid() && !cur.expired()) return cur;
+        return std::nullopt;
+    }
+    save_token(h, *refreshed);
+    return *refreshed;
+}
+
 std::optional<KimiToken> fresh_token_locked(const maya::held<locks::auth_refresh>& h) {
     auto cur = load_token(h);
     if (!cur) return std::nullopt;
@@ -508,15 +513,10 @@ std::optional<KimiToken> fresh_token_locked(const maya::held<locks::auth_refresh
     const bool force = g_force_refresh.exchange(false);
     if (!force && !cur->expired(30'000)) return cur;
 
-    auto refreshed = refresh(*cur);
-    if (!refreshed) {
-        // If the token still looks valid (e.g. a transient refresh blip and no
-        // forced invalidation), fall back to it rather than blocking the turn.
-        if (!force && cur->valid() && !cur->expired()) return cur;
-        return std::nullopt;
-    }
-    save_token(h, *refreshed);
-    return *refreshed;
+    return persistence::with_shared_file(h, persistence::cred_lane(creds_path()), creds_path(),
+        [](const maya::held<locks::cred_file>& c, persistence::Held held, bool f, KimiToken t) {
+            return refresh_in_section(c, held.cross_process, f, std::move(t));
+        }, force, *cur);
 }
 } // namespace
 

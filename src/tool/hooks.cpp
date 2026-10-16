@@ -21,6 +21,8 @@
 
 #include "agentty/auth/auth.hpp"            // auth::sha256_hex (file-content hash)
 #include "agentty/scope/scope.hpp"          // scope::Approvals (shared trust store)
+#include "agentty/io/persistence.hpp"       // random_hex_id
+#include "agentty/io/shared_file.hpp"       // create_exclusive
 #include "agentty/tool/util/sandbox.hpp"    // run_shell_command
 #include "agentty/tool/util/subprocess.hpp"
 #include "agentty/tool/util/utf8.hpp"        // strip_terminal_controls, to_valid_utf8
@@ -183,11 +185,11 @@ constexpr std::string_view kHooksApprovalsLeaf =
     return load_hook_approvals().approved(hf.hash);
 }
 
-void store_approval(const HooksFile& hf) {
+void store_approval(Io io, const maya::unlocked& cap, const HooksFile& hf) {
     if (hf.hash.empty()) return;
     scope::Approvals a = load_hook_approvals();   // includes any migrated legacy hashes
     a.approve(hf.hash);
-    (void)scope::save_approvals(kHooksApprovalsLeaf, a);   // rewrites as the array form
+    (void)scope::save_approvals(io, cap, kHooksApprovalsLeaf, a);   // rewrites as the array form
 }
 
 [[nodiscard]] bool name_matches(const std::string& ere, std::string_view tool) {
@@ -201,20 +203,20 @@ void store_approval(const HooksFile& hf) {
 }
 
 // Write the payload to a private temp file; returns its path ('' on error).
+// The temp dir is shared with other users, so the file is created whole at
+// 0600 and never over an existing name: nobody can read it early or plant a
+// symlink where it will be written.
 [[nodiscard]] std::string write_payload(const std::string& payload) {
     std::error_code ec;
     auto dir = fs::temp_directory_path(ec);
     if (ec) return {};
-    auto p = dir / ("agentty_hook_" + std::to_string(current_pid()) + "_" +
-                    std::to_string(reinterpret_cast<std::uintptr_t>(&payload)));
-    std::ofstream f(p, std::ios::binary | std::ios::trunc);
-    if (!f) return {};
-    f << payload;
-    f.close();
-#ifndef _WIN32
-    ::chmod(p.c_str(), 0600);
-#endif
-    return p.string();
+    const auto base = "agentty_hook_" + std::to_string(current_pid()) + "_"
+                    + persistence::random_hex_id();
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        auto p = dir / (base + "_" + std::to_string(attempt));
+        if (persistence::detail::create_in_section(p.string(), payload, 0600)) return p.string();
+    }
+    return {};
 }
 
 // Prefix `cmd` with variable assignments the shell applies to that command
@@ -359,7 +361,7 @@ std::string active_file(Io) {
     return load_hooks_file().path;
 }
 
-int cli(const std::string& verb) {
+int cli(Io io, const maya::unlocked& cap, const std::string& verb) {
     HooksFile hf = load_hooks_file();
     if (verb == "list" || verb.empty()) {
         if (hf.path.empty()) {
@@ -432,7 +434,7 @@ int cli(const std::string& verb) {
             std::printf("not approved\n");
             return 1;
         }
-        store_approval(hf);
+        store_approval(io, cap, hf);
         std::printf("approved (any byte change re-gates)\n");
         return 0;
     }

@@ -14,7 +14,7 @@
 #include "agentty/util/user_root.hpp"
 #include "agentty/tool/memory_store.hpp"
 
-#include "agentty/auth/auth.hpp"          // CrossProcessFileLock
+#include "agentty/io/shared_file.hpp"     // FileLocks, write_atomic, append_atomic
 #include "agentty/scope/scope.hpp"
 #include "agentty/config/inventory.hpp"   // kMemoryLayout — the one declaration
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -55,12 +55,9 @@ using json = nlohmann::json;
 //
 // store() covers THIS process only. The user-scope file is shared by every
 // agentty on the machine, and the project file by every agentty in the repo,
-// so two instances doing remember/forget at once each read the file, change
-// their copy and rename it over the other's: one change was lost, with both
-// reporting success. A rewrite therefore also holds the cross-process lock
-// on that file (auth::CrossProcessFileLock, the one settings and credentials
-// use; bounded, so a stalled peer can't wedge this). Taken INSIDE the body:
-// it is not a jaal lock and ranks with nothing, and the body is file IO.
+// so a rewrite also holds the files' cross-process locks (persistence::
+// FileLocks, bounded, sorted so two processes can't deadlock), taken inside
+// the body.
 struct Files {};
 using StoreLock = maya::guarded<Files, locks::memory_store>;
 StoreLock& store() { static StoreLock f; return f; }
@@ -303,40 +300,26 @@ StoreLock& store() { static StoreLock f; return f; }
     return out;
 }
 
-// Atomic-ish rewrite: write to a sibling .tmp, fsync, rename over. On
-// platforms where util::write_file already does this, we get it for
-// free; on simpler platforms it's still strictly safer than truncating
-// the live file. Returns empty string on success.
+// Rewrite the file atomically (temp + fsync + rename). Empty on success.
 [[nodiscard]] std::string write_records(const fs::path& p,
                                         const std::vector<Record>& recs) {
-    std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
-    // Ignore ec — write_file will surface the real error.
-    std::ostringstream out;
-    for (const auto& r : recs) out << serialise_record(r) << '\n';
-    return util::write_file(p, out.str());
+    std::string out;
+    for (const auto& r : recs) { out += serialise_record(r); out += '\n'; }
+    if (persistence::detail::write_in_section(p.string(), out,
+            {.durability = persistence::Durability::Durable, .mode = 0600}))
+        return {};
+    return "could not write " + p.string();
 }
 
-// Append one already-serialised line. Uses an actual O_APPEND open so
-// concurrent writers don't clobber each other at the byte level. If
-// the open fails we fall back to the slow path (read all + write all)
-// so a missing parent directory still gets handled. Returns empty
-// string on success.
+// Append one record in ONE write(2) with O_APPEND, so two agentty processes
+// appending at once never splice into each other's line. Empty on success.
 [[nodiscard]] std::string append_line(const fs::path& p, std::string_view line) {
-    std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
-    {
-        std::ofstream f(p, std::ios::binary | std::ios::app);
-        if (f) {
-            f.write(line.data(), static_cast<std::streamsize>(line.size()));
-            f.put('\n');
-            if (f.good()) return {};
-        }
-    }
-    // Slow path — recreate by reading-and-writing.
-    auto recs = read_records(p);
-    if (auto r = parse_record_line(line)) recs.push_back(std::move(*r));
-    return write_records(p, recs);
+    std::string rec{line};
+    rec += '\n';
+    if (persistence::detail::append_in_section(p.string(), rec,
+                                               persistence::Durability::Durable, 0600))
+        return {};
+    return "could not append to " + p.string();
 }
 
 // ── mtime-keyed cache for the prompt-loader hot path ────────────────────
@@ -613,14 +596,15 @@ AppendResult append_locked(Files&, Scope actual_scope, std::string body,
     // locked up front in one fixed order (user, then project) -- a fixed
     // order is what keeps two processes from each holding one and waiting
     // for the other.
-    std::optional<auth::CrossProcessFileLock> lock_user, lock_project;
-    {
+    const persistence::FileLocks xlocks = [&] {
         const fs::path pu = actual_scope == Scope::User ? p : path_for(Scope::User);
         const fs::path pp = actual_scope == Scope::Project ? p : path_for(Scope::Project);
         const bool both = !trim(opts.supersedes_id).empty();
-        if ((both || actual_scope == Scope::User) && !pu.empty())    lock_user.emplace(pu);
-        if ((both || actual_scope == Scope::Project) && !pp.empty()) lock_project.emplace(pp);
-    }
+        std::vector<fs::path> files;
+        if (both || actual_scope == Scope::User)    files.push_back(pu);
+        if (both || actual_scope == Scope::Project) files.push_back(pp);
+        return persistence::FileLocks{std::move(files)};
+    }();
     auto existing = read_records(p);
 
     // ── Dedup pass ───────────────────────────────────────────────────
@@ -871,7 +855,7 @@ std::size_t remove_where(Files&, Pred pred) {
     for (auto s : {Scope::User, Scope::Project}) {
         const auto p = path_for(s);
         if (p.empty()) continue;
-        const auth::CrossProcessFileLock xlock(p);   // see the note on store()
+        const persistence::FileLocks xlock({p});   // see the note on store()
         auto recs = read_records(p);
         const std::size_t before = recs.size();
         std::erase_if(recs, pred);
@@ -967,7 +951,7 @@ std::optional<std::size_t> wipe(const locks::below_memory_store& cap, Scope s) {
     // create_directories. write_records on an empty vector writes a
     // zero-byte file, which read_records / load_all both handle.
     const std::size_t n = store().with(cap, [](Files&, std::string path) {
-        const auth::CrossProcessFileLock xlock(fs::path{path});
+        const persistence::FileLocks xlock({fs::path{path}});
         const std::size_t count = read_records(path).size();
         (void)write_records(path, {});
         return count;

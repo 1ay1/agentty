@@ -20,12 +20,11 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/auth/keystore.hpp"
+#include "agentty/io/shared_file.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <filesystem>
-#include <fstream>
-#include <sstream>
 
 namespace agentty::rag::embed {
 
@@ -42,13 +41,9 @@ namespace fs = std::filesystem;
     return "agentty:embed:" + endpoint;
 }
 
-[[nodiscard]] nlohmann::json read_all() {
-    std::ifstream in(secrets_path());
-    if (!in) return nlohmann::json::object();
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    const std::string raw = ss.str();
-    if (raw.empty()) return nlohmann::json::object();
+[[nodiscard]] nlohmann::json parse_all(const std::optional<std::string>& file) {
+    if (!file || file->empty()) return nlohmann::json::object();
+    const std::string& raw = *file;
     // Sealed envelope, or (legacy/hand-written) plaintext JSON.
     if (auto opened = auth::crypt::unseal(raw)) {
         try { return nlohmann::json::parse(*opened); } catch (...) { }
@@ -61,29 +56,30 @@ namespace fs = std::filesystem;
     return nlohmann::json::object();
 }
 
-bool write_all(const nlohmann::json& j) {
-    std::error_code ec;
-    fs::create_directories(secrets_path().parent_path(), ec);
-    // Refuse to persist rather than fall back to plaintext: an unsealable
-    // secret is a secret we have no business writing to disk.
-    auto sealed = auth::crypt::seal(j.dump());
-    if (!sealed) return false;
+[[nodiscard]] nlohmann::json read_all() { return parse_all(persistence::peek_file(secrets_path())); }
 
-    const auto tmp = fs::path{secrets_path().string() + ".tmp"};
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) return false;
-        out << *sealed;
-        if (!out) return false;
-    }
-#if !defined(_WIN32)
-    // Owner-only before the rename, so the secret is never briefly world-readable.
-    fs::permissions(tmp, fs::perms::owner_read | fs::perms::owner_write,
-                    fs::perm_options::replace, ec);
-#endif
-    fs::rename(tmp, secrets_path(), ec);
-    if (ec) { fs::remove(tmp, ec); return false; }
-    return true;
+// Set (or with an empty key, drop) one endpoint's key: the whole file is read,
+// changed and rewritten in its shared-file section, so two agentty windows
+// saving different endpoints both keep theirs. Sealed, 0600, atomic; an
+// unsealable secret is refused rather than written plain. True when the file
+// now holds what was asked (dropping an absent key is a no-op success).
+bool update_key(Io io, const lock_levels::below_file_lane& cap, const std::string& endpoint,
+                const std::string& key) {
+    // Sealed inside the section (the body depends on what's on disk now). An
+    // unsealable result writes nothing: a secret is never stored plain.
+    const auto r = persistence::update_shared(io, cap, secrets_path(),
+        {.durability = persistence::Durability::Durable, .mode = 0600},
+        [](std::optional<std::string> cur, std::string ep, std::string k)
+            -> std::optional<std::string> {
+            auto all = parse_all(cur);
+            if (k.empty()) { if (all.erase(ep) == 0) return std::nullopt; }
+            else all[ep] = k;
+            return auth::crypt::seal(all.dump());
+        }, endpoint, key);
+    if (r == persistence::Update::Written) return true;
+    // Unchanged is success only for dropping a key that wasn't there; for a
+    // set it means sealing failed.
+    return r == persistence::Update::Unchanged && key.empty();
 }
 
 } // namespace
@@ -101,31 +97,28 @@ std::string load_key(const std::string& endpoint) {
     return {};
 }
 
-bool store_key(const std::string& endpoint, const std::string& key) {
+bool store_key(Io io, const lock_levels::below_file_lane& cap, const std::string& endpoint,
+               const std::string& key) {
     if (endpoint.empty()) return false;
-    if (key.empty()) return erase_key(endpoint);
+    if (key.empty()) return erase_key(io, cap, endpoint);
 
     if (auth::keystore::available()
         && auth::keystore::store(keystore_key(endpoint), key) == auth::keystore::Status::Ok) {
         // Belt and braces: drop any stale sealed copy so there is exactly one
         // home for this secret.
-        auto all = read_all();
-        if (all.erase(endpoint) > 0) (void)write_all(all);
+        (void)update_key(io, cap, endpoint, {});
         return true;
     }
-
-    auto all = read_all();
-    all[endpoint] = key;
-    return write_all(all);
+    return update_key(io, cap, endpoint, key);
 }
 
-bool erase_key(const std::string& endpoint) {
+bool erase_key(Io io, const lock_levels::below_file_lane& cap, const std::string& endpoint) {
     if (endpoint.empty()) return false;
     bool any = false;
     if (auth::keystore::available())
         any = auth::keystore::remove(keystore_key(endpoint)) == auth::keystore::Status::Ok;
-    auto all = read_all();
-    if (all.erase(endpoint) > 0) any = write_all(all) || any;
+    const bool had = read_all().contains(endpoint);
+    if (had) any = update_key(io, cap, endpoint, {}) || any;
     return any;
 }
 

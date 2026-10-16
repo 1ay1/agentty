@@ -7,6 +7,7 @@
 // Runs in a temp sandbox CWD + HOME (approvals live under $HOME). Hook
 // commands write marker files so execution (or its absence) is observable.
 
+#include "agtest_cap.hpp"
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/auth/auth.hpp"
@@ -194,7 +195,7 @@ void oversized_file_is_reported(const fs::path& sandbox) {
 
     // `agentty hooks` must SAY the file was too big rather than claim there
     // is none. Exit 1 so CI notices.
-    const int rc = hooks::cli("list");
+    const int rc = hooks::cli(::agentty::IoAccess::grant(), agtest::cap(), "list");
     check(rc == 1, "hooks list exits non-zero for an oversized file");
     std::println("PASS\n");
 }

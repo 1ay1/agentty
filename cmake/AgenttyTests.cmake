@@ -865,6 +865,7 @@ agentty_test(dirs_test MODE raw)
 add_executable(dirs_test EXCLUDE_FROM_ALL
     tests/dirs_test.cpp
     src/dirs/dirs.cpp
+    src/io/shared_file.cpp
     src/util/user_root.cpp
     src/util/home_dir.cpp
     src/util/logx.cpp
@@ -1059,6 +1060,11 @@ foreach(_pl purity duplication jsonrpc_leaf spawn_via_jaal no_sleep_poll setenv_
                      ${CMAKE_SOURCE_DIR} ${_pl})
     set_tests_properties(${_pl_name} PROPERTIES LABELS static TIMEOUT 60)
 endforeach()
+# disk_writes: shared files are written one way (io/shared_file.hpp).
+add_test(NAME disk_writes
+         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/disk_writes.py
+                 ${CMAKE_SOURCE_DIR})
+set_tests_properties(disk_writes PROPERTIES LABELS static TIMEOUT 60)
 endif()
 
 add_test(NAME io_roots

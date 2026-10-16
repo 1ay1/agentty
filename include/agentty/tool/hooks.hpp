@@ -52,6 +52,8 @@
 #include <string_view>
 #include "agentty/util/io.hpp"
 
+#include <maya/runtime.hpp>
+
 namespace agentty::tools::hooks {
 
 struct PreToolDecision {
@@ -80,6 +82,6 @@ void run_post_tool(std::string_view tool, const std::string& args_json,
 // The `agentty hooks` subcommand: `list` shows configured hooks + approval
 // state; `approve` prints the file and interactively approves it. Returns
 // a process exit code.
-int cli(const std::string& verb);
+int cli(Io, const maya::unlocked&, const std::string& verb);
 
 } // namespace agentty::tools::hooks

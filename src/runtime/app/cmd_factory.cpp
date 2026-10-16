@@ -2727,7 +2727,7 @@ Cmd edit_plugin(std::filesystem::path path, PluginEdited reply,
                     if (r.ok) tools::invalidate_mcp_catalog(io);
                     break;
                 case K::Approve:
-                    r.ok = pl::approve_server(io, path, r.server);
+                    r.ok = pl::approve_server(io, cap, path, r.server);
                     break;
                 case K::Remove:
                     record(pl::remove_server(io, cap, path, r.server));
@@ -3048,9 +3048,9 @@ namespace {
 // the store after the worker saved, and installing the old account's bearer
 // would cross-wire them. That case reports Superseded, which the reducer
 // treats as benign.
-TokenRefreshed run_refresh(Io io, const std::string& refresh_token) {
+TokenRefreshed run_refresh(Io io, const maya::unlocked& cap, const std::string& refresh_token) {
     try {
-        auto r = auth::refresh_access_token_locked(io, auth::RefreshToken{refresh_token});
+        auto r = auth::refresh_access_token_locked(io, cap, auth::RefreshToken{refresh_token});
         if (r) {
             auto on_disk = auth::load_credentials(io);
             const auto* o = on_disk ? std::get_if<auth::cred::OAuth>(&*on_disk)
@@ -3074,19 +3074,19 @@ TokenRefreshed run_refresh(Io io, const std::string& refresh_token) {
 }  // namespace
 
 Cmd refresh_oauth_if_due() {
-    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token) {
+    return cmd::io_task([](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token) {
         std::optional<std::string> tok;
         try { tok = auth::oauth_proactive_refresh_token(io); } catch (...) {}
         if (!tok) {
             out.send(Msg{msg::LoginMsg{OAuthRefreshNotDue{}}});
             return;
         }
-        out.send(Msg{run_refresh(io, *tok)});
+        out.send(Msg{run_refresh(io, cap, *tok)});
     });
 }
 
 Cmd refresh_oauth_for_401() {
-    return cmd::io_task([](Io io, maya::Sink<Msg> out, std::stop_token) {
+    return cmd::io_task([](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token) {
         std::string rt;
         try {
             if (auto loaded = auth::load_credentials(io))
@@ -3100,14 +3100,15 @@ Cmd refresh_oauth_for_401() {
                 "no refresh token stored; sign in again with /login"})}});
             return;
         }
-        out.send(Msg{run_refresh(io, rt)});
+        out.send(Msg{run_refresh(io, cap, rt)});
     });
 }
 
 Cmd refresh_oauth(std::string refresh_token) {
     return cmd::io_task(
-        [](Io io, maya::Sink<Msg> out, std::stop_token, std::string refresh_token) {
-            out.send(Msg{run_refresh(io, refresh_token)});
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token,
+           std::string refresh_token) {
+            out.send(Msg{run_refresh(io, cap, refresh_token)});
         }, std::move(refresh_token));
 }
 

@@ -34,6 +34,7 @@
 #include <nlohmann/json_fwd.hpp>
 #include <maya/runtime.hpp>
 #include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 namespace agentty::tools::plugin {
 
@@ -60,7 +61,7 @@ enum class EditResult : std::uint8_t {
 // Add `spec` to the mcpServers object of the JSON file at `path`,
 // creating the file if absent. Preserves every other key. `force`
 // overwrites an existing entry of the same name.
-[[nodiscard]] EditResult add_server(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
+[[nodiscard]] EditResult add_server(Io, const lock_levels::below_file_lane&, const std::filesystem::path& path,
                                     const ServerSpec& spec, bool force);
 
 // Add a RAW server entry, verbatim, preserving every key it carries.
@@ -80,7 +81,7 @@ enum class EditResult : std::uint8_t {
 //
 // So import does not translate. It validates (the caller checks there is a
 // command or a url) and copies. Same no-clobber contract as add_server.
-[[nodiscard]] EditResult add_server_raw(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
+[[nodiscard]] EditResult add_server_raw(Io, const lock_levels::below_file_lane&, const std::filesystem::path& path,
                                         const std::string& name,
                                         const nlohmann::json& entry,
                                         bool force);
@@ -93,11 +94,11 @@ enum class EditResult : std::uint8_t {
 // ServerSpec models (command/args/url/type/passthrough) are rewritten;
 // absent-in-spec transport keys are erased only when the KIND owns them
 // (a stdio spec clears url; an http spec clears command/args).
-[[nodiscard]] EditResult update_server(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
+[[nodiscard]] EditResult update_server(Io, const lock_levels::below_file_lane&, const std::filesystem::path& path,
                                        const ServerSpec& spec);
 
 // Remove the named server. Preserves everything else.
-[[nodiscard]] EditResult remove_server(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
+[[nodiscard]] EditResult remove_server(Io, const lock_levels::below_file_lane&, const std::filesystem::path& path,
                                        const std::string& name);
 
 // Enable/disable a WHOLE server without removing it â€” persisted as the
@@ -105,7 +106,7 @@ enum class EditResult : std::uint8_t {
 // disabled server on connect). This is the primary Enter action on a plugin
 // row: a reversible on/off, distinct from the destructive remove. No-op-Ok if
 // already in the desired state.
-[[nodiscard]] EditResult set_server_disabled(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
+[[nodiscard]] EditResult set_server_disabled(Io, const lock_levels::below_file_lane&, const std::filesystem::path& path,
                                              const std::string& name,
                                              bool disabled);
 
@@ -122,7 +123,7 @@ list_servers(const std::filesystem::path& path);
 // disabled tool is dropped from the wire catalog on the next reload.
 // `bare` is the tool's short name (e.g. "current_date", NOT the
 // mcp__server__tool form). No-op-Ok if already in the desired state.
-[[nodiscard]] EditResult set_tool_enabled(Io, const maya::below<maya::leaf>&, const std::filesystem::path& path,
+[[nodiscard]] EditResult set_tool_enabled(Io, const lock_levels::below_file_lane&, const std::filesystem::path& path,
                                           const std::string& server,
                                           const std::string& bare,
                                           bool enabled);
@@ -153,11 +154,11 @@ disabled_tools(const std::filesystem::path& path, const std::string& server);
 // neither approve itself nor keep an approval valid after its bytes change.
 //
 // is_project_config_trusted() â€” would the project config connect right now?
-// approve_project_config()    â€” record trust for the CURRENT project config's
-//                               content; returns false if there's no project
-//                               config or the store can't be written.
+// approve_project_config()    — record trust for the CURRENT project config's
+//                               content; false if there's no project config
+//                               or the store can't be written.
 [[nodiscard]] bool is_project_config_trusted(Io);
-[[nodiscard]] bool approve_project_config(Io);
+[[nodiscard]] bool approve_project_config(Io, const lock_levels::below_file_lane&);
 
 // Per-server trust â€” finer than the whole-file gate. Trust is bound to ONE
 // server's spec (its command + args), so approving `date` doesn't bless a
@@ -169,8 +170,8 @@ disabled_tools(const std::filesystem::path& path, const std::string& server);
 //                             false if the server/config is absent or unwritable.
 [[nodiscard]] bool is_server_trusted(Io, const std::filesystem::path& path,
                                      const std::string& name);
-[[nodiscard]] bool approve_server(Io, const std::filesystem::path& path,
-                                  const std::string& name);
+[[nodiscard]] bool approve_server(Io, const lock_levels::below_file_lane&,
+                                  const std::filesystem::path& path, const std::string& name);
 
 // The spawn-identity hash for one server's spec (command + url + args) â€” the
 // bytes that would actually run. The bridge's connect loop builds these from

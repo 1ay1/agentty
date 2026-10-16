@@ -15,6 +15,7 @@
 #include "agentty/provider/registry.hpp"
 #include "agentty/provider/credentials.hpp"
 #include "agentty/io/persistence.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
@@ -57,7 +58,6 @@
 #  include <sddl.h>            // (SID helpers)
 #else
 #  include <fcntl.h>
-#  include <poll.h>
 #  include <sys/file.h>
 #  include <sys/stat.h>
 #  include <unistd.h>
@@ -186,96 +186,6 @@ fs::path config_dir() {
 fs::path credentials_path() { return config_dir() / "credentials.json"; }
 
 // ---------------------------------------------------------------------------
-// Cross-process refresh lock (thundering-herd guard) — impl of the
-// CrossProcessFileLock declared in auth.hpp.
-//
-// A process-local mutex serializes refreshes across threads WITHIN one
-// agentty, but N separate agentty instances that all see the same expired
-// OAuth token will each fire their own refresh POST. Anthropic's OAuth uses
-// ROTATING refresh tokens: the first refresh invalidates the old refresh
-// token, so the losers refresh against a now-revoked token, fail, and (worse)
-// can clobber the credential file — every instance then keeps seeing a token
-// it didn't mint and refreshes again: the refresh loop. This advisory file
-// lock serializes the refresh critical section ACROSS processes; combined with
-// a re-read after the lock is held, the losers adopt the winner's freshly-
-// saved token. Best-effort: if the lock can't be taken, held() is false and
-// the caller proceeds unlocked (no worse than before).
-//
-// BOUNDED. A blocking flock(LOCK_EX) waited forever, so one agentty stopped
-// mid-refresh (^Z, a debugger, a wedged NFS home) froze every other instance's
-// refresh, along with whatever held the in-process refresh lane around it.
-// A refresh is one HTTPS round-trip capped at 30 s, so a holder past that is
-// not coming back soon: try non-blocking in short steps and, at the bound,
-// go ahead unlocked. That only means a rare double refresh, which is what
-// held()==false already allowed for.
-namespace {
-constexpr auto kXlockWait = std::chrono::seconds(35);
-constexpr auto kXlockStep = std::chrono::milliseconds(50);
-
-// Callers hold their in-process guarded lock while taking this one, so the
-// backoff can't be maya::delay_for: jaal aborts a delay_for under a lock.
-void xlock_backoff() noexcept {
-#ifdef _WIN32
-    ::Sleep(static_cast<DWORD>(kXlockStep.count()));
-#else
-    (void)::poll(nullptr, 0, static_cast<int>(kXlockStep.count()));
-#endif
-}
-} // namespace
-
-CrossProcessFileLock::CrossProcessFileLock(const fs::path& guarded_file) {
-    fs::path lp = guarded_file;
-    lp += ".lock";
-    const auto give_up = std::chrono::steady_clock::now() + kXlockWait;
-#ifdef _WIN32
-    h_ = ::CreateFileA(lp.string().c_str(), GENERIC_READ | GENERIC_WRITE,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                       OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h_ != INVALID_HANDLE_VALUE) {
-        for (;;) {
-            OVERLAPPED ov{};
-            if (::LockFileEx(h_, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                             0, 1, 0, &ov)) { held_ = true; break; }
-            if (::GetLastError() != ERROR_LOCK_VIOLATION) break;
-            if (std::chrono::steady_clock::now() >= give_up) break;
-            xlock_backoff();
-        }
-    }
-#else
-    // 0600 — the lock file lives next to the credentials and shouldn't be
-    // more permissive than they are.
-    fd_ = ::open(lp.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-    if (fd_ >= 0) {
-        for (;;) {
-            if (::flock(fd_, LOCK_EX | LOCK_NB) == 0) { held_ = true; break; }
-            if (errno == EINTR) continue;
-            if (errno != EWOULDBLOCK) break;
-            if (std::chrono::steady_clock::now() >= give_up) break;
-            xlock_backoff();
-        }
-    }
-#endif
-    if (!held_)
-        AGT_LOG(Auth, Warn, "auth.xlock",
-                "could not lock {} (held by a stalled peer?); refreshing unlocked",
-                lp.string());
-}
-
-CrossProcessFileLock::~CrossProcessFileLock() {
-#ifdef _WIN32
-    if (h_ != INVALID_HANDLE_VALUE) {
-        if (held_) { OVERLAPPED ov{}; ::UnlockFileEx(h_, 0, 1, 0, &ov); }
-        ::CloseHandle(h_);
-    }
-#else
-    if (fd_ >= 0) {
-        if (held_) ::flock(fd_, LOCK_UN);
-        ::close(fd_);
-    }
-#endif
-}
-
-// ---------------------------------------------------------------------------
 // Pre-warm: open TCP+TLS+h2 to api.anthropic.com while the user is still
 // typing, so the first real request skips the handshake. The http::Client's
 // pool keeps the connection until used or until the 90 s idle TTL elapses.
@@ -344,61 +254,11 @@ static void restrict_perms(const fs::path& p) {
 #endif
 }
 
-// POSIX: create the file with mode 0600 from the start so there is no window
-// where it exists world-readable between open() and chmod(), and write it
-// ATOMICALLY (SECURITY_AUDIT) via a sibling temp file + fsync + rename so a
-// crash mid-write can never leave a truncated/corrupt credentials.json.
-// Windows: fall back to std::ofstream (ACLs are out of scope here).
+// Secrets are born 0600 (no chmod window) and replaced atomically.
 static bool write_private(const fs::path& p, const std::string& content) {
-#ifdef _WIN32
-    std::ofstream ofs(p, std::ios::trunc);
-    if (!ofs) return false;
-    ofs.write(content.data(), (std::streamsize)content.size());
-    return static_cast<bool>(ofs);
-#else
-    // Temp path in the SAME directory as the target so rename(2) is atomic
-    // (rename across filesystems is not). Include the pid to avoid clobbering
-    // a concurrent writer's temp.
-    fs::path tmp = p;
-    tmp += ".tmp." + std::to_string(::getpid());
-
-    int fd = ::open(tmp.c_str(),
-                    O_WRONLY | O_CREAT | O_TRUNC,
-                    S_IRUSR | S_IWUSR);
-    if (fd < 0) return false;
-
-    const char* buf = content.data();
-    size_t remaining = content.size();
-    while (remaining > 0) {
-        ssize_t n = ::write(fd, buf, remaining);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            ::close(fd);
-            ::unlink(tmp.c_str());
-            return false;
-        }
-        buf += n;
-        remaining -= (size_t)n;
-    }
-    // Flush the data to disk before the rename so the rename can't land
-    // pointing at a file whose contents haven't been persisted yet.
-    if (::fsync(fd) != 0) {
-        ::close(fd);
-        ::unlink(tmp.c_str());
-        return false;
-    }
-    if (::close(fd) != 0) {
-        ::unlink(tmp.c_str());
-        return false;
-    }
-    // Atomic replace: readers see either the old file or the fully-written
-    // new one, never a partial write.
-    if (::rename(tmp.c_str(), p.c_str()) != 0) {
-        ::unlink(tmp.c_str());
-        return false;
-    }
-    return true;
-#endif
+    return persistence::write_atomic(IoAccess::grant(), p, content,
+                                     {.durability = persistence::Durability::Durable,
+                                      .mode = 0600});
 }
 
 std::optional<Credentials> load_credentials(Io) {
@@ -878,16 +738,12 @@ TokenResult token_result_from(const cred::OAuth& o) {
 }
 } // namespace
 
-TokenResult refresh_access_token_locked(Io io, const RefreshToken& refresh_token) {
-    // Cross-process serialization + double-checked re-read. Blocking on the
-    // file lock funnels every agentty instance through one refresh at a time.
-    // After the lock is held we re-read credentials.json: if a peer already
-    // refreshed (token no longer stale), return THAT token as success instead
-    // of firing our own — Anthropic rotates refresh tokens, so a redundant
-    // refresh would invalidate the peer's token and spin the refresh loop.
-    CrossProcessFileLock xlock(credentials_path());
-    std::string rt = refresh_token.value;
-    if (xlock.held()) {
+namespace {
+TokenResult refresh_in_section(Io io, bool cross, std::string rt) {
+    // Re-read under the lock: if a peer already refreshed, adopt its token
+    // instead of firing ours. Anthropic rotates refresh tokens, so a second
+    // refresh would invalidate the peer's and spin the refresh loop.
+    if (cross) {
         if (auto loaded = load_credentials(io)) {
             if (auto* o = std::get_if<cred::OAuth>(&*loaded)) {
                 if (!oauth_is_stale(*o) && !o->access_token.empty())
@@ -901,40 +757,25 @@ TokenResult refresh_access_token_locked(Io io, const RefreshToken& refresh_token
     auto tr = refresh_access_token(io, RefreshToken{rt});
     if (!tr) return tr;
 
-    // LINEAGE CHECK before persisting: an account switch (accounts::activate)
-    // writes the store WITHOUT taking this lock — deliberately, so a switch
-    // never blocks behind a 1-2 s network exchange. That means the store may
-    // now belong to a DIFFERENT account than the one we just refreshed.
-    // Detect it by re-reading: if the on-disk refresh token is neither the
-    // one we exchanged (`rt`) nor the one the exchange returned, the store
-    // was swapped underneath us — saving would clobber the switched-to
-    // account's credentials with the switched-away account's token (registry
-    // says A, store holds B: the "switch refuses to refresh" family).
-    // Skip the save AND report Superseded so the caller neither installs
-    // the stale-account token nor shows a scary error for a benign race.
-    if (xlock.held()) {
-        if (auto now_on_disk = load_credentials(io)) {
-            if (auto* o = std::get_if<cred::OAuth>(&*now_on_disk)) {
-                if (!o->refresh_token.empty() && o->refresh_token != rt
-                    && o->refresh_token != tr->refresh_token) {
-                    AGT_LOG(Auth, Warn, "auth.refresh.superseded",
-                            "store swapped mid-refresh (account switch); "
-                            "discarding refreshed token");
-                    return std::unexpected(OAuthError{
-                        OAuthErrorKind::Superseded,
-                        "account switched during refresh"});
-                }
+    // An account switch writes the store without this lock, so the store may
+    // now hold a different account. If its refresh token is neither the one
+    // we sent nor the one we got back, don't clobber it: report Superseded.
+    if (auto now_on_disk = load_credentials(io)) {
+        if (auto* o = std::get_if<cred::OAuth>(&*now_on_disk)) {
+            if (!o->refresh_token.empty() && o->refresh_token != rt
+                && o->refresh_token != tr->refresh_token) {
+                AGT_LOG(Auth, Warn, "auth.refresh.superseded",
+                        "store swapped mid-refresh (account switch); "
+                        "discarding refreshed token");
+                return std::unexpected(OAuthError{
+                    OAuthErrorKind::Superseded,
+                    "account switched during refresh"});
             }
         }
     }
 
-    // Persist under the lock so the next instance's re-read sees it. This is
-    // best-effort for the CURRENT process (we return `tr` regardless, so this
-    // session keeps working with the in-memory token) — BUT Anthropic rotates
-    // refresh tokens, so a failed write means the on-disk refresh token is now
-    // stale server-side and the NEXT process's refresh will fail into a forced
-    // re-login. That used to be completely silent; log it (terminal-safe,
-    // opt-in) so it's diagnosable instead of a mystery re-login.
+    // Saved inside the section so the next process's re-read sees it. A
+    // failed save leaves a rotated-away token on disk; log it.
     Credentials refreshed{cred::OAuth{
         tr->access_token,
         tr->refresh_token.empty() ? rt : tr->refresh_token,
@@ -945,6 +786,15 @@ TokenResult refresh_access_token_locked(Io io, const RefreshToken& refresh_token
                      "failed to persist rotated OAuth token; next launch may "
                      "require re-login (keystore locked / disk full / perms?)");
     return tr;
+}
+}  // namespace
+
+TokenResult refresh_access_token_locked(Io, const locks::below_cred_file& cap,
+                                        const RefreshToken& refresh_token) {
+    return persistence::with_shared_file(cap, persistence::cred_lane(credentials_path()), credentials_path(),
+        [](const maya::held<locks::cred_file>&, persistence::Held h, std::string rt) {
+            return refresh_in_section(IoAccess::grant(), h.cross_process, std::move(rt));
+        }, refresh_token.value);
 }
 
 // ---------------------------------------------------------------------------
@@ -1039,7 +889,8 @@ Credentials resolve(Io io, const std::string& cli_api_key) {
 // ---------------------------------------------------------------------------
 
 namespace {
-AuthHeader fresh_auth_header_locked(Io io, const AuthHeader& fallback);
+AuthHeader fresh_auth_header_locked(Io io, const maya::held<locks::auth_refresh>& cap,
+                                    const AuthHeader& fallback);
 }
 
 AuthHeader fresh_auth_header(Io /*io*/, const locks::below_auth_refresh& cap,
@@ -1058,16 +909,17 @@ AuthHeader fresh_auth_header(Io /*io*/, const locks::below_auth_refresh& cap,
     // persists; the rest re-read the freshly-saved token.
     static maya::guarded<bool, locks::auth_refresh> lane;
     return lane.with(cap,
-        [](bool&, AuthHeader fb) {
+        [](const maya::held<locks::auth_refresh>& h, bool&, AuthHeader fb) {
             // guarded's body can't take the caller's Io (it isn't Sendable),
             // but this runs under fresh_auth_header, which had one.
-            return fresh_auth_header_locked(IoAccess::grant(), fb);
+            return fresh_auth_header_locked(IoAccess::grant(), h, fb);
         },
         fallback);
 }
 
 namespace {
-AuthHeader fresh_auth_header_locked(Io io, const AuthHeader& fallback) {
+AuthHeader fresh_auth_header_locked(Io io, const maya::held<locks::auth_refresh>& cap,
+                                    const AuthHeader& fallback) {
     auto loaded = load_credentials(io);
     if (!loaded) return fallback;
 
@@ -1092,7 +944,7 @@ AuthHeader fresh_auth_header_locked(Io io, const AuthHeader& fallback) {
     // firing a redundant (refresh-token-rotating, hence mutually-invalidating)
     // refresh — the multi-instance refresh loop this guards against. It also
     // persists the new creds to disk.
-    auto tr = refresh_access_token_locked(io, RefreshToken{oauth->refresh_token});
+    auto tr = refresh_access_token_locked(io, cap, RefreshToken{oauth->refresh_token});
     if (!tr) {
         // Refresh failed (network / revoked). Return whatever we have; the
         // transport will surface the eventual 401 with the login hint.

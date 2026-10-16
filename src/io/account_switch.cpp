@@ -22,6 +22,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/io/persistence.hpp"       // load/save_settings (custom hosts)
+#include "agentty/io/shared_file.hpp"
 #include "agentty/provider/registry.hpp"      // preset_for (custom-host detect)
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
@@ -40,33 +41,22 @@ namespace copilot = agentty::provider::copilot;
 namespace kimi = agentty::provider::kimi;
 
 // Read a file whole; nullopt when missing/empty.
-std::optional<std::string> read_all(const fs::path& p) {
-    std::ifstream ifs(p, std::ios::binary);
-    if (!ifs) return std::nullopt;
-    std::string s((std::istreambuf_iterator<char>(ifs)),
-                  std::istreambuf_iterator<char>());
-    if (s.empty()) return std::nullopt;
+std::optional<std::string> read_all(Io io, const fs::path& p) {
+    auto s = agentty::persistence::read_file(io, p);
+    if (!s || s->empty()) return std::nullopt;
     return s;
 }
 
-// Write a blob to a store file atomically, 0600. Returns success.
-bool write_store(const fs::path& p, const std::string& blob) {
-    std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
-    fs::path tmp = p; tmp += ".tmp";
-    {
-        std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
-        if (!ofs) return false;
-        ofs.write(blob.data(), static_cast<std::streamsize>(blob.size()));
-        if (!ofs) return false;
-    }
-#ifndef _WIN32
-    fs::permissions(tmp, fs::perms::owner_read | fs::perms::owner_write,
-                    fs::perm_options::replace, ec);
-#endif
-    fs::rename(tmp, p, ec);
-    if (ec) { fs::remove(tmp, ec); return false; }
-    return true;
+// Install a blob as a provider's live credential file, inside that file's
+// section, so it can't land in the middle of a refresh of the same file
+// (here or in another agentty). 0600, atomic.
+bool write_store(const maya::unlocked& cap, const fs::path& p, const std::string& blob) {
+    return agentty::persistence::with_shared_file(cap, agentty::persistence::cred_lane(p), p,
+        [](const maya::held<lock_levels::cred_file>&, agentty::persistence::Held,
+           std::string path, std::string b) {
+            return agentty::persistence::detail::write_in_section(path, b,
+                {.durability = agentty::persistence::Durability::Durable, .mode = 0600});
+        }, p.string(), blob);
 }
 
 // Decrypt a store blob to its JSON body (accepts sealed or plaintext).
@@ -187,16 +177,17 @@ std::string settings_key_label(const std::string& key) {
 
 } // namespace
 
-bool snapshot_active(Io io, const std::string& provider, const std::string& label) {
+bool snapshot_active(Io io, const lock_levels::below_file_lane& cap,
+                     const std::string& provider, const std::string& label) {
     const Backend b = backend_for(provider);
     if (b.store == Store::SettingsKey) {
         const std::string key = settings_key(io, provider);
         if (key.empty()) return false;
-        return upsert(provider, label, key);
+        return upsert(io, cap, provider, label, key);
     }
-    auto blob = read_all(b.file);
+    auto blob = read_all(io, b.file);
     if (!blob) return false;                 // nothing signed in to capture
-    return upsert(provider, label, *blob);
+    return upsert(io, cap, provider, label, *blob);
 }
 
 bool activate(Io io, const maya::unlocked& cap, const std::string& provider,
@@ -214,7 +205,7 @@ bool activate(Io io, const maya::unlocked& cap, const std::string& provider,
     // (fresh install, store wiped) there is nothing fresher to save.
     if (const std::string outgoing = active_label(io, provider);
         !outgoing.empty() && outgoing != label) {
-        if (!snapshot_active(io, provider, outgoing))
+        if (!snapshot_active(io, cap, provider, outgoing))
             util::dbglog("accounts.activate.snapshot_outgoing",
                          provider + "/" + outgoing + ": no live credential");
     }
@@ -222,20 +213,20 @@ bool activate(Io io, const maya::unlocked& cap, const std::string& provider,
     const Backend b = backend_for(provider);
     if (b.store == Store::SettingsKey) {
         set_settings_key(io, cap, provider, slot->secret);   // the endpoint resolve() reads
-        return set_active(provider, label);
+        return set_active(io, cap, provider, label);
     }
-    if (!write_store(b.file, slot->secret)) return false;
+    if (!write_store(cap, b.file, slot->secret)) return false;
     // Re-seal into the keystore / bust cached tokens so the next resolve()
     // reads the switched-to account, not a stale entry.
     if (b.after_activate) b.after_activate(io, cap);
-    return set_active(provider, label);
+    return set_active(io, cap, provider, label);
 }
 
 std::string derive_current_label(Io io, const std::string& provider) {
     const Backend b = backend_for(provider);
     if (b.store == Store::SettingsKey)
         return settings_key_label(settings_key(io, provider));
-    auto blob = read_all(b.file);
+    auto blob = read_all(io, b.file);
     if (!blob) return {};
     auto body = body_of(*blob);
     if (!body) return "signed in";           // sealed for another machine

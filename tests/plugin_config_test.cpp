@@ -4,6 +4,7 @@
 // config the user wrote by hand (other servers' env blocks, the "servers"
 // spelling, unknown top-level keys).
 
+#include "agtest_cap.hpp"
 #include "agtest.hpp"
 
 #include "agentty/tool/plugin.hpp"
@@ -384,7 +385,7 @@ void approvals_merge_across_processes(const fs::path& dir) {
         // than touching a path by hand -- the store lives under state/, and
         // seeding the old flat location would trip the legacy migration
         // mid-race instead of testing the race.
-        (void)agentty::scope::save_approvals(kLeaf, agentty::scope::Approvals{});
+        (void)agentty::scope::save_approvals(::agentty::IoAccess::grant(), agtest::cap(), kLeaf, agentty::scope::Approvals{});
         { std::ofstream f(home / "state" / kLeaf, std::ios::trunc); f << "[]"; }
 
         std::vector<::pid_t> kids;
@@ -403,7 +404,7 @@ void approvals_merge_across_processes(const fs::path& dir) {
                 ::usleep(40000);   // 40 ms: all four now hold stale copies
                 store.approve("hash-r" + std::to_string(round)
                               + "-w" + std::to_string(w));
-                const bool ok = agentty::scope::save_approvals(kLeaf, store);
+                const bool ok = agentty::scope::save_approvals(::agentty::IoAccess::grant(), agtest::cap(), kLeaf, store);
                 ::_exit(ok ? 0 : 1);
             }
             if (pid > 0) kids.push_back(pid);
@@ -677,7 +678,7 @@ void project_trust_gate(const fs::path& dir) {
     check(!plug::is_project_config_trusted(::agentty::IoAccess::grant()), "project config untrusted by default");
 
     // Approve THIS content → trusted.
-    check(plug::approve_project_config(::agentty::IoAccess::grant()), "approve records trust");
+    check(plug::approve_project_config(::agentty::IoAccess::grant(), agtest::cap()), "approve records trust");
     check(plug::is_project_config_trusted(::agentty::IoAccess::grant()), "approved project config is trusted");
 
     // MCPoison: swap the command under the same name. The bytes change, so
@@ -723,7 +724,7 @@ void per_server_trust(const fs::path& dir) {
           "seed beta");
 
     // Approve only alpha.
-    check(plug::approve_server(::agentty::IoAccess::grant(), cfg, "alpha"), "approve alpha");
+    check(plug::approve_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, "alpha"), "approve alpha");
     check(plug::is_server_trusted(::agentty::IoAccess::grant(), cfg, "alpha"),  "alpha trusted");
     check(!plug::is_server_trusted(::agentty::IoAccess::grant(), cfg, "beta"),   "beta NOT trusted by alpha's approval");
     // The whole file is not trusted just because one server is.
@@ -744,7 +745,7 @@ void per_server_trust(const fs::path& dir) {
     // args are part of identity: approve, then change args → re-gated.
     check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"delta", "/bin/delta", {"--safe"}}, false)
               == plug::EditResult::Ok, "seed delta with args");
-    check(plug::approve_server(::agentty::IoAccess::grant(), cfg, "delta"), "approve delta");
+    check(plug::approve_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, "delta"), "approve delta");
     check(plug::is_server_trusted(::agentty::IoAccess::grant(), cfg, "delta"), "delta trusted with its args");
     check(plug::add_server(::agentty::IoAccess::grant(), agtest::cap(), cfg, {"delta", "/bin/delta", {"--evil"}}, /*force=*/true)
               == plug::EditResult::Ok, "change delta's args");

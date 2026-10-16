@@ -216,7 +216,7 @@ std::vector<Scan> scan_all(const fs::path& home, const fs::path& project) {
     return out;
 }
 
-Outcome adopt(Io io, const maya::below<maya::leaf>& cap, const std::vector<Found>& servers, const Options& opts) {
+Outcome adopt(Io io, const lock_levels::below_file_lane& cap, const std::vector<Found>& servers, const Options& opts) {
     Outcome o;
     o.into = util::user_root() / "mcp.json";
     for (const Found& f : servers) {

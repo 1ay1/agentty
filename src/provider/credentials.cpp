@@ -125,8 +125,9 @@ bool activate(Io io, const maya::unlocked& cap, std::string_view provider_id,
     return auth::accounts::activate(io, cap, std::string{provider_id}, std::string{label});
 }
 
-bool remove(Io io, std::string_view provider_id, std::string_view label) {
-    return auth::accounts::remove(io, std::string{provider_id}, std::string{label});
+bool remove(Io io, const maya::unlocked& cap, std::string_view provider_id,
+            std::string_view label) {
+    return auth::accounts::remove(io, cap, std::string{provider_id}, std::string{label});
 }
 
 void clear_active(Io io, const maya::unlocked& cap, std::string_view provider_id) {
@@ -152,12 +153,12 @@ bool add_key(Io io, const maya::unlocked& cap, std::string_view provider_id,
         it != s.provider_keys.end() && !it->second.empty()
         && it->second != std::string{key}) {
         if (auto prior = auth::accounts::derive_current_label(io, id); !prior.empty())
-            auth::accounts::snapshot_active(io, id, prior);
+            auth::accounts::snapshot_active(io, cap, id, prior);
     }
     s.provider_keys[id] = std::string{key};
     persistence::save_settings(io, cap, s);
     if (auto lbl = auth::accounts::derive_current_label(io, id); !lbl.empty())
-        auth::accounts::snapshot_active(io, id, lbl);
+        auth::accounts::snapshot_active(io, cap, id, lbl);
     return true;
 }
 

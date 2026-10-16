@@ -2,6 +2,7 @@
 // clean cancel, and prints the answer the way a script wants it.
 
 #include "agentty/runtime/run_cli.hpp"
+#include "agentty/io/shared_file.hpp"
 
 #include "agentty/tool/one_shot.hpp"
 
@@ -81,12 +82,13 @@ tools::OneShotOptions to_one_shot(const Options& o, std::stop_token cancel) {
     return t;
 }
 
-bool write_file(const std::string& path, const std::string& body) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return false;
-    f << body;
-    if (!body.empty() && body.back() != '\n') f << '\n';
-    return static_cast<bool>(f.flush());
+// The run's --output file: replaced whole, so a reader polling it sees the
+// last result or this one, never a half-written mix. The user's file, so its
+// mode is kept.
+bool write_file(const std::string& path, std::string body) {
+    if (!body.empty() && body.back() != '\n') body += '\n';
+    return persistence::detail::write_in_section(path, body,
+        {.durability = persistence::Durability::Atomic, .keep_mode = true});
 }
 
 // What the run and its watcher share: stop flags, the deadline result and

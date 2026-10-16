@@ -75,6 +75,8 @@
 #include "agentty/tool/effects.hpp"
 #include "agentty/util/io.hpp"
 
+#include <maya/runtime.hpp>
+
 namespace agentty::tools::skills {
 
 struct Skill {
@@ -376,7 +378,7 @@ inline constexpr std::string_view kApprovalsLeaf = "skills_approved.json";
 // root). Separate from hooks' and MCP's stores on purpose: approving a
 // skill must not silently approve an MCP server.
 [[nodiscard]] scope::Approvals load_approvals(Io);
-void                           save_approvals(const scope::Approvals&);
+void                           save_approvals(Io, const maya::unlocked&, const scope::Approvals&);
 
 // Convenience: resolve a skill's trust against the persisted store.
 [[nodiscard]] scope::Trust trust_of(Io, const Skill& s) noexcept;
@@ -398,7 +400,7 @@ void                           save_approvals(const scope::Approvals&);
 // Deliberately NOT a first-run screen and NOT a menu entry: a capability
 // arrives because the user asked for it by name. Returns a process exit
 // code; prints what it did.
-int cli(const std::vector<std::string>& argv);
+int cli(Io, const maya::unlocked&, const std::vector<std::string>& argv);
 
 // CLI entry: list every discovered skill (scope, dir, resource count)
 // with lint diagnostics. Returns 0 when every skill is clean, 1 when

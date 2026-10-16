@@ -136,9 +136,10 @@ void rebuild(const Model& m, pn::WebSearch& o, std::string_view prefer_id = {}) 
             continue;
         }
         ++o.keys_gen;   // a read already in flight must not undo this
-        out.push_back(Cmd::task_isolated(
-            [](maya::Sink<Msg> sink, std::stop_token, std::string svc, std::string k) {
-                const bool ok = tools::web_search_secret::store(svc, k);
+        out.push_back(cmd::io_task_isolated(
+            [](Io io, const maya::unlocked& cap, maya::Sink<Msg> sink, std::stop_token,
+               std::string svc, std::string k) {
+                const bool ok = tools::web_search_secret::store(io, cap, svc, k);
                 std::fill(k.begin(), k.end(), '\0');
                 sink.send(Msg{msg::WebSearchMsg{WebSearchKeySaved{std::move(svc), ok}}});
             },
@@ -254,9 +255,10 @@ Cmd web_search_update(Model& m, msg::WebSearchMsg wm) {
                             if (id == service) { origin.clear(); found = true; }
                         if (!found) o->key_origins.emplace_back(service, std::string{});
                         rebuild(m, *o, std::string{web_search_form::kKeyPrefix} + service);
-                        return Cmd::task_isolated(
-                            [](maya::Sink<Msg> out, std::stop_token, std::string svc) {
-                                (void)tools::web_search_secret::erase(svc);
+                        return cmd::io_task_isolated(
+                            [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out,
+                               std::stop_token, std::string svc) {
+                                (void)tools::web_search_secret::erase(io, cap, svc);
                                 // Judged by what is left, not by erase()'s
                                 // return: "nothing was there" is a success.
                                 const bool ok =

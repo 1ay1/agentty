@@ -13,6 +13,8 @@
 #include <string>
 
 #include "agentty/rag/embed_backend.hpp"
+#include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 namespace agentty::rag::embed {
 
@@ -26,8 +28,9 @@ namespace agentty::rag::embed {
 // Persist (or, with an empty key, erase). Returns false if the secret could
 // not be secured — callers must treat that as "not saved" rather than
 // silently writing plaintext.
-bool store_key(const std::string& endpoint, const std::string& key);
+bool store_key(Io, const lock_levels::below_file_lane&, const std::string& endpoint,
+               const std::string& key);
 
-bool erase_key(const std::string& endpoint);
+bool erase_key(Io, const lock_levels::below_file_lane&, const std::string& endpoint);
 
 } // namespace agentty::rag::embed

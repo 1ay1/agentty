@@ -15,6 +15,7 @@
 
 #include "agentty/rag/rag_adapter.hpp"
 #include "agentty/rag/rag_host.hpp"
+#include "agentty/io/shared_file.hpp"
 
 #include "agentty/util/background.hpp"
 #include "agentty/util/logx.hpp"
@@ -664,19 +665,17 @@ private:
         }
     }
 
-    // Appends run outside the lock; O_APPEND keeps concurrent lines whole.
+    // Appends run outside the lock: every line goes out in ONE write(2) with
+    // O_APPEND, so concurrent agentty processes never splice mid-line.
     static void append(const std::string& tsv, const char* kind,
                        const std::vector<std::string>& paths) {
         if (paths.empty() || tsv.empty()) return;
-        const fs::path p{tsv};
-        std::error_code ec;
-        fs::create_directories(p.parent_path(), ec);
-        std::ofstream f(p, std::ios::app);
-        if (!f) return;
         auto now = std::chrono::duration_cast<std::chrono::seconds>(
                        std::chrono::system_clock::now().time_since_epoch()).count();
+        std::string lines;
         for (const auto& path : paths)
-            f << now << '\t' << kind << '\t' << path << '\n';
+            lines += std::to_string(now) + '\t' + kind + '\t' + path + '\n';
+        (void)persistence::append_atomic(::agentty::IoAccess::grant(), tsv, lines);
     }
 
     // A read matches a surfaced passage if the exact path is recent, or if a
@@ -1200,22 +1199,11 @@ struct Index {
     // reader never observes a half-written .meta.json and a crash mid-write
     // leaves the previous good file (or none) intact — never a truncated one
     // that would desync the meta from its .ragdb.
+    // A derived cache, so no fsync: a power cut costs a rebuild, never a torn file.
     static bool atomic_write(const fs::path& dest, const std::string& body) {
         if (dest.empty()) return false;
-        std::error_code ec;
-        fs::create_directories(dest.parent_path(), ec);
-        fs::path tmp = dest;
-        tmp += ".tmp";
-        {
-            std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-            if (!out) return false;
-            out << body;
-            out.flush();
-            if (!out) { fs::remove(tmp, ec); return false; }
-        }
-        fs::rename(tmp, dest, ec);
-        if (ec) { fs::remove(tmp, ec); return false; }
-        return true;
+        return persistence::write_atomic(::agentty::IoAccess::grant(), dest, body,
+                                         {.durability = persistence::Durability::Atomic});
     }
 
     // Where the persisted docs index lives (under the workspace .agentty/).

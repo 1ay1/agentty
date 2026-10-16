@@ -18,6 +18,7 @@
 #include <limits>
 #include "agentty/domain/catalog.hpp"   // set_catalog_reasoning / set_catalog_effort_set
 #include "agentty/io/http.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/teardown.hpp"
 
@@ -249,17 +250,9 @@ int refresh() {
         return 0;   // network down / moved: the cached load already stands
     const int n = load_document(resp->body);
     if (n > 0) {
-        // Atomic-ish write: tmp + rename, matching the rest of the config dir.
-        std::error_code ec;
-        fs::create_directories(util::user_cache_dir(), ec);
-        const auto tmp = cache_path().string() + ".tmp";
-        {
-            std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
-            if (!ofs) return n;
-            ofs << resp->body;
-        }
-        fs::rename(tmp, cache_path(), ec);
-        if (ec) fs::remove(tmp, ec);
+        // A cache: atomic so a reader never sees half of it, no fsync.
+        (void)persistence::write_atomic(::agentty::IoAccess::grant(), cache_path(), resp->body,
+                                        {.durability = persistence::Durability::Atomic});
     }
     return n;
 }

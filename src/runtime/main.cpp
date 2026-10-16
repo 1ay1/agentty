@@ -92,6 +92,7 @@
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/persistence.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/i18n/startup.hpp"   // i18n::init — before anything renders
 #include "agentty/io/blob_gc.hpp"
 #include "agentty/io/http.hpp"
@@ -598,12 +599,10 @@ int cmd_diagnostics() {
         }
     }
 
-    std::error_code ec;
-    fs::create_directories(dir, ec);
+    // Redacted, but still a log of this machine: born 0600.
     const auto path = dir / "agentty-diagnostics.txt";
-    std::ofstream f{path, std::ios::binary | std::ios::trunc};
-    f << out;
-    f.close();
+    (void)agentty::persistence::write_atomic(::agentty::IoAccess::grant(), path, out,
+        {.durability = agentty::persistence::Durability::Atomic, .mode = 0600});
 
     std::printf("agentty %s \u2014 diagnostics written\n", AGENTTY_VERSION);
     if (const auto n = agentty::logx::redaction_count(); n > 0)
@@ -1409,8 +1408,8 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
                                   args.plugin_argv.end()});
     }
 #endif
-    if (args.subcommand == "skill")  return tools::skills::cli(args.plugin_argv);
-    if (args.subcommand == "hooks")  return tools::hooks::cli(args.cli_run_agent);
+    if (args.subcommand == "skill")  return tools::skills::cli(::agentty::IoAccess::grant(), cap, args.plugin_argv);
+    if (args.subcommand == "hooks")  return tools::hooks::cli(::agentty::IoAccess::grant(), cap, args.cli_run_agent);
     if (args.subcommand == "plugin") return tools::plugin::cli(::agentty::IoAccess::grant(), cap, args.plugin_argv);
     if (args.subcommand == "mcp-login")
         return mcp::oauth::cmd_mcp_login(::agentty::IoAccess::grant(), args.cli_mcp_server, args.cli_mcp_metadata,

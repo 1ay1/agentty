@@ -3,6 +3,7 @@
 #include "agentty/runtime/panel/settings/items.hpp"
 #include "agentty/util/home_dir.hpp"
 #include "agentty/util/user_root.hpp"
+#include "agentty/io/shared_file.hpp"
 
 #include "agentty/runtime/model.hpp"
 #include "agentty/domain/profile.hpp"
@@ -603,7 +604,7 @@ std::vector<std::string> starter_segments(const std::string& name) {
 
 } // namespace
 
-AddResult add_plugin_from_line(Io io, const maya::below<maya::leaf>& cap, const std::string& line) {
+AddResult add_plugin_from_line(Io io, const lock_levels::below_file_lane& cap, const std::string& line) {
     auto tok = split_ws(line);
     // Pull an optional --project flag from anywhere in the line; the rest is
     // the <name> <recipe> [args…] spec.
@@ -699,7 +700,7 @@ AddResult add_plugin_from_line(Io io, const maya::below<maya::leaf>& cap, const 
     }
 }
 
-AddResult create_starter(Io, Category cat, const std::string& name) {
+AddResult create_starter(Io io, Category cat, const std::string& name) {
     // Validate AND split on ':' into safe path segments. The command/agent
     // loaders map a `:`-namespaced name to a SUBDIRECTORY (git:fixup ->
     // git/fixup.md), so writing the colon verbatim into one filename both
@@ -738,16 +739,13 @@ AddResult create_starter(Io, Category cat, const std::string& name) {
     for (std::size_t i = 0; i + 1 < segs.size(); ++i) dir /= segs[i];
     const fs::path file = dir / (segs.back() + ".md");
 
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    if (ec) return {false, "could not create dir " + dir.string()};
-    if (fs::exists(file, ec))
-        return {false, "already exists: " + file.string()};
-    std::ofstream f(file, std::ios::binary);
-    if (!f) return {false, "could not create " + file.string()};
-    f << tmpl;
-    f.flush();
-    if (!f) return {false, "write failed: " + file.string()};
+    // Created whole, and only if the name is free: no exists-then-write race
+    // with an editor or a second agentty making the same file.
+    if (!persistence::create_exclusive(io, file, tmpl)) {
+        std::error_code ec;
+        if (fs::exists(file, ec)) return {false, "already exists: " + file.string()};
+        return {false, "could not create " + file.string()};
+    }
 
     // Force a rescan so the new entry shows on the next open.
     if (cat == Category::Commands) tools::commands::invalidate_cache();

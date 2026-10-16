@@ -12,7 +12,6 @@
 #include "agentty/util/user_root.hpp"
 
 #include <maya/runtime.hpp>
-#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <chrono>
@@ -48,6 +47,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/io/shared_file.hpp"
 
 namespace agentty::mcp::oauth {
 namespace {
@@ -332,54 +332,11 @@ StoredToken from_json(const json& j) {
 }
 
 bool save_token(const std::string& server, const StoredToken& t) {
-    std::error_code ec;
-    fs::create_directories(tokens_dir(), ec);
     auto sealed = auth::crypt::seal(to_json(t).dump());
     if (!sealed) return false;
-    const fs::path p = token_path(server);
-    // Write a sibling temp then rename over the target: a crash mid-write
-    // leaves the old token intact instead of a torn file that forces a
-    // re-login. Unique per process+call so concurrent saves don't share it.
-    static std::atomic<std::uint64_t> seq{0};
-    fs::path tmp = p;
-    tmp += ".tmp-" + std::to_string(
-#if defined(_WIN32)
-        static_cast<unsigned long>(::_getpid())
-#else
-        static_cast<unsigned long>(::getpid())
-#endif
-    ) + "-" + std::to_string(seq.fetch_add(1));
-#if defined(_WIN32)
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return false;
-        f << *sealed;
-        f.close();
-        if (!f) { fs::remove(tmp, ec); return false; }
-    }
-#else
-    {
-        // Born 0600: never readable by others, not even for an instant.
-        const int fd = ::open(tmp.c_str(),
-                              O_WRONLY | O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC,
-                              0600);
-        if (fd < 0) return false;
-        const char* d = sealed->data();
-        std::size_t left = sealed->size();
-        bool ok = true;
-        while (left > 0) {
-            const ssize_t w = ::write(fd, d, left);
-            if (w < 0) { if (errno == EINTR) continue; ok = false; break; }
-            d += w; left -= static_cast<std::size_t>(w);
-        }
-        if (ok && ::fsync(fd) != 0) ok = false;
-        ::close(fd);
-        if (!ok) { fs::remove(tmp, ec); return false; }
-    }
-#endif
-    fs::rename(tmp, p, ec);
-    if (ec) { std::error_code rm; fs::remove(tmp, rm); return false; }
-    return true;
+    return persistence::write_atomic(::agentty::IoAccess::grant(), token_path(server), *sealed,
+                                     {.durability = persistence::Durability::Durable,
+                                      .mode = 0600});
 }
 
 std::optional<StoredToken> load_token(const std::string& server) {
@@ -586,14 +543,23 @@ LoginResult login(Io io, const std::string& server_name, const std::string& endp
 }
 
 namespace {
-// The refresh itself; bearer_for serialises it.
-std::optional<std::string> bearer_for_locked(const std::string& server_name) {
+// The refresh itself, inside the token file's section: re-read first, so a
+// token another process just refreshed (and rotated) is used, not replaced.
+std::optional<std::string> bearer_for_locked(const maya::held<locks::auth_refresh>& cap,
+                                             const std::string& server_name) {
     auto tok = load_token(server_name);
     if (!tok) return std::nullopt;
     if (tok->expired()) {
-        if (auto fresh = refresh(*tok)) { save_token(server_name, *fresh); tok = *fresh; }
-        // else: fall through with the stale token — the server will 401 and the
-        // transport surfaces an actionable error telling the user to re-login.
+        tok = persistence::with_shared_file(cap, persistence::cred_lane(token_path(server_name)), token_path(server_name),
+            [](const maya::held<locks::cred_file>&, persistence::Held,
+               std::string name, StoredToken t) -> std::optional<StoredToken> {
+                if (auto disk = load_token(name); disk && !disk->expired()) return disk;
+                if (auto fresh = refresh(t)) { (void)save_token(name, *fresh); return fresh; }
+                // Stale token: the server will 401 and the transport says how
+                // to sign in again.
+                return t;
+            }, server_name, *tok);
+        if (!tok) return std::nullopt;
     }
     if (tok->access_token.empty()) return std::nullopt;
     return tok->authorization_header();
@@ -607,8 +573,9 @@ std::optional<std::string> bearer_for(const locks::below_auth_refresh& cap,
     // second. A guarded<bool> is just the lock; the work runs inside it.
     static maya::guarded<bool, locks::auth_refresh> lane;
     return lane.with(cap,
-        [](bool&, std::string name) -> std::optional<std::string> {
-            return bearer_for_locked(name);
+        [](const maya::held<locks::auth_refresh>& h, bool&, std::string name)
+            -> std::optional<std::string> {
+            return bearer_for_locked(h, name);
         },
         server_name);
 }

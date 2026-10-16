@@ -4,6 +4,7 @@
 
 #include "agentty/io/blob_store.hpp"
 #include "agentty/io/persistence.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/logx.hpp"
 #include "agentty/util/teardown.hpp"
 
@@ -27,6 +28,11 @@ using json = nlohmann::json;
 namespace {
 
 constexpr std::string_view kStampName = ".gc-stamp";
+
+persistence::Lane& gc_claim_lane() {
+    static persistence::Lane l;
+    return l;
+}
 
 // Every key under which a blob name can appear.
 //
@@ -233,13 +239,18 @@ std::optional<GcStats> collect_if_due(const maya::unlocked& cap, std::stop_token
     std::error_code ec;
     if (!fs::is_directory(blob_dir, ec)) return std::nullopt;
     const auto stamp = blob_dir / kStampName;
-    const auto now = fs::file_time_type::clock::now();
-    if (auto t = fs::last_write_time(stamp, ec); !ec && now - t < hours{24})
-        return std::nullopt;
-    // Claim the slot first so two instances starting together don't both
-    // sweep; a failed sweep simply retries tomorrow.
-    { std::ofstream touch(stamp, std::ios::trunc); }
-    fs::last_write_time(stamp, now, ec);
+    // Claim today's sweep: check the stamp and bump it in one section, so two
+    // agentty starting together can't both see it stale and both sweep.
+    const bool claimed = persistence::with_shared_file(cap, gc_claim_lane(), stamp,
+        [](const maya::held<lock_levels::file_lane>&, persistence::Held, std::string s) {
+            const auto now = fs::file_time_type::clock::now();
+            std::error_code e;
+            if (auto t = fs::last_write_time(s, e); !e && now - t < hours{24}) return false;
+            (void)persistence::detail::write_in_section(s, {},
+                {.durability = persistence::Durability::Atomic});
+            return true;
+        }, stamp.string());
+    if (!claimed) return std::nullopt;
     // Thread retention first, so the blobs of expired threads go in this sweep.
     const Io io = IoAccess::grant();
     if (const int days = persistence::thread_keep_days(io); days > 0 && !stop.stop_requested())

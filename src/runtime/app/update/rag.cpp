@@ -411,9 +411,10 @@ Cmd rag_settings_update(Model& m, msg::RagMsg rm) {
             // failure comes back as RagEmbedKeySaved{false}.
             Cmd store_key = Cmd::none();
             if (eb::needs_api_key(f->cfg.backend)) {
-                store_key = Cmd::task_isolated(
-                    [](maya::Sink<Msg> out, std::stop_token, std::string slot, std::string key) {
-                        const bool ok = eb::store_key(slot, key) || key.empty();
+                store_key = cmd::io_task_isolated(
+                    [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token,
+                       std::string slot, std::string key) {
+                        const bool ok = eb::store_key(io, cap, slot, key) || key.empty();
                         out.send(Msg{RagEmbedKeySaved{ok}});
                     }, eb::endpoint_key(f->cfg), f->cfg.api_key);
             }

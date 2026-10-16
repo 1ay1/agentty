@@ -8,6 +8,7 @@
 #include "agentty/util/user_root.hpp"   // user_cache_dir()
 #include "agentty/util/self_exe.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/dbglog.hpp"
 
 #include <nlohmann/json.hpp>
@@ -102,10 +103,10 @@ void write_cache(const CheckResult& c) {
         {"url", c.url},
         {"update_available", c.update_available},
     };
-    std::error_code ec;
-    fs::create_directories(cache_path().parent_path(), ec);
-    std::ofstream f(cache_path(), std::ios::trunc);
-    if (f) f << j.dump(2);
+    // Was a truncating write: two instances checking at once could leave a
+    // torn cache that parsed as "no update". Atomic now; a cache, so no fsync.
+    (void)persistence::write_atomic(::agentty::IoAccess::grant(), cache_path(), j.dump(2),
+                                    {.durability = persistence::Durability::Atomic});
 }
 
 } // namespace
@@ -243,17 +244,14 @@ bool self_update_possible(std::string& reason) {
         return false;
     }
     // Writable check on the parent dir (the atomic rename target).
-    std::error_code ec;
     auto dir = self.parent_path();
-    auto probe = dir / ".agentty_update_probe";
-    std::ofstream f(probe);
-    if (!f) {
+#ifndef _WIN32
+    if (::access(dir.c_str(), W_OK) != 0) {
         reason = "no write permission for " + dir.string() +
                  " — re-run with appropriate permissions";
         return false;
     }
-    f.close();
-    fs::remove(probe, ec);
+#endif
     return true;
 #endif
 }
@@ -307,30 +305,15 @@ std::string perform_update(
         return "downloaded file is not an executable — aborting";
 #endif
 
+    // Atomic swap over the live binary: the running process keeps executing
+    // its old (unlinked) image, the next launch gets the new one. Born 0755,
+    // and durable, so a power cut can't leave a half-written agentty.
     fs::path self = self_path();
-    fs::path tmp  = self;
-    tmp += ".update.tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return "cannot write " + tmp.string();
-        f.write(r.body.data(), static_cast<std::streamsize>(r.body.size()));
-        if (!f) {
-            std::error_code ec;
-            fs::remove(tmp, ec);
-            return "short write to " + tmp.string();
-        }
-    }
-#ifndef _WIN32
-    ::chmod(tmp.c_str(), 0755);
-#endif
-    // Atomic swap: rename(2) over the live binary. The running process keeps
-    // executing its old (unlinked) image — next launch gets the new one.
+    if (!persistence::write_atomic(::agentty::IoAccess::grant(), self, r.body,
+                                   {.durability = persistence::Durability::Durable,
+                                    .mode = 0755}))
+        return "could not replace " + self.string();
     std::error_code ec;
-    fs::rename(tmp, self, ec);
-    if (ec) {
-        fs::remove(tmp, ec);
-        return "could not replace " + self.string() + ": " + ec.message();
-    }
     // Invalidate the check cache so the fresh binary re-checks cleanly.
     fs::remove(cache_path(), ec);
     return {};

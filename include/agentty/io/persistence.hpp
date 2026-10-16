@@ -91,14 +91,14 @@ void save_thread(Io, const maya::below<maya::leaf>&, const Thread& t);
 // save_thread) so we don't lose the most-recent transcript on exit. It
 // joins the writer, so it needs `unlocked`.
 void flush_pending_saves(Io, const maya::unlocked&);
-void delete_thread(Io, const lock_levels::below_file_lane&, const ThreadId& id);
+void delete_thread(Io, const lock_levels::below_thread_log&, const ThreadId& id);
 
 // Thread retention. Deletes threads with no activity (file mtime) in the
 // last `keep_days` days, skipping `keep` (the open one). keep_days <= 0
 // does nothing. Their blobs are left for blob gc. Returns what it deleted
 // (or would, with dry_run).
 struct ExpireStats { std::size_t threads = 0; std::uintmax_t bytes = 0; };
-ExpireStats expire_threads(Io, const lock_levels::below_file_lane&, int keep_days,
+ExpireStats expire_threads(Io, const lock_levels::below_thread_log&, int keep_days,
                            const ThreadId& keep, bool dry_run = false);
 
 // $AGENTTY_THREADS_KEEP_DAYS, or 0 (keep everything) when unset or invalid.
@@ -140,12 +140,9 @@ void on_settings_written(std::function<void(const maya::unlocked&)> observer);
 [[nodiscard]] std::string random_hex_id();
 [[nodiscard]] std::string title_from_first_message(std::string_view text);
 
-// Atomic + durable write of `content` to `target`: writes to <target>.tmp,
-// fsyncs, then renames over the target. A crash or ctrl-C mid-write leaves
-// the previous file intact instead of a truncated one. Returns false on any
-// I/O failure (the temp file is cleaned up). Use this for every JSON sidecar
-// the runtime persists — e.g. the ACP session index — so they share the same
-// crash-safety guarantee as threads/settings.
+// Atomic + durable write of `content` to `target` (persistence::write_atomic
+// with Durability::Durable): a unique temp, fsync, rename. Readers see the old
+// file or the new one. False on any I/O failure (the temp is removed).
 bool write_json_atomic(Io, const std::filesystem::path& target,
                        const std::string& content);
 

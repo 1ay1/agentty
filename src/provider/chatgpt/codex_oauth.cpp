@@ -33,6 +33,7 @@
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/auth/auth.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/base64.hpp"
 #include "agentty/util/dbglog.hpp"
 
@@ -628,20 +629,9 @@ bool save_codex_credentials_unlocked(const CodexCredentials& c) {
     std::string to_write;
     if (auto sealed = auth::crypt::seal(payload)) to_write = std::move(*sealed);
     else return false;
-
-    const auto tmp = path.string() + ".tmp";
-    {
-        std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
-        if (!ofs) return false;
-        ofs.write(to_write.data(), static_cast<std::streamsize>(to_write.size()));
-        if (!ofs) return false;
-    }
-#if !defined(_WIN32)
-    ::chmod(tmp.c_str(), 0600);
-#endif
-    fs::rename(tmp, path, ec);
-    if (ec) { fs::remove(tmp, ec); return false; }
-    return true;
+    return persistence::write_atomic(::agentty::IoAccess::grant(), path, to_write,
+                                     {.durability = persistence::Durability::Durable,
+                                      .mode = 0600});
 }
 
 struct Loaded { std::optional<CodexCredentials> creds; std::uint64_t generation = 0; };
@@ -854,28 +844,20 @@ std::optional<CodexCredentials> codex_fresh_credentials(const locks::below_auth_
 
 namespace {
 std::optional<CodexCredentials>
-codex_fresh_credentials_locked(const maya::held<locks::auth_refresh>& cap) {
-    auto [loaded, source_generation] = load_with_generation(cap);
-    if (!loaded) return std::nullopt;
-    if (!loaded->expired(/*skew_ms=*/60'000)) return loaded;
-    if (loaded->refresh_token.empty()) return loaded;
-
-    // Cross-process serialization + double-checked re-read: block every
-    // agentty instance on one refresh at a time, then re-load so the losers
-    // adopt the winner's freshly-saved token instead of each firing a
-    // redundant refresh (ChatGPT/Codex also rotates refresh tokens, so
-    // concurrent refreshes mutually invalidate and spin the refresh loop).
-    auth::CrossProcessFileLock xlock(codex_credentials_path());
-    if (xlock.held()) {
+refresh_in_section(const maya::held<locks::cred_file>& cap, bool cross,
+                   CodexCredentials loaded, std::uint64_t source_generation) {
+    // Re-read under the lock: a peer that refreshed first has saved its
+    // token, and Codex rotates refresh tokens, so adopt it instead.
+    if (cross) {
         auto [disk, gen] = load_with_generation(cap);
         source_generation = gen;
         if (!disk) return loaded;
         if (!disk->expired(/*skew_ms=*/60'000)) return disk;  // a peer refreshed
         if (disk->refresh_token.empty()) return disk;
-        loaded = std::move(disk);   // refresh with the freshest on-disk token
+        loaded = std::move(*disk);
     }
 
-    auto refreshed = codex_refresh(*loaded);
+    auto refreshed = codex_refresh(loaded);
     if (!refreshed) return loaded;
 
     return store().with(cap, [](Store& st, std::uint64_t source_gen, CodexCredentials source,
@@ -893,7 +875,21 @@ codex_fresh_credentials_locked(const maya::held<locks::auth_refresh>& cap) {
         if (!save_codex_credentials_unlocked(fresh)) return source;
         ++st.generation;
         return fresh;
-    }, source_generation, *loaded, *refreshed);
+    }, source_generation, loaded, *refreshed);
+}
+
+std::optional<CodexCredentials>
+codex_fresh_credentials_locked(const maya::held<locks::auth_refresh>& cap) {
+    auto [loaded, source_generation] = load_with_generation(cap);
+    if (!loaded) return std::nullopt;
+    if (!loaded->expired(/*skew_ms=*/60'000)) return loaded;
+    if (loaded->refresh_token.empty()) return loaded;
+
+    return persistence::with_shared_file(cap, persistence::cred_lane(codex_credentials_path()), codex_credentials_path(),
+        [](const maya::held<locks::cred_file>& h, persistence::Held held,
+           CodexCredentials l, std::uint64_t gen) {
+            return refresh_in_section(h, held.cross_process, std::move(l), gen);
+        }, *loaded, source_generation);
 }
 } // namespace
 

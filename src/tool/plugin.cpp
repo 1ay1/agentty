@@ -6,31 +6,20 @@
 #include "agentty/util/user_root.hpp"
 
 #include "agentty/scope/scope.hpp"
-#include "agentty/config/inventory.hpp"   // kMcpApprovals â€” the one name
-#include "agentty/auth/auth.hpp"        // CrossProcessFileLock
+#include "agentty/config/inventory.hpp"   // kMcpApprovals — the one name
+#include "agentty/io/shared_file.hpp"
 
 #include "agentty/util/sendable.hpp"  // json is Sendable
 
 #include <nlohmann/json.hpp>
 
-#include <atomic>
 #include <cctype>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <system_error>
-#include <thread>
 #include <vector>
-
-#ifndef _WIN32
-#include <unistd.h>   // getpid
-#else
-#include <process.h>  // _getpid
-#define getpid _getpid
-#endif
 
 namespace fs = std::filesystem;
 using nlohmann::json;
@@ -39,26 +28,13 @@ namespace agentty::tools::plugin {
 
 namespace {
 
-// All config MUTATIONS (add/remove/toggle) serialize behind one lock. Each
-// mutator is a loadâ†’modifyâ†’store cycle, and the reducer fires them on
-// DETACHED worker threads (a "disable tool + disable server" pair, or rapid
-// toggles), so without serialization two loads race and the second store
-// clobbers the first's edit (classic lost update).
-//
-// That lock covers THIS process. It is not enough on its own: two agentty
-// instances in one workspace -- a TUI and `agentty plugin add` in another
-// terminal, or two panes -- have separate locks and race exactly the same
-// way. Measured before fixing: 20 of 20 concurrent `plugin add` pairs lost
-// one of the two servers.
-//
-// So a mutator takes BOTH: an in-process lane against our own threads, then
-// auth::CrossProcessFileLock against other agentty processes. See mutate().
-//
-// The lane is a LEAF lock: its body does file IO and nothing else, so the
-// public mutators take `const maya::below<maya::leaf>&`.
-struct Mutations {};
-[[nodiscard]] maya::guarded<Mutations>& mutations() {
-    static maya::guarded<Mutations> m;
+// Every config MUTATION (add/remove/toggle) is one load→modify→store inside
+// the file's shared-file section (io/shared_file.hpp): the lane stops our own
+// worker threads racing, the file lock stops another agentty (a TUI and
+// `agentty plugin add` in another terminal). Measured before: 20 of 20
+// concurrent `plugin add` pairs lost one server.
+[[nodiscard]] persistence::Lane& mutations() {
+    static persistence::Lane m;
     return m;
 }
 
@@ -102,59 +78,28 @@ struct Loaded {
         return out;
     }
     out.existed = true;
-    std::ifstream f(path, std::ios::binary);
-    if (!f) { out.ok = false; return out; }
-    out.doc = json::parse(f, nullptr, /*throw=*/false);
+    auto bytes = persistence::peek_file(path);
+    if (!bytes) { out.ok = false; return out; }
+    out.doc = json::parse(*bytes, nullptr, /*throw=*/false);
     if (!out.doc.is_object()) { out.ok = false; out.doc = json::object(); }
     return out;
 }
 
-[[nodiscard]] bool store(const fs::path& path, const json& doc) {
+// A SYMLINKed mcp.json (a dotfiles repo) is written through to its target, so
+// the rename replaces the real file and the link survives.
+[[nodiscard]] fs::path write_target(const fs::path& path) {
     std::error_code ec;
-    fs::create_directories(path.parent_path(), ec);
-    // If the target is a SYMLINK, write through to its real target rather than
-    // replacing the link with a regular file (a plain rename over a symlink
-    // orphans a user's dotfile symlink). weakly_canonical resolves the link;
-    // if it doesn't exist yet, we keep the original path.
-    fs::path target = path;
     if (fs::is_symlink(path, ec)) {
         auto real = fs::weakly_canonical(path, ec);
-        if (!ec && !real.empty()) target = real;
+        if (!ec && !real.empty()) return real;
     }
-    // Write-then-rename for atomicity: a crash mid-write must not leave a
-    // truncated mcp.json (which would then hit the ParseError refusal on
-    // every subsequent command â€” a self-inflicted lockout). The temp name is
-    // UNIQUE (pid + a monotonic counter) so two concurrent writers â€” our own
-    // detached mutators, or an external tool â€” never open, truncate, and
-    // rename the SAME temp file (which would interleave into corruption).
-    static std::atomic<unsigned long> seq{0};
-    const fs::path tmp = target.string() + ".tmp."
-        + std::to_string(static_cast<long>(::getpid())) + "-"
-        + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return false;
-        f << doc.dump(2) << '\n';
-        f.flush();
-        if (!f) { std::error_code rec; fs::remove(tmp, rec); return false; }
-    }
-    fs::rename(tmp, target, ec);
-#if defined(_WIN32)
-    // Windows refuses to replace a file that ANY process has open without
-    // FILE_SHARE_DELETE — and std::ifstream (every reader of this file,
-    // including is_server_disabled and the bridge) opens without it. A
-    // reader mid-load therefore made the rename fail with access denied /
-    // sharing violation and the edit was dropped (24 concurrent disables:
-    // 22 landed). Readers hold the file for microseconds, so a short
-    // bounded retry turns the transient collision into a delay.
-    for (int attempt = 0; ec && attempt < 50; ++attempt) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(2 + attempt));
-        ec.clear();
-        fs::rename(tmp, target, ec);
-    }
-#endif
-    if (ec) { std::error_code rec; fs::remove(tmp, rec); return false; }
-    return true;
+    return path;
+}
+
+[[nodiscard]] bool store(const fs::path& path, const json& doc) {
+    return persistence::detail::write_in_section(
+        write_target(path).string(), doc.dump(2) + '\n',
+        {.durability = persistence::Durability::Durable, .keep_mode = true});
 }
 
 // The servers object key: honour an existing "servers" spelling (the
@@ -191,11 +136,9 @@ constexpr std::string_view kMcpApprovalsLeaf =
     // and a directory here would throw out of the slurp below.
     std::error_code ec;
     if (!fs::is_regular_file(cfg, ec)) return {};
-    std::ifstream in(cfg, std::ios::binary);
-    if (!in) return {};
-    std::string bytes((std::istreambuf_iterator<char>(in)),
-                      std::istreambuf_iterator<char>());
-    return scope::content_hash(bytes);
+    auto bytes = persistence::read_file(io, cfg);
+    if (!bytes) return {};
+    return scope::content_hash(*bytes);
 }
 }  // namespace
 
@@ -207,14 +150,6 @@ bool is_project_config_trusted(Io io) {
     const std::string h = project_config_hash(io);
     if (h.empty()) return false;
     return scope::load_approvals(kMcpApprovalsLeaf).approved(h);
-}
-
-bool approve_project_config(Io io) {
-    const std::string h = project_config_hash(io);
-    if (h.empty()) return false;   // nothing to approve
-    scope::Approvals a = scope::load_approvals(kMcpApprovalsLeaf);
-    a.approve(h);
-    return scope::save_approvals(kMcpApprovalsLeaf, a);
 }
 
 // The spawn-identity hash for one server: the command + url + args that would
@@ -265,42 +200,45 @@ bool is_server_trusted(Io io, const fs::path& path, const std::string& name) {
     return scope::load_approvals(kMcpApprovalsLeaf).approved(h);
 }
 
-bool approve_server(Io, const fs::path& path, const std::string& name) {
+bool approve_project_config(Io io, const lock_levels::below_file_lane& cap) {
+    const std::string h = project_config_hash(io);
+    if (h.empty()) return false;   // nothing to approve
+    scope::Approvals a;
+    a.approve(h);
+    return scope::save_approvals(io, cap, kMcpApprovalsLeaf, a);   // merges
+}
+
+bool approve_server(Io io, const lock_levels::below_file_lane& cap, const fs::path& path,
+                    const std::string& name) {
     const std::string h = server_hash_from_file(path, name);
     if (h.empty()) return false;   // nothing spawnable to vouch for
-    scope::Approvals a = scope::load_approvals(kMcpApprovalsLeaf);
+    scope::Approvals a;
     a.approve(h);
-    return scope::save_approvals(kMcpApprovalsLeaf, a);
+    return scope::save_approvals(io, cap, kMcpApprovalsLeaf, a);   // merges
 }
 
 namespace {
-// One loadâ†’editâ†’store cycle under both locks. `edit` gets the parsed doc
-// and returns nullopt to write it back, or a result to stop without writing.
-//
-// Order is fixed (in-process first, then cross-process) and every mutator
-// goes through here, so two agentty processes cannot deadlock against each
-// other -- there is only ever one file lock held at a time per cycle.
-//
-// The file lock is BEST-EFFORT by design (see auth.hpp): on a filesystem
-// where it cannot be taken, held() is false and we proceed anyway. store()'s
-// unique-temp + atomic rename still guarantees no torn file -- at worst one
-// side's write wins wholesale, as against a hand editor.
+// One load→edit→store cycle in the file's section. `edit` gets the parsed
+// doc and returns nullopt to write it back, or a result to stop without
+// writing. The section takes the lock on the symlink's TARGET, so editing
+// through a link and editing the real file contend.
 enum class Need { Any, Existing };
 using Edit = std::optional<EditResult>;
 
 template <class F, class... Args>
-EditResult mutate(const maya::below<maya::leaf>& cap, const fs::path& path, Need need, F edit,
+EditResult mutate(const lock_levels::below_file_lane& cap, const fs::path& path, Need need, F edit,
                   Args... args) {
     (void)edit;   // captureless: called as F{} inside the lock
-    return mutations().with(cap, [](Mutations&, std::string p, Need n, Args... a) {
-        const fs::path target{p};
-        auth::CrossProcessFileLock file{target};
-        Loaded l = load(target);
-        if (n == Need::Existing && !l.existed) return EditResult::NotFound;
-        if (!l.ok) return EditResult::ParseError;
-        if (auto stop = F{}(l.doc, std::move(a)...)) return *stop;
-        return store(target, l.doc) ? EditResult::Ok : EditResult::IoError;
-    }, path.string(), need, std::move(args)...);
+    return persistence::with_shared_file(cap, mutations(), write_target(path),
+        [](const maya::held<lock_levels::file_lane>&, persistence::Held, std::string p, Need n,
+           Args... a) {
+            const fs::path target{p};
+            Loaded l = load(target);
+            if (n == Need::Existing && !l.existed) return EditResult::NotFound;
+            if (!l.ok) return EditResult::ParseError;
+            if (auto stop = F{}(l.doc, std::move(a)...)) return *stop;
+            return store(target, l.doc) ? EditResult::Ok : EditResult::IoError;
+        }, path.string(), need, std::move(args)...);
 }
 
 // The servers object (created if absent), and a named entry or null.
@@ -317,7 +255,7 @@ json* existing_entry(json& doc, const std::string& name) {
 }
 } // namespace
 
-EditResult add_server(Io /*io*/, const maya::below<maya::leaf>& cap, const fs::path& path, const ServerSpec& spec,
+EditResult add_server(Io /*io*/, const lock_levels::below_file_lane& cap, const fs::path& path, const ServerSpec& spec,
                       bool force) {
     return mutate(cap, path, Need::Any, [](json& doc, ServerSpec spec, bool force) -> Edit {
     auto& servers = servers_of(doc);
@@ -347,7 +285,7 @@ EditResult add_server(Io /*io*/, const maya::below<maya::leaf>& cap, const fs::p
     }, spec, force);
 }
 
-EditResult add_server_raw(Io, const maya::below<maya::leaf>& cap, const fs::path& path, const std::string& name,
+EditResult add_server_raw(Io, const lock_levels::below_file_lane& cap, const fs::path& path, const std::string& name,
                           const json& entry, bool force) {
     return mutate(cap, path, Need::Any, [](json& doc, std::string name, json entry, bool force) -> Edit {
     if (!entry.is_object()) return EditResult::ParseError;
@@ -362,7 +300,7 @@ EditResult add_server_raw(Io, const maya::below<maya::leaf>& cap, const fs::path
     }, name, entry, force);
 }
 
-EditResult update_server(Io, const maya::below<maya::leaf>& cap, const fs::path& path, const ServerSpec& spec) {
+EditResult update_server(Io, const lock_levels::below_file_lane& cap, const fs::path& path, const ServerSpec& spec) {
     return mutate(cap, path, Need::Existing, [](json& doc, ServerSpec spec) -> Edit {
     json* found = existing_entry(doc, spec.name);
     if (!found) return EditResult::NotFound;
@@ -395,7 +333,7 @@ EditResult update_server(Io, const maya::below<maya::leaf>& cap, const fs::path&
     }, spec);
 }
 
-EditResult remove_server(Io, const maya::below<maya::leaf>& cap, const fs::path& path, const std::string& name) {
+EditResult remove_server(Io, const lock_levels::below_file_lane& cap, const fs::path& path, const std::string& name) {
     return mutate(cap, path, Need::Existing, [](json& doc, std::string name) -> Edit {
         if (!existing_entry(doc, name)) return EditResult::NotFound;
         doc[servers_key(doc)].erase(name);
@@ -424,7 +362,7 @@ std::vector<ServerSpec> list_servers(const fs::path& path) {
     return out;
 }
 
-EditResult set_server_disabled(Io, const maya::below<maya::leaf>& cap, const fs::path& path, const std::string& name,
+EditResult set_server_disabled(Io, const lock_levels::below_file_lane& cap, const fs::path& path, const std::string& name,
                               bool disabled) {
     return mutate(cap, path, Need::Existing, [](json& doc, std::string name, bool disabled) -> Edit {
         json* entry = existing_entry(doc, name);
@@ -447,7 +385,7 @@ bool is_server_disabled(const fs::path& path, const std::string& name) {
     return entry_disabled(entry);
 }
 
-EditResult set_tool_enabled(Io, const maya::below<maya::leaf>& cap, const fs::path& path, const std::string& server,
+EditResult set_tool_enabled(Io, const lock_levels::below_file_lane& cap, const fs::path& path, const std::string& server,
                             const std::string& bare, bool enabled) {
     return mutate(cap, path, Need::Existing,
                   [](json& doc, std::string server, std::string bare, bool enabled) -> Edit {
@@ -600,7 +538,7 @@ int cli(Io io, const maya::unlocked& cap, const std::vector<std::string>& argv) 
             std::printf("'%s' is already trusted\n", rest[0].c_str());
             return 0;
         }
-        if (approve_server(io, path, rest[0])) {
+        if (approve_server(io, cap, path, rest[0])) {
             std::printf("approved %s â€” restart agentty to connect it\n",
                         rest[0].c_str());
             return 0;

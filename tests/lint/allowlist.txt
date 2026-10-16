@@ -115,7 +115,6 @@ io/cred_crypt.cpp: const_cast
 # this file starts no thread of its own. Its caches are maya::guarded or
 # published; the atomics are two sequence counters.
 tool/mcp_tools_backends.cpp: atomic cap_mint
-tool/plugin.cpp: atomic
 # skills: the atomic counts discovery-cache resolutions for a test.
 tool/skills.cpp: atomic
 # The subagent run registry. A subagent runs on a Cmd::task_isolated thread
@@ -173,7 +172,6 @@ mcp/bridge.cpp: atomic
 # http_server: POST workers are a util::WorkerGroup and the session is
 # maya::guarded. The atomic is the liveness flag the provider reads.
 mcp/http_server.cpp: atomic
-mcp/oauth.cpp: atomic
 # rag/adapter: the warm worker is a util::WorkerGroup; the index and the
 # feedback store are maya::guarded (the status row uses try_read so a frame
 # never waits on a rebuild). atomic is the warming gate and the stop flag.

@@ -86,6 +86,13 @@ public:
     [[nodiscard]] static std::expected<ThreadLog, persistence::DeserializeError>
     open_path(std::filesystem::path log_path);
 
+    // The log and its index only, without reading the metadata sidecar: what
+    // a save needs (it only appends, truncates and writes metadata, never
+    // reads it). meta() on the result is empty. The sidecar holds the whole
+    // compaction history, so skipping it is most of the cost of a tail save.
+    [[nodiscard]] static std::expected<ThreadLog, persistence::DeserializeError>
+    open_for_write(const ThreadId& id);
+
     [[nodiscard]] std::size_t size() const noexcept { return offsets_.size(); }
     [[nodiscard]] bool empty()      const noexcept { return offsets_.empty(); }
 
@@ -199,6 +206,9 @@ private:
     std::vector<std::uint64_t> offsets_;
     std::uint64_t              torn_tail_at_ = kNoTear;
     Thread                     meta_thread_;   // messages always empty
+
+    [[nodiscard]] static std::expected<ThreadLog, persistence::DeserializeError>
+    open_impl(std::filesystem::path log_path, bool read_meta);
 };
 
 } // namespace agentty

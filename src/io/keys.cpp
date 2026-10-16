@@ -21,6 +21,7 @@
 #include "agentty/auth/auth.hpp"        // config_dir()
 #include "agentty/auth/cred_crypt.hpp"  // crypt::seal / unseal / looks_sealed
 #include "agentty/auth/keystore.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/dbglog.hpp"
 
 namespace agentty::auth::keys {
@@ -35,35 +36,15 @@ fs::path vault_path() {
     return agentty::auth::config_dir() / "provider-keys.json";
 }
 
-// Atomic + 0600 write of the sealed envelope (the vault holds nothing
-// but ciphertext, but 0600 keeps uniform with credentials.json).
+// Atomic + 0600 write of the sealed envelope. Its only writer is
+// save_settings_locked, inside the settings file's section, so concurrent
+// processes already take turns here.
 bool write_private(const fs::path& p, const std::string& body) {
-    std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
-    fs::path tmp = p;
-    tmp += ".tmp";
-    {
-        std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
-        if (!ofs) return false;
-        ofs.write(body.data(), static_cast<std::streamsize>(body.size()));
-        if (!ofs) return false;
-    }
-#ifndef _WIN32
-    fs::permissions(tmp, fs::perms::owner_read | fs::perms::owner_write,
-                    fs::perm_options::replace, ec);
-    if (ec) {
-        util::dbglog("keys.save.perms", ec.message());
-        ec.clear();
-    }
-#endif
-    fs::rename(tmp, p, ec);
-    if (ec) {
-        std::error_code rm;
-        fs::remove(tmp, rm);
-        util::dbglog("keys.save.rename", ec.message());
-        return false;
-    }
-    return true;
+    if (persistence::detail::write_in_section(p.string(), body,
+            {.durability = persistence::Durability::Durable, .mode = 0600}))
+        return true;
+    util::dbglog("keys.save", "could not write " + p.string());
+    return false;
 }
 
 // The vault body is a plain JSON object: { "provider-id": "key", … }.
@@ -103,11 +84,9 @@ KeyMap load() {
             // stale machine binding, and the file copy is the newer store.
         }
     }
-    std::ifstream ifs(vault_path(), std::ios::binary);
-    if (!ifs) return {};
-    std::string raw((std::istreambuf_iterator<char>(ifs)),
-                    std::istreambuf_iterator<char>());
-    if (raw.empty()) return {};
+    auto file = persistence::peek_file(vault_path());
+    if (!file || file->empty()) return {};
+    const std::string& raw = *file;
     // Fail closed on unauthenticated bytes: wrong machine / corrupt → {}.
     auto body = crypt::looks_sealed(raw) ? crypt::unseal(raw) : std::nullopt;
     if (!body) {

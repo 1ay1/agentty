@@ -134,9 +134,9 @@ struct Host : maya::terminal_host<P> {
         with_unlocked([&](const maya::unlocked& cap) {
             switch (e.kind) {
                 case K::Activate:    (void)cr::activate(io_, cap, e.provider, e.label); break;
-                case K::Remove:      (void)cr::remove(io_, e.provider, e.label); break;
+                case K::Remove:      (void)cr::remove(io_, cap, e.provider, e.label); break;
                 case K::Register:
-                    (void)auth::accounts::snapshot_active(io_, e.provider, e.label);
+                    (void)auth::accounts::snapshot_active(io_, cap, e.provider, e.label);
                     break;
                 case K::AddKey:      (void)cr::add_key(io_, cap, e.provider, e.key); break;
                 case K::SignOut:     auth::vault::sign_out(io_, cap, e.provider); break;
@@ -157,7 +157,9 @@ struct Host : maya::terminal_host<P> {
         if (e.as_new_account)
             for (int n = 2; acc::get(io_, provider, label).has_value() && n < 100; ++n)
                 label = base + " " + std::to_string(n);
-        acc::snapshot_active(io_, provider, label);
+        with_unlocked([&](const maya::unlocked& cap) {
+            acc::snapshot_active(io_, cap, provider, label);
+        });
     }
 
     // The ChatGPT login's credential write (see store_fx.hpp). Loop thread,

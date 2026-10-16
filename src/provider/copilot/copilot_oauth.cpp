@@ -38,6 +38,7 @@
 #include "agentty/util/base64.hpp"
 #include "agentty/util/user_root.hpp"   // user_cache_dir — the support cache
 #include "agentty/io/http.hpp"
+#include "agentty/io/shared_file.hpp"
 #include "agentty/util/dbglog.hpp"
 #include "agentty/util/logx.hpp"
 
@@ -209,23 +210,9 @@ bool save_unlocked(const Stored& s) {
     std::string payload = j.dump();
     std::string to_write = payload;
     if (auto sealed = auth::crypt::seal(payload)) to_write = std::move(*sealed);
-
-    std::error_code ec;
-    fs::create_directories(creds_path().parent_path(), ec);
-    fs::path tmp = creds_path();
-    tmp += ".tmp";
-    {
-        std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
-        if (!ofs) return false;
-        ofs.write(to_write.data(), static_cast<std::streamsize>(to_write.size()));
-        if (!ofs) return false;
-    }
-#ifndef _WIN32
-    ::chmod(tmp.c_str(), 0600);
-#endif
-    fs::rename(tmp, creds_path(), ec);
-    if (ec) { fs::remove(tmp, ec); return false; }
-    return true;
+    return persistence::write_atomic(::agentty::IoAccess::grant(), creds_path(), to_write,
+                                     {.durability = persistence::Durability::Durable,
+                                      .mode = 0600});
 }
 
 // ── Device flow ─────────────────────────────────────────────────────────────
@@ -465,23 +452,9 @@ void save_support(const SupportSets& s) {
     j["supported"] = json::array();
     for (auto& id : s.supported) j["supported"].push_back(id);
     const std::string payload = j.dump();
-
-    std::error_code ec;
-    const auto dest = support_path();
-    fs::create_directories(dest.parent_path(), ec);
-
-    // Temp + rename: a trunc write leaves the file empty then partial, and a
-    // reader that catches it mid-write just relearns the whole set.
-    fs::path tmp = dest;
-    tmp += "." + std::to_string(static_cast<long long>(::getpid())) + ".tmp";
-    {
-        std::ofstream ofs(tmp, std::ios::binary | std::ios::trunc);
-        if (!ofs) return;
-        ofs.write(payload.data(), static_cast<std::streamsize>(payload.size()));
-        if (!ofs) { fs::remove(tmp, ec); return; }
-    }
-    fs::rename(tmp, dest, ec);
-    if (ec) fs::remove(tmp, ec);
+    // A cache: a lost write just relearns the set, so no fsync.
+    (void)persistence::write_atomic(::agentty::IoAccess::grant(), support_path(), payload,
+                                    {.durability = persistence::Durability::Atomic});
 }
 } // namespace
 
@@ -551,6 +524,27 @@ std::optional<CopilotToken> fresh_token(const locks::below_auth_refresh& cap) {
 }
 
 namespace {
+std::optional<CopilotToken> exchange_in_section(const maya::held<locks::cred_file>& h,
+                                                bool cross, bool force, Stored loaded) {
+    // Under the lock a peer may have exchanged already; adopt its token.
+    if (cross && !force) {
+        auto disk = store().with(h, [](CredsFile&) { return load_unlocked(); });
+        if (disk && disk->proxy.valid()
+            && !disk->proxy.expired(/*skew_ms=*/5 * 60 * 1000)) {
+            return disk->proxy;   // a peer refreshed while we waited
+        }
+    }
+
+    auto exchanged = exchange(loaded.github);
+    if (!exchanged) return std::nullopt;
+
+    store().with(h, [](CredsFile&, Stored s) {
+        if (auto cur = load_unlocked()) s.github = cur->github;   // adopt newest ghu_
+        (void)save_unlocked(s);
+    }, Stored{loaded.github, *exchanged});
+    return *exchanged;
+}
+
 std::optional<CopilotToken> fresh_token_locked(const maya::held<locks::auth_refresh>& h) {
     auto loaded = store().with(h, [](CredsFile&) { return load_unlocked(); });
     if (!loaded || loaded->github.access_token.empty()) return std::nullopt;
@@ -560,25 +554,10 @@ std::optional<CopilotToken> fresh_token_locked(const maya::held<locks::auth_refr
         && !loaded->proxy.expired(/*skew_ms=*/5 * 60 * 1000))
         return loaded->proxy;
 
-    // Cross-process de-dup: one instance exchanges at a time, then losers
-    // re-read the peer's freshly-saved token.
-    auth::CrossProcessFileLock xlock(creds_path());
-    if (xlock.held() && !force) {
-        auto disk = store().with(h, [](CredsFile&) { return load_unlocked(); });
-        if (disk && disk->proxy.valid()
-            && !disk->proxy.expired(/*skew_ms=*/5 * 60 * 1000)) {
-            return disk->proxy;   // a peer refreshed while we waited
-        }
-    }
-
-    auto exchanged = exchange(loaded->github);
-    if (!exchanged) return std::nullopt;
-
-    store().with(h, [](CredsFile&, Stored s) {
-        if (auto cur = load_unlocked()) s.github = cur->github;   // adopt newest ghu_
-        (void)save_unlocked(s);
-    }, Stored{loaded->github, *exchanged});
-    return *exchanged;
+    return persistence::with_shared_file(h, persistence::cred_lane(creds_path()), creds_path(),
+        [](const maya::held<locks::cred_file>& c, persistence::Held held, bool f, Stored s) {
+            return exchange_in_section(c, held.cross_process, f, std::move(s));
+        }, force, *loaded);
 }
 } // namespace
 

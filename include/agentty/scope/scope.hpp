@@ -42,6 +42,9 @@
 #include <vector>
 #include <expected>
 
+#include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
+
 namespace agentty::scope {
 
 namespace fs = std::filesystem;
@@ -238,10 +241,12 @@ struct Approvals {
 // Persistence for an Approvals store, under the USER root (~/.agentty/<leaf>).
 // A cloned repo cannot write here, so it cannot pre-approve its own content.
 // load() returns an empty store when the file is missing/malformed (fail
-// closed: no approvals → project config stays Pending). save() is best-effort;
-// returns false on an IO error.
+// closed: no approvals → project config stays Pending), and takes no lock.
+// save() merges into the file inside its cross-process section; false on an
+// IO error.
 [[nodiscard]] Approvals load_approvals(std::string_view leaf) noexcept;
-[[nodiscard]] bool      save_approvals(std::string_view leaf, const Approvals&) noexcept;
+[[nodiscard]] bool      save_approvals(Io, const lock_levels::below_file_lane&,
+                                       std::string_view leaf, const Approvals&) noexcept;
 
 // A stable content hash for a config blob — the identity trust is bound to.
 // Change the bytes (swap a command under an approved name) and the hash

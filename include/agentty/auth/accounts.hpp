@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 #include "agentty/util/io.hpp"
+#include "agentty/util/lock_levels.hpp"
 
 #include <maya/runtime.hpp>
 
@@ -56,8 +57,8 @@ struct Account {
 // Insert or update the (provider, label) slot with a fresh secret, mark it
 // active for that provider, and persist. Used right after a successful login
 // to capture the just-authenticated credential under a name.
-bool upsert(const std::string& provider, const std::string& label,
-            const std::string& secret);
+bool upsert(Io, const maya::below<lock_levels::file_lane>&, const std::string& provider,
+            const std::string& label, const std::string& secret);
 
 // Fetch a specific slot's secret. nullopt when absent.
 [[nodiscard]] std::optional<Account> get(Io, const std::string& provider,
@@ -65,10 +66,12 @@ bool upsert(const std::string& provider, const std::string& label,
 
 // Remove a slot. If it was the active one, the newest remaining account for
 // that provider (if any) becomes active. Returns true if a slot was removed.
-bool remove(Io, const std::string& provider, const std::string& label);
+bool remove(Io, const maya::below<lock_levels::file_lane>&, const std::string& provider,
+            const std::string& label);
 
 // Record which label is active for a provider (without changing secrets).
-bool set_active(const std::string& provider, const std::string& label);
+bool set_active(Io, const maya::below<lock_levels::file_lane>&, const std::string& provider,
+                const std::string& label);
 
 // The registry file (config_dir()/accounts.json). Exposed for tests.
 [[nodiscard]] std::string path();
@@ -82,7 +85,8 @@ bool set_active(const std::string& provider, const std::string& label);
 // under `label` (marking it active). Call right after a successful login so
 // the just-authenticated account is captured by name. Returns false when the
 // provider has no live credential to snapshot.
-bool snapshot_active(Io, const std::string& provider, const std::string& label);
+bool snapshot_active(Io, const maya::below<lock_levels::file_lane>&, const std::string& provider,
+                     const std::string& label);
 
 // Install the saved (provider, label) credential as the provider's active
 // credential and mark it active in the registry. Does NOT touch the live

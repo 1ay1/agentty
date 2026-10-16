@@ -548,7 +548,7 @@ TEST_CASE("web search pane: a paste on a row that takes no text is dropped") {
 TEST_CASE("web search pane: a paste on a locked key row is dropped") {
     KeyHome home;
     if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
-    REQUIRE(agentty::tools::web_search_secret::store("exa-api", "exa-STORED-0123456789"));
+    REQUIRE(agentty::tools::web_search_secret::store(::agentty::IoAccess::grant(), agtest::cap(), "exa-api", "exa-STORED-0123456789"));
     Model m = with_exa_primary();
     focus_row(m, "web_search.key.exa-api");
     m = send(std::move(m), Msg{WebSearchPaste{"exa-PASTED-0123456789"}});
@@ -560,7 +560,7 @@ TEST_CASE("web search pane: a paste on a locked key row is dropped") {
 TEST_CASE("web search pane: opening reads key origins on a worker, not in the reducer") {
     KeyHome home;
     if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
-    REQUIRE(agentty::tools::web_search_secret::store("exa-api", "exa-STORED-0123456789"));
+    REQUIRE(agentty::tools::web_search_secret::store(::agentty::IoAccess::grant(), agtest::cap(), "exa-api", "exa-STORED-0123456789"));
     Model m;
     m.d.persisted.web_search.primary = "exa-api";
     auto [m1, cmd] = app::update(std::move(m), Msg{OpenWebSearch{}});
@@ -604,7 +604,7 @@ TEST_CASE("web search pane: a stale key read does not undo a newer change") {
 TEST_CASE("web search pane: key origins that arrive mid-edit are shown when the edit ends") {
     KeyHome home;
     if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
-    REQUIRE(agentty::tools::web_search_secret::store("exa-api", "exa-STORED-0123456789"));
+    REQUIRE(agentty::tools::web_search_secret::store(::agentty::IoAccess::grant(), agtest::cap(), "exa-api", "exa-STORED-0123456789"));
     Model m;
     m.d.persisted.web_search.primary = "exa-api";
     auto [m1, open_cmd] = app::update(std::move(m), Msg{OpenWebSearch{}});
@@ -639,7 +639,7 @@ TEST_CASE("web search pane: a key that does not look like one is refused, not st
 TEST_CASE("web search pane: Remove key forgets a stored key") {
     KeyHome home;
     if (home.real_keyring) { MESSAGE("skipped: OS keystore armed for this process"); return; }
-    REQUIRE(agentty::tools::web_search_secret::store("exa-api", "exa-STORED-0123456789"));
+    REQUIRE(agentty::tools::web_search_secret::store(::agentty::IoAccess::grant(), agtest::cap(), "exa-api", "exa-STORED-0123456789"));
     Model m = with_exa_primary();
     REQUIRE(pane_of(m).form.find("web_search.keyclear.exa-api") != nullptr);
     focus_row(m, "web_search.keyclear.exa-api");

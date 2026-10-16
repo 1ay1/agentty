@@ -29,6 +29,7 @@ src/io/auth.cpp
 # The persistence store's internals (async writer, settings lock, thread
 # log, blob store) run only under its Io-taking entry points.
 src/io/persistence.cpp
+src/io/shared_file.cpp
 src/io/thread_log.cpp
 src/io/blob_store.cpp
 # The daily gc job (blob sweep + thread retention) runs on its own pool.

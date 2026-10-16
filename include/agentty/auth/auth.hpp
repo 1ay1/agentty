@@ -195,7 +195,8 @@ using TokenResult = std::expected<OAuthToken, OAuthError>;
 // 401 recovery); the reducer's TokenRefreshed handler still installs the
 // result into Deps. The freshest on-disk refresh token wins after the lock is
 // taken, so a rotated token from a peer is never re-used stale.
-[[nodiscard]] TokenResult refresh_access_token_locked(Io, const RefreshToken& refresh_token);
+[[nodiscard]] TokenResult refresh_access_token_locked(Io, const locks::below_cred_file&,
+                                                      const RefreshToken& refresh_token);
 
 // Build the claude.ai authorize URL the user must visit to grant agentty
 // access. Pure: same inputs, same URL — no side effects, safe to call
@@ -266,45 +267,8 @@ void set_pending_refresh(std::string refresh_token);
 [[nodiscard]] std::optional<std::string>
 oauth_proactive_refresh_token(Io, std::int64_t window_ms = 5 * 60 * 1000);
 
-// ── Cross-process advisory file lock (thundering-herd guard) ─────────
-// RAII exclusive lock on `<path>.lock` (POSIX flock / Windows LockFileEx).
-//
-// WHY THIS IS NOT persistence::SharedFile / maya::platform::native_file_lock.
-// Deliberate, not drift. jaal's POSIX backend uses fcntl record locks, which
-// are owned by the PROCESS: two threads of one agentty both acquire and
-// neither waits. This lock uses flock, which is owned by the OPEN FILE
-// DESCRIPTION — each CrossProcessFileLock opens its own descriptor, so two
-// threads of one process DO contend here. The refresh path depends on that:
-// refresh_access_token_locked() is reached from several callers and only some
-// of them hold the process-local refresh mutex, so losing the in-process
-// exclusion would re-open the rotating-refresh-token loop this lock exists to
-// close. Moving it to jaal means also moving the mutex pairing to every
-// caller; until then, flock's stronger guarantee is the safe choice and this
-// comment is the reason.
-//
-// Blocking on construction; released on destruction. Best-effort: if the
-// lock file can't be created/locked, held() is false and the caller should
-// proceed unlocked (no worse than no lock). Used to serialize OAuth token
-// refresh across separate agentty processes so N instances that all see the
-// same expired token don't each fire a refresh — with rotating refresh
-// tokens that mutually invalidates them and spins a refresh loop. Pair it
-// with a re-read of the credential file after held() to adopt a peer's
-// freshly-minted token instead of refreshing again.
-class CrossProcessFileLock {
-public:
-    explicit CrossProcessFileLock(const std::filesystem::path& guarded_file);
-    ~CrossProcessFileLock();
-    CrossProcessFileLock(const CrossProcessFileLock&) = delete;
-    CrossProcessFileLock& operator=(const CrossProcessFileLock&) = delete;
-    [[nodiscard]] bool held() const noexcept { return held_; }
-private:
-#ifdef _WIN32
-    void* h_ = reinterpret_cast<void*>(-1);
-#else
-    int fd_ = -1;
-#endif
-    bool held_ = false;
-};
+// Cross-process locking on any shared file goes through
+// persistence::with_shared_file (io/shared_file.hpp).
 
 // ── Interactive CLI flows (blocking, stdout/stdin — NOT in TUI) ──────────
 int cmd_login(Io, const maya::unlocked&);

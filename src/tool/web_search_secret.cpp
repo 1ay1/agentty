@@ -5,15 +5,14 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/auth/cred_crypt.hpp"
 #include "agentty/auth/keystore.hpp"
+#include "agentty/io/shared_file.hpp"
 
 #include <nlohmann/json.hpp>
 
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <optional>
-#include <sstream>
 #include <unordered_map>
 
 #include <maya/runtime.hpp>
@@ -56,13 +55,9 @@ void forget(std::string_view service) {
 // back -- corrupt, truncated, or sealed on another machine. That is not the
 // same as "no keys": a store() that went ahead would rewrite the file with one
 // key and silently destroy every other service's. So callers refuse to write.
-[[nodiscard]] std::optional<nlohmann::json> read_all() {
-    std::ifstream in(secrets_path(), std::ios::binary);
-    if (!in) return nlohmann::json::object();          // no file: no keys yet
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    const std::string raw = ss.str();
-    if (raw.empty()) return nlohmann::json::object();
+[[nodiscard]] std::optional<nlohmann::json> parse_all(const std::optional<std::string>& file) {
+    if (!file || file->empty()) return nlohmann::json::object();   // no keys yet
+    const std::string& raw = *file;
     // Only a sealed envelope is accepted. Unlike embed_keys.json there is no
     // legacy plaintext form to read, so a hand-written plaintext file is not
     // trusted as a key store.
@@ -75,28 +70,26 @@ void forget(std::string_view service) {
     return std::nullopt;
 }
 
-bool write_all(const nlohmann::json& j) {
-    std::error_code ec;
-    fs::create_directories(secrets_path().parent_path(), ec);
-    // Refuse to persist rather than fall back to plaintext.
-    auto sealed = auth::crypt::seal(j.dump());
-    if (!sealed) return false;
+[[nodiscard]] std::optional<nlohmann::json> read_all() {
+    return parse_all(persistence::peek_file(secrets_path()));
+}
 
-    const auto tmp = fs::path{secrets_path().string() + ".tmp"};
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) return false;
-        out << *sealed;
-        if (!out) return false;
-    }
-#if !defined(_WIN32)
-    // Owner-only before the rename, so the secret is never briefly readable.
-    fs::permissions(tmp, fs::perms::owner_read | fs::perms::owner_write,
-                    fs::perm_options::replace, ec);
-#endif
-    fs::rename(tmp, secrets_path(), ec);
-    if (ec) { fs::remove(tmp, ec); return false; }
-    return true;
+// Set (empty key: drop) one service's key, as one read-modify-write in the
+// file's shared-file section so two windows saving different services both
+// keep theirs. Sealed, 0600, atomic. Refuses to touch an unreadable file
+// (it would destroy the other services' keys) or to write plain.
+persistence::Update update_key(Io io, const lock_levels::below_file_lane& cap,
+                               const std::string& service, const std::string& key) {
+    return persistence::update_shared(io, cap, secrets_path(),
+        {.durability = persistence::Durability::Durable, .mode = 0600},
+        [](std::optional<std::string> cur, std::string svc, std::string k)
+            -> std::optional<std::string> {
+            auto all = parse_all(cur);
+            if (!all) return std::nullopt;
+            if (k.empty()) { if (all->erase(svc) == 0) return std::nullopt; }
+            else (*all)[svc] = k;
+            return auth::crypt::seal(all->dump());
+        }, service, key);
 }
 
 [[nodiscard]] std::string from_env(std::string_view service) {
@@ -170,24 +163,23 @@ bool plausible(std::string_view key) {
     return true;
 }
 
-bool store(std::string_view service, std::string_view key) {
+bool store(Io io, const lock_levels::below_file_lane& cap, std::string_view service,
+           std::string_view key) {
     if (service.empty()) return false;
     forget(service);
-    if (key.empty()) return erase(service);
+    if (key.empty()) return erase(io, cap, service);
     if (!plausible(key)) return false;
 
     if (auth::keystore::available()
         && auth::keystore::store(keystore_key(service), std::string{key})
                == auth::keystore::Status::Ok) {
         // One home for the secret: drop any stale sealed copy.
-        if (auto all = read_all(); all && all->erase(std::string{service}) > 0)
-            (void)write_all(*all);
+        (void)update_key(io, cap, std::string{service}, {});
         return true;
     }
-    auto all = read_all();
-    if (!all) return false;   // unreadable file: never overwrite the other keys
-    (*all)[std::string{service}] = std::string{key};
-    if (!write_all(*all)) return false;
+    if (update_key(io, cap, std::string{service}, std::string{key})
+        != persistence::Update::Written)
+        return false;
     // The keystore is enabled but refused the write: an OLDER copy there would
     // still win over the file (load() asks the keystore first), so drop it.
     if (auth::keystore::available())
@@ -195,14 +187,13 @@ bool store(std::string_view service, std::string_view key) {
     return true;
 }
 
-bool erase(std::string_view service) {
+bool erase(Io io, const lock_levels::below_file_lane& cap, std::string_view service) {
     if (service.empty()) return false;
     forget(service);
     bool any = false;
     if (auth::keystore::available())
         any = auth::keystore::remove(keystore_key(service)) == auth::keystore::Status::Ok;
-    auto all = read_all();
-    if (all && all->erase(std::string{service}) > 0) any = write_all(*all) || any;
+    if (update_key(io, cap, std::string{service}, {}) == persistence::Update::Written) any = true;
     return any;
 }
 

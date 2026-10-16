@@ -57,48 +57,8 @@ using json = nlohmann::json;
 // rather than threading it through every helper.
 static Io internal_io() { return IoAccess::grant(); }
 
-bool write_json_atomic(Io, const fs::path& target, const std::string& content) {
-    fs::path tmp = target;
-    tmp += ".tmp";
-#ifdef _WIN32
-    FILE* fp = ::_wfopen(tmp.wstring().c_str(), L"wb");
-#else
-    FILE* fp = std::fopen(tmp.c_str(), "wb");
-#endif
-    if (!fp) return false;
-    if (std::fwrite(content.data(), 1, content.size(), fp) != content.size()) {
-        std::fclose(fp);
-        std::error_code ec; fs::remove(tmp, ec);
-        return false;
-    }
-    std::fflush(fp);
-#ifdef _WIN32
-    (void)::_commit(::_fileno(fp));
-#else
-    (void)::fsync(::fileno(fp));
-#endif
-    if (std::fclose(fp) != 0) {
-        std::error_code ec; fs::remove(tmp, ec);
-        return false;
-    }
-    std::error_code ec;
-    fs::rename(tmp, target, ec);
-    if (ec) {
-        std::error_code ec2; fs::remove(tmp, ec2);
-        return false;
-    }
-    // fsync the parent directory so the rename's dentry itself survives a
-    // crash/power-loss. Without this the file content is durable (we fsync'd
-    // the fd above) but the directory entry that publishes it at `target`
-    // may not be — the file can vanish after recovery. Mirrors the hardened
-    // atomic write in tool/util/fs_helpers.cpp.
-#ifndef _WIN32
-    if (fs::path parent = target.parent_path(); !parent.empty()) {
-        int dfd = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-        if (dfd >= 0) { (void)::fsync(dfd); ::close(dfd); }
-    }
-#endif
-    return true;
+bool write_json_atomic(Io io, const fs::path& target, const std::string& content) {
+    return write_atomic(io, target, content, {.durability = Durability::Durable});
 }
 
 // ── Cross-process exclusive lock over the settings file ──────────────────
@@ -1810,11 +1770,13 @@ static bool save_thread_sync(const lock_levels::below_file_lane& cap, const Thre
     const auto legacy_path = threads_dir() / (t.id.value + ".json");
     std::error_code ec;
 
-    auto log = ThreadLog::open(t.id);
+    // open_for_write: neither the write nor the check needs the metadata
+    // sidecar, which holds the whole compaction history.
+    auto log = ThreadLog::open_for_write(t.id);
     if (log && log->store_thread(t)) {
         // Re-open from scratch so the verification reads the FILES, not
         // the in-memory state that just wrote them.
-        auto check = ThreadLog::open(t.id);
+        auto check = ThreadLog::open_for_write(t.id);
         const LogMismatch diff =
             check ? log_diff(*check, persistable(t.messages))
                   : LogMismatch{LogMismatch::Kind::Count, 0, "log", "unopenable"};
@@ -2063,18 +2025,18 @@ struct SaveJob {
 // Encode + append [from, end) after cutting the log at `from`, then verify
 // only the new lines. Returns false on any failure; the caller then does a
 // full save, which also repairs whatever this left behind.
-static bool save_tail_sync(const SaveJob& job) {
-    auto log = ThreadLog::open(job.meta.id);
+static bool save_tail_sync(const SaveJob& job, std::size_t total) {
+    auto log = ThreadLog::open_for_write(job.meta.id);
     if (!log || !log->exists() || log->size() < job.from) return false;
     if (!log->truncate_to(job.from)) return false;
     for (const auto& m : job.tail)
         if (!log->append(m)) return false;
     if (!log->set_meta(job.meta)) return false;
-    if (log->size() != job.fps.size()) return false;
+    if (log->size() != total) return false;
 
     // Same gate as the full path, scoped to what this save wrote. Reads
     // back the appended lines from the FILES, via a fresh open.
-    auto check = ThreadLog::open(job.meta.id);
+    auto check = ThreadLog::open_for_write(job.meta.id);
     if (!check) return false;
     const auto got = check->range(job.from, check->size());
     const LogMismatch diff = log_diff_range(got, job.tail, job.from);
@@ -2088,8 +2050,42 @@ static bool save_tail_sync(const SaveJob& job) {
     }
     AGT_LOG(Persist, Debug, "thread.save",
             "result=ok format=log mode=tail id={} from={} wrote={} messages={}",
-            job.meta.id.value, job.from, job.tail.size(), job.fps.size());
+            job.meta.id.value, job.from, job.tail.size(), total);
     return true;
+}
+
+// One lane for every thread's log; the file lock (inside the section) is per
+// thread, so two agentty saving DIFFERENT threads never wait on each other.
+persistence::LaneOf<lock_levels::thread_log>& thread_log_lane() {
+    static persistence::LaneOf<lock_levels::thread_log> l;
+    return l;
+}
+
+// One drain job, inside its thread's section: the tail path, and on failure
+// a full rewrite from the verified head; or a full save.
+static bool write_job(const maya::held<lock_levels::thread_log>& cap, const SaveJob& next,
+                      std::size_t total) {
+    if (next.full) return save_thread_sync(cap, *next.full);
+    if (save_tail_sync(next, total)) return true;
+    // The tail write failed partway. The head before `from` is the confirmed,
+    // verified state (the section keeps every other writer out), so rebuild
+    // the whole thread from it and write it all, which also repairs whatever
+    // the tail left.
+    if (auto log = ThreadLog::open_for_write(next.meta.id); log && log->size() >= next.from) {
+        Thread t = next.meta;
+        t.messages = log->range(0, next.from);
+        if (t.messages.size() == next.from) {
+            for (const auto& m : next.tail) t.messages.push_back(m);
+            if (save_thread_sync(cap, t)) return true;
+        }
+    }
+    // The head is gone too (log emptied or replaced behind our back). This
+    // job only carries the tail, so it can't be written whole; the caller
+    // drops `known`, which makes the NEXT save full and heals it.
+    AGT_LOG(Persist, Error, "thread.save",
+            "tail save failed and log head unreadable id={} from={} — next save will be full",
+            next.meta.id.value, next.from);
+    return false;
 }
 
 // ── Async writer ─────────────────────────────────────────────────────
@@ -2143,7 +2139,7 @@ WriterStateLock& async_writer_state() {
 
 // Defined after the writer: delete_thread() and the writer's undo of a save
 // that raced a delete both remove a thread's files and index row through it.
-void remove_thread_files(const lock_levels::below_file_lane& cap, const ThreadId& id);
+void remove_thread_files(const lock_levels::below_thread_log& cap, const ThreadId& id);
 
 struct AsyncWriter {
     // Reached in the constructor, so the state static is built first and
@@ -2369,46 +2365,28 @@ void AsyncWriter::run(const maya::unlocked& cap) {
         auto& key  = taken->key;
         auto& next = taken->job;
 
-        // Run outside the lock so concurrent enqueue() calls don't block on
-        // the (potentially slow) fsync.
+        // Run outside the writer state so enqueue() never waits on an fsync,
+        // and inside the thread's own section, so a second agentty saving
+        // the same thread waits its turn instead of interleaving appends.
         bool ok = false;
+        // What the bookkeeping below needs, taken before the job moves in.
+        const bool        was_full = next.full.has_value();
+        const Thread      meta     = next.meta;
+        const std::optional<std::string> full_idx =
+            was_full ? std::optional<std::string>{index_key(next.full->title, next.full->updated_at)}
+                     : std::nullopt;
+        std::vector<std::uint64_t> fps = std::move(next.fps);
         try {
-            if (!next.full) {
-                ok = save_tail_sync(next);
-                if (!ok) {
-                    // The tail write failed partway. The head before `from`
-                    // is the confirmed, verified state (no other job for this
-                    // key can have run in between), so rebuild the whole
-                    // thread from it and do a full write, which also repairs
-                    // whatever the tail left.
-                    if (auto log = ThreadLog::open(next.meta.id);
-                        log && log->size() >= next.from) {
-                        Thread t = next.meta;
-                        t.messages = log->range(0, next.from);
-                        if (t.messages.size() == next.from) {
-                            for (auto& m : next.tail) t.messages.push_back(std::move(m));
-                            ok = save_thread_sync(cap, t);
-                        }
-                    }
-                    // The head is gone too (log emptied or replaced behind
-                    // our back). This job only carries the tail, so it can't
-                    // be written whole. Dropping `known` below makes the NEXT
-                    // save full, which heals it; the reducer saves every
-                    // round and on quit, so the gap is one round at most.
-                    if (!ok)
-                        AGT_LOG(Persist, Error, "thread.save",
-                                "tail save failed and log head unreadable "
-                                "id={} from={} — next save will be full",
-                                next.meta.id.value, next.from);
-                }
-            } else {
-                ok = save_thread_sync(cap, *next.full);
-            }
+            ok = persistence::with_shared_file(cap, thread_log_lane(),
+                threads_dir() / (meta.id.value + ".jsonl"),
+                [](const maya::held<lock_levels::thread_log>& h, persistence::Held,
+                   SaveJob job, std::size_t total) { return write_job(h, job, total); },
+                std::move(next), fps.size());
             // The picker index only needs refreshing when what it shows
             // changes (title, timestamps) or at the first save. It is a
             // read-modify-write of one JSON file covering every thread, so
             // doing it every round was pure waste.
-            if (ok && !next.full) maybe_reindex(cap, next.meta);
+            if (ok && !was_full) maybe_reindex(cap, meta);
         }
         catch (const std::exception& e) {
             // best-effort, same policy as the sync path
@@ -2417,7 +2395,7 @@ void AsyncWriter::run(const maya::unlocked& cap) {
         catch (...) { util::dbglog("persistence.async_save", "non-std exception"); }
 
         std::optional<std::string> idx;
-        if (ok && next.full) idx = index_key(next.full->title, next.full->updated_at);
+        if (ok && full_idx) idx = full_idx;
         const bool undo = st.with(cap, [](WriterState& s, std::string k, bool good,
                    std::vector<std::uint64_t> fps, std::optional<std::string> ik) {
             s.in_flight.clear();
@@ -2428,7 +2406,7 @@ void AsyncWriter::run(const maya::unlocked& cap) {
             else       s.known[k].fps = std::move(fps);
             if (ik) s.indexed[k] = std::move(*ik);
             return false;
-        }, key, ok, std::move(next.fps), std::move(idx));
+        }, key, ok, std::move(fps), std::move(idx));
         if (undo) {
             AGT_LOG(Persist, Info, "thread.save",
                     "id={} deleted mid-save; removing what the save wrote", key);
@@ -2444,12 +2422,17 @@ void save_thread(Io, const maya::below<maya::leaf>& cap, const Thread& t) {
 
 // The files a thread owns on disk, and its index row. Shared by
 // delete_thread() and the async writer's undo of a save that raced a delete.
-void remove_thread_files(const lock_levels::below_file_lane& cap, const ThreadId& id) {
-    std::error_code ec;
-    fs::remove(threads_dir() / (id.value + ".json"), ec);
-    fs::remove(threads_dir() / (id.value + ".transcript.md"), ec);
-    // The log format: .jsonl, .ofs, .meta.json.
-    if (auto log = ThreadLog::open(id)) log->remove();
+void remove_thread_files(const lock_levels::below_thread_log& cap, const ThreadId& id) {
+    // Inside the thread's section, so a save in another agentty can't be
+    // halfway through re-creating the files we're removing.
+    persistence::with_shared_file(cap, thread_log_lane(), threads_dir() / (id.value + ".jsonl"),
+        [](const maya::held<lock_levels::thread_log>&, persistence::Held, std::string v) {
+            std::error_code ec;
+            fs::remove(threads_dir() / (v + ".json"), ec);
+            fs::remove(threads_dir() / (v + ".transcript.md"), ec);
+            // The log format: .jsonl, .ofs, .meta.json.
+            if (auto log = ThreadLog::open(ThreadId{v})) log->remove();
+        }, id.value);
     // Blobs are shared between threads (content-addressed), so they are
     // left for blob gc's mark-and-sweep. The index entry goes now, under
     // its lock, so the picker shows no ghost row.
@@ -2538,7 +2521,7 @@ std::optional<Thread> load_thread_by_id(Io io, const ThreadId& id) {
     return std::move(*loaded);
 }
 
-void delete_thread(Io, const lock_levels::below_file_lane& cap, const ThreadId& id) {
+void delete_thread(Io, const lock_levels::below_thread_log& cap, const ThreadId& id) {
     // Cancel FIRST: a save queued before this delete is dropped, so it can't
     // overwrite the removal below. One already mid-write is undone by the
     // worker when it finishes.
@@ -2546,7 +2529,7 @@ void delete_thread(Io, const lock_levels::below_file_lane& cap, const ThreadId& 
     remove_thread_files(cap, id);
 }
 
-ExpireStats expire_threads(Io io, const lock_levels::below_file_lane& cap, int keep_days,
+ExpireStats expire_threads(Io io, const lock_levels::below_thread_log& cap, int keep_days,
                            const ThreadId& keep, bool dry_run) {
     ExpireStats st;
     if (keep_days <= 0) return st;

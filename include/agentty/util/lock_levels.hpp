@@ -40,6 +40,11 @@ using copilot_auto = maya::rank<12, "copilot.auto_session">;
 // leaf) and does the network refresh.
 using auth_refresh = maya::rank<15, "auth.refresh">;
 
+// One credential file's read-modify-write, held across the network refresh
+// so other processes adopt the token instead of refreshing again. Entered
+// from inside the provider's refresh lane, so it ranks above it.
+using cred_file = maya::rank<17, "auth.cred_file">;
+
 // The RAG index: held for a whole retrieve/refresh, which reads the skills
 // catalog, the memory store and other caches inside.
 using rag_index = maya::rank<20, "rag.index">;
@@ -47,6 +52,10 @@ using rag_index = maya::rank<20, "rag.index">;
 // A memory scope file's read-modify-write (takes the id rng inside). Read
 // by a RAG reindex, so it ranks above the index.
 using memory_store = maya::rank<25, "memory.store">;
+
+// One thread's log (.jsonl/.ofs/.meta.json) while the drain worker writes
+// it. The thread index's lane (file_lane) is taken inside, so it ranks below.
+using thread_log = maya::rank<28, "persistence.thread_log">;
 
 // A shared-file lane: one read-modify-write of a file two agentty instances
 // share (thread index, settings). Its body takes the cross-process file
@@ -66,8 +75,10 @@ using settings_cache = maya::rank<40, "settings_cache.state">;
 using below_mcp_connecting = maya::below<mcp_connecting>;
 using below_copilot_auto   = maya::below<copilot_auto>;
 using below_auth_refresh   = maya::below<auth_refresh>;
+using below_cred_file      = maya::below<cred_file>;
 using below_rag_index      = maya::below<rag_index>;
 using below_memory_store   = maya::below<memory_store>;
+using below_thread_log     = maya::below<thread_log>;
 using below_file_lane      = maya::below<file_lane>;
 using below_worker_slot    = maya::below<worker_slot>;
 using below_writer_state   = maya::below<writer_state>;
