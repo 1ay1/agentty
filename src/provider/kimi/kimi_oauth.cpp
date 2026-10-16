@@ -333,15 +333,15 @@ request_device_code(std::string& out_device_code, int& out_interval) {
 }
 
 std::expected<KimiToken, OAuthError>
-poll_for_token(const std::string& device_code, int interval_s, int timeout_s,
-               const CancelProbe& cancelled) {
+poll_for_token(const maya::unlocked& cap, const std::string& device_code, int interval_s,
+               int timeout_s, const CancelProbe& cancelled) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
     int interval = interval_s > 0 ? interval_s : 5;
     while (std::chrono::steady_clock::now() < deadline) {
         if (cancelled.stop_requested())
             return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
         // The server's interval, cut short the moment the login is cancelled.
-        if (maya::delay_for(cancelled, std::chrono::seconds(interval)))
+        if (maya::delay_for(cap, cancelled, std::chrono::seconds(interval)))
             return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
         auto r = post_form(kTokenPath,
             form_encode({{"grant_type", "urn:ietf:params:oauth:grant-type:device_code"},
@@ -454,7 +454,7 @@ parse_token_response(std::string_view json_body, std::int64_t now_ms) {
 }
 
 std::expected<KimiToken, OAuthError>
-login(const maya::below<maya::leaf>& cap, int timeout_s, DeviceCodeSink on_device_code,
+login(const maya::unlocked& cap, int timeout_s, DeviceCodeSink on_device_code,
       CancelProbe cancelled) {
     if (cancelled.stop_requested())
         return std::unexpected(OAuthError{OAuthErrorKind::Network, "login cancelled"});
@@ -465,7 +465,7 @@ login(const maya::below<maya::leaf>& cap, int timeout_s, DeviceCodeSink on_devic
     if (!dc) return std::unexpected(dc.error());
     if (on_device_code) on_device_code(*dc);
 
-    auto tok = poll_for_token(device_code, interval, timeout_s, cancelled);
+    auto tok = poll_for_token(cap, device_code, interval, timeout_s, cancelled);
     if (!tok) return std::unexpected(tok.error());
 
     save_token(cap, *tok);

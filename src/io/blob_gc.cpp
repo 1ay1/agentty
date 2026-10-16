@@ -299,7 +299,7 @@ void start_background_gc() {
         // at all. delay_for returns true if we were asked to stop first — one
         // cancellation channel, the token, rather than a second stop flag that
         // someone has to remember to notify.
-        if (maya::delay_for(st, kStartDelay)) return;
+        if (maya::delay_for(cap, st, kStartDelay)) return;
         try {
             (void)collect_if_due(cap, st);   // stops at its next check on shutdown
         } catch (const std::exception& e) {

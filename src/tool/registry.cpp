@@ -148,13 +148,27 @@ std::shared_ptr<const Snapshot> native_only() {
     return s;
 }
 
-std::shared_ptr<const Snapshot> refresh_wire_cache() {
+// Whether this call may be the one that connects external MCP (spawns every
+// configured server, up to 15 s). find() is called from reducers on the UI
+// thread (tool scheduling, the permission prompt), so it must never be the
+// caller that connects: it froze the UI when it beat init's warm-up task to
+// the first access. A find() before the connect sees the native tools, the
+// same as any caller arriving mid-connect. Every other access may connect:
+// on ACP and `agentty run` the first select_wire_tools() on a turn worker is
+// what brings MCP up.
+enum class Connect { May, Never };
+
+std::shared_ptr<const Snapshot> refresh_wire_cache(Connect may = Connect::May) {
     // The first caller connects external MCP; anyone arriving meanwhile gets
     // the native tools right away (it may be the UI thread, and the connect
     // can take up to 15 s).
     enum class Claim { Mine, Busy, Done };
-    const Claim claim = [] {
+    const Claim claim = [may] {
         Phase expect = Phase::Idle;
+        if (may == Connect::Never) {
+            expect = connect_phase().load();
+            return expect == Phase::Connected ? Claim::Done : Claim::Busy;
+        }
         if (connect_phase().compare_exchange_strong(expect, Phase::Connecting))
             return Claim::Mine;
         return expect == Phase::Connected ? Claim::Done : Claim::Busy;
@@ -272,7 +286,7 @@ std::string unknown_tool_error(std::string_view name) {
 }
 
 const ToolDef* find(std::string_view name) {
-    const auto snapshot = refresh_wire_cache();
+    const auto snapshot = refresh_wire_cache(Connect::Never);
     if (auto it = snapshot->idx.find(std::string{name}); it != snapshot->idx.end())
         return it->second;
     // Miss: retry once under the canonical name so a legacy alias resolves.

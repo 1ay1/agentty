@@ -33,7 +33,7 @@ bool CallContext::wait(std::chrono::milliseconds d, std::stop_token also) const 
     std::optional<std::stop_callback<std::function<void()>>> also_cb;
     if (also.stop_possible())
         also_cb.emplace(also, std::function<void()>{[merged] { merged->request_stop(); }});
-    return maya::delay_for(merged->get_token(), d) || cancelled();
+    return maya::delay_for(capability(), merged->get_token(), d) || cancelled();
 }
 
 } // namespace agentty::tools

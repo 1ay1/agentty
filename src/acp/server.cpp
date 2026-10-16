@@ -3121,8 +3121,7 @@ StopReason AgentServer::stream_completion(Io io, const Cap& cap, const std::stri
                out_error + " (attempt " + std::to_string(attempt + 1) + " of " +
                    std::to_string(kMaxAttempts) + " in " + std::to_string(wait.count()) + "s)");
         // Wait on the cancel itself: a stop ends the wait at once.
-        if (snap->cancel ? maya::delay_for(snap->cancel->token(), wait)
-                         : maya::delay_for(std::stop_token{}, wait))
+        if (maya::delay_for(cap, snap->cancel ? snap->cancel->token() : std::stop_token{}, wait))
             break;
         out_error.clear();
         last_err_status = 0;
@@ -3439,7 +3438,7 @@ bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool&
         // deadline we fail the tool and move on.
         constexpr auto kToolDeadline = std::chrono::minutes(10);
         const auto tool_start = std::chrono::steady_clock::now();
-        const bool woke = maya::delay_for(wake.get_token(), kToolDeadline);
+        const bool woke = maya::delay_for(cap, wake.get_token(), kToolDeadline);
         on_cancel.reset();
 
         // Finished beats cancelled: a tool that completed in the same instant

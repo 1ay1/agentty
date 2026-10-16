@@ -70,7 +70,7 @@ using CancelProbe    = std::stop_token;
 // expires, or `cancelled()` trips. On success the token bundle is persisted
 // and returned. `timeout_s` bounds the whole poll loop.
 [[nodiscard]] std::expected<KimiToken, auth::OAuthError>
-login(const maya::below<maya::leaf>&, int timeout_s, DeviceCodeSink on_device_code,
+login(const maya::unlocked&, int timeout_s, DeviceCodeSink on_device_code,
       CancelProbe cancelled);
 
 // ── Credential store ───────────────────────────────────────────────────────

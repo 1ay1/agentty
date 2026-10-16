@@ -406,11 +406,12 @@ TurnResult ExternalAcpBackend::prompt(const maya::unlocked&       cap,
         round_.publish(std::move(round));
     }
     struct RoundGuard {
-        ExternalAcpBackend* self;
+        ExternalAcpBackend*   self;
+        const maya::unlocked& cap;   // the prompt's: this thread holds nothing
         ~RoundGuard() {
-            if (auto r = self->round_.take()) (void)r->inflight.stop_and_wait(std::nullopt);
+            if (auto r = self->round_.take()) (void)r->inflight.stop_and_wait(cap, std::nullopt);
         }
-    } round_guard{this};
+    } round_guard{this, cap};
 
     acp::PromptParams pp;
     pp.sessionId = *sid;

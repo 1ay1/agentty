@@ -799,7 +799,7 @@ int main() {
 
         const auto t0 = std::chrono::steady_clock::now();
         const std::size_t stuck = tools::subagent::shutdown_running(
-            std::chrono::milliseconds(3000));
+            agtest::cap(), std::chrono::milliseconds(3000));
         const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
         runner.join();

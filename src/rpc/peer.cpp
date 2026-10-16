@@ -425,7 +425,7 @@ void Peer::Core::ticker(const maya::unlocked& cap, std::stop_token st) {
         const auto now = Clock::now();
         if (*next.at > now) {
             const auto wait = std::min<Clock::duration>(*next.at - now, 50ms);
-            if (maya::delay_for(st, std::chrono::ceil<std::chrono::milliseconds>(wait))) return;
+            if (maya::delay_for(cap, st, std::chrono::ceil<std::chrono::milliseconds>(wait))) return;
             continue;
         }
         perform(cap, s.with(cap, [](Shared& sh, Clock::time_point t) {

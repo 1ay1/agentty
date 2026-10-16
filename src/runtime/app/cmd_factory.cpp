@@ -3045,11 +3045,12 @@ Sub codex_login_sub(std::uint64_t attempt_id) {
     // OAuth mode blocks while the user signs in.
     return cmd::io_stream(
         "login/codex/" + std::to_string(attempt_id),
-        [](Io io, maya::Sink<Msg> out, std::stop_token stop, std::uint64_t attempt_id) {
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token stop,
+           std::uint64_t attempt_id) {
         const std::stop_token cancelled = stop;
         try {
             auto r = provider::chatgpt::codex_login(
-                io, 900, [attempt_id, out](
+                io, cap, 900, [attempt_id, out](
                          const provider::chatgpt::CodexDeviceCode& code) {
                     out.send(Msg{CodexDeviceCodeReady{
                         .attempt_id = attempt_id,

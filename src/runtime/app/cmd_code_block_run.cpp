@@ -488,7 +488,7 @@ static void run_block_body(const maya::unlocked& cap, maya::Sink<Msg> out, std::
     auto outcome = maya::scope(cap, stop, [&](maya::nursery& n) {
         // The helper's own token comes from the scope's, so Esc reaches the
         // spinner too; the callback folds it into `done`.
-        auto beat = n.spawn([](std::stop_token st, maya::co_owned<Beat> b, std::string label,
+        auto beat = n.spawn([](const maya::unlocked& hcap, std::stop_token st, maya::co_owned<Beat> b, std::string label,
                                bool con) {
             if (!con) return;
             const std::stop_callback on_stop(st, [&b] { std::stop_source(b->done).request_stop(); });
@@ -505,7 +505,7 @@ static void run_block_body(const maya::unlocked& cap, maya::Sink<Msg> out, std::
                 s += "\r\x1b[2K\x1b[2m" + std::string(kSpin[spin++ % 8])
                    + " running\u2026 " + std::to_string(secs) + "s\x1b[0m";
                 std::fputs(s.c_str(), stdout); std::fflush(stdout);
-            } while (!maya::delay_for(b->done.get_token(), std::chrono::milliseconds(250)));
+            } while (!maya::delay_for(hcap, b->done.get_token(), std::chrono::milliseconds(250)));
         }, beat_state, label, con);
 
         // However the command ends (or throws), stop the spinner before the

@@ -259,8 +259,8 @@ std::expected<DeviceAuthorization, OAuthError> request_device_authorization() {
 }
 
 std::expected<DeviceGrant, OAuthError>
-poll_device_authorization(const DeviceAuthorization& device, int timeout_s,
-                          const CodexCancelProbe& cancelled) {
+poll_device_authorization(const maya::unlocked& cap, const DeviceAuthorization& device,
+                          int timeout_s, const CodexCancelProbe& cancelled) {
     using clock = std::chrono::steady_clock;
     const auto timeout = std::chrono::seconds{std::max(timeout_s, 1)};
     const auto deadline = clock::now() + timeout;
@@ -269,7 +269,7 @@ poll_device_authorization(const DeviceAuthorization& device, int timeout_s,
     // moment the login is cancelled.
     const auto wait_for_next_poll = [&] {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - clock::now());
-        (void)maya::delay_for(cancelled,
+        (void)maya::delay_for(cap, cancelled,
             std::min<std::chrono::milliseconds>(std::chrono::seconds{device.interval_s}, left));
     };
 
@@ -750,8 +750,8 @@ bool codex_device_auth_preferred() noexcept {
 }
 
 std::expected<CodexCredentials, OAuthError>
-codex_device_login(CodexDeviceCodeSink on_device_code, int timeout_s,
-                   CodexCancelProbe cancelled) {
+codex_device_login(const maya::unlocked& cap, CodexDeviceCodeSink on_device_code,
+                   int timeout_s, CodexCancelProbe cancelled) {
     if (cancelled.stop_requested()) {
         return std::unexpected(OAuthError{OAuthErrorKind::Network,
             "device-code login cancelled"});
@@ -766,7 +766,7 @@ codex_device_login(CodexDeviceCodeSink on_device_code, int timeout_s,
         });
     }
 
-    auto grant = poll_device_authorization(*device, timeout_s, cancelled);
+    auto grant = poll_device_authorization(cap, *device, timeout_s, cancelled);
     if (!grant) return std::unexpected(grant.error());
     if (cancelled.stop_requested()) {
         return std::unexpected(OAuthError{OAuthErrorKind::Network,
@@ -792,10 +792,10 @@ codex_device_login(CodexDeviceCodeSink on_device_code, int timeout_s,
 }
 
 std::expected<CodexCredentials, OAuthError>
-codex_login(Io io, int timeout_s, CodexDeviceCodeSink on_device_code,
+codex_login(Io io, const maya::unlocked& cap, int timeout_s, CodexDeviceCodeSink on_device_code,
             CodexCancelProbe cancelled) {
     if (codex_device_auth_preferred())
-        return codex_device_login(std::move(on_device_code), timeout_s,
+        return codex_device_login(cap, std::move(on_device_code), timeout_s,
                                   std::move(cancelled));
 
     auth::PkceVerifier verifier{auth::random_urlsafe(io, 64)};

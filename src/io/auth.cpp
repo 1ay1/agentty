@@ -1078,7 +1078,7 @@ int cmd_login(Io io, const maya::unlocked& cap) {
                       << std::flush;
         }
         auto r = provider::chatgpt::codex_login(
-            io, 900, [](const provider::chatgpt::CodexDeviceCode& code) {
+            io, cap, 900, [](const provider::chatgpt::CodexDeviceCode& code) {
                 std::cout << "\nOpen this link in a browser on any device:\n  "
                           << code.verification_url
                           << "\n\nEnter this one-time code (expires in 15 minutes):\n  "

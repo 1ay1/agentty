@@ -103,8 +103,8 @@ maya::stop_group& runs() {
 void ensure_teardown_registered() {
     static std::once_flag once;
     std::call_once(once, [] {
-        util::teardown::on_shutdown("subagent.running", [](const maya::unlocked&) {
-            (void)shutdown_running();
+        util::teardown::on_shutdown("subagent.running", [](const maya::unlocked& cap) {
+            (void)shutdown_running(cap);
         });
     });
 }
@@ -134,12 +134,12 @@ std::stop_token RunRegistration::token() const noexcept {
     return dead.get_token();
 }
 
-std::size_t shutdown_running(std::chrono::milliseconds grace) noexcept {
+std::size_t shutdown_running(const maya::unlocked& cap, std::chrono::milliseconds grace) noexcept {
     // Bounded, not a barrier: a wedged syscall must not hold the process
     // open. The runs touch provider objects that main() keeps alive past
     // this call, so the abandoned case is a slow exit, not a dangling write.
     try {
-        return runs().stop_and_wait(grace);
+        return runs().stop_and_wait(cap, grace);
     } catch (...) {
         return 0;   // a mutex failure at teardown is not worth a terminate
     }

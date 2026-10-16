@@ -233,7 +233,8 @@ private:
 // Returns how many were still running when the grace expired (0 = clean).
 // Idempotent; safe with no runs in flight. Registered with util::teardown by
 // the first run that starts, so main() needs no knowledge of this.
-std::size_t shutdown_running(std::chrono::milliseconds grace
+std::size_t shutdown_running(const maya::unlocked&,
+                             std::chrono::milliseconds grace
                                  = std::chrono::milliseconds(1500)) noexcept;
 
 // Provenance of an agent persona by name, for the task card's transparency

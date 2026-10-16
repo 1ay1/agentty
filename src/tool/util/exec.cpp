@@ -517,7 +517,7 @@ class JaalSession final : public mt::Session {
             for (int i = 0; i < 100; ++i) {
                 publish_exit(cap, proc, core);
                 if (core->s.read(cap, [](const Stream& s) { return s.ended; })) break;
-                (void)maya::delay_for(std::stop_token{}, std::chrono::milliseconds{20});
+                (void)maya::delay_for(cap, std::stop_token{}, std::chrono::milliseconds{20});
             }
         }
         publish_exit(cap, proc, core);
