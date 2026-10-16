@@ -551,15 +551,18 @@ Cmd submit_message(Model& m) {
     if (defer_for_retrieval) {
         m.s.status       = "retrieving context\xE2\x80\xA6";   // …
         m.s.status_until = {};   // sticky until the block lands
+        const std::uint64_t rid = ++m.s.retrieval_seq;
+        if (auto* c = active_ctx(m.s.phase)) c->awaiting_retrieval = rid;
         // The launch is issued by the ProactiveContextReady handler once the
         // grounding is in the transcript. Here we only kick the retrieval.
         launch = Cmd::task_isolated(
-            [](maya::Sink<Msg> out, std::stop_token, std::string probe) {
+            [](maya::Sink<Msg> out, std::stop_token, std::string probe,
+               std::uint64_t id) {
                 auto hit = tools::proactive_retrieve_blocking(probe, /*k=*/3);
                 out.send(Msg{ProactiveContextReady{
                     hit ? std::move(hit->block) : std::string{},
-                    hit ? hit->confidence : -1.0}});
-            }, std::move(proactive_probe));
+                    hit ? hit->confidence : -1.0, id}});
+            }, std::move(proactive_probe), rid);
     } else {
         perf_stamp("pre_launch_stream");
         launch = cmd::launch_stream(m);

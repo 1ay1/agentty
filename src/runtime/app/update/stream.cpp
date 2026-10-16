@@ -2932,10 +2932,13 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
             // launch the stream now. Same-turn grounding, no stale-context or
             // wrong-question cost.
             //
-            // Guard against a stale arrival: if the user cancelled (Esc →
-            // Idle) or otherwise moved on while retrieval was in flight,
-            // there's no in-flight turn to ground; drop it.
-            if (m.s.is_idle()) return Cmd::none();
+            // Drop a stale arrival: the turn it was for was cancelled, and
+            // maybe a new one started (which must not get its block or a
+            // second launch_stream). Only the waiting turn's id matches.
+            auto* wait = active_ctx(m.s.phase);
+            if (!wait || pcr.id == 0 || wait->awaiting_retrieval != pcr.id)
+                return Cmd::none();
+            wait->awaiting_retrieval = 0;
 
             // The trailing message is the empty assistant placeholder pushed
             // by submit_message. Insert the proactive User message just

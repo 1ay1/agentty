@@ -984,7 +984,7 @@ struct AuthViewLoaded {
 // The reducer STAGES it (m.d.staged_proactive_context) so the next user
 // submit flushes it into the transcript at a safe boundary — a slow first
 // turn's grounding is deferred by one turn instead of being dropped.
-struct ProactiveContextReady { std::string block; double confidence = -1.0; };
+struct ProactiveContextReady { std::string block; double confidence = -1.0; std::uint64_t id = 0; };
 
 // ── Stats viewer ───────────────────────────────────────
 // A read-only, tabbed projection of what the session actually did. Three

@@ -59,7 +59,9 @@ static Model make_deferred_model() {
     placeholder.role = Role::Assistant;
     m.d.current.messages.push_back(std::move(placeholder));
 
-    m.s.phase        = phase::Streaming{phase::Active{}};
+    phase::Active ctx;
+    ctx.awaiting_retrieval = m.s.retrieval_seq = 7;
+    m.s.phase        = phase::Streaming{std::move(ctx)};
     m.s.status       = "retrieving context\xE2\x80\xA6";
     m.s.status_until = {};
     return m;
@@ -91,7 +93,7 @@ TEST_CASE("proactive deferred") {
         Model m = make_deferred_model();
         const std::size_t before = m.d.current.messages.size();
 
-        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block, 0.82}});
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block, 0.82, 7}});
 
         auto& msgs = m2.d.current.messages;
         check(msgs.size() == before + 1,
@@ -135,7 +137,7 @@ TEST_CASE("proactive deferred") {
         Model m = make_deferred_model();
         const std::size_t before = m.d.current.messages.size();
 
-        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{std::string{}}});
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{std::string{}, -1.0, 7}});
 
         check(m2.d.current.messages.size() == before,
               "deferred(empty): no message injected");
@@ -152,7 +154,7 @@ TEST_CASE("proactive deferred") {
         m.s.phase = phase::Idle{};   // user cancelled
         const std::size_t before = m.d.current.messages.size();
 
-        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block}});
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block, 0.5, 7}});
 
         check(m2.d.current.messages.size() == before,
               "deferred(stale): no injection after cancel-to-Idle");
@@ -160,5 +162,32 @@ TEST_CASE("proactive deferred") {
               "deferred(stale): no stream launched after cancel");
         check(m2.s.is_idle(),
               "deferred(stale): phase stays Idle");
+    }
+
+    // ── 4. Stale arrival into a NEWER turn: Esc, then a new submit, then the
+    //    first retrieval lands. It must not ground or launch the new turn.
+    {
+        Model m = make_deferred_model();
+        auto* c = agentty::active_ctx(m.s.phase);
+        c->awaiting_retrieval = m.s.retrieval_seq = 8;   // the newer turn
+        const std::size_t before = m.d.current.messages.size();
+
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{block, 0.9, 7}});
+
+        check(m2.d.current.messages.size() == before,
+              "deferred(old id): no injection into the newer turn");
+        check(cmd.is_none(),
+              "deferred(old id): no second launch");
+        check(agentty::active_ctx(m2.s.phase)->awaiting_retrieval == 8,
+              "deferred(old id): newer turn still waits for its own result");
+    }
+
+    // ── 5. A duplicate delivery launches once.
+    {
+        Model m = make_deferred_model();
+        auto [m2, cmd] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m), msg::StreamMsg{agentty::ProactiveContextReady{std::string{}, -1.0, 7}});
+        check(!cmd.is_none(), "deferred(dup): first delivery launches");
+        auto [m3, cmd2] = ::agentty::app::detail::step(agentty::app::detail::stream_update, std::move(m2), msg::StreamMsg{agentty::ProactiveContextReady{std::string{}, -1.0, 7}});
+        check(cmd2.is_none(), "deferred(dup): second delivery is dropped");
     }
 }

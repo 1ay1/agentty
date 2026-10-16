@@ -145,6 +145,10 @@ struct Active {
 
     // Retry/stall machine state — see RetryState above.
     RetryState retry = retry::Fresh{};
+
+    // Nonzero while this turn's launch waits on a deferred retrieval; only a
+    // ProactiveContextReady with this id may launch it.
+    std::uint64_t awaiting_retrieval = 0;
 };
 
 // ── Phase types ──────────────────────────────────────────────────────
@@ -445,6 +449,7 @@ static_assert( is_legal_transition(PhaseKind::ExecutingTool,      PhaseKind::Idl
 
 struct StreamState {
     Phase phase = phase::Idle{};
+    std::uint64_t retrieval_seq = 0;   // source of Active::awaiting_retrieval ids
     std::chrono::steady_clock::time_point last_tick{};
     // Wall-clock (steady) of the most recent request we sent to the model —
     // stamped when a stream starts. Drives the idle cache-lapse compaction
@@ -689,6 +694,9 @@ struct StreamState {
     // additional ThreadListSelect dispatches so a mashed Enter can't
     // queue multiple loads behind each other.
     bool thread_loading = false;
+    // Which thread the in-flight load is for. Cleared when something else
+    // replaces the transcript first (^N), so the late result is dropped.
+    ThreadId loading_thread;
     // True while a background model-list fetch is in flight (kicked off
     // by init(), OpenModels, a provider switch, or a login). The
     // model picker view consults this to render "Loading models…" vs.
