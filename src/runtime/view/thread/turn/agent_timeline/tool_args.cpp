@@ -115,7 +115,7 @@ int safe_int_arg(const nlohmann::json& args, const char* key, int def) {
     return static_cast<int>(value);
 }
 
-int count_lines(const std::string& s) {
+int count_lines(std::string_view s) {
     int n = 0;
     for (char c : s) if (c == '\n') n++;
     return n + (!s.empty() && s.back() != '\n' ? 1 : 0);
@@ -131,8 +131,8 @@ float tool_elapsed(const ToolUse& tc) {
     return std::chrono::duration<float>(dt).count();
 }
 
-std::string strip_bash_output_fence(const std::string& s) {
-    std::string_view sv{s};
+std::string strip_bash_output_fence(std::string_view s) {
+    std::string_view sv = s;
     auto drop_trailer = [&](std::string_view marker) {
         auto pos = sv.rfind(marker);
         if (pos != std::string_view::npos) sv = sv.substr(0, pos);
@@ -172,7 +172,7 @@ std::string strip_bash_output_fence(const std::string& s) {
     return header + "\n\n" + body;
 }
 
-int parse_exit_code(const std::string& output) {
+int parse_exit_code(std::string_view output) {
     struct Marker { const char* text; size_t skip; };
     static constexpr Marker markers[] = {
         {"failed with exit code ", 22},
@@ -180,12 +180,27 @@ int parse_exit_code(const std::string& output) {
     };
     for (const auto& m : markers) {
         auto pos = output.rfind(m.text);
-        if (pos == std::string::npos) continue;
-        try { return std::stoi(output.substr(pos + m.skip)); }
-        catch (...) { return 1; }
+        if (pos == std::string_view::npos) continue;
+        auto p = pos + m.skip;
+        bool neg = p < output.size() && output[p] == '-';
+        if (neg) ++p;
+        int n = 0; bool got = false;
+        while (p < output.size() && output[p] >= '0' && output[p] <= '9' && n < 100000000) {
+            n = n * 10 + (output[p++] - '0'); got = true;
+        }
+        return got ? (neg ? -n : n) : 1;
     }
-    if (output.find("timed out") != std::string::npos) return 124;
+    if (output.find("timed out") != std::string_view::npos) return 124;
     return 0;
+}
+
+std::string_view card_output(const ToolUse& tc) {
+    std::string_view out = tc.output();
+    const auto desc = pick_arg(tc.args, {"display_description", "description"});
+    if (!desc.empty() && out.starts_with(desc)
+        && (out.size() == desc.size() || out[desc.size()] == '\n'))
+        out.remove_prefix(std::min(out.size(), desc.size() + 1));
+    return out;
 }
 
 } // namespace agentty::ui

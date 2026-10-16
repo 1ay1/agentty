@@ -15,7 +15,7 @@ namespace agentty::ui::detail {
 bool git_diff_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
     using Kind = maya::ToolBodyPreview::Kind;
     if (!tc.is_done()) return false;
-    const auto& body = tc.output();
+    const std::string_view body = card_output(tc);
     if (!body.empty() && body != "no changes") {
         out.kind = Kind::GitDiff;
         out.text = std::string{body};

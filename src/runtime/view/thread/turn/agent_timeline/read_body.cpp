@@ -15,11 +15,40 @@
 #include "tool_body_common.hpp"
 
 #include <string>
+#include <string_view>
+#include <utility>
 
 #include "agentty/runtime/view/palette.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 
 namespace agentty::ui::detail {
+
+namespace {
+// Returns {first line number, text without prefixes}, or {0, ""} when the
+// body isn't numbered on every line (old transcripts, outline replies).
+std::pair<int, std::string> strip_line_numbers(std::string_view body) {
+    std::string out;
+    out.reserve(body.size());
+    int first = 0;
+    std::size_t pos = 0;
+    while (pos < body.size()) {
+        std::size_t eol = body.find('\n', pos);
+        if (eol == std::string_view::npos) eol = body.size();
+        std::size_t k = pos;
+        while (k < eol && body[k] == ' ') ++k;
+        const std::size_t d = k;
+        int n = 0;
+        while (k < eol && body[k] >= '0' && body[k] <= '9' && n < 100000000)
+            n = n * 10 + (body[k++] - '0');
+        if (k == d || k >= eol || body[k] != '\t') return {0, {}};
+        if (first == 0) first = n;
+        out.append(body.substr(k + 1, eol - k - 1));
+        if (eol < body.size()) out.push_back('\n');
+        pos = eol + 1;
+    }
+    return {first, std::move(out)};
+}
+} // namespace
 
 bool read_body(const ToolUse& tc,
                const GrepHits* grep_hits,
@@ -27,7 +56,7 @@ bool read_body(const ToolUse& tc,
     using Kind = maya::ToolBodyPreview::Kind;
     if (!tc.is_done()) return false;   // failed → shared Failure fallback
 
-    const auto& raw = tc.output();
+    const std::string_view raw = card_output(tc);
     if (!raw.empty()) {
         // A cache hit is prefixed "[cached — unchanged since your last read
         // of this file]\n". That is the tool talking to the model, not file
@@ -73,7 +102,26 @@ bool read_body(const ToolUse& tc,
         }
 
         out.kind = Kind::FileRead;
-        out.text = std::string{body};
+        // Each line carries read's "%6d\t" prefix. The card draws its own
+        // gutter, so strip them; the first one is the true start line. Any
+        // heads-up note above the numbered block is dropped with them.
+        auto numbered = body;
+        for (int guard = 0; guard < 8 && !numbered.empty(); ++guard) {
+            std::size_t k = 0;
+            while (k < numbered.size() && numbered[k] == ' ') ++k;
+            const std::size_t d = k;
+            while (k < numbered.size() && numbered[k] >= '0' && numbered[k] <= '9') ++k;
+            if (k > d && k < numbered.size() && numbered[k] == '\t') break;
+            const auto nl = numbered.find('\n');
+            if (nl == std::string_view::npos) { numbered = {}; break; }
+            numbered.remove_prefix(nl + 1);
+        }
+        if (auto stripped = strip_line_numbers(numbered); stripped.first > 0) {
+            true_start = stripped.first;
+            out.text = std::move(stripped.second);
+        } else {
+            out.text = std::string{body};
+        }
         out.text_color = text_tertiary;    // bright cyan — file content rendered as code
         // Anchor the gutter to the real source line numbers. Priority:
         // the number mined from the tool's own footer / symbol header

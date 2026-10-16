@@ -31,9 +31,9 @@ bool edit_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
     // the actual failure reason ("old_text not found", "file changed since
     // read") — the user saw a red ✗ with no explanation and the model's
     // self-correction hint was only on the wire, never on screen.
-    if (tc.is_failed() && !tc.output().empty()) {
+    if (tc.is_failed() && !card_output(tc).empty()) {
         out.kind = Kind::Failure;
-        out.text = std::string{tc.output()};
+        out.text = std::string{card_output(tc)};
         out.chrome_color = status_error;
         return true;
     }
@@ -41,7 +41,7 @@ bool edit_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
         // Pull the diff payload out of the ```diff … ``` fence in the
         // tool's output. Falls back to EditDiff-from-args if the fence
         // isn't found (older threads, custom tool wrappers).
-        const auto& body = tc.output();
+        const std::string_view body = card_output(tc);
         constexpr std::string_view kOpen = "```diff\n";
         constexpr std::string_view kClose = "\n```";
         auto a = body.find(kOpen);

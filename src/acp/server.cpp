@@ -853,6 +853,19 @@ a::ToolCallContent result_content_block(const ToolUse& tc, const std::string& te
 
         std::string numbered;
         numbered.reserve(body.size() + body.size() / 8);
+        // read numbers its own lines now ("%6d\t"); only number old,
+        // unnumbered results here.
+        auto already_numbered = [](std::string_view s) {
+            std::size_t k = 0;
+            while (k < s.size() && s[k] == ' ') ++k;
+            const std::size_t d = k;
+            while (k < s.size() && s[k] >= '0' && s[k] <= '9') ++k;
+            return k > d && k < s.size() && s[k] == '\t';
+        };
+        if (already_numbered(body)) {
+            std::string md = "```\n" + std::string{body} + "\n```";
+            return a::ToolCallContent{a::TCC_Content{text_block(std::move(md)), json::object()}};
+        }
         std::int64_t ln = start;
         std::size_t pos = 0;
         while (pos <= body.size()) {

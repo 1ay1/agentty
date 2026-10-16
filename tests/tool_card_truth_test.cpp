@@ -131,3 +131,72 @@ TEST_CASE("card truth: grep files/count modes report files and totals truthfully
     INFO("header: " << h);
     CHECK(has(h, "8 match"));
 }
+
+TEST_CASE("card truth: grep body shows the matched row, not leading context") {
+    std::string out = "Found 1 match across 1 file.\n\n## Matches in /w/p.cpp\n\n### L170-200\n```\n";
+    for (int i = 170; i <= 200; ++i)
+        out += (i == 190 ? std::string{"    auto id = next_proc_id();"}
+                         : "    line " + std::to_string(i)) + "\n";
+    out += "```\n";
+    auto tc = done("grep", {{"pattern", "next_proc_id"}, {"path", "/w"}}, out);
+    const auto body = body_text(tc);
+    INFO("body:\n" << body);
+    CHECK(has(body, "190"));
+    CHECK(has(body, "next_proc_id"));
+    CHECK_FALSE(has(body, "line 170"));
+}
+
+// Most tools echo display_description as line 1 of their output. The card
+// already shows it as the title; it must not break counts or become body text.
+const nlohmann::json kDesc = {{"display_description", "Find the widgets"}};
+
+A::ToolUse with_desc(std::string name, nlohmann::json args, std::string out) {
+    for (auto& [k, v] : kDesc.items()) args[k] = v;
+    return done(std::move(name), std::move(args), "Find the widgets\n" + out);
+}
+
+TEST_CASE("card truth: glob count survives a description echo") {
+    auto tc = with_desc("glob", {{"pattern", "*.cpp"}},
+                        "Found 3 file(s):\na.cpp  1K\nb.cpp  2K\nc.cpp  3K\n");
+    const auto h = U::tool_timeline_detail(tc);
+    INFO("header: " << h);
+    CHECK(has(h, "3"));
+    CHECK_FALSE(has(h, "no "));
+    CHECK_FALSE(has(body_text(tc), "Find the widgets"));
+}
+
+TEST_CASE("card truth: grep count survives a description echo") {
+    auto tc = with_desc("grep", {{"pattern", "proc-"}, {"path", "/w/process.cpp"}},
+                        kGrepOneMatchWithContext);
+    const auto h = U::tool_timeline_detail(tc);
+    INFO("header: " << h);
+    CHECK(has(h, "1 match"));
+}
+
+TEST_CASE("card truth: a read body never shows the description as line 1") {
+    auto tc = with_desc("read", {{"path", "/w/f.txt"}}, "line one\nline two\n");
+    const auto body = body_text(tc);
+    INFO("body:\n" << body);
+    CHECK_FALSE(has(body, "Find the widgets"));
+    CHECK(has(body, "line one"));
+}
+
+TEST_CASE("card truth: shell exit code survives a description echo") {
+    auto tc = with_desc("shell", {{"command", "make"}},
+                        "Command \"make\" failed with exit code 2.\n```\nboom\n```");
+    const auto h = U::tool_timeline_detail(tc);
+    INFO("header: " << h);
+    CHECK(has(h, "2"));
+    CHECK_FALSE(has(body_text(tc), "Find the widgets"));
+}
+
+TEST_CASE("card truth: git_status on a repo with no commits names the branch") {
+    auto tc = with_desc("git_status", nlohmann::json::object(),
+                        "On branch master \xc2\xb7 2 staged\n"
+                        "## No commits yet on master\nA  d.json\nA  src/a.cpp\n");
+    const auto h = U::tool_timeline_detail(tc);
+    INFO("header: " << h);
+    CHECK(has(h, "master"));
+    CHECK_FALSE(has(h, "No"));
+    CHECK(has(h, "2"));
+}

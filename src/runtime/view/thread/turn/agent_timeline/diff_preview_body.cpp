@@ -73,7 +73,7 @@ std::string_view file_header(std::string_view line) {
 bool diff_preview_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
     using Kind = maya::ToolBodyPreview::Kind;
     if (!tc.is_done()) return false;
-    const auto& raw = tc.output();
+    const std::string_view raw = card_output(tc);
     if (raw.empty()) return true;
 
     std::string diff;

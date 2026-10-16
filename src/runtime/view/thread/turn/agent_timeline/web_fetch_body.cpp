@@ -14,7 +14,7 @@ namespace agentty::ui::detail {
 bool web_fetch_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
     using Kind = maya::ToolBodyPreview::Kind;
     if (!tc.is_done()) return false;
-    const auto& body = tc.output();
+    const std::string_view body = card_output(tc);
     if (!body.empty()) {
         out.kind = Kind::Json;
         out.text = std::string{body};

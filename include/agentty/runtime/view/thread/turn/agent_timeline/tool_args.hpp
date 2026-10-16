@@ -5,6 +5,7 @@
 
 #include <initializer_list>
 #include <string>
+#include <string_view>
 
 #include <nlohmann/json_fwd.hpp>  // only const json& params below; full type lives in the .cpp
 
@@ -46,7 +47,7 @@ namespace agentty::ui {
 [[nodiscard]] int safe_int_arg(const nlohmann::json& args, const char* key, int def);
 
 // Newline count + 1 for trailing non-newline line. Zero for empty input.
-[[nodiscard]] int count_lines(const std::string& s);
+[[nodiscard]] int count_lines(std::string_view s);
 
 // Seconds spent on this tool call so far. Running → now - started;
 // terminal → finished - started; returns 0 when started_at is unset.
@@ -56,11 +57,16 @@ namespace agentty::ui {
 // Strip the ```…``` fence and trailing metadata bash wraps its captured
 // stdout/stderr in. The fence lets the model see an unambiguous "literal
 // output" boundary but is visual noise inside the widget's own frame.
-[[nodiscard]] std::string strip_bash_output_fence(const std::string& s);
+[[nodiscard]] std::string strip_bash_output_fence(std::string_view s);
 
 // Pull the exit code out of bash/diagnostics tool output — recognizes
 // both "failed with exit code N" (Zed-style) and "[exit code N]" (legacy).
 // Returns 124 for a timeout marker, 0 when none of those patterns match.
-[[nodiscard]] int parse_exit_code(const std::string& output);
+[[nodiscard]] int parse_exit_code(std::string_view output);
+
+// The tool's output as the card should read it. Most tools echo the call's
+// `display_description` as line 1; that's already the card title, and left
+// in it breaks every "Found N"/"HTTP ..." parse and shows as body line 1.
+[[nodiscard]] std::string_view card_output(const ToolUse& tc);
 
 } // namespace agentty::ui

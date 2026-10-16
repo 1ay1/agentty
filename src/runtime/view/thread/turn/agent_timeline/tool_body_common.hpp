@@ -20,6 +20,7 @@
 
 #include "agentty/domain/conversation.hpp"
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_body_preview.hpp"  // GrepHits
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"  // card_output
 
 namespace agentty::ui::detail {
 
@@ -77,7 +78,7 @@ inline constexpr std::size_t kStreamTailLines = 64;
 
 // Parse `## Matches in <path>` + `### L<start>-<end>` markers out of
 // agentty's grep output and accumulate (path → {start lines}) into out.
-void accumulate_grep_hits(const std::string& output, GrepHits& out);
+void accumulate_grep_hits(std::string_view output, GrepHits& out);
 
 // ── Per-tool body renderers ───────────────────────────────────────────
 //

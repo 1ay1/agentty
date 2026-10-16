@@ -99,7 +99,7 @@ std::string read_path_arg(const nlohmann::json& args) {
 // individual match offsets aren't recoverable from the rendered body.
 // Block-start is good enough for the highlight_lines anchor; the user's
 // eye lands on the right region of the file.
-void accumulate_grep_hits(const std::string& output, GrepHits& out) {
+void accumulate_grep_hits(std::string_view output, GrepHits& out) {
     constexpr std::string_view kPathTag  = "## Matches in ";
     constexpr std::string_view kBlockTag = "### L";
 

@@ -177,7 +177,7 @@ std::string pretty_path(std::string p) {
 // Counting rendered LINES (the old behaviour) inflated the number —
 // grep output includes ### context headers, 2 context lines per hit and
 // blank separators, so "· 45 matches" showed for 3 real hits.
-[[nodiscard]] int parse_found_count(const std::string& out) {
+[[nodiscard]] int parse_found_count(std::string_view out) {
     constexpr std::string_view kTag = "Found ";
     if (out.rfind(kTag, 0) != 0) return -1;
     int n = 0;
@@ -190,7 +190,7 @@ std::string pretty_path(std::string p) {
     return got ? n : -1;
 }
 
-// True line count for a `read`. count_lines(tc.output()) is WRONG here: a read
+// True line count for a `read`. count_lines(card_output(tc)) is WRONG here: a read
 // output is decorated — an optional `display_description` line, an optional
 // symbol header, and a trailing `[showing lines A-B of N ...]` / `[... of N
 // ...]` hint the tool appends — so re-counting rows inflates the number and
@@ -199,7 +199,7 @@ std::string pretty_path(std::string p) {
 // read it as the authoritative count. Returns -1 when there's no such marker
 // (a small file read whole, no truncation), so the caller falls back to a
 // plain content-line count.
-[[nodiscard]] int parse_read_total_lines(const std::string& out) {
+[[nodiscard]] int parse_read_total_lines(std::string_view out) {
     // read reports the file's real length in two shapes:
     //   • content / 1-KiB fallback: "[showing lines A-B of N ...]" — " of N"
     //     followed by end-of-number + (" lines" | "]" | ";" | " more").
@@ -240,7 +240,7 @@ std::string pretty_path(std::string p) {
 // The range a `read` actually returned, from its "[showing lines A-B of N"
 // footer. first == 0 when there is no such footer (a whole small file).
 struct ShownRange { int first = 0, second = 0, total = 0; };
-[[nodiscard]] ShownRange parse_read_shown_range(const std::string& out) {
+[[nodiscard]] ShownRange parse_read_shown_range(std::string_view out) {
     constexpr std::string_view kTag = "[showing lines ";
     const auto p = out.rfind(kTag);
     if (p == std::string::npos) return {};
@@ -275,13 +275,13 @@ struct ShownRange { int first = 0, second = 0, total = 0; };
 // an "[exit code N]" / "[terminated by signal …]" trailer instead — so we sniff
 // that too. Returns "" when there's nothing meaningful to show.
 static std::string tool_failure_reason(const ToolUse& tc) {
-    const std::string& out = tc.output();
+    const std::string_view out = card_output(tc);
     if (out.empty()) return {};
 
     // "[kind] detail" — the structured ToolError shape.
     if (out.front() == '[') {
         if (auto close = out.find(']'); close != std::string::npos && close > 1) {
-            std::string kind = out.substr(1, close - 1);
+            std::string kind{out.substr(1, close - 1)};
             // A bracketed exit trailer ("[exit code 1]") is not a kind — fall
             // through to the bash sniff below.
             if (kind.rfind("exit code", 0) != 0
@@ -295,10 +295,10 @@ static std::string tool_failure_reason(const ToolUse& tc) {
     if (auto p = out.rfind("[exit code "); p != std::string::npos) {
         auto e = out.find(']', p);
         if (e != std::string::npos)
-            return out.substr(p + 1, e - p - 1);   // "exit code N"
+            return std::string{out.substr(p + 1, e - p - 1)};   // "exit code N"
     }
     // Unstructured error text: take the first short line.
-    std::string first = out.substr(0, out.find('\n'));
+    std::string first{out.substr(0, out.find('\n'))};
     if (first.size() > 48) first = first.substr(0, 47) + "\xe2\x80\xa6";
     return first;
 }
@@ -334,7 +334,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
             // What was SHOWN, from the tool's own "[showing lines A-B of N]"
             // footer: a 5-line read of a 349-line file reads "131–135 of
             // 349", not "349 lines", which looked like the card's own size.
-            if (auto r = parse_read_shown_range(tc.output()); r.first > 0) {
+            if (auto r = parse_read_shown_range(card_output(tc)); r.first > 0) {
                 detail += "  \xc2\xb7  " + std::to_string(r.first) + "\xe2\x80\x93"
                         + std::to_string(r.second);
                 if (r.total > 0) detail += " of " + std::to_string(r.total);
@@ -344,8 +344,8 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
             // Prefer the file's true length that read reports in its
             // "[showing lines A-B of N]" footer; only re-count the (decorated)
             // output when there's no such marker (small file read whole).
-            int lines = parse_read_total_lines(tc.output());
-            if (lines < 0) lines = count_lines(tc.output());
+            int lines = parse_read_total_lines(card_output(tc));
+            if (lines < 0) lines = count_lines(card_output(tc));
             if (lines > 1) detail += "  \xc2\xb7  " + std::to_string(lines) + " lines";
         } else if (off > 0) {
             detail += " @" + std::to_string(off);
@@ -398,7 +398,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         if (auto nl = cmd.find('\n'); nl != std::string::npos)
             cmd = cmd.substr(0, nl) + " \xe2\x80\xa6";
         if (tc.is_done()) {
-            int rc = parse_exit_code(tc.output());
+            int rc = parse_exit_code(card_output(tc));
             if (rc != 0) cmd += "  \xc2\xb7  exit " + std::to_string(rc);
         }
         return cmd;
@@ -429,7 +429,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         if (pat.empty()) return "\xe2\x80\xa6";
         std::string detail = path_pp.empty() ? pat : pat + "  in  " + path_pp;
         if (tc.is_done()) {
-            int matches = parse_found_count(tc.output());
+            int matches = parse_found_count(card_output(tc));
             if (matches == 0)     detail += "  \xc2\xb7  no matches";
             else if (matches > 0) detail += "  \xc2\xb7  " + std::to_string(matches)
                                           + (matches == 1 ? " match" : " matches");
@@ -441,7 +441,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         if (pat.empty()) return "\xe2\x80\xa6";
         std::string detail = pat;
         if (tc.is_done()) {
-            int hits = parse_found_count(tc.output());
+            int hits = parse_found_count(card_output(tc));
             if (hits == 0)     detail += "  \xc2\xb7  no hits";
             else if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits)
                                        + (hits == 1 ? " hit" : " hits");
@@ -468,7 +468,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
             // Count the emitted content rows (each is `N\t…`); the collapsed
             // gap markers `⋯ N lines ⋯` don't start with a digit, so they're
             // naturally excluded.
-            const auto& out = tc.output();
+            const std::string_view out = card_output(tc);
             int kept = 0;
             bool at_line_start = true;
             for (char c : out) {
@@ -528,7 +528,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
             // and any bracketed notice line.
             const std::string desc = safe_arg(tc.args, "display_description");
             int entries = 0;
-            const std::string& out = tc.output();
+            const std::string_view out = card_output(tc);
             std::size_t start = 0;
             bool first = true;
             while (start <= out.size()) {
@@ -550,7 +550,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         std::string detail = safe("symbol");
         if (tc.is_done()) {
             int hits = 0;
-            const auto& out = tc.output();
+            const std::string_view out = card_output(tc);
             for (std::size_t p = 0; (p = out.find("## Matches in ", p)) != std::string::npos; p += 14)
                 ++hits;
             if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits)
@@ -573,12 +573,12 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
     if (n == "web_fetch") {
         std::string detail = safe("url");
         if (tc.is_done()) {
-            const auto& out = tc.output();
+            const std::string_view out = card_output(tc);
             auto nl = out.find('\n');
             if (nl != std::string::npos && out.starts_with("HTTP ")) {
                 auto sp = out.find(' ', 5);
                 if (sp != std::string::npos)
-                    detail += "  \xc2\xb7  " + out.substr(5, sp - 5);
+                    detail += "  \xc2\xb7  " + std::string{out.substr(5, sp - 5)};
             }
         }
         return detail;
@@ -587,7 +587,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         std::string detail = safe("query");
         if (tc.is_done()) {
             int hits = 0;
-            const auto& out = tc.output();
+            const std::string_view out = card_output(tc);
             for (std::size_t p = 0; p + 1 < out.size(); ++p) {
                 if ((p == 0 || out[p - 1] == '\n')
                     && std::isdigit(static_cast<unsigned char>(out[p]))
@@ -618,13 +618,13 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         auto m = safe("message");
         if (auto nl = m.find('\n'); nl != std::string::npos) m = m.substr(0, nl);
         if (tc.is_done()) {
-            const auto& out = tc.output();
+            const std::string_view out = card_output(tc);
             auto open = out.find('[');
             if (open != std::string::npos) {
                 auto close = out.find(']', open);
                 auto sp = out.find(' ', open + 1);
                 if (sp != std::string::npos && sp < close) {
-                    auto hash = out.substr(sp + 1, close - sp - 1);
+                    std::string hash{out.substr(sp + 1, close - sp - 1)};
                     if (!hash.empty() && hash.size() <= 12)
                         m += "  \xc2\xb7  " + hash;
                 }
@@ -633,9 +633,9 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         return m;
     }
     if (n == "git_status" && tc.is_done()) {
-        const auto& out = tc.output();
+        const std::string_view out = card_output(tc);
         std::string branch;
-        int modified = 0, staged = 0, untracked = 0;
+        int modified = 0, staged = 0, untracked = 0, conflicts = 0;
         bool seen_branch = false;
         std::size_t lo = 0;
         while (lo < out.size()) {
@@ -650,24 +650,31 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
                 if (line.starts_with("## ")) {
                     seen_branch = true;
                     std::string_view b = line.substr(3);
+                    for (std::string_view pre : {"No commits yet on ", "Initial commit on "})
+                        if (b.starts_with(pre)) b.remove_prefix(pre.size());
                     std::size_t cut = b.size();
                     if (auto d = b.find("..."); d != std::string_view::npos)
                         cut = std::min(cut, d);
                     if (auto s = b.find(' '); s != std::string_view::npos)
                         cut = std::min(cut, s);
-                    branch = std::string{b.substr(0, cut)};
+                    if (!b.starts_with("HEAD (no branch)"))
+                        branch = std::string{b.substr(0, cut)};
                 }
-            } else if (line.size() >= 2 && line[0] == '?' && line[1] == '?') {
-                ++untracked;
             } else if (line.size() >= 3 && line[2] == ' ') {
-                if (line[0] != ' ' && line[0] != '?') ++staged;   // index side
-                if (line[1] == 'M' || line[1] == 'D') ++modified; // worktree side
+                const char x = line[0], y = line[1];
+                if (x == '?' && y == '?')                ++untracked;
+                else if (x == 'U' || y == 'U' || (x == 'A' && y == 'A')
+                         || (x == 'D' && y == 'D'))      ++conflicts;
+                else {
+                    if (x != ' ' && x != '?') ++staged;    // index side
+                    if (y != ' ' && y != '?') ++modified;  // worktree side
+                }
             }
             if (eol == std::string::npos) break;
             lo = eol + 1;
         }
         std::string detail = branch.empty() ? std::string{"(detached)"} : branch;
-        if (modified || staged || untracked) {
+        if (modified || staged || untracked || conflicts) {
             detail += "  \xc2\xb7  ";
             bool first = true;
             auto add = [&](int n_, const char* suffix) {
@@ -677,6 +684,7 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
                 first = false;
             };
             add(modified, "M"); add(staged, "S"); add(untracked, "?");
+            add(conflicts, "U");
         } else {
             detail += "  \xc2\xb7  clean";
         }
@@ -693,11 +701,11 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         if (scope.empty()) scope = "project";
         std::string detail = "[" + scope + "] " + text;
         if (tc.is_done()) {
-            const auto& out = tc.output();
+            const std::string_view out = card_output(tc);
             if (auto p = out.find("id="); p != std::string::npos) {
                 auto end = out.find_first_of(")\n ", p + 3);
                 if (end != std::string::npos && end - (p + 3) <= 16)
-                    detail += "  \xc2\xb7  " + out.substr(p + 3, end - p - 3);
+                    detail += "  \xc2\xb7  " + std::string{out.substr(p + 3, end - p - 3)};
             }
         }
         return detail;
@@ -711,11 +719,11 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         if (auto nl = detail.find('\n'); nl != std::string::npos)
             detail = detail.substr(0, nl) + " \xe2\x80\xa6";
         if (tc.is_done()) {
-            const auto& out = tc.output();
+            const std::string_view out = card_output(tc);
             if (out.starts_with("Forgot ")) {
                 auto sp = out.find(' ', 7);
                 if (sp != std::string::npos) {
-                    auto count = out.substr(7, sp - 7);
+                    std::string count{out.substr(7, sp - 7)};
                     detail += "  \xc2\xb7  " + count + " removed";
                 }
             } else if (out.starts_with("No memory matched")) {
@@ -799,12 +807,12 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         std::string detail = type_tag;
         if (!what.empty()) detail += "  \xc2\xb7  " + what;
         if (tc.is_terminal()) {
-            const auto& out = tc.output();
+            const std::string_view out = card_output(tc);
             if (auto p = out.find("report ("); p != std::string::npos) {
                 if (auto end = out.find(')', p); end != std::string::npos) {
                     // "(type, N turns)" — keep only the "N turns" half; the
                     // type is already leading the detail.
-                    std::string inner = out.substr(p + 8, end - (p + 8));
+                    std::string inner{out.substr(p + 8, end - (p + 8))};
                     if (auto comma = inner.find(", "); comma != std::string::npos)
                         inner = inner.substr(comma + 2);
                     detail += "  \xc2\xb7  " + inner;

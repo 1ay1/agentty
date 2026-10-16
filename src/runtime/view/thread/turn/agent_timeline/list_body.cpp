@@ -23,10 +23,15 @@
 
 #include "tool_body_common.hpp"
 
+#include <algorithm>
+#include <cctype>
+#include <optional>
+#include <regex>
 #include <string>
 #include <string_view>
 
 #include "agentty/runtime/view/palette.hpp"
+#include "agentty/runtime/view/thread/turn/agent_timeline/tool_args.hpp"
 
 namespace agentty::ui::detail {
 
@@ -52,16 +57,68 @@ int block_start_line(std::string_view tag) {
     return 0;
 }
 
+// Tells which rows of a grep block are hits. grep's markdown doesn't mark
+// them, so re-test each row with the call's own pattern, using the same
+// case/word rules and the same literal fallback for a bad regex.
+class HitTest {
+public:
+    explicit HitTest(const nlohmann::json& args) {
+        pat_ = safe_arg(args, "pattern");
+        icase_ = !(args.is_object() && args.contains("case_sensitive")
+                   && args["case_sensitive"].is_boolean()
+                   && args["case_sensitive"].get<bool>());
+        const bool word = args.is_object() && args.contains("word")
+                       && args["word"].is_boolean() && args["word"].get<bool>();
+        if (pat_.empty()) return;
+        auto flags = std::regex::ECMAScript | std::regex::optimize;
+        if (icase_) flags |= std::regex::icase;
+        if (auto ex = safe_arg(args, "exclude"); !ex.empty()) {
+            try { ex_.emplace(ex, flags); } catch (const std::regex_error&) {}
+        }
+        try {
+            re_.emplace(word ? "\\b(?:" + pat_ + ")\\b" : pat_, flags);
+        } catch (const std::regex_error&) {
+            re_.reset();   // searched as text, like the tool does
+        }
+    }
+    [[nodiscard]] bool usable() const { return !pat_.empty(); }
+    [[nodiscard]] bool hit(std::string_view row) const {
+        if (row.size() > 4096) row = row.substr(0, 4096);   // bound regex cost
+        if (ex_) {
+            try { if (std::regex_search(row.begin(), row.end(), *ex_)) return false; }
+            catch (const std::regex_error&) {}
+        }
+        if (re_) {
+            try { return std::regex_search(row.begin(), row.end(), *re_); }
+            catch (const std::regex_error&) { return false; }
+        }
+        if (!icase_) return row.find(pat_) != std::string_view::npos;
+        auto lo = [](unsigned char c) { return std::tolower(c); };
+        return std::search(row.begin(), row.end(), pat_.begin(), pat_.end(),
+                           [&](char a, char b) { return lo(a) == lo(b); })
+               != row.end();
+    }
+private:
+    std::string pat_;
+    bool icase_ = true;
+    std::optional<std::regex> re_;
+    std::optional<std::regex> ex_;
+};
+
 } // namespace
 
 bool grep_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
     using Kind = maya::ToolBodyPreview::Kind;
     if (!tc.is_done()) return false;
-    const auto& raw = tc.output();
+    const std::string_view raw = card_output(tc);
     if (raw.empty()) return true;
 
-    // Walk the markdown shape and synthesize `path:line:text` rows.
-    std::string rows;
+    // Walk the markdown shape and synthesize `path:line:text` rows. `rows`
+    // keeps every row; `hits` only the ones the pattern matches, which is
+    // what the card shows (a 1-match block with 20 lines of context used to
+    // preview its first 8 context lines and never the match).
+    const HitTest test{tc.args};
+    std::string rows, hits;
     rows.reserve(raw.size());
     std::string_view current_path;
     int  next_line = 0;
@@ -80,12 +137,14 @@ bool grep_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
         if (in_fence) {
             if (line.starts_with("```")) { in_fence = false; continue; }
             if (!current_path.empty() && next_line > 0) {
-                rows += current_path;
-                rows += ':';
-                rows += std::to_string(next_line++);
-                rows += ':';
-                rows += line;
-                rows += '\n';
+                std::string row{current_path};
+                row += ':';
+                row += std::to_string(next_line++);
+                row += ':';
+                row += line;
+                row += '\n';
+                if (test.usable() && test.hit(line)) hits += row;
+                rows += row;
             }
             continue;
         }
@@ -112,7 +171,9 @@ bool grep_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
         return true;
     }
     out.kind = Kind::GrepMatches;
-    out.text = std::move(rows);
+    // No row matched card-side (a regex feature std::regex lacks, a
+    // multiline pattern): show every row rather than nothing.
+    out.text = hits.empty() ? std::move(rows) : std::move(hits);
     out.text_color = text_tertiary;
     return true;
 }
@@ -120,9 +181,9 @@ bool grep_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
 bool generic_list_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
     using Kind = maya::ToolBodyPreview::Kind;
     if (!tc.is_done()) return false;
-    if (!tc.output().empty()) {
+    if (!card_output(tc).empty()) {
         out.kind = Kind::CodeBlock;
-        out.text = std::string{tc.output()};
+        out.text = std::string{card_output(tc)};
         out.text_color = text_tertiary;
         // Head-heavy output: show the FIRST lines (plus a small tail via
         // the head_tail profile) instead of the tail-anchored window that

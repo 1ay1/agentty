@@ -90,9 +90,9 @@ void generic_lifecycle_body(const ToolUse& tc,
     const bool generic_text = supports_generic_text_body(tc.name.value);
     out.text_color = text_tertiary;
     if (tc.is_failed()) {
-        if (text_is_visible(tc.output())) {
+        if (text_is_visible(card_output(tc))) {
             out.kind = Kind::Failure;
-            out.text = tc.output();
+            out.text = std::string{card_output(tc)};
             out.chrome_color = status_error;
         }
         return;
@@ -118,9 +118,9 @@ void generic_lifecycle_body(const ToolUse& tc,
         // progress arrive, for the same committed-scrollback invariant above.
         return;
     }
-    if (generic_text && tc.is_done() && text_is_visible(tc.output())) {
+    if (generic_text && tc.is_done() && text_is_visible(card_output(tc))) {
         out.kind = Kind::CodeBlock;
-        out.text = tc.output();
+        out.text = std::string{card_output(tc)};
         // Settled output for the tools that land here (repo_map, outline,
         // read_filter, search_*, extract, json_query, MCP tools…) is
         // HEAD-heavy: the answer is at the top, the tail is pagination /
@@ -144,7 +144,7 @@ GrepHits collect_grep_hits(std::span<const ToolUse> tool_calls) {
     GrepHits out;
     for (const auto& tc : tool_calls) {
         if (tc.name.value != "grep") continue;
-        const auto& body = tc.output();
+        const std::string_view body = card_output(tc);
         if (body.empty()) continue;
         detail::accumulate_grep_hits(body, out);
     }

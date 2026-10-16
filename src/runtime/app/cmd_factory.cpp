@@ -1812,20 +1812,36 @@ SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
     bool wait_active = false;
     for (const auto& tc : batch)
         if (tc.is_running() && is_wait(tc)) wait_active = true;
+    // process_poll / process_stop name a session an earlier process_start
+    // creates, and process_poll declares no effects, so nothing else kept it
+    // from running beside that start and asking for a session that wasn't
+    // registered yet ("unknown process session"). process_* calls in one
+    // batch run in the order given, each after the previous one finishes.
+    auto is_proc = [](const ToolUse& tc) {
+        return tc.name.value.starts_with("process_");
+    };
+    bool proc_open = false;   // an earlier process_* call hasn't finished
     SchedDecision out;
     for (std::size_t i = 0; i < batch.size(); ++i) {
         const auto& tc = batch[i];
-        if (!tc.is_pending() && !tc.is_approved()) continue;
+        const bool proc = is_proc(tc);
+        if (!tc.is_pending() && !tc.is_approved()) {
+            if (proc && tc.is_running()) proc_open = true;
+            continue;
+        }
+        if (proc && proc_open) continue;    // waits for the earlier process call
         const bool wait = is_wait(tc);
         if (wait && wait_active) break;     // keep waits in order, one at a time
         const auto want = effects_of(tc.name);
         if (!can_run(tc, want)) {
             if (wait) break;                // a wait never overtakes
+            if (proc) proc_open = true;
             continue;                       // stays pending; advances next kick
         }
         note(tc, want);
         out.promote.push_back(i);
         if (wait) wait_active = true;
+        if (proc) proc_open = true;
     }
     return out;
 }

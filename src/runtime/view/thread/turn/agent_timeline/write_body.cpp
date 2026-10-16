@@ -21,9 +21,9 @@ bool write_body(const ToolUse& tc, maya::ToolBodyPreview::Config& out) {
     using Kind = maya::ToolBodyPreview::Kind;
 
     // FAILED write: error body, same rationale as edit above.
-    if (tc.is_failed() && !tc.output().empty()) {
+    if (tc.is_failed() && !card_output(tc).empty()) {
         out.kind = Kind::Failure;
-        out.text = std::string{tc.output()};
+        out.text = std::string{card_output(tc)};
         out.chrome_color = status_error;
         return true;
     }

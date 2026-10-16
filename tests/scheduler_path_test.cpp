@@ -267,6 +267,28 @@ TEST_CASE("scheduler path") {
               && !has(d.promote, 2), promoted_str(d.promote));
     }
 
+    // (m3) process_start then process_poll in one batch: the poll names the
+    //      session the start creates, so it must not run beside it.
+    {
+        std::vector<ToolUse> b = {
+            pending("process_start", {{"command", "make"}}),
+            pending("process_poll", {{"id", "proc-2"}, {"wait_ms", 290000}}),
+        };
+        auto d = schedule_parallel_batch(b);
+        expect("start runs, poll waits for it", d.promote.size() == 1 && has(d.promote, 0),
+              promoted_str(d.promote));
+    }
+    {
+        std::vector<ToolUse> b = {
+            running("process_start", {{"command", "make"}}),
+            pending("process_poll", {{"id", "proc-2"}}),
+            pending("process_stop", {{"id", "proc-2"}}),
+        };
+        auto d = schedule_parallel_batch(b);
+        expect("nothing overtakes a running process_start", d.promote.empty(),
+              promoted_str(d.promote));
+    }
+
     // (n) Lexical aliases and absolute-vs-relative spellings name the same
     //     resource and therefore serialise.
     {
