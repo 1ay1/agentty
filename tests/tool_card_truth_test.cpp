@@ -148,6 +148,35 @@ TEST_CASE("card truth: grep body shows the matched row, not leading context") {
 
 // Most tools echo display_description as line 1 of their output. The card
 // already shows it as the title; it must not break counts or become body text.
+
+TEST_CASE("card truth: read_filter counts matching lines, not context rows") {
+    auto tc = done("read_filter", {{"path", "src/a.cpp"}, {"pattern", "f1"}},
+                   "src/a.cpp \xe2\x80\x94 2 matching lines of 60 (\xc2\xb12 context; gaps collapsed):\n\n"
+                   "1\tint f0();\n2\tint f1();\n3\tint f2();\n\xe2\x8b\xaf 6 lines \xe2\x8b\xaf\n"
+                   "10\tint f9();\n11\tint f10();\n12\tint f11();\n");
+    const auto h = U::tool_timeline_detail(tc);
+    INFO("header: " << h);
+    CHECK(has(h, "2 matches"));
+    CHECK_FALSE(has(h, "6"));
+}
+
+TEST_CASE("card truth: extract shows how many values it pulled") {
+    auto tc = done("extract", {{"pattern", "f(\\d+)"}},
+                   "Extracted 60 values.\n\n0\n1\n2\n");
+    const auto h = U::tool_timeline_detail(tc);
+    INFO("header: " << h);
+    CHECK(has(h, "60 values"));
+}
+
+TEST_CASE("card truth: a capped glob says 500+, not a fake exact count") {
+    auto tc = done("glob", {{"pattern", "*"}},
+                   "Found more than 500 matches; showing the first 500 found (not sorted "
+                   "by recency across all matches). Narrow the pattern or `path` to see the rest.\n"
+                   "a.cpp  1K\n");
+    const auto h = U::tool_timeline_detail(tc);
+    INFO("header: " << h);
+    CHECK(has(h, "500+"));
+}
 const nlohmann::json kDesc = {{"display_description", "Find the widgets"}};
 
 A::ToolUse with_desc(std::string name, nlohmann::json args, std::string out) {

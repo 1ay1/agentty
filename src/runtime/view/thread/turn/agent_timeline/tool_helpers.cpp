@@ -441,10 +441,13 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         if (pat.empty()) return "\xe2\x80\xa6";
         std::string detail = pat;
         if (tc.is_done()) {
-            int hits = parse_found_count(card_output(tc));
-            if (hits == 0)     detail += "  \xc2\xb7  no hits";
-            else if (hits > 0) detail += "  \xc2\xb7  " + std::to_string(hits)
-                                       + (hits == 1 ? " hit" : " hits");
+            const auto out = card_output(tc);
+            int hits = parse_found_count(out);
+            if (out.starts_with("Found more than "))
+                detail += "  \xc2\xb7  500+ hits";
+            else if (hits == 0) detail += "  \xc2\xb7  no hits";
+            else if (hits > 0)  detail += "  \xc2\xb7  " + std::to_string(hits)
+                                        + (hits == 1 ? " hit" : " hits");
         }
         return detail;
     }
@@ -458,26 +461,50 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
             pat.resize(tools::util::safe_utf8_cut(pat, 47));
             pat += "\xe2\x80\xa6";
         }
-        return path_pp.empty() ? pat : pat + "  in  " + path_pp;
+        std::string detail = path_pp.empty() ? pat : pat + "  in  " + path_pp;
+        // "Extracted N values." / "Aggregated N matches by ..."
+        if (tc.is_done()) {
+            const std::string_view out = card_output(tc);
+            const std::string_view lead = n == "extract" ? "Extracted " : "Aggregated ";
+            if (out.starts_with(lead)) {
+                int v = 0; std::size_t i = lead.size(); bool got = false;
+                while (i < out.size() && out[i] >= '0' && out[i] <= '9' && v < 100000000) {
+                    v = v * 10 + (out[i++] - '0'); got = true;
+                }
+                if (got) {
+                    const char* one  = n == "extract" ? " value" : " match";
+                    const char* many = n == "extract" ? " values" : " matches";
+                    detail += "  \xc2\xb7  " + (v == 0 ? std::string{"none"}
+                                                    : std::to_string(v) + (v == 1 ? one : many));
+                }
+            }
+        }
+        return detail;
     }
     if (n == "read_filter") {
         auto pat = safe("pattern");
         std::string detail = path_pp.empty() ? std::string{"\xe2\x80\xa6"} : path_pp;
         if (!pat.empty()) detail += "  \xc2\xb7  " + pat;
         if (tc.is_done()) {
-            // Count the emitted content rows (each is `N\t…`); the collapsed
-            // gap markers `⋯ N lines ⋯` don't start with a digit, so they're
-            // naturally excluded.
+            // The tool's header has the true count: "path — N matching lines
+            // of M". Counting body rows would include the context lines.
             const std::string_view out = card_output(tc);
-            int kept = 0;
-            bool at_line_start = true;
-            for (char c : out) {
-                if (at_line_start && c >= '0' && c <= '9') ++kept;
-                at_line_start = (c == '\n');
+            int kept = -1;
+            constexpr std::string_view kTag = " matching line";
+            if (auto at = out.substr(0, out.find('\n')).find(kTag); at != std::string_view::npos) {
+                std::size_t b = at;
+                while (b > 0 && out[b - 1] >= '0' && out[b - 1] <= '9') --b;
+                if (b < at) {
+                    kept = 0;
+                    for (std::size_t i = b; i < at && kept < 100000000; ++i)
+                        kept = kept * 10 + (out[i] - '0');
+                }
             }
-            if (kept > 0)
+            if (kept == 0)
+                detail += "  \xc2\xb7  no matches";
+            else if (kept > 0)
                 detail += "  \xc2\xb7  " + std::to_string(kept)
-                        + (kept == 1 ? " line" : " lines");
+                        + (kept == 1 ? " match" : " matches");
         }
         return detail;
     }
