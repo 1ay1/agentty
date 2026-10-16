@@ -6,6 +6,7 @@
 #include "agentty/util/logx.hpp"
 #include "agentty/util/background.hpp"   // util::WorkerGroup
 #include "agentty/util/lock_levels.hpp"
+#include "agentty/util/teardown.hpp"
 
 #include "agentty/util/sendable.hpp"   // maya::guarded + the json opt-in
 #include <atomic>
@@ -2110,8 +2111,8 @@ static bool write_job(const maya::held<lock_levels::thread_log>& cap, const Save
 // fsync, reindexing -- runs between bodies), so enqueue() can be called
 // from any lock-free caller and the drain worker never holds it across IO.
 // The worker group that runs the drain is NOT in a lock: it joins on
-// destruction, so jaal refuses it inside a guarded. It lives in a published
-// slot and is stopped with `unlocked`.
+// destruction, so jaal refuses it inside a guarded. It is a plain member of
+// the writer, started once and stopped once at exit.
 struct WriterState {
     std::unordered_map<std::string, SaveJob> pending;
     // Per-thread knowledge of the log. The reducer reads it to build a
@@ -2127,7 +2128,7 @@ struct WriterState {
     std::string undo;
     std::string in_flight;
     bool        stopping = false;
-    bool        started  = false;
+    bool        started  = false;   // the drain job has been posted
 };
 
 using WriterStateLock = maya::guarded<WriterState>;
@@ -2145,10 +2146,11 @@ struct AsyncWriter {
     // destroyed after this one.
     WriterStateLock& st = async_writer_state();
 
-    // The drain worker: a jaal-backed group, joined with no deadline on stop
-    // so every queued save lands. Recreated if saves arrive again. A
-    // published slot, not a lock: whoever wins `started` (under `st`)
-    // creates and publishes it, and flush_and_stop takes it out to stop it.
+    // The drain worker: joined with no deadline on stop so every queued save
+    // lands. A published slot, not a lock: whoever flips `started` (under
+    // `st`) creates and publishes it; flush_and_stop takes it out to join it
+    // and a later save starts a fresh one. flush() only waits for the queue
+    // to empty, so a normal flush never restarts the thread.
     maya::published<util::WorkerGroup> worker;
 
     // Build the job on the CALLER's thread, copying only what changed.
@@ -2268,37 +2270,40 @@ struct AsyncWriter {
         }, key);
     }
 
-    void flush_and_stop(const maya::unlocked& cap, bool restartable = true) {
-        // Mark stopping (which wakes run()), take the worker out of its slot,
-        // and join with no lock held. run() drains every queued save before
-        // it sees `stopping` and exits, so nothing enqueued before this call
-        // is dropped. `started` stays true until the join is done, so a save
-        // racing this queues onto the draining worker instead of starting a
-        // second one; then it's cleared, and a later save starts a fresh one.
+    // Wait until everything queued before this call is on disk. The worker
+    // keeps running; a save queued after this returns is the caller's.
+    void flush(const maya::unlocked& cap) {
+        st.wait_with(cap,
+            [](const WriterState& s) {
+                return (s.pending.empty() && s.in_flight.empty()) || !s.started;
+            },
+            [](WriterState&) {});
+    }
+
+    // Process exit (or a test's clean slate): drain, join the worker, and
+    // leave the writer ready for a later save. `started` stays true until
+    // the join is done, so a save racing this queues onto the draining
+    // worker; a save that slipped in after run() exited gets a new one.
+    void flush_and_stop(const maya::unlocked& cap) {
         st.with(cap, [](WriterState& s) { s.stopping = true; });
         if (auto g = worker.take()) g->stop(cap);
-        if (!restartable) return;   // process exit: nothing runs after this
         const bool leftover = st.with(cap, [](WriterState& s) {
             s.stopping = false;
             s.started  = !s.pending.empty();
             return s.started;
         });
-        // A save that queued after run() drained and exited: give it a worker.
         if (leftover) start_worker();
     }
 
-    // Normally main() has already called flush_pending_saves(unlocked) and
-    // the worker is gone. But any exit path that skips it (a test, an early
-    // return, an embedder) used to hang here forever: run() waits for
-    // "pending or stopping", nobody sets stopping, and ~WorkerGroup joins
-    // it. So stop it ourselves. A destructor can't be handed `unlocked`, so
-    // it takes the root: static destructors run on the exiting thread after
-    // main, and nothing in this file calls exit() from inside a lock body,
-    // so no agentty lock is held here (allowlisted: cap_mint).
+    // Static destruction, after main. run() waits for "pending or stopping"
+    // and ~WorkerGroup would join it forever, so set stopping first. A
+    // destructor can't be handed `unlocked`; it takes the root: nothing in
+    // this file calls exit() from inside a lock body (allowlisted: cap_mint).
     ~AsyncWriter() {
         if (!worker.current()) return;
         maya::thread_root([this](const maya::unlocked& cap) {
-            flush_and_stop(cap, /*restartable=*/false);
+            st.with(cap, [](WriterState& s) { s.stopping = true; });
+            if (auto g = worker.take()) g->stop(cap);
         });
     }
 
@@ -2329,6 +2334,12 @@ private:
 
 static AsyncWriter& async_writer() {
     static AsyncWriter w;
+    // Joined before static destructors, like every other threaded subsystem.
+    static const auto registered = [] {
+        return util::teardown::on_shutdown("persistence.async_writer",
+            [](const maya::unlocked& cap) { async_writer().flush_and_stop(cap); });
+    }();
+    (void)registered;
     return w;
 }
 
@@ -2443,7 +2454,7 @@ void remove_thread_files(const lock_levels::below_thread_log& cap, const ThreadI
 }
 
 void flush_pending_saves(Io, const maya::unlocked& cap) {
-    async_writer().flush_and_stop(cap);
+    async_writer().flush(cap);
 }
 
 namespace {
