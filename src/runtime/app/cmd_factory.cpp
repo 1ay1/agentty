@@ -1794,14 +1794,38 @@ SchedDecision schedule_parallel_batch(const std::vector<ToolUse>& batch) {
     for (const auto& tc : batch)
         if (tc.is_running()) note(tc, effects_of(tc.name));
     // Greedily promote pending/approved calls in submission order.
+    //
+    // A WAIT (process_poll, or a shell whose command sleeps) never runs
+    // beside another wait, and never jumps ahead of an earlier one. A model
+    // that batches several "sleep 270; check the log" calls means "check,
+    // then check again later"; run together they all started at once, so
+    // the waits didn't add up, and a poll could answer before the shell
+    // ahead of it had even run.
+    auto is_wait = [](const ToolUse& tc) {
+        if (tc.name.value == "process_poll") return true;
+        if (tc.name.value != "shell" || !tc.args.is_object()) return false;
+        const auto it = tc.args.find("command");
+        if (it == tc.args.end() || !it->is_string()) return false;
+        const auto& c = it->get_ref<const std::string&>();
+        return c.find("sleep ") != std::string::npos;
+    };
+    bool wait_active = false;
+    for (const auto& tc : batch)
+        if (tc.is_running() && is_wait(tc)) wait_active = true;
     SchedDecision out;
     for (std::size_t i = 0; i < batch.size(); ++i) {
         const auto& tc = batch[i];
         if (!tc.is_pending() && !tc.is_approved()) continue;
+        const bool wait = is_wait(tc);
+        if (wait && wait_active) break;     // keep waits in order, one at a time
         const auto want = effects_of(tc.name);
-        if (!can_run(tc, want)) continue;   // stays pending; advances next kick
+        if (!can_run(tc, want)) {
+            if (wait) break;                // a wait never overtakes
+            continue;                       // stays pending; advances next kick
+        }
         note(tc, want);
         out.promote.push_back(i);
+        if (wait) wait_active = true;
     }
     return out;
 }

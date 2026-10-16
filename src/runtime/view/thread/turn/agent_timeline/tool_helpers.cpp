@@ -237,6 +237,29 @@ std::string pretty_path(std::string p) {
     return found;
 }
 
+// The range a `read` actually returned, from its "[showing lines A-B of N"
+// footer. first == 0 when there is no such footer (a whole small file).
+struct ShownRange { int first = 0, second = 0, total = 0; };
+[[nodiscard]] ShownRange parse_read_shown_range(const std::string& out) {
+    constexpr std::string_view kTag = "[showing lines ";
+    const auto p = out.rfind(kTag);
+    if (p == std::string::npos) return {};
+    ShownRange r;
+    std::size_t i = p + kTag.size();
+    auto num = [&](int& v) {
+        bool got = false;
+        while (i < out.size() && out[i] >= '0' && out[i] <= '9') {
+            v = v * 10 + (out[i] - '0'); got = true; ++i;
+        }
+        return got;
+    };
+    if (!num(r.first) || i >= out.size() || out[i] != '-') return {};
+    ++i;
+    if (!num(r.second)) return {};
+    if (out.compare(i, 4, " of ") == 0) { i += 4; num(r.total); }
+    return r;
+}
+
 } // namespace
 
 // One-line "what this tool is doing" for the timeline. Tool-specific
@@ -307,14 +330,25 @@ static std::string tool_timeline_detail_base(const ToolUse& tc) {
         // Both spellings of the range start (offset / Zed-style start_line).
         int off = safe_int_arg(tc.args, "offset", 0);
         if (off == 0) off = safe_int_arg(tc.args, "start_line", 0);
-        if (off > 0) detail += " @" + std::to_string(off);
         if (tc.is_done()) {
+            // What was SHOWN, from the tool's own "[showing lines A-B of N]"
+            // footer: a 5-line read of a 349-line file reads "131–135 of
+            // 349", not "349 lines", which looked like the card's own size.
+            if (auto r = parse_read_shown_range(tc.output()); r.first > 0) {
+                detail += "  \xc2\xb7  " + std::to_string(r.first) + "\xe2\x80\x93"
+                        + std::to_string(r.second);
+                if (r.total > 0) detail += " of " + std::to_string(r.total);
+                return detail;
+            }
+            if (off > 0) detail += " @" + std::to_string(off);
             // Prefer the file's true length that read reports in its
             // "[showing lines A-B of N]" footer; only re-count the (decorated)
             // output when there's no such marker (small file read whole).
             int lines = parse_read_total_lines(tc.output());
             if (lines < 0) lines = count_lines(tc.output());
             if (lines > 1) detail += "  \xc2\xb7  " + std::to_string(lines) + " lines";
+        } else if (off > 0) {
+            detail += " @" + std::to_string(off);
         }
         return detail;
     }

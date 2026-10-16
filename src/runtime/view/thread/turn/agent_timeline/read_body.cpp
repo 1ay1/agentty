@@ -29,6 +29,14 @@ bool read_body(const ToolUse& tc,
 
     const auto& raw = tc.output();
     if (!raw.empty()) {
+        // A cache hit is prefixed "[cached — unchanged since your last read
+        // of this file]\n". That is the tool talking to the model, not file
+        // text; leaving it in made it line 1 of the gutter and shifted every
+        // real line number by one.
+        std::string_view body_src{raw};
+        if (body_src.starts_with("[cached"))
+            if (const auto nl = body_src.find('\n'); nl != std::string_view::npos)
+                body_src.remove_prefix(nl + 1);
         // The read tool decorates its output: a leading "SUCCESS: `sym`
         // defined at path:N (lines A–B).\n\n" header for symbol reads and a
         // trailing "\n[showing lines A-B of N …]" pagination footer. Both
@@ -36,7 +44,7 @@ bool read_body(const ToolUse& tc,
         // every line number below them. Strip them here and mine them for
         // the TRUE first line — authoritative over the args echo (which is
         // absent for symbol reads and negative for tail reads).
-        std::string_view body{raw};
+        std::string_view body{body_src};
         int true_start = 0;
 
         auto parse_int_at = [](std::string_view s, std::size_t i) -> int {

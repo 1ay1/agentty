@@ -343,8 +343,8 @@ TEST_CASE("tool timeline adapter") {
         const auto d = U::tool_timeline_detail(make_tool("read",
             A::ToolUse::Done{{}, {}, out}, {{"path", "big.cpp"},
             {"display_description", "describe this"}}));
-        check(d.find("812 lines") != std::string::npos,
-              "read reports the file's true line count, not decorated rows");
+        check(d.find("1\xe2\x80\x93" "3 of 812") != std::string::npos,
+              "read reports the range shown of the file's true length: " + d);
         check(d.find("5 lines") == std::string::npos,
               "read does not count the description + footer rows");
     }

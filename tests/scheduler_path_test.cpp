@@ -229,6 +229,44 @@ TEST_CASE("scheduler path") {
               promoted_str(d.promote));
     }
 
+    // (m2) WAITS are sequential. A batch of "sleep; check" shells and
+    //      process_polls means "wait, look, wait again": run together they all
+    //      started at once. Only the first wait may run; nothing jumps it.
+    {
+        std::vector<ToolUse> b = {
+            pending("shell", {{"command", "sleep 270; tail -1 build.log"}}),
+            pending("process_poll", {{"id", "proc-1"}, {"wait_ms", 250000}}),
+            pending("shell", {{"command", "sleep 280; tail -1 build.log"}}),
+            pending("process_poll", {{"id", "proc-1"}, {"wait_ms", 250000}}),
+        };
+        auto d = schedule_parallel_batch(b);
+        expect("only the first wait runs", d.promote.size() == 1 && has(d.promote, 0),
+              promoted_str(d.promote));
+    }
+    {
+        // With the first wait running, the poll after it still waits its turn.
+        std::vector<ToolUse> b = {
+            running("shell", {{"command", "sleep 270; tail -1 build.log"}}),
+            pending("process_poll", {{"id", "proc-1"}, {"wait_ms", 250000}}),
+            pending("process_poll", {{"id", "proc-1"}, {"wait_ms", 250000}}),
+        };
+        auto d = schedule_parallel_batch(b);
+        expect("a poll never overtakes a running wait", d.promote.empty(),
+              promoted_str(d.promote));
+    }
+    {
+        // Reads in the same batch are not waits and still fan out.
+        std::vector<ToolUse> b = {
+            pending("process_poll", {{"id", "proc-1"}}),
+            pending("read", {{"path", "a.cpp"}}),
+            pending("process_poll", {{"id", "proc-1"}}),
+            pending("read", {{"path", "b.cpp"}}),
+        };
+        auto d = schedule_parallel_batch(b);
+        expect("reads beside one wait", has(d.promote, 0) && has(d.promote, 1)
+              && !has(d.promote, 2), promoted_str(d.promote));
+    }
+
     // (n) Lexical aliases and absolute-vs-relative spellings name the same
     //     resource and therefore serialise.
     {
