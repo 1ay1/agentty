@@ -4,6 +4,26 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Web Search: more settings per service.** Every new setting changes
+  which results come back, not what a search costs. Tavily (both tiers)
+  gains *Exact phrases*, *Language match*, *Country* and *Safe search*,
+  and Tavily Free gains *Depth*. Brave API gains *Spell correction*.
+  Firecrawl gains *Safe search*, *Sort* (newest first) and *Location*.
+  Exa gains *Safe search* and *Country*, and Perplexity gains *Mode*.
+  Brave API also takes a *Goggle*: the URL of a hosted rules file that
+  re-ranks its results. *Goggle* and *Location* are typed rows, saved only
+  when the service would accept them.
+
+### Changed
+- **Web Search: dials list every documented value.** Past hour on Firecrawl,
+  Serper and Exa. All six Exa modes, including deep-lite and deep-reasoning
+  (deep-reasoning can take 12-40 seconds, longer than the 30-second request
+  limit). Brave's *All regions* country. All 68 DuckDuckGo regions.
+  Firecrawl's categories are now Developer, Research, PDF and Government;
+  GitHub is gone from Firecrawl's API, so a saved GitHub choice is no longer
+  sent.
+
 ## [0.9.25] - 2026-10-16
 
 ### Changed
