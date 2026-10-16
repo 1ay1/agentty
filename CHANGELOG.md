@@ -23,6 +23,11 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   Firecrawl's categories are now Developer, Research, PDF and Government;
   GitHub is gone from Firecrawl's API, so a saved GitHub choice is no longer
   sent.
+- **Web Search: Firecrawl's Research category keeps working after
+  2026-11-16.** From that date Firecrawl answers it with research papers
+  instead of web pages. Each paper is shown with a link to its page on
+  arXiv, PubMed, PubMed Central or doi.org, or to Firecrawl's own page for
+  the paper when it has none of those, and its abstract as the snippet.
 
 ## [0.9.25] - 2026-10-16
 
