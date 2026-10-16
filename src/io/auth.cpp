@@ -57,6 +57,7 @@
 #  include <sddl.h>            // (SID helpers)
 #else
 #  include <fcntl.h>
+#  include <poll.h>
 #  include <sys/file.h>
 #  include <sys/stat.h>
 #  include <unistd.h>
@@ -210,6 +211,16 @@ fs::path credentials_path() { return config_dir() / "credentials.json"; }
 namespace {
 constexpr auto kXlockWait = std::chrono::seconds(35);
 constexpr auto kXlockStep = std::chrono::milliseconds(50);
+
+// Callers hold their in-process guarded lock while taking this one, so the
+// backoff can't be maya::delay_for: jaal aborts a delay_for under a lock.
+void xlock_backoff() noexcept {
+#ifdef _WIN32
+    ::Sleep(static_cast<DWORD>(kXlockStep.count()));
+#else
+    (void)::poll(nullptr, 0, static_cast<int>(kXlockStep.count()));
+#endif
+}
 } // namespace
 
 CrossProcessFileLock::CrossProcessFileLock(const fs::path& guarded_file) {
@@ -227,7 +238,7 @@ CrossProcessFileLock::CrossProcessFileLock(const fs::path& guarded_file) {
                              0, 1, 0, &ov)) { held_ = true; break; }
             if (::GetLastError() != ERROR_LOCK_VIOLATION) break;
             if (std::chrono::steady_clock::now() >= give_up) break;
-            (void)maya::delay_for(std::stop_token{}, kXlockStep);
+            xlock_backoff();
         }
     }
 #else
@@ -240,7 +251,7 @@ CrossProcessFileLock::CrossProcessFileLock(const fs::path& guarded_file) {
             if (errno == EINTR) continue;
             if (errno != EWOULDBLOCK) break;
             if (std::chrono::steady_clock::now() >= give_up) break;
-            (void)maya::delay_for(std::stop_token{}, kXlockStep);
+            xlock_backoff();
         }
     }
 #endif
