@@ -10,6 +10,7 @@
 #include "agentty/domain/conversation.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/provider/ollama/transport.hpp"
+#include "agentty/provider/openai/transport.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/responses/responses.hpp"
 
@@ -128,6 +129,27 @@ TEST_CASE("tool_result image on every wire dialect") {
             }
         }
         check(found, "ollama: role:tool result emitted");
+    }
+
+    // ── OpenAI chat completions ─────────────────────────────────────────
+    // A role:"tool" message is text-only there, so the picture rides a user
+    // message right after the tool results. It shipped missing: the model got
+    // "image attached" and no image, and kept re-reading the file.
+    {
+        namespace oai = agentty::provider::openai;
+        auto arr = oai::build_messages(
+            Thread{ThreadId{"t"}, "", tool_image_messages(img, "[image pic.png]"), {}, {}});
+        std::size_t tool_at = arr.size(), img_at = arr.size();
+        for (std::size_t i = 0; i < arr.size(); ++i) {
+            if (arr[i].value("role", "") == "tool") tool_at = i;
+            if (arr[i].value("role", "") == "user" && arr[i]["content"].is_array())
+                for (const auto& part : arr[i]["content"])
+                    if (part.value("type", "") == "image_url") img_at = i;
+        }
+        check(tool_at < arr.size(), "openai: role:tool result emitted");
+        check(arr[tool_at]["content"].is_string(), "openai: tool content stays text");
+        check(img_at < arr.size() && img_at == tool_at + 1,
+              "openai: the image follows the tool results as a user message");
     }
 }
 

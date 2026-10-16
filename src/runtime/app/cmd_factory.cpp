@@ -1866,6 +1866,7 @@ struct Streak {
     bool       repeated_after_nudge = false;  // …and the model called it again
     bool       last_rejected = false;
     ToolCallId last_id{};
+    std::uint64_t last_output = 0;            // success streaks: the result seen
 
     void add(const ToolUse& tc) {
         if (nudged) repeated_after_nudge = true;
@@ -1877,6 +1878,24 @@ struct Streak {
     }
     void reset() { *this = Streak{}; }
 };
+
+// What a call returned, without the nudge the guard itself appended (else the
+// nudged call would never match the next one). Images count: a re-read
+// screenshot of a rebuilt UI has the same text note and new pixels.
+std::uint64_t output_hash(const ToolUse& tc) {
+    std::string_view out = tc.output();
+    if (auto p = out.find(kLoopNudgeMarker); p != std::string_view::npos)
+        out = out.substr(0, p);
+    // A repeat read of an unchanged file comes back tagged "[cached ...]"
+    // with the same body: that is the same result, not a new one.
+    if (out.starts_with("[cached"))
+        if (auto nl = out.find('\n'); nl != std::string_view::npos) out.remove_prefix(nl + 1);
+    while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.remove_suffix(1);
+    std::uint64_t h = std::hash<std::string_view>{}(out);
+    for (const auto& img : tc.done_images())
+        h = (h ^ std::hash<std::string_view>{}(img.bytes())) * 0x100000001b3ull;
+    return h;
+}
 } // namespace
 
 std::optional<LoopBreak> agent_loop_should_break(
@@ -1924,8 +1943,13 @@ std::optional<LoopBreak> agent_loop_should_break(
     // streak. A success resets that call's streak; historical failures before
     // demonstrated recovery must not trip the breaker later.
     std::unordered_map<std::string, Streak> failure_streaks;
-    // The mirror, for calls that keep SUCCEEDING identically.
-    std::unordered_map<std::string, Streak> success_streaks;
+    // The mirror, for calls that keep SUCCEEDING identically. Only ONE streak
+    // is live: the current run of back-to-back identical calls that return
+    // the same thing. Any other call in between, or a different result (the
+    // file was rebuilt, the test now passes), ends it. A screenshot -> fix ->
+    // re-shoot loop re-reads the same path many times and is not stuck.
+    std::string success_key;
+    Streak      success;
     for (std::size_t i = run_start; i < messages.size(); ++i) {
         const auto& msg = messages[i];
         if (msg.role != Role::Assistant || msg.tool_calls.empty()) continue;
@@ -1940,8 +1964,20 @@ std::optional<LoopBreak> agent_loop_should_break(
             std::string key = tc.name.value + '\0'
                 + (tc.args.is_null() ? std::string{} : tc.args_dump());
             const bool bad = tc.is_failed() || tc.is_rejected();
-            (bad ? failure_streaks : success_streaks)[key].add(tc);
-            (bad ? success_streaks : failure_streaks)[key].reset();
+            if (bad) {
+                failure_streaks[key].add(tc);
+                success_key.clear();
+                success.reset();
+                continue;
+            }
+            failure_streaks[key].reset();
+            const std::uint64_t out = output_hash(tc);
+            if (key != success_key || out != success.last_output) {
+                success_key = std::move(key);
+                success.reset();
+                success.last_output = out;
+            }
+            success.add(tc);
         }
     }
 
@@ -1986,15 +2022,15 @@ std::optional<LoopBreak> agent_loop_should_break(
     // threshold is higher — re-reading a file after editing it is normal.
     // Six identical, successful, byte-for-byte calls without a text answer is
     // not.
-    for (const auto& [key, s] : success_streaks) {
-        if (s.count >= kSuccessRepeatLimit) {
-            if (auto b = judge(key, s,
-                "The `" + tool_of(key) + "` tool was called "
-                + std::to_string(s.count) + " times in a row with identical "
-                "arguments and the same result. You already have this output — "
-                "answer the user with what you know, or take a different "
-                "action.")) return b;
-        }
+    // Six byte-identical successful calls in a row, each returning exactly
+    // what the last one did, without a text answer in between, is stuck.
+    if (success.count >= kSuccessRepeatLimit) {
+        if (auto b = judge(success_key, success,
+            "The `" + tool_of(success_key) + "` tool was called "
+            + std::to_string(success.count) + " times in a row with identical "
+            "arguments and the same result. You already have this output — "
+            "answer the user with what you know, or take a different "
+            "action.")) return b;
     }
     // ── No step cap ─────────────────────────────────────────────────────
     //

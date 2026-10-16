@@ -362,3 +362,45 @@ TEST_CASE("issue 90 success repeat nudges then stops") {
     check(brk2 && brk2->stop, "identical read after the nudge stops");
 }
 
+// The screenshot loop: read a png, fix the code, re-shoot, read it again.
+// Same path every time, other calls in between, a new picture each time.
+// That's work, not a loop, and it used to get stopped at the 6th read.
+TEST_CASE("re-reading a file between other calls is not a loop") {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json shot = {{"path", "/tmp/k4/cmp/sbs-dcc.png"}};
+    for (int i = 0; i < 10; ++i) {
+        msgs.push_back(asst_call("shell", {{"command", "ninja && ./shot " + std::to_string(i)}},
+                                 Term::Done));
+        msgs.push_back(asst_call("read", shot, Term::Done));
+    }
+    check(!agent_loop_should_break(msgs), "interleaved identical reads never trip");
+}
+
+TEST_CASE("back-to-back repeats with a changing result are not a loop") {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"path", "build.log"}};
+    for (int i = 0; i < 10; ++i) {
+        auto m = asst_call("read", a, Term::Done);
+        m.tool_calls.back().status = ToolUse::Done{{}, {}, "line " + std::to_string(i)};
+        msgs.push_back(std::move(m));
+    }
+    check(!agent_loop_should_break(msgs), "a file that keeps changing is being watched");
+}
+
+TEST_CASE("a cached repeat of the same file still counts") {
+    std::vector<Message> msgs;
+    msgs.push_back(user());
+    json a = {{"path", "log.txt"}};
+    for (int i = 0; i < 6; ++i) {
+        auto m = asst_call("read", a, Term::Done);
+        if (i > 0)
+            m.tool_calls.back().status =
+                ToolUse::Done{{}, {}, "[cached \xe2\x80\x94 unchanged since your last read of this file]\nok"};
+        msgs.push_back(std::move(m));
+    }
+    auto brk = agent_loop_should_break(msgs);
+    check(brk && !brk->stop, "the [cached] tag is the same result: nudge");
+}
+

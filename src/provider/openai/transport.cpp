@@ -1955,6 +1955,7 @@ json build_messages(const Thread& t) {
     // Earlier reads whose file a later turn re-read/edited are collapsed to a
     // one-line pointer instead of their full body — see wire::superseded_read_ids.
     const auto superseded = wire::superseded_read_ids(t);
+    const unsigned max_side = util::wire_max_side(wire::wire_image_count(t.messages));
     for (const auto& m : t.messages) {
         const bool has_text   = !m.text.empty();
         // Skip empty-bytes images (a drained draft attachment that leaked
@@ -2019,6 +2020,11 @@ json build_messages(const Thread& t) {
 
         // Tool results as separate role:"tool" messages.
         if (has_tools) {
+            // OpenAI chat allows only text in a role:"tool" message, so the
+            // images a tool returned (read on a screenshot) follow every tool
+            // result of this turn as ONE user message. The tool messages stay
+            // contiguous after the assistant call, which the API requires.
+            json tool_images = json::array();
             for (const auto& tc : m.tool_calls) {
                 const int recency_rank = total_tool_results - 1 - tool_results_emitted;
                 ++tool_results_emitted;
@@ -2040,7 +2046,18 @@ json build_messages(const Thread& t) {
                     {"tool_call_id", tc.id.value},
                     {"content", scrub_utf8(out)},
                 });
+                if (is_error || superseded.count(tc.id.value)) continue;
+                for (const auto* imgp : wire::wire_tool_result_images(tc, max_side)) {
+                    if (tool_images.empty())
+                        tool_images.push_back({{"type", "text"},
+                            {"text", "Images returned by the tool calls above:"}});
+                    tool_images.push_back({{"type", "image_url"},
+                        {"image_url", {{"url", "data:" + std::string{wire::wire_media_type(*imgp)}
+                                                + ";base64," + imgp->base64()}}}});
+                }
             }
+            if (!tool_images.empty())
+                arr.push_back({{"role", "user"}, {"content", std::move(tool_images)}});
         }
     }
     return arr;

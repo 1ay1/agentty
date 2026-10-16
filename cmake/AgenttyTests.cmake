@@ -879,7 +879,7 @@ target_include_directories(dirs_test PRIVATE include
 # Same transitive deps keystore_test needs for the same reason: logx pulls
 # nlohmann + maya, and fs_helpers.cpp includes mcp-cpp's util header to
 # mirror the workspace root into it.
-target_link_libraries(dirs_test PRIVATE maya::maya nlohmann_json::nlohmann_json)
+target_link_libraries(dirs_test PRIVATE maya::maya maya::runtime nlohmann_json::nlohmann_json)
 if(TARGET mcp::tools)
     target_link_libraries(dirs_test PRIVATE mcp::tools)
 endif()
