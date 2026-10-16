@@ -613,6 +613,20 @@ target_compile_definitions(persistence_race_test_narrow PRIVATE
 add_test(NAME persistence_race_test_narrow COMMAND persistence_race_test_narrow)
 set_tests_properties(persistence_race_test_narrow PROPERTIES TIMEOUT 120 LABELS "race")
 
+# The settings write-behind cache, hammered from many threads with an
+# in-memory disk. Three TUs, so it stays cheap in the TSan lane.
+agentty_test(settings_cache_race_test MODE raw LABELS race)
+add_executable(settings_cache_race_test EXCLUDE_FROM_ALL
+    tests/settings_cache_race_test.cpp src/runtime/app/settings_cache.cpp
+    src/util/teardown.cpp src/util/logx.cpp src/util/dbglog.cpp)
+target_include_directories(settings_cache_race_test PRIVATE include tests
+    $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(settings_cache_race_test PRIVATE
+    nlohmann_json::nlohmann_json Threads::Threads maya::runtime)
+target_compile_definitions(settings_cache_race_test PRIVATE AGENTTY_MCP=0)
+add_test(NAME settings_cache_race_test COMMAND settings_cache_race_test)
+set_tests_properties(settings_cache_race_test PROPERTIES TIMEOUT 120 LABELS "race")
+
 # sandbox_config_race_test — publishing the sandbox policy while tools read it.
 #
 # Narrow on purpose, same reasoning as persistence_race_test_narrow above: it
