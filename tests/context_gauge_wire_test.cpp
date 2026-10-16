@@ -15,6 +15,7 @@
 #include "agtest.hpp"
 
 #include "agentty/domain/conversation.hpp"
+#include "agentty/io/http.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/app/update.hpp"
@@ -161,6 +162,30 @@ TEST_CASE("thread load: a result landing after ^N doesn't replace the new thread
     auto [m, c2] = app::update(std::move(fresh), Msg{ThreadLoaded{std::move(late)}});
     CHECK(m.d.current.id == fresh_id);
     CHECK(m.d.current.messages.empty());
+}
+
+TEST_CASE("^N mid-stream cancels the old stream's token") {
+    install_stub_deps();
+    auto start = model_with_gauge(60000);
+    auto tok = std::make_shared<http::CancelToken>();
+    phase::Active ctx; ctx.cancel = tok;
+    start.s.phase = phase::Streaming{std::move(ctx)};
+    auto [m, _] = app::update(std::move(start), Msg{NewThread{}});
+    CHECK(m.s.is_idle());
+    CHECK(tok->is_cancelled());
+}
+
+TEST_CASE("submit during a thread load keeps the draft and sends nothing") {
+    install_stub_deps();
+    auto start = model_with_gauge(60000);
+    start.s.thread_loading = true;
+    start.s.loading_thread = ThreadId{"other"};
+    start.ui.composer.text = "hello";
+    const auto before = start.d.current.messages.size();
+    auto [m, _] = app::update(std::move(start), Msg{ComposerEnter{}});
+    CHECK(m.ui.composer.text == "hello");
+    CHECK(m.d.current.messages.size() == before);
+    CHECK(m.s.is_idle());
 }
 
 TEST_CASE("gauge: a new thread starts at zero") {

@@ -36,6 +36,12 @@ namespace pn = agentty::ui::panel;
 namespace agentty::app::detail {
 
 Cmd submit_message(Model& m) {
+    // The transcript is about to be replaced (thread load) or cut (checkpoint
+    // rewind). A turn sent now would go to the thread being left or land
+    // between the rewind's index and its cut. Keep the draft untouched.
+    if (m.s.thread_loading)
+        return set_status_toast(m, "wait for the thread to finish loading");
+
     // Perf stamps: `AGENTTY_LOG=perf=debug` reveals where the first-turn
     // keystroke-to-stream latency goes (git spawn, slash/skill disk scan,
     // credential resolve, wire-tool build). Each stage logs its delta.
