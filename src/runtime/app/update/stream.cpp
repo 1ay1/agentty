@@ -2407,9 +2407,14 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 // matched something that only looked like a vision
                 // rejection, and stripping nothing then retrying would be
                 // an infinite loop on an unrelated 400.
+                // Images ride on user messages and on tool results (read
+                // on a png); both have to be counted and stripped.
                 std::size_t carried = 0;
-                for (const auto& msg : m.d.current.messages)
+                for (const auto& msg : m.d.current.messages) {
                     carried += msg.images.size();
+                    for (const auto& tc : msg.tool_calls)
+                        carried += tc.done_images().size();
+                }
 
                 if (carried > 0) {
                     AGT_LOG(Model, Warn, "vision.rejected",
@@ -2453,7 +2458,16 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // Strip and retry. The transcript keeps its images for
                     // display — only the wire payload loses them, rebuilt
                     // from m.d.current on the retry.
-                    for (auto& msg : m.d.current.messages) msg.images.clear();
+                    for (auto& msg : m.d.current.messages) {
+                        msg.images.clear();
+                        for (auto& tc : msg.tool_calls)
+                            if (auto* d = std::get_if<ToolUse::Done>(&tc.status);
+                                d && !d->images.empty()) {
+                                d->images.clear();
+                                d->output += "\n[image removed: the provider "
+                                             "could not process it]";
+                            }
+                    }
 
                     if (!reschedule_streaming(m.s.phase, [&](phase::Active& c) {
                             c.transient_retries = prior_transient + 1;
