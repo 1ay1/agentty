@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.25] - 2026-10-16
+
 ### Changed
 - **Tools work like Zed's agent.** `read` numbers every line (`cat -n`
   style), so the model can point at lines and won't mistake the numbers for
