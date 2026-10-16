@@ -1989,9 +1989,11 @@ a::LoadSessionResult AgentServer::on_load_session(const Cap& cap, const a::LoadS
         Session s;
         s.id = sid; s.cwd = cwd; s.profile = profile; s.thread = thread;
         s.extra_roots = std::move(extra);
+        // try_emplace: a concurrent load of the same id may have made it live
+        // since the check above (and queued a turn on it). Keep that one.
         sessions_.with(cap, [](Sessions& ss, Session v) {
             std::string k = v.id;
-            ss.by_id.insert_or_assign(std::move(k), std::move(v));
+            ss.by_id.try_emplace(std::move(k), std::move(v));
         }, std::move(s));
     }
 
