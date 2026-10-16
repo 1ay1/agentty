@@ -1987,7 +1987,10 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                     // this a compaction against a broken endpoint would
                     // retry forever (the compaction face of the dead loop).
                     && cctx->no_progress_failures
-                           < provider::kMaxNoProgressFailures;
+                           < provider::kMaxNoProgressFailures
+                    // A quota (hours to reset) won't clear on retry.
+                    && !(e.retry_after
+                         && e.retry_after->count() > provider::kRetryAfterTerminalSeconds);
 
                 if (can_retry_compact) {
                     std::chrono::milliseconds delay;

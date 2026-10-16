@@ -1786,7 +1786,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
                 msg += "  (model not loaded — run 'ollama pull " + req.model + "')";
             return msg;
         },
-        .retry_after = sc.retry_after_hint,
+        .retry_after = sc.retry_after(),
         .transport_error_message = [&]() -> std::string {
             std::string msg = std::string{"http: "} + result.error().render();
             msg += "  (is Ollama running? start it with 'ollama serve', or check "

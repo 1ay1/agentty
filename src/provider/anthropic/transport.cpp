@@ -595,7 +595,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
                 msg += "  (run 'agentty login' to re-authenticate)";
             return msg;
         },
-        .retry_after = sc.retry_after_hint,
+        .retry_after = sc.retry_after(),
         // Network / TLS / nghttp2-level error — never produced a complete SSE
         // stream. The typed HttpError's render() is embedded so the
         // downstream error_class substring sniff still routes it.

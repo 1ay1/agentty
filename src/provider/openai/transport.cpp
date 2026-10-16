@@ -2373,7 +2373,7 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
                        "model with ^/)";
             return msg;
         },
-        .retry_after = sc.retry_after_hint,
+        .retry_after = sc.retry_after(),
         .transport_error_message = [&]() -> std::string {
             std::string msg = std::string{"http: "} + result.error().render();
             // Local backend unreachable — the daemon almost certainly isn't

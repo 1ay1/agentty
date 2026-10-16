@@ -97,6 +97,14 @@ struct StreamScaffold {
         return http_status >= 200 && http_status < 300;
     }
 
+    // The server's backoff: the Retry-After header, else a delay named in
+    // the error body (Gemini sends only that). What finish_stream gets.
+    [[nodiscard]] std::optional<std::chrono::seconds> retry_after() const noexcept {
+        if (retry_after_hint) return retry_after_hint;
+        if (ok()) return std::nullopt;
+        return parse_retry_after_body(error_body);
+    }
+
     // Build the uniform handler. `this` must outlive the stream call (it
     // lives on run_stream_sync's stack; the HTTP client is synchronous).
     [[nodiscard]] http::StreamHandler handler() {

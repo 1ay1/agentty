@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agentty/io/http.hpp"
+#include "agentty/provider/error_class.hpp"
 #include "agentty/provider/stream_epilogue.hpp"
 #include "agentty/provider/usage.hpp"
 #include "agentty/provider/wire.hpp"
@@ -81,6 +82,31 @@ TEST_CASE("retry after") {
         auto r = parse_retry_after({});
         CHECK(!r.has_value());
     }
+}
+
+TEST_CASE("retry delay in the body: gemini sends no header (#102)") {
+    using agentty::provider::parse_retry_after_body;
+    using agentty::provider::parse_go_duration;
+    using std::chrono::seconds;
+
+    // The real body from #102 (google.rpc.RetryInfo + the message line).
+    const std::string gemini = R"([{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. * Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-4-argon Please retry in 1h40m43.390047655s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"6043s"}]}}])";
+    CHECK(parse_retry_after_body(gemini) == seconds{6043});
+    // Past the quota line: terminal, not three 10-minute waits.
+    CHECK(parse_retry_after_body(gemini)->count()
+          > agentty::provider::kRetryAfterTerminalSeconds);
+
+    // Message-only form (no RetryInfo detail).
+    CHECK(parse_retry_after_body("Please retry in 1h40m43.390047655s.") == seconds{6044});
+    // A burst limit stays a short wait.
+    CHECK(parse_retry_after_body(R"({"retryDelay": "43s"})") == seconds{43});
+    CHECK(parse_retry_after_body("retry in 2.5s") == seconds{3});
+
+    CHECK(parse_go_duration("500ms") == seconds{1});
+    CHECK(parse_go_duration("2m") == seconds{120});
+    CHECK(!parse_go_duration("soon"));
+    CHECK(!parse_retry_after_body("rate limited"));
+    CHECK(!parse_retry_after_body(R"({"retryDelay": ""})"));
 }
 
 TEST_CASE("scrub utf8 strict") {

@@ -1036,7 +1036,7 @@ provider::StreamResult stream_started(const Site& site,
         .http_error_message = [&]() -> std::string {
             return site.explain_http_error(sc.http_status, sc.error_body);
         },
-        .retry_after = sc.retry_after_hint,
+        .retry_after = sc.retry_after(),
         .transport_error_message = [&]() -> std::string {
             return result.error().render();
         },

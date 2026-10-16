@@ -35,6 +35,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "agentty/io/http.hpp"
 #include "agentty/util/logx.hpp"
@@ -350,6 +351,64 @@ parse_retry_after(const http::Headers& headers) noexcept {
             // to its own backoff schedule.
         }
         return std::nullopt;   // matched the header; don't scan further
+    }
+    return std::nullopt;
+}
+
+// A Go-style duration ("6043s", "43.39s", "1h40m43.390047655s", "500ms")
+// at the start of `s`, rounded up to whole seconds. nullopt if `s` doesn't
+// start with one.
+[[nodiscard]] inline std::optional<std::chrono::seconds>
+parse_go_duration(std::string_view s) noexcept {
+    double total = 0;
+    bool any = false;
+    std::size_t i = 0;
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+        double whole = 0, frac = 0, scale = 1;
+        bool dot = false, digits = false;
+        for (; i < s.size(); ++i) {
+            const char c = s[i];
+            if (c >= '0' && c <= '9') {
+                digits = true;
+                if (dot) { scale /= 10; frac += (c - '0') * scale; }
+                else     whole = whole * 10 + (c - '0');
+            } else if (c == '.' && !dot) {
+                dot = true;
+            } else {
+                break;
+            }
+        }
+        if (!digits) return std::nullopt;
+        const double n = whole + frac;
+        const std::string_view rest = s.substr(i);
+        if (rest.starts_with("ms"))      { total += n / 1000;    i += 2; }
+        else if (rest.starts_with("h")) { total += n * 3600;    i += 1; }
+        else if (rest.starts_with("m")) { total += n * 60;      i += 1; }
+        else if (rest.starts_with("s")) { total += n;           i += 1; }
+        else return std::nullopt;
+        any = true;
+    }
+    if (!any || total <= 0) return std::nullopt;
+    const auto whole = static_cast<long long>(total);
+    return std::chrono::seconds(whole + (total > static_cast<double>(whole) ? 1 : 0));
+}
+
+// The server's "wait this long" when it's in the BODY instead of a
+// Retry-After header. Google's Gemini API does this: its 429 carries a
+// google.rpc.RetryInfo detail (`"retryDelay": "6043s"`) and repeats it in
+// the message ("Please retry in 1h40m43.39s."), with no header at all.
+// Without this a daily quota looked like a burst limit and was retried for
+// minutes before failing with the message the first response already had.
+[[nodiscard]] inline std::optional<std::chrono::seconds>
+parse_retry_after_body(std::string_view body) noexcept {
+    if (auto k = body.find("\"retryDelay\""); k != std::string_view::npos) {
+        auto q = body.find('"', body.find(':', k) + 1);
+        if (q != std::string_view::npos)
+            if (auto d = parse_go_duration(body.substr(q + 1))) return d;
+    }
+    for (std::string_view key : {"retry in ", "Retry in "}) {
+        if (auto k = body.find(key); k != std::string_view::npos)
+            if (auto d = parse_go_duration(body.substr(k + key.size()))) return d;
     }
     return std::nullopt;
 }
