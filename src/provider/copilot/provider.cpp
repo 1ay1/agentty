@@ -11,6 +11,7 @@
 #include "agentty/domain/bundled_catalog.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <set>
 #include <string>
 
@@ -64,7 +65,24 @@ std::vector<std::pair<std::string, std::string>> copilot_headers() {
 }
 
 using Models = std::vector<ModelInfo>;
-maya::snapshot<Models>& models_cache() { static maya::snapshot<Models> c; return c; }
+// The list plus a generation bumped by invalidate_model_cache(). A fetch that
+// started before a bump must not store its now-stale list over it.
+struct ModelsCache { Models models; std::uint64_t gen = 0; };
+maya::snapshot<ModelsCache>& models_cache_slot() { static maya::snapshot<ModelsCache> c; return c; }
+
+struct ModelsView {
+    [[nodiscard]] Models get() const { return models_cache_slot().load()->models; }
+};
+ModelsView models_cache() { return {}; }
+std::uint64_t models_gen() { return models_cache_slot().load()->gen; }
+
+void store_models_if_current(const Models& fresh, std::uint64_t gen) {
+    models_cache_slot().update(
+        [](const ModelsCache& cur, const Models& f, std::uint64_t g) {
+            return cur.gen == g ? ModelsCache{f, g} : cur;
+        },
+        fresh, gen);
+}
 
 } // namespace
 
@@ -429,6 +447,7 @@ static std::vector<ModelInfo> bundled_models() {
 std::vector<ModelInfo> list_models(Io io, const maya::unlocked& cap) {
     if (auto hit = models_cache().get(); !hit.empty())
         return hit;
+    const std::uint64_t gen = models_gen();
     auto tok = fresh_token(cap);
     if (!tok || !tok->chat_enabled) {
         // The "no models / only stale models" report: the live catalog was
@@ -627,7 +646,7 @@ std::vector<ModelInfo> list_models(Io io, const maya::unlocked& cap) {
     out.reserve(rows.size());
     for (auto& r : rows) out.push_back(std::move(r.info));
 
-    models_cache().store(out);
+    store_models_if_current(out, gen);
     return out;
 }
 
@@ -671,7 +690,9 @@ std::string pick_auto_model_for_test(
 }
 
 void invalidate_model_cache() {
-    models_cache().store(Models{});
+    models_cache_slot().update([](const ModelsCache& cur) {
+        return ModelsCache{{}, cur.gen + 1};
+    });
 }
 
 } // namespace agentty::provider::copilot
