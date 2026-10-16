@@ -11,6 +11,7 @@
 #include "agentty/tool/mcp_tools_backends.hpp"
 
 #include "agentty/diff/diff.hpp"
+#include "agentty/domain/sandbox_config.hpp"   // kAlwaysMaskedNames: files the read tools refuse
 #include "agentty/io/http.hpp"
 #include "agentty/rag/rag_adapter.hpp"   // rag::feedback::note_file_opened (learning loop)
 #include "agentty/tool/registry.hpp"   // tools::progress::emit
@@ -333,6 +334,7 @@ ToolError decode_tool_error(std::string text) {
         std::pair{"subprocess failed", K::Subprocess},
         std::pair{"io", K::Io},
         std::pair{"out of workspace", K::OutOfWorkspace},
+        std::pair{"denied", K::Denied},
         std::pair{"unknown", K::Unknown},
     };
     for (const auto& [label, kind] : kinds) {
@@ -452,6 +454,10 @@ class GuardedToolState final : public mt::StateAccess {
                 // agentty's own way to widen the boundary, for the refusal text.
                 s.widen_hint = "Restart agentty in a parent directory or pass "
                                "--workspace <dir> to widen the scope.";
+                // The native read tools refuse what the sandbox masks for
+                // commands (.env, keys, tokens), like zed's private_files.
+                for (const char* n : sandbox_cfg::kAlwaysMaskedNames)
+                    s.private_names.emplace_back(n);
             }, std::move(home));
         });
     }
