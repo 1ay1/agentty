@@ -281,6 +281,15 @@ TEST_CASE("hosted models share agent prompt policy") {
     lan.openai_endpoint.host = "192.168.1.40";
     CHECK(provider::system_prompt_for(::agentty::IoAccess::grant(), lan)
           == provider::system_prompt_for(::agentty::IoAccess::grant(), local));
+
+    // #91 again: `agentty run` and subagents pick their prompt through
+    // uses_local_prompt(). It must agree with the main turn, or a local model
+    // there gets the hosted prompt without the "don't refuse" rules.
+    CHECK(provider::uses_local_prompt(local));
+    CHECK(provider::uses_local_prompt(lan));
+    CHECK(!provider::uses_local_prompt(anthropic));
+    CHECK(!provider::uses_local_prompt(chatgpt));
+    CHECK(!provider::uses_local_prompt(provider::parse_selection("groq")));
 }
 
 

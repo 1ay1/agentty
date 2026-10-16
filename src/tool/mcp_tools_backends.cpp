@@ -32,6 +32,8 @@
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/anthropic/transport.hpp"
 #include "agentty/provider/error_class.hpp"
+#include "agentty/provider/openai/transport.hpp"
+#include "agentty/provider/prompt_policy.hpp"
 #include "agentty/provider/provider.hpp"
 #include "agentty/provider/selection.hpp"
 #include "agentty/provider/credentials.hpp"
@@ -949,7 +951,13 @@ const AgentType& resolve_agent_type(std::string_view t) {
 }
 
 std::string subagent_system_prompt(Io io, const AgentType& type) {
-    std::string base = provider::default_system_prompt(io, /*lean=*/true);
+    // A local model gets the same compact prompt (with its "do the work,
+    // never refuse a big task" rules) the main turn gives it. The lean hosted
+    // prompt left `agentty run` and every subagent on a small local model
+    // without them, which is the refusal in #91.
+    const bool local = provider::uses_local_prompt(provider::active());
+    std::string base = local ? provider::openai::local_model_system_prompt()
+                             : provider::default_system_prompt(io, /*lean=*/true);
     base += "\n\n<subagent>\n";
     base += std::string{type.role};
     base +=

@@ -18,4 +18,9 @@ struct Selection;
 // compact local profile. External ACP agents own their own prompt/session.
 [[nodiscard]] std::string system_prompt_for(Io, const Selection& selection);
 
+// True when `selection` gets the compact local-model prompt: an OpenAI-compat
+// server you run (loopback / LAN, plain HTTP). Shared so the main turn and
+// subagents / `agentty run` can't disagree about which prompt a model gets.
+[[nodiscard]] bool uses_local_prompt(const Selection& selection);
+
 } // namespace agentty::provider

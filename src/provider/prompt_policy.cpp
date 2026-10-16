@@ -31,7 +31,7 @@ std::string system_prompt_for(Io io, const Selection& selection) {
         // rule the window probe uses. It used to be loopback-only, so a
         // llama.cpp/vLLM on another machine fed gpt-oss the long hosted
         // prompt and none of the local action rules (#91).
-        if (!ep.use_tls && openai::detail::is_local_endpoint(ep))
+        if (uses_local_prompt(selection))
             return openai::local_model_system_prompt();
 
         // Hosted OpenAI-compatible model on the shared base + any openai delta.
@@ -42,6 +42,12 @@ std::string system_prompt_for(Io io, const Selection& selection) {
     // agent/tool/RAG policy plus its provider overlay. Provider adapters only
     // decide how this string is encoded on their wire.
     return system_prompt_with_overlay(io, "anthropic");
+}
+
+bool uses_local_prompt(const Selection& selection) {
+    if (selection.kind != Kind::OpenAI || selection.is_oauth_native()) return false;
+    const auto& ep = selection.openai_endpoint;
+    return !ep.native_api && !ep.use_tls && openai::detail::is_local_endpoint(ep);
 }
 
 } // namespace agentty::provider
