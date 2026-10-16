@@ -817,6 +817,9 @@ Cmd launch_stream(Model& m) {
     // runs, so active_ctx is non-null here.
     auto cancel = std::make_shared<http::CancelToken>();
     if (auto* a = active_ctx(m.s.phase)) {
+        // A retry replaces the token. Trip the old one first so a previous
+        // worker still winding down can't send into the new attempt.
+        if (a->cancel && a->cancel != cancel) a->cancel->cancel();
         a->cancel = cancel;
 
         // Start the per-stream clock HERE, at the one point every stream
