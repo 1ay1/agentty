@@ -123,9 +123,8 @@ fs::path data_dir() {
     // stderr is enough — it prints before maya takes the screen, and
     // the static guard keeps it from spamming on every save.
     if (p.empty() || !fs::is_directory(p, ec)) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true, std::memory_order_relaxed)) {
             std::fprintf(stderr,
                 "agentty: warning: cannot create data dir '%s' (%s) — "
                 "threads and settings will not persist this session\n",
