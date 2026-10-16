@@ -139,8 +139,28 @@ TEST_CASE("gauge: opening a thread shows that thread's last prompt, not the old 
     Message tail; tail.role = Role::Assistant; tail.text = "unmeasured";
     t.messages.push_back(tail);                        // newest turn has no usage
 
-    auto [m, _] = app::update(model_with_gauge(60000), Msg{ThreadLoaded{std::move(t)}});
+    auto start = model_with_gauge(60000);
+    start.s.thread_loading = true;
+    start.s.loading_thread = t.id;   // as ThreadListSelect does
+    auto [m, _] = app::update(std::move(start), Msg{ThreadLoaded{std::move(t)}});
     CHECK(m.s.tokens_in == 12000);
+}
+
+TEST_CASE("thread load: a result landing after ^N doesn't replace the new thread") {
+    install_stub_deps();
+    auto start = model_with_gauge(60000);
+    start.s.thread_loading = true;
+    start.s.loading_thread = ThreadId{"other"};
+    auto [fresh, c1] = app::update(std::move(start), Msg{NewThread{}});
+    const ThreadId fresh_id = fresh.d.current.id;
+    CHECK(!fresh.s.thread_loading);
+
+    Thread late; late.id = ThreadId{"other"};
+    Message u; u.role = Role::User; u.text = "old";
+    late.messages.push_back(u);
+    auto [m, c2] = app::update(std::move(fresh), Msg{ThreadLoaded{std::move(late)}});
+    CHECK(m.d.current.id == fresh_id);
+    CHECK(m.d.current.messages.empty());
 }
 
 TEST_CASE("gauge: a new thread starts at zero") {

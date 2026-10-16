@@ -70,6 +70,12 @@ namespace {
     // Keys embed thread_id so there's no collision — this purely reclaims
     // the old thread's staged/pinned entries so they don't linger.
     m.ui.view_cache.clear();
+    // A thread load still in flight is for the transcript we're replacing;
+    // forget it so its result doesn't overwrite the fresh thread.
+    if (!m.s.loading_thread.value.empty()) {
+        m.s.loading_thread = {};
+        m.s.thread_loading = false;
+    }
     m.d.current = Thread{};
     m.d.current.id = persistence::new_id();
     m.d.current.created_at = m.d.current.updated_at =
@@ -251,6 +257,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                     return Cmd::none();
                 }
                 m.s.thread_loading = true;
+                m.s.loading_thread = meta.id;
                 // Warm the socket so the first turn in the thread the user
                 // is switching INTO doesn't re-pay the handshake (the pool's
                 // idle TTL has usually evicted it during composer breathing
@@ -370,6 +377,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             Cmd save = m.d.current.messages.empty()
                          ? Cmd::none() : Cmd(SaveThread{m.d.current});
             m.s.thread_loading = true;
+            m.s.loading_thread = meta.id;
             // "thread k/N · title" — the positional readout that makes
             // repeated Alt+←/→ presses feel like flipping through a
             // deck rather than teleporting blind. Survives the swap
@@ -412,8 +420,12 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // ThreadListSelect. Empty Thread (default ThreadId) means
             // the disk read or parse failed; just clear the spinner
             // and leave the current thread in place.
+            // No pending load means it was superseded (^N): drop it.
+            if (m.s.loading_thread.value.empty()) return Cmd::none();
+            const bool wanted = e.thread.id == m.s.loading_thread;
+            m.s.loading_thread = {};
             m.s.thread_loading = false;
-            if (e.thread.id.value.empty()) return Cmd::none();
+            if (!wanted || e.thread.id.value.empty()) return Cmd::none();
             // Smart-Mode per-thread routing state belongs to the departing
             // thread too — same reset as reset_to_fresh_thread (momentum,
             // cascade bias, outcome-feedback signature). Without it the
