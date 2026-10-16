@@ -28,6 +28,11 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   instead of web pages. Each paper is shown with a link to its page on
   arXiv, PubMed, PubMed Central or doi.org, or to Firecrawl's own page for
   the paper when it has none of those, and its abstract as the snippet.
+- **Web Search: Never return reaches Perplexity's own domain filter.**
+  Excluded sites used to be added to Perplexity searches as `-site:`
+  words, which Perplexity does not document. They are now sent through its
+  documented exclude filter, as for Tavily, Firecrawl and Exa. Perplexity
+  takes up to 20; any more are still added as `-site:`.
 
 ## [0.9.25] - 2026-10-16
 
