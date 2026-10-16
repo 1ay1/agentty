@@ -37,6 +37,13 @@ maya::snapshot<std::vector<sandbox_cfg::TrustHandoff>>& feed() {
     return f;
 }
 
+// Whether the latest snapshot hit its cap. A snapshot, like feed(), so the
+// pane reads it without a lock.
+maya::snapshot<bool>& last_truncated() {
+    static maya::snapshot<bool> t{false};
+    return t;
+}
+
 // Bounded for the same reason the broker's feed is: a loop writing to a trusted
 // path would otherwise grow this without limit, which is a denial of service the
 // gate inflicts on its own host. Smaller than the broker's 64 because a handoff
@@ -482,7 +489,15 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
     // authority on whether a path counts -- this list only decides walk ORDER.
     static constexpr std::string_view kPriorityDirs[] = {
         ".git", ".vscode", ".claude", ".agentty", ".cursor", ".idea",
-        ".direnv",
+        ".direnv", ".codex", ".gemini",
+    };
+    // The same idea for paths that only exist under $HOME and need two
+    // components to name: run at login or found on PATH. Small, and the
+    // most dangerous thing to lose to the cap when the workspace is ~.
+    static constexpr std::string_view kPriorityHomeDirs[] = {
+        ".config/fish", ".config/environment.d", ".config/autostart",
+        ".config/systemd", ".config/hypr", ".config/sway", ".config/i3",
+        ".config/plasma-workspace", ".local/bin",
     };
     const auto is_priority = [](std::string_view name) {
         return std::ranges::find(kPriorityDirs, name) != std::ranges::end(kPriorityDirs);
@@ -495,6 +510,12 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
         // near the workspace root in every real layout), then walk each fully.
         // Depth 3 is deep enough to find .vscode in a sub-package.
         std::vector<fs::path> targets;
+        for (auto rel : kPriorityHomeDirs) {
+            std::error_code hec;
+            fs::path p = base / rel;
+            if (fs::is_directory(p, hec) && !fs::is_symlink(fs::symlink_status(p, hec)))
+                targets.push_back(std::move(p));
+        }
         std::vector<std::pair<fs::path, int>> stack{{base, 0}};
         std::size_t pseen = 0;
         while (!stack.empty() && pseen <= kMaxEntries) {
@@ -566,6 +587,7 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
         }
     }
 
+    last_truncated().store(truncated);
     if (truncated)
         AGT_LOG(General, Warn, "handoff",
                 "trusted snapshot truncated at {} entries under {} -- a write "
@@ -577,6 +599,8 @@ TrustedSnapshot snapshot_trusted(std::string_view root) {
             snap.entries.size(), std::string{root});
     return snap;
 }
+
+bool last_snapshot_truncated() noexcept { return *last_truncated().load(); }
 
 std::size_t review_trusted(const TrustedSnapshot& before, std::string_view tool) {
     if (before.empty()) return 0;

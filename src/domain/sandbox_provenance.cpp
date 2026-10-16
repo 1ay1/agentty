@@ -83,8 +83,37 @@ constexpr std::array kRules{
     ShapeRule{".envrc", tag(TrustKind::ShellInit), ShapeMatch::Basename},
     ShapeRule{".bashrc", tag(TrustKind::ShellInit), ShapeMatch::Basename},
     ShapeRule{".zshrc", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".profile", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".bash_profile", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".bash_login", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".bash_logout", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".zprofile", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".zshenv", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".zlogin", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".xprofile", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".xinitrc", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".xsession", tag(TrustKind::ShellInit), ShapeMatch::Basename},
+    ShapeRule{".pam_environment", tag(TrustKind::ShellInit), ShapeMatch::Basename},
     ShapeRule{"activate", tag(TrustKind::ShellInit), ShapeMatch::Basename},
     ShapeRule{".direnv", tag(TrustKind::ShellInit), ShapeMatch::Component},
+    // fish, and per-user environment.d, read at every login
+    ShapeRule{".config/fish", tag(TrustKind::ShellInit), ShapeMatch::Component},
+    ShapeRule{".config/environment.d", tag(TrustKind::ShellInit), ShapeMatch::Component},
+
+    // ── session start: run at the next login, outside any sandbox ───────
+    ShapeRule{".config/autostart", tag(TrustKind::SessionStart), ShapeMatch::Component},
+    ShapeRule{".config/systemd", tag(TrustKind::SessionStart), ShapeMatch::Component},
+    ShapeRule{".config/hypr", tag(TrustKind::SessionStart), ShapeMatch::Component},
+    ShapeRule{".config/sway", tag(TrustKind::SessionStart), ShapeMatch::Component},
+    ShapeRule{".config/i3", tag(TrustKind::SessionStart), ShapeMatch::Component},
+    ShapeRule{".config/plasma-workspace", tag(TrustKind::SessionStart), ShapeMatch::Component},
+
+    // ── PATH: a file here shadows a real command for every later shell ──
+    ShapeRule{".local/bin", tag(TrustKind::Interpreter), ShapeMatch::Component},
+
+    // ── other agents: config that names commands they run unsandboxed ───
+    ShapeRule{".codex", tag(TrustKind::HookConfig), ShapeMatch::Component},
+    ShapeRule{".gemini", tag(TrustKind::HookConfig), ShapeMatch::Component},
 
     // ── build scripts: run on the next build, which is soon ─────────────
     ShapeRule{"Makefile", tag(TrustKind::BuildScript), ShapeMatch::Basename},

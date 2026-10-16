@@ -157,9 +157,38 @@ inline constexpr const char* kAlwaysMasked[] = {
     "/.cargo/credentials",
     "/.cargo/credentials.toml",
     "/.git-credentials",
+    // other agents' and CLIs' sign-ins: plaintext OAuth tokens and account ids
+    "/.codex/auth.json",
+    "/.claude/.credentials.json",
+    "/.claude.json",
+    "/.config/github-copilot",
+    "/.config/op",                        // 1password cli
+    "/.config/rclone/rclone.conf",
+    "/.terraform.d/credentials.tfrc.json",
+    "/.m2/settings.xml",
+    "/.gradle/gradle.properties",
+    "/.password-store",
+    // keyrings and browser profiles: encrypted, but the key material and the
+    // data it unlocks would leave together for an offline attack
+    "/.local/share/keyrings",
+    "/.config/google-chrome",
+    "/.config/chromium",
+    "/.config/BraveSoftware",
+    "/.mozilla",
+    // shell and REPL history: pasted tokens and passwords end up here
+    "/.bash_history",
+    "/.zsh_history",
+    "/.local/share/fish/fish_history",
+    "/.python_history",
+    "/.psql_history",
+    "/.mysql_history",
+    "/.node_repl_history",
     // agentty's own state: the memory store can contain anything the user
-    // told it, and the credential store obviously counts.
+    // told it, and the credential store obviously counts. The credentials
+    // live in a directory (~/.agentty/credentials/); the old single-file
+    // path is kept for installs that predate the move.
     "/.agentty/memory.jsonl",
+    "/.agentty/credentials",
     "/.agentty/credentials.json",
 };
 

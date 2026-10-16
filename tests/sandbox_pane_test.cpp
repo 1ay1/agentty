@@ -2282,6 +2282,48 @@ TEST_CASE("sandbox pane: loosening the handoff policy warns on the row") {
     CHECK(safe.fields[static_cast<std::size_t>(h2)].error.empty());
 }
 
+TEST_CASE("sandbox pane: host risks the audit found are said on the row") {
+    // Sandbox audit 2026-10-17: a port list under Full read as an allowlist,
+    // a workspace of $HOME left every dotfile writable, and handoff
+    // truncation only reached the log. Each now says so on its row.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.net_mode = sandbox_cfg::NetMode::Full;
+    cfg.allow_ports = {22, 53, 80, 443};
+    install(cfg);
+
+    auto facts = facts_for(cfg);
+    facts.workspace_is_home = true;
+    facts.handoff_truncated = true;
+    auto form = pn::build_sandbox_form(cfg, facts);
+    pn::annotate_host_risks(form, cfg, facts);
+
+    auto err_of = [&](std::string_view id) {
+        const int i = row_of(form, id);
+        REQUIRE(i >= 0);
+        return form.fields[static_cast<std::size_t>(i)].error;
+    };
+#if AGENTTY_TEST_SANDBOX_BACKEND
+    CHECK(err_of(pn::kSbPorts).find("ignored") != std::string::npos);
+    CHECK(err_of(pn::kSbFsScope).find("home") != std::string::npos);
+    CHECK(err_of(pn::kSbHandoff).find("cap") != std::string::npos);
+#else
+    (void)err_of;
+#endif
+
+    // The safe case is silent: no warning trains the user to skip warnings.
+    cfg.net_mode = sandbox_cfg::NetMode::Ports;
+    auto calm = facts_for(cfg);
+    auto quiet = pn::build_sandbox_form(cfg, calm);
+    pn::annotate_host_risks(quiet, cfg, calm);
+    for (auto id : {pn::kSbPorts, pn::kSbFsScope, pn::kSbHandoff}) {
+        const int i = row_of(quiet, id);
+        REQUIRE(i >= 0);
+        CHECK(quiet.fields[static_cast<std::size_t>(i)].error.empty());
+    }
+}
+
 TEST_CASE("sandbox pane: a policy that will not compile annotates no walls") {
     // The worst possible lie would be a confident per-row "strong" read off a
     // stale preview. When the compile fails, every annotated row must say it

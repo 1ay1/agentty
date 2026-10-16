@@ -82,6 +82,7 @@ enum class TrustKind : std::uint8_t {
     ShellInit,      // .envrc, .bashrc, activate scripts
     BuildScript,    // Makefile, package.json scripts, build.rs
     DaemonSocket,   // docker.sock and friends -- a second execution env
+    SessionStart,   // autostart, systemd user units, WM config -- run at login
 };
 
 [[nodiscard]] constexpr std::string_view explain(TrustKind k) noexcept {
@@ -100,6 +101,8 @@ enum class TrustKind : std::uint8_t {
             return "a build script -- runs on the next build";
         case TrustKind::DaemonSocket:
             return "a privileged daemon -- it can act outside the sandbox entirely";
+        case TrustKind::SessionStart:
+            return "session start -- runs at your next login, outside the sandbox";
     }
     return "";
 }

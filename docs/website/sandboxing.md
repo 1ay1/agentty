@@ -57,7 +57,7 @@ The sandbox isn't one mechanism. It's several, each closing a different route ou
 
 **A private view of the filesystem.** The command gets its own *mount namespace* — its own idea of what the filesystem looks like. Your project is there, system libraries are there read-only, and `~/.ssh` is an empty file. Not hidden by convention: it genuinely isn't in that view.
 
-**A list of syscalls it may make.** Every program asks the kernel to do things — open a file, start a process, send a packet. These requests are called **syscalls**, and a *seccomp filter* is a list of which ones are allowed. agentty's default profile blocks the ones used to escape a sandbox (`ptrace`, `mount`, `unshare`) while allowing everything a compiler needs.
+**A list of syscalls it may make.** Every program asks the kernel to do things — open a file, start a process, send a packet. These requests are called **syscalls**, and a *seccomp filter* is a list of which ones are allowed. agentty's default profile blocks the ones used to escape a sandbox (`ptrace`, `mount`, `unshare`) while allowing everything a compiler needs. Sockets are limited to the families real tools use (Unix, IPv4, IPv6); netlink, vsock, raw and packet sockets are refused.
 
 **File rules the kernel checks directly.** *Landlock* is a Linux feature (kernel 5.13+) that lets a program permanently drop its own file access. Once set, it applies to that process and everything it starts — so a build script spawning a shell spawning a Python script is still confined.
 
@@ -133,7 +133,13 @@ agentty --sandbox-backend bwrap     # force the fallback
 
 **Masked (reads as empty)**
 
-`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.config/gcloud`, `~/.azure`, `~/.netrc`, `~/.npmrc`, `~/.cargo/credentials`, `~/.git-credentials`, and agentty's own credential store.
+- **Credentials:** `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.config/gcloud`, `~/.azure`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.cargo/credentials`, `~/.git-credentials`, `~/.password-store`, `~/.config/op`, `~/.config/rclone/rclone.conf`, `~/.terraform.d/credentials.tfrc.json`, `~/.m2/settings.xml`, `~/.gradle/gradle.properties`.
+- **Other agents' sign-ins:** `~/.codex/auth.json`, `~/.claude/.credentials.json`, `~/.claude.json`, `~/.config/github-copilot`.
+- **Keyrings and browser profiles:** `~/.local/share/keyrings`, `~/.config/google-chrome`, `~/.config/chromium`, `~/.config/BraveSoftware`, `~/.mozilla`. These are encrypted, but a key and the data it unlocks shouldn't leave together.
+- **Shell and REPL history:** `~/.bash_history`, `~/.zsh_history`, fish history, and the Python, psql, MySQL and Node REPL histories. Pasted tokens end up there.
+- **agentty's own state:** its credential store and its memory file.
+
+A mask always wins. Nothing else the sandbox mounts, including the read-only binds below, can make a masked path readable again.
 
 **Not there at all**
 
@@ -179,11 +185,24 @@ Then **you** open the project in your editor, or run `git commit`, or activate t
 
 agentty refuses those writes by default, and tells the model what to do instead ("write the content somewhere inert and ask the user to wire it up"). You can relax it to warn-and-allow in the pane, but `refuse` is the default because this is the shape nearly every real agent escape has taken.
 
+The files it guards:
+
+- **Editor and agent config:** `.vscode`, `.idea`, `.cursor`, `.claude`, `.agentty`, `.codex`, `.gemini`, `hooks.json`
+- **git:** `.git/config`, `.git/hooks`, `.git/info`
+- **Shell start-up:** `.bashrc`, `.zshrc`, `.profile`, `.bash_profile`, `.zprofile`, `.zshenv`, `.xprofile`, `.xinitrc`, `.envrc`, `.config/fish`, `.config/environment.d`, virtualenv `activate`
+- **Login session:** `.config/autostart`, `.config/systemd`, and window-manager config (Hyprland, Sway, i3, Plasma)
+- **Executables found on `PATH`:** `.local/bin`, `node_modules/.bin`, virtualenv interpreters
+- **Build scripts:** `Makefile`, `package.json`, `build.rs`, and similar
+
+Where the sandbox can, it also binds the ones that already exist read-only, so the write fails with `EROFS` instead of landing. Where it can't (a host without user namespaces), the write is still detected and reported.
+
 ## What it doesn't stop
 
 A boundary you can't see the edge of isn't one you can trust. So, plainly:
 
 - **Sending data out over a network you allowed.** If a command can read your files and the network is on, it can upload them. This is a real trade — blocking the network breaks `git push` and `npm install` — and it's exactly why `airgapped` exists. For one headless run, `agentty run --no-network` takes the network away from every command it spawns without changing your saved setting.
+- **Ports mode is TCP only.** With Network set to `ports`, the allowed-ports list limits TCP connections. UDP and ICMP aren't filtered, so DNS-based exfiltration still works there. Under `full` the ports list is ignored entirely, and the pane says so.
+- **A memory bug that maps, writes, then flips a page executable.** W^X refuses a mapping that is writable and executable at once. Writing a page and then making it executable still works, because JITs need it.
 - **Secrets deeper than the scan depth,** or inside a skipped folder like `node_modules`.
 - **Credential files nobody would recognise.** A secret in `config.local.yaml` doesn't look like a secret.
 - **Kernel bugs.** The command shares your kernel. A flaw in the kernel itself defeats any sandbox of this kind — which is what the pane means when it reports kernel isolation as `none`.
@@ -224,6 +243,10 @@ If your machine blocks the feature agentty needs, `--sandbox auto` runs unsandbo
 
 :::warn
 Running with `--workspace /` makes your entire filesystem the project folder, so there's nothing left to contain — agentty reports the sandbox as degraded. Keep the workspace scoped to the project you're working on.
+:::
+
+:::warn Don't use your home directory as the workspace
+The workspace is the one place commands may write. Start agentty in `~` and every dotfile becomes writable: shell start-up files, `~/.local/bin`, autostart entries, other tools' config. The masks and the read-only binds above still hold for the files they cover, but anything they don't name is fair game, and the trust-handoff check hits its size cap on a whole home directory. Settings → Sandbox warns when this is the case. Start agentty in a project folder instead.
 :::
 
 ## See it work

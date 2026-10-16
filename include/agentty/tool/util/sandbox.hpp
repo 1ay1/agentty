@@ -179,6 +179,10 @@ void reset_config_for_test() noexcept;
 // flag is the obvious one to query).
 [[nodiscard]] bool is_active() noexcept;
 
+// Is the workspace the user's home directory? Then every dotfile is writable
+// to sandboxed commands (login files, ~/.local/bin). The Sandbox pane warns.
+[[nodiscard]] bool workspace_is_home();
+
 // Single-line describe of current state for the startup banner / status
 // command. Examples:
 //   "sandbox: active (claybin)"

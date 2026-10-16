@@ -196,6 +196,14 @@ struct HostFacts {
     // to be sandboxed is a choice to respect. The pane says different things
     // for each, and the handoff gate stands down only for the second.
     bool mode_off = false;
+
+    // The workspace is the user's home directory. Then every dotfile is
+    // writable, including login files and ~/.local/bin, and the pane says so.
+    bool workspace_is_home = false;
+
+    // The last trust-handoff snapshot hit its entry cap, so a write below
+    // the cut would not be reported. Logged before; now shown on the row.
+    bool handoff_truncated = false;
 };
 
 // ── The path list editor ────────────────────────────────────────
@@ -455,6 +463,13 @@ enum class EngineStatus : std::uint8_t {
 // should say so where it is typed.
 void annotate_sandbox_form(form::Form& f, const Preview& preview,
                            const sandbox_cfg::Config& cfg, EngineStatus status);
+
+// Warnings that depend on the HOST rather than the config: the workspace is
+// $HOME (every dotfile writable), or the last handoff snapshot hit its cap.
+// Also config warnings the audit found misleading: allow_ports does nothing
+// under Full, and Ports covers TCP only. Run after annotate_sandbox_form.
+void annotate_host_risks(form::Form& f, const sandbox_cfg::Config& cfg,
+                         const HostFacts& facts);
 
 }  // namespace agentty::ui::panel
 

@@ -351,7 +351,8 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
         {"shares the host network \xc2\xb7 git push and npm install work, and so "
          "does exfiltration",
          "an empty network namespace \xc2\xb7 nothing can connect out",
-         "only the ports listed below \xc2\xb7 needs landlock abi 4+"}));
+         "only the TCP ports listed below \xc2\xb7 UDP and ICMP are not filtered "
+         "\xc2\xb7 needs landlock abi 4+"}));
     // Per-port needs landlock abi 4. Below that the kernel cannot express it,
     // so say so on the row rather than accepting a setting that silently
     // degrades to Full.
@@ -399,12 +400,13 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
 
     form.fields.push_back(
         toggle(kSbWxProtect, "W^X",
-               "no page may be both writable and executable",
+               "no page may be writable and executable at the same time",
                cfg.wx_protect,
-               "on: a bug that writes code cannot then run it \xc2\xb7 "
-               "breaks JITs (some node flags, any JVM)",
-               "off: JITs work \xc2\xb7 a memory bug can write new code and "
-               "execute it"));
+               "on: a single writable+executable mapping is refused \xc2\xb7 "
+               "writing a page and then making it executable still works \xc2\xb7 "
+               "breaks JITs that ask for RWX (some node flags, any JVM)",
+               "off: JITs work \xc2\xb7 a memory bug can map writable+executable "
+               "memory directly"));
     if (!claybin_live) lock_row(form, kSbWxProtect, why_locked);
 
     // ── Resources ─────────────────────────────────────────────────────
@@ -1113,6 +1115,39 @@ void annotate_sandbox_form(form::Form& f, const Preview& preview,
     }
 }
 
+void annotate_host_risks(form::Form& f, const sandbox_cfg::Config& cfg,
+                         const HostFacts& facts) {
+    auto row_of = [&](std::string_view id) -> form::Field* {
+        for (auto& fld : f.fields)
+            if (fld.id == id) return &fld;
+        return nullptr;
+    };
+    // Only fill a row's warning if nothing more specific is already there.
+    auto warn = [&](std::string_view id, std::string msg) {
+        if (auto* fld = row_of(id); fld && fld->error.empty())
+            fld->error = std::move(msg);
+    };
+
+    // A port list under Full does nothing. The audit found [22,53,80,443]
+    // set with Access at full and read it as an allowlist; it isn't one.
+    if (cfg.net_mode == sandbox_cfg::NetMode::Full && !cfg.allow_ports.empty())
+        warn(kSbPorts, "ignored while Access is full \xc2\xb7 every port is open "
+                       "\xc2\xb7 set Access to ports to use this list");
+
+    // Workspace = $HOME: the write wall is the workspace, so every dotfile is
+    // writable, including login files and ~/.local/bin.
+    if (facts.workspace_is_home)
+        warn(kSbFsScope, "workspace is your home dir \xc2\xb7 every dotfile is "
+                         "writable \xc2\xb7 start agentty in a project dir instead");
+
+    // The handoff snapshot hit its cap, so a write below the cut would not be
+    // reported. The read-only binds for what WAS found still hold.
+    if (facts.handoff_truncated)
+        warn(kSbHandoff, "last check hit its 20000-entry cap \xc2\xb7 a write "
+                         "deeper in the tree is not reported \xc2\xb7 use a smaller "
+                         "workspace");
+}
+
 #else
 
 Preview preview_sandbox(const sandbox_cfg::Config&) {
@@ -1134,6 +1169,9 @@ void annotate_sandbox_form(form::Form&, const Preview&,
     // per-row "none" next to a row that already says why would be the same
     // fact twice.
 }
+
+void annotate_host_risks(form::Form&, const sandbox_cfg::Config&,
+                         const HostFacts&) {}
 
 #endif
 

@@ -170,6 +170,13 @@ using namespace ::clay::literals;
             if (ro.starts_with(p.workspace))
                 d = std::move(d).bind_try(ro, ro, /*ro=*/true);
         }
+
+        // Masks go last, after every bind. build_claybin_posture already
+        // keeps masked paths out of handoff_ro; this makes the order itself
+        // safe too, so no later bind can uncover a mask again.
+        if (!p.handoff_ro.empty())
+            for (const auto& m : p.masked)
+                if (m.starts_with(p.workspace)) d = std::move(d).mask(m);
     }
 
     // ── network ─────────────────────────────────────────────────────────
@@ -243,6 +250,28 @@ using namespace ::clay::literals;
         for (auto nr : broker::brokered_syscalls()) sp.notify(nr);
     }
 #endif
+
+    // socket(): only the address families real tools use. AF_NETLINK reads
+    // the host's routes, links and addresses (the host netns is shared under
+    // Full), and AF_VSOCK reaches a hypervisor -- neither is something a
+    // build or a test needs. The family is arg 0, a 32-bit int.
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+    if (p.syscall_mode != 0) {
+        static constexpr std::uint32_t kFamilies[] = {
+            1,   // AF_UNIX
+            2,   // AF_INET
+            10,  // AF_INET6
+        };
+#if defined(__x86_64__)
+        constexpr clay::SysNr kSocket = 41;
+#else
+        constexpr clay::SysNr kSocket = 198;
+#endif
+        sp.allow_arg32_only(kSocket, 0 /* family */,
+                            std::span<const std::uint32_t>{kFamilies},
+                            clay::SysAction::errno_, 97 /* EAFNOSUPPORT */);
+    }
+#endif
     d = std::move(d).syscall_profile(std::move(sp));
 
     // Resource caps. cgroup2 when the host delegates, rlimit as a backstop;
@@ -268,8 +297,10 @@ using namespace ::clay::literals;
     // that shells out to `hostname`, which makes those non-reproducible and
     // mildly fingerprintable. claybin already defaults its PolicyData to
     // "sandbox"; this is the row that lets a user keep the real one when a
-    // build genuinely depends on it.
-    if (p.fake_hostname) d = std::move(d).hostname("sandbox");
+    // build genuinely depends on it. claybin defaults to "sandbox", so off
+    // has to clear it; an empty name skips sethostname and the new UTS
+    // namespace keeps the host's own name.
+    d = std::move(d).hostname(p.fake_hostname ? "sandbox" : "");
 
     return std::move(d).seal();
 }

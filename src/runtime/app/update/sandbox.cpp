@@ -52,6 +52,7 @@
 #include "agentty/runtime/panel/sandbox.hpp"
 #include "agentty/runtime/panel/form_keys.hpp"
 #include "agentty/tool/util/sandbox_claybin.hpp"
+#include "agentty/tool/util/handoff_gate.hpp"
 
 namespace pn = agentty::ui::panel;
 
@@ -107,6 +108,8 @@ namespace sb = agentty::tools::util::sandbox;
     f.sandbox_active = sb::is_active();
     f.mode_off = sb::requested_mode() == sb::Mode::Off;
     f.running = sandbox_cfg::LinuxBackend::Claybin;
+    f.workspace_is_home = sb::workspace_is_home();
+    f.handoff_truncated = tools::util::handoff::last_snapshot_truncated();
     return f;
 }
 
@@ -129,6 +132,7 @@ void reprice(pn::Sandbox& o) {
     // that is not running are a forecast and have to read as one.
     pn::annotate_sandbox_form(o.pane.form, o.pane.preview, cfg,
                               pn::engine_status(cfg, o.pane.facts));
+    pn::annotate_host_risks(o.pane.form, cfg, o.pane.facts);
     // And the answer to "will this actually work when I restart". Computed
     // HERE, with the preview that was just built from the same cfg, so the
     // verdict and the walls it is judging cannot disagree.

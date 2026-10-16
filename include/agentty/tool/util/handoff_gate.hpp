@@ -161,6 +161,9 @@ struct TrustedSnapshot {
 // sandbox is off -- there is nothing to report, so there is no reason to stat.
 [[nodiscard]] TrustedSnapshot snapshot_trusted(std::string_view root);
 
+// Did the most recent snapshot hit its entry cap? Read by the Sandbox pane.
+[[nodiscard]] bool last_snapshot_truncated() noexcept;
+
 // Compare after the call and record a handoff for every path that changed,
 // appeared or vanished. Returns the number recorded.
 //

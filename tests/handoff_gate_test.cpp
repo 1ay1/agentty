@@ -170,12 +170,39 @@ TEST_CASE("handoff: the known escape shapes are all refused") {
         {"/work/.vscode/tasks.json",        Kind::EditorTask},
         {"/work/.git/config",               Kind::GitConfig},
         {"/work/.envrc",                    Kind::ShellInit},
+        {"/home/u/.config/autostart/x.desktop", Kind::SessionStart},
     };
     for (const auto& c : cases) {
         auto v = hg::check_with(c.path, "write", Policy::Refuse);
         CHECK_FALSE(v.allowed);
         CHECK(v.kind == c.kind);
     }
+}
+
+TEST_CASE("handoff: login, session and PATH files are host-trusted (audit 2026-10-17)") {
+    Fresh fresh;
+
+    // With the workspace at $HOME these were plain writable files: a command
+    // could drop something that runs at the next login or shadows a real
+    // command on PATH. Each is now a trusted shape.
+    for (const char* p : {"/home/u/.profile", "/home/u/.bash_profile",
+                          "/home/u/.zprofile", "/home/u/.zshenv",
+                          "/home/u/.config/fish/config.fish",
+                          "/home/u/.config/environment.d/10-x.conf",
+                          "/home/u/.config/autostart/x.desktop",
+                          "/home/u/.config/systemd/user/x.service",
+                          "/home/u/.config/hypr/hyprland.conf",
+                          "/home/u/.local/bin/git",
+                          "/home/u/.codex/config.toml",
+                          "/home/u/.gemini/settings.json"}) {
+        INFO(p);
+        CHECK_FALSE(hg::check_with(p, "write", Policy::Refuse).allowed);
+    }
+    // A plain dotfile that runs nothing is still ordinary.
+    CHECK(hg::check_with("/home/u/.config/kitty/kitty.conf", "write",
+                         Policy::Refuse).allowed);
+    CHECK(hg::check_with("/home/u/.local/share/notes.txt", "write",
+                         Policy::Refuse).allowed);
 }
 
 // ── The feed ─────────────────────────────────────────────────────────────

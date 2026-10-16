@@ -641,6 +641,95 @@ int main() {
         }
     }
 
+    // ── sandbox audit 2026-10-17 ───────────────────────────────────────────────
+    std::printf("\naudit 2026-10-17 regressions:\n");
+    {
+        // #9: netlink and vsock refused, unix/inet still fine.
+        auto p = base_posture();
+        std::string out;
+        run(p,
+            "python3 -c 'import socket\n"
+            "for fam,name in ((16,\"netlink\"),(40,\"vsock\"),(1,\"unix\"),(2,\"inet\")):\n"
+            "    try:\n"
+            "        s=socket.socket(fam,socket.SOCK_DGRAM if fam!=1 else socket.SOCK_STREAM); s.close(); print(name,\"ok\")\n"
+            "    except OSError as e: print(name,\"refused\",e.errno)' 2>&1", out);
+        std::printf("  child said: %s", out.c_str());
+        expect(out.find("netlink refused") != std::string::npos, "AF_NETLINK socket refused");
+        expect(out.find("vsock refused") != std::string::npos, "AF_VSOCK socket refused");
+        expect(out.find("unix ok") != std::string::npos, "AF_UNIX still works");
+        expect(out.find("inet ok") != std::string::npos, "AF_INET still works");
+    }
+    {
+        // #7: fake_hostname=false keeps the real name.
+        char host[256] = {};
+        ::gethostname(host, sizeof host - 1);
+        auto p = base_posture();
+        p.fake_hostname = false;
+        std::string out;
+        run(p, "uname -n", out);
+        std::printf("  host=%s child(off)=%s", host, out.c_str());
+        expect(out.find(host) != std::string::npos && out.find("sandbox") == std::string::npos,
+               "fake_hostname=false shows the real host name");
+        p.fake_hostname = true;
+        out.clear();
+        run(p, "uname -n", out);
+        std::printf("  child(on)=%s", out.c_str());
+        expect(out.find("sandbox") != std::string::npos,
+               "fake_hostname=true shows `sandbox`");
+    }
+    {
+        // #1: a handoff ro bind must not uncover a mask. Workspace = a fake
+        // $HOME holding ~/.agentty/memory.jsonl (masked) inside .agentty (a
+        // handoff dir), the exact shape the audit hit.
+        namespace sb = agentty::tools::util::sandbox;
+        const std::string fake_home = std::string{kWorkspace} + "-home";
+        std::error_code ec;
+        std::filesystem::create_directories(fake_home + "/.agentty", ec);
+        std::filesystem::create_directories(fake_home + "/.config/autostart", ec);
+        {
+            std::ofstream f(fake_home + "/.agentty/memory.jsonl");
+            f << "{\"text\":\"MEMORY_SHOULD_NEVER_APPEAR\"}\n";
+        }
+        {
+            std::ofstream f(fake_home + "/.agentty/hooks.json");
+            f << "{}\n";
+        }
+        {
+            std::ofstream f(fake_home + "/.config/autostart/x.desktop");
+            f << "[Desktop Entry]\n";
+        }
+        const char* old_home = std::getenv("HOME");
+        const std::string saved = old_home ? old_home : "";
+        ::setenv("HOME", fake_home.c_str(), 1);
+        agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), fake_home);
+        sb::reset_config_for_test();
+        agentty::sandbox_cfg::Config cfg;
+        cfg.configured = true;
+        sb::set_config(cfg);
+        (void)sb::init(sb::Mode::On);
+        if (sb::is_active()) {
+            expect(sb::workspace_is_home(), "workspace == $HOME is detected");
+            auto r = sb::run_shell_command("cat .agentty/memory.jsonl; echo END",
+                                           4096, std::chrono::seconds{15});
+            expect(r.output.find("MEMORY_SHOULD_NEVER_APPEAR") == std::string::npos,
+                   "a masked file inside a handoff dir stays masked");
+            auto w = sb::run_shell_command(
+                "echo PWNED > .config/autostart/x.desktop && echo wrote || echo denied",
+                4096, std::chrono::seconds{15});
+            std::string after;
+            {
+                std::ifstream f(fake_home + "/.config/autostart/x.desktop");
+                std::getline(f, after);
+            }
+            expect(after.find("PWNED") == std::string::npos,
+                   "an autostart entry is read-only (#3)");
+        } else {
+            std::printf("  no backend -- skipped\n");
+        }
+        if (saved.empty()) ::unsetenv("HOME"); else ::setenv("HOME", saved.c_str(), 1);
+        std::filesystem::remove_all(fake_home, ec);
+    }
+
     std::printf("\n%s\n", failures ? "LIVE CHECK FAILURES" : "all live checks passed");
     return failures ? 1 : 0;
 }

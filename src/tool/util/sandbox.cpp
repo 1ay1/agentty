@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <memory>   // shared_ptr — the config snapshot
+#include <optional>
+#include <string_view>
 
 #include <maya/runtime.hpp>
 #include <set>
@@ -277,6 +279,26 @@ constexpr const char* kHomeToolSubdirs[] = {
 #endif  // __linux__ (reopened below)
 
 #if defined(__linux__) || defined(__APPLE__)
+// The directory a trusted file under one of these is protected through, or
+// nullopt. These hold many files (and running binaries), so one read-only
+// bind of the directory replaces a bind per file.
+[[nodiscard]] std::optional<std::string> trusted_dir_of(const std::string& path,
+                                                        const std::string& workspace) {
+    static constexpr std::string_view kDirs[] = {
+        ".local/bin", ".config/autostart", ".config/systemd",
+        ".config/fish", ".config/environment.d", ".config/hypr",
+        ".config/sway", ".config/i3", ".config/plasma-workspace",
+    };
+    for (auto rel : kDirs) {
+        std::string dir = workspace;
+        if (!dir.empty() && dir.back() != '/') dir += '/';
+        dir += rel;
+        if (path.size() > dir.size() && path.starts_with(dir) && path[dir.size()] == '/')
+            return dir;
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] claybin_backend::Posture build_claybin_posture(
         const handoff::TrustedSnapshot* trusted = nullptr) {
     claybin_backend::Posture p;
@@ -384,8 +406,22 @@ constexpr const char* kHomeToolSubdirs[] = {
         // Files under a .git/hooks or .git/info dir get one ro bind of that
         // dir instead of one each. A checkout of many repos has thousands.
         std::set<std::string> dirs;
+        // A masked path must stay masked. The handoff walk matches .agentty
+        // as a hook-config dir, so with the workspace at $HOME it found
+        // ~/.agentty/memory.jsonl and bound the real file read-only on top
+        // of its mask. Skip anything that is masked or sits under a mask.
+        auto under_mask = [&](const std::string& path) {
+            for (const auto& m : p.masked) {
+                if (path == m) return true;
+                if (path.size() > m.size() && path.starts_with(m)
+                    && path[m.size()] == '/')
+                    return true;
+            }
+            return false;
+        };
         for (const auto& e : snap.entries) {
             if (!e.existed) continue;
+            if (under_mask(e.path)) continue;
             // A bind follows the link, so it can't protect it, and a link that
             // points out of the tree makes claybin's confined open fail (EXDEV).
             std::error_code lec;
@@ -395,8 +431,18 @@ constexpr const char* kHomeToolSubdirs[] = {
             if ((pname == "hooks" || pname == "info")
                 && parent.parent_path().filename() == ".git"
                 && !fs::is_symlink(fs::symlink_status(parent, lec))) {
-                if (dirs.insert(parent.string()).second)
+                if (dirs.insert(parent.string()).second && !under_mask(parent.string()))
                     p.handoff_ro.push_back(parent.string());
+                continue;
+            }
+            // Same for the login and PATH dirs: one ro bind of the dir, not
+            // one per file. Binding a file needs claybin to open it for
+            // writing, which fails with ETXTBSY on a binary in ~/.local/bin
+            // that is running right now, and that failed every spawn.
+            if (const auto d = trusted_dir_of(e.path, p.workspace)) {
+                if (dirs.insert(*d).second && !under_mask(*d)
+                    && !fs::is_symlink(fs::symlink_status(*d, lec)))
+                    p.handoff_ro.push_back(*d);
                 continue;
             }
             p.handoff_ro.push_back(e.path);
@@ -839,6 +885,13 @@ bool config_enforceable() noexcept {
 bool is_active() noexcept {
     return requested_mode() != Mode::Off
         && detected_backend() != Backend::None;
+}
+
+bool workspace_is_home() {
+    const char* home = std::getenv("HOME");
+    if (!home || !*home) return false;
+    std::error_code ec;
+    return std::filesystem::equivalent(workspace_root(), home, ec) && !ec;
 }
 
 std::string describe_state() {
