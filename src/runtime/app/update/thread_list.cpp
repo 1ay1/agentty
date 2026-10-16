@@ -52,8 +52,8 @@ namespace {
 // Swap the model over to a brand-new empty thread and return the terminal
 // reset that wipes the departing thread's rendered turns off-screen.
 //
-// This is the SHARED core behind two entry points: `NewThread` (^N / picker
-// `N`) and `ThreadListDelete` when the row removed is the active thread.
+// This is the SHARED core behind two entry points: `NewThread` (^N, in the
+// picker too) and `ThreadListDelete` when the row removed is the active thread.
 // It is deliberately the part *after* the caller's save/delete decision —
 // NewThread persists the outgoing thread first, delete has just destroyed
 // it — so the caller owns that policy and this owns the reset. Keeping the
@@ -179,7 +179,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
         [&](ThreadListMove& e) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
             if (!p) return Cmd::none();
-            p->confirm_remove.clear();   // moving disarms a pending `d`
+            p->confirm_remove.clear();   // moving disarms a pending ^D
             p->index = ui::step(p->index, e.delta, visible_count(m, *p));
             return Cmd::none();
         },
@@ -188,7 +188,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             if (!p) return Cmd::none();
             const int sz = visible_count(m, *p);
             if (sz == 0) return Cmd::none();
-            p->confirm_remove.clear();   // jumping disarms a pending `d`
+            p->confirm_remove.clear();   // jumping disarms a pending ^D
             using W = ThreadListJump::Where;
             constexpr int kPage = 14;  // matches kViewportH in pickers.cpp
             switch (e.where) {
@@ -244,7 +244,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
         [&](ThreadListSelect) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
             Cmd cmd = Cmd::none();
-            if (p) p->confirm_remove.clear();   // selecting disarms a pending `d`
+            if (p) p->confirm_remove.clear();   // selecting disarms a pending ^D
             if (p && !m.d.threads.empty() && !m.s.thread_loading) {
                 const int at = picked_thread(m, *p);
                 if (at < 0) return Cmd::none();   // the filter matches nothing
@@ -269,11 +269,11 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             return cmd;
         },
         [&](ThreadListDelete) -> Cmd {
-            // `d` / `D` in the thread picker — two-press delete with
-            // confirm_remove, mirroring SettingsListRemove / AccountRemove.
-            // First press on a row marks it pending (⚠ badge in the view);
-            // second press on the SAME row commits via deps().delete_thread().
-            // Any move/jump/select/new/close disarms the pending state.
+            // ^D in the thread picker: two-press delete with confirm_remove,
+            // mirroring SettingsListRemove / AccountRemove. First press on a
+            // row marks it pending (warning badge in the view); second press
+            // on the SAME row returns a DeleteThread effect. Any
+            // move/jump/select/new/close disarms the pending state.
             auto* p = m.ui.panel.get<pn::ThreadList>();
             if (!p || m.d.threads.empty()) return Cmd::none();
             // The cursor is a position in the FILTERED list; picked_thread

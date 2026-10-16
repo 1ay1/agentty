@@ -551,10 +551,10 @@ struct ThreadListSelect {};
 // Type to filter the thread list by title.
 struct ThreadListFilterInput     { char32_t ch; };
 struct ThreadListFilterBackspace {};
-// `d` / `D` in the thread picker — two-press delete with confirm_remove.
+// ^D in the thread picker: two-press delete with confirm_remove.
 // Mirrors the established SettingsListRemove / AccountRemove pattern:
-// first press marks the focused thread as pending-delete (⚠ badge),
-// second press on the SAME row commits via persistence::delete_thread().
+// first press marks the focused thread as pending-delete (warning badge in
+// the view), second press on the SAME row returns a DeleteThread effect.
 // Any move/select/new/close disarms the pending state.
 struct ThreadListDelete {};
 // Quick-cycle: switch to the adjacent thread (by recency order, the

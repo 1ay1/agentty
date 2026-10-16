@@ -1,12 +1,12 @@
 // thread_delete_test — the two-press thread-picker delete (ThreadListDelete).
 //
-// `d` / `D` in the ^J thread picker removes a thread, mirroring the
+// ^D in the ^J thread picker removes a thread, mirroring the
 // SettingsListRemove / AccountRemove two-press pattern. This pins the
 // contract that keeps it safe:
 //   1. ARM then COMMIT — the first press only marks the row (confirm_remove
 //      set, nothing deleted); the second press on the SAME row commits.
 //   2. DISARM on move — any navigation between the two presses clears the
-//      pending state, so a stray `d` can never delete a thread.
+//      pending state, so a stray ^D can never delete a thread.
 //   3. ACTIVE-thread delete starts a FRESH thread through the same core
 //      NewThread uses: the phase drops to Idle (a mid-stream delete can't
 //      leave the wire running against a dead thread) and current.id changes.
@@ -39,7 +39,7 @@ void check(bool cond, const std::string& msg) {
 }
 
 int g_new_ids = 0;
-std::vector<std::string> g_deleted;   // ids passed to deps().delete_thread
+std::vector<std::string> g_deleted;   // ids of the DeleteThread effects returned
 
 void install_stub_deps() {
     g_deleted.clear();
@@ -174,13 +174,13 @@ int main() {
         Model m = make_model(0, "other");
         m = step(std::move(m), ThreadListDelete{});   // arm t0
         check(picker(m)->confirm_remove == "t0", "armed t0");
-        // Jump to End (t2), then press d — different row, so it re-arms t2
+        // Jump to End (t2), then press ^D: a different row, so it re-arms t2
         // rather than deleting t0.
         m = step(std::move(m), ThreadListJump{ThreadListJump::Where::End});
         check(picker(m)->confirm_remove.empty(), "jump disarms t0");
         m = step(std::move(m), ThreadListDelete{});
         check(g_deleted.empty(), "no delete: the armed row lost focus before commit");
-        check(picker(m)->confirm_remove == "t2", "d on the new row arms it instead");
+        check(picker(m)->confirm_remove == "t2", "^D on the new row arms it instead");
     }
 
     if (g_failed == 0) std::println("thread_delete_test: OK");

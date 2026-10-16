@@ -1,4 +1,4 @@
-// thread_list.cpp — the thread switcher panel (^T): pick, d-to-delete.
+// thread_list.cpp - the thread switcher panel (^J): pick, ^D delete.
 //
 // Pure adapter: builds maya::Panel::Config from Model state; the widget
 // owns every chrome decision. Shared scaffolding: panels_prologue.hpp.
