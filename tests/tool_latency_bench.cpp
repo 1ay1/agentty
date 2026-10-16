@@ -21,6 +21,7 @@
 
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include "agentty/tool/registry.hpp"
+#include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/domain/sandbox_config.hpp"
@@ -90,10 +91,10 @@ int main(int argc, char** argv) {
         if (!td) { std::printf("%-18s  (tool not registered)\n", c.label); continue; }
         std::vector<long> us;
         bool ok = true;
-        (void)td->execute(agtest::cap(), c.args, agentty::tools::CallContext{});   // warm: first-touch caches, page cache
+        (void)agentty::tool::DynamicDispatch::execute_with(agtest::cap(), td, td->name.value, c.args, agentty::tools::CallContext{});   // warm: first-touch caches, page cache
         for (int i = 0; i < runs; ++i) {
             const auto t0 = std::chrono::steady_clock::now();
-            auto r = td->execute(agtest::cap(), c.args, agentty::tools::CallContext{});
+            auto r = agentty::tool::DynamicDispatch::execute_with(agtest::cap(), td, td->name.value, c.args, agentty::tools::CallContext{});
             const auto t1 = std::chrono::steady_clock::now();
             if (!r.has_value() && ok)
                 std::printf("  [%s] %s\n", c.label,

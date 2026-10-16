@@ -23,6 +23,7 @@
 #include "agentty/tool/policy.hpp"
 #include "agentty/tool/registry.hpp"
 #include "agentty/tool/spec.hpp"
+#include "agentty/tool/write_lanes.hpp"
 
 namespace agentty::tool {
 
@@ -180,7 +181,23 @@ struct DynamicDispatch {
             // when the call returns (CallContext::cap).
             tools::CallContext call_ctx = ctx;
             call_ctx.cap.set(std::addressof(cap));
-            result = td->execute(cap, safe_args, call_ctx);
+            // A writer holds the files it writes for the length of the call,
+            // so two writers of one file (from any caller: the parent's batch,
+            // a subagent, ACP, mcp-serve) run one after the other instead of
+            // losing an update. Applied HERE because this is the only place
+            // a tool body runs (tools::ToolBody); see write_lanes.hpp.
+            //
+            // Not for a tool that dispatches more tools (task): its permission
+            // effects say Exec, not WriteFs, and the calls it makes take their
+            // own lanes, so it never waits on a lane it already holds.
+            std::vector<std::string> lanes;
+            if (td->effects.has(tools::Effect::WriteFs))
+                lanes = tools::write_lanes::lanes_for(name, safe_args, call_ctx);
+            const tools::write_lanes::Hold lane{cap, std::move(lanes), call_ctx};
+            if (!lane.held())
+                return std::unexpected(ToolError::io(
+                    "cancelled while waiting for another write to the same file"));
+            result = td->execute(tools::DispatchKey{}, cap, safe_args, call_ctx);
         } catch (const std::exception& e) {
             return std::unexpected(ToolError::unknown(std::string{"tool crashed: "} + e.what()));
         } catch (...) {

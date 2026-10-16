@@ -39,6 +39,7 @@ set(_AGENTTY_CONSOLIDATED
     tool_definition_pin_test
     shell_env_floor_test
     edit_idempotent_guard_test
+    edit_lane_race_test
     exec_policy_test
     subprocess_group_kill_test
     plugins_in_model_test tool_stream_snapshot_test tool_timeline_adapter_test
@@ -1045,7 +1046,7 @@ set_tests_properties(maya_seam PROPERTIES LABELS static TIMEOUT 60)
 # core, and jsonrpc-cpp stays a leaf (docs/PROTOCOL_LIBRARIES.md §7).
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
-foreach(_pl purity duplication jsonrpc_leaf spawn_via_jaal no_sleep_poll setenv_in_main)
+foreach(_pl purity duplication jsonrpc_leaf spawn_via_jaal no_sleep_poll setenv_in_main tool_boundary)
     if(_pl STREQUAL "purity")
         set(_pl_name submodule_purity)
     elseif(_pl STREQUAL "duplication")

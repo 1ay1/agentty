@@ -198,7 +198,26 @@ Tools are fully typed internally; only the dispatcher boundary speaks JSON.
 `DynamicDispatch` looks a tool up in the registry, executes it inside a
 `try/catch` (a crashing tool becomes a typed `ToolError`, not a process abort),
 and applies a **per-tool output budget** so a runaway `read`/`bash`/`grep`
-can't blow the context window. Truncation is UTF-8-safe and comes in three
+can't blow the context window.
+
+**The dispatcher is the only way to run a tool, and the compiler enforces it.**
+A `ToolDef`'s body is a `tools::ToolBody`, which can be assigned and tested
+but only *called* with a `DispatchKey`, and only `DynamicDispatch` can make
+one. So every rule that has to hold for every call lives in
+`DynamicDispatch::execute_with` and can't be skipped: the worker's `unlocked`
+capability, exception containment, the output budget, and the **write lanes**
+(`tool/write_lanes.hpp`). This covers the parent's batch, `task` subagents,
+ACP, `mcp-serve` and abandoned jobs alike. A call whose effects include
+`WriteFs` holds a lane for each file it names, or the whole workspace if it
+names none, for the length of the call:
+
+- Two writers of one file run one after the other instead of losing an update.
+- Claims are all-or-nothing, so crossing claims can't deadlock.
+- A queued call that's cancelled gives up cleanly.
+
+The `tool_boundary` static check (`tests/lint/protocol_libraries.py`) closes
+the text-level ways around the type: a `DispatchKey` or a lane `Hold` made
+anywhere else fails CI. Truncation is UTF-8-safe and comes in three
 strategies:
 
 - **Head** — keep the front; right for ordered chunks (read, edit, write).

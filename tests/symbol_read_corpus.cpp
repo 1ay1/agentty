@@ -14,6 +14,7 @@
 
 #include "agentty/tool/mcp_tools_bridge.hpp"
 #include "agentty/tool/registry.hpp"
+#include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
 
 using nlohmann::json;
@@ -33,7 +34,7 @@ int main(int argc, char** argv) {
         if (tab == std::string::npos) continue;
         const std::string path = line.substr(0, tab), sym = line.substr(tab + 1);
         ++total;
-        auto r = read->execute(agtest::cap(), json{{"path", path}, {"symbol", sym}}, agentty::tools::CallContext{});
+        auto r = agentty::tool::DynamicDispatch::execute_with(agtest::cap(), read, read->name.value, json{{"path", path}, {"symbol", sym}}, agentty::tools::CallContext{});
         if (r && r->text.find("no definition of") == std::string::npos) {
             ++ok;
             if (verbose) {

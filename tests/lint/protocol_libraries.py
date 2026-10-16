@@ -298,6 +298,27 @@ def setenv_in_main(root):
     return [h for h in hits if "runtime/main.cpp" not in h.split(":", 1)[0]]
 
 
+def tool_boundary(root):
+    # Every tool call goes through tool::DynamicDispatch::execute_with, where
+    # the per-call rules live (capability, write lanes, exception containment,
+    # output budget). tools::ToolBody makes a direct call a compile error; this
+    # catches the ways around the type: minting a DispatchKey anywhere else,
+    # taking the write lanes anywhere else, or a module keeping a private copy
+    # of them.
+    rules = (
+        (r"(?<!class )\bDispatchKey\s*\{", ("include/agentty/tool/tool.hpp",)),
+        (r"\bwrite_lanes::Hold\b", ("include/agentty/tool/tool.hpp",)),
+        (r"\b(WriteLaneHold|write_lane_paths)\b", ()),
+    )
+    hits = []
+    for pat, allowed in rules:
+        for h in scan_agentty(root, re.compile(pat), ""):
+            if h.split(":", 1)[0] not in allowed:
+                hits.append(h)
+    print("tool_boundary: tool bodies run only through tool::DynamicDispatch")
+    return hits
+
+
 def scan_agentty(root, rx, banner):
     hits = []
     for sub in ("src", "include"):
@@ -310,20 +331,21 @@ def scan_agentty(root, rx, banner):
                 for no, line in enumerate(code.split("\n"), 1):
                     if rx.search(" " + line):
                         hits.append(f"{relpath(path, root)}:{no}: {line.strip()}")
-    print(banner)
+    if banner:
+        print(banner)
     return hits
 
 
 def main():
     if len(sys.argv) != 3 or sys.argv[2] not in ("purity", "duplication", "jsonrpc_leaf",
                                                  "spawn_via_jaal", "no_sleep_poll",
-                                                 "setenv_in_main"):
+                                                 "setenv_in_main", "tool_boundary"):
         print(__doc__)
         return 2
     root, what = sys.argv[1], sys.argv[2]
     hits = {"purity": purity, "duplication": duplication, "jsonrpc_leaf": jsonrpc_leaf,
             "spawn_via_jaal": spawn_via_jaal, "no_sleep_poll": no_sleep_poll,
-            "setenv_in_main": setenv_in_main}[what](root)
+            "setenv_in_main": setenv_in_main, "tool_boundary": tool_boundary}[what](root)
     if hits:
         print(f"\n{what}: {len(hits)} violation(s) (docs/PROTOCOL_LIBRARIES.md):")
         for h in hits:

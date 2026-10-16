@@ -17,6 +17,12 @@
 #include "agentty/tool/effects.hpp"
 #include "agentty/util/io.hpp"
 
+#include <concepts>
+#include <type_traits>
+
+// The one tool caller (tool.hpp): befriended by tools::DispatchKey below.
+namespace agentty::tool { struct DynamicDispatch; }
+
 namespace agentty::tools {
 
 // ── Tool result types (std::expected-based) ──────────────────────────────
@@ -186,6 +192,50 @@ struct CallContext {
     }
 };
 
+// ── The tool body: callable ONLY by the dispatcher ────────────────────────────────────
+//
+// Every safety rule a tool call needs is applied at ONE place,
+// tool::DynamicDispatch::execute_with: the capability handed to the body,
+// the write lanes that keep two writers off one file, exception
+// containment, the output budget, the cancelled-before-start check. A
+// caller that invoked a ToolDef's closure directly skipped all of them,
+// silently; that is how concurrent edits came to lose each other.
+//
+// So the closure is wrapped in a type whose call operator takes a key only
+// the dispatcher can make (DispatchKey's constructor is private to it).
+// Assigning a body and testing whether one is installed work as before;
+// RUNNING it anywhere but through dispatch does not compile.
+class DispatchKey {
+    DispatchKey() = default;
+    friend struct ::agentty::tool::DynamicDispatch;
+};
+
+class ToolBody {
+public:
+    using Fn = std::function<ExecResult(const maya::unlocked& cap,
+                                        const nlohmann::json& args,
+                                        const CallContext& ctx)>;
+    ToolBody() = default;
+    template <class F>
+        requires (!std::same_as<std::remove_cvref_t<F>, ToolBody>)
+              && std::constructible_from<Fn, F>
+    ToolBody(F f) : fn_(std::move(f)) {}          // NOLINT: implicit on purpose
+    template <class F>
+        requires (!std::same_as<std::remove_cvref_t<F>, ToolBody>)
+              && std::constructible_from<Fn, F>
+    ToolBody& operator=(F f) { fn_ = std::move(f); return *this; }
+
+    [[nodiscard]] explicit operator bool() const noexcept { return static_cast<bool>(fn_); }
+
+    // Dispatch only: see DispatchKey.
+    ExecResult operator()(DispatchKey, const maya::unlocked& cap, const nlohmann::json& args,
+                          const CallContext& ctx) const {
+        return fn_(cap, args, ctx);
+    }
+private:
+    Fn fn_;
+};
+
 struct ToolDef {
     ToolName    name;
     std::string description;
@@ -236,11 +286,9 @@ struct ToolDef {
     // the body gets that thread's `unlocked`. A tool may block (a subprocess,
     // an MCP round-trip, a scope of helpers) and take any lock in rank
     // order; the type is what proves the dispatcher never calls it from
-    // inside a lock body.
-    using ExecuteFn = std::function<ExecResult(const maya::unlocked& cap,
-                                               const nlohmann::json& args,
-                                               const CallContext& ctx)>;
-    ExecuteFn execute;
+    // inside a lock body. Only tool::DynamicDispatch can run it (ToolBody).
+    using ExecuteFn = ToolBody;
+    ToolBody execute;
 
     // A stable fingerprint of everything a consent decision depends on:
     // which tool this is, what it claims to do, what it accepts, and what it

@@ -705,6 +705,8 @@ std::vector<ToolDef> build_mcp_tool_defs() {
             const auto merged = ctx.merged_stop();
             req.stop      = merged->get_token();
             req.cancelled = [&ctx] { return ctx.cancelled(); };
+            // Write lanes are taken by the dispatcher, around this whole call
+            // (tool.hpp, write_lanes.hpp), not here.
             auto r = provider->execute(req);
 
             if (watchable && !before.empty()) {
