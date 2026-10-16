@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.26] - 2026-10-16
+
 ### Added
 - **Web Search: more settings per service.** Every new setting changes
   which results come back, not what a search costs. Tavily (both tiers)
