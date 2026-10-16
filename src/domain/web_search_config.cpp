@@ -173,7 +173,8 @@ nlohmann::json rewrite_args(const Config& c, nlohmann::json args) {
 }
 
 bool dial_entry_ok(std::string_view key, std::string_view value) noexcept {
-    if (key.empty() || key.size() > 64 || value.empty() || value.size() > 64) return false;
+    if (key.empty() || key.size() > 64 || value.empty() || value.size() > kMaxDialValueBytes)
+        return false;
     const auto dot = key.find('.');
     if (dot == std::string_view::npos || dot == 0 || dot + 1 == key.size()) return false;
     auto printable = [](std::string_view s) {

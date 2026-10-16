@@ -27,7 +27,9 @@ using KeyOrigin = std::function<std::string(std::string_view service)>;
 
 // Row ids beyond the registry's. A service's dials and key hang under the
 // slot that names it (the first slot only, when two name the same service).
-//   web_search.dial.<service>.<dial>   a Choice; value id "" = the service default
+//   web_search.dial.<service>.<dial>   a Choice (value id "" = the service
+//                                      default), or Text for a free-text dial
+//                                      (empty = the default)
 //   web_search.key.<service>           a Secret; always empty, see the .cpp
 inline constexpr std::string_view kDialPrefix = "web_search.dial.";
 inline constexpr std::string_view kKeyPrefix  = "web_search.key.";

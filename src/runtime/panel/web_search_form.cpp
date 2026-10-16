@@ -38,6 +38,25 @@ std::string dial_key(std::string_view service, std::string_view dial) {
     return k;
 }
 
+std::string trim(std::string_view s) {
+    constexpr std::string_view kSpace = " \t";
+    const auto b = s.find_first_not_of(kSpace);
+    if (b == std::string_view::npos) return {};
+    return std::string{s.substr(b, s.find_last_not_of(kSpace) - b + 1)};
+}
+
+// Whether `value` may be stored for the text dial `key` ("<service>.<dial>"):
+// mcp-cpp's own rule, so the pane never saves what a search would drop.
+bool text_dial_ok(std::string_view key, std::string_view value) {
+    const auto dot = key.find('.');
+    if (dot == std::string_view::npos) return false;
+    const auto* svc = ::mcp::tools::find_web_search_service(key.substr(0, dot));
+    if (!svc) return false;
+    for (const auto& d : svc->dials)
+        if (d.id == key.substr(dot + 1)) return ::mcp::tools::web_search_dial_value_ok(d, value);
+    return false;
+}
+
 // "Brave Free \xe2\x86\x92 DuckDuckGo Free \xe2\x86\x92 Tavily Free" for the subtitle.
 std::string chain_text(const web_search_cfg::Config& c) {
     std::string out;
@@ -72,14 +91,19 @@ void add_service_rows(form::Builder& b, const web_search_cfg::Config& c,
                       const ::mcp::tools::WebSearchService& svc,
                       const KeyOrigin& key_origin) {
     for (const auto& d : svc.dials) {
-        std::vector<std::string> labels, ids;
-        for (const auto& v : d.values) { labels.push_back(v.label); ids.push_back(v.id); }
         std::string cur;
         if (auto it = c.dials.find(dial_key(svc.id, d.id)); it != c.dials.end())
             cur = it->second;
         std::string help = svc.label + (d.help.empty() ? "" : " \xc2\xb7 " + d.help);
-        b.choice(std::string{kDialPrefix} + dial_key(svc.id, d.id),
-                 "  " + d.label, std::move(labels), std::move(ids), cur, std::move(help));
+        std::string row_id = std::string{kDialPrefix} + dial_key(svc.id, d.id);
+        if (d.text != ::mcp::tools::WebSearchText::None) {
+            b.text(std::move(row_id), "  " + d.label, cur, std::move(help));
+        } else {
+            std::vector<std::string> labels, ids;
+            for (const auto& v : d.values) { labels.push_back(v.label); ids.push_back(v.id); }
+            b.choice(std::move(row_id), "  " + d.label, std::move(labels), std::move(ids),
+                     cur, std::move(help));
+        }
         b.origin(cur.empty() ? "default" : "settings.json");
     }
     if (!svc.needs_key) return;
@@ -214,13 +238,21 @@ void apply_form(const form::Form& f, web_search_cfg::Config& c) {
     reg::read_rows(c, f, reg::Owner::WebSearch);
     // Dial rows. They are not registry rows (which dials exist depends on the
     // services chosen), so they are found by their id prefix. A dial set back
-    // to the service's own default is erased, not stored as "".
+    // to the service's own default (or a text row emptied) is erased, not
+    // stored as "". Typed text mcp-cpp would not send is not stored either:
+    // the rebuild then shows the row with what was on record.
     for (const auto& row : f.fields) {
         if (row.locked || row.id.rfind(kDialPrefix, 0) != 0) continue;
-        const auto* ch = std::get_if<form::field::Choice>(&row.value);
-        if (!ch) continue;
         const std::string key = row.id.substr(kDialPrefix.size());
-        const std::string val{ch->id()};
+        std::string val;
+        if (const auto* ch = std::get_if<form::field::Choice>(&row.value)) {
+            val = std::string{ch->id()};
+        } else if (const auto* tx = std::get_if<form::field::Text>(&row.value)) {
+            val = trim(tx->value);
+            if (!val.empty() && !text_dial_ok(key, val)) continue;
+        } else {
+            continue;
+        }
         if (val.empty()) c.dials.erase(key);
         else             c.dials[key] = val;
     }

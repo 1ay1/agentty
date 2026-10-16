@@ -30,9 +30,10 @@
 // What is and is not known about `-site:` support: DuckDuckGo documents it;
 // Brave honours it (checked live: a query that returns ten pinterest.com hits
 // returns none with `-site:pinterest.com`; Brave's own docs spell the operator
-// `NOT site:`). Services with a native domain filter (Tavily, Firecrawl, Exa)
-// receive the list as a request field instead, which mcp-cpp does by lifting
-// the `-site:` tokens back out of the query.
+// `NOT site:`). Services with a native domain filter (Tavily, Firecrawl, Exa,
+// Perplexity) receive the list as a request field instead, which mcp-cpp does
+// by lifting the `-site:` tokens back out of the query (at most 20; any more
+// stay in the query).
 //
 // Pure: no IO, no globals. The tool layer installs a value of this type
 // (tool/web_search_policy.hpp); the runtime persists it through the settings
@@ -120,20 +121,24 @@ struct Config {
     std::string language = "auto";
 
     // Per-SERVICE extra settings (freshness, region, ...), keyed
-    // "<service-id>.<dial-id>" -> value id. Per service rather than per slot
+    // "<service-id>.<dial-id>" -> value id, or the typed text for a free-text
+    // dial (a Brave Goggle URL). Per service rather than per slot
     // so choosing Exa for Fallback after trying it as Primary keeps what was
     // set. Only non-default values are stored. Values are not checked here:
-    // mcp-cpp sends a value only if the service lists it.
+    // mcp-cpp sends a value only if it passes web_search_dial_value_ok.
     std::map<std::string, std::string> dials;
 
     [[nodiscard]] bool operator==(const Config&) const = default;
 };
 
 // What a stored dial entry must look like: key "<service>.<dial>" and a value,
-// both short and printable. Applied on load AND on save, so a hand-edited
+// both printable, the key short and the value within kMaxDialValueBytes.
+// Applied on load AND on save, so a hand-edited
 // settings.json cannot hold what the pane could not produce, and junk keys
 // cannot crowd real ones out of the cap.
 inline constexpr std::size_t kMaxDials = 64;
+// Room for the longest free-text dial mcp-cpp declares: a 2048-byte Goggle URL.
+inline constexpr std::size_t kMaxDialValueBytes = 2048;
 [[nodiscard]] bool dial_entry_ok(std::string_view key, std::string_view value) noexcept;
 
 // The typed view of Config::mode_text. Anything unrecognised reads as Auto —
