@@ -33,6 +33,33 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   words, which Perplexity does not document. They are now sent through its
   documented exclude filter, as for Tavily, Firecrawl and Exa. Perplexity
   takes up to 20; any more are still added as `-site:`.
+- **A model you pick stays picked.** When a provider's model list arrived,
+  a model it didn't list by exact name (a `[1m]` variant, another spelling,
+  a gateway that lists only some models) was swapped for the list's first
+  model and saved that way. Now it's kept, with a one-time note; only a
+  `[1m]` window your account was refused falls back, to its own base model.
+- **One turn runs on one model.** A model picked while a turn is running now
+  takes effect when the turn ends. Before, the rest of the turn (tool steps,
+  retries) switched over midway, and a provider switch could send the old
+  provider's model and key to the new one.
+
+### Fixed
+- **The agent re-reading the same file over and over (#104).** After reading
+  a whole file, a read of part of it came back from the cache as the whole
+  file again, so the model never saw the lines it asked for and kept asking.
+- **The loop guard stopped legitimate work.** It counted identical calls
+  across the whole turn, so re-reading a screenshot after each rebuild, or
+  polling a running job, got cut off. Now only back-to-back calls with the
+  same result count.
+- **Images from tools reach OpenAI-compatible models.** A screenshot read
+  by a tool was never sent on the OpenAI chat API; the model saw only a
+  note that an image was attached.
+- **Several agentty windows no longer lose each other's changes.** Accounts,
+  saved keys, OAuth tokens (Claude, Codex, Copilot, Kimi, MCP), MCP config,
+  memory, approvals and thread saves are each changed under a cross-process
+  lock that gives up after 5 seconds if another window is stuck. Secrets are
+  created private (0600) instead of being tightened after writing.
+- **Saving a turn is about twice as fast** on long threads.
 
 ## [0.9.25] - 2026-10-16
 
