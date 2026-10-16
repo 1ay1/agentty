@@ -627,6 +627,15 @@ target_compile_definitions(settings_cache_race_test PRIVATE AGENTTY_MCP=0)
 add_test(NAME settings_cache_race_test COMMAND settings_cache_race_test)
 set_tests_properties(settings_cache_race_test PROPERTIES TIMEOUT 120 LABELS "race")
 
+# util::GenCache (the Copilot/Kimi model-list cache): header only.
+agentty_test(gen_cache_race_test MODE raw LABELS race)
+add_executable(gen_cache_race_test EXCLUDE_FROM_ALL tests/gen_cache_race_test.cpp)
+target_include_directories(gen_cache_race_test PRIVATE include
+    $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(gen_cache_race_test PRIVATE Threads::Threads maya::runtime)
+add_test(NAME gen_cache_race_test COMMAND gen_cache_race_test)
+set_tests_properties(gen_cache_race_test PROPERTIES TIMEOUT 120 LABELS "race")
+
 # sandbox_config_race_test — publishing the sandbox policy while tools read it.
 #
 # Narrow on purpose, same reasoning as persistence_race_test_narrow above: it

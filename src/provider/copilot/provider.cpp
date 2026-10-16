@@ -23,6 +23,7 @@
 #include "agentty/provider/responses/responses.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/gen_cache.hpp"
 
 #include <maya/runtime.hpp>
 
@@ -65,24 +66,9 @@ std::vector<std::pair<std::string, std::string>> copilot_headers() {
 }
 
 using Models = std::vector<ModelInfo>;
-// The list plus a generation bumped by invalidate_model_cache(). A fetch that
-// started before a bump must not store its now-stale list over it.
-struct ModelsCache { Models models; std::uint64_t gen = 0; };
-maya::snapshot<ModelsCache>& models_cache_slot() { static maya::snapshot<ModelsCache> c; return c; }
-
-struct ModelsView {
-    [[nodiscard]] Models get() const { return models_cache_slot().load()->models; }
-};
-ModelsView models_cache() { return {}; }
-std::uint64_t models_gen() { return models_cache_slot().load()->gen; }
-
-void store_models_if_current(const Models& fresh, std::uint64_t gen) {
-    models_cache_slot().update(
-        [](const ModelsCache& cur, const Models& f, std::uint64_t g) {
-            return cur.gen == g ? ModelsCache{f, g} : cur;
-        },
-        fresh, gen);
-}
+// A fetch that started before invalidate_model_cache() must not store its
+// now-stale list over it; GenCache drops that store.
+util::GenCache<Models>& models_cache() { static util::GenCache<Models> c; return c; }
 
 } // namespace
 
@@ -447,7 +433,7 @@ static std::vector<ModelInfo> bundled_models() {
 std::vector<ModelInfo> list_models(Io io, const maya::unlocked& cap) {
     if (auto hit = models_cache().get(); !hit.empty())
         return hit;
-    const std::uint64_t gen = models_gen();
+    const std::uint64_t gen = models_cache().gen();
     auto tok = fresh_token(cap);
     if (!tok || !tok->chat_enabled) {
         // The "no models / only stale models" report: the live catalog was
@@ -646,7 +632,7 @@ std::vector<ModelInfo> list_models(Io io, const maya::unlocked& cap) {
     out.reserve(rows.size());
     for (auto& r : rows) out.push_back(std::move(r.info));
 
-    store_models_if_current(out, gen);
+    (void)models_cache().store_if(out, gen);
     return out;
 }
 
@@ -690,9 +676,7 @@ std::string pick_auto_model_for_test(
 }
 
 void invalidate_model_cache() {
-    models_cache_slot().update([](const ModelsCache& cur) {
-        return ModelsCache{{}, cur.gen + 1};
-    });
+    models_cache().clear();
 }
 
 } // namespace agentty::provider::copilot

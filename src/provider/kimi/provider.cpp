@@ -24,6 +24,7 @@
 #include "agentty/provider/openai/transport.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/util/dbglog.hpp"
+#include "agentty/util/gen_cache.hpp"
 
 namespace agentty::provider::kimi {
 
@@ -34,7 +35,7 @@ constexpr const char* kApiHost   = "api.kimi.com";
 constexpr const char* kBasePath  = "/coding/v1";
 
 using Models = std::vector<ModelInfo>;
-maya::snapshot<Models>& models_cache() { static maya::snapshot<Models> c; return c; }
+util::GenCache<Models>& models_cache() { static util::GenCache<Models> c; return c; }
 
 // Query /coding/v1/usages. Returns a human message when the account is out of
 // credits (Kimi reports 429 resource_exhausted here even though /chat 500s),
@@ -151,6 +152,7 @@ static std::vector<ModelInfo> bundled_models() {
 std::vector<ModelInfo> list_models(Io io, const maya::unlocked& cap) {
     if (auto hit = models_cache().get(); !hit.empty())
         return hit;
+    const std::uint64_t gen = models_cache().gen();
     auto tok = fresh_token(cap);
     if (!tok) return bundled_models();
 
@@ -168,7 +170,7 @@ std::vector<ModelInfo> list_models(Io io, const maya::unlocked& cap) {
             if (b.id.value == m.id.value) { m.context_window = b.context_window; break; }
     }
 
-    models_cache().store(models);
+    (void)models_cache().store_if(models, gen);
     return models;
 }
 
@@ -178,7 +180,7 @@ std::string default_model(Io io, const maya::unlocked& cap) {
 }
 
 void invalidate_model_cache() {
-    models_cache().store(Models{});
+    models_cache().clear();
 }
 
 } // namespace agentty::provider::kimi
