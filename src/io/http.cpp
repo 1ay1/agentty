@@ -2940,7 +2940,10 @@ static bool backoff_sleep(int attempt, const CancelTokenPtr& cancel) {
     std::uniform_int_distribution<long> dist(0, ceiling);
     const auto budget = std::chrono::milliseconds(dist(rng));
     // Wakes the instant the request is cancelled; no token means a plain wait.
-    return !maya::delay_for(cancel ? cancel->token() : std::stop_token{}, budget);
+    // backoff_for, not delay_for: a token refresh holds its single-flight
+    // lane across this request, and delay_for aborts under any lock (a ^C
+    // during a slow refresh crashed with SIGABRT). The pause is capped.
+    return !maya::backoff_for(cancel ? cancel->token() : std::stop_token{}, budget);
 }
 
 HttpResult
