@@ -69,6 +69,25 @@ TEST_CASE("anthropic selection hits anthropic route") {
     CHECK(route_for(provider::parse_selection("anthropic")) == "anthropic");
 }
 
+// The turn worker builds a request (model id, auth, prompt) for one provider
+// and stamps it with that provider. Routing must follow the stamp, not the
+// live selection: a provider switch while the turn runs used to send this
+// provider's model and key to the newly-picked one.
+TEST_CASE("a request routes to the provider it was built for") {
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
+    Probe p;
+    provider::Request built_for_chatgpt;
+    built_for_chatgpt.selection = provider::parse_selection("chatgpt");
+    (void)provider::dispatch_stream(agtest::cap(), p.router(), std::move(built_for_chatgpt),
+                                    provider::EventSink{});
+    CHECK(p.hit == "chatgpt");   // not the live anthropic
+
+    Probe q;
+    (void)provider::dispatch_stream(agtest::cap(), q.router(), provider::Request{},
+                                    provider::EventSink{});
+    CHECK(q.hit == "anthropic");   // unstamped: the live provider
+}
+
 TEST_CASE("chatgpt selection hits chatgpt route") {
     // parse_selection resolves the registry row; identity travels ON the
     // selection rather than being re-derived from a mutable label.

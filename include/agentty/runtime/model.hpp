@@ -479,6 +479,14 @@ struct Model {
         // load+fsync+rename on the UI thread; instead the CycleEffort arm
         // sets this and CloseModels/Select flush once.
         bool                effort_dirty = false;
+        // The model id we last told the user isn't in its provider's list, so
+        // each catalog refresh doesn't repeat the toast.
+        std::string         unlisted_model_noted;
+        // A model picked while a turn was running. It's applied when the turn
+        // ends (publish_derived checks every fold), so the running turn's
+        // continuations and retries stay on the model and provider it started
+        // with. A newer pick replaces it; picking the running model clears it.
+        std::optional<ModelRef> pending_switch;
         // Plugins/MCP connection snapshot — OWNED BY THE MODEL, not read from
         // the global pool at render time. This is the architectural fix for
         // the recurring "stuck on connecting… / laggy panel" bugs: the view

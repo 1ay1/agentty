@@ -497,6 +497,8 @@ Cmd  tool_update          (Model& m, msg::ToolMsg           tm);
 Cmd  tool_output_update   (Model& m, msg::ToolOutputMsg     tm);
 Cmd  providers_update(Model& m, msg::ProvidersMsg pm);
 Cmd  models_update  (Model& m, msg::ModelsMsg     pm);
+// A model picked mid-turn, applied once the phase is Idle (publish_derived).
+Cmd  apply_pending_switch(Model& m);
 // Shared fused-row builder (SSOT for reducer + view): enumerates authed
 // providers into catalogs (+ un-authed sign-in offers), applies the current
 // fused_picker query, and returns the ordered/sectioned FusedRow list. The

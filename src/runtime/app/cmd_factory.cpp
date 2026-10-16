@@ -1155,6 +1155,7 @@ Cmd launch_stream(Model& m) {
         // and OpenAI-compatible models receive the same complete agent/tool/RAG
         // instructions; only constrained local endpoints use a compact profile.
         const auto sel_now = in.selection;
+        req.selection = sel_now;   // route to the provider this was built for
         req.system_prompt = provider::system_prompt_for(io, sel_now);
         // Layer 3a (orchestration): teach the Strategic model to keep the
         // thinking and DELEGATE mechanical work to subagents — the

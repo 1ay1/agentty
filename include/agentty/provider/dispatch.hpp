@@ -90,8 +90,8 @@ using Routes = ProviderRouter;
 StreamResult dispatch_stream(const maya::unlocked& cap, const Routes& routes,
                              const Selection& sel, Request req, EventSink sink);
 
-// Convenience overload: route the process-global `active()` selection. This
-// is the whole body of main.cpp's `stream_fn`.
+// Convenience overload: route by req.selection (the provider the request was
+// built for), else the live active() one. The whole body of main's stream_fn.
 StreamResult dispatch_stream(const maya::unlocked& cap, const Routes& routes, Request req,
                              EventSink sink);
 

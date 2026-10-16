@@ -107,11 +107,13 @@ StreamResult dispatch_stream(const maya::unlocked& cap, const ProviderRouter& ro
 
 StreamResult dispatch_stream(const maya::unlocked& cap, const ProviderRouter& router,
                              Request req, EventSink sink) {
-    // Dispatch on the LIVE selection so a picker switch retargets the next
-    // request with no seam rebuild. active() hands back a by-value snapshot
-    // taken under the selection mutex, so the stream worker can't observe a
-    // torn mid-select() endpoint.
-    const Selection sel = active();
+    // Route by the provider the request was BUILT for. Its model id, auth and
+    // prompt came from that selection; the live one may have moved on (the
+    // user switched provider while this turn was running), and sending it
+    // there mixed one provider's model and key with another's endpoint.
+    // A request built without one goes to the live selection. active() is a
+    // by-value snapshot, so the worker can't see a torn mid-select() endpoint.
+    const Selection sel = req.selection ? *req.selection : active();
     return dispatch_stream(cap, router, sel, std::move(req), std::move(sink));
 }
 

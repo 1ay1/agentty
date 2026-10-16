@@ -440,6 +440,26 @@ void rebuild_fused_rows(Model& m, bool sync_sources) {
 Cmd switch_to_model_ref(Model& m, const ModelRef& ref, bool record = true) {
     const std::string cur_pid = active_provider_id(m);
 
+    // A turn is running: its continuations and retries must stay on the model
+    // and provider it started with, or half a turn goes to one model and half
+    // to another (and a cross-provider pick sent the old provider's model id
+    // to the new one). Hold the pick and apply it the moment the turn ends
+    // (publish_derived). The MRU records it now, so ^Tab sees it.
+    if (m.s.active()) {
+        const bool same = ref.provider_id == cur_pid && ref.model_id == m.d.model_id.value;
+        if (same) m.ui.pending_switch.reset();   // picked the running model: nothing to do
+        else      m.ui.pending_switch = ref;
+        auto mru = record ? record_recent(m, ref.provider_id, ref.model_id) : Cmd::none();
+        auto toast = same ? set_status_toast(m, "already on " + ui::pretty_model_label(ref.model_id),
+                                             std::chrono::seconds{3})
+                          : set_status_toast(m,
+                                ui::pretty_model_label(ref.model_id)
+                                    + " \xc2\xb7 from the next turn (this one keeps its model)",
+                                std::chrono::seconds{4});
+        return Cmd::batch(std::move(mru), std::move(toast));
+    }
+    m.ui.pending_switch.reset();
+
     if (ref.provider_id == cur_pid) {
         // Same provider — pure model change.
         m.d.model_id    = ModelId{ref.model_id};
@@ -499,6 +519,18 @@ Cmd open_login_for(Model& m, const std::string& provider_id,
 }
 
 } // namespace
+
+// A model picked during a turn, applied once the turn has ended. Called from
+// publish_derived after every fold, so it fires on whichever fold returns the
+// phase to Idle (finish, error, cancel, thread switch) with no reducer having
+// to remember it.
+Cmd apply_pending_switch(Model& m) {
+    if (!m.ui.pending_switch || m.s.active()) return Cmd::none();
+    const ModelRef ref = std::move(*m.ui.pending_switch);
+    m.ui.pending_switch.reset();
+    // Already recorded in the MRU when it was picked.
+    return switch_to_model_ref(m, ref, /*record=*/false);
+}
 
 Cmd models_update(Model& m, msg::ModelsMsg pm) {
     using namespace agentty::msg;
@@ -1124,33 +1156,67 @@ Cmd models_update(Model& m, msg::ModelsMsg pm) {
             // to the cheapest capable model THIS provider offers without a
             // reducer remembering to push them.
             //
-            // If the active model isn't offered by this provider (e.g. just
-            // switched to Ollama with no recall, or a stale saved id), fall
-            // back to the first available model so the user is never pointed
-            // at a model that 400s on the first prompt. Persist the pick so
-            // it sticks as this provider's recall.
-            bool active_present = false;
-            for (const auto& mi : m.d.available_models)
-                if (mi.id == m.d.model_id) { active_present = true; break; }
-            if (!active_present && !m.d.available_models.empty()) {
-                m.d.model_id = m.d.available_models.front().id;
-                m.s.context_max = resolved_context_max(m, active_provider_id(m));
-                // The auto-selected model may not support the effort tier that
-                // rode over from the previous provider — clamp it so the picker
-                // chip and the wire agree (commit_provider_switch couldn't do
-                // this yet: the model id was empty until this refetch landed).
-                // Uniform across every provider INCLUDING ChatGPT: gpt-5.x
-                // decodes through Family::Gpt with an exact ladder, so the
-                // same clamp keeps chip == wire (a stale `max` on a model
-                // capped at xhigh must degrade in the CHIP too, not just be
-                // silently rewritten at request time). Empty id = unknown
-                // model → skip (clamping would wipe the tier, not no-op).
-                if (!m.d.model_id.value.empty())
-                    m.d.effort = clamp_effort(
-                        m.d.effort, resolved_caps(m.d.model_id.value));
-                proven_save = Cmd::batch(std::move(proven_save),
-                                         persist_settings(m));
+            // Is the user's model offered by this provider?
+            //
+            // This used to compare ids byte for byte and, on a miss, switch to
+            // the catalog's FIRST model and save that as the provider's recall.
+            // A miss was common and not a reason to switch: a `[1m]` variant
+            // dropped by the entitlement filter above, a differently-spelled
+            // alias, a gateway that lists only some of its models. So a pick
+            // silently turned into another model a second later, and stayed
+            // that way after restart.
+            //
+            // Now:
+            //   • match on the folded id (case, separators, `[1m]`), the same
+            //     identity the picker rows use;
+            //   • a `[1m]` the account can't use falls back to its own base
+            //     model, not to whatever sorts first;
+            //   • any other unlisted model is KEPT (it may well work: -m, a
+            //     fine-tune, a partial list) and the user is told once; a real
+            //     "no such model" surfaces on the turn with its own error;
+            //   • only an EMPTY model (nothing chosen yet) is filled in.
+            const auto folded = [](std::string_view id) { return capkey::norm_model(id); };
+            const std::string want = m.d.model_id.value;
+            const ModelInfo* exact = nullptr;
+            const ModelInfo* same_model = nullptr;   // same model, other variant
+            for (const auto& mi : m.d.available_models) {
+                if (mi.id.value == want) { exact = &mi; break; }
+                if (!same_model && !want.empty() && folded(mi.id.value) == folded(want))
+                    same_model = &mi;
             }
+            Cmd unlisted_note = Cmd::none();
+            const auto adopt = [&](const ModelId& id) {
+                m.d.model_id = id;
+                // The new model may not support the effort tier in use, so
+                // the chip and the wire agree only after a clamp. Scoped to the
+                // active provider, as every other clamp in this file.
+                m.d.effort = clamp_effort(m.d.effort,
+                                          resolved_caps(id.value, active_provider_id(m)));
+                proven_save = Cmd::batch(std::move(proven_save), persist_settings(m));
+            };
+            if (exact || m.d.available_models.empty()) {
+                // Offered as-is (or nothing to compare against): leave it.
+            } else if (want.empty()) {
+                adopt(m.d.available_models.front().id);
+            } else if (same_model) {
+                // Offered under another spelling or window: switch only when
+                // the one we hold is a `[1m]` this account can't use. A plain
+                // alias already works on the wire and is left alone.
+                const bool blocked_1m =
+                    want.find("[1m]") != std::string::npos
+                    && entitlement_blocked(settings, m.d.auth,
+                                           domain::entitlement::Fact::Context1M,
+                                           active_provider_id(m), wire_model_id(want));
+                if (blocked_1m) adopt(ModelId{wire_model_id(want)});
+            } else if (m.ui.unlisted_model_noted != want) {
+                m.ui.unlisted_model_noted = want;
+                unlisted_note = set_status_toast(m,
+                    ui::pretty_model_label(want) + " isn't in "
+                        + provider::provider_display_name(m.d.selection)
+                        + "'s model list \xc2\xb7 keeping it",
+                    std::chrono::seconds{6});
+            }
+            proven_save = Cmd::batch(std::move(proven_save), std::move(unlisted_note));
             // The active model may have remained valid, in which case the
             // old branch did not refresh its context cap. Codex publishes a
             // 272K window (rather than Agentty's generic 200K fallback), and

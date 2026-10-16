@@ -9,6 +9,7 @@
 
 #include <concepts>
 #include <functional>
+#include <optional>
 #include <string_view>
 #include <string>
 #include <utility>
@@ -19,6 +20,7 @@
 #include "agentty/auth/auth.hpp"
 #include "agentty/domain/conversation.hpp"
 #include "agentty/io/http.hpp"
+#include "agentty/provider/selection.hpp"
 #include "agentty/runtime/msg.hpp"
 
 namespace agentty::provider {
@@ -105,6 +107,13 @@ struct Request {
     // thread instead of serialising the entire transcript into every prompt.
     // Empty means the caller has no durable conversation identity.
     std::string session_key;
+
+    // The provider this request was BUILT for: its model id, auth and system
+    // prompt all came from this selection. dispatch_stream routes by it, so a
+    // provider switch while the turn is running can't send this provider's
+    // model and credential to the newly-picked one. nullopt means "the active
+    // provider", for callers that don't build against a particular one.
+    std::optional<Selection> selection;
 };
 
 using EventSink = std::function<void(Msg)>;

@@ -119,6 +119,12 @@ std::pair<Model, Cmd> update(Model m, Msg msg,
 // stale router running, and equality can't be wrong in that direction — the
 // same reasoning as jaal's subs_key (D38).
 Cmd publish_derived(Model& m, Cmd c) {
+    // A model picked while a turn ran: apply it on the fold that ended the
+    // turn. First, so the selection and subagent view published below
+    // already describe the new model.
+    if (Cmd sw = detail::apply_pending_switch(m); !sw.is_none())
+        c = Cmd::batch(std::move(c), std::move(sw));
+
     // The active provider. The Model owns it; code off the loop (the stream
     // worker, ACP, main) reads a published copy in a process global. Same
     // shape as the subagent view below: compare with what was last

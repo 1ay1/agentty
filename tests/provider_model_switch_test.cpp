@@ -11,8 +11,8 @@
 //      then offers models the active backend cannot stream (pick one and the
 //      request 400s, or silently streams the wrong backend's model).
 //
-//   2. ACCEPTED FETCH INSTALLS THE CATALOG + auto-corrects a model id that
-//      the new provider doesn't offer (first-available fallback).
+//   2. ACCEPTED FETCH INSTALLS THE CATALOG and keeps the user's model; only
+//      an empty model is filled in from it.
 //
 // Driven through the REAL app::update reducer, no mocks of the reducer path.
 
@@ -135,10 +135,13 @@ TEST_CASE("provider model switch") {
     }
 
     // ── 2: a ModelsLoaded stamped for the ACTIVE provider installs ──
+    //    and keeps the user's model even when it isn't listed. Replacing it
+    //    with the first model (the old behaviour) turned a pick into another
+    //    model a second later, and saved that as the provider's recall.
     {
         Model m = seeded_model();
         m.s.models_loading = true;
-        m.d.model_id = ModelId{"some-stale-model"};
+        m.d.model_id = ModelId{"some-unlisted-model"};
 
         ModelsLoaded fresh;
         fresh.models      = { mi("claude-opus-4-5", "anthropic"),
@@ -149,10 +152,65 @@ TEST_CASE("provider model switch") {
         apply_fx(cmd);
         CHECK(m2.d.available_models.size() == 2, "fresh catalog installed");
         CHECK(!m2.s.models_loading, "loading cleared on accepted fetch");
-        // The stale active model isn't in the new catalog: auto-correct to
-        // the first available so the next prompt can't 400.
+        CHECK(m2.d.model_id.value == "some-unlisted-model",
+              "an unlisted model is kept, not swapped for the first one");
+        CHECK(m2.s.status.find("keeping it") != std::string::npos,
+              "and the user is told it isn't in the list");
+    }
+
+    // ── 2b: with NO model chosen, the first one is filled in ──
+    {
+        Model m = seeded_model();
+        m.s.models_loading = true;
+        m.d.model_id = ModelId{""};
+
+        ModelsLoaded fresh;
+        fresh.models      = { mi("claude-opus-4-5", "anthropic"),
+                              mi("claude-sonnet-4-5", "anthropic") };
+        fresh.provider_id = "anthropic";
+
+        auto [m2, cmd] = app::update(std::move(m), Msg{std::move(fresh)});
+        apply_fx(cmd);
         CHECK(m2.d.model_id.value == "claude-opus-4-5",
-              "model auto-corrected to a catalog member");
+              "an empty model is filled from the catalog");
+    }
+
+    // ── 2c: a differently spelled id for a listed model is the same model ──
+    {
+        Model m = seeded_model();
+        m.s.models_loading = true;
+        m.d.model_id = ModelId{"Claude_Sonnet.4.5"};
+
+        ModelsLoaded fresh;
+        fresh.models      = { mi("claude-opus-4-5", "anthropic"),
+                              mi("claude-sonnet-4-5", "anthropic") };
+        fresh.provider_id = "anthropic";
+
+        auto [m2, cmd] = app::update(std::move(m), Msg{std::move(fresh)});
+        apply_fx(cmd);
+        CHECK(m2.d.model_id.value == "Claude_Sonnet.4.5",
+              "an alias of a listed model is left alone");
+        CHECK(m2.s.status.find("keeping it") == std::string::npos,
+              "and is not reported as unlisted");
+    }
+
+    // ── 2d: a [1m] variant missing from the list stays [1m] ──
+    //    (only a 1M window the account was refused falls back, and to its
+    //    OWN base model, never to whatever sorts first)
+    {
+        Model m = seeded_model();
+        m.s.models_loading = true;
+        m.d.model_id = ModelId{"claude-sonnet-4-5[1m]"};
+
+        ModelsLoaded fresh;
+        fresh.models      = { mi("claude-opus-4-5", "anthropic"),
+                              mi("claude-sonnet-4-5", "anthropic") };
+        fresh.provider_id = "anthropic";
+
+        auto [m2, cmd] = app::update(std::move(m), Msg{std::move(fresh)});
+        apply_fx(cmd);
+        CHECK(m2.d.model_id.value == "claude-sonnet-4-5[1m]",
+              "a [1m] pick isn't silently swapped for another model");
     }
 
     // ── 3: legacy/synthetic dispatch (empty provider_id) still accepted ──
@@ -764,6 +822,71 @@ TEST_CASE("^Tab cycles the MRU ring without reordering") {
     CHECK(m.d.recent_models[0].model_id == "claude-a");
     CHECK(m.d.recent_models[1].model_id == "claude-b");
     CHECK(m.d.recent_models[2].model_id == "claude-c");
+}
+
+// A pick while a turn is running must not move that turn: its tool-loop
+// continuations and retries re-read the model on every request, so switching
+// at once sent half a turn to one model and half to another. The pick waits
+// and lands the moment the turn ends, whatever ended it.
+TEST_CASE("a model picked during a turn applies when the turn ends") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
+
+    Model m = seeded_model();
+    m.d.model_id = ModelId{"claude-a"};
+    m.d.available_models = {mi("claude-a", "anthropic"), mi("claude-b", "anthropic")};
+    m.d.recent_models = {ModelRef{"anthropic", "claude-a"}, ModelRef{"anthropic", "claude-b"}};
+    m.s.phase = phase::Streaming{};   // a turn is running
+
+    auto [m1, c1] = app::update(std::move(m), Msg{SwitchToPreviousModel{}});
+    apply_fx(c1);
+    CHECK(m1.d.model_id.value == "claude-a", "the running turn keeps its model");
+    REQUIRE(m1.ui.pending_switch.has_value());
+    CHECK(m1.ui.pending_switch->model_id == "claude-b", "the pick is held");
+    CHECK(m1.s.status.find("next turn") != std::string::npos, "and the user is told when");
+
+    // Any fold that leaves the turn Idle applies it.
+    m1.s.phase = phase::Idle{};
+    auto [m2, c2] = app::update(std::move(m1), Msg{Tick{}});
+    apply_fx(c2);
+    CHECK(m2.d.model_id.value == "claude-b", "applied once the turn ended");
+    CHECK(!m2.ui.pending_switch.has_value(), "and cleared");
+}
+
+TEST_CASE("picking the running model mid-turn cancels a held pick") {
+    using namespace agentty::msg;
+    install_stub_deps();
+    g_settings = store::Settings{};
+    g_settings.provider_keys["anthropic"] = "sk-test";
+    provider::select(::agentty::IoAccess::grant(), provider::parse_selection("anthropic"));
+
+    Model m = seeded_model();
+    m.d.model_id = ModelId{"claude-a"};   // the running turn's model
+    m.d.available_models = {mi("claude-a", "anthropic"), mi("claude-b", "anthropic")};
+    m.d.recent_models = {ModelRef{"anthropic", "claude-a"}, ModelRef{"anthropic", "claude-b"}};
+    m.s.phase = phase::Streaming{};
+
+    // Pick b mid-turn (held), then pick a (the running model) mid-turn.
+    auto [m1, c1] = app::update(std::move(m), Msg{SwitchToPreviousModel{}});
+    apply_fx(c1);
+    REQUIRE(m1.ui.pending_switch.has_value());
+    auto [mo, co] = app::update(std::move(m1), Msg{OpenModels{}});
+    apply_fx(co);
+    int a_row = -1;
+    for (int i = 0; i < static_cast<int>(mo.d.fused_rows.size()); ++i)
+        if (mo.d.fused_rows[static_cast<std::size_t>(i)].model.id.value == "claude-a") a_row = i;
+    REQUIRE(a_row >= 0);
+    mo.ui.panel.get<pn::Models>()->index = a_row;
+    auto [m2, c2] = app::update(std::move(mo), Msg{ModelsSelect{}});
+    apply_fx(c2);
+    CHECK(!m2.ui.pending_switch.has_value(), "choosing the running model drops the held pick");
+
+    m2.s.phase = phase::Idle{};
+    auto [m3, c3] = app::update(std::move(m2), Msg{Tick{}});
+    CHECK(m3.d.model_id.value == "claude-a", "nothing changes when the turn ends");
 }
 
 // Selecting a model in the CLASSIC model picker feeds the MRU ring, so ^Tab
