@@ -955,9 +955,10 @@ std::string subagent_system_prompt(Io io, const AgentType& type) {
     // never refuse a big task" rules) the main turn gives it. The lean hosted
     // prompt left `agentty run` and every subagent on a small local model
     // without them, which is the refusal in #91.
-    const bool local = provider::uses_local_prompt(provider::active());
-    std::string base = local ? provider::openai::local_model_system_prompt()
-                             : provider::default_system_prompt(io, /*lean=*/true);
+    const auto sel = provider::active();
+    std::string base = provider::uses_local_prompt(sel)
+        ? provider::local_system_prompt_for(sel)
+        : provider::default_system_prompt(io, /*lean=*/true);
     base += "\n\n<subagent>\n";
     base += std::string{type.role};
     base +=

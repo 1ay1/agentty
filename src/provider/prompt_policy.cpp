@@ -20,19 +20,17 @@ std::string system_prompt_for(Io io, const Selection& selection) {
         if (selection.is_oauth_native())
             return system_prompt_with_overlay(io, "chatgpt");
 
-        const auto& ep = selection.openai_endpoint;
-        if (ep.native_api) return ollama::system_prompt();
-
         // Compact prompting is a model/endpoint capability decision, not a
-        // provider-brand decision. Keep it for self-hosted OpenAI-compatible
-        // servers, where small models benefit from short imperative
-        // instructions. "Self-hosted" means a server YOU run -- loopback,
-        // a LAN box (192.168.x.x, gpu-box, *.local), a tailnet -- the same
-        // rule the window probe uses. It used to be loopback-only, so a
-        // llama.cpp/vLLM on another machine fed gpt-oss the long hosted
-        // prompt and none of the local action rules (#91).
+        // provider-brand decision. Keep it for self-hosted servers (Ollama's
+        // native API, or an OpenAI-compatible one), where small models
+        // benefit from short imperative instructions. "Self-hosted" means a
+        // server YOU run -- loopback, a LAN box (192.168.x.x, gpu-box,
+        // *.local), a tailnet -- the same rule the window probe uses. It used
+        // to be loopback-only, so a llama.cpp/vLLM on another machine fed
+        // gpt-oss the long hosted prompt and none of the local action rules
+        // (#91).
         if (uses_local_prompt(selection))
-            return openai::local_model_system_prompt();
+            return local_system_prompt_for(selection);
 
         // Hosted OpenAI-compatible model on the shared base + any openai delta.
         return system_prompt_with_overlay(io, "openai");
@@ -47,7 +45,14 @@ std::string system_prompt_for(Io io, const Selection& selection) {
 bool uses_local_prompt(const Selection& selection) {
     if (selection.kind != Kind::OpenAI || selection.is_oauth_native()) return false;
     const auto& ep = selection.openai_endpoint;
-    return !ep.native_api && !ep.use_tls && openai::detail::is_local_endpoint(ep);
+    // Ollama's native API is always a server you run.
+    if (ep.native_api) return true;
+    return !ep.use_tls && openai::detail::is_local_endpoint(ep);
+}
+
+std::string local_system_prompt_for(const Selection& selection) {
+    return selection.openai_endpoint.native_api ? ollama::system_prompt()
+                                                : openai::local_model_system_prompt();
 }
 
 } // namespace agentty::provider

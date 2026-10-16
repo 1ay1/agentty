@@ -290,6 +290,12 @@ TEST_CASE("hosted models share agent prompt policy") {
     CHECK(!provider::uses_local_prompt(anthropic));
     CHECK(!provider::uses_local_prompt(chatgpt));
     CHECK(!provider::uses_local_prompt(provider::parse_selection("groq")));
+    const auto ollama = provider::parse_selection("ollama");
+    CHECK(provider::uses_local_prompt(ollama));
+    CHECK(provider::local_system_prompt_for(ollama)
+          == provider::system_prompt_for(::agentty::IoAccess::grant(), ollama));
+    CHECK(provider::local_system_prompt_for(local)
+          == provider::system_prompt_for(::agentty::IoAccess::grant(), local));
 }
 
 

@@ -23,4 +23,9 @@ struct Selection;
 // subagents / `agentty run` can't disagree about which prompt a model gets.
 [[nodiscard]] bool uses_local_prompt(const Selection& selection);
 
+// The compact prompt for a selection uses_local_prompt() accepts: Ollama's
+// own for its native API, the OpenAI-compat local one otherwise. Both carry
+// the same action rules.
+[[nodiscard]] std::string local_system_prompt_for(const Selection& selection);
+
 } // namespace agentty::provider
