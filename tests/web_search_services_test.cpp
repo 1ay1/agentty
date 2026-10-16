@@ -217,14 +217,14 @@ TEST_CASE("web search plan: keys go to keyed services only, and a missing key st
 TEST_CASE("web search plan: dials follow their service, not their slot") {
     sc::Config c;
     c.primary = "firecrawl-free"; c.secondary = "tavily-free"; c.fallback = "none";
-    c.dials["firecrawl-free.category"] = "github";
+    c.dials["firecrawl-free.category"] = "developer";
     c.dials["tavily-free.topic"] = "news";
     c.dials["exa-api.type"] = "fast";             // not in the plan
     auto p = sp::build_plan(c, no_keys);
     REQUIRE(p.slots.size() == 2);
     REQUIRE(p.slots[0].dials.size() == 1);
     CHECK(p.slots[0].dials[0].first == "category");
-    CHECK(p.slots[0].dials[0].second == "github");
+    CHECK(p.slots[0].dials[0].second == "developer");
     REQUIRE(p.slots[1].dials.size() == 1);
     CHECK(p.slots[1].dials[0].first == "topic");
 
@@ -257,6 +257,10 @@ TEST_CASE("web search settings: a dial entry must look like <service>.<dial>") {
     CHECK(!sc::dial_entry_ok("brave-free.freshness", ""));
     CHECK(!sc::dial_entry_ok("brave-free.freshness", "p\nw"));
     CHECK(!sc::dial_entry_ok(std::string(65, 'a') + ".x", "pw"));
+    // A value has room for the longest free-text dial (a Goggle URL), no more.
+    const std::string url = "https://" + std::string(sc::kMaxDialValueBytes - 8, 'g');
+    CHECK(sc::dial_entry_ok("brave-api.goggles", url));
+    CHECK(!sc::dial_entry_ok("brave-api.goggles", url + "g"));
 }
 
 // ── The key store ────────────────────────────────────────────────────────
@@ -480,6 +484,40 @@ TEST_CASE("web search form: a dial round-trips through apply_form, and the defau
     CHECK(c.dials.find("brave-free.freshness") == c.dials.end());
 }
 
+TEST_CASE("web search form: a text dial is a Text row, checked before it is stored") {
+    const std::string goggle =
+        "https://raw.githubusercontent.com/brave/goggles-quickstart/main/goggles/tech_blogs.goggle";
+    sc::Config c;
+    c.primary = "brave-api";
+    auto f = wtf::build_form(c, kNoEnv);
+    auto* row = f.find("web_search.dial.brave-api.goggles");
+    REQUIRE(row != nullptr);
+    auto* tx = std::get_if<form::field::Text>(&row->value);
+    REQUIRE(tx != nullptr);
+    CHECK(tx->value.empty());
+
+    // Typed with stray spaces: stored trimmed, and shown again on rebuild.
+    tx->value = "  " + goggle + " ";
+    wtf::apply_form(f, c);
+    CHECK(c.dials.at("brave-api.goggles") == goggle);
+    auto g = wtf::build_form(c, kNoEnv);
+    CHECK(std::get<form::field::Text>(g.find("web_search.dial.brave-api.goggles")->value).value
+          == goggle);
+
+    // Something a search would not send is not stored; the old value stays.
+    for (const char* bad : {"http://example.com/a.goggle", "$boost=3,site=dev.to",
+                            "https://a.com/x y"}) {
+        std::get<form::field::Text>(g.find("web_search.dial.brave-api.goggles")->value).value = bad;
+        wtf::apply_form(g, c);
+        CHECK(c.dials.at("brave-api.goggles") == goggle, bad);
+    }
+
+    // Emptied: the entry is removed, as a list dial set back to its default is.
+    std::get<form::field::Text>(g.find("web_search.dial.brave-api.goggles")->value).value = "  ";
+    wtf::apply_form(g, c);
+    CHECK(c.dials.find("brave-api.goggles") == c.dials.end());
+}
+
 TEST_CASE("web search form: choosing a slot's service changes the rows under it") {
     sc::Config c;
     c.primary = "exa-api";
@@ -513,6 +551,8 @@ TEST_CASE("web search settings: dials and slots persist, and a key never does") 
     s.web_search.secondary = "none";
     s.web_search.language = "de";
     s.web_search.dials["exa-api.type"] = "fast";
+    s.web_search.dials["brave-api.goggles"] =
+        "https://raw.githubusercontent.com/brave/goggles-quickstart/main/goggles/tech_blogs.goggle";
     REQUIRE(ss::store("exa-api", "exa-LEAKCHECK-0123456789"));
     persistence::save_settings(::agentty::IoAccess::grant(), agtest::cap(), s);
 
@@ -527,6 +567,7 @@ TEST_CASE("web search settings: dials and slots persist, and a key never does") 
     CHECK(back.web_search.fallback == "tavily-free");        // untouched default
     CHECK(back.web_search.language == "de");
     CHECK(back.web_search.dials.at("exa-api.type") == "fast");
+    CHECK(back.web_search.dials.at("brave-api.goggles").size() > 64);   // over the old cap
 }
 
 TEST_CASE("web search settings: a hand-edited bad value cannot reach a slot") {
