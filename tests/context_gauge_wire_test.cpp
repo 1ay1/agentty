@@ -188,6 +188,38 @@ TEST_CASE("submit during a thread load keeps the draft and sends nothing") {
     CHECK(m.s.is_idle());
 }
 
+TEST_CASE("vision 400: an image from a read tool result is stripped and the turn retried") {
+    install_stub_deps();
+    auto start = model_with_gauge(60000);
+    Message u; u.role = Role::User; u.text = "look at this";
+    start.d.current.messages.push_back(u);
+    Message a; a.role = Role::Assistant;
+    ToolUse tc; tc.id = ToolCallId{"r1"}; tc.name = ToolName{"read"};
+    ToolUse::Done done{};
+    done.output = "[image /tmp/x.png]";
+    ImageContent img; img.media_type = "image/png";
+    done.images.push_back(img);
+    tc.status = std::move(done);
+    a.tool_calls.push_back(std::move(tc));
+    start.d.current.messages.push_back(std::move(a));
+    Message next; next.role = Role::Assistant;   // the failing continuation
+    start.d.current.messages.push_back(next);
+    start.s.phase = phase::Streaming{phase::Active{}};
+
+    StreamError err;
+    err.message = "Could not process image";
+    err.http_status = 400;
+    auto [m, cmd] = app::update(std::move(start), Msg{msg::StreamMsg{err}});
+
+    bool any_image = false;
+    for (const auto& msg : m.d.current.messages)
+        for (const auto& t : msg.tool_calls)
+            any_image = any_image || !t.done_images().empty();
+    CHECK(!any_image);
+    CHECK(!m.s.is_idle());      // retry scheduled, not a dead turn
+    CHECK(!cmd.is_none());
+}
+
 TEST_CASE("gauge: a new thread starts at zero") {
     install_stub_deps();
     auto [m, _] = app::update(model_with_gauge(60000), Msg{NewThread{}});
