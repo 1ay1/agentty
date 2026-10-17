@@ -1062,13 +1062,11 @@ std::string effective_effort(const std::string& want, const std::vector<Effort>&
     return "auto";
 }
 
-// The permission profile (Ask / Write / Minimal) as a MODERN config option,
-// category "mode". This is the v2-preferred surface for what v1 modelled as
-// SessionModeState: emitting BOTH (the legacy `modes` field in the session
-// result AND this config option) is deliberate — v1 clients render the mode
-// picker from `modes`, config-option-aware clients render this, and neither
-// sees a gap. Kept in lockstep with mode_state()/mode_id_for() by sharing the
-// same three ids.
+// The permission profile (Ask / Write / Minimal) as a config option,
+// category "mode". Sent on every connection next to the legacy `modes`
+// field: Zed's profile picker is the first `select` option with category
+// "mode", and once configOptions are present Zed ignores `modes`. Same
+// three ids as mode_state()/mode_id_for().
 [[nodiscard]] a::ConfigOption mode_config_option(const char* current_mode_id) {
     auto mk = [](const char* value, const char* name, const char* desc) {
         a::ConfigSelectOption o;
@@ -1448,11 +1446,11 @@ a::List<a::ConfigOption> AgentServer::config_options(const Cap& cap,
         if (c.model.empty()) c.model = fallback_model;
     }
     a::List<a::ConfigOption> out;
-    // Clean cut: the permission MODE is a config option ONLY when the client
-    // negotiated v2+. A v1 client renders it from SessionModeState (the
-    // `modes` field on the session result) instead, one surface per
-    // connection.
-    if (v2_config()) {
+    // The permission mode is always a config option. A client that gets
+    // configOptions builds its selectors from them alone (Zed drops `modes`
+    // as soon as configOptions is present, on v1 too), so leaving it out
+    // meant no profile picker at all.
+    {
         auto opt = mode_config_option(mode_id_for(c.prof));
         if (auto* u = std::get_if<a::CSO_Ungrouped>(&opt.options))
             for (auto& o : u->items)
@@ -1868,9 +1866,9 @@ a::NewSessionResult AgentServer::on_new_session(const Cap& cap, const a::NewSess
 
     a::NewSessionResult r;
     r.sessionId = a::SessionId{sid};
-    // Clean cut: v1 clients get the permission mode via SessionModeState here;
-    // v2+ clients get it as the `mode` config option (emit_config_state) and
-    // NOT via `modes` — one surface per connection, never both.
+    // v1 clients also get the mode as SessionModeState. The `mode` config
+    // option below is sent on every connection, since Zed only reads modes
+    // when no configOptions are present.
     if (!v2_config())
         r.modes = a::Just(modes_for_client(session_profile));
     // The selectors ride on the result too: JetBrains builds its model
@@ -2173,6 +2171,8 @@ void AgentServer::on_set_mode(const Cap& cap, const a::SetModeParams& p) {
                           json{{"sessionId", p.sessionId.value}});
     send_update(cap, p.sessionId.value,
         a::SU_CurrentMode{a::SessionModeId{mode_id_for(*applied)}, json::object()});
+    // Keep the `mode` config option in step for clients that render that.
+    emit_config_state(cap, p.sessionId.value, model_id_);
 }
 
 a::SetConfigOptionResult AgentServer::on_set_config_option(const Cap& cap, const a::SetConfigOptionParams& p) {
@@ -2250,10 +2250,8 @@ a::SetConfigOptionResult AgentServer::on_set_config_option(const Cap& cap, const
         }, value);
         if (!got) throw unknown();
         const Profile applied = *got;
-        // Feedback goes on the ONE surface this connection uses: v2 clients
-        // get it via the emit_config_state() echo below (the `mode` config
-        // option); a v1 client that reached this path anyway still gets its
-        // SessionModeState surface updated. Never both.
+        // v2 clients see the change in the config echo below; a v1 client
+        // also keeps a SessionModeState, so update that too.
         if (!v2_config())
             send_update(cap, p.sessionId.value,
                 a::SU_CurrentMode{a::SessionModeId{mode_id_for(applied)}, json::object()});
