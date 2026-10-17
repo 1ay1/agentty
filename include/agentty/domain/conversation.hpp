@@ -991,6 +991,10 @@ struct Thread {
     std::optional<RagMode> rag_mode_override;
     std::chrono::system_clock::time_point created_at = std::chrono::system_clock::now();
     std::chrono::system_clock::time_point updated_at = std::chrono::system_clock::now();
+    // When the user last renamed the thread (0 = never). A save only writes
+    // its title over the stored one when its own rename is at least as new,
+    // so another agentty holding an old copy can't undo a rename.
+    std::int64_t renamed_at = 0;   // unix seconds
 
     // Wire-only compaction records. Each entry says "upstream requests
     // built from this thread should replace messages[0..up_to_index)

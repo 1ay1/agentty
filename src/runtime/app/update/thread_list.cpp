@@ -431,14 +431,20 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // Empty or unchanged is a cancel: Enter on an untouched draft
             // must not cost a disk write.
             if (title.empty() || title == it->title) return Cmd::none();
-            it->title = title;
+            const std::int64_t at = std::chrono::duration_cast<std::chrono::seconds>(
+                m.wall_now().time_since_epoch()).count();
+            it->title      = title;
+            it->renamed_at = at;
             // The open thread is re-saved every turn from m.d.current, which
             // would write the old title back over the rename.
-            if (m.d.current.id == id) m.d.current.title = title;
+            if (m.d.current.id == id) {
+                m.d.current.title      = title;
+                m.d.current.renamed_at = at;
+            }
             // The renamed row may no longer match the filter.
             const int sz = visible_count(m, *p);
             p->index = sz > 0 ? std::clamp(p->index, 0, sz - 1) : 0;
-            return Cmd(RenameThread{id, std::move(title)});
+            return Cmd(RenameThread{id, std::move(title), at});
         },
         [&](ThreadCycle& e) -> Cmd {
             // Alt+←/→ — jump to the adjacent thread without the picker.
@@ -518,6 +524,14 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             return Cmd::batch(std::move(save), std::move(reset));
         },
         [&](ThreadsLoaded& e) -> Cmd {
+            // A reload can be read from disk before a rename made a moment
+            // ago has been written. Keep any row's newer rename.
+            for (auto& t : e.threads)
+                if (const auto it = std::ranges::find(m.d.threads, t.id, &Thread::id);
+                    it != m.d.threads.end() && it->renamed_at > t.renamed_at) {
+                    t.title      = it->title;
+                    t.renamed_at = it->renamed_at;
+                }
             m.d.threads = std::move(e.threads);
             m.s.threads_loading = false;
             // If the thread picker is open, its cursor may now point past the
@@ -563,11 +577,13 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             m.d.current = std::move(e.thread);
             // A rename is stored by the writer, which may still be busy with
             // an earlier save, so a load right after one can read the old
-            // title from disk. The picker's list took the new title at once;
-            // without this, the next save would write the old one back.
+            // title from disk. Keep whichever title was renamed more recently.
             if (const auto it = std::ranges::find(m.d.threads, m.d.current.id, &Thread::id);
-                it != m.d.threads.end() && !it->title.empty())
-                m.d.current.title = it->title;
+                it != m.d.threads.end() && !it->title.empty()
+                && it->renamed_at > m.d.current.renamed_at) {
+                m.d.current.title      = it->title;
+                m.d.current.renamed_at = it->renamed_at;
+            }
             m.s.reset_usage_for_thread(last_reported_prompt(m.d.current));
             // The loaded thread has no live turn, so any run state still
             // standing belongs to the thread we just left. Dropping it is

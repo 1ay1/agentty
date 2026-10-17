@@ -310,11 +310,23 @@ bool ThreadLog::set_meta(const Thread& t) {
     meta_thread_ = t;
     meta_thread_.messages.clear();
     try {
+        const auto cur = persistence::peek_file(meta_);
+        // A newer rename on disk (another agentty, or a rename that landed
+        // after this copy was taken) wins over the title this save carries.
+        if (cur) {
+            const json on_disk = json::parse(*cur, nullptr, /*allow_exceptions=*/false);
+            const auto it = on_disk.is_object() ? on_disk.find("renamed_at") : on_disk.end();
+            if (it != on_disk.end() && it->is_number_integer()
+                && it->get<std::int64_t>() > meta_thread_.renamed_at) {
+                meta_thread_.renamed_at = it->get<std::int64_t>();
+                meta_thread_.title      = on_disk.value("title", meta_thread_.title);
+            }
+        }
         std::string bytes = persistence::thread_meta_to_json(meta_thread_).dump(2);
         // Most saves change nothing here (it holds the title, timestamps and
         // compaction history). Rewriting and fsyncing ~45 KB every turn was
         // the bulk of a tail save's IO, so a same-bytes header isn't written.
-        if (const auto cur = persistence::peek_file(meta_); cur && *cur == bytes) return true;
+        if (cur && *cur == bytes) return true;
         return persistence::write_json_atomic(::agentty::IoAccess::grant(), meta_, bytes);
     } catch (const std::exception& e) {
         AGT_LOG(General, Error, "thread_log.meta",

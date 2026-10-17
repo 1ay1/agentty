@@ -430,6 +430,38 @@ TEST_CASE("threads: ^R renames the focused row, pre-filled") {
     CHECK(p->renaming.empty());
 }
 
+TEST_CASE("threads: a reload read before the rename landed keeps it") {
+    install_stub_deps();
+    Model m = two_threads_open();
+    m = press(std::move(m), ctrl(U'r'));
+    for (int i = 0; i < 64; ++i) m = press(std::move(m), sk(maya::SpecialKey::Backspace));
+    for (char32_t c : std::u32string{U"mine"}) m = press(std::move(m), ch(c));
+    const auto fx = press_fx(m, sk(maya::SpecialKey::Enter));
+    REQUIRE(fx.renamed_threads.size() == 1);
+    const ThreadId id = fx.renamed_threads[0].id;
+    const auto at = fx.renamed_threads[0].renamed_at;
+    CHECK(at > 0);
+    auto row = [&](const Model& mm) -> const Thread& {
+        return *std::ranges::find(mm.d.threads, id, &Thread::id);
+    };
+    CHECK(row(m).renamed_at == at);
+
+    // The list comes back from disk with the old title: the writer hasn't
+    // stored the rename yet. The newer rename in memory wins.
+    std::vector<Thread> from_disk = m.d.threads;
+    for (auto& t : from_disk)
+        if (t.id == id) { t.title = "[Pasted text \xc2\xb7 3 lines \xc2\xb7 99 B]"; t.renamed_at = 0; }
+    m = app::update(std::move(m), Msg{ThreadsLoaded{std::move(from_disk)}}).first;
+    CHECK(row(m).title == "mine");
+
+    // A rename from disk that is newer (another agentty) does replace it.
+    from_disk = m.d.threads;
+    for (auto& t : from_disk)
+        if (t.id == id) { t.title = "theirs"; t.renamed_at = at + 10; }
+    m = app::update(std::move(m), Msg{ThreadsLoaded{std::move(from_disk)}}).first;
+    CHECK(row(m).title == "theirs");
+}
+
 TEST_CASE("threads: rename Esc, empty and unchanged write nothing") {
     install_stub_deps();
     Model m = two_threads_open();

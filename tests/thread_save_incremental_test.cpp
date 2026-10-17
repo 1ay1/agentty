@@ -329,9 +329,9 @@ TEST_CASE("thread log: truncate_to cuts both files and appends cleanly") {
 }
 
 namespace {
-void retitle(const Thread& t, std::string title) {
+void retitle(const Thread& t, std::string title, std::int64_t at = 1'800'000'000) {
     persistence::rename_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id,
-                               std::move(title));
+                               std::move(title), at);
     persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
 }
 } // namespace
@@ -382,6 +382,43 @@ TEST_CASE("rename: a save queued just before does not undo it") {
     t.title = "renamed while queued";
     save(t);
     CHECK_MESSAGE(head_marked(t), "history before the change was not rewritten");
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+}
+
+TEST_CASE("rename: a stale copy saved later keeps the rename") {
+    // Another agentty had this thread open from before the rename. Its copy
+    // still carries the old title (and no rename stamp), and it saves a new
+    // turn after the rename landed. The rename must survive, on both the
+    // tail path and a full rewrite.
+    Thread t = make_thread("inc-rename-stale", 3);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+    save(t);
+    const Thread stale = t;   // the other process's copy
+
+    retitle(t, "renamed here");
+
+    Thread other = stale;
+    other.messages.push_back(make_msg(3));
+    save(other);   // tail append from the stale copy
+    auto got = load(t);
+    CHECK(got.title == "renamed here");
+    CHECK(got.messages.size() == 4u);
+
+    // A full rewrite from a stale copy (the writer has never seen this id).
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+    other.messages.push_back(make_msg(4));
+    other.messages.front().text = "edited history forces a rewrite";
+    save(other);
+    got = load(t);
+    CHECK(got.title == "renamed here");
+
+    // The picker's listing agrees.
+    for (const auto& meta : persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap()))
+        if (meta.id == t.id) CHECK(meta.title == "renamed here");
+
+    // A newer rename still wins over an older one.
+    retitle(t, "renamed again", 1'900'000'000);
+    CHECK(load(t).title == "renamed again");
     persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
 }
 
