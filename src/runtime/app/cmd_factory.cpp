@@ -1644,17 +1644,18 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                                       + ": " + result.error().detail,
                          shell_cat, args_dump);
                 if (result) {
-                    // post_tool hooks: fire-and-forget (never block, never
-                    // rewrite the result).
-                    tools::hooks::run_post_tool(name.value, args_dump,
-                                                result->text);
-                    // Carry the structured FileChange(s) — single-file (edit/
-                    // write/apply_patch) via change, multi-file (replace) via
-                    // changes — into the reducer for diff-review.
+                    // The result goes out first: a post_tool hook can take
+                    // up to its 30 s timeout, and the card should not sit on
+                    // "running" for a tool that already finished.
+                    const std::string result_text = result->text;
                     sink.send(Msg{out(ToolExecOutput{id, std::move(result->text),
                                             std::move(result->change),
                                             std::move(result->changes),
                                             std::move(result->images)})});
+                    // post_tool hooks: never rewrite the result. Still on
+                    // this call's own thread, so a slow hook costs nobody
+                    // else anything.
+                    tools::hooks::run_post_tool(name.value, args_dump, result_text);
                 } else {
                     sink.send(Msg{out(ToolExecOutput{id,
                         std::unexpected(std::move(result).error())})});

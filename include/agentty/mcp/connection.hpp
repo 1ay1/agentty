@@ -89,7 +89,8 @@ public:
     void set_on_list_changed(ListChangedFn fn) override;
 
     [[nodiscard]] bool alive() const;
-    [[nodiscard]] const ::mcp::ServerCapabilities& server_capabilities() const noexcept { return caps_; }
+    // The capabilities the live connection negotiated (empty when down).
+    [[nodiscard]] ::mcp::ServerCapabilities server_capabilities() const;
 
 private:
     struct Live;   // the peer, the holder, the cached lists
@@ -109,10 +110,11 @@ private:
     ConnectionConfig          cfg_;
     Link                      link_;
     std::string               origin_;
-    ::mcp::ServerCapabilities caps_{};
 
     // The live connection, swapped whole on reconnect. Readers take a
-    // snapshot; a call keeps its snapshot alive for its duration.
+    // snapshot; a call keeps its snapshot alive for its duration. The
+    // server's capabilities live inside it: a reconnect negotiates fresh
+    // ones, and a reader on the old Live keeps seeing the old ones.
     maya::published<Live> live_;
     // One reconnect at a time (an atomic gate; see connection.cpp).
     std::atomic<bool>     reconnecting_{false};

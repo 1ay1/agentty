@@ -386,13 +386,10 @@ TEST_CASE("acp integration end-to-end") {
     CHECK(saw_skill_or_compact_cmd.load());
     CHECK(config_opts.load() >= 1);
     CHECK(saw_model_option.load());
-    // Clean cut: on a v1 connection (the default build), the permission mode
-    // is surfaced ONLY via SessionModeState (ns.modes, checked above) — NOT as
-    // a config option. The v2 `mode` config-option path is exercised only
-    // under an ACP_ENABLE_V2_DRAFT build with a v2 client; here it must be
-    // absent so the two surfaces never overlap.
-    if (init.protocolVersion < 2)
-        CHECK(!saw_mode_option.load());
+    // The permission mode is a config option on every connection: Zed builds
+    // its selectors from configOptions alone once they exist (it drops
+    // `modes`), so without it there was no profile picker in Zed.
+    CHECK(saw_mode_option.load());
 
     // The MODEL option is version-agnostic. session/set_config_option applies
     // a value from the option's own list and echoes the complete config state.

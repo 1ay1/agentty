@@ -90,6 +90,7 @@ void release(std::atomic<bool>& gate) {
 struct Connection::Live {
     std::shared_ptr<void>      holder;   // what backs the channel; dropped after the peer
     std::unique_ptr<rpc::Peer> peer;
+    ::mcp::ServerCapabilities  caps;     // set during connect(), read-only after
     maya::snapshot<Lists>      lists;
     std::atomic<bool>          poisoned{false};   // a cancelled call left it untrusted
     std::atomic<bool>          busy{false};       // a call is in flight; calls go one at a time
@@ -254,7 +255,7 @@ std::shared_ptr<Connection::Live> Connection::connect(const maya::unlocked& cap)
     // legacy initialize handshake.
     l->peer->set_request_meta(cap, m::modern_request_meta(cfg_.client_info, client_caps));
     if (auto disc = l->peer->call<m::to_server::Discover>(cap, m::DiscoverParams{})) {
-        caps_ = disc->capabilities;
+        l->caps = disc->capabilities;
     } else {
         // A pre-2026 server. Speak its dialect all the way down: no modern
         // per-request _meta, the legacy version in initialize, and (over
@@ -267,7 +268,7 @@ std::shared_ptr<Connection::Live> Connection::connect(const maya::unlocked& cap)
         ip.capabilities    = client_caps;
         ip.clientInfo      = cfg_.client_info;
         auto init = take(l->peer->call<m::to_server::Initialize>(cap, ip));
-        caps_ = init.capabilities;
+        l->caps = init.capabilities;
         // The version the server picked goes on every later request.
         if (link_.set_protocol_version)
             link_.set_protocol_version(l->holder, init.protocolVersion);
@@ -275,8 +276,8 @@ std::shared_ptr<Connection::Live> Connection::connect(const maya::unlocked& cap)
     }
 
     refresh_tools(cap, *l);
-    if (caps_.resources) { try { refresh_resources(cap, *l); } catch (...) {} }
-    if (caps_.prompts)   { try { refresh_prompts(cap, *l); } catch (...) {} }
+    if (l->caps.resources) { try { refresh_resources(cap, *l); } catch (...) {} }
+    if (l->caps.prompts)   { try { refresh_prompts(cap, *l); } catch (...) {} }
 
     l->peer->set_default_timeout(cfg_.call_timeout);
     return l;
@@ -288,20 +289,28 @@ bool Connection::alive() const {
     return !link_.alive || link_.alive(l->holder);
 }
 
+::mcp::ServerCapabilities Connection::server_capabilities() const {
+    auto l = live_.current();
+    return l ? l->caps : ::mcp::ServerCapabilities{};
+}
+
 std::expected<std::shared_ptr<Connection::Live>, std::string>
 Connection::ensure_live(const maya::unlocked& cap) {
+    const auto healthy = [&](const std::shared_ptr<Live>& x) {
+        return x && !x->peer->closed(cap) && (!link_.alive || link_.alive(x->holder))
+               && !x->poisoned.load(std::memory_order_acquire);
+    };
     auto l = live_.current();
-    const bool healthy = l && !l->peer->closed(cap) && (!link_.alive || link_.alive(l->holder))
-                         && !l->poisoned.load(std::memory_order_acquire);
-    if (healthy) return l;
+    if (healthy(l)) return l;
 
     // One reconnect at a time; whoever loses the race uses the winner's.
     bool expected = false;
     const bool mine = reconnecting_.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
     if (!mine) {
-        // Block until the winner finishes (atomic wait, not a sleep-poll).
+        // Block until the winner finishes (atomic wait, not a sleep-poll),
+        // then use whatever it left, if it is healthy.
         reconnecting_.wait(true, std::memory_order_acquire);
-        if (auto now = live_.current(); now && now != l) return now;
+        if (auto now = live_.current(); healthy(now)) return now;
         return std::unexpected(std::string{"mcp server '" + origin_ + "' is not running"});
     }
     struct Done {
@@ -311,11 +320,18 @@ Connection::ensure_live(const maya::unlocked& cap) {
             c->reconnecting_.notify_all();
         }
     } done{this};
+    // A previous winner may have finished between our health check and the
+    // CAS: don't tear down its fresh connection.
+    if (auto now = live_.current(); now != l && healthy(now)) return now;
     try {
-        if (auto old = live_.current()) old->peer->stop(cap);
-        live_.publish(nullptr);
+        // Build the new connection first, then swap: a reader that races this
+        // sees either the old Live (closed, it will come back here) or the new
+        // one, never an empty slot it would report as "not running".
+        auto old = live_.current();
+        if (old) old->peer->stop(cap);
         live_.publish(connect(cap));
     } catch (const std::exception& e) {
+        live_.publish(nullptr);
         return std::unexpected(std::string{"mcp reconnect failed: "} + e.what());
     }
     if (auto fn = on_changed_->current(); fn && *fn) (*fn)();
@@ -411,7 +427,7 @@ std::vector<m::Tool> Connection::list() const {
 
 std::vector<m::Resource> Connection::resources() const {
     auto l = live_.current();
-    if (!l || !caps_.resources) return {};
+    if (!l || !l->caps.resources) return {};
     if (l->lists.load()->resources_stale) {
         try { entry_root([&](const maya::unlocked& c) { refresh_resources(c, *l); }); } catch (...) {}
     }
@@ -420,7 +436,7 @@ std::vector<m::Resource> Connection::resources() const {
 
 std::vector<m::ResourceTemplate> Connection::resource_templates() const {
     auto l = live_.current();
-    if (!l || !caps_.resources) return {};
+    if (!l || !l->caps.resources) return {};
     if (l->lists.load()->resources_stale) {
         try { entry_root([&](const maya::unlocked& c) { refresh_resources(c, *l); }); } catch (...) {}
     }
@@ -429,7 +445,7 @@ std::vector<m::ResourceTemplate> Connection::resource_templates() const {
 
 std::vector<m::Prompt> Connection::prompts() const {
     auto l = live_.current();
-    if (!l || !caps_.prompts) return {};
+    if (!l || !l->caps.prompts) return {};
     if (l->lists.load()->prompts_stale) {
         try { entry_root([&](const maya::unlocked& c) { refresh_prompts(c, *l); }); } catch (...) {}
     }

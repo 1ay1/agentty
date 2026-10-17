@@ -240,7 +240,9 @@ void Peer::stop(const maya::unlocked& cap) noexcept {
         try { core_->ch.interrupt(cap); } catch (...) {}
     }
     // A reader wedged in read() past the grace is abandoned; it co-owns Core.
-    (void)pool_.shutdown(cap);
+    // stop() is noexcept; a self-join (stop from the peer's own reader) aborts
+    // with its reason instead of throwing through here into terminate.
+    (void)pool_.shutdown_noexcept(std::chrono::seconds(2));
 }
 
 void Peer::wait_closed(const maya::unlocked& cap) {
@@ -307,7 +309,10 @@ void Peer::Core::writer(const maya::unlocked& cap) {
         for (auto& f : batch) bytes += f;
         if (!ch.write(cap, bytes)) {
             util::dbglog("rpc.write", name + ": channel gone");
-            out.with(cap, [](Outbox& o) { o.closed = true; o.frames.clear(); });
+            // Nothing can be sent any more: fail every waiting call now rather
+            // than leave it parked until the reader happens to see EOF.
+            close(cap, "write failed");
+            out.with(cap, [](Outbox& o) { o.frames.clear(); });
             return;
         }
     }
