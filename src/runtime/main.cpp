@@ -102,6 +102,9 @@
 #include "agentty/rag/rag_adapter.hpp"
 #include "agentty/rag/embed_secret.hpp"
 #include "agentty/util/update.hpp"
+#include "agentty/util/home_dir.hpp"   // window_title's ~/ abbreviation
+#include "agentty/util/dbglog.hpp"     // window_title's fallback log
+#include "agentty/tool/util/utf8.hpp"  // window_title's UTF-8 scrub
 #include "agentty/util/user_root.hpp"   // user_logs_dir (stderr.log home)
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
@@ -1175,6 +1178,58 @@ Utf8Argv recover_utf8_argv() {
 #endif
 
 namespace {
+// "agentty ~/path": the workspace (--workspace, default cwd) in the window
+// title, so concurrent instances can be told apart. $HOME shows as ~; a bare
+// basename would collide across same-named projects.
+std::string window_title() {
+    namespace fs = std::filesystem;
+    try {
+        const fs::path& root = agentty::tools::util::workspace_root();
+        fs::path shown = root;
+        // home gets the weakly_canonical set_workspace_root() gave root, so a
+        // symlinked $HOME still matches. A home of "/" is skipped, as bash's
+        // prompt does; any other mismatch (drive, case) shows the full path.
+        if (const fs::path home = agentty::util::home_dir_or_empty(); !home.empty()) {
+            std::error_code ec;
+            const fs::path canon_home = fs::weakly_canonical(home, ec);
+            if (!ec && canon_home.has_relative_path()) {
+                const fs::path rel = root.lexically_relative(canon_home);
+                if (!rel.empty() && *rel.begin() != "..")
+                    shown = rel == "." ? fs::path{"~"} : fs::path{"~"} / rel;
+            }
+        }
+        // generic_u8string(): '/' separators on every platform, so the title
+        // reads the same everywhere (C:/Users/me/proj on Windows). UTF-8, not
+        // string(): on Windows that goes through the ANSI code page and MSVC
+        // throws on characters it cannot represent.
+        const auto u8 = shown.generic_u8string();
+        const std::string text = agentty::tools::util::sanitize_utf8(
+            {reinterpret_cast<const char*>(u8.data()), u8.size()});
+        // maya writes the title verbatim inside OSC 0, and Linux/macOS allow
+        // control characters in names: an ESC or BEL would end the OSC early and
+        // inject sequences. C0, DEL and C1 (UTF-8 C2 80..9F) become '?'.
+        std::string out = "agentty ";
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            const auto c = static_cast<unsigned char>(text[i]);
+            const bool c1 = c == 0xC2 && i + 1 < text.size()
+                && static_cast<unsigned char>(text[i + 1]) >= 0x80
+                && static_cast<unsigned char>(text[i + 1]) <= 0x9F;
+            if (c < 0x20 || c == 0x7F || c1) {
+                out += '?';
+                if (c1) ++i;
+                continue;
+            }
+            out += text[i];
+        }
+        return out;
+    } catch (const std::exception& e) {
+        // Same fallback prompt.cpp takes for an unconvertible cwd: log it and
+        // keep the fixed title rather than abort startup.
+        agentty::util::dbglog("startup.window_title", e.what());
+        return "agentty";
+    }
+}
+
 // The program, from the one thread that starts holding no lock. Everything
 // main() did is here, unchanged, except that it can PROVE it holds no lock:
 // `cap` is the root capability every lock, wait and join below is checked
@@ -2405,7 +2460,8 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
     // effects (runtime/app/host.hpp). maya::run opens the terminal, installs
     // maya's executor and runs the program on jaal; agentty never calls jaal.
     {
-        maya::Options cfg{.title = "agentty", .fps = 0,
+        const std::string title = window_title();
+        maya::Options cfg{.title = title, .fps = 0,
                           .mode = maya::Mode::Inline, .backend = backend};
         if (const int rc = maya::run<app::AgenttyApp, app::Host>(cfg);
             rc == 70) {
