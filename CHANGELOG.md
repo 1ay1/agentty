@@ -4,6 +4,14 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Rename a thread from the thread list.** [[Ctrl+R]] in the [[Ctrl+J]]
+  list opens the highlighted thread's title for editing, so a thread that
+  began with a paste no longer has to stay `[Pasted text ...`. The arrow
+  keys, [[Home]]/[[End]], [[Backspace]] and [[Delete]] edit it, [[Enter]]
+  saves and [[Esc]] cancels. A title is one line of up to 60 bytes, and the
+  thread keeps its place in the list.
+
 ### Fixed
 - **Gemini quota errors show at once (#102).** Google sends no
   `Retry-After` header; the wait is in the error body (`retryDelay`, and
