@@ -350,6 +350,10 @@ struct LoopBreak {
 // thread; answers LibraryLoaded, which the reducer stores in m.ui.library.
 [[nodiscard]] Cmd load_library();
 
+// Render an MCP `/prompt args` line off the UI thread (it asks the server);
+// answers SlashPromptRendered, which submits the text. Empty text on failure.
+[[nodiscard]] Cmd render_slash_prompt(std::string typed);
+
 // The settings pane's add-mode create: a plugin line into the user mcp.json,
 // or a starter command/agent file. Writes the disk off the fold and answers
 // with SettingsAddDone.

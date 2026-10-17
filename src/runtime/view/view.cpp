@@ -16,6 +16,7 @@
 #include "agentty/runtime/panel/top.hpp"
 #include "agentty/runtime/view/changes_strip.hpp"
 #include "agentty/runtime/view/composer.hpp"
+#include "agentty/runtime/view/slash_menu.hpp"
 #include "agentty/runtime/view/diff_review.hpp"
 #include "agentty/runtime/view/login.hpp"
 #include "agentty/runtime/view/panels.hpp"
@@ -189,6 +190,7 @@ maya::Element view(const Model& m) {
         maya::RenderContextGuard guard(ctx);
         alc.thread        = thread_config(m);
         alc.changes_strip = changes_strip_config(m);
+        alc.above_composer = slash_menu(m);
         alc.composer      = composer_config(m);
         alc.status_bar    = status_bar_config(m);
         overlay = pick_panel(m);

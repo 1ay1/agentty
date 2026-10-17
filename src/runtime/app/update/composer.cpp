@@ -29,6 +29,7 @@
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/panel/mention.hpp"
 #include "agentty/runtime/panel/symbol.hpp"
+#include "agentty/runtime/slash.hpp"
 #include "agentty/workspace/files.hpp"
 #include "agentty/workspace/symbols.hpp"
 #include "agentty/runtime/view/helpers.hpp"
@@ -463,30 +464,9 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
     }
     Cmd step = std::visit(overload{
         [&](ComposerCharInput e) -> Cmd {
-            // '/' opens the command palette when it's LINE-LEADING —
-            // the cursor sits at the start of the buffer or right
-            // after a newline, with no attachment placeholder
-            // immediately before it. This matches how real shells /
-            // Claude Code treat slash-commands (line-leading) and is
-            // symmetric with the '@'/'#' word-boundary rule below,
-            // rather than the older "only on a totally empty buffer"
-            // gate that silently swallowed '/' at the start of an
-            // existing draft. Mid-prose slashes (URLs, regexes,
-            // formula divides) still type literally because they're
-            // never line-leading. Once the palette is open, subscribe
-            // routes subsequent keystrokes to on_command_palette so
-            // the slash itself is not consumed twice; the open-palette
-            // starts with an empty query.
-            auto at_line_start = [&]{
-                if (m.ui.composer.cursor == 0) return true;
-                char prev = m.ui.composer.text[
-                    static_cast<std::size_t>(m.ui.composer.cursor) - 1];
-                return prev == '\n';
-            };
-            if (e.ch == U'/' && at_line_start()) {
-                m.ui.panel.descend(pn::Palette{});
-                return Cmd::none();
-            }
+            // '/' is ordinary text. The `/` menu above the composer works
+            // itself out from text + caret (slash::menu_query), so nothing
+            // opens here and the typed name always stays in the composer.
             // '@' opens the file mention picker. Unlike '/' this is
             // permitted mid-prose ("ping @alice tomorrow" is a fine
             // English sentence), so we don't require an empty buffer
@@ -921,6 +901,26 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                 e.text = std::move(norm);
             }
 
+            // A short one-line `/name args` pasted into an empty composer is
+            // typed text, not a chip: it has to stay a command the menu and
+            // the resolver can read (a chip hides the slash behind a token).
+            // A path (`/tmp/x.png`, a second '/' in the first word) still
+            // goes the chip way, so a dropped image is still an image.
+            const bool slash_name = [&] {
+                if (!m.ui.composer.text.empty() || !e.text.starts_with('/')) return false;
+                if (e.text.size() > 512 || e.text.find('\n') != std::string::npos) return false;
+                const auto word_end = e.text.find_first_of(" \t");
+                const std::string_view word = std::string_view{e.text}.substr(1, word_end == std::string::npos ? std::string::npos : word_end - 1);
+                return !word.empty() && word.find('/') == std::string_view::npos
+                    && word.find('.') == std::string_view::npos;
+            }();
+            if (slash_name) {
+                begin_edit(m.ui.composer);
+                m.ui.composer.text   = std::move(e.text);
+                m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
+                return Cmd::none();
+            }
+
             // Always-chip: every paste, regardless of size, becomes
             // an Attachment + inline placeholder. Single-line pastes
             // get a preview caption ("Pasted: hello world") so they
@@ -1253,6 +1253,43 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                 cs.expanded = true;
             return Cmd::none();
         },
+        [&](ComposerSlashMove& e) -> Cmd {
+            const auto cat  = slash::catalog_of(m);
+            const auto rows = slash::menu_rows(m, cat);
+            if (rows.empty()) return Cmd::none();
+            m.ui.composer.slash.index =
+                ui::step(m.ui.composer.slash.index, e.delta, static_cast<int>(rows.size()));
+            return Cmd::none();
+        },
+        [&](ComposerSlashComplete) -> Cmd {
+            const auto cat  = slash::catalog_of(m);
+            const auto rows = slash::menu_rows(m, cat);
+            if (rows.empty()) return Cmd::none();
+            const int i = std::clamp(m.ui.composer.slash.index, 0,
+                                     static_cast<int>(rows.size()) - 1);
+            begin_edit(m.ui.composer);
+            auto done = slash::complete(m.ui.composer.text, *rows[static_cast<std::size_t>(i)].entry);
+            m.ui.composer.text   = std::move(done.text);
+            m.ui.composer.cursor = done.cursor;
+            m.ui.composer.slash  = {};
+            return Cmd::none();
+        },
+        [&](ComposerSlashDismiss) -> Cmd {
+            if (const auto q = slash::menu_query(m.ui.composer.text, m.ui.composer.cursor))
+                m.ui.composer.slash.dismissed = std::string{q->query};
+            return Cmd::none();
+        },
+        [&](SlashPromptRendered& e) -> Cmd {
+            m.ui.composer.slash_pending = false;
+            // The user edited the line meanwhile: their newer text wins.
+            if (m.ui.composer.text != e.typed) return Cmd::none();
+            if (e.text.empty())
+                return set_status_toast(m, "that prompt's server didn't answer");
+            begin_edit(m.ui.composer);
+            m.ui.composer.text   = std::move(e.text);
+            m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
+            return submit_message(m);
+        },
         [&](ComposerQueuePopLast) -> Cmd {
             // Alt+Backspace on an empty composer with no peek active
             // — "undo queue": remove the most recently queued item.
@@ -1275,6 +1312,17 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             return Cmd::none();
         },
     }, cm);
+
+    // The `/` menu's selection belongs to one query. A new query starts at
+    // the top; a dismiss only holds while its token is unchanged.
+    {
+        auto& sm = m.ui.composer.slash;
+        const auto q = slash::menu_query(m.ui.composer.text, m.ui.composer.cursor);
+        const std::string now = q ? std::string{q->query} : std::string{};
+        if (!q || now != sm.query) sm.index = 0;
+        if (sm.dismissed && (!q || *sm.dismissed != now)) sm.dismissed.reset();
+        sm.query = now;
+    }
 
     // Fold in the opportunistic effects armed above (prewarm, proactive OAuth
     // refresh) without disturbing whatever Cmd the matched arm produced.

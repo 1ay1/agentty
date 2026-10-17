@@ -110,9 +110,11 @@ jq -r 'select(.ev=="reasoning") | .text' events.jsonl
 | 124 | Hit `--timeout`. |
 | 130 / 143 | Stopped by Ctrl-C / SIGTERM. |
 
-## Command palette
+## Command palette and slash names
 
-Inside a thread there are no typed `/command` literals — press `^K` (or `/` on an empty composer) to open a fuzzy command palette. The fixed command set:
+Type `/` at the start of the composer for a menu of everything you can run by name: built-in actions (`/new`, `/compact`, `/model`, `/rename`, `/fork`, `/rewind`, `/review`, `/threads`, `/settings`, `/login`, `/quit`), your own commands, skills and MCP prompts. See [Slash Commands](/docs/slash-commands).
+
+`^K` opens the fuzzy command palette with the full action set:
 
 | Command | What it does |
 |---|---|

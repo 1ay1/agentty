@@ -415,6 +415,28 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             p->rename_cursor = 0;
             return Cmd::none();
         },
+        [&](RenameCurrentThread& e) -> Cmd {
+            std::string title = persistence::clean_title(e.title);
+            if (title.empty())
+                return set_status_toast(m, "/rename needs a title");
+            // A thread with nothing in it isn't saved yet, so there's
+            // nothing on disk to rename.
+            if (m.d.current.messages.empty())
+                return set_status_toast(m, "send a message first, then /rename");
+            if (title == m.d.current.title) return Cmd::none();
+            const std::int64_t at = std::chrono::duration_cast<std::chrono::seconds>(
+                m.wall_now().time_since_epoch()).count();
+            m.d.current.title      = title;
+            m.d.current.renamed_at = at;
+            if (const auto it = std::ranges::find(m.d.threads, m.d.current.id, &Thread::id);
+                it != m.d.threads.end()) {
+                it->title      = title;
+                it->renamed_at = at;
+            }
+            auto toast = set_status_toast(m, "renamed to \"" + title + "\"");
+            return Cmd::batch(Cmd(RenameThread{m.d.current.id, std::move(title), at}),
+                              std::move(toast));
+        },
         [&](ThreadListRenameSubmit) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
             if (!p || p->renaming.empty()) return Cmd::none();

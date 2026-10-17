@@ -195,4 +195,10 @@ struct PromptInfo {
     const std::vector<std::pair<std::string, std::string>>& args,
     std::string& err);
 
+// Render `/name a b c` when name is a server prompt: its arguments fill in
+// order from the words after the name, the last one takes the rest of the
+// line. nullopt when it isn't a prompt; a failure renders as a short note.
+// Talks to the server: call it off the UI thread.
+[[nodiscard]] std::optional<std::string> mcp_expand_prompt(std::string_view line);
+
 } // namespace agentty::mcp

@@ -194,6 +194,8 @@ set(AGENTTY_TOOL_SOURCES
 set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/composer_attachment.cpp
     src/runtime/library.cpp
+    src/runtime/slash.cpp
+    src/runtime/slash_io.cpp
     src/runtime/app/deps.cpp
     src/runtime/app/settings_cache.cpp
     src/runtime/app/init.cpp
@@ -279,6 +281,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/status_bar/model_badge.cpp
     src/runtime/view/status_bar/status_bar.cpp
     src/runtime/view/changes_strip.cpp
+    src/runtime/view/slash_menu.cpp
     # One panel = one view file (view/panels/<name>.cpp); shared scaffolding
     # in panels_prologue.hpp / panels_common.hpp / form_common.cpp.
     src/runtime/view/panels/models.cpp

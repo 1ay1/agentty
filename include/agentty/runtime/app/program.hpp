@@ -304,6 +304,12 @@ struct AgenttyApp {
         // ── Composer / UI.
         mix_str(m.ui.composer.text);
         mix(static_cast<std::uint64_t>(m.ui.composer.cursor));
+        // The `/` menu: its selection, an Esc, and the names it lists.
+        mix(static_cast<std::uint64_t>(m.ui.composer.slash.index));
+        mix(m.ui.composer.slash.dismissed ? 1ULL : 0ULL);
+        mix(m.ui.library.commands.size());
+        mix(m.ui.library.skills.size());
+        mix(m.ui.plugins.prompts.size());
         mix(m.ui.composer.attachments.size());
         mix(m.ui.composer.queued.size());
         mix(m.ui.composer.expanded ? 1ULL : 0ULL);

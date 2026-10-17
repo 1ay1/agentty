@@ -643,6 +643,16 @@ std::string mcp_bare_name(std::string_view exposed) {
     return std::string{exposed};
 }
 
+// The name a prompt is typed as: `server:prompt`, from either wire form
+// (`mcp:server__prompt` or the canonical `mcp__server__prompt`).
+std::string short_prompt_name(std::string_view exposed) {
+    if (exposed.starts_with("mcp:")) exposed.remove_prefix(4);
+    else if (exposed.starts_with("mcp__")) exposed.remove_prefix(5);
+    const auto split = exposed.find("__");
+    if (split == std::string_view::npos) return std::string{exposed};
+    return std::string{exposed.substr(0, split)} + ":" + std::string{exposed.substr(split + 2)};
+}
+
 // Synthesize a ToolDef that routes through the shared registry by EXPOSED name.
 tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t,
                          const ServerPolicy& policy) {
@@ -1899,6 +1909,22 @@ PluginModel plugin_model() {
                 }
         }
     }
+    // Prompts for the composer's `/` menu, same hint shape ACP sends. They
+    // show as `server:prompt`, which reads better and types faster than
+    // the wire name `mcp__server__prompt`; both resolve to the same prompt.
+    for (const auto& pr : mcp_prompts()) {
+        if (pr.name.empty()) continue;
+        PromptState ps;
+        ps.name = short_prompt_name(pr.name);
+        ps.description = !pr.description.empty() ? pr.description
+                       : !pr.title.empty()       ? pr.title
+                                                 : "Prompt from " + pr.server;
+        for (const auto& arg : pr.arguments) {
+            if (!ps.hint.empty()) ps.hint += ' ';
+            ps.hint += arg.required ? "<" + arg.name + ">" : "[" + arg.name + "]";
+        }
+        model.prompts.push_back(std::move(ps));
+    }
     return model;
 }
 
@@ -1983,6 +2009,43 @@ std::vector<PromptInfo> mcp_prompts() {
                     a.required.has_value() && *a.required});
         out.push_back(std::move(pi));
     }
+    return out;
+}
+
+std::optional<std::string> mcp_get_prompt(
+    const std::string& name,
+    const std::vector<std::pair<std::string, std::string>>& args,
+    std::string& err);
+
+std::optional<std::string> mcp_expand_prompt(std::string_view t) {
+    if (!t.starts_with('/')) return std::nullopt;
+    const auto sp = t.find_first_of(" \t\n");
+    const std::string typed{t.substr(1, sp == std::string_view::npos ? sp : sp - 1)};
+    std::string_view rest = sp == std::string_view::npos ? std::string_view{} : t.substr(sp + 1);
+    std::vector<PromptInfo> prompts;
+    try { prompts = mcp_prompts(); } catch (...) { return std::nullopt; }
+    // Either spelling: the wire name, or the `server:prompt` the menu shows.
+    const auto it = std::ranges::find_if(prompts, [&](const auto& p) {
+        return p.name == typed || short_prompt_name(p.name) == typed;
+    });
+    if (it == prompts.end()) return std::nullopt;
+    const std::string name = it->name;
+    std::vector<std::pair<std::string, std::string>> args;
+    for (std::size_t i = 0; i < it->arguments.size(); ++i) {
+        while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+        if (rest.empty()) break;
+        std::string_view v;
+        if (i + 1 == it->arguments.size()) { v = rest; rest = {}; }
+        else {
+            const auto e = rest.find(' ');
+            v = rest.substr(0, e);
+            rest = e == std::string_view::npos ? std::string_view{} : rest.substr(e + 1);
+        }
+        args.emplace_back(it->arguments[i].name, std::string{v});
+    }
+    std::string err;
+    auto out = mcp_get_prompt(name, args, err);
+    if (!out) return "The /" + name + " prompt failed: " + err;
     return out;
 }
 

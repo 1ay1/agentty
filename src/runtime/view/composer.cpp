@@ -1,4 +1,5 @@
 #include "agentty/runtime/view/composer.hpp"
+#include "agentty/runtime/view/slash_menu.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -235,6 +236,16 @@ maya::Composer::Config composer_config(const Model& m) {
     // resurrecting the hints.
     cfg.status          = model_badge_config(m);
     cfg.show_key_hints  = false;
+    // While the `/` menu is open its keys take the slot, so you can see
+    // how to complete, run and dismiss without guessing.
+    if (slash_menu_open(m)) {
+        auto k = [](const char* s) { return maya::dsl::text(s, maya::Style{}.with_fg(fg).with_bold()); };
+        auto l = [](const char* s) { return maya::dsl::text(s, maya::Style{}.with_fg(muted).with_dim()); };
+        cfg.status = maya::dsl::h(k("\xe2\x86\xb9"), l(" complete  "),     // ↹
+                                  k("\xe2\x86\xb5"), l(" run  "),          // ↵
+                                  k("\xe2\x86\x91\xe2\x86\x93"), l(" pick  "), // ↑↓
+                                  k("esc"), l(" hide")).build();
+    }
 
     // ── Ambient counters over the REAL payload ──────────────────────
     //

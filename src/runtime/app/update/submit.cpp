@@ -20,6 +20,8 @@
 #include "agentty/util/image_dims.hpp"   // image_dimensions — lift-time trace
 #include "agentty/tool/commands.hpp"
 #include "agentty/runtime/view/helpers.hpp"
+#include "agentty/runtime/slash.hpp"
+#include "agentty/runtime/app/update.hpp"   // re-enter update() for /actions
 #include "agentty/io/persistence.hpp"   // title_from_first_message (pure)
 #include "agentty/provider/chatgpt/provider.hpp"
 #include "agentty/provider/copilot/provider.hpp"
@@ -34,6 +36,55 @@
 namespace pn = agentty::ui::panel;
 
 namespace agentty::app::detail {
+
+namespace {
+
+// Re-enter the top-level reducer with `msg`, the way the palette does.
+[[nodiscard]] Cmd emit_msg(Model& m, Msg msg) {
+    auto [next, cmd] = agentty::app::update(std::move(m), std::move(msg));
+    m = std::move(next);
+    return std::move(cmd);
+}
+
+// Clear the composer after a slash action ran, keeping it out of history.
+void clear_composer(Model& m) {
+    m.ui.composer.text.clear();
+    m.ui.composer.cursor = 0;
+    m.ui.composer.attachments.clear();
+    m.ui.composer.slash = {};
+}
+
+// Run a built-in `/action`. nullopt: not handled here (keeps the text).
+[[nodiscard]] std::optional<Cmd> run_slash_action(Model& m, const slash::Entry& e,
+                                                  const std::string& args) {
+    using A = slash::Action;
+    if (!e.takes_args && !args.empty())
+        return set_status_toast(m, "/" + e.name + " takes no arguments");
+    clear_composer(m);
+    switch (e.action) {
+        case A::New:      return emit_msg(m, Msg{NewThread{}});
+        case A::Compact:  return emit_msg(m, Msg{CompactContext{}});
+        case A::Model:    return emit_msg(m, Msg{OpenModels{}});
+        case A::Fork:     return emit_msg(m, Msg{OpenFork{}});
+        case A::Rewind:   return emit_msg(m, Msg{OpenCheckpoints{}});
+        case A::Review:   return emit_msg(m, Msg{OpenDiffReview{}});
+        case A::Threads:  return emit_msg(m, Msg{OpenThreadList{}});
+        case A::Settings: return emit_msg(m, Msg{OpenSettingsList{settings::Category::General}});
+        case A::Login:    return emit_msg(m, Msg{OpenLogin{}});
+        case A::Quit:     return emit_msg(m, Msg{Quit{}});
+        case A::Rename:
+            if (args.empty()) {
+                // No title: open the picker with the open thread's rename
+                // started, so you edit the current name instead of retyping.
+                Cmd open = emit_msg(m, Msg{OpenThreadList{}});
+                return Cmd::batch(std::move(open), emit_msg(m, Msg{ThreadListRenameStart{}}));
+            }
+            return emit_msg(m, Msg{RenameCurrentThread{args}});
+    }
+    return std::nullopt;
+}
+
+}  // namespace
 
 Cmd submit_message(Model& m) {
     // The transcript is about to be replaced (thread load) or cut (checkpoint
@@ -63,6 +114,28 @@ Cmd submit_message(Model& m) {
     // into the wire text.
     if (m.ui.composer.text.empty() && m.ui.composer.attachments.empty())
         return Cmd::none();
+
+    // ── Slash names ────────────────────────────────────────────────
+    // One resolver (runtime/slash.hpp) decides what a leading `/name` is,
+    // the same one ACP and `agentty run` use. A built-in action runs here,
+    // before the guards below: `/model` must work with no model set, and
+    // `/review` must not clear the changes it opens. A user command expands
+    // below; a skill or MCP prompt is handled further down; anything else
+    // (/etc/hosts) is sent as typed.
+    {
+        const slash::Catalog cat = slash::catalog_of(m);
+        const slash::Resolved hit = slash::resolve(m.ui.composer.text, cat);
+        if (hit.what == slash::Resolved::What::Action)
+            if (auto ran = run_slash_action(m, *hit.entry, hit.args))
+                return std::move(*ran);
+        // An MCP prompt asks its server, which can't happen on the UI
+        // thread. Render it in a task; SlashPromptRendered submits the
+        // result. The typed line stays visible until then.
+        if (hit.what == slash::Resolved::What::Prompt && !m.ui.composer.slash_pending) {
+            m.ui.composer.slash_pending = true;
+            return cmd::render_slash_prompt(m.ui.composer.text);
+        }
+    }
 
     // No model resolved yet — don't start a turn. Sending `"model": ""` to a
     // local OpenAI-compatible server (llama.cpp / vLLM) is rejected, and the

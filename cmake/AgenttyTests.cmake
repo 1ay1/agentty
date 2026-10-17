@@ -23,6 +23,7 @@ set(_AGENTTY_CONSOLIDATED
     quit_cancels_stream_test
     midrun_freeze_test smart_mode_test stream_liveness_test wire_golden_test
     smart_tuning_settings_test smart_routing_card_test settings_nav_test settings_rows_input_test
+    slash_menu_test
     effort_auto_test settings_multiproc_test
     wire_shared_test complexity_test copilot_token_test kimi_token_test
     chatgpt_bundled_models_test settings_default_test

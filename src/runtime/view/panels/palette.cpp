@@ -110,8 +110,12 @@ Element palette_panel(const Model& m) {
             // survives a narrow (phone/SSH) terminal, marked SECONDARY so it
             // yields before the label does.
             row.help = cmd.description;
-            if (cmd.shortcut && *cmd.shortcut) {
-                row.trailing           = cmd.shortcut;
+            // The chord if there is one, else the typed `/name`, so the
+            // palette teaches what to type in the composer next time.
+            const char* trail = (cmd.shortcut && *cmd.shortcut) ? cmd.shortcut
+                                                                 : slash_name_for(cmd.id);
+            if (trail && *trail) {
+                row.trailing           = trail;
                 row.trailing_style     = fg_dim(muted);
                 row.trailing_secondary = true;
             }

@@ -52,6 +52,7 @@
 #include "agentty/runtime/app/cmd_factory.hpp"        // wire_messages_for, compaction prompts
 #include "agentty/tool/commands.hpp"
 #include "agentty/tool/skills.hpp"
+#include "agentty/runtime/slash.hpp"   // one resolver for /name
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -209,41 +210,6 @@ std::optional<std::string> air_git_patch(const FileChange& ch) {
     return out;
 }
 
-// "/name a b c" where name is an MCP server prompt: render it, filling its
-// arguments in order from the words after the name (the last one takes the
-// rest of the line). nullopt when it isn't one.
-std::optional<std::string> expand_mcp_prompt(std::string_view t) {
-#if AGENTTY_MCP
-    if (!t.starts_with('/')) return std::nullopt;
-    const auto sp = t.find_first_of(" \t\n");
-    const std::string name{t.substr(1, sp == std::string_view::npos ? sp : sp - 1)};
-    std::string_view rest = sp == std::string_view::npos ? std::string_view{} : t.substr(sp + 1);
-    std::vector<::agentty::mcp::PromptInfo> prompts;
-    try { prompts = ::agentty::mcp::mcp_prompts(); } catch (...) { return std::nullopt; }
-    const auto it = std::ranges::find_if(prompts, [&](const auto& p) { return p.name == name; });
-    if (it == prompts.end()) return std::nullopt;
-    std::vector<std::pair<std::string, std::string>> args;
-    for (std::size_t i = 0; i < it->arguments.size(); ++i) {
-        while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
-        if (rest.empty()) break;
-        std::string_view v;
-        if (i + 1 == it->arguments.size()) { v = rest; rest = {}; }
-        else {
-            const auto e = rest.find(' ');
-            v = rest.substr(0, e);
-            rest = e == std::string_view::npos ? std::string_view{} : rest.substr(e + 1);
-        }
-        args.emplace_back(it->arguments[i].name, std::string{v});
-    }
-    std::string err;
-    auto out = ::agentty::mcp::mcp_get_prompt(name, args, err);
-    if (!out) return "The /" + name + " prompt failed: " + err;
-    return out;
-#else
-    (void)t;
-    return std::nullopt;
-#endif
-}
 
 // Construct a text ContentBlock.
 a::ContentBlock text_block(std::string s) {
@@ -2501,32 +2467,20 @@ void AgentServer::on_prompt(const Cap& cap, const a::PromptParams& p, Responder 
             return;
         }
         // A user slash command expands into its prompt template; a skill
-        // splices in its instructions, the same as the TUI's submit does.
+        // splices in its instructions; an MCP prompt renders. One resolver
+        // (runtime/slash.hpp) decides which, the same one the TUI uses.
         if (t.starts_with('/')) {
             const Io io = IoAccess::grant();
-            if (auto expanded = tools::commands::try_expand(io, t)) {
-                text = std::move(*expanded);
-            } else if (auto rendered = expand_mcp_prompt(t)) {
-                text = std::move(*rendered);
-            } else {
-                const auto sp  = t.find_first_of(" \t\n");
-                const auto tok = t.substr(1, sp == std::string_view::npos ? sp : sp - 1);
-                const std::string rest = sp == std::string_view::npos
-                                       ? std::string{} : std::string{t.substr(sp + 1)};
-                if (auto sk = tools::skills::find(io, tok)) {
-                    const Thread snap = with_session(cap, sid, [](Session& s) {
-                        return s.thread;
-                    }).value_or(Thread{});
-                    if (!tools::skills::is_active_in(sk->name, ::agentty::visible_text(snap))) {
-                        text  = tools::skills::activation_payload(io, *sk);
-                        text += "\n\nFollow the skill instructions above";
-                        text += rest.empty() ? "." : " for this task: " + rest;
-                    } else {
-                        text = "Apply the already-loaded '" + sk->name + "' skill" +
-                               (rest.empty() ? "." : ": " + rest);
-                    }
-                }
+            const slash::Catalog cat = slash::discover(io);
+            bool active = false;
+            if (const auto hit = slash::resolve(t, cat);
+                hit.what == slash::Resolved::What::Skill) {
+                const Thread snap = with_session(cap, sid, [](Session& s) {
+                    return s.thread;
+                }).value_or(Thread{});
+                active = tools::skills::is_active_in(hit.entry->name, ::agentty::visible_text(snap));
             }
+            if (auto out = slash::expand(io, t, cat, active)) text = std::move(*out);
         }
     }
     // Title from what the user typed ("/review src"), not the expanded template.

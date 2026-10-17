@@ -15,6 +15,7 @@
 #include "agentty/runtime/panel/nav.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
 #include "agentty/runtime/app/cmd_factory.hpp"   // device_login_sub / codex_login_sub
+#include "agentty/runtime/slash.hpp"            // the composer's `/` menu
 
 namespace pn = agentty::ui::panel;
 
@@ -1007,9 +1008,40 @@ struct ComposerKeyState {
     bool in_history;     // walking over prior user messages — ↓ has meaning
     bool has_history;    // any prior user turns exist at all — ↑ has meaning
     bool in_queue_peek;  // editing a queued item in place (Alt+↑/↓ cycle)
+    bool slash_menu = false;    // the `/` menu is showing
+    bool slash_exact = false;   // the typed /name is exactly a known one
 };
 
+std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev);
+
+// The `/` menu's own keys. nullopt for every other key, which then edits
+// the composer as usual (so typing keeps filtering the menu).
+std::optional<Msg> on_slash_menu(ComposerKeyState s, const KeyEvent& ev) {
+    if (!s.slash_menu || ev.mods.alt || ev.mods.shift) return std::nullopt;
+    if (const auto* sk = std::get_if<SpecialKey>(&ev.key)) {
+        switch (*sk) {
+            case SpecialKey::Up:     return Msg{ComposerSlashMove{-1}};
+            case SpecialKey::Down:   return Msg{ComposerSlashMove{+1}};
+            case SpecialKey::Tab:    return Msg{ComposerSlashComplete{}};
+            case SpecialKey::Escape: return Msg{ComposerSlashDismiss{}};
+            // An exact name runs (falls through to the normal Enter); a
+            // half-typed one completes first, so Enter never fires a guess.
+            case SpecialKey::Enter:
+                if (!s.slash_exact) return Msg{ComposerSlashComplete{}};
+                return std::nullopt;
+            default: return std::nullopt;
+        }
+    }
+    if (const auto* ck = std::get_if<CharKey>(&ev.key)) {
+        const char32_t c = ck->codepoint;
+        if (c == 0x10 || (ev.mods.ctrl && (c == U'p' || c == U'P'))) return Msg{ComposerSlashMove{-1}};
+        if (c == 0x0E || (ev.mods.ctrl && (c == U'n' || c == U'N'))) return Msg{ComposerSlashMove{+1}};
+    }
+    return std::nullopt;
+}
+
 std::optional<Msg> on_composer(ComposerKeyState s, const KeyEvent& ev) {
+    if (auto msg = on_slash_menu(s, ev)) return msg;
     if (std::holds_alternative<SpecialKey>(ev.key)) {
         auto sk = std::get<SpecialKey>(ev.key);
         switch (sk) {
@@ -1193,12 +1225,20 @@ std::optional<Msg> on_key(const Model& m, const KeyEvent& ev) {
             break;
         }
     }
+    const auto slash_cat  = slash::catalog_of(m);
+    const auto slash_rows = slash::menu_rows(m, slash_cat);
+    const bool slash_exact = !slash_rows.empty() && [&] {
+        const auto q = slash::menu_query(m.ui.composer.text, m.ui.composer.cursor);
+        return q && slash_rows.front().entry->name == q->query;
+    }();
     const ComposerKeyState composer_state{
         m.ui.composer.text.empty(),
         !m.ui.composer.queued.empty(),
         m.ui.composer.history_index().has_value(),
         has_history,
         m.ui.composer.queue_peek_index().has_value(),
+        !slash_rows.empty(),
+        slash_exact,
     };
 
     // Changes-strip bulk chords (^A / ^X).
@@ -1327,6 +1367,11 @@ std::optional<Msg> on_key(const Model& m, const KeyEvent& ev) {
                 // modality requires.
                 return Msg{NoOp{}};
             }
+            // The `/` menu is part of the composer: while it shows, its keys
+            // (Esc to hide it, ^N/^P to move) come before the stream cancel
+            // and the global chords. A second Esc still cancels.
+            if (active_panel == OK::None)
+                if (auto msg = on_slash_menu(composer_state, ev)) return msg;
             // Esc during a live stream cancels the request rather than
             // quitting the app. Modals above swallow Esc themselves, so this
             // only fires from the bare composer view.

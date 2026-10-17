@@ -59,11 +59,19 @@ struct ServerState {
     }
 };
 
+// An MCP server prompt, offered as `/name` in the composer.
+struct PromptState {
+    std::string name;          // exposed (possibly namespaced) name
+    std::string description;
+    std::string hint;          // "<arg> [opt]" from its arguments
+};
+
 // The single UI-facing truth: every configured server, its connection state,
 // and its advertised tools, unified from config + live pool. A value snapshot
 // safe to hold across a concurrent pool swap.
 struct PluginModel {
     std::vector<ServerState> servers;
+    std::vector<PromptState> prompts;  // every connected server's prompts
     std::size_t native_tool_count = 0; // agentty's own tools (always shipped)
     std::size_t wire_tool_count   = 0; // total tools actually on the wire
     std::size_t tool_budget       = 0; // soft cap (0 = unset)

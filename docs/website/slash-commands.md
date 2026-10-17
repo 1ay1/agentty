@@ -8,7 +8,7 @@ slug: slash-commands
 
 A slash command is a **prompt template** you invoke from the composer as `/name [arguments]`. On submit, the template — with your arguments substituted in — replaces what you typed and the turn runs as if you'd written the whole thing. Commands are prompt **macros**: save the phrasing of a task you run often ("review this file for security issues", "write a conventional-commit message for the staged diff") and fire it with a few keystrokes.
 
-They complement the [command palette](/docs/keybindings) ([[Ctrl+K]]), which dispatches app *actions* like New Thread — slash commands expand into *prompts*.
+They complement the [command palette](/docs/keybindings) ([[Ctrl+K]]), which dispatches app *actions* like New Thread. The common actions can be typed as `/name` too (see below).
 
 ## Authoring a command
 
@@ -27,8 +27,8 @@ Save that as `.agentty/commands/review.md` and type `/review auth.cpp tokens` �
 
 | Frontmatter | Meaning |
 |-------------|---------|
-| `description` | one-line summary shown in the `/` picker (falls back to the body's first line) |
-| `argument-hint` | usage hint shown next to the command, e.g. `<file> [focus]` |
+| `description` | one-line summary shown in the `/` menu (falls back to the body's first line) |
+| `argument-hint` | usage hint shown under the menu for the selected command, e.g. `<file> [focus]` |
 
 Both are optional — a file with no frontmatter is treated as the whole body.
 
@@ -46,7 +46,29 @@ A placeholder with no matching argument expands to an empty string, so a command
 
 ## Invoking
 
-Type `/` at the **start of the composer** (or right after a newline) to open the command picker; it lists every discovered command with its description and argument hint. Keep typing to filter, pick one, add arguments, and submit. The typed `/name …` is replaced by the expanded prompt before the turn runs.
+Type `/` at the start of the composer. A menu opens right above the composer and filters as you type. What you type stays in the composer the whole time.
+
+The menu lists everything you can run by name, in this order:
+
+- built-in actions: `/new`, `/compact`, `/model`, `/rename <title>`, `/fork`, `/rewind`, `/review`, `/threads`, `/settings`, `/login`, `/quit`
+- your commands (this page)
+- [skills](/docs/skills): `/name task` loads the skill and runs the task with it
+- MCP server prompts: `/name args`, filled in from the prompt's arguments
+
+A name taken by an earlier group wins, so a command file called `new.md` doesn't replace `/new`.
+
+Keys while it's open:
+
+| Key | Does |
+|-----|------|
+| [[Tab]] | fill in the selected name and a space, ready for arguments |
+| [[Enter]] | run it if what you typed is a full name, otherwise fill it in like Tab |
+| [[Up]] / [[Down]], [[Ctrl+P]] / [[Ctrl+N]] | pick a row |
+| [[Esc]] | hide the menu and keep the text |
+
+Enter never runs a guess. If the name you typed isn't a known one, the menu closes by itself and the text is sent as a normal message, so starting a message with a path like `/etc/hosts` works.
+
+The same names work over [ACP](/docs/acp) and with `agentty run "/name args"`.
 
 ## Namespacing
 
@@ -73,7 +95,7 @@ Files are picked up live (an mtime signature refreshes the cache), so editing a 
 
 ## Browsing commands in the app
 
-[[Ctrl+K]] → **Slash commands** lists every command it discovered and where each came from (project or user). To author one, create the `.md` file — the panel is for browsing what's available.
+Type `/` to see them all. Settings → **Slash commands** also lists every command and where it came from (project or user). To author one, create the `.md` file. The [[Ctrl+K]] palette shows each action's `/name` next to it.
 
 ## Related
 

@@ -137,6 +137,24 @@ inline constexpr std::array kCommands = std::array{
     CommandDef{Command::Quit,          "Quit",               "Exit agentty", "Ctrl+C", Category::General},
 };
 
+// The `/name` that runs the same action from the composer, or "" when
+// there isn't one. Kept next to kCommands so a renamed row is seen here.
+[[nodiscard]] constexpr const char* slash_name_for(Command c) noexcept {
+    switch (c) {
+        case Command::NewThread:        return "/new";
+        case Command::CompactContext:   return "/compact";
+        case Command::OpenModels:       return "/model";
+        case Command::ForkThread:       return "/fork";
+        case Command::RewindCheckpoint: return "/rewind";
+        case Command::ReviewChanges:    return "/review";
+        case Command::OpenThreads:      return "/threads";
+        case Command::OpenGeneralSettings: return "/settings";
+        case Command::OpenLogin:        return "/login";
+        case Command::Quit:             return "/quit";
+        default:                        return "";
+    }
+}
+
 // Live context that decides which conditionally-visible rows appear. A dead
 // row (Accept-all with no diff, Run-code-block with no fenced reply) trains
 // users to distrust the palette, so we hide it — the same discipline already

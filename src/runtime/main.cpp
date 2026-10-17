@@ -123,6 +123,7 @@
 #include "agentty/mcp/import.hpp"         // mcp::import_::cli
 #endif
 #include "agentty/tool/commands.hpp"
+#include "agentty/runtime/slash.hpp"   // `agentty run "/name"`
 #include "agentty/tool/hooks.hpp"
 #include "agentty/tool/plugin.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
@@ -2266,9 +2267,13 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
                 "agentty run: no prompt (pass one, or pipe stdin)\n");
             return 2;
         }
-        // Slash commands work here too: `agentty run "/review src/x.cpp"`.
-        if (auto expanded = tools::commands::try_expand(IoAccess::grant(), prompt))
-            prompt = std::move(*expanded);
+        // Slash names work here too: `agentty run "/review src/x.cpp"`, a
+        // skill, or an MCP prompt, resolved the same way as the TUI and ACP.
+        if (prompt.starts_with('/')) {
+            const Io io = IoAccess::grant();
+            if (auto expanded = slash::expand(io, prompt, slash::discover(io)))
+                prompt = std::move(*expanded);
+        }
 
         provider::prewarm_active_provider(::agentty::IoAccess::grant());
         ro.prompt = std::move(prompt);

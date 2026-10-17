@@ -2738,6 +2738,18 @@ Cmd load_library() {
     });
 }
 
+Cmd render_slash_prompt(std::string typed) {
+    return Cmd::task_isolated(
+        [](maya::Sink<Msg> out, std::stop_token, std::string line) {
+            std::string text;
+#if AGENTTY_MCP
+            if (auto r = mcp::mcp_expand_prompt(line)) text = std::move(*r);
+#endif
+            out.send(Msg{SlashPromptRendered{std::move(line), std::move(text)}});
+        },
+        std::move(typed));
+}
+
 Cmd load_plugins_async(bool reconnect) {
     // Bring the MCP connection snapshot INTO the Model. reconnect=true runs
     // the full reload (respawn + handshake, bounded by the bridge's 15s

@@ -69,6 +69,13 @@ struct ComposerCursorLeft {};
 struct ComposerCursorRight {};
 struct ComposerCursorHome {};
 struct ComposerCursorEnd {};
+// The `/` menu over the composer. Move shifts the selection, Complete
+// writes the selected name into the text, Dismiss hides it for the token.
+struct ComposerSlashMove { int delta; };
+struct ComposerSlashComplete {};
+struct ComposerSlashDismiss {};
+// An MCP `/prompt` rendered off the UI thread; submitted as the message.
+struct SlashPromptRendered { std::string typed; std::string text; };
 struct ComposerPaste {
     std::string text;
     // Set when this paste already went through the image-path check (see
@@ -563,6 +570,8 @@ struct ThreadListDelete {};
 // Submit stores it (empty or unchanged = cancel); Cancel (Esc) leaves it
 // as it was.
 struct ThreadListRenameStart     {};
+// `/rename <title>`: rename the open thread without the picker.
+struct RenameCurrentThread       { std::string title; };
 struct ThreadListRenameChar      { char32_t ch; };
 struct ThreadListRenameBackspace {};
 struct ThreadListRenameDelete    {};
@@ -1330,6 +1339,7 @@ using ComposerMsg = std::variant<
     ComposerCharInput, ComposerBackspace, ComposerEnter, ComposerNewline,
     ComposerSubmit, ComposerToggleExpand, ComposerToggleLoop,
     ComposerCursorLeft, ComposerCursorRight, ComposerCursorHome, ComposerCursorEnd,
+    ComposerSlashMove, ComposerSlashComplete, ComposerSlashDismiss, SlashPromptRendered,
     ComposerCursorWordLeft, ComposerCursorWordRight,
     ComposerKillToEndOfLine, ComposerKillToBeginningOfLine,
     ComposerDeleteWordBack, ComposerDeleteWordForward,
@@ -1386,6 +1396,7 @@ using ThreadListMsg = std::variant<
     ThreadListRenameStart, ThreadListRenameChar, ThreadListRenameBackspace,
     ThreadListRenameDelete, ThreadListRenameCursor,
     ThreadListRenamePaste, ThreadListRenameSubmit, ThreadListRenameCancel,
+    RenameCurrentThread,
     ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded, ThreadTitleGenerated>;
 
 using PaletteMsg = std::variant<

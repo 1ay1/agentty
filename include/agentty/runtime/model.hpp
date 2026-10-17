@@ -128,6 +128,20 @@ struct ComposerState {
     /// previous schemas). Cleared together with `draft_save`.
     std::vector<Attachment>    draft_save_attachments;
 
+    /// The `/` menu. Whether it shows is worked out from text + caret each
+    /// frame (slash::menu_query); only the selection and an Esc are kept.
+    /// `dismissed` holds the token text Esc was pressed on, so the menu
+    /// stays hidden while that token is unchanged.
+    struct SlashMenu {
+        int                        index = 0;
+        std::optional<std::string> dismissed;
+        std::string                query;   // what `index` was picked for
+    };
+    SlashMenu slash;
+    /// An MCP `/prompt` is being rendered (cmd::render_slash_prompt); a
+    /// second Enter meanwhile doesn't start another.
+    bool slash_pending = false;
+
     /// ── Loop mode (^B) ───────────────────────────────────────────
     /// When armed, the message that armed it is RE-SENT automatically
     /// every time the agent finishes a turn, until the user toggles it
