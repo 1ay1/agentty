@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.27] - 2026-10-17
+
 ### Fixed
 - **Gemini quota errors show at once (#102).** Google sends no
   `Retry-After` header; the wait is in the error body (`retryDelay`, and
