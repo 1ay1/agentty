@@ -20,8 +20,9 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 - **Serply as a web search service.** `serply-api` joins the API key
   services in Settings > Web Search: Google results from
   [Serply](https://serply.io) ([docs](https://serply.io/docs)), with
-  Country and Freshness, up to 10 results a search. The key comes from the
-  key store or `AGENTTY_WEB_SEARCH_KEY_SERPLY_API`.
+  Country and Freshness, up to 10 results a search. Country defaults to
+  United States. The key comes from the key store or
+  `AGENTTY_WEB_SEARCH_KEY_SERPLY_API`.
 ## [0.9.27] - 2026-10-17
 
 ### Fixed
