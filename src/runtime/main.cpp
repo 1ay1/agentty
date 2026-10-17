@@ -102,6 +102,7 @@
 #include "agentty/rag/rag_adapter.hpp"
 #include "agentty/rag/embed_secret.hpp"
 #include "agentty/util/update.hpp"
+#include "agentty/util/home_dir.hpp"   // window_title's ~/ abbreviation
 #include "agentty/util/user_root.hpp"   // user_logs_dir (stderr.log home)
 #include "agentty/provider/anthropic/provider.hpp"
 #include "agentty/provider/chatgpt/provider.hpp"
@@ -1175,6 +1176,23 @@ Utf8Argv recover_utf8_argv() {
 #endif
 
 namespace {
+// "agentty ~/path" -- the terminal window title. The workspace
+// (--workspace, default cwd) is what disambiguates concurrent instances, so
+// it rides in the title bar. $HOME is abbreviated to ~ because the full path
+// is noise the user already knows; a bare basename would collide across two
+// same-named projects.
+std::string window_title() {
+    const std::filesystem::path root = agentty::tools::util::workspace_root();
+    const std::filesystem::path home = agentty::util::home_dir_or_empty();
+    std::string r  = root.string();
+    const std::string h = home.empty() ? std::string{} : home.string();
+    if (!h.empty() && r.size() >= h.size() &&
+        r.compare(0, h.size(), h) == 0 &&
+        (r.size() == h.size() || r[h.size()] == '/' || r[h.size()] == '\\'))
+        r.replace(0, h.size(), "~");
+    return "agentty " + r;
+}
+
 // The program, from the one thread that starts holding no lock. Everything
 // main() did is here, unchanged, except that it can PROVE it holds no lock:
 // `cap` is the root capability every lock, wait and join below is checked
@@ -2405,7 +2423,8 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
     // effects (runtime/app/host.hpp). maya::run opens the terminal, installs
     // maya's executor and runs the program on jaal; agentty never calls jaal.
     {
-        maya::Options cfg{.title = "agentty", .fps = 0,
+        const std::string title = window_title();
+        maya::Options cfg{.title = title, .fps = 0,
                           .mode = maya::Mode::Inline, .backend = backend};
         if (const int rc = maya::run<app::AgenttyApp, app::Host>(cfg);
             rc == 70) {
