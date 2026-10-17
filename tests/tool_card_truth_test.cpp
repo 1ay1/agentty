@@ -151,7 +151,8 @@ TEST_CASE("card truth: grep body shows the matched row, not leading context") {
 
 TEST_CASE("card truth: read_filter counts matching lines, not context rows") {
     auto tc = done("read_filter", {{"path", "src/a.cpp"}, {"pattern", "f1"}},
-                   "src/a.cpp \xe2\x80\x94 2 matching lines of 60 (\xc2\xb12 context; gaps collapsed):\n\n"
+                   "src/a.cpp \xe2\x80\x94 2 matching lines of 60 (\xc2\xb1"
+                   "2 context; gaps collapsed):\n\n"
                    "1\tint f0();\n2\tint f1();\n3\tint f2();\n\xe2\x8b\xaf 6 lines \xe2\x8b\xaf\n"
                    "10\tint f9();\n11\tint f10();\n12\tint f11();\n");
     const auto h = U::tool_timeline_detail(tc);
