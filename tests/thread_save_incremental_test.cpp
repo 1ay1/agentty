@@ -11,10 +11,13 @@
 #include <agentty/io/persistence.hpp>
 #include <agentty/io/thread_log.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+
+#include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
 using namespace agentty;
@@ -323,4 +326,134 @@ TEST_CASE("thread log: truncate_to cuts both files and appends cleanly") {
     CHECK(log->truncate_to(100));       // past the end: no-op, no error
     CHECK(log->size() == 4u);
     again->remove();
+}
+
+namespace {
+void retitle(const Thread& t, std::string title) {
+    persistence::rename_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id,
+                               std::move(title));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+}
+} // namespace
+
+TEST_CASE("rename: retitles a log thread and leaves the rest alone") {
+    Thread t = make_thread("inc-rename", 5);
+    t.updated_at = std::chrono::system_clock::time_point{std::chrono::seconds{1'700'000'000}};
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+    save(t);
+    const std::string log_before = slurp(log_path(t));
+
+    retitle(t, "a better name");
+
+    auto got = load(t);
+    CHECK(got.title == "a better name");
+    check_same(t, got);
+    // Kept, so the row does not jump to the top of the picker.
+    CHECK(got.updated_at == t.updated_at);
+    CHECK_MESSAGE(slurp(log_path(t)) == log_before, "a rename never touches the log");
+
+    // The picker's directory walk sees it too, not just the by-id load.
+    bool listed = false;
+    for (const auto& meta : persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap()))
+        if (meta.id == t.id) { listed = true; CHECK(meta.title == "a better name"); }
+    CHECK(listed);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+}
+
+TEST_CASE("rename: a save queued just before does not undo it") {
+    Thread t = make_thread("inc-rename-queued", 4);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+    save(t);
+
+    // Queue a save built with the OLD title (what ^N / Alt+arrow do for the
+    // thread being left), then rename at once. Whether the writer has picked
+    // the save up yet is up to it; either way the rename must win.
+    t.messages.push_back(make_msg(4));
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    retitle(t, "renamed while queued");
+
+    auto got = load(t);
+    CHECK(got.title == "renamed while queued");
+    CHECK(got.messages.size() == 5u);
+
+    // And the writer still knows the log: the next save is a tail append.
+    mark_head(t);
+    t.messages.push_back(make_msg(5));
+    t.title = "renamed while queued";
+    save(t);
+    CHECK_MESSAGE(head_marked(t), "history before the change was not rewritten");
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+}
+
+TEST_CASE("rename: a legacy thread is retitled and moved to the log") {
+    Thread t = make_thread("inc-rename-legacy", 3);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+    {
+        auto j = persistence::thread_meta_to_json(t);
+        nlohmann::json msgs = nlohmann::json::array();
+        for (const auto& m : t.messages) msgs.push_back(persistence::message_to_json(m));
+        j["messages"] = std::move(msgs);
+        REQUIRE(persistence::write_json_atomic(::agentty::IoAccess::grant(),
+            persistence::threads_dir() / (t.id.value + ".json"), j.dump(2)));
+    }
+
+    retitle(t, "legacy renamed");
+
+    auto got = load(t);
+    CHECK(got.title == "legacy renamed");
+    check_same(t, got);
+    CHECK(fs::exists(log_path(t)));
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+}
+
+TEST_CASE("delete: a save queued just before does not bring the thread back") {
+    Thread t = make_thread("inc-delete-queued", 4);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+
+    // A thread this process has not saved yet goes to the writer WHOLE: what
+    // ^N queues for a thread just opened from the picker. ^D ^D on it right
+    // after must win, whether the writer has started that save or not.
+    persistence::save_thread(::agentty::IoAccess::grant(), agtest::cap(), t);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+
+    std::error_code ec;
+    CHECK_FALSE(fs::exists(log_path(t), ec));
+    CHECK_FALSE(fs::exists(persistence::threads_dir() / (t.id.value + ".meta.json"), ec));
+    CHECK_FALSE(fs::exists(persistence::threads_dir() / (t.id.value + ".json"), ec));
+    for (const auto& meta : persistence::load_all_threads(::agentty::IoAccess::grant(), agtest::cap()))
+        CHECK_MESSAGE(meta.id != t.id, "no ghost row in the picker");
+
+    // A later save of the same id is a new thread: written whole, not a
+    // tail append against the log that was deleted.
+    Thread again = make_thread("inc-delete-queued", 2);
+    save(again);
+    auto got = load(again);
+    CHECK(got.messages.size() == 2u);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+}
+
+TEST_CASE("rename: an unknown id writes nothing") {
+    const Thread t = make_thread("inc-rename-missing", 0);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+    retitle(t, "ghost");
+    std::error_code ec;
+    CHECK_FALSE(fs::exists(persistence::threads_dir() / (t.id.value + ".meta.json"), ec));
+    CHECK_FALSE(fs::exists(log_path(t), ec));
+}
+
+TEST_CASE("clean_title: one safe line, at most kTitleMaxBytes") {
+    using persistence::clean_title;
+    CHECK(clean_title("  two\nlines\there  ") == "two lines here");
+    CHECK(clean_title("\x1b[31mred") == "[31mred");      // ESC dropped
+    CHECK(clean_title("a\xc2\x9b" "b") == "ab");          // C1 CSI dropped
+    CHECK(clean_title("   ").empty());
+    // Cut on a code-point boundary: 59 ASCII bytes, then a 3-byte em dash
+    // that would end at byte 62.
+    const std::string long_in = std::string(59, 'x') + "\xe2\x80\x94";
+    const std::string out = clean_title(long_in);
+    CHECK(out == std::string(59, 'x'));
+    CHECK(out.size() <= persistence::kTitleMaxBytes);
+    // Kept whole when it fits.
+    CHECK(clean_title("caf\xc3\xa9") == "caf\xc3\xa9");
 }

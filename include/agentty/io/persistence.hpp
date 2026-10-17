@@ -92,6 +92,12 @@ void save_thread(Io, const maya::below<maya::leaf>&, const Thread& t);
 // joins the writer, so it needs `unlocked`.
 void flush_pending_saves(Io, const maya::unlocked&);
 void delete_thread(Io, const lock_levels::below_thread_log&, const ThreadId& id);
+// Retitle a saved thread. Queued on the same writer as save_thread, so it
+// lands after any write of that thread already in flight, and a save still
+// queued takes the new title instead of writing the old one back over it.
+// updated_at is kept, so the thread does not move in the picker. `title`
+// is stored as given: clean it with clean_title() first.
+void rename_thread(Io, const maya::below<maya::leaf>&, const ThreadId& id, std::string title);
 
 // Thread retention. Deletes threads with no activity (file mtime) in the
 // last `keep_days` days, skipping `keep` (the open one). keep_days <= 0
@@ -139,6 +145,17 @@ void on_settings_written(std::function<void(const maya::unlocked&)> observer);
 // 64 random bits as 16 hex digits; backs new_id() and new_message_id().
 [[nodiscard]] std::string random_hex_id();
 [[nodiscard]] std::string title_from_first_message(std::string_view text);
+
+// The longest title, in bytes: what title_from_first_message produces and
+// what a rename is held to, so every picker row has the same budget.
+inline constexpr std::size_t kTitleMaxBytes = 60;
+
+// A typed or pasted title made safe to store and paint on one row: line
+// breaks and tabs become spaces, other control bytes are dropped (a title
+// reaches the terminal, so no escape sequences), invalid UTF-8 is repaired,
+// the result is cut to kTitleMaxBytes on a code-point boundary and trimmed
+// of blanks at both ends. May return "".
+[[nodiscard]] std::string clean_title(std::string_view text);
 
 // Atomic + durable write of `content` to `target` (persistence::write_atomic
 // with Durability::Durable): a unique temp, fsync, rename. Readers see the old

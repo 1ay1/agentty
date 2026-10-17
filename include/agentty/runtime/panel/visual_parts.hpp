@@ -232,7 +232,10 @@ static_assert(visual::parts_cover_all<Providers>);
 
 inline auto visual_parts(const ThreadList& p) {
     return std::make_tuple(visual::ref(static_cast<const pick::OpenAt&>(p)),
-                           visual::ref(static_cast<const WithFrom&>(p)));
+                           visual::ref(static_cast<const WithFrom&>(p)),
+                           visual::ref(p.renaming),
+                           visual::ref(p.rename_input),
+                           p.rename_cursor);
 }
 static_assert(visual::parts_cover_all<ThreadList>);
 

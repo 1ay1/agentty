@@ -25,7 +25,7 @@ Threads are global: the directory is flat and a thread isn't bound to the worksp
 
 ## Managing threads
 
-Press [[Ctrl+J]] to open the thread list and switch between past conversations. [[Ctrl+N]] starts a new thread. Deleting a thread removes all its files; its blobs go in the next daily sweep if no other thread uses them.
+Press [[Ctrl+J]] to open the thread list and switch between past conversations. [[Ctrl+N]] starts a new thread. [[Ctrl+R]] renames the highlighted thread: its title opens for editing, [[Enter]] saves and [[Esc]] cancels. Titles start out as the first line of the first message, so this is how a thread that began with a paste gets a name you can find. Deleting a thread removes all its files; its blobs go in the next daily sweep if no other thread uses them.
 
 Threads are kept until you delete them. To expire old ones automatically:
 

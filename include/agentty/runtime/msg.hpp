@@ -551,12 +551,25 @@ struct ThreadListSelect {};
 // Type to filter the thread list by title.
 struct ThreadListFilterInput     { char32_t ch; };
 struct ThreadListFilterBackspace {};
-// `d` / `D` in the thread picker — two-press delete with confirm_remove.
+// ^D in the thread picker: two-press delete with confirm_remove.
 // Mirrors the established SettingsListRemove / AccountRemove pattern:
-// first press marks the focused thread as pending-delete (⚠ badge),
-// second press on the SAME row commits via persistence::delete_thread().
+// first press marks the focused thread as pending-delete (warning badge in
+// the view), second press on the SAME row returns a DeleteThread effect.
 // Any move/select/new/close disarms the pending state.
 struct ThreadListDelete {};
+// ^R in the thread picker: edit the focused row's title in place. Start
+// opens the editor pre-filled with the current title, caret at the end;
+// Char/Backspace/Delete/Paste edit at the caret and Cursor moves it;
+// Submit stores it (empty or unchanged = cancel); Cancel (Esc) leaves it
+// as it was.
+struct ThreadListRenameStart     {};
+struct ThreadListRenameChar      { char32_t ch; };
+struct ThreadListRenameBackspace {};
+struct ThreadListRenameDelete    {};
+struct ThreadListRenameCursor    { enum class To { Left, Right, Home, End }; To to; };
+struct ThreadListRenamePaste     { std::string text; };
+struct ThreadListRenameSubmit    {};
+struct ThreadListRenameCancel    {};
 // Quick-cycle: switch to the adjacent thread (by recency order, the
 // same order the ^J picker shows) WITHOUT opening the picker. delta is
 // applied to the thread-list index: +1 = older, -1 = newer; wraps at
@@ -1366,7 +1379,11 @@ using ModelsMsg = std::variant<
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,
     ThreadListFilterInput, ThreadListFilterBackspace,
-    ThreadListSelect, ThreadListDelete, ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded>;
+    ThreadListSelect, ThreadListDelete,
+    ThreadListRenameStart, ThreadListRenameChar, ThreadListRenameBackspace,
+    ThreadListRenameDelete, ThreadListRenameCursor,
+    ThreadListRenamePaste, ThreadListRenameSubmit, ThreadListRenameCancel,
+    ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded>;
 
 using PaletteMsg = std::variant<
     OpenPalette, ClosePalette, PaletteInput, PanelFilterPaste,

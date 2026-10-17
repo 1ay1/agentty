@@ -1,4 +1,4 @@
-// thread_list.cpp — the thread switcher panel (^T): pick, d-to-delete.
+// thread_list.cpp - the thread switcher panel (^J): pick, ^D delete, ^R rename.
 //
 // Pure adapter: builds maya::Panel::Config from Model state; the widget
 // owns every chrome decision. Shared scaffolding: panels_prologue.hpp.
@@ -14,6 +14,7 @@ Element thread_list_panel(const Model& m) {
     auto* picker = m.ui.panel.get<pn::ThreadList>();
     if (!picker) return nothing();
     const auto visible = ui::visible_threads(m.d.threads, picker->query);
+    const bool renaming = !picker->renaming.empty();
 
     Panel::Config cfg;
     cfg.title      = " Threads ";
@@ -22,7 +23,25 @@ Element thread_list_panel(const Model& m) {
     cfg.viewport_h = panel_viewport_h();
     cfg.scroll     = &m.ui.thread_list_scroll;
     cfg.selected   = visible.empty() ? -1 : picker->index;
-    if (!m.d.threads.empty()) {
+    if (renaming) {
+        // The draft takes the filter's place: a bright line with a REAL
+        // caret, same as the settings add-prompt. The highlighted row below
+        // stays lit so you can see which thread it renames.
+        std::size_t at = std::string::npos;
+        const std::string shown = maya::panel::detail::with_caret(
+            picker->rename_input,
+            static_cast<std::size_t>(std::max(0, picker->rename_cursor)),
+            panel_terminal_cols() - 14, &at);
+        const auto caret = Style{}.with_fg(info).with_conceal()
+                                  .with_caret_anchor().with_caret_shape(1);
+        cfg.header.push_back(h(
+            text("  rename  ", fg_of(info)),
+            text(shown.substr(0, at), fg_bold(fg)),
+            text(shown.substr(at, 3), caret),
+            text(shown.substr(at + 3), fg_bold(fg))
+        ).build());
+        cfg.header.push_back(sep);
+    } else if (!m.d.threads.empty()) {
         cfg.header.push_back(filter_header(picker->query, "threads"));
         cfg.header.push_back(sep);
     }
@@ -92,12 +111,22 @@ Element thread_list_panel(const Model& m) {
     // in the app reads the same way.
     if (!picker->confirm_remove.empty())
         cfg.note = "^D confirm delete \xc2\xb7 any other key cancels";
+    if (renaming) {
+        cfg.footer.push_back(key_hints({
+            {"type", "edit title", 5},
+            {"\xe2\x86\x90\xe2\x86\x92", "move", 4},   // left/right arrows
+            {"Enter", "save", 5},
+            {"Esc", "cancel", 5},
+        }));
+        return Panel{std::move(cfg)}.build();
+    }
     cfg.footer.push_back(key_hints({
         {"type", "filter", 5},
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
         {"Enter", "open", 5},
         {"^N", "new", 3},
         {"^D", picker->confirm_remove.empty() ? "remove" : "confirm", 3},
+        {"^R", "rename", 3},
         {"^/Alt+\xe2\x86\x90\xe2\x86\x92", "cycle", 1},   // ^←→ / Alt+←→
         {"Esc", picker->query.empty() ? "close" : "clear", 4},
     }));

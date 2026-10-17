@@ -133,6 +133,7 @@ using Cmd = maya::Cmd<Msg,
     // host runs — see runtime/store_fx.hpp.
     save_thread,
     delete_thread,
+    rename_thread,
     write_file,
     save_settings,
     // ── agentty's own: publishing Model-derived state to worker threads ──

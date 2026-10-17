@@ -550,8 +550,33 @@ std::optional<Msg> on_provider_picker(const KeyEvent& ev) {
 }
 
 // Thread list: shared grammar + type to filter by title. Actions are chords
-// (^N new, ^D delete, two-press) so letters are free for the filter.
-std::optional<Msg> on_thread_list(const KeyEvent& ev) {
+// (^N new, ^D delete two-press, ^R rename) so letters are free for the
+// filter. While a rename is open the keys edit the title instead: Enter
+// stores it, Esc drops it, Left/Right/Home/End move the caret, Delete removes
+// forward, and the chords are ignored so ^D can't delete the row being
+// renamed.
+std::optional<Msg> on_thread_list(const KeyEvent& ev, bool renaming) {
+    if (renaming) {
+        nav::NavSpec s;
+        s.close     = [] { return Msg{ThreadListRenameCancel{}}; };
+        s.select    = [] { return Msg{ThreadListRenameSubmit{}}; };
+        s.filter_bs = [] { return Msg{ThreadListRenameBackspace{}}; };
+        s.filter_ch = [](char32_t c) { return Msg{ThreadListRenameChar{c}}; };
+        s.extra     = [](const KeyEvent& e) -> std::optional<Msg> {
+            const auto* sk = std::get_if<SpecialKey>(&e.key);
+            if (!sk) return std::nullopt;
+            using To = ThreadListRenameCursor::To;
+            switch (*sk) {
+                case SpecialKey::Left:   return Msg{ThreadListRenameCursor{To::Left}};
+                case SpecialKey::Right:  return Msg{ThreadListRenameCursor{To::Right}};
+                case SpecialKey::Home:   return Msg{ThreadListRenameCursor{To::Home}};
+                case SpecialKey::End:    return Msg{ThreadListRenameCursor{To::End}};
+                case SpecialKey::Delete: return Msg{ThreadListRenameDelete{}};
+                default:                 return std::nullopt;
+            }
+        };
+        return nav::translate(s, ev);
+    }
     nav::NavSpec s;
     s.close   = [] { return Msg{CloseThreadList{}}; };
     s.select  = [] { return Msg{ThreadListSelect{}}; };
@@ -574,6 +599,7 @@ std::optional<Msg> on_thread_list(const KeyEvent& ev) {
         switch (v->c) {
             case U'n': return Msg{NewThread{}};
             case U'd': return Msg{ThreadListDelete{}};
+            case U'r': return Msg{ThreadListRenameStart{}};
             default:   return std::nullopt;
         }
     };
@@ -1262,7 +1288,10 @@ std::optional<Msg> on_key(const Model& m, const KeyEvent& ev) {
                     case OK::Fork:           return on_fork_picker(ev);
                     case OK::Models:    return on_fused_picker(ev);
                     case OK::Providers: return on_provider_picker(ev);
-                    case OK::ThreadList:     return on_thread_list(ev);
+                    case OK::ThreadList: {
+                        const auto* tl = m.ui.panel.get<pn::ThreadList>();
+                        return on_thread_list(ev, tl && !tl->renaming.empty());
+                    }
                     case OK::SmartMode:      return on_smart_mode(smart_form_snap, ev);
                     case OK::WebSearch:      return on_web_search(web_search_form_snap, ev);
                     case OK::PluginEdit:     return on_plugin_edit(plugin_form_snap, ev);
@@ -1375,6 +1404,7 @@ std::optional<Msg> on_key(const Model& m, const KeyEvent& ev) {
 Msg on_paste(const Model& m, const maya::PasteEvent& pe) {
     const auto active_panel = ui::panel::top(m);
     const auto* so     = m.ui.panel.get<pn::SettingsList>();
+    const auto* tl     = m.ui.panel.get<pn::ThreadList>();
     const bool filter_open = active_panel == ui::panel::Kind::Palette
                           || active_panel == ui::panel::Kind::Models
                           || active_panel == ui::panel::Kind::Providers
@@ -1390,6 +1420,8 @@ Msg on_paste(const Model& m, const maya::PasteEvent& pe) {
     // composer hidden behind it.
     if (active_panel == ui::panel::Kind::Login) return LoginPaste{std::move(s)};
     if (so && so->input_active)                 return SettingsListPaste{std::move(s)};
+    if (active_panel == ui::panel::Kind::ThreadList && tl && !tl->renaming.empty())
+        return ThreadListRenamePaste{std::move(s)};
     if (filter_open) return PanelFilterPaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::Rag>())         return RagEmbedPaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::SmartMode>())   return SmartModePaste{std::move(s)};

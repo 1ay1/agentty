@@ -1,5 +1,5 @@
-// thread_list.cpp — the thread switcher's reducer (open/pick/delete +
-// the async ThreadsLoaded). Split from panels.cpp; shares only
+// thread_list.cpp - the thread switcher's reducer (open/pick/delete/rename
+// + the async ThreadsLoaded). Split from panels.cpp; shares only
 // reset_to_fresh_thread (defined here, its sole user).
 
 #include "agentty/runtime/app/update/internal.hpp"
@@ -25,6 +25,7 @@
 #include "agentty/runtime/view/helpers.hpp"
 #include "agentty/tool/skills.hpp"
 #include "agentty/tool/subagent.hpp"
+#include "agentty/tool/util/utf8.hpp"   // safe_utf8_cut: the rename draft cap
 
 namespace pn = agentty::ui::panel;
 
@@ -47,13 +48,27 @@ namespace {
     return static_cast<int>(ui::visible_threads(m.d.threads, p.query).size());
 }
 
+// A pasted or typed piece of a title, flattened to one line: line breaks
+// and tabs become spaces, other control bytes go. The draft is cleaned
+// again on submit; this only keeps what is on screen sane meanwhile.
+[[nodiscard]] std::string one_line(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        const auto u = static_cast<unsigned char>(c);
+        if (c == '\n' || c == '\r' || c == '\t') out.push_back(' ');
+        else if (u >= 0x20 && u != 0x7f)         out.push_back(c);
+    }
+    return out;
+}
+
 }  // namespace
 // ── Fresh-thread reset ────────────────────────────────────────────────────
 // Swap the model over to a brand-new empty thread and return the terminal
 // reset that wipes the departing thread's rendered turns off-screen.
 //
-// This is the SHARED core behind two entry points: `NewThread` (^N / picker
-// `N`) and `ThreadListDelete` when the row removed is the active thread.
+// This is the SHARED core behind two entry points: `NewThread` (^N, in the
+// picker too) and `ThreadListDelete` when the row removed is the active thread.
 // It is deliberately the part *after* the caller's save/delete decision —
 // NewThread persists the outgoing thread first, delete has just destroyed
 // it — so the caller owns that policy and this owns the reset. Keeping the
@@ -179,7 +194,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
         [&](ThreadListMove& e) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
             if (!p) return Cmd::none();
-            p->confirm_remove.clear();   // moving disarms a pending `d`
+            p->confirm_remove.clear();   // moving disarms a pending ^D
             p->index = ui::step(p->index, e.delta, visible_count(m, *p));
             return Cmd::none();
         },
@@ -188,7 +203,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             if (!p) return Cmd::none();
             const int sz = visible_count(m, *p);
             if (sz == 0) return Cmd::none();
-            p->confirm_remove.clear();   // jumping disarms a pending `d`
+            p->confirm_remove.clear();   // jumping disarms a pending ^D
             using W = ThreadListJump::Where;
             constexpr int kPage = 14;  // matches kViewportH in pickers.cpp
             switch (e.where) {
@@ -244,7 +259,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
         [&](ThreadListSelect) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
             Cmd cmd = Cmd::none();
-            if (p) p->confirm_remove.clear();   // selecting disarms a pending `d`
+            if (p) p->confirm_remove.clear();   // selecting disarms a pending ^D
             if (p && !m.d.threads.empty() && !m.s.thread_loading) {
                 const int at = picked_thread(m, *p);
                 if (at < 0) return Cmd::none();   // the filter matches nothing
@@ -269,11 +284,11 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             return cmd;
         },
         [&](ThreadListDelete) -> Cmd {
-            // `d` / `D` in the thread picker — two-press delete with
-            // confirm_remove, mirroring SettingsListRemove / AccountRemove.
-            // First press on a row marks it pending (⚠ badge in the view);
-            // second press on the SAME row commits via deps().delete_thread().
-            // Any move/jump/select/new/close disarms the pending state.
+            // ^D in the thread picker: two-press delete with confirm_remove,
+            // mirroring SettingsListRemove / AccountRemove. First press on a
+            // row marks it pending (warning badge in the view); second press
+            // on the SAME row returns a DeleteThread effect. Any
+            // move/jump/select/new/close disarms the pending state.
             auto* p = m.ui.panel.get<pn::ThreadList>();
             if (!p || m.d.threads.empty()) return Cmd::none();
             // The cursor is a position in the FILTERED list; picked_thread
@@ -325,6 +340,105 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                                   std::move(reset), std::move(toast));
             }
             return Cmd::batch(std::move(del), std::move(toast));
+        },
+        [&](ThreadListRenameStart) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p) return Cmd::none();
+            const int idx = picked_thread(m, *p);
+            if (idx < 0) return Cmd::none();
+            const Thread& target = m.d.threads[static_cast<std::size_t>(idx)];
+            p->confirm_remove.clear();
+            p->renaming     = target.id.value;
+            p->rename_input = target.title;   // pre-filled: edit, don't retype
+            p->rename_cursor = static_cast<int>(p->rename_input.size());
+            return Cmd::none();
+        },
+        [&](ThreadListRenameChar& e) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p || p->renaming.empty()) return Cmd::none();
+            const std::string add = one_line(ui::utf8_encode(e.ch));
+            // Refuse past the cap rather than cut on submit, so what you see
+            // is what gets stored.
+            if (p->rename_input.size() + add.size() > persistence::kTitleMaxBytes)
+                return Cmd::none();
+            p->rename_input.insert(static_cast<std::size_t>(p->rename_cursor), add);
+            p->rename_cursor += static_cast<int>(add.size());
+            return Cmd::none();
+        },
+        [&](ThreadListRenameBackspace) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p || p->renaming.empty() || p->rename_cursor <= 0) return Cmd::none();
+            const int at = ui::utf8_prev(p->rename_input, p->rename_cursor);
+            p->rename_input.erase(static_cast<std::size_t>(at),
+                                  static_cast<std::size_t>(p->rename_cursor - at));
+            p->rename_cursor = at;
+            return Cmd::none();
+        },
+        [&](ThreadListRenameDelete) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p || p->renaming.empty()) return Cmd::none();
+            const int end = ui::utf8_next(p->rename_input, p->rename_cursor);
+            p->rename_input.erase(static_cast<std::size_t>(p->rename_cursor),
+                                  static_cast<std::size_t>(end - p->rename_cursor));
+            return Cmd::none();
+        },
+        [&](ThreadListRenameCursor& e) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p || p->renaming.empty()) return Cmd::none();
+            using To = ThreadListRenameCursor::To;
+            switch (e.to) {
+                case To::Left:  p->rename_cursor = ui::utf8_prev(p->rename_input, p->rename_cursor); break;
+                case To::Right: p->rename_cursor = ui::utf8_next(p->rename_input, p->rename_cursor); break;
+                case To::Home:  p->rename_cursor = 0; break;
+                case To::End:   p->rename_cursor = static_cast<int>(p->rename_input.size()); break;
+            }
+            return Cmd::none();
+        },
+        [&](ThreadListRenamePaste& e) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p || p->renaming.empty()) return Cmd::none();
+            // Only what fits goes in, so a long paste mid-title cuts the
+            // paste, never the text after the caret.
+            std::string add = one_line(e.text);
+            const std::size_t room = persistence::kTitleMaxBytes
+                                   - std::min(persistence::kTitleMaxBytes, p->rename_input.size());
+            add.resize(tools::util::safe_utf8_cut(add, room));
+            p->rename_input.insert(static_cast<std::size_t>(p->rename_cursor), add);
+            p->rename_cursor += static_cast<int>(add.size());
+            return Cmd::none();
+        },
+        [&](ThreadListRenameCancel) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p) return Cmd::none();
+            p->renaming.clear();
+            p->rename_input.clear();
+            p->rename_cursor = 0;
+            return Cmd::none();
+        },
+        [&](ThreadListRenameSubmit) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p || p->renaming.empty()) return Cmd::none();
+            const ThreadId id{p->renaming};
+            std::string title = persistence::clean_title(p->rename_input);
+            p->renaming.clear();
+            p->rename_input.clear();
+            p->rename_cursor = 0;
+            // Found by id: a refresh that landed mid-edit may have reordered
+            // the list, or dropped the thread (deleted elsewhere): then there
+            // is nothing to rename.
+            const auto it = std::ranges::find(m.d.threads, id, &Thread::id);
+            if (it == m.d.threads.end()) return Cmd::none();
+            // Empty or unchanged is a cancel: Enter on an untouched draft
+            // must not cost a disk write.
+            if (title.empty() || title == it->title) return Cmd::none();
+            it->title = title;
+            // The open thread is re-saved every turn from m.d.current, which
+            // would write the old title back over the rename.
+            if (m.d.current.id == id) m.d.current.title = title;
+            // The renamed row may no longer match the filter.
+            const int sz = visible_count(m, *p);
+            p->index = sz > 0 ? std::clamp(p->index, 0, sz - 1) : 0;
+            return Cmd(RenameThread{id, std::move(title)});
         },
         [&](ThreadCycle& e) -> Cmd {
             // Alt+←/→ — jump to the adjacent thread without the picker.
@@ -447,6 +561,13 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                         tag, dt);
             };
             m.d.current = std::move(e.thread);
+            // A rename is stored by the writer, which may still be busy with
+            // an earlier save, so a load right after one can read the old
+            // title from disk. The picker's list took the new title at once;
+            // without this, the next save would write the old one back.
+            if (const auto it = std::ranges::find(m.d.threads, m.d.current.id, &Thread::id);
+                it != m.d.threads.end() && !it->title.empty())
+                m.d.current.title = it->title;
             m.s.reset_usage_for_thread(last_reported_prompt(m.d.current));
             // The loaded thread has no live turn, so any run state still
             // standing belongs to the thread we just left. Dropping it is

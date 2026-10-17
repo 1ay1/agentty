@@ -89,6 +89,7 @@ struct Store {
     agentty::store::Settings          settings;
     std::vector<agentty::Thread>      saved_threads;
     std::vector<agentty::ThreadId>    deleted_threads;
+    std::vector<agentty::RenameThread> renamed_threads;
     std::vector<std::pair<std::string, std::string>> written_files;
 };
 
@@ -107,6 +108,8 @@ inline void run(const agentty::Cmd& c, Store& s) {
             s.saved_threads.push_back(e.thread);
         else if constexpr (std::same_as<U, agentty::DeleteThread>)
             s.deleted_threads.push_back(e.id);
+        else if constexpr (std::same_as<U, agentty::RenameThread>)
+            s.renamed_threads.push_back(e);
         else if constexpr (std::same_as<U, agentty::WriteFile>)
             s.written_files.emplace_back(e.path, e.contents);
         else if constexpr (std::same_as<U, agentty::PublishSelection>)

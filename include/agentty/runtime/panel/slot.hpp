@@ -134,7 +134,16 @@ struct Models     : pick::OpenAt, WithFrom {
     std::optional<smart::ModelRole> assign_slot;
 };
 struct Providers  : pick::OpenAt, WithFrom {};
-struct ThreadList      : pick::OpenAt, WithFrom {};
+// The thread picker, plus the ^R title editor. `renaming` holds the id of
+// the thread being retitled (empty = browsing): an id, not a row, so an
+// async list refresh that reorders rows can't move the edit to another
+// thread. `rename_input` is the draft; `rename_cursor` is the caret, a byte
+// offset into it that always sits on a code-point boundary.
+struct ThreadList      : pick::OpenAt, WithFrom {
+    std::string renaming;
+    std::string rename_input;
+    int         rename_cursor = 0;
+};
 // Smart Mode carries a typed ROW, not an index. The other pickers list a
 // variable number of runtime-derived entries, so an int cursor is the honest
 // representation there; Smart Mode's rows are a fixed, named set, and
