@@ -19,6 +19,8 @@
 #include "agentty/runtime/panel/step.hpp"
 #include "agentty/runtime/panel/thread_filter.hpp"
 #include "agentty/runtime/panel/top.hpp"
+#include "agentty/io/persistence.hpp"   // kTitleMaxBytes
+#include "agtest_fx.hpp"
 
 #include <maya/terminal/input.hpp>
 
@@ -364,6 +366,214 @@ TEST_CASE("threads: paste goes into the filter") {
     REQUIRE(m.ui.panel.get<pn::ThreadList>() != nullptr);
     CHECK(m.ui.panel.get<pn::ThreadList>()->query == "alp");
     CHECK(m.ui.composer.text.empty());
+}
+
+namespace {
+maya::KeyEvent ctrl(char32_t c) {
+    maya::KeyEvent ev{maya::CharKey{c}, {}, {}};
+    ev.mods.ctrl = true;
+    return ev;
+}
+
+// What a key returned for the host to run, through the real key path.
+agtest::fx::Store press_fx(Model& m, const maya::KeyEvent& ev) {
+    agtest::fx::Store s;
+    if (auto msg = app::on_key(m, ev)) {
+        auto [next, cmd] = app::update(std::move(m), std::move(*msg));
+        m = std::move(next);
+        agtest::fx::run(cmd, s);
+    }
+    return s;
+}
+
+Model two_threads_open() {
+    Model m;
+    for (const char* id : {"p1", "p2"}) {
+        Thread th;
+        th.id = ThreadId{id};
+        th.title = "[Pasted text \xc2\xb7 3 lines \xc2\xb7 99 B]";
+        m.d.threads.push_back(th);
+    }
+    m.d.current.id = ThreadId{"other"};
+    return app::update(std::move(m), Msg{OpenThreadList{}}).first;
+}
+} // namespace
+
+TEST_CASE("threads: ^R renames the focused row, pre-filled") {
+    install_stub_deps();
+    Model m = two_threads_open();
+    m = press(std::move(m), sk(maya::SpecialKey::Down));   // focus p2
+    m = press(std::move(m), ctrl(U'r'));
+    auto* p = m.ui.panel.get<pn::ThreadList>();
+    REQUIRE(p != nullptr);
+    CHECK(p->renaming == "p2");
+    CHECK(p->rename_input == m.d.threads[1].title);
+
+    // Letters edit the draft, not the filter; ^D does nothing mid-edit.
+    for (int i = 0; i < 64; ++i) m = press(std::move(m), sk(maya::SpecialKey::Backspace));
+    for (char32_t c : std::u32string{U"auth fix"}) m = press(std::move(m), ch(c));
+    CHECK(press_fx(m, ctrl(U'd')).deleted_threads.empty());
+    p = m.ui.panel.get<pn::ThreadList>();
+    REQUIRE(p != nullptr);
+    CHECK(p->query.empty());
+    CHECK(p->confirm_remove.empty());
+    CHECK(p->rename_input == "auth fix");
+
+    const auto fx = press_fx(m, sk(maya::SpecialKey::Enter));
+    REQUIRE(fx.renamed_threads.size() == 1);
+    CHECK(fx.renamed_threads[0].id.value == "p2");
+    CHECK(fx.renamed_threads[0].title == "auth fix");
+    CHECK(m.d.threads[1].title == "auth fix");
+    CHECK(m.d.threads[0].title != "auth fix");
+    p = m.ui.panel.get<pn::ThreadList>();
+    REQUIRE(p != nullptr);             // Enter saved; it did not open the thread
+    CHECK(p->renaming.empty());
+}
+
+TEST_CASE("threads: rename Esc, empty and unchanged write nothing") {
+    install_stub_deps();
+    Model m = two_threads_open();
+    const std::string before = m.d.threads[0].title;
+
+    // Esc cancels the edit and keeps the picker open.
+    m = press(std::move(m), ctrl(U'r'));
+    m = press(std::move(m), ch(U'x'));
+    m = press(std::move(m), sk(maya::SpecialKey::Escape));
+    REQUIRE(m.ui.panel.get<pn::ThreadList>() != nullptr);
+    CHECK(m.ui.panel.get<pn::ThreadList>()->renaming.empty());
+    CHECK(m.d.threads[0].title == before);
+
+    // Enter on the untouched draft is a no-op.
+    m = press(std::move(m), ctrl(U'r'));
+    CHECK(press_fx(m, sk(maya::SpecialKey::Enter)).renamed_threads.empty());
+
+    // Blank is a cancel, not an empty title.
+    m = press(std::move(m), ctrl(U'r'));
+    for (int i = 0; i < 64; ++i) m = press(std::move(m), sk(maya::SpecialKey::Backspace));
+    m = press(std::move(m), ch(U' '));
+    CHECK(press_fx(m, sk(maya::SpecialKey::Enter)).renamed_threads.empty());
+    CHECK(m.d.threads[0].title == before);
+}
+
+TEST_CASE("threads: rename paste is one line, capped, and renames the open thread") {
+    install_stub_deps();
+    Model m = two_threads_open();
+    m.d.current.id = ThreadId{"p1"};
+    m.d.current.title = m.d.threads[0].title;
+    m = press(std::move(m), ctrl(U'r'));
+    for (int i = 0; i < 64; ++i) m = press(std::move(m), sk(maya::SpecialKey::Backspace));
+    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{"one\ntwo"})).first;
+    auto* p = m.ui.panel.get<pn::ThreadList>();
+    REQUIRE(p != nullptr);
+    CHECK(p->rename_input == "one two");
+    CHECK(p->query.empty());
+    CHECK(m.ui.composer.text.empty());
+
+    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{std::string(200, 'z')})).first;
+    p = m.ui.panel.get<pn::ThreadList>();
+    REQUIRE(p != nullptr);
+    CHECK(p->rename_input.size() == persistence::kTitleMaxBytes);
+    m = press(std::move(m), ch(U'q'));   // typing past the cap is refused
+    CHECK(m.ui.panel.get<pn::ThreadList>()->rename_input.size() == persistence::kTitleMaxBytes);
+
+    const auto fx = press_fx(m, sk(maya::SpecialKey::Enter));
+    REQUIRE(fx.renamed_threads.size() == 1);
+    // The open thread is re-saved from m.d.current every turn, so it must
+    // carry the new title too or the next save writes the old one back.
+    CHECK(m.d.current.title == fx.renamed_threads[0].title);
+}
+
+TEST_CASE("threads: rename edits at the caret; arrows, Home/End and Delete work") {
+    install_stub_deps();
+    Model m;
+    Thread th;
+    th.id = ThreadId{"c1"};
+    th.title = "caf\xc3\xa9 bug";          // a 2-byte code point mid-title
+    m.d.threads.push_back(th);
+    m.d.current.id = ThreadId{"other"};
+    m = app::update(std::move(m), Msg{OpenThreadList{}}).first;
+    m = press(std::move(m), ctrl(U'r'));
+    auto draft = [&] { return m.ui.panel.get<pn::ThreadList>()->rename_input; };
+    auto caret = [&] { return m.ui.panel.get<pn::ThreadList>()->rename_cursor; };
+    CHECK(caret() == static_cast<int>(th.title.size()));   // opens at the end
+
+    // Home, then fix the first letter: Delete forward, type the new one.
+    m = press(std::move(m), sk(maya::SpecialKey::Home));
+    CHECK(caret() == 0);
+    m = press(std::move(m), sk(maya::SpecialKey::Delete));
+    m = press(std::move(m), ch(U'C'));
+    CHECK(draft() == "Caf\xc3\xa9 bug");
+    CHECK(caret() == 1);
+
+    // Right steps over the whole code point, never into the middle of it.
+    for (int i = 0; i < 3; ++i) m = press(std::move(m), sk(maya::SpecialKey::Right));
+    CHECK(caret() == 5);                     // past "af" and the 2-byte e
+    m = press(std::move(m), sk(maya::SpecialKey::Left));
+    CHECK(caret() == 3);
+    m = press(std::move(m), sk(maya::SpecialKey::Delete));   // removes e-acute whole
+    CHECK(draft() == "Caf bug");
+    m = press(std::move(m), sk(maya::SpecialKey::Backspace)); // removes 'f'
+    CHECK(draft() == "Ca bug");
+    CHECK(caret() == 2);
+
+    // Delete at the end, Backspace at the start: nothing to remove.
+    m = press(std::move(m), sk(maya::SpecialKey::End));
+    m = press(std::move(m), sk(maya::SpecialKey::Delete));
+    m = press(std::move(m), sk(maya::SpecialKey::Home));
+    m = press(std::move(m), sk(maya::SpecialKey::Backspace));
+    CHECK(draft() == "Ca bug");
+
+    // A paste lands at the caret.
+    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{"[x] "})).first;
+    CHECK(draft() == "[x] Ca bug");
+    CHECK(caret() == 4);
+    // Alt+Left (thread quick-cycle elsewhere) only moves the caret here.
+    maya::KeyEvent alt_left{maya::SpecialKey::Left, {}, {}};
+    alt_left.mods.alt = true;
+    m = press(std::move(m), alt_left);
+    CHECK(caret() == 3);
+    CHECK(m.ui.panel.get<pn::ThreadList>()->renaming == "c1");
+    CHECK(m.d.current.id.value == "other");
+
+    const auto fx = press_fx(m, sk(maya::SpecialKey::Enter));
+    REQUIRE(fx.renamed_threads.size() == 1);
+    CHECK(fx.renamed_threads[0].title == "[x] Ca bug");
+}
+
+TEST_CASE("threads: a capped paste mid-title keeps the text after the caret") {
+    install_stub_deps();
+    Model m = two_threads_open();
+    m = press(std::move(m), ctrl(U'r'));
+    m = press(std::move(m), sk(maya::SpecialKey::Home));
+    const std::string before = m.ui.panel.get<pn::ThreadList>()->rename_input;
+    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{std::string(200, 'z')})).first;
+    const auto* p = m.ui.panel.get<pn::ThreadList>();
+    REQUIRE(p != nullptr);
+    CHECK(p->rename_input.size() == persistence::kTitleMaxBytes);
+    CHECK(p->rename_input.ends_with(before));
+    CHECK(p->rename_cursor == static_cast<int>(persistence::kTitleMaxBytes - before.size()));
+}
+
+TEST_CASE("threads: opening a renamed thread before the rename lands keeps it") {
+    install_stub_deps();
+    Model m = two_threads_open();
+    m = press(std::move(m), ctrl(U'r'));
+    for (int i = 0; i < 64; ++i) m = press(std::move(m), sk(maya::SpecialKey::Backspace));
+    for (char32_t c : std::u32string{U"kept"}) m = press(std::move(m), ch(c));
+    m = press(std::move(m), sk(maya::SpecialKey::Enter));
+    REQUIRE(m.d.threads[0].title == "kept");
+
+    // The disk read raced the writer and still has the old title. A load
+    // result only lands while it is the pending one (ThreadListSelect sets
+    // that), so stand it up the same way.
+    Thread loaded;
+    loaded.id = ThreadId{"p1"};
+    loaded.title = "[Pasted text \xc2\xb7 3 lines \xc2\xb7 99 B]";
+    m.s.loading_thread = loaded.id;
+    m.s.thread_loading = true;
+    m = app::update(std::move(m), Msg{ThreadLoaded{std::move(loaded)}}).first;
+    CHECK(m.d.current.id.value == "p1");
+    CHECK(m.d.current.title == "kept");
 }
 
 TEST_CASE("settings rows: a cleared Embeddings port takes any number (#97)") {

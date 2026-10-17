@@ -2013,12 +2013,15 @@ struct LogState {
 // A queued save. `from` is the index (into the persistable messages) of
 // the first one that may differ from the log; `tail` is those messages.
 // `full` carries the whole thread when the tail path can't be used.
+// `retitle` marks a rename: only meta.id and meta.title are set, and
+// write_job rewrites the stored title and nothing else.
 struct SaveJob {
     Thread                     meta;         // header only, messages empty
     std::size_t                from = 0;
     std::vector<Message>       tail;
     std::vector<std::uint64_t> fps;          // fingerprints for ALL messages
     std::optional<Thread>      full;
+    bool                       retitle = false;
 };
 
 // Encode + append [from, end) after cutting the log at `from`, then verify
@@ -2053,6 +2056,46 @@ static bool save_tail_sync(const SaveJob& job, std::size_t total) {
     return true;
 }
 
+// Store a new title for one thread, leaving its messages and timestamps
+// alone. A log thread rewrites only its small .meta.json. A legacy document
+// has nowhere smaller to write, so it is saved whole, which also moves it to
+// the log. Runs inside the thread's section, like every other write of it.
+static bool retitle_sync(const lock_levels::below_file_lane& cap,
+                         const ThreadId& id, const std::string& title) {
+    std::error_code ec;
+    if (fs::exists(threads_dir() / (id.value + ".meta.json"), ec)) {
+        auto log = ThreadLog::open(id);
+        if (!log) {
+            AGT_LOG(Persist, Error, "thread.rename", "result=unopenable id={} err={}",
+                    id.value, log.error().render());
+            return false;
+        }
+        Thread meta = log->meta();
+        if (meta.id.value.empty()) meta.id = id;
+        meta.title = title;
+        if (!log->set_meta(meta)) {
+            AGT_LOG(Persist, Error, "thread.rename", "result=write_failed id={}", id.value);
+            return false;
+        }
+        reindex_thread(cap, meta);
+        return true;
+    }
+    const auto legacy = threads_dir() / (id.value + ".json");
+    if (fs::exists(legacy, ec)) {
+        auto loaded = load_thread_file(internal_io(), legacy);
+        if (!loaded) {
+            AGT_LOG(Persist, Error, "thread.rename", "result=unreadable id={} err={}",
+                    id.value, loaded.error().render());
+            return false;
+        }
+        loaded->title = title;
+        // Logs its own failures, and refreshes the index on every path.
+        return save_thread_sync(cap, *loaded);
+    }
+    AGT_LOG(Persist, Warn, "thread.rename", "result=missing id={}", id.value);
+    return false;
+}
+
 // One lane for every thread's log; the file lock (inside the section) is per
 // thread, so two agentty saving DIFFERENT threads never wait on each other.
 persistence::LaneOf<lock_levels::thread_log>& thread_log_lane() {
@@ -2064,6 +2107,7 @@ persistence::LaneOf<lock_levels::thread_log>& thread_log_lane() {
 // a full rewrite from the verified head; or a full save.
 static bool write_job(const maya::held<lock_levels::thread_log>& cap, const SaveJob& next,
                       std::size_t total) {
+    if (next.retitle) return retitle_sync(cap, next.meta.id, next.meta.title);
     if (next.full) return save_thread_sync(cap, *next.full);
     if (save_tail_sync(next, total)) return true;
     // The tail write failed partway. The head before `from` is the confirmed,
@@ -2261,6 +2305,29 @@ struct AsyncWriter {
         }, key);
     }
 
+    // A save of this thread that is still queued was built with the old
+    // title and would write it back over the rename, so it takes the new
+    // title instead and nothing else is queued. A save already mid-write
+    // has no pending entry: the retitle queues behind it and lands second.
+    void retitle(const maya::below<maya::leaf>& cap, const ThreadId& id, std::string title) {
+        const bool start = st.with(cap, [](WriterState& s, std::string k, std::string t) {
+            if (auto it = s.pending.find(k); it != s.pending.end()) {
+                it->second.meta.title = t;
+                if (it->second.full) it->second.full->title = std::move(t);
+                return false;
+            }
+            SaveJob j;
+            j.meta.id    = ThreadId{k};
+            j.meta.title = std::move(t);
+            j.retitle    = true;
+            s.pending.emplace(std::move(k), std::move(j));
+            if (s.started) return false;
+            s.started = true;
+            return true;
+        }, id.value, std::move(title));
+        if (start) start_worker();
+    }
+
     // Saved or queued by this process: a thread someone has open.
     [[nodiscard]] bool live(const maya::below<maya::leaf>& cap, const std::string& key) {
         return st.read(cap, [](const WriterState& s, std::string k) {
@@ -2370,6 +2437,7 @@ void AsyncWriter::run(const maya::unlocked& cap) {
         bool ok = false;
         // What the bookkeeping below needs, taken before the job moves in.
         const bool        was_full = next.full.has_value();
+        const bool        retitle  = next.retitle;
         const Thread      meta     = next.meta;
         const std::optional<std::string> full_idx =
             was_full ? std::optional<std::string>{index_key(next.full->title, next.full->updated_at)}
@@ -2384,8 +2452,10 @@ void AsyncWriter::run(const maya::unlocked& cap) {
             // The picker index only needs refreshing when what it shows
             // changes (title, timestamps) or at the first save. It is a
             // read-modify-write of one JSON file covering every thread, so
-            // doing it every round was pure waste.
-            if (ok && !was_full) maybe_reindex(cap, meta);
+            // doing it every round was pure waste. A rename refreshed it
+            // already, from the real header; its `meta` is a stub with no
+            // timestamps and must not reach the index.
+            if (ok && !was_full && !retitle) maybe_reindex(cap, meta);
         }
         catch (const std::exception& e) {
             // best-effort, same policy as the sync path
@@ -2395,17 +2465,24 @@ void AsyncWriter::run(const maya::unlocked& cap) {
 
         std::optional<std::string> idx;
         if (ok && full_idx) idx = full_idx;
-        const bool undo = st.with(cap, [](WriterState& s, std::string k, bool good,
+        const bool undo = st.with(cap, [](WriterState& s, std::string k, bool good, bool rt,
                    std::vector<std::uint64_t> fps, std::optional<std::string> ik) {
             s.in_flight.clear();
             // Deleted while this save was writing: the files it just wrote
             // must not outlive the delete.
             if (!s.undo.empty() && s.undo == k) { s.undo.clear(); return true; }
+            if (rt) {
+                // A rename leaves the messages alone, so what the writer
+                // knows about the log still holds; it carries no `fps` to
+                // replace that with. The index row changed under the cache.
+                s.indexed.erase(k);
+                return false;
+            }
             if (!good) s.known.erase(k);
             else       s.known[k].fps = std::move(fps);
             if (ik) s.indexed[k] = std::move(*ik);
             return false;
-        }, key, ok, std::move(fps), std::move(idx));
+        }, key, ok, retitle, std::move(fps), std::move(idx));
         if (undo) {
             AGT_LOG(Persist, Info, "thread.save",
                     "id={} deleted mid-save; removing what the save wrote", key);
@@ -2417,6 +2494,11 @@ void AsyncWriter::run(const maya::unlocked& cap) {
 void save_thread(Io, const maya::below<maya::leaf>& cap, const Thread& t) {
     if (t.id.empty() || t.messages.empty()) return;
     async_writer().enqueue(cap, t);
+}
+
+void rename_thread(Io, const maya::below<maya::leaf>& cap, const ThreadId& id, std::string title) {
+    if (id.empty()) return;
+    async_writer().retitle(cap, id, std::move(title));
 }
 
 // The files a thread owns on disk, and its index row. Shared by
@@ -3459,16 +3541,41 @@ ThreadId new_id() {
 std::string title_from_first_message(std::string_view text) {
     std::string t{text};
     for (auto& c : t) if (c == '\n' || c == '\r') c = ' ';
-    if (t.size() > 60) {
+    if (t.size() > kTitleMaxBytes) {
         // UTF-8-safe cut: a naive resize(57) can split a multi-byte sequence,
         // and the partial bytes propagate into json::dump() which throws
         // type_error.316 on any invalid UTF-8. Scrub afterward as belt-and-
         // suspenders in case `text` itself arrived malformed.
-        t.resize(tools::util::safe_utf8_cut(t, 57));
+        t.resize(tools::util::safe_utf8_cut(t, kTitleMaxBytes - 3));
         t = tools::util::to_valid_utf8(std::move(t));
         t += "...";
     }
     if (t.empty()) t = "New thread";
+    return t;
+}
+
+std::string clean_title(std::string_view text) {
+    // Repair first, so the filter below walks whole code points.
+    const std::string valid = tools::util::to_valid_utf8(std::string{text});
+    std::string t;
+    t.reserve(valid.size());
+    for (std::size_t i = 0; i < valid.size(); ++i) {
+        const auto u = static_cast<unsigned char>(valid[i]);
+        if (u == '\n' || u == '\r' || u == '\t') { t.push_back(' '); continue; }
+        if (u < 0x20 || u == 0x7f) continue;
+        // C1 controls (U+0080..U+009F, encoded C2 80..C2 9F) can still
+        // start an escape sequence on some terminals.
+        if (u == 0xC2 && i + 1 < valid.size()) {
+            const auto n = static_cast<unsigned char>(valid[i + 1]);
+            if (n >= 0x80 && n <= 0x9F) { ++i; continue; }
+        }
+        t.push_back(valid[i]);
+    }
+    t.resize(tools::util::safe_utf8_cut(t, kTitleMaxBytes));
+    const auto first = t.find_first_not_of(' ');
+    if (first == std::string::npos) return {};
+    t.erase(t.find_last_not_of(' ') + 1);
+    t.erase(0, first);
     return t;
 }
 

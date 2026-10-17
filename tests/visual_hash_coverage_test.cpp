@@ -245,6 +245,17 @@ const std::vector<Axis>& visual_axes() {
             o.confirm_remove = "abc123";
             m.ui.panel.descend(agentty::ui::panel::ThreadList{std::move(o)});
         }},
+        {"thread_list rename draft", [](Model& m) {
+            pn::ThreadList t{{0}};
+            t.renaming     = "abc123";
+            t.rename_input = "new name";
+            m.ui.panel.descend(std::move(t));
+        }},
+        {"thread_list rename caret", [](Model& m) {
+            pn::ThreadList t{{0}};
+            t.rename_cursor = 3;
+            m.ui.panel.descend(std::move(t));
+        }},
         {"diff_review opens at cell", [](Model& m) {
             m.ui.panel.descend(pn::DiffReview{{0, 0}});
         }},

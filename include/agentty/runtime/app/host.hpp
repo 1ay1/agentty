@@ -84,6 +84,11 @@ struct Host : maya::terminal_host<P> {
     void handle(DeleteThread e) {
         with_unlocked([&](const maya::unlocked& c) { persistence::delete_thread(io_, c, e.id); });
     }
+    void handle(RenameThread e) {
+        with_unlocked([&](const maya::unlocked& c) {
+            persistence::rename_thread(io_, c, e.id, std::move(e.title));
+        });
+    }
 
     // Publish the subagent router's view (see store_fx.hpp PublishSubagent).
     // A mutex-guarded copy into the registry — microseconds — so it runs here

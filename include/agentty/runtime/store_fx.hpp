@@ -55,6 +55,11 @@ using save_thread = maya::pure_fx<SaveThread, "save_thread">;
 struct DeleteThread { ThreadId id; };
 using delete_thread = maya::pure_fx<DeleteThread, "delete_thread">;
 
+/// Store a new title for a saved thread; its messages and timestamps are
+/// left alone. `title` is already cleaned (persistence::clean_title).
+struct RenameThread { ThreadId id; std::string title; };
+using rename_thread = maya::pure_fx<RenameThread, "rename_thread">;
+
 /// Write a file to disk. The diff-review pane's accept/reject path.
 struct WriteFile { std::string path; std::string contents; };
 using write_file = maya::pure_fx<WriteFile, "write_file">;
