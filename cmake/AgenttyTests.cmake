@@ -636,6 +636,21 @@ target_link_libraries(gen_cache_race_test PRIVATE Threads::Threads maya::runtime
 add_test(NAME gen_cache_race_test COMMAND gen_cache_race_test)
 set_tests_properties(gen_cache_race_test PROPERTIES TIMEOUT 120 LABELS "race")
 
+# mcp::Connection dropped while its reader is inside a server callback.
+# connection.cpp + peer.cpp + logging, on an in-memory channel.
+if(AGENTTY_MCP)
+    agentty_test(mcp_connection_race_test MODE raw LABELS race)
+    add_executable(mcp_connection_race_test EXCLUDE_FROM_ALL
+        tests/mcp_connection_race_test.cpp src/mcp/connection.cpp src/rpc/peer.cpp
+        src/util/teardown.cpp src/util/logx.cpp src/util/dbglog.cpp)
+    target_include_directories(mcp_connection_race_test PRIVATE include tests
+        $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
+    target_link_libraries(mcp_connection_race_test PRIVATE
+        mcp::mcp jsonrpc::jsonrpc nlohmann_json::nlohmann_json Threads::Threads maya::runtime)
+    add_test(NAME mcp_connection_race_test COMMAND mcp_connection_race_test)
+    set_tests_properties(mcp_connection_race_test PROPERTIES TIMEOUT 120 LABELS "race")
+endif()
+
 # sandbox_config_race_test — publishing the sandbox policy while tools read it.
 #
 # Narrow on purpose, same reasoning as persistence_race_test_narrow above: it

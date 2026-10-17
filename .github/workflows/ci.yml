@@ -461,6 +461,7 @@ jobs:
           cmake --build build-tsan -j"$(nproc)" --target exec_session_race_test
           cmake --build build-tsan -j"$(nproc)" --target settings_cache_race_test
           cmake --build build-tsan -j"$(nproc)" --target gen_cache_race_test
+          cmake --build build-tsan -j"$(nproc)" --target mcp_connection_race_test
       - name: Run under TSan
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
