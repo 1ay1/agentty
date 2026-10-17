@@ -318,8 +318,9 @@ bool ThreadLog::set_meta(const Thread& t) {
             const auto it = on_disk.is_object() ? on_disk.find("renamed_at") : on_disk.end();
             if (it != on_disk.end() && it->is_number_integer()
                 && it->get<std::int64_t>() > meta_thread_.renamed_at) {
-                meta_thread_.renamed_at = it->get<std::int64_t>();
-                meta_thread_.title      = on_disk.value("title", meta_thread_.title);
+                meta_thread_.renamed_at   = it->get<std::int64_t>();
+                meta_thread_.title        = on_disk.value("title", meta_thread_.title);
+                meta_thread_.name_is_auto = on_disk.value("name_is_auto", false);
             }
         }
         std::string bytes = persistence::thread_meta_to_json(meta_thread_).dump(2);

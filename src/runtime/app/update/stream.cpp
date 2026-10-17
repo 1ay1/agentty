@@ -44,10 +44,16 @@ namespace agentty::app::detail {
 
 // Name the chat once it has a real first exchange, like chat apps do: the
 // first user message has a reply with text. Skipped when the user named it,
-// when it was already titled, while a request is out, and when turned off.
+// when it was already titled or tried, while a request is out, when turned
+// off, and for threads that aren't eligible (from before titling existed,
+// or a fork, which is named after its parent).
 Cmd maybe_auto_title(Model& m) {
     const auto& t = m.d.current;
-    if (!m.d.persisted.auto_title || t.auto_titled || t.renamed_at > 0) return Cmd::none();
+    // Eligible: a thread started since titling existed, or one whose chosen
+    // name was cleared back to automatic.
+    const bool eligible = t.auto_title_ok || (t.name_is_auto && t.renamed_at > 0);
+    if (!m.d.persisted.auto_title || !eligible || t.auto_titled || t.user_named())
+        return Cmd::none();
     if (!m.s.titling.value.empty()) return Cmd::none();
     const bool replied = std::ranges::any_of(t.messages, [](const Message& msg) {
         return msg.role == Role::Assistant && !msg.text.empty();

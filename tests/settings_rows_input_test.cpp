@@ -9,6 +9,7 @@
 #include "agtest.hpp"
 
 #include "agentty/runtime/app/deps.hpp"
+#include "agentty/runtime/app/cmd_factory.hpp"   // generate_thread_title
 #include "agentty/runtime/app/program.hpp"   // AgenttyApp::visual_hash (the render gate)
 #include "agentty/runtime/app/subscribe.hpp"
 #include "agentty/runtime/app/update.hpp"
@@ -483,10 +484,13 @@ TEST_CASE("threads: a generated title names the open thread, cleaned") {
     REQUIRE(fx.saved_threads.size() == 1);
     CHECK(fx.saved_threads[0].title == "Fix the login bug");
 
-    // A failed request (empty title) keeps the name it has.
+    // A failed request (empty title) keeps the name it has, and isn't
+    // asked again: a model that can't answer would cost a request a turn.
     m.d.current.title = "kept"; m.d.current.auto_titled = false;
     m = app::update(std::move(m), Msg{ThreadTitleGenerated{ThreadId{"t-auto"}, ""}}).first;
     CHECK(m.d.current.title == "kept");
+    CHECK(m.d.current.auto_titled);
+    CHECK(app::detail::maybe_auto_title(m).is_none());
 }
 
 TEST_CASE("threads: a generated title never replaces a chosen name") {
@@ -513,6 +517,7 @@ TEST_CASE("threads: a title is asked for once, after the first reply") {
     install_stub_deps();
     Model m;
     m.d.current.id = ThreadId{"t-ask"};
+    m.d.current.auto_title_ok = true;   // a thread started since titling
     Message u; u.role = Role::User; u.text = "how do I fix the login bug";
     m.d.current.messages.push_back(u);
     CHECK(app::detail::maybe_auto_title(m).is_none());   // no reply yet
@@ -536,6 +541,104 @@ TEST_CASE("threads: a title is asked for once, after the first reply") {
     CHECK(app::detail::maybe_auto_title(m).is_none());   // turned off
 }
 
+TEST_CASE("threads: old threads and forks are never auto-titled") {
+    install_stub_deps();
+    Model m;
+    m.d.current.id = ThreadId{"t-old"};
+    Message u; u.role = Role::User; u.text = "an old chat";
+    Message a; a.role = Role::Assistant; a.text = "a reply";
+    m.d.current.messages = {u, a};
+    // Saved before titling existed: no flag, so continuing it keeps its name.
+    CHECK(app::detail::maybe_auto_title(m).is_none());
+
+    // A fork: its first User message is the fork note, and it's named after
+    // its parent. It starts with the flag off.
+    Model f;
+    f.d.current.id = ThreadId{"t-fork"};
+    f.d.current.title = "Fork: an old chat";
+    Message note; note.role = Role::User; note.fork_note = true;
+    note.text = "This conversation is a fork of an earlier one";
+    f.d.current.messages = {note, a};
+    CHECK(app::detail::maybe_auto_title(f).is_none());
+}
+
+TEST_CASE("threads: a new thread is eligible, a fresh one from ^N too") {
+    install_stub_deps();
+    Model m;
+    m.d.current.messages.push_back(Message{});
+    m = app::update(std::move(m), Msg{NewThread{}}).first;
+    CHECK(m.d.current.auto_title_ok);
+}
+
+TEST_CASE("threads: clearing a rename goes back to the automatic name") {
+    install_stub_deps();
+    Model m;
+    m.d.current.id = ThreadId{"t-c"};
+    m.d.current.title = "my name";
+    m.d.current.renamed_at = 1'700'000'000;   // a rename from 2023
+    Message u; u.role = Role::User; u.text = "fix the login bug\nand more";
+    Message a; a.role = Role::Assistant; a.text = "ok";
+    m.d.current.messages = {u, a};
+    m.d.threads.push_back(m.d.current);
+    m = app::update(std::move(m), Msg{OpenThreadList{}}).first;
+
+    // ^R, empty the draft, Enter.
+    m = press(std::move(m), ctrl(U'r'));
+    for (int i = 0; i < 64; ++i) m = press(std::move(m), sk(maya::SpecialKey::Backspace));
+    const auto fx = press_fx(m, sk(maya::SpecialKey::Enter));
+    REQUIRE(fx.renamed_threads.size() == 1);
+    CHECK(fx.renamed_threads[0].name_is_auto);
+    CHECK(fx.renamed_threads[0].renamed_at > 1'700'000'000);   // beats the old rename
+    CHECK(m.d.current.title == "fix the login bug and more");   // the first-line name
+    CHECK_FALSE(m.d.current.user_named());
+    // And it gets an auto title after the next reply.
+    CHECK_FALSE(app::detail::maybe_auto_title(m).is_none());
+}
+
+TEST_CASE("threads: a clear on a thread you never named writes nothing") {
+    install_stub_deps();
+    Model m = two_threads_open();
+    m = press(std::move(m), ctrl(U'r'));
+    for (int i = 0; i < 64; ++i) m = press(std::move(m), sk(maya::SpecialKey::Backspace));
+    CHECK(press_fx(m, sk(maya::SpecialKey::Enter)).renamed_threads.empty());
+}
+
+TEST_CASE("threads: the title prompt skips the fork note and injected context") {
+    install_stub_deps();
+    Model m;
+    m.d.model_id.value = "test-model";
+    Message note; note.role = Role::User; note.fork_note = true; note.text = "fork note";
+    Message mine; mine.role = Role::User; mine.text = "the real question";
+    Message a; a.role = Role::Assistant; a.text = "an answer";
+    m.d.current.messages = {note, mine, a};
+    // Not empty: it found a typed message to title from.
+    CHECK_FALSE(app::cmd::generate_thread_title(m).is_none());
+    Model only_note;
+    only_note.d.current.messages = {note, a};
+    CHECK(app::cmd::generate_thread_title(only_note).is_none());
+}
+
+TEST_CASE("threads: an auto title says so in a toast and in the list") {
+    install_stub_deps();
+    Model m;
+    m.d.current.id = ThreadId{"t-n"};
+    m.d.threads.push_back(m.d.current);
+    m = app::update(std::move(m),
+        Msg{ThreadTitleGenerated{ThreadId{"t-n"}, "Login bug"}}).first;
+    CHECK(m.s.status.find("Login bug") != std::string::npos);
+    CHECK(m.s.status.find("/rename") != std::string::npos);
+}
+
+TEST_CASE("settings: chat names toggles auto titling") {
+    install_stub_deps();
+    Model m;
+    const bool before = m.d.persisted.auto_title;
+    m = app::update(std::move(m), Msg{ToggleAutoTitle{}}).first;
+    CHECK(m.d.persisted.auto_title != before);
+    const auto rows = settings::items_for(m, settings::Category::General);
+    CHECK(std::ranges::any_of(rows, [](const auto& r) { return r.primary == "Chat names"; }));
+}
+
 TEST_CASE("threads: rename Esc, empty and unchanged write nothing") {
     install_stub_deps();
     Model m = two_threads_open();
@@ -553,7 +656,8 @@ TEST_CASE("threads: rename Esc, empty and unchanged write nothing") {
     m = press(std::move(m), ctrl(U'r'));
     CHECK(press_fx(m, sk(maya::SpecialKey::Enter)).renamed_threads.empty());
 
-    // Blank is a cancel, not an empty title.
+    // A blank draft on a thread you never named is a no-op (clearing a
+    // name there has nothing to clear).
     m = press(std::move(m), ctrl(U'r'));
     for (int i = 0; i < 64; ++i) m = press(std::move(m), sk(maya::SpecialKey::Backspace));
     m = press(std::move(m), ch(U' '));

@@ -2652,7 +2652,11 @@ Cmd generate_thread_title(const Model& m) {
     constexpr std::size_t kMaxBytes = 2000;
     std::string user, reply;
     for (const auto& msg : m.d.current.messages) {
-        if (msg.role == Role::User && user.empty() && !msg.text.empty()) user = msg.text;
+        // Only something the user typed: not the fork note, a compaction
+        // summary or injected context, all of which are User messages too.
+        const bool typed = msg.role == Role::User && !msg.fork_note
+                        && !msg.is_compact_summary && !msg.proactive.has_value();
+        if (typed && user.empty() && !msg.text.empty()) user = msg.text;
         else if (msg.role == Role::Assistant && !user.empty() && reply.empty() && !msg.text.empty())
             reply = msg.text;
         if (!user.empty() && !reply.empty()) break;

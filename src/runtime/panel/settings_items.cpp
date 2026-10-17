@@ -89,6 +89,19 @@ std::vector<Item> general(const Model& m) {
         i.action    = Action::ToggleChangesStrip;
         out.push_back(std::move(i));
     }
+    // Chat names. Costs one cheap request per new chat and sends its first
+    // message to the utility model, so it's a visible switch, not a
+    // settings.json-only key.
+    {
+        Item i;
+        i.primary   = "Chat names";
+        i.secondary = m.d.persisted.auto_title
+            ? "automatic \xc2\xb7 the utility model names a chat after its first reply"
+            : "first line \xc2\xb7 named after the first message";
+        i.hint      = "Enter: toggle";
+        i.action    = Action::ToggleAutoTitle;
+        out.push_back(std::move(i));
+    }
     // Appearance. A pane, not rows: it is grouped and has its own theme
     // browser, neither of which this flat list can hold. The row shows the
     // theme in use so the commonest reason to open it is answered without

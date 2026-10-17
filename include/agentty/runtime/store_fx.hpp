@@ -57,8 +57,10 @@ using delete_thread = maya::pure_fx<DeleteThread, "delete_thread">;
 
 /// Store a new title for a saved thread; its messages and timestamps are
 /// left alone. `title` is already cleaned (persistence::clean_title).
-/// `renamed_at` is the reducer's clock, unix seconds.
-struct RenameThread { ThreadId id; std::string title; std::int64_t renamed_at = 0; };
+/// `renamed_at` is the reducer's clock, unix seconds. `name_is_auto` marks
+/// a cleared rename (back to the automatic name).
+struct RenameThread { ThreadId id; std::string title; std::int64_t renamed_at = 0;
+                      bool name_is_auto = false; };
 using rename_thread = maya::pure_fx<RenameThread, "rename_thread">;
 
 /// Write a file to disk. The diff-review pane's accept/reject path.

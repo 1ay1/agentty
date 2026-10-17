@@ -25,9 +25,9 @@ Threads are global: the directory is flat and a thread isn't bound to the worksp
 
 ## Managing threads
 
-Press [[Ctrl+J]] to open the thread list and switch between past conversations. [[Ctrl+N]] starts a new thread. [[Ctrl+R]] renames the highlighted thread: its title opens for editing, [[Enter]] saves and [[Esc]] cancels. Deleting a thread removes all its files; its blobs go in the next daily sweep if no other thread uses them.
+Press [[Ctrl+J]] to open the thread list and switch between past conversations. [[Ctrl+N]] starts a new thread. [[Ctrl+R]] renames the highlighted thread: its title opens for editing, [[Enter]] saves and [[Esc]] cancels. Saving an empty title clears your name and goes back to the automatic one. `/rename <title>` renames the open thread from the composer. Deleting a thread removes all its files; its blobs go in the next daily sweep if no other thread uses them.
 
-A new thread is named after the first line of its first message. After the first reply, agentty asks the cheap utility model (the one compaction uses) for a 3 to 6 word title and swaps it in, the way chat apps name a chat. It is asked once per thread and never replaces a name you set with [[Ctrl+R]]. To keep first-line names, set `"auto_title": false` in `settings.json`.
+A new thread is named after the first line of its first message. After the first reply, agentty asks the cheap utility model (the one compaction uses) for a 3 to 6 word title and swaps it in, the way chat apps name a chat. A toast says when that happens, and the thread list marks those names `auto`. It is asked once per thread, even if it fails, and never replaces a name you set. Forks keep their `Fork:` name, and threads from before this feature keep the name they had. Turn it off in Settings → **Chat names**, or with `"auto_title": false` in `settings.json`.
 
 Threads are kept until you delete them. To expire old ones automatically:
 

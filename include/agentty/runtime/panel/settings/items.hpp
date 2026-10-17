@@ -45,6 +45,7 @@ enum class Action : std::uint8_t {
     OpenList,      // General: open another settings list (Item::target)
 
     ToggleChangesStrip, // General: show/hide the persistent "N changes" banner
+    ToggleAutoTitle,    // General: name new chats with the utility model
     // (No RemovePlugin: removal is the two-step `d` → SettingsListRemove
     // flow, never an Enter action — a one-press destructive Enter and a
     // two-step d coexisting was a trap. See the reducer's Activate arm.)

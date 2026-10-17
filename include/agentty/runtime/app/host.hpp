@@ -86,7 +86,8 @@ struct Host : maya::terminal_host<P> {
     }
     void handle(RenameThread e) {
         with_unlocked([&](const maya::unlocked& c) {
-            persistence::rename_thread(io_, c, e.id, std::move(e.title), e.renamed_at);
+            persistence::rename_thread(io_, c, e.id, std::move(e.title), e.renamed_at,
+                                       e.name_is_auto);
         });
     }
 

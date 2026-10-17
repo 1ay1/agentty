@@ -976,6 +976,8 @@ parse_thread_meta_only(const json& j) {
     if (const auto it = j.find("renamed_at"); it != j.end() && it->is_number_integer())
         t.renamed_at = it->get<std::int64_t>();
     t.auto_titled = j.value("auto_titled", false);
+    t.auto_title_ok = j.value("auto_title_ok", false);
+    t.name_is_auto = j.value("name_is_auto", false);
     return t;
 }
 
@@ -1252,6 +1254,8 @@ struct IndexEntry {
     long long   created_at = 0;   // unix seconds
     long long   updated_at = 0;   // unix seconds
     long long   renamed_at = 0;   // unix seconds, 0 = never renamed
+    bool        auto_titled  = false;   // the name came from the model
+    bool        name_is_auto = false;   // a cleared rename
     long long   mtime      = 0;   // file last_write_time, ns since clock epoch
     long long   size       = -1;  // file size in bytes; -1 == unknown (pre-v2)
 };
@@ -1343,6 +1347,8 @@ std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
             ie.created_at = e.value("created_at", 0LL);
             ie.updated_at = e.value("updated_at", 0LL);
             ie.renamed_at = e.value("renamed_at", 0LL);
+            ie.auto_titled  = e.value("auto_titled", false);
+            ie.name_is_auto = e.value("name_is_auto", false);
             ie.mtime      = e.value("mtime", 0LL);
             // Absent in v1 indexes — -1 means "unknown", which the
             // freshness check treats as a miss so the entry gets
@@ -1366,6 +1372,8 @@ void write_thread_index_locked(const std::unordered_map<std::string, IndexEntry>
         ej["created_at"] = e.created_at;
         ej["updated_at"] = e.updated_at;
         if (e.renamed_at > 0) ej["renamed_at"] = e.renamed_at;
+        if (e.auto_titled)  ej["auto_titled"]  = true;
+        if (e.name_is_auto) ej["name_is_auto"] = true;
         ej["mtime"]      = e.mtime;
         ej["size"]       = e.size;
         threads[id] = std::move(ej);
@@ -1386,6 +1394,8 @@ Thread thread_from_index(const std::string& id, const IndexEntry& e) {
     t.updated_at = std::chrono::system_clock::time_point{
         std::chrono::seconds{e.updated_at}};
     t.renamed_at = e.renamed_at;
+    t.auto_titled  = e.auto_titled;
+    t.name_is_auto = e.name_is_auto;
     return t;
 }
 
@@ -1415,6 +1425,8 @@ void reindex_thread(const lock_levels::below_file_lane& cap, const Thread& t) {
     ie.updated_at = std::chrono::duration_cast<std::chrono::seconds>(
                         t.updated_at.time_since_epoch()).count();
     ie.renamed_at = t.renamed_at;
+    ie.auto_titled  = t.auto_titled;
+    ie.name_is_auto = t.name_is_auto;
     ie.mtime      = mt;
     ie.size       = sz;
     with_thread_index(cap, [](const maya::held<lock_levels::file_lane>&, persistence::Held,
@@ -1507,6 +1519,8 @@ std::vector<Thread> load_all_threads(Io, const lock_levels::below_file_lane& cap
             ie.updated_at = std::chrono::duration_cast<std::chrono::seconds>(
                                 loaded->updated_at.time_since_epoch()).count();
             ie.renamed_at = loaded->renamed_at;
+            ie.auto_titled  = loaded->auto_titled;
+            ie.name_is_auto = loaded->name_is_auto;
             ie.mtime      = mt;
             ie.size       = sz;
             fresh.emplace(id, std::move(ie));
@@ -1557,6 +1571,8 @@ json thread_meta_to_json(const Thread& t) {
         t.updated_at.time_since_epoch()).count();
     if (t.renamed_at > 0) j["renamed_at"] = t.renamed_at;
     if (t.auto_titled) j["auto_titled"] = true;
+    if (t.auto_title_ok) j["auto_title_ok"] = true;
+    if (t.name_is_auto) j["name_is_auto"] = true;
     // Wire-only compaction records. Persisting these lets a reloaded
     // thread keep sending the SAME wire payload it was sending before
     // shutdown — if the user compacted at turn 40 then closed the app,
@@ -2078,7 +2094,7 @@ static bool save_tail_sync(const SaveJob& job, std::size_t total) {
 // the log. Runs inside the thread's section, like every other write of it.
 static bool retitle_sync(const lock_levels::below_file_lane& cap,
                          const ThreadId& id, const std::string& title,
-                         std::int64_t renamed_at) {
+                         std::int64_t renamed_at, bool name_is_auto) {
     std::error_code ec;
     if (fs::exists(threads_dir() / (id.value + ".meta.json"), ec)) {
         auto log = ThreadLog::open(id);
@@ -2091,6 +2107,7 @@ static bool retitle_sync(const lock_levels::below_file_lane& cap,
         if (meta.id.value.empty()) meta.id = id;
         meta.title = title;
         meta.renamed_at = renamed_at;
+        meta.name_is_auto = name_is_auto;
         if (!log->set_meta(meta)) {
             AGT_LOG(Persist, Error, "thread.rename", "result=write_failed id={}", id.value);
             return false;
@@ -2108,6 +2125,7 @@ static bool retitle_sync(const lock_levels::below_file_lane& cap,
         }
         loaded->title = title;
         loaded->renamed_at = renamed_at;
+        loaded->name_is_auto = name_is_auto;
         // Logs its own failures, and refreshes the index on every path.
         return save_thread_sync(cap, *loaded);
     }
@@ -2126,7 +2144,8 @@ persistence::LaneOf<lock_levels::thread_log>& thread_log_lane() {
 // a full rewrite from the verified head; or a full save.
 static bool write_job(const maya::held<lock_levels::thread_log>& cap, const SaveJob& next,
                       std::size_t total) {
-    if (next.retitle) return retitle_sync(cap, next.meta.id, next.meta.title, next.meta.renamed_at);
+    if (next.retitle) return retitle_sync(cap, next.meta.id, next.meta.title, next.meta.renamed_at,
+                                          next.meta.name_is_auto);
     if (next.full) return save_thread_sync(cap, *next.full);
     if (save_tail_sync(next, total)) return true;
     // The tail write failed partway. The head before `from` is the confirmed,
@@ -2255,6 +2274,8 @@ struct AsyncWriter {
         job.meta.updated_at        = t.updated_at;
         job.meta.renamed_at        = t.renamed_at;
         job.meta.auto_titled       = t.auto_titled;
+        job.meta.auto_title_ok     = t.auto_title_ok;
+        job.meta.name_is_auto      = t.name_is_auto;
         job.meta.compactions       = t.compactions;
         job.fps = fps;
 
@@ -2299,6 +2320,8 @@ struct AsyncWriter {
             full.meta.updated_at        = t.updated_at;
             full.meta.renamed_at        = t.renamed_at;
             full.meta.auto_titled       = t.auto_titled;
+            full.meta.auto_title_ok     = t.auto_title_ok;
+            full.meta.name_is_auto      = t.name_is_auto;
             full.meta.compactions       = t.compactions;
             full.fps  = std::move(fps);
             full.full = t;
@@ -2334,15 +2357,17 @@ struct AsyncWriter {
     // title instead and nothing else is queued. A save already mid-write
     // has no pending entry: the retitle queues behind it and lands second.
     void retitle(const maya::below<maya::leaf>& cap, const ThreadId& id, std::string title,
-                 std::int64_t renamed_at) {
+                 std::int64_t renamed_at, bool name_is_auto) {
         const bool start = st.with(cap, [](WriterState& s, std::string k, std::string t,
-                                           std::int64_t at) {
+                                           std::int64_t at, bool na) {
             if (auto it = s.pending.find(k); it != s.pending.end()) {
                 it->second.meta.title = t;
                 it->second.meta.renamed_at = at;
+                it->second.meta.name_is_auto = na;
                 if (it->second.full) {
-                    it->second.full->title      = std::move(t);
-                    it->second.full->renamed_at = at;
+                    it->second.full->title        = std::move(t);
+                    it->second.full->renamed_at   = at;
+                    it->second.full->name_is_auto = na;
                 }
                 return false;
             }
@@ -2350,12 +2375,13 @@ struct AsyncWriter {
             j.meta.id    = ThreadId{k};
             j.meta.title = std::move(t);
             j.meta.renamed_at = at;
+            j.meta.name_is_auto = na;
             j.retitle    = true;
             s.pending.emplace(std::move(k), std::move(j));
             if (s.started) return false;
             s.started = true;
             return true;
-        }, id.value, std::move(title), renamed_at);
+        }, id.value, std::move(title), renamed_at, name_is_auto);
         if (start) start_worker();
     }
 
@@ -2416,13 +2442,14 @@ private:
 
     static void run(const maya::unlocked& cap);
 
-    // Title + updated_at, the fields the picker index holds. updated_at is
-    // second-resolution on disk, so compare at that grain.
-    static std::string index_key(const std::string& title,
-                                 std::chrono::system_clock::time_point up) {
-        return title + '\x1f' + std::to_string(
-            std::chrono::duration_cast<std::chrono::seconds>(
-                up.time_since_epoch()).count());
+    // The fields the picker index holds: title, the title flags, and
+    // updated_at. updated_at is second-resolution on disk, so compare at
+    // that grain.
+    static std::string index_key(const Thread& t) {
+        return t.title + '\x1f' + (t.auto_titled ? 'a' : '-') + (t.name_is_auto ? 'n' : '-')
+             + std::to_string(t.renamed_at) + '\x1f'
+             + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                   t.updated_at.time_since_epoch()).count());
     }
 
     static void maybe_reindex(const maya::unlocked& cap, const Thread& meta);
@@ -2446,7 +2473,7 @@ void AsyncWriter::maybe_reindex(const maya::unlocked& cap, const Thread& meta) {
             if (it != s.indexed.end() && it->second == k) return false;
             s.indexed[id] = k;
             return true;
-        }, meta.id.value, index_key(meta.title, meta.updated_at));
+        }, meta.id.value, index_key(meta));
     if (changed) reindex_thread(cap, meta);
 }
 
@@ -2480,7 +2507,7 @@ void AsyncWriter::run(const maya::unlocked& cap) {
         const bool        retitle  = next.retitle;
         const Thread      meta     = next.meta;
         const std::optional<std::string> full_idx =
-            was_full ? std::optional<std::string>{index_key(next.full->title, next.full->updated_at)}
+            was_full ? std::optional<std::string>{index_key(*next.full)}
                      : std::nullopt;
         std::vector<std::uint64_t> fps = std::move(next.fps);
         try {
@@ -2500,8 +2527,9 @@ void AsyncWriter::run(const maya::unlocked& cap) {
                 Thread shown = meta;
                 if (auto on_disk = load_thread_meta_file(threads_dir() / (meta.id.value + ".meta.json"));
                     on_disk && on_disk->renamed_at > shown.renamed_at) {
-                    shown.title      = on_disk->title;
-                    shown.renamed_at = on_disk->renamed_at;
+                    shown.title        = on_disk->title;
+                    shown.renamed_at   = on_disk->renamed_at;
+                    shown.name_is_auto = on_disk->name_is_auto;
                 }
                 maybe_reindex(cap, shown);
             }
@@ -2546,9 +2574,9 @@ void save_thread(Io, const maya::below<maya::leaf>& cap, const Thread& t) {
 }
 
 void rename_thread(Io, const maya::below<maya::leaf>& cap, const ThreadId& id, std::string title,
-                   std::int64_t renamed_at) {
+                   std::int64_t renamed_at, bool name_is_auto) {
     if (id.empty()) return;
-    async_writer().retitle(cap, id, std::move(title), renamed_at);
+    async_writer().retitle(cap, id, std::move(title), renamed_at, name_is_auto);
 }
 
 // The files a thread owns on disk, and its index row. Shared by

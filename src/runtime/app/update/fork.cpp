@@ -142,6 +142,9 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
                              : ("Fork: " + (m.d.current.title.empty()
                                                 ? std::string{"conversation"}
                                                 : m.d.current.title));
+            // A fork is named after its parent; auto-titling would swap that
+            // for a name made from the fork note. Left off.
+            fork.auto_title_ok = false;
 
             // 4. Seed the fork note: a synthetic Role::User message that
             //    (a) tells the MODEL the prior context exists and how to

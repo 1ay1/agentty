@@ -995,8 +995,19 @@ struct Thread {
     // its title over the stored one when its own rename is at least as new,
     // so another agentty holding an old copy can't undo a rename.
     std::int64_t renamed_at = 0;   // unix seconds
+    // The stamped title is the automatic one, not a chosen name: the user
+    // cleared their rename. It still carries renamed_at, so the clear beats
+    // a stale copy, but it may be auto-titled again.
+    bool name_is_auto = false;
+    // True when the title is one the user picked (and so must not be
+    // replaced by an auto title).
+    [[nodiscard]] bool user_named() const noexcept { return renamed_at > 0 && !name_is_auto; }
     // The title came from the model (auto-titling), so it isn't generated again.
     bool auto_titled = false;
+    // This thread may be auto-titled. Set on threads started since titling
+    // existed; a thread from before has no flag and keeps its first-line
+    // name, so continuing an old chat never renames it.
+    bool auto_title_ok = false;
 
     // Wire-only compaction records. Each entry says "upstream requests
     // built from this thread should replace messages[0..up_to_index)

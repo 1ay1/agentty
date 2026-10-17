@@ -85,7 +85,11 @@ Element thread_list_panel(const Model& m) {
                 row.trailing       = "press ^D again to confirm";
                 row.trailing_style = fg_of(warn);
             } else {
-                row.trailing       = timestamp_full(t.updated_at);
+                // A model-written name says so, so it doesn't pass for one
+                // you typed. ^R or /rename makes it yours.
+                row.trailing       = (t.auto_titled && !t.user_named()
+                                          ? std::string{"auto \xc2\xb7 "} : std::string{})
+                                   + timestamp_full(t.updated_at);
                 row.trailing_style = fg_dim(muted);
             }
             // The TITLE is what you are choosing; the timestamp is reference
@@ -112,10 +116,13 @@ Element thread_list_panel(const Model& m) {
     if (!picker->confirm_remove.empty())
         cfg.note = "^D confirm delete \xc2\xb7 any other key cancels";
     if (renaming) {
+        // Saving an emptied draft clears the name, back to the automatic
+        // one; say so while the draft is empty, so the key is findable.
+        const bool emptied = picker->rename_input.empty();
         cfg.footer.push_back(key_hints({
             {"type", "edit title", 5},
             {"\xe2\x86\x90\xe2\x86\x92", "move", 4},   // left/right arrows
-            {"Enter", "save", 5},
+            {"Enter", emptied ? "use automatic name" : "save", 5},
             {"Esc", "cancel", 5},
         }));
         return Panel{std::move(cfg)}.build();

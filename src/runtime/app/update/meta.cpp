@@ -175,6 +175,15 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             return Cmd::batch(std::move(save), std::move(cmd));
         },
 
+        [&](ToggleAutoTitle) -> Cmd {
+            m.d.persisted.auto_title = !m.d.persisted.auto_title;
+            auto save = save_record(m);
+            auto cmd = set_status_toast(m, m.d.persisted.auto_title
+                ? "chat names: automatic after the first reply"
+                : "chat names: first line of the first message");
+            return Cmd::batch(std::move(save), std::move(cmd));
+        },
+
         [&](CycleProfile) -> Cmd {
             m.d.profile = m.d.profile == Profile::Write   ? Profile::Ask
                       : m.d.profile == Profile::Ask     ? Profile::Minimal

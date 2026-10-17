@@ -98,9 +98,10 @@ void delete_thread(Io, const lock_levels::below_thread_log&, const ThreadId& id)
 // updated_at is kept, so the thread does not move in the picker. `title`
 // is stored as given: clean it with clean_title() first. `renamed_at`
 // (unix seconds) is stored with it; a later save with an older stamp
-// keeps this title instead of its own.
+// keeps this title instead of its own. `name_is_auto` marks a cleared rename:
+// the stamp still wins over stale copies, but the thread may be auto-titled.
 void rename_thread(Io, const maya::below<maya::leaf>&, const ThreadId& id, std::string title,
-                   std::int64_t renamed_at);
+                   std::int64_t renamed_at, bool name_is_auto = false);
 
 // Thread retention. Deletes threads with no activity (file mtime) in the
 // last `keep_days` days, skipping `keep` (the open one). keep_days <= 0

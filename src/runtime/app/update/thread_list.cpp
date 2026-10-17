@@ -93,6 +93,7 @@ namespace {
     }
     m.d.current = Thread{};
     m.d.current.id = persistence::new_id();
+    m.d.current.auto_title_ok = true;
     m.d.current.created_at = m.d.current.updated_at =
         m.wall_now();
     m.s.reset_usage_for_thread(0);
@@ -134,6 +135,46 @@ namespace {
     // because the user asked to switch threads. Do NOT extend it to per-turn
     // paths.
     return Cmd::batch(cmd::prewarm_provider(m), cmd::reset_inline());
+}
+
+// Rename thread `id`, or with `clear` drop the chosen name and go back to
+// the automatic one: the first line of its first message, auto-titled again
+// after the next reply. Both stamp renamed_at, so either beats a stale copy
+// another agentty may still write. Updates the list row and, if it's the
+// open thread, m.d.current (which is re-saved every turn and would
+// otherwise write the old title back).
+[[nodiscard]] Cmd apply_rename(Model& m, const ThreadId& id, std::string title, bool clear) {
+    const auto it = std::ranges::find(m.d.threads, id, &Thread::id);
+    Thread* open = m.d.current.id == id ? &m.d.current : nullptr;
+    if (clear) {
+        // The first-line name, from the first message you typed.
+        const Thread& src = open ? *open : (it != m.d.threads.end() ? *it : m.d.current);
+        std::string first;
+        for (const auto& msg : src.messages)
+            if (msg.role == Role::User && !msg.fork_note && !msg.is_compact_summary
+                && !msg.proactive.has_value() && !msg.text.empty()) {
+                first = msg.text;
+                break;
+            }
+        // A list row holds no messages: keep its current title until the
+        // thread is opened and its next reply titles it.
+        title = first.empty() ? (it != m.d.threads.end() ? it->title : src.title)
+                              : persistence::title_from_first_message(first);
+    }
+    const std::int64_t at = std::chrono::duration_cast<std::chrono::seconds>(
+        m.wall_now().time_since_epoch()).count();
+    auto apply = [&](Thread& t) {
+        t.title        = title;
+        t.renamed_at   = at;
+        t.name_is_auto = clear;
+        // A cleared name gets an auto title again (if titling is on).
+        if (clear) { t.auto_titled = false; t.auto_title_ok = true; }
+    };
+    if (it != m.d.threads.end()) apply(*it);
+    if (open) apply(*open);
+    auto toast = set_status_toast(m, clear ? "name cleared \xc2\xb7 back to automatic"
+                                           : "renamed to \"" + title + "\"");
+    return Cmd::batch(Cmd(RenameThread{id, std::move(title), at, clear}), std::move(toast));
 }
 
 Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
@@ -416,26 +457,14 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             return Cmd::none();
         },
         [&](RenameCurrentThread& e) -> Cmd {
-            std::string title = persistence::clean_title(e.title);
-            if (title.empty())
-                return set_status_toast(m, "/rename needs a title");
             // A thread with nothing in it isn't saved yet, so there's
             // nothing on disk to rename.
             if (m.d.current.messages.empty())
                 return set_status_toast(m, "send a message first, then /rename");
-            if (title == m.d.current.title) return Cmd::none();
-            const std::int64_t at = std::chrono::duration_cast<std::chrono::seconds>(
-                m.wall_now().time_since_epoch()).count();
-            m.d.current.title      = title;
-            m.d.current.renamed_at = at;
-            if (const auto it = std::ranges::find(m.d.threads, m.d.current.id, &Thread::id);
-                it != m.d.threads.end()) {
-                it->title      = title;
-                it->renamed_at = at;
-            }
-            auto toast = set_status_toast(m, "renamed to \"" + title + "\"");
-            return Cmd::batch(Cmd(RenameThread{m.d.current.id, std::move(title), at}),
-                              std::move(toast));
+            std::string title = persistence::clean_title(e.title);
+            if (title.empty())
+                return set_status_toast(m, "/rename needs a title");
+            return apply_rename(m, m.d.current.id, std::move(title), /*clear=*/false);
         },
         [&](ThreadListRenameSubmit) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
@@ -450,23 +479,18 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // is nothing to rename.
             const auto it = std::ranges::find(m.d.threads, id, &Thread::id);
             if (it == m.d.threads.end()) return Cmd::none();
-            // Empty or unchanged is a cancel: Enter on an untouched draft
-            // must not cost a disk write.
-            if (title.empty() || title == it->title) return Cmd::none();
-            const std::int64_t at = std::chrono::duration_cast<std::chrono::seconds>(
-                m.wall_now().time_since_epoch()).count();
-            it->title      = title;
-            it->renamed_at = at;
-            // The open thread is re-saved every turn from m.d.current, which
-            // would write the old title back over the rename.
-            if (m.d.current.id == id) {
-                m.d.current.title      = title;
-                m.d.current.renamed_at = at;
-            }
+            // An emptied draft clears the name, back to the automatic one. On
+            // a thread you never named that's a no-op, like an unchanged draft:
+            // Enter on an untouched draft must not cost a disk write.
+            const bool clear = title.empty();
+            if (clear ? !it->user_named() : title == it->title) return Cmd::none();
+            Cmd out = apply_rename(m, id, std::move(title), clear);
             // The renamed row may no longer match the filter.
-            const int sz = visible_count(m, *p);
-            p->index = sz > 0 ? std::clamp(p->index, 0, sz - 1) : 0;
-            return Cmd(RenameThread{id, std::move(title), at});
+            if (auto* pp = m.ui.panel.get<pn::ThreadList>()) {
+                const int sz = visible_count(m, *pp);
+                pp->index = sz > 0 ? std::clamp(pp->index, 0, sz - 1) : 0;
+            }
+            return out;
         },
         [&](ThreadCycle& e) -> Cmd {
             // Alt+←/→ — jump to the adjacent thread without the picker.
@@ -555,21 +579,30 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             while (!title.empty() && (title.back() == '"' || title.back() == '\''
                                       || title.back() == '.'))
                 title.pop_back();
-            if (title.empty()) return Cmd::none();   // failed: keep what it has
+            // Failed: keep the first-line name, and don't ask again. A model
+            // that can't answer would otherwise cost a request every turn.
+            if (title.empty()) {
+                if (m.d.current.id != e.id) return Cmd::none();
+                // Tried once; never again. The title stays what it was.
+                m.d.current.auto_titled = true;
+                return Cmd(SaveThread{m.d.current});
+            }
 
             // Only the open thread. If you switched away while the title was
             // being made, the thread keeps its first-line name, the same as a
             // failed request.
-            if (m.d.current.id != e.id || m.d.current.renamed_at > 0) return Cmd::none();
+            if (m.d.current.id != e.id || m.d.current.user_named()) return Cmd::none();
             if (const auto it = std::ranges::find(m.d.threads, e.id, &Thread::id);
                 it != m.d.threads.end()) {
-                if (it->renamed_at > 0) return Cmd::none();   // never replace a chosen name
+                if (it->user_named()) return Cmd::none();   // never replace a chosen name
                 it->title       = title;
                 it->auto_titled = true;
             }
             m.d.current.title       = title;
             m.d.current.auto_titled = true;
-            return Cmd(SaveThread{m.d.current});
+            // Say so: the name changed under you, and /rename changes it.
+            auto toast = set_status_toast(m, "named this chat \"" + title + "\" \xc2\xb7 /rename to change");
+            return Cmd::batch(Cmd(SaveThread{m.d.current}), std::move(toast));
         },
         [&](ThreadsLoaded& e) -> Cmd {
             // A reload can be read from disk before a rename made a moment
@@ -577,8 +610,9 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             for (auto& t : e.threads)
                 if (const auto it = std::ranges::find(m.d.threads, t.id, &Thread::id);
                     it != m.d.threads.end() && it->renamed_at > t.renamed_at) {
-                    t.title      = it->title;
-                    t.renamed_at = it->renamed_at;
+                    t.title        = it->title;
+                    t.renamed_at   = it->renamed_at;
+                    t.name_is_auto = it->name_is_auto;
                 }
             m.d.threads = std::move(e.threads);
             m.s.threads_loading = false;
@@ -629,8 +663,9 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             if (const auto it = std::ranges::find(m.d.threads, m.d.current.id, &Thread::id);
                 it != m.d.threads.end() && !it->title.empty()
                 && it->renamed_at > m.d.current.renamed_at) {
-                m.d.current.title      = it->title;
-                m.d.current.renamed_at = it->renamed_at;
+                m.d.current.title        = it->title;
+                m.d.current.renamed_at   = it->renamed_at;
+                m.d.current.name_is_auto = it->name_is_auto;
             }
             m.s.reset_usage_for_thread(last_reported_prompt(m.d.current));
             // The loaded thread has no live turn, so any run state still
