@@ -92,9 +92,14 @@ maya::Element slash_menu(const Model& m) {
         if (!detail.empty()) detail += "  ";
         detail += kind_tag(e.kind);
         it.detail = std::move(detail);
-        // What to type after the name, shown under the list for the
-        // selected row only.
-        if (show_hint && !e.hint.empty()) it.doc = "/" + e.name + " " + one_line(e.hint, 60);
+        // The help line under the list, for the selected row: its usage
+        // when it takes arguments, else its full description. Every row
+        // has one, so arrowing never changes the menu's height.
+        if (show_hint) {
+            if (!e.hint.empty())             it.doc = "/" + e.name + " " + one_line(e.hint, 60);
+            else if (!e.description.empty()) it.doc = one_line(e.description, 90);
+            else                             it.doc = "/" + e.name;
+        }
         menu.item(std::move(it));
     }
     const int sel = std::clamp(m.ui.composer.slash.index, 0, static_cast<int>(rows.size()) - 1);
