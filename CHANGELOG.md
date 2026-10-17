@@ -17,6 +17,11 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   keys, [[Home]]/[[End]], [[Backspace]] and [[Delete]] edit it, [[Enter]]
   saves and [[Esc]] cancels. A title is one line of up to 60 bytes, and the
   thread keeps its place in the list.
+- **Serply as a web search service.** `serply-api` joins the API key
+  services in Settings > Web Search: Google results from
+  [Serply](https://serply.io) ([docs](https://serply.io/docs)), with
+  Country and Freshness, up to 10 results a search. The key comes from the
+  key store or `AGENTTY_WEB_SEARCH_KEY_SERPLY_API`.
 ## [0.9.27] - 2026-10-17
 
 ### Fixed
