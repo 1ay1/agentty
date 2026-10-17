@@ -688,6 +688,9 @@ tools::ToolDef make_tool(PoolHandle pool, const ::mcp::Tool& t,
             ::mcp::cap::Request req{exposed, args, ctx.progress,
                                     [&ctx] { return ctx.cancelled(); }};
             req.elicit = ctx.elicit;   // the server may ask the user mid-call
+            // The connection cancels on req.stop, not the polled callback.
+            const auto merged = ctx.merged_stop();
+            req.stop = merged->get_token();
             r = pool->registry.dispatch(req);
             if (r.is_error)
                 return std::unexpected(tools::ToolError::subprocess(

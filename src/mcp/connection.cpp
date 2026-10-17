@@ -164,9 +164,10 @@ Connection::Connection(ConnectionConfig cfg, Link link)
 }
 
 Connection::~Connection() {
-    // Stop the peer before anything its dispatch points at goes away:
-    // dropping our handle runs ~Live -> ~Peer (stop + join) if we were the
-    // last owner; a call still in flight holds its own handle until it ends.
+    // Stop the peer here, on our thread. Otherwise a callback on its reader
+    // could be holding the last ref, and ~Peer would join its own pool there.
+    if (auto l = live_.current())
+        entry_root([&](const maya::unlocked& cap) { l->peer->stop(cap); });
     live_.publish(nullptr);
 }
 
@@ -239,6 +240,14 @@ std::shared_ptr<Connection::Live> Connection::connect(const maya::unlocked& cap)
     l->peer = std::make_unique<rpc::Peer>(std::move(opened.channel), std::move(d), origin_);
     l->peer->set_default_timeout(cfg_.handshake_timeout);
     l->peer->start();
+    // Same reason as ~Connection: if the handshake throws, stop the peer
+    // before `l` drops, so its reader can't end up with the last ref.
+    struct StopOnThrow {
+        const maya::unlocked& cap;
+        Live& l;
+        bool armed = true;
+        ~StopOnThrow() { if (armed) l.peer->stop(cap); }
+    } stop_on_throw{cap, *l};
 
     m::ClientCapabilities client_caps;
     if (!cfg_.roots.empty()) client_caps.roots = m::RootsCapability{true};
@@ -280,6 +289,7 @@ std::shared_ptr<Connection::Live> Connection::connect(const maya::unlocked& cap)
     if (l->caps.prompts)   { try { refresh_prompts(cap, *l); } catch (...) {} }
 
     l->peer->set_default_timeout(cfg_.call_timeout);
+    stop_on_throw.armed = false;
     return l;
 }
 
