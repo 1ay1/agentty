@@ -48,6 +48,26 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
     while the clipboard check refreshed it.
 - **The sandbox (claybin) builds on Termux/Android again** (`ioctl` is
   overloaded on bionic).
+- **Sandbox masks always win.** The trust-handoff binds could put
+  `~/.agentty/memory.jsonl` and the credentials back on top of their masks,
+  so a sandboxed command could read them. Masked paths are kept out of the
+  handoff and the masks are applied after it. The masked list now also
+  covers Codex/Claude/Copilot sign-ins, keyrings, browser profiles, shell
+  and REPL histories and `~/.agentty/credentials/`. Login, session and PATH
+  files (`.profile`, fish config, systemd user units, `~/.local/bin`, …)
+  are read-only. `socket()` is limited to unix/inet/inet6, and
+  `fake_hostname=false` keeps the real name.
+- **A slow post_tool hook no longer holds up the turn.** The tool result
+  was sent only after every post_tool hook finished (up to 30 s each), so
+  the card stayed on “running”. The result goes out first now.
+- **More concurrency fixes:**
+  - Two saves racing a flush could run two thread-save workers at once.
+    The flush now waits for the queue instead of restarting the worker.
+  - An MCP server's capabilities were read while a reconnect rewrote them.
+    A reconnect also no longer shows the server as “not running” for a
+    moment, or tears down a connection another call just made.
+  - When an MCP or ACP peer's pipe breaks, calls waiting on it fail at once
+    instead of waiting for their timeout.
 
 ### Changed
 - Sleeping or waiting while holding a lock is now a compile error rather
