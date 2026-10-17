@@ -995,6 +995,8 @@ struct Thread {
     // its title over the stored one when its own rename is at least as new,
     // so another agentty holding an old copy can't undo a rename.
     std::int64_t renamed_at = 0;   // unix seconds
+    // The title came from the model (auto-titling), so it isn't generated again.
+    bool auto_titled = false;
 
     // Wire-only compaction records. Each entry says "upstream requests
     // built from this thread should replace messages[0..up_to_index)

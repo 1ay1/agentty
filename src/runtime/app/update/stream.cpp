@@ -42,6 +42,21 @@
 
 namespace agentty::app::detail {
 
+// Name the chat once it has a real first exchange, like chat apps do: the
+// first user message has a reply with text. Skipped when the user named it,
+// when it was already titled, while a request is out, and when turned off.
+Cmd maybe_auto_title(Model& m) {
+    const auto& t = m.d.current;
+    if (!m.d.persisted.auto_title || t.auto_titled || t.renamed_at > 0) return Cmd::none();
+    if (!m.s.titling.value.empty()) return Cmd::none();
+    const bool replied = std::ranges::any_of(t.messages, [](const Message& msg) {
+        return msg.role == Role::Assistant && !msg.text.empty();
+    });
+    if (!replied) return Cmd::none();
+    m.s.titling = t.id;
+    return cmd::generate_thread_title(m);
+}
+
 using json = nlohmann::json;
 
 namespace {
@@ -926,7 +941,8 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
     // here: every return below already carries kp, so this reaches the host
     // down all five paths without threading a second local through them.
     auto kp = Cmd::batch(Cmd(SaveThread{m.d.current}),
-                         cmd::kick_pending_tools(m));
+                         cmd::kick_pending_tools(m),
+                         maybe_auto_title(m));
     // Set by the idle-settle block below when the reply carries runnable
     // shell blocks; batched into whichever return path fires.
     Cmd block_toast = Cmd::none();

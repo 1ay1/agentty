@@ -587,6 +587,9 @@ struct NewThread {};
 // `m.d.threads` and a `Cmd::task` that does the directory walk +
 // JSON parse off the UI thread; this Msg lands when it's done.
 struct ThreadsLoaded    { std::vector<Thread> threads; };
+// A short title the model wrote for a thread after its first reply.
+// Empty `title` means it failed; the thread keeps the title it has.
+struct ThreadTitleGenerated { ThreadId id; std::string title; };
 // Result of a background single-thread load kicked off when the user
 // hits Enter on a row in the thread picker. The synchronous load was
 // ~30ms of JSON parse + ~3ms of rehydrate on real threads (786+ msgs)
@@ -1383,7 +1386,7 @@ using ThreadListMsg = std::variant<
     ThreadListRenameStart, ThreadListRenameChar, ThreadListRenameBackspace,
     ThreadListRenameDelete, ThreadListRenameCursor,
     ThreadListRenamePaste, ThreadListRenameSubmit, ThreadListRenameCancel,
-    ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded>;
+    ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded, ThreadTitleGenerated>;
 
 using PaletteMsg = std::variant<
     OpenPalette, ClosePalette, PaletteInput, PanelFilterPaste,

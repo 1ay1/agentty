@@ -334,6 +334,11 @@ struct LoopBreak {
 // `init()` returns immediately with an empty thread list.
 [[nodiscard]] Cmd load_threads_async();
 
+// Ask a cheap model for a short title for a thread, from its first user
+// message and reply, the way chat apps name a chat. Off the UI thread;
+// dispatches ThreadTitleGenerated (empty title on any failure).
+[[nodiscard]] Cmd generate_thread_title(const Model& m);
+
 // Connect/snapshot the MCP servers off the UI thread and dispatch
 // `PluginsUpdated{model}` when done — the reducer stores it in m.ui.plugins,
 // the single source the Plugins panel renders. reconnect=true respawns +

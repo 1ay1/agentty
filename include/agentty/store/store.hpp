@@ -296,6 +296,9 @@ struct Settings {
     // across every provider (Anthropic / Codex / OpenAI-compat reasoners).
     // Toggle: Ctrl+K → "Reasoning".
     bool                 show_reasoning = false;
+    // After the first reply, ask the cheap utility model for a short chat
+    // title, like chat apps do. Off keeps the first-line name.
+    bool                 auto_title = true;
 };
 
 template <class S>

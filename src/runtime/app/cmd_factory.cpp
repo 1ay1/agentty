@@ -42,6 +42,7 @@
 #include "agentty/tool/spec.hpp"
 #include "agentty/tool/tool.hpp"
 #include "agentty/tool/util/fs_helpers.hpp"
+#include "agentty/tool/util/utf8.hpp"   // safe_utf8_cut: trims the title prompt
 #include "agentty/io/persistence.hpp"
 #include "agentty/runtime/view/helpers.hpp"
 
@@ -2642,6 +2643,73 @@ Cmd oauth_exchange(auth::OAuthCode    code,
             }
         },
         std::move(code), std::move(verifier), std::move(state));
+}
+
+Cmd generate_thread_title(const Model& m) {
+    // The first user message and the first reply text, trimmed: enough to
+    // name the chat, cheap to send. Same cheap "utility" model compaction
+    // uses, so it never bills the flagship.
+    constexpr std::size_t kMaxBytes = 2000;
+    std::string user, reply;
+    for (const auto& msg : m.d.current.messages) {
+        if (msg.role == Role::User && user.empty() && !msg.text.empty()) user = msg.text;
+        else if (msg.role == Role::Assistant && !user.empty() && reply.empty() && !msg.text.empty())
+            reply = msg.text;
+        if (!user.empty() && !reply.empty()) break;
+    }
+    if (user.empty()) return Cmd::none();
+    user.resize(tools::util::safe_utf8_cut(user, kMaxBytes));
+    reply.resize(tools::util::safe_utf8_cut(reply, kMaxBytes));
+
+    struct TitleInputs {
+        ThreadId            id;
+        std::string         model;
+        std::string         user;
+        std::string         reply;
+        provider::Selection selection;
+    };
+    const std::string main_model = m.d.model_id.value;
+    return cmd::io_task_isolated(
+        [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token, TitleInputs in) {
+            provider::Request req;
+            req.model         = in.model;
+            req.max_tokens    = 64;
+            req.selection     = in.selection;
+            req.auth          = auth_snapshot(io, in.selection);
+            req.system_prompt =
+                "You name chat conversations. Reply with only a title of 3 to 6 "
+                "words that says what the user wants. No quotes, no trailing "
+                "period, no emoji, no preamble.";
+            Message ask;
+            ask.role = Role::User;
+            ask.text = "User:\n" + in.user +
+                       (in.reply.empty() ? std::string{} : "\n\nAssistant:\n" + in.reply) +
+                       "\n\nTitle:";
+            req.messages.push_back(std::move(ask));
+
+            std::string text;
+            bool failed = false;
+            try {
+                deps(io).stream(cap, std::move(req), [&](Msg ev) {
+                    // Msg groups events by domain; provider events are StreamMsg.
+                    const auto* s = std::get_if<msg::StreamMsg>(&ev);
+                    if (!s) return;
+                    if (const auto* d = std::get_if<StreamTextDelta>(s)) text += d->text;
+                    else if (std::holds_alternative<StreamError>(*s)) failed = true;
+                });
+            } catch (...) { failed = true; }
+            AGT_LOG(Model, Debug, "thread.title", "id={} model={} ok={} bytes={}",
+                    in.id.value, in.model, failed ? 0 : 1, text.size());
+            out.send(Msg{ThreadTitleGenerated{in.id, failed ? std::string{} : std::move(text)}});
+        },
+        TitleInputs{
+            .id        = m.d.current.id,
+            .model     = smart::utility_model(main_model, m.d.available_models, m.d.smart,
+                                              detail::active_provider_id(m)),
+            .user      = std::move(user),
+            .reply     = std::move(reply),
+            .selection = m.d.selection,
+        });
 }
 
 Cmd load_threads_async() {

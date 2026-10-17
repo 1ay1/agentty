@@ -975,6 +975,7 @@ parse_thread_meta_only(const json& j) {
             std::chrono::seconds{j["updated_at"].get<long long>()}};
     if (const auto it = j.find("renamed_at"); it != j.end() && it->is_number_integer())
         t.renamed_at = it->get<std::int64_t>();
+    t.auto_titled = j.value("auto_titled", false);
     return t;
 }
 
@@ -1555,6 +1556,7 @@ json thread_meta_to_json(const Thread& t) {
     j["updated_at"] = std::chrono::duration_cast<std::chrono::seconds>(
         t.updated_at.time_since_epoch()).count();
     if (t.renamed_at > 0) j["renamed_at"] = t.renamed_at;
+    if (t.auto_titled) j["auto_titled"] = true;
     // Wire-only compaction records. Persisting these lets a reloaded
     // thread keep sending the SAME wire payload it was sending before
     // shutdown — if the user compacted at turn 40 then closed the app,
@@ -2251,6 +2253,8 @@ struct AsyncWriter {
         job.meta.rag_mode_override = t.rag_mode_override;
         job.meta.created_at        = t.created_at;
         job.meta.updated_at        = t.updated_at;
+        job.meta.renamed_at        = t.renamed_at;
+        job.meta.auto_titled       = t.auto_titled;
         job.meta.compactions       = t.compactions;
         job.fps = fps;
 
@@ -2293,6 +2297,8 @@ struct AsyncWriter {
             full.meta.rag_mode_override = t.rag_mode_override;
             full.meta.created_at        = t.created_at;
             full.meta.updated_at        = t.updated_at;
+            full.meta.renamed_at        = t.renamed_at;
+            full.meta.auto_titled       = t.auto_titled;
             full.meta.compactions       = t.compactions;
             full.fps  = std::move(fps);
             full.full = t;
@@ -2872,6 +2878,7 @@ store::Settings load_settings_from_disk() {
         }
         s.show_changes_strip = j.value("show_changes_strip", false);
         s.show_reasoning     = j.value("show_reasoning", false);
+        s.auto_title         = j.value("auto_title", true);
 
         // Sandbox policy. Every field falls back to the CURRENT value rather
         // than a literal, so the defaults live in one place (the struct) and a
@@ -3248,6 +3255,8 @@ void save_settings_locked(persistence::Held held, const store::Settings& s) {
     // Only persisted when turned ON (default is off), keeping fresh configs clean.
     if (s.show_changes_strip) j["show_changes_strip"] = true;
     if (s.show_reasoning)     j["show_reasoning"] = true;
+    // Only persisted when turned OFF (default is on).
+    if (!s.auto_title)        j["auto_title"] = false;
 
     // Sandbox policy, written only once the user has edited it. Until then
     // the runtime keeps its shipped posture, so upgrading never silently

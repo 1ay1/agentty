@@ -5,6 +5,12 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Threads name themselves.** After the first reply, the cheap utility
+  model writes a short title (3 to 6 words) and it replaces the first-line
+  name, the way ChatGPT and Claude name a chat. A thread that began with a
+  paste no longer stays `[Pasted text ...`. It runs once per thread, off
+  the UI thread, and never replaces a name you chose. Turn it off with
+  `"auto_title": false` in `settings.json`.
 - **Rename a thread from the thread list.** [[Ctrl+R]] in the [[Ctrl+J]]
   list opens the highlighted thread's title for editing, so a thread that
   began with a paste no longer has to stay `[Pasted text ...`. The arrow

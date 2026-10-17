@@ -462,6 +462,80 @@ TEST_CASE("threads: a reload read before the rename landed keeps it") {
     CHECK(row(m).title == "theirs");
 }
 
+TEST_CASE("threads: a generated title names the open thread, cleaned") {
+    install_stub_deps();
+    Model m;
+    m.d.current.id    = ThreadId{"t-auto"};
+    m.d.current.title = "[Pasted text \xc2\xb7 3 lines \xc2\xb7 99 B]";
+    m.d.threads.push_back(m.d.current);
+    m.s.titling = m.d.current.id;
+
+    // Quotes, a trailing period and a line break are stripped.
+    agtest::fx::Store fx;
+    auto [next, cmd] = app::update(std::move(m),
+        Msg{ThreadTitleGenerated{ThreadId{"t-auto"}, "\"Fix the login bug.\"\n"}});
+    m = std::move(next);
+    agtest::fx::run(cmd, fx);
+    CHECK(m.d.current.title == "Fix the login bug");
+    CHECK(m.d.current.auto_titled);
+    CHECK(m.d.threads[0].title == "Fix the login bug");
+    CHECK(m.s.titling.value.empty());
+    REQUIRE(fx.saved_threads.size() == 1);
+    CHECK(fx.saved_threads[0].title == "Fix the login bug");
+
+    // A failed request (empty title) keeps the name it has.
+    m.d.current.title = "kept"; m.d.current.auto_titled = false;
+    m = app::update(std::move(m), Msg{ThreadTitleGenerated{ThreadId{"t-auto"}, ""}}).first;
+    CHECK(m.d.current.title == "kept");
+}
+
+TEST_CASE("threads: a generated title never replaces a chosen name") {
+    install_stub_deps();
+    Model m;
+    m.d.current.id         = ThreadId{"t-mine"};
+    m.d.current.title      = "my name";
+    m.d.current.renamed_at = 1'800'000'000;
+    m.d.threads.push_back(m.d.current);
+    m = app::update(std::move(m),
+        Msg{ThreadTitleGenerated{ThreadId{"t-mine"}, "Model title"}}).first;
+    CHECK(m.d.current.title == "my name");
+    CHECK(m.d.threads[0].title == "my name");
+
+    // Nor one for a thread you switched away from.
+    m.d.current.id = ThreadId{"elsewhere"};
+    m.d.threads[0].renamed_at = 0;
+    m = app::update(std::move(m),
+        Msg{ThreadTitleGenerated{ThreadId{"t-mine"}, "Model title"}}).first;
+    CHECK(m.d.threads[0].title == "my name");
+}
+
+TEST_CASE("threads: a title is asked for once, after the first reply") {
+    install_stub_deps();
+    Model m;
+    m.d.current.id = ThreadId{"t-ask"};
+    Message u; u.role = Role::User; u.text = "how do I fix the login bug";
+    m.d.current.messages.push_back(u);
+    CHECK(app::detail::maybe_auto_title(m).is_none());   // no reply yet
+
+    Message a; a.role = Role::Assistant; a.text = "Check the session cookie.";
+    m.d.current.messages.push_back(a);
+    CHECK_FALSE(app::detail::maybe_auto_title(m).is_none());
+    CHECK(m.s.titling == m.d.current.id);
+    CHECK(app::detail::maybe_auto_title(m).is_none());   // already asked
+
+    m.s.titling = {};
+    m.d.current.auto_titled = true;
+    CHECK(app::detail::maybe_auto_title(m).is_none());   // already titled
+
+    m.d.current.auto_titled = false;
+    m.d.current.renamed_at  = 1;
+    CHECK(app::detail::maybe_auto_title(m).is_none());   // the user named it
+
+    m.d.current.renamed_at = 0;
+    m.d.persisted.auto_title = false;
+    CHECK(app::detail::maybe_auto_title(m).is_none());   // turned off
+}
+
 TEST_CASE("threads: rename Esc, empty and unchanged write nothing") {
     install_stub_deps();
     Model m = two_threads_open();

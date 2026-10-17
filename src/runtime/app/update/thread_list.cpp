@@ -523,6 +523,32 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             auto reset = reset_to_fresh_thread(m);
             return Cmd::batch(std::move(save), std::move(reset));
         },
+        [&](ThreadTitleGenerated& e) -> Cmd {
+            if (m.s.titling == e.id) m.s.titling = {};
+            // The model's reply, cleaned the same way a typed name is. Quotes
+            // and a trailing period are the usual chat-model habits.
+            std::string title = persistence::clean_title(e.title);
+            while (!title.empty() && (title.front() == '"' || title.front() == '\''))
+                title.erase(0, 1);
+            while (!title.empty() && (title.back() == '"' || title.back() == '\''
+                                      || title.back() == '.'))
+                title.pop_back();
+            if (title.empty()) return Cmd::none();   // failed: keep what it has
+
+            // Only the open thread. If you switched away while the title was
+            // being made, the thread keeps its first-line name, the same as a
+            // failed request.
+            if (m.d.current.id != e.id || m.d.current.renamed_at > 0) return Cmd::none();
+            if (const auto it = std::ranges::find(m.d.threads, e.id, &Thread::id);
+                it != m.d.threads.end()) {
+                if (it->renamed_at > 0) return Cmd::none();   // never replace a chosen name
+                it->title       = title;
+                it->auto_titled = true;
+            }
+            m.d.current.title       = title;
+            m.d.current.auto_titled = true;
+            return Cmd(SaveThread{m.d.current});
+        },
         [&](ThreadsLoaded& e) -> Cmd {
             // A reload can be read from disk before a rename made a moment
             // ago has been written. Keep any row's newer rename.

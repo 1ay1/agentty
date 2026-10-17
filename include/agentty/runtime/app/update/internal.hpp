@@ -78,6 +78,8 @@ bool guard_truncated_tool_args(ToolUse& tc,
                                std::chrono::steady_clock::time_point now);
 nlohmann::json salvage_args(const ToolUse& tc);
 Cmd finalize_turn(Model& m, StopReason stop_reason = StopReason::Unspecified);
+// After a finished turn: ask for a chat title if the thread needs one.
+Cmd maybe_auto_title(Model& m);
 
 // Sync the persistent plan state (m.ui.todo.items) from a `todo` tool
 // call's args["todos"] array. Called live during arg streaming AND at
