@@ -54,8 +54,9 @@ namespace agentty::web_search_cfg {
 //
 // What a search can actually RETURN is capped per service: mcp-cpp asks the
 // service that answers for one result page and clamps the count to that
-// service's documented maximum (WebSearchService::max_count: 20 for Brave, Tavily,
-// Serper and Perplexity, 30 for DuckDuckGo, 100 for Firecrawl and Exa). So a
+// service's documented maximum (WebSearchService::max_count: 10 for Serply, 20
+// for Brave, Tavily, Serper and Perplexity, 30 for DuckDuckGo, 100 for Firecrawl
+// and Exa). So a
 // ceiling above a service's cap is accepted and clamped correctly, but yields
 // no more than that service gives. The ceiling is a limit, not a promise.
 inline constexpr int kCountMin       = 1;
@@ -71,10 +72,12 @@ inline constexpr int kMaxCountDefault = 20;
 // the two ever disagree. Primary cannot be empty; the other two can.
 inline constexpr std::string_view kServiceIds =
     "brave-free|ddg-free|tavily-free|firecrawl-free|"
-    "brave-api|tavily-api|firecrawl-api|exa-api|serper-api|perplexity-api";
+    "brave-api|tavily-api|firecrawl-api|exa-api|serper-api|serply-api|"
+    "perplexity-api";
 inline constexpr std::string_view kOptionalServiceIds =
     "none|brave-free|ddg-free|tavily-free|firecrawl-free|"
-    "brave-api|tavily-api|firecrawl-api|exa-api|serper-api|perplexity-api";
+    "brave-api|tavily-api|firecrawl-api|exa-api|serper-api|serply-api|"
+    "perplexity-api";
 // ISO 639-1, the languages the keyed services document support for.
 inline constexpr std::string_view kLanguages =
     "auto|en|de|fr|es|it|pt|nl|sv|da|fi|pl|cs|ru|uk|tr|ja|ko|zh|ar|he|hi";
