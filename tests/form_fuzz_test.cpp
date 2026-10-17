@@ -307,7 +307,7 @@ TEST_CASE("form fuzz: random keys through every real settings pane") {
             std::string label;
             if (std::uniform_int_distribution<int>(0, 29)(rng) == 0) {
                 label = "paste";
-                m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{random_paste(rng)})).first;
+                { auto msg = app::on_paste(m, maya::PasteEvent{random_paste(rng)}); m = app::update(std::move(m), std::move(msg)).first; }
             } else {
                 const auto ev = random_key(rng, label);
                 if (auto msg = app::on_key(m, ev))

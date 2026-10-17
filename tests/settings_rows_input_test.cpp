@@ -335,7 +335,7 @@ TEST_CASE("settings search: blank, backspace and paste behave") {
     m = press(std::move(m), ch(U' '));
     CHECK(m.ui.panel.get<pn::SettingsList>()->query.empty());
     // Paste lands in the search, not the composer.
-    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{"port\n"})).first;
+    { auto msg = app::on_paste(m, maya::PasteEvent{"port\n"}); m = app::update(std::move(m), std::move(msg)).first; }
     auto* hub = m.ui.panel.get<pn::SettingsList>();
     REQUIRE(hub != nullptr);
     CHECK(hub->query == "port");
@@ -362,7 +362,7 @@ TEST_CASE("threads: paste goes into the filter") {
     t.title = "alpha";
     m.d.threads.push_back(t);
     m = app::update(std::move(m), Msg{OpenThreadList{}}).first;
-    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{"alp"})).first;
+    { auto msg = app::on_paste(m, maya::PasteEvent{"alp"}); m = app::update(std::move(m), std::move(msg)).first; }
     REQUIRE(m.ui.panel.get<pn::ThreadList>() != nullptr);
     CHECK(m.ui.panel.get<pn::ThreadList>()->query == "alp");
     CHECK(m.ui.composer.text.empty());
@@ -568,14 +568,14 @@ TEST_CASE("threads: rename paste is one line, capped, and renames the open threa
     m.d.current.title = m.d.threads[0].title;
     m = press(std::move(m), ctrl(U'r'));
     for (int i = 0; i < 64; ++i) m = press(std::move(m), sk(maya::SpecialKey::Backspace));
-    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{"one\ntwo"})).first;
+    { auto msg = app::on_paste(m, maya::PasteEvent{"one\ntwo"}); m = app::update(std::move(m), std::move(msg)).first; }
     auto* p = m.ui.panel.get<pn::ThreadList>();
     REQUIRE(p != nullptr);
     CHECK(p->rename_input == "one two");
     CHECK(p->query.empty());
     CHECK(m.ui.composer.text.empty());
 
-    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{std::string(200, 'z')})).first;
+    { auto msg = app::on_paste(m, maya::PasteEvent{std::string(200, 'z')}); m = app::update(std::move(m), std::move(msg)).first; }
     p = m.ui.panel.get<pn::ThreadList>();
     REQUIRE(p != nullptr);
     CHECK(p->rename_input.size() == persistence::kTitleMaxBytes);
@@ -630,7 +630,7 @@ TEST_CASE("threads: rename edits at the caret; arrows, Home/End and Delete work"
     CHECK(draft() == "Ca bug");
 
     // A paste lands at the caret.
-    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{"[x] "})).first;
+    { auto msg = app::on_paste(m, maya::PasteEvent{"[x] "}); m = app::update(std::move(m), std::move(msg)).first; }
     CHECK(draft() == "[x] Ca bug");
     CHECK(caret() == 4);
     // Alt+Left (thread quick-cycle elsewhere) only moves the caret here.
@@ -652,7 +652,7 @@ TEST_CASE("threads: a capped paste mid-title keeps the text after the caret") {
     m = press(std::move(m), ctrl(U'r'));
     m = press(std::move(m), sk(maya::SpecialKey::Home));
     const std::string before = m.ui.panel.get<pn::ThreadList>()->rename_input;
-    m = app::update(std::move(m), app::on_paste(m, maya::PasteEvent{std::string(200, 'z')})).first;
+    { auto msg = app::on_paste(m, maya::PasteEvent{std::string(200, 'z')}); m = app::update(std::move(m), std::move(msg)).first; }
     const auto* p = m.ui.panel.get<pn::ThreadList>();
     REQUIRE(p != nullptr);
     CHECK(p->rename_input.size() == persistence::kTitleMaxBytes);
