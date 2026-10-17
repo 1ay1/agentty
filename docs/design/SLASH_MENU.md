@@ -122,14 +122,16 @@ their slash name on the right, so people learn the typed form.
 
 ## Layout
 
-- The menu is drawn by the composer, directly above its top border, at
-  the composer's width minus 2. It's not a full overlay: the thread
-  above stays visible and doesn't reflow.
+- The menu floats over the bottom of the thread, its last row right on
+  top of the composer's border. It takes no row in the layout, so opening
+  or closing it moves nothing: the composer, the status bar and the frame
+  height stay put. It's opaque, so the thread under it doesn't show
+  through its blank cells.
 - Height: up to 8 rows plus the hint line. On a short terminal the hint
   goes first, then rows, down to 3.
-- It reuses `maya::CompletionMenu` through a new `AppLayout::above_composer`
-  slot. Rows, match highlighting, scroll hints and the argument line come
-  from the widget.
+- It reuses `maya::CompletionMenu` through `AppLayout::above_composer`,
+  which floats it in a z-stack over the base. Rows, match highlighting,
+  scroll hints and the argument line come from the widget.
 - The hint row under the composer switches to
   `↹ complete  ↵ run  ↑↓ pick  esc hide` while the menu is open.
 - A one-line `/name ...` pasted into an empty composer stays text instead

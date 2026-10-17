@@ -48,7 +48,10 @@ for s in steps:
     os.write(fd, KEYS.get(s, s.encode()))
     pump(0.4)
 pump(0.6)
-for line in screen.display:
-    if line.strip():
+full = os.environ.get("FULL")
+for i, line in enumerate(screen.display):
+    if full:
+        print(f"{i:2d}|{line.rstrip()}")
+    elif line.strip():
         print(line.rstrip())
 os.kill(pid, 9)
