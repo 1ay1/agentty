@@ -261,15 +261,20 @@ constexpr const char* kHomeToolSubdirs[] = {
 // .ssh is at %USERPROFILE%\\.ssh, .aws at %USERPROFILE%\\.aws, just like
 // posix). claybin's windows compiler takes NATIVE paths; these are native.
 #if defined(_WIN32)
-constexpr const char* kSystemReadRootsWin[] = {
-    "C:\\Windows",           // the toolchain: loader, DLLs, System32
-    "C:\\Program Files",     // installed tools
-    "C:\\Program Files (x86)",
+// {env var, fallback}. Windows isn't always on C:, so read the real roots.
+constexpr std::pair<const char*, const char*> kSystemReadRootsWin[] = {
+    {"SystemRoot", "C:\\Windows"},                  // loader, DLLs, System32
+    {"ProgramFiles", "C:\\Program Files"},           // installed tools
+    {"ProgramFiles(x86)", "C:\\Program Files (x86)"},
 };
 // "readable machine config", the %ProgramData% half of what /etc is on posix.
-constexpr const char* kEtcReadableWin[] = {
-    "C:\\ProgramData",       // package manager metadata, host ssh config
+constexpr std::pair<const char*, const char*> kEtcReadableWin[] = {
+    {"ProgramData", "C:\\ProgramData"},  // package manager metadata, host ssh config
 };
+[[nodiscard]] std::string win_dir(const std::pair<const char*, const char*>& d) {
+    const char* v = std::getenv(d.first);
+    return v && *v ? std::string{v} : std::string{d.second};
+}
 constexpr const char* kHomeToolSubdirsWin[] = {
     "\\.cargo\\bin", "\\.rustup",   // Rust
     "\\go\\bin",                     // Go
@@ -351,8 +356,8 @@ constexpr const char* kHomeToolSubdirsWin[] = {
     // command. On Windows the lists are native paths (kSystemReadRootsWin etc.);
     // the home env var is USERPROFILE there and HOME nowhere else.
 #if defined(_WIN32)
-    for (const char* r : kSystemReadRootsWin) p.system_read_roots.emplace_back(r);
-    for (const char* f : kEtcReadableWin) p.etc_readable.emplace_back(f);
+    for (const auto& r : kSystemReadRootsWin) p.system_read_roots.push_back(win_dir(r));
+    for (const auto& f : kEtcReadableWin) p.etc_readable.push_back(win_dir(f));
     if (cfg.fs_scope == sandbox_cfg::FsScope::Toolchain) {
         if (const char* home = std::getenv("USERPROFILE"); home && *home) {
             for (const char* sub : kHomeToolSubdirsWin)

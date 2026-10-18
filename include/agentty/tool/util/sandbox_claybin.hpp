@@ -75,12 +75,6 @@ struct Posture {
     bool scope_ipc{true};
     bool close_inherited_fds{true};
 
-    // Windows only: opt OUT of the host-side ACL stamping that spawn_argv
-    // otherwise does (allow_host_acl_mutation=true is hardcoded there). A
-    // diagnostic lever for the 0xc0000142 isolation work -- production never
-    // sets it false.
-    bool test_no_acl_stamps{false};
-
     // ── resources ────────────────────────────────────────────────
     std::uint64_t tmp_bytes{512ull * 1024 * 1024};
     std::uint64_t memory_bytes{0};   // 0 = no cap

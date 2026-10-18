@@ -538,9 +538,7 @@ SpawnResult spawn_argv(const Posture& p, const std::vector<std::string>& argv_in
     // is an appcontainer that can reach nothing the user asked the command to
     // reach, which makes the sandbox useless rather than safe. The compile
     // report still grades the walls honestly (partial, per-object semantics).
-    // test_no_acl_stamps: the 0xc0000142 isolation lever -- production never
-    // sets it.
-    opts.allow_host_acl_mutation = !p.test_no_acl_stamps;
+    opts.allow_host_acl_mutation = true;
 
     auto compiled = ::clay::windows::compile(sealed, ::clay::windows::probe_host(), opts);
     if (!compiled) {
@@ -642,12 +640,14 @@ SpawnResult spawn_argv(const Posture& p, const std::vector<std::string>& argv_in
     // the kill switch, the process handle the waitable exit -- both owned by
     // the caller from here.
     out.pidfd = static_cast<int>(reinterpret_cast<intptr_t>(spawned->process));
-    out.kill_tree = [job = spawned->job]() -> bool {
-        // closing the job handle is the kill: KILL_ON_JOB_CLOSE takes the
-        // tree down, and a grandchild cannot escape the job. Terminate
-        // first so the exit is prompt rather than at handle-close time.
+    // The closure owns the job handle. Dropping it closes the job, and
+    // KILL_ON_JOB_CLOSE takes down anything the command left behind.
+    std::shared_ptr<void> job{spawned->job, [](void* h) {
+        if (h) ::CloseHandle(static_cast<HANDLE>(h));
+    }};
+    out.kill_tree = [job = std::move(job)]() -> bool {
         if (!job) return false;
-        return ::TerminateJobObject(static_cast<HANDLE>(job), 1) != FALSE;
+        return ::TerminateJobObject(static_cast<HANDLE>(job.get()), 1) != FALSE;
     };
     // No broker on windows: seccomp user-notify has no equivalent, so
     // supervisor_fd and service_broker keep their sentinel defaults.

@@ -171,18 +171,14 @@ int main(int argc, char** argv) {
     //
     // argv[1] optionally isolates ONE variable per run (the rest stays the
     // shipped default):
-    //   no-acl        spawn must skip the host-side ACL stamps
     //   no-net        net_mode = None (no capability SIDs in the token)
     //   no-wx         wx_protect = false
-    //   cwd           workdir = build dir (the live_check working shape)
     const char* isolate = argc > 1 ? argv[1] : "";
     {
         sb::set_config(cfgn::Config{});
         auto posture = sb::claybin_posture_for_test();
         if (std::string_view{isolate} == "no-net") posture.net_mode = 1;
         if (std::string_view{isolate} == "no-wx") posture.wx_protect = false;
-        if (std::string_view{isolate} == "no-acl") posture.test_no_acl_stamps = true;
-        if (std::string_view{isolate} == "cwd") posture.cwd = "C:\\_Workspace_\\claybin\\build";
         std::printf("\n=== live spawn (shipped posture%s%s)\n",
                     *isolate ? " isolate=" : "", isolate);
         std::fflush(stdout);
