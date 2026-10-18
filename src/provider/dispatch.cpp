@@ -52,7 +52,7 @@ StreamResult dispatch_stream(const maya::unlocked& cap, const ProviderRouter& ro
     AGT_LOG(Model, Debug, "dispatch.turn",
             "route={} provider={} model={} effort={} tools={} json_protocol={} "
             "show_reasoning={} ctx_window={} max_tokens={} retry={}",
-            route_tag(sel), sel.provider_id(), req.model,
+            route_tag(sel), sel.catalog_id(), req.model,
             req.effort.empty() ? "off" : req.effort, req.tools.size(),
             req.json_protocol ? 1 : 0, req.show_reasoning ? 1 : 0,
             req.context_window, req.max_tokens, req.retry_count);

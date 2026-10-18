@@ -471,7 +471,8 @@ inline auto visual_parts(const ApiKeyInput& s) {
                            visual::ref(s.provider),
                            visual::ref(s.provider_label),
                            s.key_input.size(),      // SECRET: length only
-                           s.cursor);
+                           s.cursor,
+                           s.key_required);
 }
 static_assert(visual::parts_cover_all<ApiKeyInput>);
 

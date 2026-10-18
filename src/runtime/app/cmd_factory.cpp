@@ -2677,7 +2677,10 @@ Cmd generate_thread_title(const Model& m) {
         [](Io io, const maya::unlocked& cap, maya::Sink<Msg> out, std::stop_token, TitleInputs in) {
             provider::Request req;
             req.model         = in.model;
-            req.max_tokens    = 64;
+            // A few words, but a thinking model that ignores `quick` still
+            // needs room to think before it answers.
+            req.max_tokens    = 1024;
+            req.quick         = true;
             req.selection     = in.selection;
             req.auth          = auth_snapshot(io, in.selection);
             req.system_prompt =
@@ -2693,6 +2696,7 @@ Cmd generate_thread_title(const Model& m) {
 
             std::string text;
             bool failed = false;
+            bool cut_off = false;
             try {
                 deps(io).stream(cap, std::move(req), [&](Msg ev) {
                     // Msg groups events by domain; provider events are StreamMsg.
@@ -2700,10 +2704,15 @@ Cmd generate_thread_title(const Model& m) {
                     if (!s) return;
                     if (const auto* d = std::get_if<StreamTextDelta>(s)) text += d->text;
                     else if (std::holds_alternative<StreamError>(*s)) failed = true;
+                    else if (const auto* f = std::get_if<StreamFinished>(s))
+                        cut_off = f->stop_reason == StopReason::MaxTokens;
                 });
             } catch (...) { failed = true; }
-            AGT_LOG(Model, Debug, "thread.title", "id={} model={} ok={} bytes={}",
-                    in.id.value, in.model, failed ? 0 : 1, text.size());
+            // The transport's empty-turn placeholder and a reply cut off by
+            // the token limit are not titles.
+            if (cut_off || text == provider::openai::kEmptyTurnText) failed = true;
+            AGT_LOG(Model, Debug, "thread.title", "id={} model={} ok={} cut_off={} bytes={}",
+                    in.id.value, in.model, failed ? 0 : 1, cut_off ? 1 : 0, text.size());
             out.send(Msg{ThreadTitleGenerated{in.id, failed ? std::string{} : std::move(text)}});
         },
         TitleInputs{

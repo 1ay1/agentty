@@ -24,6 +24,7 @@
 #include <variant>
 #include <vector>
 
+#include "agentty/provider/registry.hpp"
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/view/palette.hpp"
 
@@ -368,27 +369,38 @@ Element panel_device_waiting(const login::DeviceWaiting& s) {
 
 Element panel_api_key(const login::ApiKeyInput& s) {
     const bool anthropic = s.provider.empty();
+    const bool custom = !anthropic && !provider::preset_for(s.provider);
+    const bool optional = custom && !s.key_required;
     std::vector<Element> prose;
     prose.push_back(body_text(
         anthropic
-            ? "  Paste an sk-ant-\xe2\x80\xa6 key. It will be saved to "
-              "~/.config/agentty/credentials.json (0600)."
+            ? "  Paste an sk-ant-\xe2\x80\xa6 key. It's saved encrypted under "
+              "~/.agentty/credentials."
+        : optional
+            ? "  Paste this host's API key, or leave it empty if the server "
+              "needs none. A key is saved encrypted under ~/.agentty/credentials."
+        : custom
+            ? "  This host answered 401: it needs an API key. Paste it here; "
+              "it's saved encrypted under ~/.agentty/credentials."
             : "  Paste your " + s.provider_label + " API key to switch to "
-              "it. It's saved to ~/.config/agentty settings so you won't "
-              "be asked again.",
+              "it. It's saved encrypted under ~/.agentty/credentials so you "
+              "won't be asked again.",
         fg_dim(muted)));
     // The KEY never reaches the widget — panel::Secret carries a count.
     maya::panel::Secret sec;
     sec.filled      = s.key_input.size();
     sec.caret       = std::min<std::size_t>(
         static_cast<std::size_t>(std::max(0, s.cursor)), s.key_input.size());
-    sec.placeholder = anthropic ? "sk-ant-\xe2\x80\xa6" : "paste API key\xe2\x80\xa6";
+    sec.placeholder = anthropic ? "sk-ant-\xe2\x80\xa6"
+                    : optional  ? "API key (optional)\xe2\x80\xa6"
+                                : "paste API key\xe2\x80\xa6";
     const char* back = login::has_parent(s.origin) ? "esc back" : "esc cancel";
+    const std::string enter = optional && s.key_input.empty()
+        ? "\xe2\x86\xb5 continue without a key \xc2\xb7 "
+        : "\xe2\x86\xb5 submit \xc2\xb7 ";
     return input_panel(
         " " + (anthropic ? std::string{"Anthropic"} : s.provider_label) + " API key ",
-        std::move(prose), std::move(sec),
-        std::string{"\xe2\x86\xb5 submit \xc2\xb7 "} + back,
-        std::string{"\xe2\x86\xb5 submit \xc2\xb7 "} + back);
+        std::move(prose), std::move(sec), enter + back, enter + back);
 }
 
 // Connect probe in flight: name the host and what's being tried so the

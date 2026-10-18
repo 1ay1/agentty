@@ -307,3 +307,29 @@ TEST_CASE("body: an empty system prompt adds no empty message") {
     for (const auto& m : b["messages"])
         CHECK(m["role"] != "system");
 }
+
+// ═══ Quick utility calls ═════════════════════════════════════════════════════════════
+
+TEST_CASE("body: a quick call asks a custom host not to think") {
+    // A thinking model on llama.cpp spent a 64-token title budget on
+    // reasoning_content and returned no text.
+    auto ep = oa::Endpoint::from_spec("https://pod-8888.proxy.runpod.net/v1");
+    auto req = base(ep);
+    req.quick = true;
+    const json b = oa::build_request_body(req);
+    CHECK(b["chat_template_kwargs"]["enable_thinking"] == false);
+
+    req.quick = false;                                 // normal turn: untouched
+    CHECK(!oa::build_request_body(req).contains("chat_template_kwargs"));
+
+    req.quick  = true;                                 // asked for effort: honour it
+    req.effort = "low";
+    CHECK(!oa::build_request_body(req).contains("chat_template_kwargs"));
+}
+
+TEST_CASE("body: a quick call never sends chat_template_kwargs to a preset") {
+    // Hosted schemas are strict; an unknown field is a 400.
+    auto req = base(oa::Endpoint::from_spec("openai"));
+    req.quick = true;
+    CHECK(!oa::build_request_body(req).contains("chat_template_kwargs"));
+}

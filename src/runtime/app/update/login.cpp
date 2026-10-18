@@ -189,6 +189,7 @@ Cmd host_probed(Model& m, HostProbed r) {
             login::ApiKeyInput api;
             api.provider       = r.spec;
             api.provider_label = r.spec;    // a custom host IS its own label
+            api.key_required   = true;
             api.origin         = std::move(origin);
             m.ui.login         = std::move(api);
             auto toast = set_status_toast(
@@ -902,29 +903,18 @@ Cmd login_submit(Model& m) {
             return Cmd::none();
         }
 
-        // Remote (TLS) custom hosts need an API key — local servers
-        // (http://, bare host:port) conventionally don't. For TLS hosts,
-        // hand off to the ApiKeyInput modal instead of committing immediately:
-        // the user pastes a key, it's saved to provider_keys[spec], and the
-        // existing ApiKeyInput arm commits the switch. Esc at the key prompt
-        // dispatches CloseLogin → no switch (matching how Esc works for
-        // every other login sub-state). For non-TLS hosts, fall through to
-        // the keyless commit path below.
-        const bool needs_key = provider::parse_selection(spec)
-                                   .openai_endpoint.use_tls;
-        if (needs_key) {
+        // Probe first, TLS or not. Plenty of remote hosts need no key (a
+        // RunPod or tunnelled llama.cpp), and the probe's 401/403 is the
+        // honest answer to "does it want one" (host_probed then opens the
+        // key prompt). A host that already has a saved key goes straight to
+        // that prompt so the key can be checked or changed.
+        std::string existing_key;
+        if (auto it = m.d.persisted.provider_keys.find(spec);
+            it != m.d.persisted.provider_keys.end())
+            existing_key = it->second;
+        if (!existing_key.empty()) {
             std::string label = provider::provider_display_name(
                 provider::parse_selection(spec));
-            // Pre-fill the key field with any key already saved for this
-            // spec so re-entering a known host shows its current key (masked)
-            // for confirmation/edit, not a blank field.
-            std::string existing_key;
-            {
-                const auto& settings = m.d.persisted;
-                if (auto it = settings.provider_keys.find(spec);
-                    it != settings.provider_keys.end())
-                    existing_key = it->second;
-            }
             // Capture size BEFORE the move: designated initializers evaluate
             // in declaration order (key_input before cursor), so
             // std::move(existing_key) into .key_input would leave
@@ -942,7 +932,7 @@ Cmd login_submit(Model& m) {
             return Cmd::none();
         }
 
-        // Non-TLS (local) host: no key needed. PROBE before committing —
+        // No saved key: probe before committing —
         // dial the model list on a worker (configured path → /v1/models →
         // Ollama /api/tags) and only commit on an answer, with the DETECTED
         // dialect. The modal shows "probing…"; failure returns here with
@@ -967,6 +957,22 @@ Cmd login_submit(Model& m) {
                               || key.back() == ' ' || key.back() == '\t'))
             key.pop_back();
         if (key.empty()) {
+            // A custom host may need no key at all: check it without one
+            // rather than bouncing back to the sign-in menu.
+            if (!provider.empty() && !provider::preset_for(provider)
+                && !api->key_required
+                && provider::parse_selection(provider).kind == provider::Kind::OpenAI) {
+                const auto attempt_id = cmd::next_codex_login_attempt_id();
+                m.ui.login = login::HostProbing{
+                    .spec = provider, .attempt_id = attempt_id,
+                    .origin = login::origin::HostInput{provider}};
+                return cmd::probe_host_async(std::move(provider), attempt_id);
+            }
+            if (api->key_required) {
+                // Stay on the prompt: the host said it needs one.
+                return set_status_toast(m, provider_label + " needs an API key",
+                                        std::chrono::seconds{4});
+            }
             m.ui.login = login::Failed{"no key entered"};
             return Cmd::none();
         }

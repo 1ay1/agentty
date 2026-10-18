@@ -102,6 +102,11 @@ struct Request {
     // the DISPLAY, which the view handles. Off by default (dead-air-free wire).
     bool show_reasoning = false;
 
+    // A short utility call (thread title, summary label): the answer is a
+    // few words, so a thinking model should not think. Transports that can
+    // say "don't think" to the server do; others ignore it.
+    bool quick = false;
+
     // Stable host-conversation identity. Providers with native server-side
     // threads (notably Codex app-server) use this to retain the provider
     // thread instead of serialising the entire transcript into every prompt.
@@ -170,6 +175,8 @@ void lower_shared(TReq& dst, Request& src) {
     // Request to grow a field it ignores.
     if constexpr (requires { dst.show_reasoning = src.show_reasoning; })
         dst.show_reasoning = src.show_reasoning;
+    if constexpr (requires { dst.quick = src.quick; })
+        dst.quick = src.quick;
 }
 
 // How a streamed turn ended, as a value (defined in stream_epilogue.hpp, which

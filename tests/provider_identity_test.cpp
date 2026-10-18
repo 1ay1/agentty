@@ -202,3 +202,31 @@ TEST_CASE("routing: slot tags match the dispatch.turn route vocabulary") {
     CHECK(provider::slot_tag(provider::RouteSlot::Copilot)   == "copilot");
     CHECK(provider::slot_tag(provider::RouteSlot::Kimi)      == "kimi");
 }
+
+#include "agentty/provider/auth_state.hpp"
+#include "agentty/store/store.hpp"
+
+TEST_CASE("signed_in: a saved custom host counts, even with no key") {
+    store::Settings s;
+    auth::AuthView v;
+    const std::string tls   = "https://pod-8888.proxy.runpod.net/v1";
+    const std::string local = "http://127.0.0.1:8080/v1";
+    CHECK_FALSE(provider::signed_in(tls, s, v));     // never added
+    s.provider_keys[tls]   = "";                     // keyless remote host
+    s.provider_keys[local] = "";                     // keyless local host
+    CHECK(provider::signed_in(tls, s, v));
+    CHECK(provider::signed_in(local, s, v));
+    s.provider_keys[tls] = "sk-x";
+    CHECK(provider::signed_in(tls, s, v));
+}
+
+TEST_CASE("signed_in: hosted presets still need a real key") {
+    store::Settings s;
+    auth::AuthView v;
+    s.provider_keys["groq"] = "";
+    CHECK_FALSE(provider::signed_in("groq", s, v));
+    s.provider_keys["groq"] = "gsk-x";
+    CHECK(provider::signed_in("groq", s, v));
+    // An empty id is Anthropic, never a custom host.
+    CHECK_FALSE(provider::signed_in("", s, v));
+}

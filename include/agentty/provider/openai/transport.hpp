@@ -91,9 +91,17 @@ struct Request {
     // uses it to decide whether to send `think:true` (enable the native
     // reasoning field). Off by default keeps the dead-air-free wire unchanged.
     bool show_reasoning = false;
+    // Mirrors provider::Request::quick: ask the server not to think.
+    bool quick = false;
 };
 
 using EventSink = std::function<void(Msg)>;
+
+// What the transport writes when a turn ends with no text and no tool call,
+// so the bubble isn't blank. Not model output: callers that want only the
+// model's words (thread titles) must drop it.
+inline constexpr std::string_view kEmptyTurnText =
+    "(the model returned an empty or unparseable response)";
 
 // Runs a streaming chat-completions request synchronously on the calling
 // thread. Each SSE delta is translated into an agentty Msg via `sink`.

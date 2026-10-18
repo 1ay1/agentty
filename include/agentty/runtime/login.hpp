@@ -133,6 +133,8 @@ struct ApiKeyInput {
     // lookup.
     std::string provider;        // canonical id; empty = Anthropic
     std::string provider_label;  // display name for the panel title
+    // The server already answered 401/403, so a key is required, not optional.
+    bool        key_required = false;
     Origin origin = origin::Nowhere{};     // Esc target (one level up)
 };
 

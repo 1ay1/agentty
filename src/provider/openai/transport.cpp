@@ -560,8 +560,7 @@ void ensure_nonempty_turn(StreamCtx& ctx) {
     if (ctx.any_text_flushed) return;
     if (ctx.any_structured_tool) return;
     if (ctx.stop_reason == StopReason::ToolUse) return;  // salvaged a call
-    ctx.sink(StreamTextDelta{
-        "(the model returned an empty or unparseable response)"});
+    ctx.sink(StreamTextDelta{std::string{kEmptyTurnText}});
     ctx.any_text_flushed = true;
 }
 
@@ -2085,13 +2084,11 @@ http::Headers build_request_headers(const AuthHeader& auth,
     // token (or a custom raw header). See auth::bearer_token — the single
     // source of truth for OpenAI-family token extraction.
     std::string key = auth::bearer_token(auth);
-    // Diagnostic: which credential is going out (length + last-4 only, never
-    // the full key). Enable with AGENTTY_LOG=debug,chan=openai.auth to debug a
-    // 401 — an empty/short key means the provider switch didn't install this
-    // host's credential (wrong active auth header).
-    util::dbglog("openai.auth",
-        "host=" + endpoint.host + " key_len=" + std::to_string(key.size())
-        + (key.size() >= 4 ? " tail=" + key.substr(key.size() - 4) : ""));
+    // Which credential goes out: length + last 4 only, never the key.
+    // Debug, so it's there when chasing a 401 and quiet otherwise.
+    AGT_LOG(Wire, Debug, "openai.auth", "host={} key_len={}{}", endpoint.host,
+            key.size(), key.size() >= 4 ? " tail=" + key.substr(key.size() - 4)
+                                        : std::string{});
     if (key.empty()) return h;
     if (!endpoint.auth_header_name.empty()) {
         // Custom header name (--auth-header): key goes out raw, no "Bearer "
@@ -2234,9 +2231,11 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
         // the endpoint). Fall through to chat: a degraded turn beats none.
     }
 
-    // Ollama and other local servers accept an empty key. Only error out when
-    // the endpoint is a TLS/hosted one that needs auth.
-    if (req.endpoint.use_tls && is_empty(req.auth)) {
+    // Only a known hosted provider is sure to need a key. A custom host may
+    // not (a RunPod or tunnelled llama.cpp is TLS and keyless), so send it
+    // and let the server answer; a 401 then says what to do.
+    const bool custom_host = provider::preset_for(req.endpoint.label) == nullptr;
+    if (req.endpoint.use_tls && is_empty(req.auth) && !custom_host) {
         sink(StreamError{"not authenticated — set the provider's API key "
                          "(e.g. OPENAI_API_KEY) or run 'agentty login'"});
         return provider::StreamResult::failed("not authenticated");
@@ -2358,7 +2357,10 @@ provider::StreamResult run_stream_sync(Request req, EventSink sink, http::Cancel
             if (auto said = provider_error_message(sc.error_body); !said.empty())
                 msg += ": " + said;
             if (sc.http_status == 401 || sc.http_status == 403)
-                msg += "  (check the provider API key)";
+                msg += provider::preset_for(req.endpoint.label)
+                    ? "  (check the provider API key)"
+                    : "  (this host wants an API key: add it in the provider "
+                      "picker, Ctrl-P, or pass -k)";
             // A 404 on a local OpenAI-compatible server is one of TWO things:
             // the chat path doesn't exist on this server (custom-host spec
             // missing its /v1 prefix — llama.cpp only serves /v1/…), or the
@@ -2713,6 +2715,13 @@ json build_request_body(const Request& req) {
     // model's capabilities.
     if (!req.effort.empty())
         body["reasoning_effort"] = req.effort;
+
+    // A quick utility call on a custom host: turn thinking off. llama.cpp,
+    // vLLM and SGLang pass this to the chat template; servers that don't
+    // know it ignore it. Hosted presets never get it (strict schemas 400).
+    if (req.quick && req.effort.empty()
+        && provider::preset_for(req.endpoint.label) == nullptr)
+        body["chat_template_kwargs"] = {{"enable_thinking", false}};
 
     return body;
 }
@@ -3607,7 +3616,11 @@ int probe_loaded_window(Io /*io*/, const AuthHeader& auth, const Endpoint& endpo
 std::vector<ModelInfo> list_models(Io io, const AuthHeader& auth, const Endpoint& endpoint,
                                    bool force_probe) {
     std::vector<ModelInfo> result;
-    if (endpoint.use_tls && is_empty(auth)) return result;
+    // A known hosted provider with no key would only 401. A custom host may
+    // need no key at all, so ask it.
+    if (endpoint.use_tls && is_empty(auth)
+        && provider::preset_for(endpoint.label) != nullptr)
+        return result;
 
     http::Request hreq;
     hreq.method = http::HttpMethod::Get;

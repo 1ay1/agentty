@@ -1,7 +1,9 @@
-// custom_host_key_prompt_test — the CustomHostInput → ApiKeyInput handoff for
-// TLS custom hosts. A remote https://host/path needs an API key before the
-// provider switch commits; a local http://host:port or bare host:port commits
-// keyless as before. Esc at the key prompt cancels the whole switch.
+// custom_host_key_prompt_test — how a custom host gets added. Every host is
+// probed first, TLS or not, because plenty of remote hosts need no key. The
+// key prompt opens only when the probe gets a 401/403 (key required) or the
+// host already has a saved key (to check or change it). On an optional
+// prompt, an empty Enter probes keyless instead of failing. Esc at the key
+// prompt cancels the switch.
 //
 // Pure reducer test: stubs deps() with an in-memory store::Settings and
 // sets XDG_CONFIG_HOME to a temp dir so auth::load_credentials() returns
@@ -63,7 +65,7 @@ TEST_CASE("custom host key prompt transitions") {
     // Ensure parse_selection's custom_auth_header() read is deterministic.
     agentty::provider::set_custom_auth_header(::agentty::IoAccess::grant(), "");
 
-    // ── Case 1: TLS host, no saved key → ApiKeyInput with empty key field ──
+    // ── Case 1: TLS host, no saved key → probe it, no key prompt ──
     {
         agentty::store::Settings s;
         install_stub_deps(s);
@@ -71,20 +73,49 @@ TEST_CASE("custom host key prompt transitions") {
         m.d.persisted = s;   // the record, as init() seeds it
         m.ui.login = login::CustomHostInput{.host_input = "https://chat.example.org/api"};
         auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
-        auto* api = std::get_if<login::ApiKeyInput>(&m2.ui.login);
-        check(api != nullptr,
-              "1: TLS host transitions to ApiKeyInput (not committed)");
+        auto* hp = std::get_if<login::HostProbing>(&m2.ui.login);
+        check(hp != nullptr,
+              "1: TLS host with no key is probed (a RunPod pod needs none)");
+        check(hp && hp->spec == "https://chat.example.org/api",
+              "1: probing the full URL spec");
+        check(!m2.s.models_loading, "1: no commit while probing");
+
+        // The server answers 401 → the key prompt opens, marked required.
+        agentty::HostProbed needs;
+        needs.attempt_id = hp ? hp->attempt_id : 0;
+        needs.spec = "https://chat.example.org/api";
+        needs.ok = false;
+        needs.needs_key = true;
+        needs.error = "HTTP 401";
+        auto [m3, cmd3] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m2), msg::LoginMsg{std::move(needs)});
+        auto* api = std::get_if<login::ApiKeyInput>(&m3.ui.login);
+        check(api != nullptr, "1: a 401 opens the key prompt");
         check(api && api->provider == "https://chat.example.org/api",
               "1: ApiKeyInput.provider is the full URL spec (persistence key)");
-        check(api && api->provider_label == "chat.example.org",
-              "1: ApiKeyInput.provider_label is the host-only display name");
-        check(api && api->key_input.empty(),
-              "1: key_input is empty (no saved key to pre-fill)");
-        check(api && api->cursor == 0,
-              "1: cursor at 0 for empty key field");
-        // commit_provider_switch did NOT run: models_loading stays false.
-        check(!m2.s.models_loading,
-              "1: no commit (models_loading false)");
+        check(api && api->key_required, "1: the key is marked required");
+
+        // Enter on an empty required key stays on the prompt.
+        auto [m4, cmd4] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m3), msg::LoginMsg{agentty::LoginSubmit{}});
+        check(std::holds_alternative<login::ApiKeyInput>(m4.ui.login),
+              "1: empty submit on a required key stays on the prompt");
+        check(!m4.s.models_loading, "1: still no commit");
+        (void)cmd; (void)cmd3; (void)cmd4;
+    }
+
+    // ── Case 1b: optional key prompt, empty Enter → probe keyless ──
+    {
+        agentty::store::Settings s;
+        install_stub_deps(s);
+        agentty::Model m;
+        m.d.persisted = s;
+        m.ui.login = login::ApiKeyInput{
+            .provider = "https://pod-8888.proxy.runpod.net/v1",
+            .provider_label = "pod-8888.proxy.runpod.net"};
+        auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
+        auto* hp = std::get_if<login::HostProbing>(&m2.ui.login);
+        check(hp != nullptr, "1b: empty key on a custom host probes keyless");
+        check(hp && hp->spec == "https://pod-8888.proxy.runpod.net/v1",
+              "1b: probing the host the prompt was for");
         (void)cmd;
     }
 
@@ -99,7 +130,7 @@ TEST_CASE("custom host key prompt transitions") {
         auto [m2, cmd] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
         auto* api = std::get_if<login::ApiKeyInput>(&m2.ui.login);
         check(api != nullptr,
-              "2: TLS host with saved key still transitions to ApiKeyInput");
+              "2: TLS host with a saved key opens the key prompt to check it");
         check(api && api->key_input == "sk-test-key",
               "2: key_input pre-filled with the saved key (2a)");
         check(api && api->cursor == 11,
@@ -190,14 +221,15 @@ TEST_CASE("custom host key prompt transitions") {
     // ── Case 5: Esc at the key prompt → cancel the whole switch ──
     {
         agentty::store::Settings s;
+        s.provider_keys["https://chat.example.org/api"] = "sk-test-key";
         install_stub_deps(s);
         agentty::Model m;
         m.d.persisted = s;   // the record, as init() seeds it
-        // First submit a TLS host to land in ApiKeyInput.
+        // A host with a saved key lands in ApiKeyInput.
         m.ui.login = login::CustomHostInput{.host_input = "https://chat.example.org/api"};
         auto [m1, cmd1] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m), msg::LoginMsg{agentty::LoginSubmit{}});
         check(std::holds_alternative<login::ApiKeyInput>(m1.ui.login),
-              "5: setup — TLS host entered ApiKeyInput");
+              "5: setup — host with saved key entered ApiKeyInput");
         // Now press Esc (CloseLogin).
         auto [m2, cmd2] = ::agentty::app::detail::step(::agentty::app::detail::login_update, std::move(m1), msg::LoginMsg{agentty::CloseLogin{}});
         check(std::holds_alternative<login::Closed>(m2.ui.login),

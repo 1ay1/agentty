@@ -123,6 +123,11 @@ bool provider_is_authed(std::string_view id, const store::Settings& settings,
 bool signed_in(std::string_view id, const store::Settings& settings,
                const auth::AuthView& view) {
     const std::string pid{id};
+    // A custom host has no registry row. Saving it at all (even with an
+    // empty key, for a server that needs none) is what makes it usable.
+    const ProviderDescriptor* row = preset_for(id);
+    if (!row && !id.empty()) return settings.provider_keys.count(pid) != 0;
+    if (row && (row->is_local || row->auth == AuthStyle::None)) return true;
     switch (auth::vault::of(id).kind) {
         case auth::vault::Kind::AnthropicFile:
         case auth::vault::Kind::OAuthFile:

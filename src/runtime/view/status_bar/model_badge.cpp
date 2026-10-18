@@ -91,8 +91,16 @@ maya::Element model_badge_config(const Model& m) {
     //
     // Answered from the Model (the settings record + AuthView), so the
     // view reads no credential files.
-    const bool authed = provider::signed_in(active_sel.provider_id(),
-                                            m.d.persisted, m.d.auth);
+    // A custom host has no row, so provider_id() is "" and would be checked
+    // as Anthropic. Ask about the host's own spec instead. ACP agents run
+    // their own auth, so they are never "signed out" here.
+    const bool custom_host = active_sel.kind == provider::Kind::OpenAI
+                          && active_sel.provider_id().empty();
+    const bool authed =
+        active_sel.kind == provider::Kind::ExternalAcp
+        || provider::signed_in(custom_host ? active_sel.catalog_id()
+                                           : std::string{active_sel.provider_id()},
+                               m.d.persisted, m.d.auth);
     if (!authed) {
         // Dimmed provider chip + a muted "-- sign in" where the model name
         // would be. No family hue (there IS no model), no update chip, no
