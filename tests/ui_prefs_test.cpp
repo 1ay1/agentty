@@ -468,7 +468,7 @@ TEST_CASE("appearance: only a theme that names a background owns the canvas") {
 }
 
 TEST_CASE("appearance: usable on the terminals issue #37 reported") {
-    // github.com/1ay1/agentty#37 — "Horrible look and feel in non-black
+    // github.com/agentty-org/agentty#37 — "Horrible look and feel in non-black
     // terminals. Almost unusable." Light-grey background, black fonts, and
     // a reasonable objection that TERM was being ignored.
     //

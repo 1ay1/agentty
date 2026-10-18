@@ -107,4 +107,4 @@ Smart Mode follows the **orchestrator-workers** pattern from Anthropic's multi-a
 2. **Complexity-scaled effort + cascade.** Most turns are simple; spending flagship effort on them is waste. The classifier scales effort to the turn, and cascade correction retries at higher effort only when a cheap attempt actually falls short — the RouteLLM/cascade insight applied inside the agent loop.
 3. **Outcome-grounded learning.** A stateless router can't learn, because it never sees whether its choice worked. The agent loop *does* — it sees the build fail, the test go red, the user correct the next turn. Smart Mode's learning layers close that loop: they persist what the cascade discovered and what decompositions succeeded, so the second session in a repo is smarter than the first.
 
-See the [design note](https://github.com/1ay1/agentty/blob/master/docs/design/smart-mode.md) for the full write-up and the layer-to-file map.
+See the [design note](https://github.com/agentty-org/agentty/blob/master/docs/design/smart-mode.md) for the full write-up and the layer-to-file map.

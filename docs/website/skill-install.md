@@ -360,7 +360,7 @@ the flagged case looks different.
 ## Credit
 
 The idea of declaring a skill's capability in frontmatter came out of
-[PR #47](https://github.com/1ay1/agentty/pull/47) by Arag Agrawal
+[PR #47](https://github.com/agentty-org/agentty/pull/47) by Arag Agrawal
 (Cohesivity), which proposed bundling an effectful skill into first-run
 setup. The placement is what agentty declined; the observation underneath
 it was right — there was no vocabulary for "this skill will run programs

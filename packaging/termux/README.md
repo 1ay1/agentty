@@ -68,7 +68,7 @@ Until that PR merges, install on-device straight from source:
 
 ```sh
 pkg install git cmake ninja clang openssl libnghttp2 nlohmann-json simdjson
-git clone --recursive https://github.com/1ay1/agentty
+git clone --recursive https://github.com/agentty-org/agentty
 cd agentty
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
       -DAGENTTY_AUTO_PULL_SUBMODULES=OFF \

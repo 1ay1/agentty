@@ -1,7 +1,7 @@
 # Website docs — source of truth for agentty.org/docs
 
 Every file in this directory is **one page** on <https://agentty.org/docs>. The
-site (repo `1ay1/agentty.org`) fetches this directory at build time and renders
+site (repo `agentty-org/agentty.org`) fetches this directory at build time and renders
 each `.md` through a dynamic route — there are no hand-written page components on
 the site anymore. Edit docs *here*, next to the code.
 

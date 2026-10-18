@@ -21,7 +21,7 @@ AppleClang tops out at C++23 — building the tests (`AGENTTY_BUILD_TESTS`) requ
 ## Basic build
 
 ```bash
-git clone --recursive git@github.com:1ay1/agentty.git
+git clone --recursive git@github.com:agentty-org/agentty.git
 cd agentty
 cmake --preset release
 cmake --build build -j

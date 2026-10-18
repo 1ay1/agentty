@@ -47,7 +47,7 @@ jobs:
     # is forked or copied elsewhere, github.repository won't match and the job
     # is skipped entirely — the Discord webhooks can never be posted to from
     # any other repository.
-    if: github.repository == '1ay1/agentty'
+    if: github.repository == 'agentty-org/agentty'
     steps:
       - name: Route event to the right Discord channel
         env:
@@ -63,9 +63,9 @@ jobs:
 
           # ---- Defense in depth: only forward events that genuinely belong to
           # the product repo. Both the workflow context AND the event payload
-          # must name 1ay1/agentty, so a spoofed/mismatched payload is dropped
+          # must name agentty-org/agentty, so a spoofed/mismatched payload is dropped
           # before any Discord webhook is contacted.
-          ALLOWED_REPO="1ay1/agentty"
+          ALLOWED_REPO="agentty-org/agentty"
           if [ "$REPO" != "$ALLOWED_REPO" ]; then
             echo "Refusing: workflow repo '$REPO' != '$ALLOWED_REPO'."; exit 0
           fi

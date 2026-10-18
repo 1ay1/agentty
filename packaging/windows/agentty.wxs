@@ -45,7 +45,7 @@
     <!-- Add/Remove Programs metadata -->
     <Property Id="ARPHELPLINK" Value="https://agentty.org/docs" />
     <Property Id="ARPURLINFOABOUT" Value="https://agentty.org" />
-    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/1ay1/agentty/releases/latest" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/agentty-org/agentty/releases/latest" />
     <Property Id="ARPNOREPAIR" Value="1" />
     <Icon Id="agentty.ico" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="agentty.ico" />

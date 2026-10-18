@@ -279,7 +279,7 @@ else
 fi
 
 hr "done — v$NEW_VERSION"
-info "github:   https://github.com/1ay1/agentty/releases/tag/v$NEW_VERSION"
+info "github:   https://github.com/agentty-org/agentty/releases/tag/v$NEW_VERSION"
 [ "$DO_AUR" -eq 1 ] && info "aur:      https://aur.archlinux.org/packages/agentty-bin"
 info "homebrew: https://github.com/1ay1/homebrew-tap"
 info "scoop:    https://github.com/1ay1/scoop-bucket"

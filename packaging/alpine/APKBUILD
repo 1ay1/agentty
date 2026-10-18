@@ -6,7 +6,7 @@ pkgname=agentty
 pkgver=@VERSION@
 pkgrel=0
 pkgdesc="Blazing-fast Claude in your terminal — single static binary, sandboxed by default, one-command SSH airgap"
-url="https://github.com/1ay1/agentty"
+url="https://github.com/agentty-org/agentty"
 arch="x86_64 aarch64"
 license="MIT"
 # agentty ships as a fully-static musl binary, so no runtime deps.
@@ -18,7 +18,7 @@ options="!check !strip"  # prebuilt release binary; nothing to test or strip
 # Alpine's musl target matches agentty's own fully-static musl build exactly,
 # so we install the published release binary rather than compiling from source
 # (agentty needs C++26 / a very recent GCC not always in the build image).
-_baseurl="https://github.com/1ay1/agentty/releases/download/v$pkgver"
+_baseurl="https://github.com/agentty-org/agentty/releases/download/v$pkgver"
 source="
 	agentty-linux-x86_64::$_baseurl/agentty-linux-x86_64
 	agentty-linux-aarch64::$_baseurl/agentty-linux-aarch64

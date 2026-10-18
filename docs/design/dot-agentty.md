@@ -422,7 +422,7 @@ before anyone files it.
              total                         852.8 MB
 ```
 
-This is what [#58](https://github.com/1ay1/agentty/issues/58) actually needed.
+This is what [#58](https://github.com/agentty-org/agentty/issues/58) actually needed.
 "Store all non-configuration data on a different path" is a decision nobody
 can make without knowing which categories are big — the ratio argument in
 `user_root.hpp` (KB of settings against GB of threads) was true but

@@ -42,7 +42,7 @@ parts:
   agentty:
     plugin: dump
     # $CRAFT_ARCH_TRIPLET_BUILD_FOR-free: map snap arch → release asset name.
-    source: https://github.com/1ay1/agentty/releases/download/v@VERSION@/agentty-linux-x86_64
+    source: https://github.com/agentty-org/agentty/releases/download/v@VERSION@/agentty-linux-x86_64
     source-type: file
     organize:
       agentty-linux-x86_64: bin/agentty

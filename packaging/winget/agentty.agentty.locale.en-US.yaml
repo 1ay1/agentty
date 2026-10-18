@@ -4,11 +4,11 @@ PackageVersion: "@VERSION@"
 PackageLocale: en-US
 Publisher: agentty
 PublisherUrl: https://agentty.org
-PublisherSupportUrl: https://github.com/1ay1/agentty/issues
+PublisherSupportUrl: https://github.com/agentty-org/agentty/issues
 PackageName: agentty
 PackageUrl: https://agentty.org
 License: MIT
-LicenseUrl: https://github.com/1ay1/agentty/blob/master/LICENSE
+LicenseUrl: https://github.com/agentty-org/agentty/blob/master/LICENSE
 Copyright: Copyright (c) agentty contributors
 ShortDescription: Blazing-fast Claude in your terminal — a C++26 alternative to claude-code.
 Description: >-
@@ -24,6 +24,6 @@ Tags:
   - coding-agent
   - terminal
   - developer-tools
-ReleaseNotesUrl: https://github.com/1ay1/agentty/releases/tag/v@VERSION@
+ReleaseNotesUrl: https://github.com/agentty-org/agentty/releases/tag/v@VERSION@
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

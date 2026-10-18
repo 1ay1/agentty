@@ -101,7 +101,7 @@ jobs:
           # assets 404 / release doesn't show up".
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title "$TAG" \
-                 --notes "See [CHANGELOG.md](https://github.com/1ay1/agentty/blob/master/CHANGELOG.md)."
+                 --notes "See [CHANGELOG.md](https://github.com/agentty-org/agentty/blob/master/CHANGELOG.md)."
           gh release edit "$TAG" --draft=false --prerelease=false
           pipx run git-archive-all "agentty-${V}.tar.gz"
           gh release upload "$TAG" "agentty-${V}.tar.gz" --clobber
@@ -674,7 +674,7 @@ jobs:
             echo "pkgbase = agentty-bin"
             echo "pkgver = $V-1"
             echo "pkgdesc = Blazing-fast Claude in your terminal (C++26, static binary)"
-            echo "url = https://github.com/1ay1/agentty"
+            echo "url = https://github.com/agentty-org/agentty"
             echo "builddate = $(date +%s)"
             echo "packager = agentty CI <noreply@github.com>"
             echo "size = $asize"
@@ -1348,7 +1348,7 @@ jobs:
             | gh api "repos/$me/winget-pkgs/git/refs" --input - >/dev/null
 
           # 5. Open the PR against microsoft/winget-pkgs.
-          body="First-time submission of agentty.agentty ($V). agentty is a native C++26 terminal coding agent: a single static binary, sandboxed by default, one-command SSH air-gap. https://github.com/1ay1/agentty"
+          body="First-time submission of agentty.agentty ($V). agentty is a native C++26 terminal coding agent: a single static binary, sandboxed by default, one-command SSH air-gap. https://github.com/agentty-org/agentty"
           jq -n --arg t "New version: agentty.agentty version $V" --arg h "$me:$branch" --arg b "$body" \
             '{title:$t,head:$h,base:"master",body:$b}' \
             | gh api repos/microsoft/winget-pkgs/pulls --input - -q '.html_url'
@@ -1361,8 +1361,8 @@ jobs:
   #   1. Create the project at https://copr.fedorainfracloud.org (name it
   #      `agentty`; enable the fedora-*/epel-*/opensuse-* chroots you want).
   #   2. Copr → API → copy the whole `[copr-cli]` token block.
-  #   3. gh secret set COPR_CONFIG --repo 1ay1/agentty < the-token-file
-  #   4. gh secret set COPR_PROJECT --repo 1ay1/agentty --body '<user>/agentty'
+  #   3. gh secret set COPR_CONFIG --repo agentty-org/agentty < the-token-file
+  #   4. gh secret set COPR_PROJECT --repo agentty-org/agentty --body '<user>/agentty'
   # Users then:  dnf copr enable <user>/agentty && dnf install agentty
   #
   # We hand COPR the version-pinned .spec + the prebuilt binary as an SRPM so
@@ -1418,7 +1418,7 @@ jobs:
   # One-time setup (you):
   #   1. Generate a GPG key:  gpg --full-generate-key  (RSA, no passphrase)
   #   2. Export it:  gpg --armor --export-secret-keys <KEYID> > apt-signing.asc
-  #   3. gh secret set APT_GPG_KEY --repo 1ay1/agentty < apt-signing.asc
+  #   3. gh secret set APT_GPG_KEY --repo agentty-org/agentty < apt-signing.asc
   #   4. Settings → Pages → deploy from branch `apt-repo` (root).
   # Users then:
   #   curl -fsSL https://1ay1.github.io/agentty/apt/public.key \

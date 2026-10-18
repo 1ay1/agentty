@@ -4,7 +4,7 @@ Section: devel
 Priority: optional
 Architecture: @ARCH@
 Maintainer: Ayush Bhat <tfeayush@gmail.com>
-Homepage: https://github.com/1ay1/agentty
+Homepage: https://github.com/agentty-org/agentty
 Recommends: bubblewrap, openssh-client
 Description: Blazing-fast Claude in your terminal
  agentty is a single-binary terminal client for Anthropic's Claude,

@@ -1,0 +1,50 @@
+name: Bug report
+description: Something is broken or behaves wrong.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. agentty ...
+        2. ...
+  - type: input
+    id: version
+    attributes:
+      label: agentty version
+      description: Output of `agentty --version`.
+      placeholder: agentty 0.9.28
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options: [Linux, macOS, Windows, Windows (MSYS2), WSL, Android (Termux), Other]
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model
+      placeholder: anthropic / claude-sonnet-4, ollama / qwen3, ...
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal and $TERM
+      description: For anything that looks wrong on screen.
+      placeholder: kitty, xterm-kitty
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The end of `~/.agentty/logs/agentty.log` helps a lot. Check it for anything private first.
+      render: text

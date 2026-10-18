@@ -14,13 +14,13 @@
 EAPI=8
 
 DESCRIPTION="Blazing-fast Claude in your terminal — single static binary, sandboxed, airgap-capable"
-HOMEPAGE="https://github.com/1ay1/agentty"
+HOMEPAGE="https://github.com/agentty-org/agentty"
 
 # agentty publishes a fully-static musl binary per arch; we install that rather
 # than building C++26 from source (needs a very recent GCC).
 SRC_URI="
-	amd64? ( https://github.com/1ay1/agentty/releases/download/v${PV}/agentty-linux-x86_64 -> ${P}-x86_64 )
-	arm64? ( https://github.com/1ay1/agentty/releases/download/v${PV}/agentty-linux-aarch64 -> ${P}-aarch64 )
+	amd64? ( https://github.com/agentty-org/agentty/releases/download/v${PV}/agentty-linux-x86_64 -> ${P}-x86_64 )
+	arm64? ( https://github.com/agentty-org/agentty/releases/download/v${PV}/agentty-linux-aarch64 -> ${P}-aarch64 )
 "
 
 LICENSE="MIT"

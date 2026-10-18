@@ -2,10 +2,10 @@
 # install.sh — agentty universal installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --prefix ~/.local
-#   curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --version v0.2.0
-#   curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --build --prefix ~/.local
+#   curl -fsSL https://raw.githubusercontent.com/agentty-org/agentty/master/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/agentty-org/agentty/master/install.sh | sh -s -- --prefix ~/.local
+#   curl -fsSL https://raw.githubusercontent.com/agentty-org/agentty/master/install.sh | sh -s -- --version v0.2.0
+#   curl -fsSL https://raw.githubusercontent.com/agentty-org/agentty/master/install.sh | sh -s -- --build --prefix ~/.local
 #
 # Detects OS+arch, downloads the matching binary from the GitHub release,
 # verifies SHA256, installs to $PREFIX/bin (default /usr/local/bin or ~/.local/bin
@@ -26,7 +26,7 @@
 
 set -eu
 
-REPO="1ay1/agentty"
+REPO="agentty-org/agentty"
 VERSION="latest"
 # Capture Termux's exported $PREFIX (…/com.termux/files/usr) BEFORE we clear our
 # own PREFIX var below — it's the correct, on-PATH install root on Android.

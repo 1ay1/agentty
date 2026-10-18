@@ -262,4 +262,4 @@ $ cat .env                   # empty — masked even inside your own project
 A sandbox shrinks the blast radius. It is not a substitute for reading what the agent proposes. With the network on, an approved command can still send your code somewhere.
 :::
 
-Technical detail, the full threat model, and how to verify any of this on your own machine: [`docs/SANDBOX.md`](https://github.com/1ay1/agentty/blob/master/docs/SANDBOX.md).
+Technical detail, the full threat model, and how to verify any of this on your own machine: [`docs/SANDBOX.md`](https://github.com/agentty-org/agentty/blob/master/docs/SANDBOX.md).

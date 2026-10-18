@@ -114,14 +114,14 @@ if [ "$UPLOAD" -eq 1 ]; then
     if ! command -v gh >/dev/null 2>&1; then
         warn "gh not installed — disabling streaming upload (will build only)"
         UPLOAD=0
-    elif gh release view "$TAG" --repo 1ay1/agentty >/dev/null 2>&1; then
+    elif gh release view "$TAG" --repo agentty-org/agentty >/dev/null 2>&1; then
         info "release $TAG exists — reusing for streaming uploads"
         release_ready=1
     else
         info "creating empty release $TAG (assets stream in as builds finish)"
-        gh release create "$TAG" --repo 1ay1/agentty \
+        gh release create "$TAG" --repo agentty-org/agentty \
             --title "agentty $TAG" \
-            --notes "See [CHANGELOG.md](https://github.com/1ay1/agentty/blob/master/CHANGELOG.md)." \
+            --notes "See [CHANGELOG.md](https://github.com/agentty-org/agentty/blob/master/CHANGELOG.md)." \
             >/dev/null
         ok "release $TAG created"
         release_ready=1
@@ -136,7 +136,7 @@ upload_one() {
     asset=$1
     name=$(basename "$asset")
     size=$(ls -lh "$asset" | awk '{print $5}')
-    if gh release upload "$TAG" --repo 1ay1/agentty --clobber "$asset" >/dev/null 2>&1; then
+    if gh release upload "$TAG" --repo agentty-org/agentty --clobber "$asset" >/dev/null 2>&1; then
         ok "uploaded $name ($size)"
     else
         warn "upload failed for $name — will retry in final sweep"
@@ -473,9 +473,9 @@ mac_arm=$(sum_for "agentty-macos-arm64")
 # won't have them in dist/. Pull their SHAs from the published release's
 # SHA256SUMS so the formula (generated on the Linux host) can pin them.
 if [ "$HOST_OS" = linux ] && { [ -z "$mac_x64" ] || [ -z "$mac_arm" ]; }; then
-    remote_sums=$(gh release view "$TAG" --repo 1ay1/agentty \
+    remote_sums=$(gh release view "$TAG" --repo agentty-org/agentty \
         --json assets -q '.assets[].name' 2>/dev/null | grep -qx SHA256SUMS \
-        && gh release download "$TAG" --repo 1ay1/agentty \
+        && gh release download "$TAG" --repo agentty-org/agentty \
              --pattern SHA256SUMS --output - 2>/dev/null)
     [ -z "$mac_x64" ] && mac_x64=$(printf '%s\n' "$remote_sums" | awk '$2=="agentty-macos-x86_64"{print $1}')
     [ -z "$mac_arm" ] && mac_arm=$(printf '%s\n' "$remote_sums" | awk '$2=="agentty-macos-arm64"{print $1}')
@@ -596,7 +596,7 @@ if [ "$UPLOAD" -eq 1 ]; then
         name=$(basename "$a")
         size=$(ls -lh "$a" | awk '{print $5}')
         info "[$i/$total] $name ($size)"
-        if gh release upload "$TAG" --repo 1ay1/agentty --clobber "$a" >/dev/null 2>&1; then
+        if gh release upload "$TAG" --repo agentty-org/agentty --clobber "$a" >/dev/null 2>&1; then
             ok "$name"
         else
             warn "$name (upload failed)"

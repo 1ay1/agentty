@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or help
+    url: https://github.com/agentty-org/agentty/discussions
+    about: Ask in Discussions instead of opening an issue.
+  - name: Discord
+    url: https://discord.gg/qhb9AZ8f3c
+    about: Chat, and an AI helper bot that answers agentty questions.
+  - name: Security issue
+    url: https://github.com/agentty-org/agentty/security/advisories/new
+    about: Report vulnerabilities privately, not in a public issue.

@@ -30,4 +30,4 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-The canonical copy lives in [the repository](https://github.com/1ay1/agentty/blob/master/LICENSE).
+The canonical copy lives in [the repository](https://github.com/agentty-org/agentty/blob/master/LICENSE).

@@ -5,7 +5,7 @@
 # scripts/release.sh. This is a TEMPLATE — do not hardcode the version.
 #
 # Install (flake-free, ad-hoc):
-#   nix-env -iA agentty -f https://github.com/1ay1/agentty/archive/master.tar.gz
+#   nix-env -iA agentty -f https://github.com/agentty-org/agentty/archive/master.tar.gz
 # Or add to your configuration.nix / home-manager as an overlay.
 #
 # agentty ships as a fully-static musl binary, so we fetch the published
@@ -39,7 +39,7 @@ stdenvNoCC.mkDerivation {
   inherit version;
 
   src = fetchurl {
-    url = "https://github.com/1ay1/agentty/releases/download/v${version}/${src.name}";
+    url = "https://github.com/agentty-org/agentty/releases/download/v${version}/${src.name}";
     inherit (src) sha256;
   };
 
@@ -56,7 +56,7 @@ stdenvNoCC.mkDerivation {
 
   meta = with lib; {
     description = "Blazing-fast Claude in your terminal — single static binary, sandboxed, airgap-capable";
-    homepage = "https://github.com/1ay1/agentty";
+    homepage = "https://github.com/agentty-org/agentty";
     license = licenses.mit;
     mainProgram = "agentty";
     platforms = [ "x86_64-linux" "aarch64-linux" ];

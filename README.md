@@ -6,16 +6,16 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/1ay1/agentty/releases/latest"><img src="https://img.shields.io/github/v/release/1ay1/agentty?style=flat-square&color=blue" alt="Release" /></a>
-  <a href="https://github.com/1ay1/agentty/stargazers"><img src="https://img.shields.io/github/stars/1ay1/agentty?style=flat-square&color=f1c40f&labelColor=555555" alt="Stars" /></a>
-  <a href="https://github.com/1ay1/agentty/releases"><img src="https://img.shields.io/github/downloads/1ay1/agentty/total?style=flat-square&color=brightgreen" alt="Downloads" /></a>
+  <a href="https://github.com/agentty-org/agentty/releases/latest"><img src="https://img.shields.io/github/v/release/agentty-org/agentty?style=flat-square&color=blue" alt="Release" /></a>
+  <a href="https://github.com/agentty-org/agentty/stargazers"><img src="https://img.shields.io/github/stars/agentty-org/agentty?style=flat-square&color=f1c40f&labelColor=555555" alt="Stars" /></a>
+  <a href="https://github.com/agentty-org/agentty/releases"><img src="https://img.shields.io/github/downloads/agentty-org/agentty/total?style=flat-square&color=brightgreen" alt="Downloads" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License" /></a>
   <a href="https://discord.gg/qhb9AZ8f3c"><img src="https://img.shields.io/badge/Discord-join%20chat-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord" /></a>
   <a href="https://web.libera.chat/#agentty"><img src="https://img.shields.io/badge/IRC-%23agentty-555555?style=flat-square&logo=libera.chat&logoColor=white" alt="IRC" /></a>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/1ay1/agentty/master/agentty.gif" alt="agentty demo" width="800" />
+  <img src="https://raw.githubusercontent.com/agentty-org/agentty/master/agentty.gif" alt="agentty demo" width="800" />
 </p>
 
 ## Why agentty?
@@ -33,7 +33,7 @@ Coming from another tool? See the honest comparisons: [vs Claude Code](https://a
 ## Getting Started
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/agentty-org/agentty/master/install.sh | sh
 cd your-project
 agentty
 ```
@@ -258,14 +258,14 @@ Pasting images **over SSH** needs one terminal setting — see [Clipboard & Imag
 
 ```bash
 # Debian / Ubuntu  (V = the release you want, e.g. 0.9.5)
-curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty_${V}_amd64.deb
+curl -fsSLO https://github.com/agentty-org/agentty/releases/latest/download/agentty_${V}_amd64.deb
 sudo dpkg -i agentty_${V}_amd64.deb
 
 # Fedora / RHEL / CentOS
-sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-${V}-1.x86_64.rpm
+sudo dnf install https://github.com/agentty-org/agentty/releases/latest/download/agentty-${V}-1.x86_64.rpm
 
 # openSUSE
-sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-${V}-1.x86_64.rpm
+sudo zypper install https://github.com/agentty-org/agentty/releases/latest/download/agentty-${V}-1.x86_64.rpm
 
 # Arch (AUR)
 yay -S agentty-bin   # prebuilt static release
@@ -275,7 +275,7 @@ yay -S agentty-git   # build HEAD from source, dynamically linked
 ```
 
 Package filenames carry the version, so `latest/download/` needs it spelled
-out — see the [releases page](https://github.com/1ay1/agentty/releases/latest)
+out — see the [releases page](https://github.com/agentty-org/agentty/releases/latest)
 for the exact names, or use the install script, which resolves it for you.
 
 **macOS**
@@ -299,7 +299,7 @@ script detects Termux and installs into `$PREFIX/bin` (on your PATH):
 
 ```bash
 pkg install git cmake clang openssl libnghttp2
-curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --build
+curl -fsSL https://raw.githubusercontent.com/agentty-org/agentty/master/install.sh | sh -s -- --build
 ```
 
 Shell/build tools run **unsandboxed** on unrooted Android (Bubblewrap needs
@@ -309,7 +309,7 @@ user namespaces Android doesn't grant) — everything else works. See
 **Anywhere (no package manager)**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/agentty-org/agentty/master/install.sh | sh
 ```
 
 If the prebuilt binary won't run on your system (e.g. a libc mismatch), pass
@@ -317,13 +317,13 @@ If the prebuilt binary won't run on your system (e.g. a libc mismatch), pass
 automatically when the downloaded binary fails to execute:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --build
+curl -fsSL https://raw.githubusercontent.com/agentty-org/agentty/master/install.sh | sh -s -- --build
 ```
 
 **From source** (needs a C++26 toolchain — GCC 14+ / recent Clang / MSVC)
 
 ```bash
-git clone --recursive https://github.com/1ay1/agentty.git
+git clone --recursive https://github.com/agentty-org/agentty.git
 cd agentty && cmake -B build && cmake --build build -j
 ```
 

@@ -144,5 +144,5 @@ Run `agentty config` to see every folder agentty uses and its size, and `agentty
 Some terminals lag on DEC 2026 synchronized output. File a bug with your `$TERM`, the terminal emulator name, and a screenshot.
 
 :::note
-Found something not covered here? [Open an issue](https://github.com/1ay1/agentty/issues) with `$TERM`, your emulator, the version, and a screenshot or paste of the relevant block.
+Found something not covered here? [Open an issue](https://github.com/agentty-org/agentty/issues) with `$TERM`, your emulator, the version, and a screenshot or paste of the relevant block.
 :::

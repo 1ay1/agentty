@@ -8,7 +8,7 @@ We take the security of agentty seriously — it handles your provider credentia
 
 ## Reporting a vulnerability
 
-Please **do not** open a public issue for security vulnerabilities. Instead, report privately through GitHub's [private security advisory](https://github.com/1ay1/agentty/security/advisories/new) form. Include a description, reproduction steps, affected versions, and impact.
+Please **do not** open a public issue for security vulnerabilities. Instead, report privately through GitHub's [private security advisory](https://github.com/agentty-org/agentty/security/advisories/new) form. Include a description, reproduction steps, affected versions, and impact.
 
 ## What to expect
 

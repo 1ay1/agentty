@@ -22,7 +22,7 @@ Installers:
   - Architecture: x64
     InstallerType: wix
     Scope: user
-    InstallerUrl: https://github.com/1ay1/agentty/releases/download/v@VERSION@/agentty-windows-x86_64.msi
+    InstallerUrl: https://github.com/agentty-org/agentty/releases/download/v@VERSION@/agentty-windows-x86_64.msi
     InstallerSha256: @MSI_SHA256@
     ProductCode: "@MSI_PRODUCT_CODE@"
 ManifestType: installer

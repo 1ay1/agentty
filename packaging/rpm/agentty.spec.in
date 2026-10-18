@@ -3,7 +3,7 @@ Version:        @VERSION@
 Release:        1%{?dist}
 Summary:        Blazing-fast Claude in your terminal
 License:        MIT
-URL:            https://github.com/1ay1/agentty
+URL:            https://github.com/agentty-org/agentty
 Source0:        agentty-linux-@RPM_ARCH@
 ExclusiveArch:  @RPM_ARCH@
 

@@ -1,4 +1,4 @@
-TERMUX_PKG_HOMEPAGE=https://github.com/1ay1/agentty
+TERMUX_PKG_HOMEPAGE=https://github.com/agentty-org/agentty
 TERMUX_PKG_DESCRIPTION="AI pair programming in your terminal — one binary, any model"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="LICENSE"
@@ -12,7 +12,7 @@ TERMUX_PKG_VERSION="0.9.2"
 # The release artifact is assembled with submodules included, which means
 # this recipe needs no network after the source step: no `git submodule
 # update`, no configure-time clone.
-TERMUX_PKG_SRCURL=https://github.com/1ay1/agentty/releases/download/v${TERMUX_PKG_VERSION}/agentty-${TERMUX_PKG_VERSION}.tar.gz
+TERMUX_PKG_SRCURL=https://github.com/agentty-org/agentty/releases/download/v${TERMUX_PKG_VERSION}/agentty-${TERMUX_PKG_VERSION}.tar.gz
 TERMUX_PKG_SHA256=9dadc6130fba3a5a13ee3728d2e200b063f54fb273cadaa99e33e9439bced6c3
 TERMUX_PKG_AUTO_UPDATE=true
 

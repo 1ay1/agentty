@@ -19,7 +19,7 @@ pkgver=0.8.0.r56.g3708ca82
 pkgrel=1
 pkgdesc="Blazing-fast Claude in your terminal (C++26 TUI agent) — git HEAD, dynamically linked"
 arch=('x86_64' 'aarch64')
-url="https://github.com/1ay1/agentty"
+url="https://github.com/agentty-org/agentty"
 license=('MIT')
 depends=('glibc' 'gcc-libs' 'openssl' 'libnghttp2')
 makedepends=('git' 'cmake' 'ninja')
@@ -42,7 +42,7 @@ _json_tag=v3.11.3
 _simdjson_tag=v3.10.1
 _mimalloc_tag=v3.4.5
 
-source=("$_pkgname::git+https://github.com/1ay1/agentty.git"
+source=("$_pkgname::git+https://github.com/agentty-org/agentty.git"
         'git+https://github.com/1ay1/maya.git'
         'git+https://github.com/1ay1/jaal.git'
         'git+https://github.com/1ay1/acp-cpp.git'

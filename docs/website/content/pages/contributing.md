@@ -8,7 +8,7 @@ agentty is open source under the MIT license. Bug reports, fixes, and well-scope
 
 ## Reporting bugs
 
-File issues on [GitHub](https://github.com/1ay1/agentty/issues). For a rendering bug, include your `$TERM`, your terminal emulator name, and a screenshot. For a code-path bug, paste the relevant block and your `git rev-parse HEAD` (or the release version from `agentty --version`).
+File issues on [GitHub](https://github.com/agentty-org/agentty/issues). For a rendering bug, include your `$TERM`, your terminal emulator name, and a screenshot. For a code-path bug, paste the relevant block and your `git rev-parse HEAD` (or the release version from `agentty --version`).
 
 ## Setting up
 

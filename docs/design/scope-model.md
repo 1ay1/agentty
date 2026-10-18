@@ -258,7 +258,7 @@ change what we execute — silently, because nothing tells us it changed.
 
 ### Why import is what #60 actually asked for
 
-[#60](https://github.com/1ay1/agentty/issues/60) asked agentty to *read*
+[#60](https://github.com/agentty-org/agentty/issues/60) asked agentty to *read*
 `~/.ai/mcp/mcp.json`, "to have all my custom MCP servers in one place". The
 literal ask is a sixth read location; the stated wish is the opposite of it.
 If agentty read that file, the servers would live in **two** places with a

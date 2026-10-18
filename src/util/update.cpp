@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// update.cpp — self-update against the GitHub releases of 1ay1/agentty.
+// update.cpp — self-update against the GitHub releases of agentty-org/agentty.
 // See include/agentty/util/update.hpp for the design contract.
 
 #include "agentty/util/update.hpp"
@@ -37,7 +37,7 @@ using nlohmann::json;
 
 namespace {
 
-constexpr const char* kRepo = "1ay1/agentty";
+constexpr const char* kRepo = "agentty-org/agentty";
 constexpr auto kCacheTtl = std::chrono::hours{24};
 
 fs::path cache_path() { return util::user_cache_dir() / "update_check.json"; }
@@ -217,7 +217,7 @@ CheckResult check_latest(bool force) {
 bool self_update_possible(std::string& reason) {
 #ifdef _WIN32
     reason = "self-update is not supported on Windows yet — download the "
-             "installer from https://github.com/1ay1/agentty/releases";
+             "installer from https://github.com/agentty-org/agentty/releases";
     return false;
 #else
     fs::path self = self_path();

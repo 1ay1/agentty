@@ -14,8 +14,8 @@ Prefer IRC? Join **#agentty on Libera.Chat** (`irc.libera.chat`, port 6697, TLS)
 
 - **Join the [Discord](https://discord.gg/qhb9AZ8f3c)** — chat, get help, and ask the AI helper bot anything.
 - **Join [#agentty on Libera.Chat](https://web.libera.chat/#agentty)** — the IRC channel.
-- **Star & watch** the [repository](https://github.com/1ay1/agentty) to follow releases.
-- **Report bugs** on the [issue tracker](https://github.com/1ay1/agentty/issues) — include `$TERM`, emulator, version, and a screenshot.
+- **Star & watch** the [repository](https://github.com/agentty-org/agentty) to follow releases.
+- **Report bugs** on the [issue tracker](https://github.com/agentty-org/agentty/issues) — include `$TERM`, emulator, version, and a screenshot.
 - **Open a PR** — read the [contributing guide](/contributing) first.
 - **Improve the docs** — typos, gaps, and clarifications are all welcome.
 - **Help triage** — reproduce reported issues and add detail.
@@ -31,8 +31,8 @@ Prefer IRC? Join **#agentty on Libera.Chat** (`irc.libera.chat`, port 6697, TLS)
 
 - [Discord](https://discord.gg/qhb9AZ8f3c) — the community chat, with an AI helper bot.
 - [#agentty on Libera.Chat](https://web.libera.chat/#agentty) — the IRC channel.
-- [Source code](https://github.com/1ay1/agentty) — the agentty repository.
-- [Releases](https://github.com/1ay1/agentty/releases/latest) — prebuilt binaries and packages.
+- [Source code](https://github.com/agentty-org/agentty) — the agentty repository.
+- [Releases](https://github.com/agentty-org/agentty/releases/latest) — prebuilt binaries and packages.
 - [maya](https://github.com/1ay1/maya) — the sister TUI engine agentty renders through.
 
 ## Be excellent to each other

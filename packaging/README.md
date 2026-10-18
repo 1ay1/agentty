@@ -59,7 +59,7 @@ macOS / Windows
 Universal (no package manager):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/agentty-org/agentty/master/install.sh | sh
 ```
 
 ## AUR: agentty-bin vs agentty-git

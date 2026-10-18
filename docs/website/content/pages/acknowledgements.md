@@ -22,7 +22,7 @@ agentty exists because of [Anthropic's](https://www.anthropic.com/) Claude and t
 
 ## Contributors
 
-agentty is maintained by its contributors. See the full list on [GitHub](https://github.com/1ay1/agentty/graphs/contributors). Want to join them? Start with the [contributing guide](/contributing).
+agentty is maintained by its contributors. See the full list on [GitHub](https://github.com/agentty-org/agentty/graphs/contributors). Want to join them? Start with the [contributing guide](/contributing).
 
 ## License
 

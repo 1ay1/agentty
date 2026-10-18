@@ -26,7 +26,7 @@ Most awesome lists want a single markdown bullet. Match the surrounding style;
 this is the canonical form:
 
 ```markdown
-- [agentty](https://github.com/1ay1/agentty) — Native C++26 terminal coding agent and drop-in claude-code alternative. Single static binary, sub-millisecond cold start, sandboxed by default, runs any model (Claude, GPT, Groq, OpenRouter, Ollama), and drives an air-gapped host over SSH. MIT.
+- [agentty](https://github.com/agentty-org/agentty) — Native C++26 terminal coding agent and drop-in claude-code alternative. Single static binary, sub-millisecond cold start, sandboxed by default, runs any model (Claude, GPT, Groq, OpenRouter, Ollama), and drives an air-gapped host over SSH. MIT.
 ```
 
 PR title: `Add agentty (native C++ terminal coding agent)`
@@ -39,7 +39,7 @@ PR body:
 > local Ollama model. Also runs inside Zed over ACP and on air-gapped hosts
 > over SSH. MIT-licensed, ~82★ and growing.
 >
-> Repo: https://github.com/1ay1/agentty · Site: https://agentty.org
+> Repo: https://github.com/agentty-org/agentty · Site: https://agentty.org
 
 ---
 
@@ -50,7 +50,7 @@ Form at https://terminaltrove.com/submit/. Fields:
 - **Name:** agentty
 - **Category:** AI Coding Agents / TUI
 - **Homepage:** https://agentty.org
-- **Repo:** https://github.com/1ay1/agentty
+- **Repo:** https://github.com/agentty-org/agentty
 - **Short description:** A blazing-fast native C++26 coding agent in your terminal — a single static binary, sub-ms cold start, sandboxed by default, any model.
 - **Long description:** agentty is a drop-in claude-code alternative written in C++26. One ~13.6 MB static binary with no runtime dependencies (no Node, Python, or Electron). Bring your own model — point it at OpenAI, Groq, OpenRouter, Together, Cerebras, an Anthropic API key, or a local Ollama model, or sign in with your Claude Pro/Max OAuth. Every shell call is sandboxed by default (claybin: landlock + seccomp on Linux, seatbelt on macOS). Runs inside Zed over ACP, and can drive an agent on an air-gapped host with a single SSH command. Linux, macOS, Windows, and Termux/Android. MIT.
 
@@ -75,7 +75,7 @@ At https://alternativeto.net, add agentty as an alternative to **Claude Code**,
 ## 4. Show HN (when ready for a spike)
 
 - **Title:** `Show HN: agentty – a native C++26 claude-code alternative (single static binary)`
-- **URL:** https://github.com/1ay1/agentty
+- **URL:** https://github.com/agentty-org/agentty
 - **First comment:** lead with the honest technical hook — why C++ (sub-ms
   start, no Node/GC), the sandbox-by-default design, model-agnostic, ACP-in-Zed,
   SSH air-gap. Acknowledge it's pre-1.0. Invite architecture questions —

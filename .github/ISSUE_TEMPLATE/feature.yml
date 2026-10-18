@@ -1,0 +1,16 @@
+name: Feature request
+description: Something agentty should do.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What you want
+      description: What you're trying to do and what's in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: How it could work
+      description: Optional. A sketch, or how another tool does it.

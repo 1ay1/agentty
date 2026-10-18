@@ -29,7 +29,7 @@ Flags: `--prefix ~/somewhere`, `--version {{versionLabel}}`, `--no-verify`, `--b
 ## Debian / Ubuntu
 
 ```bash
-curl -fsSLO https://github.com/1ay1/agentty/releases/latest/download/agentty_{{version}}_amd64.deb
+curl -fsSLO https://github.com/agentty-org/agentty/releases/latest/download/agentty_{{version}}_amd64.deb
 sudo dpkg -i agentty_{{version}}_amd64.deb       # or agentty_{{version}}_arm64.deb
 ```
 
@@ -39,13 +39,13 @@ Update: `dpkg -i` the new release's `.deb`.
 
 ```bash
 # Fedora / RHEL / CentOS
-sudo dnf install https://github.com/1ay1/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
+sudo dnf install https://github.com/agentty-org/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
 
 # openSUSE
-sudo zypper install https://github.com/1ay1/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
+sudo zypper install https://github.com/agentty-org/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
 
 # or upgrade an existing install:
-sudo rpm -Uvh https://github.com/1ay1/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
+sudo rpm -Uvh https://github.com/agentty-org/agentty/releases/latest/download/agentty-{{version}}-1.x86_64.rpm
 ```
 
 `-U` is upgrade; works for the first install too. Use `agentty-{{version}}-1.aarch64.rpm` on ARM.
@@ -110,9 +110,9 @@ scoop bucket add 1ay1 https://github.com/1ay1/scoop-bucket
 scoop install agentty
 ```
 
-Prefer the MSI? Download `agentty-windows-x86_64.msi` from the [latest release](https://github.com/1ay1/agentty/releases/latest) and double-click it — it installs **just for you** (`%LOCALAPPDATA%\Programs\agentty`), edits only your user `PATH`, and needs **no administrator rights**.
+Prefer the MSI? Download `agentty-windows-x86_64.msi` from the [latest release](https://github.com/agentty-org/agentty/releases/latest) and double-click it — it installs **just for you** (`%LOCALAPPDATA%\Programs\agentty`), edits only your user `PATH`, and needs **no administrator rights**.
 
-Portable single `.exe` (no installer): `curl -L https://github.com/1ay1/agentty/releases/latest/download/agentty-windows-x86_64.exe -o agentty.exe`
+Portable single `.exe` (no installer): `curl -L https://github.com/agentty-org/agentty/releases/latest/download/agentty-windows-x86_64.exe -o agentty.exe`
 
 ## Termux / Android
 
@@ -120,12 +120,12 @@ agentty builds natively on Termux against its Bionic/libc++ toolchain — no roo
 
 ```bash
 pkg install git cmake clang openssl libnghttp2
-curl -fsSL https://raw.githubusercontent.com/1ay1/agentty/master/install.sh | sh -s -- --build
+curl -fsSL https://raw.githubusercontent.com/agentty-org/agentty/master/install.sh | sh -s -- --build
 ```
 
 Everything works — file tools, RAG, the agent loop, and shell/build tools — with one caveat: the shell sandbox needs Linux user namespaces that unrooted Android doesn't grant, so `bash`/`diagnostics` run **unsandboxed** (agentty detects this and prints `sandbox: unavailable, running unsandboxed`). Point it at a scoped workspace if that matters to you.
 
-An on-repo [`packaging/termux/build.sh`](https://github.com/1ay1/agentty/blob/master/packaging/termux/build.sh) recipe targets the official Termux repos for a future `pkg install agentty`.
+An on-repo [`packaging/termux/build.sh`](https://github.com/agentty-org/agentty/blob/master/packaging/termux/build.sh) recipe targets the official Termux repos for a future `pkg install agentty`.
 
 ## Raw static binaries
 
@@ -133,12 +133,12 @@ Fully-static, no shared-library dependencies. Drop and run:
 
 ```bash
 # Linux x86_64
-curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-linux-x86_64 -o agentty && chmod +x agentty
+curl -fsSL https://github.com/agentty-org/agentty/releases/latest/download/agentty-linux-x86_64 -o agentty && chmod +x agentty
 # Linux i686 (32-bit)
-curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-linux-i686 -o agentty && chmod +x agentty
+curl -fsSL https://github.com/agentty-org/agentty/releases/latest/download/agentty-linux-i686 -o agentty && chmod +x agentty
 # macOS (Apple Silicon / Intel)
-curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-macos-arm64 -o agentty && chmod +x agentty
-curl -fsSL https://github.com/1ay1/agentty/releases/latest/download/agentty-macos-x86_64 -o agentty && chmod +x agentty
+curl -fsSL https://github.com/agentty-org/agentty/releases/latest/download/agentty-macos-arm64 -o agentty && chmod +x agentty
+curl -fsSL https://github.com/agentty-org/agentty/releases/latest/download/agentty-macos-x86_64 -o agentty && chmod +x agentty
 ```
 
 Each release asset carries a published SHA256 (shown on the release page and verified automatically by the one-line installer).

@@ -215,7 +215,7 @@ ok "pushed $BRANCH and $TAG"
 # ---- 5. point at the run -----------------------------------------------------
 printf '\n'
 ok "release $TAG cut. GitHub Actions is now building + publishing everything."
-info "watch it:  https://github.com/1ay1/agentty/actions/workflows/release.yml"
+info "watch it:  https://github.com/agentty-org/agentty/actions/workflows/release.yml"
 if command -v gh >/dev/null 2>&1; then
-    info "or:        gh run watch --repo 1ay1/agentty \$(gh run list --repo 1ay1/agentty --workflow release.yml -L1 --json databaseId -q '.[0].databaseId')"
+    info "or:        gh run watch --repo agentty-org/agentty \$(gh run list --repo agentty-org/agentty --workflow release.yml -L1 --json databaseId -q '.[0].databaseId')"
 fi

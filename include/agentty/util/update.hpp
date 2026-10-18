@@ -13,7 +13,7 @@
 //      classic Unix; on Windows the old file is moved aside first). Any
 //      failure leaves the installed binary untouched.
 //
-// Channel: the GitHub releases of 1ay1/agentty, single-file binaries named
+// Channel: the GitHub releases of agentty-org/agentty, single-file binaries named
 // agentty-<os>-<arch>[.exe]. Package-manager installs (rpm/pacman/ebuild)
 // are detected by install-path heuristics and get a "use your package
 // manager" message instead of a self-replace.
