@@ -196,9 +196,19 @@ std::string restart_outcome(const sandbox_cfg::Config& cfg,
     //    may be on a different machine tomorrow, and the config is portable)
     //    but the promise has to name the fallback rather than imply the walls
     //    below will be up.
-    if (engine_status(cfg, facts) == EngineStatus::CannotStart)
+    if (engine_status(cfg, facts) == EngineStatus::CannotStart) {
+#if defined(_WIN32)
+        // There IS no bwrap on windows, and the windows probe() has no
+        // fallback engine: Auto degrades to UNSANDBOXED, it does not silently
+        // switch to a weaker tool. Saying "falls back to bwrap" here promised
+        // a mechanism that does not exist on this platform.
+        return "claybin cannot start on this host \xc2\xb7 commands would run "
+               "unsandboxed";
+#else
         return "claybin cannot start on this host \xc2\xb7 restart falls back to "
                "bwrap, which enforces only the mount walls";
+#endif
+    }
 
     // 3. It compiles and starts, but something comes out weaker than asked.
     //    This is the quiet case and the reason the function exists: the rows
@@ -227,9 +237,17 @@ std::string describe_running(const HostFacts& facts) {
         return "sandboxing is OFF (--sandbox off) \xc2\xb7 nothing below is enforced";
     if (!facts.sandbox_active)
         return "no sandbox \xc2\xb7 commands run unconfined";
-    if (facts.running == sandbox_cfg::LinuxBackend::Claybin)
+    if (facts.running == sandbox_cfg::LinuxBackend::Claybin) {
+#if defined(_WIN32)
+        // The mechanisms THIS platform puts up. landlock/seccomp/cgroup2 are
+        // linux vocabulary; naming them on windows is the same lie as
+        // "sandbox: active" with nothing behind it, one level down.
+        return "claybin \xc2\xb7 appcontainer \xc2\xb7 job limits \xc2\xb7 mitigation policies";
+#else
         return "claybin \xc2\xb7 landlock abi " + std::to_string(facts.landlock_abi) +
                " \xc2\xb7 seccomp \xc2\xb7 cgroup2";
+#endif
+    }
     return "bwrap \xc2\xb7 mount namespaces only";
 }
 
@@ -267,10 +285,20 @@ form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,
     // The row stays SETTABLE -- the choice is legitimate, the host just
     // cannot honour it, and locking it would strand anyone who set it on a
     // machine where it worked.
-    if (!claybin_available && on_claybin)
+    if (!claybin_available && on_claybin) {
+#if defined(_WIN32)
+        // The windows probe fails for appcontainer/profile reasons (policy
+        // software, token shape), not user namespaces -- and there is no bwrap
+        // to fall back to on this platform.
+        form.fields.back().help =
+            "claybin cannot start on this host (appcontainer unavailable) "
+            "\xc2\xb7 commands would run unsandboxed";
+#else
         form.fields.back().help =
             "claybin cannot start on this host (no user namespaces) "
             "\xc2\xb7 falling back to bwrap";
+#endif
+    }
 
     // Every row below is enforceable only when claybin is BOTH selected and
     // usable. One predicate, used everywhere, so a row cannot disagree with

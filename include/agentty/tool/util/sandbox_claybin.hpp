@@ -1,9 +1,9 @@
 #pragma once
-// agentty::tools::util::sandbox::claybin_backend — the library-based Linux
-// sandbox backend, alongside the bwrap one.
+// agentty::tools::util::sandbox::claybin_backend — the library-based sandbox
+// backend, alongside the bwrap one.
 //
 // Header kept free of claybin's own headers so the rest of agentty does not
-// need claybin's include path, and so a build with AGENTTY_HAVE_CLAIN off
+// need claybin's include path, and so a build with AGENTTY_HAVE_CLAYBIN off
 // compiles this file away entirely.
 //
 // The interface is deliberately narrow: a Posture (what to bind, what to cap)
@@ -12,6 +12,11 @@
 // does it correctly for both the sandboxed and unsandboxed paths. A sandbox
 // backend that also owned the supervise loop would be two implementations of
 // the hard part.
+//
+// Platform note: on Windows the two int handle fields of SpawnResult carry
+// HANDLEs, not descriptors -- `pidfd` is the child's PROCESS handle (the
+// waitable exit; jaal's windows_process::adopt consumes it), and `kill_tree`
+// closes in on the JOB handle (KILL_ON_JOB_CLOSE = the tree kill).
 
 #include <cstdint>
 #include <functional>
@@ -69,6 +74,12 @@ struct Posture {
     // ── hardening ────────────────────────────────────────────────────────
     bool scope_ipc{true};
     bool close_inherited_fds{true};
+
+    // Windows only: opt OUT of the host-side ACL stamping that spawn_argv
+    // otherwise does (allow_host_acl_mutation=true is hardcoded there). A
+    // diagnostic lever for the 0xc0000142 isolation work -- production never
+    // sets it false.
+    bool test_no_acl_stamps{false};
 
     // ── resources ────────────────────────────────────────────────
     std::uint64_t tmp_bytes{512ull * 1024 * 1024};

@@ -12,6 +12,18 @@
 
 #if !defined(_WIN32)
 #include <unistd.h>
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+namespace {
+// The file only needs a per-process unique name; the pid is the posix way to
+// get one, GetCurrentProcessId the windows one. Same property, no extra deps.
+[[nodiscard]] int local_pid() noexcept {
+    return static_cast<int>(::GetCurrentProcessId());
+}
+}  // namespace
 #endif
 
 #include "agtest.hpp"
@@ -39,7 +51,13 @@ TEST_CASE("no builtin acp agents when unconfigured") {
 
 TEST_CASE("configured acp agents resolve") {
     fs::path tmp = fs::temp_directory_path() /
-        ("acp-agents-" + std::to_string(::getpid()) + ".json");
+        ("acp-agents-" + std::to_string(
+#if defined(_WIN32)
+             local_pid()
+#else
+             ::getpid()
+#endif
+         ) + ".json");
     {
         std::ofstream f(tmp);
         f << R"({

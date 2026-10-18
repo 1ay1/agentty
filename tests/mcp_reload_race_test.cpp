@@ -136,7 +136,15 @@ TEST_CASE("mcp reload race") {
           "final snapshot has both configured servers (got "
           + std::to_string(final.servers.size()) + ")");
 
-    fs::remove_all(tmp);
+    // Windows: the pool's sh.exe children may still hold the temp dir open
+    // (their cwd or the script they're reading from). POSIX deletes a tree
+    // out from under a running child; Windows refuses until every handle is
+    // gone, so give the short-lived servers a beat to exit, then delete
+    // BEST-EFFORT: a leftover temp dir at worst, never a red test for what
+    // is a cleanup race, not the regression this test locks.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    std::error_code ec;
+    fs::remove_all(tmp, ec);   // swallow: ec carries it if a child lingers
 }
 
 // ── destroy-during-handshake ────────────────────────────────────────────────

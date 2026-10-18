@@ -80,10 +80,19 @@ namespace sb = agentty::tools::util::sandbox;
     // guessing is how issue #21 happened -- "sandbox: active" while every
     // command died on the denial.
     return sb::claybin_backend::available();
+#elif defined(_WIN32)
+    // The windows backend APPLIES policies since the appcontainer/restricted-
+    // token integration: available() runs the real probe (it creates and
+    // deletes an appcontainer profile and runs a child under the walls) and
+    // its verdict is what sb::init() already used to put the startup banner
+    // at "active (claybin)". The old arm returned false unconditionally from
+    // before that integration -- which made this pane claim "claybin cannot
+    // start here" on a host where the banner and every exec call disagreed
+    // with it. The pane and the engine now answer the same probe.
+    return sb::claybin_backend::available();
 #else
-    // claybin compiles a plan on every platform but can only APPLY one on
-    // Linux and macOS, so elsewhere the answer is no regardless of the
-    // library being linked.
+    // claybin compiles a plan on every platform but applies one on linux,
+    // macOS and windows only.
     return false;
 #endif
 }

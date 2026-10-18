@@ -25,6 +25,16 @@
 #include "agentty/tool/util/sandbox_claybin.hpp"
 #include "agentty/tool/host_call.hpp"   // the dispatcher's per-call data
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #if !defined(_WIN32)
 #  include <fcntl.h>
 #  include <unistd.h>
@@ -58,7 +68,7 @@ sandbox_spawner(const std::vector<std::string>& argv, const std::string& cwd,
                 std::vector<std::string> extra_roots = {},
                 const handoff::TrustedSnapshot* trusted = nullptr,
                 std::vector<std::pair<std::string, std::string>> env = {}) {
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
     namespace sb = agentty::tools::util::sandbox;
     if (sb::is_active() && sb::detected_backend() == sb::Backend::Claybin) {
         // `trusted` is the dispatcher's, alive for the whole call; the spawn
@@ -76,7 +86,7 @@ sandbox_spawner(const std::vector<std::string>& argv, const std::string& cwd,
         };
     }
 #else
-    (void)argv; (void)cwd;
+    (void)argv; (void)cwd; (void)trusted; (void)env;
 #endif
     return {};
 }
@@ -123,6 +133,41 @@ start_child(const ChildRun& run) {
         auto adopted = pf::posix_process::adopt(c);
         if (!adopted) return std::unexpected(std::string{adopted.error().what});
         return started{std::move(*adopted), a.supervisor_fd,
+                       std::move(a.service_broker), std::move(a.kill_tree)};
+    }
+#endif
+
+#if defined(_WIN32)
+    if (run.spawn_adopted) {
+        // One anonymous pipe; the sandbox gets the write end duplicated
+        // inheritable, we keep the read end. Same shape as the posix arm --
+        // one merged stream, the interleaving a terminal would show -- but
+        // with HANDLEs, because that is what every windows API takes.
+        SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+        HANDLE out_r = nullptr, out_w = nullptr;
+        if (!::CreatePipe(&out_r, &out_w, &sa, 0))
+            return std::unexpected(std::string{"pipe: "} +
+                                   std::to_string(::GetLastError()));
+        auto a = run.spawn_adopted(
+            static_cast<int>(reinterpret_cast<intptr_t>(out_w)));
+        // the spawner duplicated what it needed; OUR write end goes now, or
+        // the reader below never sees EOF.
+        ::CloseHandle(out_w);
+        if (a.error.empty() && a.pid <= 0) a.error = "sandbox did not start";
+        if (!a.error.empty()) {
+            ::CloseHandle(out_r);
+            return std::unexpected(a.error);
+        }
+        pf::windows_process::adopted_child c;
+        c.pid         = a.pid;
+        c.process     = reinterpret_cast<void*>(static_cast<intptr_t>(a.pidfd));
+        c.stdout_pipe = out_r;
+        auto adopted = pf::windows_process::adopt(std::move(c));
+        if (!adopted) {
+            ::CloseHandle(out_r);
+            return std::unexpected(std::string{adopted.error().what});
+        }
+        return started{std::move(*adopted), -1 /*no seccomp on windows*/,
                        std::move(a.service_broker), std::move(a.kill_tree)};
     }
 #endif
@@ -461,6 +506,13 @@ class JaalSession final : public mt::Session {
             // Stop: asked by the handle, or the process is shutting down.
             const bool stopping = core->stop.load() || pool_stop.stop_requested();
             if (stopping && !kill_at && !exited) {
+                // Tree first, then the leader: the pump's "ask first" grace
+                // cannot reach a grandchild that jaal's leader-only graceful
+                // stop leaves alive (see run_child's stop branch). The
+                // sandbox's kill_tree is the exact kill; give_up_eof below
+                // bounds a pipe that outlives the whole tree anyway.
+                if (!(hooks.kill_tree && hooks.kill_tree()))
+                    (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
                 (void)proc.stop(pf::stop_mode::graceful, pf::stop_scope::tree);
                 kill_at = clock_t_::now() + kGrace;
             }
@@ -772,6 +824,15 @@ ChildResult run_child(const ChildRun& run) {
     constexpr std::chrono::seconds kAfterKill{5};
     bool exited = false;
 
+    // AGENTTY_STOP_TRACE=1: the cancel/wall paths are timing bugs that show
+    // up only under load, so the whole stop sequence (deadline requests,
+    // events, the tail steps) goes to stderr without a rebuild.
+    const bool stop_trace = [] {
+        char b[8]{};
+        const DWORD n = ::GetEnvironmentVariableA("AGENTTY_STOP_TRACE", b, sizeof b);
+        return n > 0 && n < sizeof b && b[0] == '1';
+    }();
+
     for (;;) {
         const auto now = clock_t_::now();
         auto next = now + std::chrono::hours{24};
@@ -783,12 +844,39 @@ ChildResult run_child(const ChildRun& run) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             next > now ? next - now : std::chrono::milliseconds::zero());
 
+        // AGENTTY_STOP_TRACE=1: log the wait REQUEST and what came back. The
+        // cancel path of this loop once sat 20s in a single wait() that was
+        // asked for 2s — the kill_at deadline never woke it — so the pair
+        // (requested, actual, timeout, events) is the diagnosis.
+        const auto wait_started = clock_t_::now();
         auto res = reactor->wait(ms);
+        if (stop_trace)
+            std::fprintf(stderr,
+                         "[exec] wait req=%lldms actual=%lldms timeout=%d events=%u "
+                         "stopping=%d kill_at=%d\n",
+                         static_cast<long long>(ms.count()),
+                         static_cast<long long>(
+                             std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 clock_t_::now() - wait_started).count()),
+                         res ? static_cast<int>(res->timeout) : -1,
+                         res ? static_cast<unsigned>(res->count) : 0u,
+                         static_cast<int>(stopping),
+                         static_cast<int>(static_cast<bool>(kill_at)));
         if (!res) break;
 
         bool saw_output = false;
         for (std::uint8_t i = 0; i < res->count; ++i) {
             const auto& e = res->ready[i];
+            if (stop_trace)
+                std::fprintf(stderr,
+                             "[exec] event t=%lldms token=%llu read=%d write=%d hangup=%d err=%d woken=%d\n",
+                             static_cast<long long>(
+                                 std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     clock_t_::now() - started_at).count()),
+                             static_cast<unsigned long long>(e.token),
+                             static_cast<int>(e.readable), static_cast<int>(e.writable),
+                             static_cast<int>(e.hangup), static_cast<int>(e.error),
+                             static_cast<int>(res->woken));
             if (e.token == kOutToken && (e.readable || e.hangup)) {
                 std::size_t got = 0;
                 if (auto h = proc.stdout_handle())
@@ -824,10 +912,50 @@ ChildResult run_child(const ChildRun& run) {
             else if (has_idle && t >= idle_at)              r.timed_out_idle = true;
             else if (has_wall && t >= wall_at)              r.timed_out_wall = true;
             if (r.cancelled || r.timed_out_idle || r.timed_out_wall) {
+                // Kill the WHOLE TREE first, then "ask". On POSIX a graceful
+                // stop can let a shell reap its own children; on Windows an
+                // adopted sandbox child carries no job handle in jaal, so a
+                // graceful stop is TerminateProcess on the leader only — the
+                // grandchildren (ping inside cmd) survive it and hold the
+                // stdout pipe open, and the post-loop drain then waits for
+                // them to finish naturally (measured: 19.9s for `ping -n 21`).
+                // The sandbox's kill_tree (TerminateJobObject, a grandchild
+                // cannot escape the job) is exact, so it goes FIRST; the
+                // graceful call keeps its place for the leader's flush, and
+                // kill_at still bounds a tree the hook could not reach.
+                if (st->kill_tree && st->kill_tree()) {
+                    if (stop_trace)
+                        std::fprintf(stderr, "[exec] tree-kill fired t=%lldms\n",
+                                     static_cast<long long>(
+                                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             t - started_at).count()));
+                }
                 // Ask first: a shell given SIGTERM reaps its own children.
                 (void)proc.stop(pf::stop_mode::graceful, pf::stop_scope::tree);
                 stopping = true;
                 kill_at  = t + run.kill_grace;
+                {
+                    // AGENTTY_STOP_TRACE=1: the cancel/wall paths of the exec
+                    // loop are timing bugs that show up only under load, so
+                    // the sequence (what fired, what the kill call returned,
+                    // whether the tree kill came from the sandbox hook) goes
+                    // to stderr without a rebuild.
+                    char tb[8]{};
+                    const DWORD tn = ::GetEnvironmentVariableA(
+                        "AGENTTY_STOP_TRACE", tb, sizeof tb);
+                    if (tn > 0 && tn < sizeof tb && tb[0] == '1')
+                        std::fprintf(stderr,
+                                     "[exec] stop t=%lldms cancelled=%d idle=%d wall=%d "
+                                     "kill_tree=%d\n",
+                                     static_cast<long long>(
+                                         std::chrono::duration_cast<
+                                             std::chrono::milliseconds>(t - started_at)
+                                             .count()),
+                                     static_cast<int>(r.cancelled),
+                                     static_cast<int>(r.timed_out_idle),
+                                     static_cast<int>(r.timed_out_wall),
+                                     static_cast<int>(static_cast<bool>(st->kill_tree)));
+                }
                 continue;
             }
         }
@@ -835,7 +963,22 @@ ChildResult run_child(const ChildRun& run) {
             // The whole tree. kill_tree is claybin's cgroup.kill, which a
             // setsid() in a grandchild cannot escape; the group signal is
             // the fallback.
-            if (!(st->kill_tree && st->kill_tree()))
+            const bool kt = st->kill_tree && st->kill_tree();
+            {
+                char tb[8]{};
+                const DWORD tn = ::GetEnvironmentVariableA(
+                    "AGENTTY_STOP_TRACE", tb, sizeof tb);
+                if (tn > 0 && tn < sizeof tb && tb[0] == '1')
+                    std::fprintf(stderr,
+                                 "[exec] force t=%lldms kill_tree_called=%d ok=%d\n",
+                                 static_cast<long long>(
+                                     std::chrono::duration_cast<
+                                         std::chrono::milliseconds>(t - started_at)
+                                         .count()),
+                                 static_cast<int>(static_cast<bool>(st->kill_tree)),
+                                 static_cast<int>(kt));
+            }
+            if (!kt)
                 (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
             kill_at.reset();
             // SIGKILL is sent; the exit should follow at once. If it doesn't
@@ -850,8 +993,18 @@ ChildResult run_child(const ChildRun& run) {
     }
 
     // The exit says the bytes are done, not that we have them.
+    if (stop_trace)
+        std::fprintf(stderr, "[exec] loop ended t=%lldms\n",
+                     static_cast<long long>(
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             clock_t_::now() - started_at).count()));
     if (auto h = proc.stdout_handle())
         drain_into(*h, r.output, run.max_output_bytes, r.truncated);
+    if (stop_trace)
+        std::fprintf(stderr, "[exec] drained t=%lldms\n",
+                     static_cast<long long>(
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             clock_t_::now() - started_at).count()));
     progress(true);
 
     if (auto status = proc.reap()) {
@@ -860,6 +1013,11 @@ ChildResult run_child(const ChildRun& run) {
     } else {
         r.signalled = true;   // gone, and nothing to tell us how
     }
+    if (stop_trace)
+        std::fprintf(stderr, "[exec] reaped t=%lldms\n",
+                     static_cast<long long>(
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             clock_t_::now() - started_at).count()));
 #if defined(_WIN32)
     // A grandchild can still hold the stdin pipe's read end, leaving the
     // feeder blocked in WriteFile. Ending the job closes every copy, so the
@@ -871,6 +1029,11 @@ ChildResult run_child(const ChildRun& run) {
     // are captureless over their own value). The join re-states that here,
     // the one reviewed root for this helper (tests/lint/allowlist.txt).
     maya::thread_root([&](const maya::unlocked& c) { feeder.stop(c); });
+    if (stop_trace)
+        std::fprintf(stderr, "[exec] feeder joined t=%lldms\n",
+                     static_cast<long long>(
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             clock_t_::now() - started_at).count()));
 #endif
     stamp();
     return r;

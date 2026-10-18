@@ -53,7 +53,19 @@ Settings persist as you edit and apply **on the next launch** — see
 | `bwrap` (bubblewrap) | Linux | fallback |
 | `claybin` | macOS | **default** |
 | `sandbox-exec` | macOS | fallback |
-| — | Windows | none (documented gap) |
+| `claybin` | Windows | **default** |
+| — | Windows fallback | **none, by design** |
+
+On Windows there is no fallback engine and no bwrap: the probe either proves
+it can build a wall (AppContainer or a job object) and claybin runs, or
+`sandbox: active` becomes `sandbox: none` and commands run unconfined —
+reported at startup, never silently. Windows Sandbox (the Hyper-V VM product)
+was deliberately not chosen: it is a whole-OS VM with seconds of boot time, no
+pipe-stdout model and no per-command exit codes, which breaks the
+spawn/adopt/stream/kill contract every tool call relies on. AppContainer is
+the process-level translation of the same policy; the kernel-isolation gap it
+carries is reported per capability rather than hidden (see
+[claybin on Windows](#claybin-on-windows)).
 
 ### Why claybin is the default
 
@@ -141,10 +153,68 @@ Asking for claybin on a mac where seatbelt is unavailable yields
 `sandbox-exec`, never nothing — the same fallback discipline as Linux, in both
 directions.
 
+### claybin on Windows
+
+Same engine, same policy, the third set of walls. `compile()` is pure and
+unit-tested on every host; the apply step (`claybin/windows/spawn.cpp`) uses
+one AppContainer profile per capability set, stamps DACL/integrity ACEs for
+the granted paths (opt-in — without it the report honestly says `partial`),
+wraps resource limits in a job object, and maps the policy's syscall posture
+onto process mitigation policies.
+
+| capability | claybin on Windows | note |
+|---|---|---|
+| filesystem read/write/exec | partial | AppContainer default-deny + per-object ACEs |
+| network isolation | partial (Full/Ports) · **strong** (None) | no net capability = no socket |
+| process isolation | **strong** (AppContainer token) | the wall Linux builds with user+pid ns |
+| syscall filter | partial | mitigation policies, no programmable filter; `hardened_process` is refused |
+| memory / cpu / pids caps | **strong** (job object) | as hard as cgroup v2 |
+| privilege drop | host-dependent | `strong` only where the probe proves the restricted token + AppContainer combination survives; measured per host, never assumed |
+| device isolation | partial | AppContainer object namespace |
+| host kernel isolation | **none** | process backend, by definition |
+
+Two behaviors are specific to this platform and measured, not assumed:
+
+- **The privilege-drop probe is process-lifetime cached.** On some Windows
+  builds (insider 26300 measured) the restricted-token + AppContainer
+  combination is process-warmth dependent: early probes fail, later ones
+  pass, and a re-probe per spawn could build a wall that kills every guest
+  (0xC0000142 during ntdll init). The probe therefore runs the child in the
+  exact production spawn shape — SUSPENDED, job-assigned, handle-listed —
+  three times, and the first (coldest) verdict sticks for the process.
+- **Cancel kills the tree first.** An adopted child carries no job handle in
+  jaal, so a graceful stop can only terminate the leader; a grandchild
+  (`ping` inside `cmd`) survives and holds the stdout pipe open, which turned
+  a 2-second Esc into a 20-second drain. The exec loop fires
+  `TerminateJobObject` (via the sandbox's `kill_tree`) before the graceful
+  stop; the grace remains as fallback.
+
+`/proc` and `/dev` policy roots map to a virtual object-namespace sentinel:
+there is nothing to stamp an ACL on, so grants on them are skipped and the
+AppContainer's default-deny carries the isolation. Run `sandbox_audit` on a
+Windows host for the live wall list; `tests/sandbox_win_posture_test.cpp`
+pins the exec chain end to end.
+
+Two env-gated traces exist for the stop/spawn paths, because those are the
+ones where a bug shows only under load and a rebuild-only diagnosis costs a
+codebase-scale rebuild:
+
+| variable | what it prints | where |
+|---|---|---|
+| `AGENTTY_STOP_TRACE=1` | every reactor wait (deadline requested vs actual), every event with its token, the stop/tree-kill/force sequence, and the drain + feeder-join tail of `run_child` | `src/tool/util/exec.cpp` |
+| `CLAYBIN_TRACE=1` | one line per spawn: which API was used, whether the appcontainer and restricted token were applied, capability count, limits, workdir, flags, and whether `CreateProcess` itself succeeded | claybin `src/windows/spawn.cpp` |
+
+Both cost one `GetEnvironmentVariable` per call when unset and are silent
+then; the cancel bug above was root-caused with them and they stay for the
+next one.
+
 ### Availability is a probe, not a `which`
 
 On Linux, `available()` forks and attempts the real `uid_map` write. On macOS
-it forks and actually calls `sandbox_init()`. A binary on `$PATH` that cannot
+it forks and actually calls `sandbox_init()`. On Windows it creates and
+deletes an AppContainer profile and runs a real child under the compiled
+walls (the verdict is cached for the process lifetime — see
+[claybin on Windows](#claybin-on-windows)). A binary on `$PATH` that cannot
 start a namespace — or a symbol that is present but refused — is not an
 available backend, and treating it as one is precisely how `sandbox: active`
 came to mean nothing.

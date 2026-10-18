@@ -25,16 +25,19 @@
 #include "agentty/util/logx.hpp"   // AGT_LOG — the broker audit trail
 
 // POSIX, not Linux-only. claybin's plan compiler is portable, and as of the
-// macOS backend there are now two platforms that can APPLY a policy:
+// macOS and Windows backends there are now three platforms that can APPLY a
+// policy:
 //
 //   Linux  — namespaces, landlock, seccomp, cgroup2  (claybin/plan/spawn.hpp)
 //   macOS  — seatbelt + rlimits                      (claybin/macos/backend.hpp)
+//   Windows— appcontainer, restricted token, job,   (claybin/windows/spawn.cpp)
+//            mitigation policies
 //
 // `build_policy()` below is shared between them, which is the entire point of
 // claybin's design: one description of the boundary, compiled per platform,
 // with a guarantee report saying what each host could actually enforce. The
-// two spawn paths differ because the mechanisms differ; the POLICY does not.
-#if defined(__linux__) || defined(__APPLE__)
+// three spawn paths differ because the mechanisms differ; the POLICY does not.
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 
 #include <cerrno>
 #include <cstdlib>
@@ -44,8 +47,10 @@
 #include <utility>
 #include <vector>
 
+#if !defined(_WIN32)
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #include "claybin/plan/compile.hpp"
 #include "claybin/policy/policy.hpp"
@@ -54,8 +59,17 @@
 #if defined(__linux__)
 #include "claybin/broker/notify.hpp"
 #include "claybin/plan/spawn.hpp"
-#else
+#elif defined(__APPLE__)
 #include "claybin/macos/backend.hpp"
+#else
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include "claybin/windows/backend.hpp"
 #endif
 
 namespace agentty::tools::util::sandbox::claybin_backend {
@@ -402,6 +416,196 @@ std::string compile_profile(const Posture& p, std::string& error) {
         return {};
     }
     return std::move(compiled->profile);
+}
+
+#elif defined(_WIN32)
+
+// ─────────────────────────── Windows ──────────────────────────────
+//
+// appcontainer + restricted token + job object + mitigation policies, through
+// claybin's windows backend. The compiler is the same build_policy() the
+// other two platforms run; only the apply step differs, and the guarantee
+// report says which walls each host actually erected.
+//
+// What the caller gets back is HANDLES, not fds: process + job, both already
+// open, both owned by the caller. jaal's windows_process::adopt consumes them;
+// the job is the kill switch (KILL_ON_JOB_CLOSE), the process handle the
+// waitable exit.
+
+bool available() {
+    // The probe is real, like every other backend's: appcontainer profiles are
+    // created and deleted, restricted tokens are PROVEN by running a child
+    // under one, mitigation attributes by initializing the list. A capability
+    // that reads as present but fails on use is worse than absence, because
+    // Auto then degrades silently instead of loudly.
+    const auto host = ::clay::windows::probe_host();
+    // The floor is one real wall: the appcontainer token or a job object.
+    return host.app_container || host.job_objects;
+}
+
+Report describe(const Posture& p) {
+    Report r;
+    auto sealed = build_policy(p);
+    auto compiled = ::clay::windows::compile(sealed, ::clay::windows::probe_host());
+    if (!compiled) {
+        r.ok = false;
+        r.detail = std::string{compiled.error().mechanism};
+        return r;
+    }
+    r.ok = true;
+    for (int i = 0; i < static_cast<int>(CapId::count_); ++i) {
+        auto id = static_cast<CapId>(i);
+        auto s = compiled->guarantees.strength(id);
+        Wall w;
+        w.name = ::clay::cap_name(id);
+        w.strength = s == Enforcement::strong    ? "strong"
+                     : s == Enforcement::partial ? "partial"
+                                                 : "none";
+        // The receipt, per platform truth: "filesystem.read partial via
+        // appcontainer+DACL" is checkable; "sandbox active" is not.
+        w.mechanism = compiled->guarantees.mechanism(id);
+        r.walls.push_back(std::move(w));
+    }
+    return r;
+}
+
+SpawnResult spawn_argv(const Posture& p, const std::vector<std::string>& argv_in,
+                       int stdout_fd, int stderr_fd,
+                       const std::vector<std::pair<std::string, std::string>>& env) {
+    SpawnResult out;
+
+    if (argv_in.empty()) {
+        out.start_error = "claybin: empty argv";
+        return out;
+    }
+
+    auto sealed = build_policy(p);
+    ::clay::windows::Options opts;
+    opts.profile_name = "agentty";
+    // ACL stamping is a host-side mutation, so it stays opt-in at the API
+    // level -- and agentty opts in HERE, once, deliberately: the alternative
+    // is an appcontainer that can reach nothing the user asked the command to
+    // reach, which makes the sandbox useless rather than safe. The compile
+    // report still grades the walls honestly (partial, per-object semantics).
+    // test_no_acl_stamps: the 0xc0000142 isolation lever -- production never
+    // sets it.
+    opts.allow_host_acl_mutation = !p.test_no_acl_stamps;
+
+    auto compiled = ::clay::windows::compile(sealed, ::clay::windows::probe_host(), opts);
+    if (!compiled) {
+        out.start_error = "claybin: compile failed: " +
+                          std::string{compiled.error().mechanism};
+        return out;
+    }
+
+    // The caller's argv reaches the child exactly as given -- argv[0] is the
+    // program NAME, the posix convention all three backends share, and
+    // claybin's windows spawner rebuilds the command line from it. No shell
+    // re-parsing of user data on the way in.
+    std::vector<const char*> argv;
+    argv.reserve(argv_in.size() + 1);
+    for (const auto& a : argv_in) argv.push_back(a.c_str());
+    argv.push_back(nullptr);
+
+    // PATH resolution: CreateProcessW searches the loader path like execvp,
+    // but only when no slash is present; keep the caller's program as given.
+    const std::string program = argv_in.front();
+
+    // The request's env, layered on ours. Empty env: inherit ours unchanged.
+    // The windows loader wants a sorted double-NUL block; claybin builds that
+    // (case-insensitive sort, "NAME=VALUE\0" pairs) from the char* list below.
+    std::vector<std::string> env_store;
+    std::vector<const char*> envp;
+    if (!env.empty()) {
+        // ours first, so the caller's overrides land after and win the sort
+        if (wchar_t* wbase = ::GetEnvironmentStringsW()) {
+            for (const wchar_t* e = wbase; *e;) {
+                const std::wstring wide{e};
+                e += wide.size() + 1;
+                // only "NAME=VALUE" shapes, skip the odd special entries
+                const auto eq = wide.find(L'=');
+                if (eq == std::wstring::npos || eq == 0) continue;
+                const std::string name(wide.begin(), wide.begin() + eq);
+                // overridden names are supplied by the caller below; keep the
+                // name side ASCII-faithful (env var names are ASCII in
+                // practice) and convert the value losslessly via UTF-8
+                bool overridden = false;
+                for (const auto& [k, v] : env)
+                    if (_stricmp(k.c_str(), name.c_str()) == 0) { overridden = true; break; }
+                if (overridden) continue;
+                const int n = ::WideCharToMultiByte(
+                    CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                if (n > 0) {
+                    std::string line(n - 1, '\0');
+                    ::WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1,
+                                          line.data(), n, nullptr, nullptr);
+                    env_store.push_back(std::move(line));
+                }
+            }
+            ::FreeEnvironmentStringsW(wbase);
+        }
+        for (const auto& [k, v] : env) env_store.push_back(k + "=" + v);
+        for (const auto& line : env_store) envp.push_back(line.c_str());
+        envp.push_back(nullptr);
+    }
+
+    ::clay::windows::SpawnRequest req;
+    req.program = program.c_str();
+    req.argv = argv.data();
+    req.envp = env.empty() ? nullptr : envp.data();
+    // The caller's pipe handles arrive through the FdMap (they are HANDLES on
+    // windows, and the exec path maps them explicitly). The sentinel fields
+    // below cover the spawn_shell path where no map was provided: inherit
+    // stdout/stderr, NUL on stdin.
+    req.stdin_fd = ::clay::windows::SpawnRequest::kDevNull;
+    if (stdout_fd >= 0 || stderr_fd >= 0) {
+        int n = 0;
+        if (stdout_fd >= 0)
+            req.fds[n++] = {reinterpret_cast<void*>(static_cast<intptr_t>(stdout_fd)), 1};
+        if (stderr_fd >= 0)
+            req.fds[n++] = {reinterpret_cast<void*>(static_cast<intptr_t>(stderr_fd)), 2};
+        req.fd_count = n;
+        req.stdout_fd = -1;  // mapped explicitly above
+        req.stderr_fd = -1;
+    } else {
+        req.stdout_fd = -1;
+        req.stderr_fd = -1;
+    }
+    if (!p.cwd.empty())
+        req.workdir = p.cwd;
+    else if (!p.workspace.empty())
+        req.workdir = p.workspace;
+
+    auto spawned = ::clay::windows::spawn(*compiled, req);
+    if (!spawned) {
+        out.start_error = "claybin: spawn failed: " +
+                          std::string{spawned.error().mechanism} + " (errno " +
+                          std::to_string(spawned.error().sys_errno) + ")";
+        return out;
+    }
+
+    out.started = true;
+    out.pid = spawned->pid;
+    // HANDLES, not descriptors. SpawnResult carries them as ints (its shape is
+    // shared with the posix paths); jaal's adopt reinterprets them. The job is
+    // the kill switch, the process handle the waitable exit -- both owned by
+    // the caller from here.
+    out.pidfd = static_cast<int>(reinterpret_cast<intptr_t>(spawned->process));
+    out.kill_tree = [job = spawned->job]() -> bool {
+        // closing the job handle is the kill: KILL_ON_JOB_CLOSE takes the
+        // tree down, and a grandchild cannot escape the job. Terminate
+        // first so the exit is prompt rather than at handle-close time.
+        if (!job) return false;
+        return ::TerminateJobObject(static_cast<HANDLE>(job), 1) != FALSE;
+    };
+    // No broker on windows: seccomp user-notify has no equivalent, so
+    // supervisor_fd and service_broker keep their sentinel defaults.
+    return out;
+}
+
+SpawnResult spawn_shell(const Posture& p, const std::string& shell_cmd, int stdout_fd,
+                        int stderr_fd) {
+    return spawn_argv(p, {"cmd.exe", "/d", "/s", "/c", shell_cmd}, stdout_fd, stderr_fd);
 }
 
 #else  // __linux__

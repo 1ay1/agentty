@@ -214,10 +214,21 @@ TEST_CASE("exec: the sandboxed path spawns, is watched, and still obeys the cloc
     namespace sb = agentty::tools::util::sandbox;
     if (!sb::init(sb::Mode::On) || !sb::is_active()) return;
 
+    // The shell is the platform's: the sandbox contract is not "linux only",
+    // it is "whatever shell this host runs the command with".
+#if defined(_WIN32)
+    const std::vector<std::string> echo_cmd = {"cmd.exe", "/d", "/s", "/c", "echo inside"};
+    const std::vector<std::string> spin_cmd = {"cmd.exe", "/d", "/s", "/c",
+                                               "for /l %i in () do @echo s"};
+#else
+    const std::vector<std::string> echo_cmd = {"/bin/sh", "-c", "echo inside"};
+    const std::vector<std::string> spin_cmd = {"/bin/sh", "-c", "while :; do echo s; done"};
+#endif
+
     auto e = agentty::tools::util::make_exec();
 
     // 1. it runs at all -- the adopt() hand-off works.
-    auto ran = e->run(mt::Call{}, {.program = {"/bin/sh", {"-c", "echo inside"}},
+    auto ran = e->run(mt::Call{}, {.program = {echo_cmd[0], {echo_cmd.begin() + 1, echo_cmd.end()}},
                        .budgets = {.idle = 10s, .wall = 30s}});
     CHECK_MESSAGE(ran.ok(), "a sandboxed command still runs and is reaped");
     CHECK(ran.output.find("inside") != std::string::npos);
@@ -232,7 +243,7 @@ TEST_CASE("exec: the sandboxed path spawns, is watched, and still obeys the cloc
     //    clock cannot (output keeps resetting it), and a sandboxed child is
     //    exactly where an unreaped runaway would be hardest to notice.
     const auto t0 = std::chrono::steady_clock::now();
-    auto runaway = e->run(mt::Call{}, {.program = {"/bin/sh", {"-c", "while :; do echo s; done"}},
+    auto runaway = e->run(mt::Call{}, {.program = {spin_cmd[0], {spin_cmd.begin() + 1, spin_cmd.end()}},
                            .budgets = {.idle = 30s, .wall = 2s},
                            .max_output_bytes = 32u * 1024u});
     const auto elapsed = std::chrono::steady_clock::now() - t0;
@@ -247,12 +258,21 @@ TEST_CASE("exec: the request's env reaches a sandboxed child") {
     namespace sb = agentty::tools::util::sandbox;
     if (!sb::init(sb::Mode::On) || !sb::is_active()) return;
     auto e = agentty::tools::util::make_exec();
-    auto r = e->run(mt::Call{}, {.program = {"/bin/sh", {"-c", "printf '%s|%s' \"$AGT_PROBE\" \"${PATH:+path}\""}},
+#if defined(_WIN32)
+    auto r = e->run(mt::Call{}, {.program = {"cmd.exe", {"/d", "/s", "/c", "echo %AGT_PROBE%"}},
+                                 .env = {{"AGT_PROBE", "from-request"}},
+                                 .budgets = {.idle = 10s, .wall = 20s}});
+    CHECK(r.ok());
+    CHECK_MESSAGE(r.output.find("from-request") != std::string::npos,
+                  "child saw: " << r.output);
+#else
+    auto r = e->run(mt::Call{}, {.program = {"/bin/sh", {"-c", "printf '%s|%s' "$AGT_PROBE" \"${PATH:+path}\""}},
                                  .env = {{"AGT_PROBE", "from-request"}},
                                  .budgets = {.idle = 10s, .wall = 20s}});
     CHECK(r.ok());
     // Layered on the parent's env, not instead of it: PATH survives.
     CHECK_MESSAGE(r.output == "from-request|path", "child saw: " << r.output);
+#endif
 }
 
 // A background session under the sandbox makes a brokered syscall (kill).
@@ -260,6 +280,13 @@ TEST_CASE("exec: the request's env reaches a sandboxed child") {
 // nobody services never gets past it.
 TEST_CASE("exec: a sandboxed background session gets its brokered syscalls answered") {
     namespace sb = agentty::tools::util::sandbox;
+#if !defined(__linux__)
+    // the broker is seccomp-notify: a linux-only mechanism. on windows the
+    // sandbox reports syscall.filter as `partial` (mitigation policies, no
+    // programmable filter) and there is no listener to service -- python3's
+    // kill() runs unbrokered and the test's premise does not apply.
+    return;
+#else
     if (!sb::init(sb::Mode::On) || !sb::is_active()) return;
     if (sb::config_snapshot()->syscall_mode == agentty::sandbox_cfg::SyscallMode::Off)
         return;   // no filter, so nothing is brokered
@@ -291,6 +318,7 @@ TEST_CASE("exec: a sandboxed background session gets its brokered syscalls answe
     (*s)->stop();
     CHECK_MESSAGE(out.find("after-kill") != std::string::npos, "the guest got past kill: " << out);
     CHECK_MESSAGE(ended, "and exited on its own");
+#endif  // __linux__
 }
 
 // ── a session: started here, polled later ───────────────────────────────
@@ -434,5 +462,8 @@ TEST_CASE("exec: a tool call streams progress and stops on cancel") {
 #endif
         (void)DynamicDispatch::execute(agtest::cap(), "shell", json{{"command", kLong}}, ctx);
     }
-    CHECK_MESSAGE(std::chrono::steady_clock::now() - t0 < 5s, "Esc stopped the command");
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    std::fprintf(stderr, "[cancel-test] execute took %lld ms\n",
+                 static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()));
+    CHECK_MESSAGE(elapsed < 5s, "Esc stopped the command");
 }
