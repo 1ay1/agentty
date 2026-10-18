@@ -14,8 +14,8 @@ server, then what's actually happening on the wire.
 
 Two runnable examples ship in the mcp-cpp repo and are referenced throughout:
 
-- **[`wordcount-mcp`](https://github.com/1ay1/mcp-cpp/tree/master/examples/wordcount-mcp)** — ~120 lines of pure-stdlib **Python**, no build.
-- **[`date-mcp`](https://github.com/1ay1/mcp-cpp/tree/master/examples/date-mcp)** — ~130 lines of **C++** built with mcp-cpp.
+- **[`wordcount-mcp`](https://github.com/agentty-org/mcp-cpp/tree/master/examples/wordcount-mcp)** — ~120 lines of pure-stdlib **Python**, no build.
+- **[`date-mcp`](https://github.com/agentty-org/mcp-cpp/tree/master/examples/date-mcp)** — ~130 lines of **C++** built with mcp-cpp.
 
 :::tip
 You do **not** need to write a server for most things — the [MCP ecosystem](https://github.com/modelcontextprotocol/servers) has hundreds ready to add (Playwright, Postgres, GitHub, filesystem, …). Write your own when you have an internal API or a bespoke tool the model should reach.
@@ -99,7 +99,7 @@ use the official [Python SDK](https://github.com/modelcontextprotocol/python-sdk
 
 ## Native C++ with mcp-cpp
 
-agentty's own tools are built on [mcp-cpp](https://github.com/1ay1/mcp-cpp), a
+agentty's own tools are built on [mcp-cpp](https://github.com/agentty-org/mcp-cpp), a
 header-only C++ MCP library — so a C++ server is a natural fit when you want
 speed or to reuse existing C++ code. The whole server is a few `register_tool`
 calls (see `date-mcp/date_server.cpp`):
@@ -137,7 +137,7 @@ int main() {
 ```cmake
 include(FetchContent)
 FetchContent_Declare(mcp
-    GIT_REPOSITORY https://github.com/1ay1/mcp-cpp.git
+    GIT_REPOSITORY https://github.com/agentty-org/mcp-cpp.git
     GIT_TAG        master)
 FetchContent_MakeAvailable(mcp)
 target_link_libraries(my_server PRIVATE mcp::mcp)

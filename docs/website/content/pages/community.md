@@ -33,7 +33,7 @@ Prefer IRC? Join **#agentty on Libera.Chat** (`irc.libera.chat`, port 6697, TLS)
 - [#agentty on Libera.Chat](https://web.libera.chat/#agentty) — the IRC channel.
 - [Source code](https://github.com/agentty-org/agentty) — the agentty repository.
 - [Releases](https://github.com/agentty-org/agentty/releases/latest) — prebuilt binaries and packages.
-- [maya](https://github.com/1ay1/maya) — the sister TUI engine agentty renders through.
+- [maya](https://github.com/agentty-org/maya) — the sister TUI engine agentty renders through.
 
 ## Be excellent to each other
 

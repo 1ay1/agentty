@@ -23,7 +23,7 @@ Cmd  →  runtime executes side effects  →  new Msg events
 
 ## The view
 
-Rendering is a single function `Model → Element`. agentty builds widget Configs from `Model` state; the actual chrome — every glyph, layout decision, and breathing animation — is owned by [maya](https://github.com/1ay1/maya), a sister header-mostly TUI engine. The host constructs no Elements directly.
+Rendering is a single function `Model → Element`. agentty builds widget Configs from `Model` state; the actual chrome — every glyph, layout decision, and breathing animation — is owned by [maya](https://github.com/agentty-org/maya), a sister header-mostly TUI engine. The host constructs no Elements directly.
 
 ## The provider
 

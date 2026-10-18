@@ -97,7 +97,7 @@ if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/maya/CMakeLists.txt")
 else()
     FetchContent_Declare(
         maya
-        GIT_REPOSITORY https://github.com/1ay1/maya.git
+        GIT_REPOSITORY https://github.com/agentty-org/maya.git
         GIT_TAG        master
         GIT_SHALLOW    TRUE
     )

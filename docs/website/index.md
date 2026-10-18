@@ -32,7 +32,7 @@ Already convinced? Jump straight to [Installation](/docs/installation) or the [Q
 
 ## How it works, in one paragraph
 
-agentty is a pure-functional update loop: `(Model, Msg) → (Model, Cmd)`. The view is a single function `Model → Element`, rendered by [maya](https://github.com/1ay1/maya), a sister TUI engine. The Anthropic provider speaks HTTP/2 + SSE directly through an in-house `nghttp2` + OpenSSL stack. Subprocesses use `posix_spawn` + `poll(2)` with in-process kill deadlines. See [Architecture](/docs/architecture) for the full tour.
+agentty is a pure-functional update loop: `(Model, Msg) → (Model, Cmd)`. The view is a single function `Model → Element`, rendered by [maya](https://github.com/agentty-org/maya), a sister TUI engine. The Anthropic provider speaks HTTP/2 + SSE directly through an in-house `nghttp2` + OpenSSL stack. Subprocesses use `posix_spawn` + `poll(2)` with in-process kill deadlines. See [Architecture](/docs/architecture) for the full tour.
 
 ## Project status
 

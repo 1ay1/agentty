@@ -184,7 +184,7 @@ plugin for some *other* MCP host. The interface is symmetric.
 
 ## A compiled one: C++ with mcp-cpp
 
-agentty's own MCP stack — [mcp-cpp](https://github.com/1ay1/mcp-cpp), the
+agentty's own MCP stack — [mcp-cpp](https://github.com/agentty-org/mcp-cpp), the
 header-only library its built-in tools are served with — works just as
 well for writing plugins. A compiled plugin makes sense when the tool
 wraps native code, needs real performance, or should ship as a single
@@ -282,7 +282,7 @@ set(CMAKE_CXX_STANDARD 23)
 
 include(FetchContent)
 FetchContent_Declare(mcp
-    GIT_REPOSITORY https://github.com/1ay1/mcp-cpp.git
+    GIT_REPOSITORY https://github.com/agentty-org/mcp-cpp.git
     GIT_TAG        master)
 FetchContent_MakeAvailable(mcp)
 

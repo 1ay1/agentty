@@ -12,7 +12,7 @@ An AI coding agent that runs shell commands is powerful — and risky. A bad com
 
 ## Sandbox by default
 
-agentty runs shell and build commands inside an OS-level sandbox, on **Linux and macOS**, using its own policy compiler ([claybin](https://github.com/1ay1/claybin)). The agent's commands are isolated from the rest of your system unless you explicitly allow more access. You don't have to configure anything — it's on by default.
+agentty runs shell and build commands inside an OS-level sandbox, on **Linux and macOS**, using its own policy compiler ([claybin](https://github.com/agentty-org/claybin)). The agent's commands are isolated from the rest of your system unless you explicitly allow more access. You don't have to configure anything — it's on by default.
 
 The same policy compiles to whatever the kernel underneath can actually enforce:
 

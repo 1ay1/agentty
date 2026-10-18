@@ -43,13 +43,13 @@ _simdjson_tag=v3.10.1
 _mimalloc_tag=v3.4.5
 
 source=("$_pkgname::git+https://github.com/agentty-org/agentty.git"
-        'git+https://github.com/1ay1/maya.git'
-        'git+https://github.com/1ay1/jaal.git'
-        'git+https://github.com/1ay1/acp-cpp.git'
-        'git+https://github.com/1ay1/mcp-cpp.git'
-        'git+https://github.com/1ay1/rag-cpp.git'
-        'git+https://github.com/1ay1/claybin.git'
-        'git+https://github.com/1ay1/jsonrpc-cpp.git'
+        'git+https://github.com/agentty-org/maya.git'
+        'git+https://github.com/agentty-org/jaal.git'
+        'git+https://github.com/agentty-org/acp-cpp.git'
+        'git+https://github.com/agentty-org/mcp-cpp.git'
+        'git+https://github.com/agentty-org/rag-cpp.git'
+        'git+https://github.com/agentty-org/claybin.git'
+        'git+https://github.com/agentty-org/jsonrpc-cpp.git'
         "nlohmann_json-${_json_tag}.tar.gz::https://github.com/nlohmann/json/archive/${_json_tag}.tar.gz"
         "simdjson-${_simdjson_tag}.tar.gz::https://github.com/simdjson/simdjson/archive/${_simdjson_tag}.tar.gz"
         "mimalloc-${_mimalloc_tag}.tar.gz::https://github.com/microsoft/mimalloc/archive/${_mimalloc_tag}.tar.gz")
