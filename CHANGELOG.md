@@ -23,6 +23,41 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   Country and Freshness, up to 10 results a search. Country defaults to
   United States. The key comes from the key store or
   `AGENTTY_WEB_SEARCH_KEY_SERPLY_API`.
+- **A `/` menu in the composer.** Typing `/` used to open the [[Ctrl+K]]
+  palette and take your text away. Now `/` is just text, and a menu floats
+  above the composer listing built-in actions (`/new`, `/compact`,
+  `/model`, `/rename` ...), your commands, skills and MCP prompts
+  (`server:prompt`). It filters as you type, [[Tab]] fills in the name,
+  [[Enter]] runs only an exact name, and [[Esc]] hides the menu and keeps
+  the text. One resolver handles `/` in the TUI, ACP and `agentty run`.
+- **The sandbox works on Windows (#109).** The claybin backend now runs
+  commands under an AppContainer with a restricted token and a job object,
+  instead of only compiling the policy. Cancel and timeouts kill the whole
+  job, so a child left running (`ping` inside `cmd`) can't hold the output
+  open: cancelling `ping -n 21` took 19.9 s and now takes 0.35 s. The
+  sandbox pane no longer says claybin can't start while it's running.
+  Thanks to @davidwed.
+- **The window title shows the workspace**, e.g. `agentty ~/myproject`,
+  so several agentty windows can be told apart.
+
+### Fixed
+- **Custom hosts without a key.** An https custom host (llama.cpp on
+  RunPod, a tunnel, LM Studio) always asked for a key. Every custom host
+  is probed first now, and the key prompt only opens on a 401. The status
+  badge no longer shows “sign in” on a keyless host.
+- **Thread titles from thinking models.** They used the whole title
+  budget on reasoning and the thread got named “(the model returned an
+  empty or unparseable response)”. Titles now ask custom hosts not to
+  think and drop empty or cut-off replies.
+- **Auto-titling gaps.** Forks keep their `Fork:` name, a failed title
+  request isn't retried every turn, old chats aren't renamed when you
+  continue them, and saving an empty [[Ctrl+R]] draft clears your name.
+- **Zed shows the profile picker.** The permission mode now goes out as a
+  config option on every ACP connection.
+- **Cancelling an external MCP tool call works.** It used to do nothing
+  until the 60 s timeout. A crash when an MCP connection dropped while its
+  reader ran a callback is fixed too.
+
 ## [0.9.27] - 2026-10-17
 
 ### Fixed
