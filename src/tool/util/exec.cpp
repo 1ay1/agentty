@@ -12,6 +12,7 @@
 #include <thread>
 #include <cstdlib>
 #include <cstring>
+#include <cstdarg>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -24,6 +25,16 @@
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/util/sandbox_claybin.hpp"
 #include "agentty/tool/host_call.hpp"   // the dispatcher's per-call data
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #if !defined(_WIN32)
 #  include <fcntl.h>
@@ -46,11 +57,34 @@ constexpr std::uint64_t kOutToken  = 2;
 constexpr std::uint64_t kBrokerToken = 3;
 constexpr std::uint64_t kInToken   = 4;
 
+// AGENTTY_STOP_TRACE=1 logs the exec stop sequence to stderr, each line
+// prefixed with ms since `since`.
+bool stop_trace_on() {
+    static const bool on = [] {
+        const char* v = std::getenv("AGENTTY_STOP_TRACE");
+        return v && v[0] == '1';
+    }();
+    return on;
+}
 
-#if defined(__linux__)
-/// The sandbox's way in, or empty when no sandbox is active. Linux-only:
-/// adopting a foreign child needs a pidfd. Darwin confines by wrapping the
-/// argv instead (see JaalExec::confine).
+[[gnu::format(printf, 2, 3)]]
+void stop_trace(clock_t_::time_point since, const char* fmt, ...) {
+    if (!stop_trace_on()) return;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        clock_t_::now() - since).count();
+    std::fprintf(stderr, "[exec] t=%lldms ", static_cast<long long>(ms));
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    std::fputc('\n', stderr);
+}
+
+
+#if defined(__linux__) || defined(_WIN32)
+/// The sandbox's way in, or empty when no sandbox is active. Linux and
+/// Windows only: adopting a foreign child needs a pidfd or a process handle.
+/// Darwin confines by wrapping the argv instead (see JaalExec::confine).
 ///
 /// claybin clones with namespace flags, installs a seccomp filter and enters
 /// a cgroup -- none of it expressible as "fork then exec" -- so it spawns,
@@ -123,6 +157,41 @@ start_child(const ChildRun& run) {
         auto adopted = pf::posix_process::adopt(c);
         if (!adopted) return std::unexpected(std::string{adopted.error().what});
         return started{std::move(*adopted), a.supervisor_fd,
+                       std::move(a.service_broker), std::move(a.kill_tree)};
+    }
+#endif
+
+#if defined(_WIN32)
+    if (run.spawn_adopted) {
+        // One anonymous pipe; the sandbox gets the write end duplicated
+        // inheritable, we keep the read end. Same shape as the posix arm --
+        // one merged stream, the interleaving a terminal would show -- but
+        // with HANDLEs, because that is what every windows API takes.
+        SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+        HANDLE out_r = nullptr, out_w = nullptr;
+        if (!::CreatePipe(&out_r, &out_w, &sa, 0))
+            return std::unexpected(std::string{"pipe: "} +
+                                   std::to_string(::GetLastError()));
+        auto a = run.spawn_adopted(
+            static_cast<int>(reinterpret_cast<intptr_t>(out_w)));
+        // the spawner duplicated what it needed; OUR write end goes now, or
+        // the reader below never sees EOF.
+        ::CloseHandle(out_w);
+        if (a.error.empty() && a.pid <= 0) a.error = "sandbox did not start";
+        if (!a.error.empty()) {
+            ::CloseHandle(out_r);
+            return std::unexpected(a.error);
+        }
+        pf::windows_process::adopted_child c;
+        c.pid         = a.pid;
+        c.process     = reinterpret_cast<void*>(static_cast<intptr_t>(a.pidfd));
+        c.stdout_pipe = out_r;
+        auto adopted = pf::windows_process::adopt(std::move(c));
+        if (!adopted) {
+            ::CloseHandle(out_r);
+            return std::unexpected(std::string{adopted.error().what});
+        }
+        return started{std::move(*adopted), -1 /*no seccomp on windows*/,
                        std::move(a.service_broker), std::move(a.kill_tree)};
     }
 #endif
@@ -461,6 +530,11 @@ class JaalSession final : public mt::Session {
             // Stop: asked by the handle, or the process is shutting down.
             const bool stopping = core->stop.load() || pool_stop.stop_requested();
             if (stopping && !kill_at && !exited) {
+#if defined(_WIN32)
+                // A graceful stop only ends the leader here, and a surviving
+                // grandchild holds stdout open, so kill the job first.
+                if (hooks.kill_tree) (void)hooks.kill_tree();
+#endif
                 (void)proc.stop(pf::stop_mode::graceful, pf::stop_scope::tree);
                 kill_at = clock_t_::now() + kGrace;
             }
@@ -559,7 +633,7 @@ class JaalExec final : public mt::Exec {
     [[nodiscard]] static std::optional<std::string> confine(const mt::Call& call, ChildRun& run) {
         std::vector<std::string> roots;
         for (const auto& r : call.scope_extra_roots) roots.push_back(r.string());
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
         run.spawn_adopted = sandbox_spawner(run.argv, run.cwd, roots,
                                             ::agentty::tools::host_call(call.host).trusted,
                                             run.env);
@@ -825,10 +899,19 @@ ChildResult run_child(const ChildRun& run) {
             else if (has_idle && t >= idle_at)              r.timed_out_idle = true;
             else if (has_wall && t >= wall_at)              r.timed_out_wall = true;
             if (r.cancelled || r.timed_out_idle || r.timed_out_wall) {
+                // A graceful stop only ends the leader on Windows, and a
+                // surviving grandchild holds stdout open, so kill the job first.
+                bool tree_killed = false;
+#if defined(_WIN32)
+                tree_killed = st->kill_tree && st->kill_tree();
+#endif
                 // Ask first: a shell given SIGTERM reaps its own children.
                 (void)proc.stop(pf::stop_mode::graceful, pf::stop_scope::tree);
                 stopping = true;
                 kill_at  = t + run.kill_grace;
+                stop_trace(started_at, "stop cancelled=%d idle=%d wall=%d tree_kill=%d",
+                           int(r.cancelled), int(r.timed_out_idle), int(r.timed_out_wall),
+                           int(tree_killed));
                 continue;
             }
         }
@@ -836,7 +919,9 @@ ChildResult run_child(const ChildRun& run) {
             // The whole tree. kill_tree is claybin's cgroup.kill, which a
             // setsid() in a grandchild cannot escape; the group signal is
             // the fallback.
-            if (!(st->kill_tree && st->kill_tree()))
+            const bool kt = st->kill_tree && st->kill_tree();
+            stop_trace(started_at, "force tree_kill=%d", int(kt));
+            if (!kt)
                 (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
             kill_at.reset();
             // SIGKILL is sent; the exit should follow at once. If it doesn't
@@ -851,8 +936,10 @@ ChildResult run_child(const ChildRun& run) {
     }
 
     // The exit says the bytes are done, not that we have them.
+    stop_trace(started_at, "loop ended");
     if (auto h = proc.stdout_handle())
         drain_into(*h, r.output, run.max_output_bytes, r.truncated);
+    stop_trace(started_at, "drained");
     progress(true);
 
     if (auto status = proc.reap()) {
@@ -861,6 +948,7 @@ ChildResult run_child(const ChildRun& run) {
     } else {
         r.signalled = true;   // gone, and nothing to tell us how
     }
+    stop_trace(started_at, "reaped");
 #if defined(_WIN32)
     // A grandchild can still hold the stdin pipe's read end, leaving the
     // feeder blocked in WriteFile. Ending the job closes every copy, so the
@@ -872,6 +960,7 @@ ChildResult run_child(const ChildRun& run) {
     // are captureless over their own value). The join re-states that here,
     // the one reviewed root for this helper (tests/lint/allowlist.txt).
     maya::thread_root([&](const maya::unlocked& c) { feeder.stop(c); });
+    stop_trace(started_at, "feeder joined");
 #endif
     stamp();
     return r;

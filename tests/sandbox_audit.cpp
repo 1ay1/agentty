@@ -14,6 +14,9 @@
 
 #include <claybin/plan/compile.hpp>
 #include <claybin/policy/policy.hpp>
+#if defined(_WIN32)
+#include <claybin/windows/backend.hpp>
+#endif
 #if defined(__APPLE__)
 #include <claybin/macos/backend.hpp>
 #endif
@@ -70,7 +73,7 @@ void audit_cfg(const char* label, const cfgn::Config& cfg) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     const char* ws = "/tmp/agentty-audit-ws";
     std::filesystem::create_directories(ws);
     agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), ws);
@@ -158,5 +161,76 @@ int main() {
     }
 
     sb::reset_config_for_test();
+
+#if defined(_WIN32)
+    // 4. LIVE spawn, through the shipped path, with the shipped posture. The
+    // audit above grades compile-time walls; this answers the question the
+    // walls cannot: does a real child survive them on THIS host? The exec
+    // chain failures (0xc0000142 during dll init) never showed up in any
+    // compile-time report, so the audit now measures the runtime too.
+    //
+    // argv[1] optionally isolates ONE variable per run (the rest stays the
+    // shipped default):
+    //   no-acl        spawn must skip the host-side ACL stamps
+    //   no-net        net_mode = None (no capability SIDs in the token)
+    //   no-wx         wx_protect = false
+    //   cwd           workdir = build dir (the live_check working shape)
+    const char* isolate = argc > 1 ? argv[1] : "";
+    {
+        sb::set_config(cfgn::Config{});
+        auto posture = sb::claybin_posture_for_test();
+        if (std::string_view{isolate} == "no-net") posture.net_mode = 1;
+        if (std::string_view{isolate} == "no-wx") posture.wx_protect = false;
+        if (std::string_view{isolate} == "no-acl") posture.test_no_acl_stamps = true;
+        if (std::string_view{isolate} == "cwd") posture.cwd = "C:\\_Workspace_\\claybin\\build";
+        std::printf("\n=== live spawn (shipped posture%s%s)\n",
+                    *isolate ? " isolate=" : "", isolate);
+        std::fflush(stdout);
+        // the probe verdict IN THIS PROCESS, immediately before the spawn --
+        // caps_print (standalone) reports restricted_tokens=0 stably while the
+        // spawn below ran with rt_used=1; this pinpoints WHICH call disagrees.
+        {
+            const auto pv = ::clay::windows::probe_host();
+            std::printf("  probe: ac=%d rt=%d mit=%d build=%u\n",
+                        pv.app_container, pv.restricted_tokens,
+                        pv.mitigation_policies, pv.build);
+        }
+        SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
+        HANDLE r = nullptr, w = nullptr;
+        if (!::CreatePipe(&r, &w, &sa, 0)) {
+            std::printf("  pipe: gle=%lu\n", ::GetLastError());
+            return 1;
+        }
+        const int wfd = static_cast<int>(reinterpret_cast<intptr_t>(w));
+        auto res = cb::spawn_argv(posture,
+            {"cmd.exe", "/d", "/s", "/c", "echo audit-live"}, wfd, wfd, {});
+        ::CloseHandle(w);  // our write end goes, or the reader never sees EOF
+        if (!res.started) {
+            std::printf("  spawn failed: %s\n", res.start_error.c_str());
+            ::CloseHandle(r);
+            return 1;
+        }
+        std::printf("  pid=%d\n", res.pid);
+        char buf[512]{};
+        DWORD n = 0;
+        std::string out;
+        while (::ReadFile(r, buf, sizeof buf, &n, nullptr) && n) out.append(buf, n);
+        ::CloseHandle(r);
+        DWORD code = 0;
+        HANDLE ph = reinterpret_cast<HANDLE>(
+            static_cast<intptr_t>(res.pidfd));
+        ::WaitForSingleObject(ph, 20000);
+        ::GetExitCodeProcess(ph, &code);
+        std::printf("  exit=%lu (%s) output='%.*s'\n", code,
+                    code == 0 ? "RUNS" : "DIED  (0x hex below)",
+                    static_cast<int>(out.size()), out.c_str());
+        std::printf("  exit-hex=0x%08lx\n", code);
+        if (res.kill_tree) (void)res.kill_tree();
+        // NOTE: pidfd is a raw handle borrowed for the wait above; agentty's
+        // adapter owns it via the job/kill_tree closure in real runs. The
+        // audit is a tool, not a leak-free harness.
+    }
+#endif
+
     std::filesystem::remove_all(ws);
 }

@@ -53,9 +53,11 @@ Cold start under 1 ms; keystroke-to-pixel about 1 ms. No Node, no Python, no npm
 Claude, GPT, Groq, OpenRouter, Ollama, or any OpenAI-compatible endpoint. Switch live with `^P`.
 
 ### 🛡️ Sandboxed by default
-Every shell call runs inside an OS-enforced sandbox — claybin on both Linux
-(seccomp + landlock + cgroup2, with bubblewrap as the fallback) and macOS
-(seatbelt + rlimits, with sandbox-exec as the fallback).
+Every shell call runs inside an OS-enforced sandbox — claybin on Linux
+(seccomp + landlock + cgroup2, with bubblewrap as the fallback), macOS
+(seatbelt + rlimits, with sandbox-exec as the fallback), and Windows
+(AppContainer + job objects; there is no weaker fallback engine — when the
+host cannot build a wall, startup says so and commands run unconfined).
 Credential files are masked whether or not you configure anything, and file
 tools refuse paths outside your workspace. Deep dive:
 [`docs/SANDBOX.md`](docs/SANDBOX.md).

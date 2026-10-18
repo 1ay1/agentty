@@ -27,7 +27,7 @@
 // compiles a plan anywhere, and can APPLY one on Linux (namespaces, landlock,
 // seccomp, cgroup2) and on macOS (seatbelt, rlimits). Windows compiles the
 // policy and refuses to apply it, so the include stays out there.
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 #include "agentty/tool/util/sandbox_claybin.hpp"
 #include "agentty/tool/util/handoff_gate.hpp"   // snapshot_trusted: ONE path table
 #endif
@@ -255,6 +255,31 @@ constexpr const char* kHomeToolSubdirs[] = {
 };
 #endif  // __linux__ || __APPLE__
 
+// Windows' names for the same three lists, resolved at posture build time:
+// the toolchain and shell live under the system root and Program Files, and
+// the user profile is where the credential hygiene still bites (a Windows
+// .ssh is at %USERPROFILE%\\.ssh, .aws at %USERPROFILE%\\.aws, just like
+// posix). claybin's windows compiler takes NATIVE paths; these are native.
+#if defined(_WIN32)
+constexpr const char* kSystemReadRootsWin[] = {
+    "C:\\Windows",           // the toolchain: loader, DLLs, System32
+    "C:\\Program Files",     // installed tools
+    "C:\\Program Files (x86)",
+};
+// "readable machine config", the %ProgramData% half of what /etc is on posix.
+constexpr const char* kEtcReadableWin[] = {
+    "C:\\ProgramData",       // package manager metadata, host ssh config
+};
+constexpr const char* kHomeToolSubdirsWin[] = {
+    "\\.cargo\\bin", "\\.rustup",   // Rust
+    "\\go\\bin",                     // Go
+    "\\.nvm",                        // Node version manager
+    "\\.pyenv", "\\.rbenv",          // version managers
+    "\\.bun\\bin", "\\.deno\\bin",   // Bun / Deno
+    "\\.dotnet",                     // .NET
+};
+#endif  // _WIN32
+
 // Back into the per-platform arm the shared read set interrupted.
 #if defined(__linux__)
 
@@ -278,7 +303,7 @@ constexpr const char* kHomeToolSubdirs[] = {
 // run_wrapped(), and the per-platform arm reopens right after it.
 #endif  // __linux__ (reopened below)
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 // The directory a trusted file under one of these is protected through, or
 // nullopt. These hold many files (and running binaries), so one read-only
 // bind of the directory replaces a bind per file.
@@ -316,13 +341,30 @@ constexpr const char* kHomeToolSubdirs[] = {
     const auto snap = config_snapshot();
     const auto& cfg = *snap;
 
-    // ── the read set, by scope ────────────────────────────────────────────
+    // ── the read set, by scope ────────────────────────────────────────
     //
-    // Minimal deliberately omits the $HOME toolchain dirs: for a
-    // self-contained repo, anything under $HOME is suspicious. HostReadable
-    // is the convenient answer other agents take, named honestly -- it is
-    // still a mount namespace and still read-only outside the workspace, but
-    // your other projects are readable by an approved command.
+    // Minimal deliberately omits the home toolchain dirs: for a
+    // self-contained repo, anything under the home directory is suspicious.
+    // HostReadable is the convenient answer other agents take, named
+    // honestly -- it is still confined by the appcontainer token's DACLs and
+    // by the mask list, but your other projects are readable by an approved
+    // command. On Windows the lists are native paths (kSystemReadRootsWin etc.);
+    // the home env var is USERPROFILE there and HOME nowhere else.
+#if defined(_WIN32)
+    for (const char* r : kSystemReadRootsWin) p.system_read_roots.emplace_back(r);
+    for (const char* f : kEtcReadableWin) p.etc_readable.emplace_back(f);
+    if (cfg.fs_scope == sandbox_cfg::FsScope::Toolchain) {
+        if (const char* home = std::getenv("USERPROFILE"); home && *home) {
+            for (const char* sub : kHomeToolSubdirsWin)
+                p.home_tool_dirs.emplace_back(std::string{home} + sub);
+        }
+    } else if (cfg.fs_scope == sandbox_cfg::FsScope::HostReadable) {
+        if (const char* drive = std::getenv("SystemDrive"); drive && *drive)
+            p.system_read_roots.emplace_back(std::string{drive} + "\\");
+        else
+            p.system_read_roots.emplace_back("C:\\");
+    }
+#else
     for (const char* r : kSystemReadRoots) p.system_read_roots.emplace_back(r);
     for (const char* f : kEtcReadable) p.etc_readable.emplace_back(f);
     if (cfg.fs_scope == sandbox_cfg::FsScope::Toolchain) {
@@ -333,6 +375,7 @@ constexpr const char* kHomeToolSubdirs[] = {
     } else if (cfg.fs_scope == sandbox_cfg::FsScope::HostReadable) {
         p.system_read_roots.emplace_back("/");
     }
+#endif
     // Whatever the user added on top.
     for (const auto& r : cfg.read_paths) p.read_paths.push_back(r);
     for (const auto& w : cfg.write_paths) p.write_paths.push_back(w);
@@ -340,18 +383,22 @@ constexpr const char* kHomeToolSubdirs[] = {
     p.workspace = workspace_root().string();
     p.cwd = p.workspace;
 
-    // ── secrets, always, plus the user's own masks ────────────────────
+    // ── secrets, always, plus the user's own masks ───────────────
     //
     // kAlwaysMasked is not configurable, and that is the point: a control the
     // user can switch off to make their build work is a control that is off.
     // The pane can ADD masks, never remove these.
     //
-    // The LIST is shared with the bwrap path (sandbox_cfg::mask_paths), so the
-    // two backends cannot disagree about what is covered. Only the mechanism
-    // is per-backend: MountKind::mask here, mount arguments there. It used to
-    // be computed twice, and the copies drifted -- bwrap's didn't exist at all.
+    // The LIST is shared with the bwrap path (sandbox_cfg::mask_paths), so
+    // the backends cannot disagree about what is covered. On Windows the home
+    // prefix differs (%USERPROFILE% instead of $HOME); the list is POSIX
+    // vocabulary, so each platform prefixes its own home onto the same names.
     {
+#if defined(_WIN32)
+        const char* home = std::getenv("USERPROFILE");
+#else
         const char* home = std::getenv("HOME");
+#endif
         auto masks = sandbox_cfg::mask_paths(cfg, p.workspace,
                                             home ? home : "");
         p.masked.insert(p.masked.end(),
@@ -359,10 +406,15 @@ constexpr const char* kHomeToolSubdirs[] = {
                         std::make_move_iterator(masks.end()));
     }
 
-    // ── /dev/tty: the controlling terminal is agentty's own screen ───────
+#if !defined(_WIN32)
+    // ── /dev/tty: the controlling terminal is agentty's own screen ────
     //
     // Not a credential, so it is not in kAlwaysMasked (that list is $HOME
-    // secrets) -- but it is masked for the same reason, on every backend.
+    // secrets) -- but it is masked for the same reason, on every backend that
+    // has a device tree. Windows has no /dev/tty node: the console is a
+    // handle the child either inherits (it does not here) or opens through
+    // CONIN$/CONOUT$, both blocked by the appcontainer's default-deny on
+    // the console object. So there is nothing to mask and nothing omitted.
     //
     // claybin's devtmpfs binds the HOST /dev/tty into the sandbox, following
     // bubblewrap's node list exactly. That node resolves to the calling
@@ -375,6 +427,7 @@ constexpr const char* kHomeToolSubdirs[] = {
     // terminal, while a masked one still opens and still accepts writes --
     // they just go nowhere. Captured stdout/stderr are untouched.
     p.masked.emplace_back("/dev/tty");
+#endif
 
     // ── trust-handoff prevention: bind host-trusted paths read-only ─────
     //
@@ -474,9 +527,14 @@ constexpr const char* kHomeToolSubdirs[] = {
     p.broker = cfg.syscall_mode != sandbox_cfg::SyscallMode::Off;
     return p;
 }
-#endif  // __linux__ || __APPLE__
+#endif  // __linux__ || __APPLE__ || _WIN32
 
 // Back into the per-platform arm the posture builder interrupted.
+//
+// Linux takes the first branch (its run_wrapped), macOS the second, Windows
+// the third. The guard must stay linux-ONLY: a `|| _WIN32` here would take
+// the linux branch on Windows and the probe() definition below would never
+// compile -- the one thing init() needs.
 #if defined(__linux__)
 
 [[nodiscard]] SubprocessResult run_wrapped(std::string_view cmd,
@@ -558,7 +616,7 @@ constexpr const char* kHomeToolSubdirs[] = {
     opts.max_bytes   = max_bytes;
     opts.timeout     = timeout;
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
     if (detected_backend() == Backend::Claybin) {
         opts.command = SubprocessOptions::Argv{user_argv};
         std::vector<std::string> argv = user_argv;
@@ -727,6 +785,83 @@ constexpr const char* kHomeToolSubdirs[] = {
     return Subprocess::run(std::move(opts));
 }
 
+#elif defined(_WIN32)
+
+// A REAL capability probe, not a table lookup: claybin's probe_host() creates
+// and deletes an appcontainer profile, proves a restricted token by RUNNING a
+// child under it, and initializes the mitigation attribute list. The floor is
+// one working wall -- appcontainer or job objects -- so Auto degrades only
+// when there is genuinely nothing to build a boundary from.
+[[nodiscard]] Backend probe() {
+    if (claybin_backend::available()) return Backend::Claybin;
+    return Backend::None;
+}
+
+[[nodiscard]] SubprocessResult run_wrapped(std::string_view cmd,
+                                           std::size_t max_bytes,
+                                           std::chrono::seconds timeout) {
+    SubprocessOptions opts;
+    opts.command = SubprocessOptions::Shell{std::string{cmd}};
+    opts.max_bytes = max_bytes;
+    opts.timeout   = timeout;
+
+    if (detected_backend() == Backend::Claybin) {
+        opts.spawner = [shell_cmd = std::string{cmd}](
+                           const SubprocessOptions&,
+                           int pipe_write_fd) -> SubprocessOptions::SpawnedChild {
+            SubprocessOptions::SpawnedChild out;
+            auto posture = build_claybin_posture();
+            // Both streams onto the one pipe the runner already made. The
+            // window HANDLE arrives as an int (the runner's pipe was a
+            // HANDLE); the adapter maps it onto the child's stdout/stderr.
+            auto r = claybin_backend::spawn_shell(posture, shell_cmd, pipe_write_fd,
+                                                  pipe_write_fd);
+            if (!r.started) { out.error = r.start_error; return out; }
+            out.pid = r.pid;
+            // HANDLES, not descriptors: the process handle is the waitable
+            // exit, the job the kill switch. The runner's adopt consumes both.
+            out.pidfd = r.pidfd;
+            out.kill_tree = std::move(r.kill_tree);
+            return out;
+        };
+    }
+    return Subprocess::run(std::move(opts));
+}
+
+// argv-form: the user's argv reaches claybin's spawner exactly as given -- no
+// cmd.exe /S /C re-parsing of quotes or %vars% on the way in. Same contract as
+// the linux and macOS arms.
+[[nodiscard]] SubprocessResult run_wrapped_argv(const std::vector<std::string>& user_argv,
+                                                std::size_t max_bytes,
+                                                std::chrono::seconds timeout) {
+    if (user_argv.empty()) {
+        SubprocessResult r;
+        r.started = false; r.start_error = "empty argv";
+        return r;
+    }
+    SubprocessOptions opts;
+    opts.command = SubprocessOptions::Argv{user_argv};
+    opts.max_bytes = max_bytes;
+    opts.timeout   = timeout;
+
+    if (detected_backend() == Backend::Claybin) {
+        opts.spawner = [argv = user_argv](
+                           const SubprocessOptions&,
+                           int pipe_write_fd) -> SubprocessOptions::SpawnedChild {
+            SubprocessOptions::SpawnedChild out;
+            auto posture = build_claybin_posture();
+            auto r = claybin_backend::spawn_argv(posture, argv, pipe_write_fd,
+                                                 pipe_write_fd);
+            if (!r.started) { out.error = r.start_error; return out; }
+            out.pid = r.pid;
+            out.pidfd = r.pidfd;
+            out.kill_tree = std::move(r.kill_tree);
+            return out;
+        };
+    }
+    return Subprocess::run(std::move(opts));
+}
+
 #else // Windows / unsupported
 
 [[nodiscard]] Backend probe() { return Backend::None; }
@@ -872,7 +1007,7 @@ bool config_enforceable() noexcept {
     // Nothing configured ⇒ nothing to ignore. A default config is exactly the
     // posture the bwrap argv already builds, so both backends "enforce" it.
     if (!cfg->configured) return true;
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
     // Off is not a failure to enforce, it is a choice not to sandbox, which
     // the banner already reports on its own.
     if (requested_mode() == Mode::Off) return true;
@@ -922,6 +1057,10 @@ std::string describe_state() {
                "nothing left to build a boundary from; run with --sandbox off)";
 #elif defined(__APPLE__)
                "(sandbox-exec missing \xe2\x80\x94 system integrity issue)";
+#elif defined(_WIN32)
+               "(no sandbox wall could be built on this host \xe2\x80\x94 "
+               "appcontainer profiles unavailable and no job objects; "
+               "run with --sandbox off)";
 #else
                "(unsupported on this platform)";
 #endif
@@ -931,6 +1070,8 @@ std::string describe_state() {
            "(the kernel offers neither landlock nor seccomp)";
 #elif defined(__APPLE__)
            "(sandbox-exec missing)";
+#elif defined(_WIN32)
+           "(no sandbox wall available: appcontainer unavailable)";
 #else
            "(no backend on this platform)";
 #endif
@@ -1032,7 +1173,7 @@ claybin_backend::SpawnResult spawn_in_sandbox(
         const std::vector<std::string>& extra_roots,
         const handoff::TrustedSnapshot* trusted,
         const std::vector<std::pair<std::string, std::string>>& env) {
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
     if (detected_backend() == Backend::Claybin) {
         auto posture = build_claybin_posture(trusted);
         if (!cwd.empty()) posture.cwd = std::string{cwd};
@@ -1080,7 +1221,7 @@ wrap_argv_for_exec(const std::vector<std::string>& argv, std::string_view cwd,
 #endif
 
 claybin_backend::Posture claybin_posture_for_test() {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
     return build_claybin_posture();
 #else
     return {};

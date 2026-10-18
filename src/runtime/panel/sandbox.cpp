@@ -228,8 +228,13 @@ std::string describe_running(const HostFacts& facts) {
         return "sandboxing is OFF (--sandbox off) \xc2\xb7 nothing below is enforced";
     if (!facts.sandbox_active)
         return "no sandbox \xc2\xb7 commands run unconfined";
+#if defined(_WIN32)
+    // landlock/seccomp/cgroup2 are linux words; name what windows puts up.
+    return "claybin \xc2\xb7 appcontainer \xc2\xb7 job limits \xc2\xb7 mitigation policies";
+#else
     return "claybin \xc2\xb7 landlock abi " + std::to_string(facts.landlock_abi) +
            " \xc2\xb7 seccomp \xc2\xb7 cgroup2";
+#endif
 }
 
 form::Form build_sandbox_form(const sandbox_cfg::Config& cfg,

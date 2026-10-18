@@ -55,6 +55,7 @@ set(_AGENTTY_CONSOLIDATED
     copilot_item_id_test wire_audit_test
     login_routing_test tool_advertisement_test gateway_context_window_test
     smart_settings_roundtrip_test sandbox_parity_test context_ladder_test
+    sandbox_win_posture_test
     capability_conformance_test
     ollama_transport_test openai_transport_test code_block_extract_test
     openai_dialect_test host_probe_taxonomy_test openai_conformance_policy_test
