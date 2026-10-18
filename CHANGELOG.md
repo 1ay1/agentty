@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.28] - 2026-10-19
+
 ### Added
 - **Threads name themselves.** After the first reply, the cheap utility
   model writes a short title (3 to 6 words) and it replaces the first-line
