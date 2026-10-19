@@ -143,6 +143,13 @@ struct ThreadList      : pick::OpenAt, WithFrom {
     std::string renaming;
     std::string rename_input;
     int         rename_cursor = 0;
+    // Tab flips between this folder's threads and all of them. Starts on
+    // this folder; falls back to all when the folder has none.
+    bool        all_workspaces = false;
+    // The peek: which thread it shows, and how many turns back from the
+    // latest its view is scrolled (0 = latest). Reset per thread.
+    std::string peek_id;
+    int         peek_turn = 0;
 };
 // Smart Mode carries a typed ROW, not an index. The other pickers list a
 // variable number of runtime-derived entries, so an int cursor is the honest

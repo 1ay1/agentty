@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
+#include <limits>
 #include <utility>
 
 #include <maya/core/overload.hpp>
@@ -36,16 +38,75 @@ using maya::overload;
 
 namespace {
 
+// What the picker lists right now: its query, in its folder scope.
+[[nodiscard]] std::vector<int> visible(const Model& m, const pn::ThreadList& p) {
+    return ui::visible_threads(m.d.threads, p.query, m.env.cwd, p.all_workspaces);
+}
+
 // The thread under the picker cursor, after the filter. -1 when none.
 [[nodiscard]] int picked_thread(const Model& m, const pn::ThreadList& p) {
-    const auto vis = ui::visible_threads(m.d.threads, p.query);
+    const auto vis = visible(m, p);
     if (vis.empty()) return -1;
     return vis[static_cast<std::size_t>(
         std::clamp(p.index, 0, static_cast<int>(vis.size()) - 1))];
 }
 
 [[nodiscard]] int visible_count(const Model& m, const pn::ThreadList& p) {
-    return static_cast<int>(ui::visible_threads(m.d.threads, p.query).size());
+    return static_cast<int>(visible(m, p).size());
+}
+
+// Where thread `id` sits in the picker's current list, or -1.
+[[nodiscard]] int visible_index_of(const Model& m, const pn::ThreadList& p,
+                                   const ThreadId& id) {
+    const auto vis = visible(m, p);
+    for (int i = 0; i < static_cast<int>(vis.size()); ++i)
+        if (m.d.threads[static_cast<std::size_t>(vis[static_cast<std::size_t>(i)])].id == id)
+            return i;
+    return -1;
+}
+
+// Old threads with no picker summary yet, newest first: the ones whose
+// preview and message count are still to be filled in.
+constexpr std::size_t kSummaryBatch = 12;
+
+[[nodiscard]] Cmd next_summary_batch(Model& m) {
+    if (m.s.summaries_filling) return Cmd::none();
+    std::vector<ThreadId> ids;
+    for (const auto& t : m.d.threads) {
+        if (t.message_count == 0 && t.preview.empty() && !t.summary_tried)
+            ids.push_back(t.id);
+        if (ids.size() == kSummaryBatch) break;
+    }
+    if (ids.empty()) return Cmd::none();
+    // Marked before the work, so a thread that can't be summarised (empty,
+    // unreadable) isn't picked again and the backfill always ends.
+    for (auto& t : m.d.threads)
+        if (std::ranges::find(ids, t.id) != ids.end()) t.summary_tried = true;
+    m.s.summaries_filling = true;
+    return cmd::backfill_summaries_async(std::move(ids));
+}
+
+// The peek pauses this long on a row before loading it, so holding ↓
+// through the list doesn't load every thread it passes.
+constexpr auto kPeekSettle = std::chrono::milliseconds{90};
+
+// Point the peek at the row under the cursor. A new row resets its scroll
+// to the latest turn and, unless it's cached or already loading, (re)starts
+// one keyed settle timer: holding ↓ keeps replacing it, so only the row
+// you stop on is loaded.
+[[nodiscard]] Cmd sync_peek(Model& m) {
+    auto* p = m.ui.panel.get<pn::ThreadList>();
+    if (!p) return Cmd::none();
+    const int at = picked_thread(m, *p);
+    if (at < 0) { p->peek_id.clear(); return Cmd::none(); }
+    const ThreadId id = m.d.threads[static_cast<std::size_t>(at)].id;
+    if (p->peek_id == id.value) return Cmd::none();
+    p->peek_id   = id.value;
+    p->peek_turn = 0;
+    const bool cached = std::ranges::any_of(
+        m.ui.peek_cache, [&](const auto& t) { return t.id == id; });
+    if (cached || m.ui.peek_loading == id.value) return Cmd::cancel("thread-peek");
+    return Cmd::after("thread-peek", kPeekSettle, Msg{ThreadPeekSettled{id}});
 }
 
 // A pasted or typed piece of a title, flattened to one line: line breaks
@@ -94,6 +155,7 @@ namespace {
     m.d.current = Thread{};
     m.d.current.id = persistence::new_id();
     m.d.current.auto_title_ok = true;
+    m.d.current.workspace = m.env.cwd;
     m.d.current.created_at = m.d.current.updated_at =
         m.wall_now();
     m.s.reset_usage_for_thread(0);
@@ -171,6 +233,7 @@ namespace {
         if (clear) { t.auto_titled = false; t.auto_title_ok = true; }
     };
     if (it != m.d.threads.end()) apply(*it);
+    ++m.d.threads_rev;
     if (open) apply(*open);
     auto toast = set_status_toast(m, clear ? "name cleared \xc2\xb7 back to automatic"
                                            : "renamed to \"" + title + "\"");
@@ -193,21 +256,19 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // Open AT the current thread, not row 0 — the user's mental
             // anchor is "where am I", and cycling from there (↑ newer /
             // ↓ older) mirrors the Alt+←/→ quick-cycle order.
-            int at = 0;
-            for (int i = 0; i < static_cast<int>(m.d.threads.size()); ++i)
-                if (m.d.threads[static_cast<std::size_t>(i)].id == m.d.current.id) {
-                    at = i;
-                    break;
-                }
-            m.ui.panel.descend(pn::ThreadList{{at}});
-            return cmd;
+            pn::ThreadList fresh{{0}};
+            fresh.index = std::max(0, visible_index_of(m, fresh, m.d.current.id));
+            m.ui.panel.descend(std::move(fresh));
+            return Cmd::batch(std::move(cmd), sync_peek(m));
         },
         [&](CloseThreadList) -> Cmd {
             // Esc with a filter clears it first, so a typo never closes the list.
             if (auto* p = m.ui.panel.get<pn::ThreadList>(); p && !p->query.empty()) {
                 const int was = picked_thread(m, *p);
                 p->query.clear();
-                p->index = std::max(0, was);   // stay on the same thread
+                // Stay on the same thread, now at its unfiltered position.
+                p->index = was < 0 ? 0 : std::max(0, visible_index_of(
+                    m, *p, m.d.threads[static_cast<std::size_t>(was)].id));
                 return Cmd::none();
             }
             ascend(m);   // Esc: back to whatever opened this, or close
@@ -220,7 +281,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             p->query += ui::utf8_encode(e.ch);
             p->index = 0;                    // best (most recent) match first
             m.ui.thread_list_scroll.y = 0;
-            return Cmd::none();
+            return sync_peek(m);
         },
         [&](ThreadListFilterBackspace) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
@@ -230,14 +291,14 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                 ui::utf8_prev(p->query, static_cast<int>(p->query.size()))));
             p->index = 0;
             m.ui.thread_list_scroll.y = 0;
-            return Cmd::none();
+            return sync_peek(m);
         },
         [&](ThreadListMove& e) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
             if (!p) return Cmd::none();
             p->confirm_remove.clear();   // moving disarms a pending ^D
             p->index = ui::step(p->index, e.delta, visible_count(m, *p));
-            return Cmd::none();
+            return sync_peek(m);
         },
         [&](ThreadListJump& e) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
@@ -253,6 +314,62 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                 case W::PageUp:   p->index = std::max(0, p->index - kPage); break;
                 case W::PageDown: p->index = std::min(sz - 1, p->index + kPage); break;
             }
+            return sync_peek(m);
+        },
+        [&](ThreadListScopeToggle) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p) return Cmd::none();
+            // Keep the cursor on the same thread if it's in the new scope.
+            const int was = picked_thread(m, *p);
+            p->all_workspaces = !ui::effective_all(m.d.threads, m.env.cwd, p->all_workspaces);
+            p->confirm_remove.clear();
+            const int at = was < 0 ? -1 : visible_index_of(
+                m, *p, m.d.threads[static_cast<std::size_t>(was)].id);
+            p->index = std::max(0, at);
+            m.ui.thread_list_scroll.y = 0;
+            return sync_peek(m);
+        },
+        [&](ThreadPeekScroll& e) -> Cmd {
+            auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p || p->peek_id.empty()) return Cmd::none();
+            // peek_turn counts back from the latest turn (0 = latest). Clamp
+            // to the turns this thread really has, so the far end isn't
+            // "sticky". Before the thread has loaded the count is unknown:
+            // keep the presses (clamped once it lands) instead of dropping
+            // them, which read as dead arrow keys.
+            const auto it = std::ranges::find(m.ui.peek_cache, p->peek_id,
+                                              [](const auto& t) { return t.id.value; });
+            const int last = it == m.ui.peek_cache.end()
+                ? std::numeric_limits<int>::max() / 2
+                : std::max(0, static_cast<int>(it->turns.size()) - 1);
+            const int cur = std::clamp(p->peek_turn, 0, last);
+            p->peek_turn = e.to_end ? (e.delta < 0 ? last : 0)
+                                    : std::clamp(cur - e.delta, 0, last);
+            return Cmd::none();
+        },
+        [&](ThreadPeekSettled& e) -> Cmd {
+            // Only if the cursor is still on that row, and it isn't already
+            // loading. Another row's load being in flight doesn't block it:
+            // that one is stale now, and lands in the cache harmlessly.
+            const auto* p = m.ui.panel.get<pn::ThreadList>();
+            if (!p || p->peek_id != e.id.value) return Cmd::none();
+            if (m.ui.peek_loading == e.id.value) return Cmd::none();
+            m.ui.peek_loading = e.id.value;
+            return cmd::load_thread_peek_async(std::move(e.id));
+        },
+        [&](ThreadPeekLoaded& e) -> Cmd {
+            if (m.ui.peek_loading == e.id.value) m.ui.peek_loading.clear();
+            if (!e.turns) return Cmd::none();
+            std::erase_if(m.ui.peek_cache, [&](const auto& t) { return t.id == e.id; });
+            m.ui.peek_cache.insert(m.ui.peek_cache.begin(),
+                                   Model::UI::PeekThread{e.id, std::move(*e.turns)});
+            if (m.ui.peek_cache.size() > Model::UI::kPeekCache)
+                m.ui.peek_cache.resize(Model::UI::kPeekCache);
+            // Presses made while it loaded were kept unclamped; fit them now.
+            if (auto* p = m.ui.panel.get<pn::ThreadList>(); p && p->peek_id == e.id.value)
+                p->peek_turn = std::clamp(
+                    p->peek_turn, 0,
+                    std::max(0, static_cast<int>(m.ui.peek_cache.front().turns.size()) - 1));
             return Cmd::none();
         },
         // ── Model swap: commit overflow before swapping ──────────────
@@ -358,6 +475,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // returns below — taken here, where target_id is still in hand.
             Cmd del = Cmd(DeleteThread{target_id});
             m.d.threads.erase(m.d.threads.begin() + idx);
+            ++m.d.threads_rev;
             // Clamp the cursor so it stays valid after removal.
             const int sz = visible_count(m, *p);
             if (sz == 0) {
@@ -365,6 +483,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             } else if (p->index >= sz) {
                 p->index = sz - 1;
             }
+            std::erase_if(m.ui.peek_cache, [&](const auto& t) { return t.id == target_id; });
             std::string msg = "deleted \"" + label + "\"";
             if (was_current) msg += " \xe2\x80\x94 started a new thread";
             auto toast = set_status_toast(m, std::move(msg));
@@ -380,7 +499,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                 return Cmd::batch(std::move(del), cmd::load_threads_async(),
                                   std::move(reset), std::move(toast));
             }
-            return Cmd::batch(std::move(del), std::move(toast));
+            return Cmd::batch(std::move(del), std::move(toast), sync_peek(m));
         },
         [&](ThreadListRenameStart) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
@@ -597,6 +716,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                 if (it->user_named()) return Cmd::none();   // never replace a chosen name
                 it->title       = title;
                 it->auto_titled = true;
+                ++m.d.threads_rev;
             }
             m.d.current.title       = title;
             m.d.current.auto_titled = true;
@@ -614,16 +734,45 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                     t.renamed_at   = it->renamed_at;
                     t.name_is_auto = it->name_is_auto;
                 }
+            // Keep the picker's cursor on the thread it was on: the reload
+            // can add or reorder rows above it.
+            ThreadId was;
+            if (const auto* p = m.ui.panel.get<pn::ThreadList>())
+                if (const int at = picked_thread(m, *p); at >= 0)
+                    was = m.d.threads[static_cast<std::size_t>(at)].id;
+            // Keep the backfill's progress: a reload must not re-queue a
+            // thread it already tried (an empty or unreadable one).
+            for (auto& t : e.threads)
+                if (t.message_count == 0 && t.preview.empty())
+                    if (const auto it = std::ranges::find(m.d.threads, t.id, &Thread::id);
+                        it != m.d.threads.end())
+                        t.summary_tried = it->summary_tried;
             m.d.threads = std::move(e.threads);
+            ++m.d.threads_rev;
             m.s.threads_loading = false;
-            // If the thread picker is open, its cursor may now point past the
-            // end of the freshly-loaded (possibly shorter) list. Re-clamp so
-            // the view and every ThreadList* handler index safely.
+            // Old threads have no preview yet: fill them in, a batch at a
+            // time, now that the list is already showing.
+            Cmd fill = next_summary_batch(m);
+            // Re-clamp too: the new list may be shorter.
             if (auto* p = m.ui.panel.get<pn::ThreadList>()) {
                 const int sz = visible_count(m, *p);
-                p->index = sz > 0 ? std::clamp(p->index, 0, sz - 1) : 0;
+                const int at = was.value.empty() ? -1 : visible_index_of(m, *p, was);
+                p->index = at >= 0 ? at : (sz > 0 ? std::clamp(p->index, 0, sz - 1) : 0);
+                return Cmd::batch(std::move(fill), sync_peek(m));
             }
-            return Cmd::none();
+            return fill;
+        },
+        [&](ThreadSummariesFilled& e) -> Cmd {
+            m.s.summaries_filling = false;
+            for (auto& f : e.threads)
+                if (const auto it = std::ranges::find(m.d.threads, f.id, &Thread::id);
+                    it != m.d.threads.end()) {
+                    it->preview       = std::move(f.preview);
+                    it->message_count = f.message_count;
+                    if (it->workspace.empty()) it->workspace = std::move(f.workspace);
+                }
+            if (!e.threads.empty()) ++m.d.threads_rev;
+            return next_summary_batch(m);
         },
         [&](ThreadLoaded& e) -> Cmd {
             // Result of the async single-thread load kicked off by

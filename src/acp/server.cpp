@@ -1820,6 +1820,7 @@ a::NewSessionResult AgentServer::on_new_session(const Cap& cap, const a::NewSess
         s.extra_roots = std::move(extra);
         s.profile = profile_;
         s.thread.id = tid;
+        s.thread.workspace = p.cwd;
         s.thread.title = p.cwd.empty() ? std::string{"ACP session"}
                                        : std::string{"ACP "} + p.cwd;
         sessions_.with(cap, [](Sessions& ss, Session v) {
@@ -1883,6 +1884,7 @@ a::NewSessionResult AgentServer::on_fork_session(const Cap& cap, const a::ForkSe
         s.thread   = std::move(copy->thread);
         s.thread.id = tid;
         s.thread.forked_from = src;
+        if (!p.cwd.empty()) s.thread.workspace = p.cwd;
         s.thread.title = s.thread.title.empty() ? std::string{"Fork"}
                                                 : "Fork of " + s.thread.title;
         sessions_.with(cap, [](Sessions& ss, Session v) {

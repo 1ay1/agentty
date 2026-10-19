@@ -826,6 +826,13 @@ struct Message {
         return proactive.has_value();
     }
 
+    // Did the user type this? The fork note, compaction summaries, injected
+    // context and routing cards are User messages too, but nobody wrote them.
+    [[nodiscard]] bool typed_by_user() const noexcept {
+        return role == Role::User && !fork_note && !is_compact_summary
+            && !proactive.has_value() && !smart_routing;
+    }
+
     // Smart Mode routing telemetry (view-only, wire-inert, not persisted).
     // When `smart_routing` is set, this is a synthetic zero-text card that
     // renders the per-turn ROUTING DECISION as a first-class thread event
@@ -1008,6 +1015,18 @@ struct Thread {
     // existed; a thread from before has no flag and keeps its first-line
     // name, so continuing an old chat never renames it.
     bool auto_title_ok = false;
+
+    // For the ^J picker, kept in the header so the list can show them
+    // without loading messages. workspace is the folder the thread was
+    // started in ("" on threads from before it was recorded); preview is
+    // the first thing you typed, one line; message_count is the number of
+    // messages you typed plus the assistant replies.
+    std::string   workspace;
+    std::string   preview;
+    std::uint32_t message_count = 0;
+    // Runtime only, never saved: the picker already tried to fill this
+    // thread's preview and count in the background this session.
+    bool          summary_tried = false;
 
     // Wire-only compaction records. Each entry says "upstream requests
     // built from this thread should replace messages[0..up_to_index)

@@ -555,6 +555,18 @@ struct ThreadListMove { int delta; };
 // Absolute-jump nav for long thread histories. See ModelsJump.
 struct ThreadListJump  { enum class Where { Home, End, PageUp, PageDown }; Where where; };
 struct ThreadListSelect {};
+// Tab: this folder's threads <-> all threads.
+struct ThreadListScopeToggle {};
+// ← → scroll the peek a turn at a time; Shift jumps to the first / latest.
+struct ThreadPeekScroll { int delta; bool to_end = false; };
+// The settle timer fired for `id`: load it if the cursor is still there.
+struct ThreadPeekSettled { ThreadId id; };
+// The peeked thread finished loading off the reducer, already cut into the
+// card's turns. `turns` is empty when the load failed.
+struct ThreadPeekLoaded {
+    ThreadId id;
+    std::optional<std::vector<ui::PeekTurn>> turns;
+};
 // Type to filter the thread list by title.
 struct ThreadListFilterInput     { char32_t ch; };
 struct ThreadListFilterBackspace {};
@@ -596,6 +608,9 @@ struct NewThread {};
 // `m.d.threads` and a `Cmd::task` that does the directory walk +
 // JSON parse off the UI thread; this Msg lands when it's done.
 struct ThreadsLoaded    { std::vector<Thread> threads; };
+// A batch of old threads got their picker summary (preview, message count)
+// filled in the background. Headers only.
+struct ThreadSummariesFilled { std::vector<Thread> threads; };
 // A short title the model wrote for a thread after its first reply.
 // Empty `title` means it failed; the thread keeps the title it has.
 struct ThreadTitleGenerated { ThreadId id; std::string title; };
@@ -1396,12 +1411,14 @@ using ModelsMsg = std::variant<
 using ThreadListMsg = std::variant<
     OpenThreadList, CloseThreadList, ThreadListMove, ThreadListJump,
     ThreadListFilterInput, ThreadListFilterBackspace,
-    ThreadListSelect, ThreadListDelete,
+    ThreadListSelect, ThreadListScopeToggle, ThreadPeekScroll, ThreadPeekSettled,
+    ThreadPeekLoaded,
+    ThreadListDelete,
     ThreadListRenameStart, ThreadListRenameChar, ThreadListRenameBackspace,
     ThreadListRenameDelete, ThreadListRenameCursor,
     ThreadListRenamePaste, ThreadListRenameSubmit, ThreadListRenameCancel,
     RenameCurrentThread,
-    ThreadCycle, NewThread, ThreadsLoaded, ThreadLoaded, ThreadTitleGenerated>;
+    ThreadCycle, NewThread, ThreadsLoaded, ThreadSummariesFilled, ThreadLoaded, ThreadTitleGenerated>;
 
 using PaletteMsg = std::variant<
     OpenPalette, ClosePalette, PaletteInput, PanelFilterPaste,

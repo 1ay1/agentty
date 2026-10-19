@@ -235,7 +235,10 @@ inline auto visual_parts(const ThreadList& p) {
                            visual::ref(static_cast<const WithFrom&>(p)),
                            visual::ref(p.renaming),
                            visual::ref(p.rename_input),
-                           p.rename_cursor);
+                           p.rename_cursor,
+                           p.all_workspaces,
+                           visual::ref(p.peek_id),
+                           p.peek_turn);
 }
 static_assert(visual::parts_cover_all<ThreadList>);
 

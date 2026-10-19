@@ -368,6 +368,16 @@ struct LoopBreak {
 // `thread_loading` flag stuck.
 [[nodiscard]] Cmd load_thread_async(ThreadId id);
 
+// Read a thread for the ^J peek, off the UI thread, and send
+// ThreadPeekLoaded. Only reads: unlike load_thread_async it grants nothing,
+// because looking at a thread doesn't open it.
+[[nodiscard]] Cmd load_thread_peek_async(ThreadId id);
+
+// Fill the picker summary for a batch of old threads off the UI thread and
+// send ThreadSummariesFilled. The reducer starts the next batch when this
+// one lands, so only one runs at a time.
+[[nodiscard]] Cmd backfill_summaries_async(std::vector<ThreadId> ids);
+
 // Re-sync the RAG retriever to `cfg` off the UI thread. An effect, so the
 // reducer RETURNS this rather than calling into the retriever itself: update()
 // stays a pure function of (Model, Msg), and the work runs where every other

@@ -42,6 +42,7 @@ namespace {
 struct NullStore {
     std::vector<Thread> load_threads() { return {}; }
     std::optional<Thread> load_thread(const ThreadId&) { return std::nullopt; }
+    std::vector<Thread> backfill_summaries(const std::vector<ThreadId>&) { return {}; }
     void save_thread(const Thread&) {}
     void delete_thread(const ThreadId&) {}
     store::Settings load_settings() { return {}; }

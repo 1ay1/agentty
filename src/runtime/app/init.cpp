@@ -299,6 +299,7 @@ std::pair<Model, Cmd> init() {
 
     m.d.current.id  = deps(io).new_thread_id();
     m.d.current.auto_title_ok = true;
+    m.d.current.workspace = m.env.cwd;
     m.s.status = "ready";
 
     // Deferred startup Cmds (declared early: the first-run branch below may

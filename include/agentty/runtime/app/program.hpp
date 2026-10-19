@@ -348,6 +348,22 @@ struct AgenttyApp {
             visual::mix_any(mix, m.d.provider_catalogs);
             visual::mix_any(mix, m.d.fused_rows);
         }
+        //   • the ^J list and its peek, which read the thread list and the
+        //     peek cache from outside the slot. A load landing changes what
+        //     the peek shows, so it has to move the hash.
+        if (m.ui.panel.is<pn::ThreadList>()) {
+            // Every change to the list bumps threads_rev, so this is O(1)
+            // instead of walking ~700 titles a frame.
+            mix(m.d.threads.size());
+            mix(m.d.threads_rev);
+            mix(m.s.threads_loading ? 1ULL : 0ULL);
+            mix(m.ui.peek_cache.size());
+            for (const auto& t : m.ui.peek_cache) {
+                mix_str(t.id.value);
+                mix(t.turns.size());
+            }
+            mix_str(m.ui.peek_loading);
+        }
         //   • the todo modal: open/closed AND the items — the agent
         //     rewrites items mid-stream while the modal is open, which was
         //     hash-invisible (the exact forgotten-facet class, found by

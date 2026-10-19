@@ -595,6 +595,14 @@ std::optional<Msg> on_thread_list(const KeyEvent& ev, bool renaming) {
     // maps it to SpecialKey::Enter first, so only the flagged form arrives).
     s.toggle_close_chord = U'j';
     s.extra   = [](const KeyEvent& e) -> std::optional<Msg> {
+        if (const auto* sk = std::get_if<SpecialKey>(&e.key)) {
+            switch (*sk) {
+                case SpecialKey::Tab:   return Msg{ThreadListScopeToggle{}};
+                case SpecialKey::Left:  return Msg{ThreadPeekScroll{-1, e.mods.shift}};
+                case SpecialKey::Right: return Msg{ThreadPeekScroll{+1, e.mods.shift}};
+                default:                return std::nullopt;
+            }
+        }
         const auto v = nav::char_view(e);
         if (!v || !v->ctrl) return std::nullopt;   // chords only
         switch (v->c) {

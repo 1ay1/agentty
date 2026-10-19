@@ -978,6 +978,14 @@ parse_thread_meta_only(const json& j) {
     t.auto_titled = j.value("auto_titled", false);
     t.auto_title_ok = j.value("auto_title_ok", false);
     t.name_is_auto = j.value("name_is_auto", false);
+    // Type-checked: a hand-edited or future value must not throw the load.
+    if (const auto it = j.find("workspace"); it != j.end() && it->is_string())
+        t.workspace = it->get<std::string>();
+    if (const auto it = j.find("preview"); it != j.end() && it->is_string())
+        t.preview = it->get<std::string>();
+    if (const auto it = j.find("message_count"); it != j.end() && it->is_number_unsigned())
+        t.message_count = static_cast<std::uint32_t>(
+            std::min<std::uint64_t>(it->get<std::uint64_t>(), UINT32_MAX));
     return t;
 }
 
@@ -1088,6 +1096,10 @@ struct ThreadMetaSax {
                 got_id = true;
             } else if (last_key == "title") {
                 out.title = std::move(v);
+            } else if (last_key == "workspace") {
+                out.workspace = std::move(v);
+            } else if (last_key == "preview") {
+                out.preview = std::move(v);
             }
         }
         return true;
@@ -1105,6 +1117,9 @@ struct ThreadMetaSax {
                     std::chrono::seconds{v}};
             else if (last_key == "renamed_at")
                 out.renamed_at = v;
+            else if (last_key == "message_count" && v > 0)
+                out.message_count = static_cast<std::uint32_t>(
+                    std::min<long long>(v, UINT32_MAX));
         }
         return true;
     }
@@ -1249,6 +1264,11 @@ auto with_thread_index(const lock_levels::below_file_lane& cap, F body, Args... 
                                           body, std::move(args)...);
 }
 
+// Bumping this drops every user's index and re-parses their whole history
+// on the next start (over a minute for ~1 GB of old threads). New fields go
+// in as optional keys instead: an entry without them just reads as empty.
+constexpr int kThreadIndexVersion = 4;
+
 struct IndexEntry {
     std::string title;
     long long   created_at = 0;   // unix seconds
@@ -1256,6 +1276,9 @@ struct IndexEntry {
     long long   renamed_at = 0;   // unix seconds, 0 = never renamed
     bool        auto_titled  = false;   // the name came from the model
     bool        name_is_auto = false;   // a cleared rename
+    std::string workspace;
+    std::string preview;
+    std::uint32_t message_count = 0;
     long long   mtime      = 0;   // file last_write_time, ns since clock epoch
     long long   size       = -1;  // file size in bytes; -1 == unknown (pre-v2)
 };
@@ -1337,7 +1360,7 @@ std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
         //
         // Reading a stale index costs a full reparse anyway, so an older one
         // is dropped whole and this run rebuilds it correctly.
-        if (j.value("version", 0) < 4) return out;
+        if (j.value("version", 0) < kThreadIndexVersion) return out;
         auto& threads = j.contains("threads") ? j["threads"] : j;
         if (!threads.is_object()) return out;
         for (auto& [id, e] : threads.items()) {
@@ -1349,6 +1372,10 @@ std::unordered_map<std::string, IndexEntry> read_thread_index_locked() {
             ie.renamed_at = e.value("renamed_at", 0LL);
             ie.auto_titled  = e.value("auto_titled", false);
             ie.name_is_auto = e.value("name_is_auto", false);
+            ie.workspace  = e.value("workspace", std::string{});
+            ie.preview    = e.value("preview", std::string{});
+            ie.message_count = static_cast<std::uint32_t>(
+                std::clamp<long long>(e.value("message_count", 0LL), 0, UINT32_MAX));
             ie.mtime      = e.value("mtime", 0LL);
             // Absent in v1 indexes — -1 means "unknown", which the
             // freshness check treats as a miss so the entry gets
@@ -1374,12 +1401,15 @@ void write_thread_index_locked(const std::unordered_map<std::string, IndexEntry>
         if (e.renamed_at > 0) ej["renamed_at"] = e.renamed_at;
         if (e.auto_titled)  ej["auto_titled"]  = true;
         if (e.name_is_auto) ej["name_is_auto"] = true;
+        if (!e.workspace.empty()) ej["workspace"] = e.workspace;
+        if (!e.preview.empty())   ej["preview"]   = e.preview;
+        if (e.message_count > 0)  ej["message_count"] = e.message_count;
         ej["mtime"]      = e.mtime;
         ej["size"]       = e.size;
         threads[id] = std::move(ej);
     }
     json j;
-    j["version"] = 4;
+    j["version"] = kThreadIndexVersion;
     j["threads"] = std::move(threads);
     try { (void)write_json_atomic(internal_io(), thread_index_path(), j.dump()); }
     catch (const std::exception&) { /* best-effort cache */ }
@@ -1396,6 +1426,9 @@ Thread thread_from_index(const std::string& id, const IndexEntry& e) {
     t.renamed_at = e.renamed_at;
     t.auto_titled  = e.auto_titled;
     t.name_is_auto = e.name_is_auto;
+    t.workspace     = e.workspace;
+    t.preview       = e.preview;
+    t.message_count = e.message_count;
     return t;
 }
 
@@ -1427,6 +1460,9 @@ void reindex_thread(const lock_levels::below_file_lane& cap, const Thread& t) {
     ie.renamed_at = t.renamed_at;
     ie.auto_titled  = t.auto_titled;
     ie.name_is_auto = t.name_is_auto;
+    ie.workspace     = t.workspace;
+    ie.preview       = t.preview;
+    ie.message_count = t.message_count;
     ie.mtime      = mt;
     ie.size       = sz;
     with_thread_index(cap, [](const maya::held<lock_levels::file_lane>&, persistence::Held,
@@ -1438,6 +1474,22 @@ void reindex_thread(const lock_levels::below_file_lane& cap, const Thread& t) {
 }
 
 } // namespace
+
+std::vector<Thread> backfill_picker_summaries(Io io, const lock_levels::below_file_lane& cap,
+                                              const std::vector<ThreadId>& ids) {
+    std::vector<Thread> out;
+    for (const auto& id : ids) {
+        auto full = load_thread_by_id(io, id);
+        if (!full) continue;
+        refresh_picker_summary(*full);
+        // An empty thread stays at 0; nothing to show, nothing to retry.
+        full->messages.clear();
+        full->messages.shrink_to_fit();
+        reindex_thread(cap, *full);
+        out.push_back(std::move(*full));
+    }
+    return out;
+}
 
 std::vector<Thread> load_all_threads(Io, const lock_levels::below_file_lane& cap) {
     // Metadata-only directory walk, index-accelerated (see the index
@@ -1521,6 +1573,9 @@ std::vector<Thread> load_all_threads(Io, const lock_levels::below_file_lane& cap
             ie.renamed_at = loaded->renamed_at;
             ie.auto_titled  = loaded->auto_titled;
             ie.name_is_auto = loaded->name_is_auto;
+            ie.workspace     = loaded->workspace;
+            ie.preview       = loaded->preview;
+            ie.message_count = loaded->message_count;
             ie.mtime      = mt;
             ie.size       = sz;
             fresh.emplace(id, std::move(ie));
@@ -1573,6 +1628,9 @@ json thread_meta_to_json(const Thread& t) {
     if (t.auto_titled) j["auto_titled"] = true;
     if (t.auto_title_ok) j["auto_title_ok"] = true;
     if (t.name_is_auto) j["name_is_auto"] = true;
+    if (!t.workspace.empty()) j["workspace"] = t.workspace;
+    if (!t.preview.empty())   j["preview"]   = t.preview;
+    if (t.message_count > 0)  j["message_count"] = t.message_count;
     // Wire-only compaction records. Persisting these lets a reloaded
     // thread keep sending the SAME wire payload it was sending before
     // shutdown — if the user compacted at turn 40 then closed the app,
@@ -2222,6 +2280,29 @@ WriterStateLock& async_writer_state() {
 // that raced a delete both remove a thread's files and index row through it.
 void remove_thread_files(const lock_levels::below_thread_log& cap, const ThreadId& id);
 
+// The header a save job carries: every field but the messages, plus the
+// picker summary worked out from them. Field by field, because
+// `meta = t; meta.messages.clear()` would deep-copy the transcript first.
+[[nodiscard]] static Thread header_of(const Thread& t) {
+    Thread h;
+    h.id                = t.id;
+    h.title             = t.title;
+    h.forked_from       = t.forked_from;
+    h.rag_mode_override = t.rag_mode_override;
+    h.created_at        = t.created_at;
+    h.updated_at        = t.updated_at;
+    h.renamed_at        = t.renamed_at;
+    h.auto_titled       = t.auto_titled;
+    h.auto_title_ok     = t.auto_title_ok;
+    h.name_is_auto      = t.name_is_auto;
+    h.workspace         = t.workspace;
+    h.compactions       = t.compactions;
+    h.preview           = t.preview;
+    h.message_count     = t.message_count;
+    summarise_for_picker(t.messages, h);
+    return h;
+}
+
 struct AsyncWriter {
     // Reached in the constructor, so the state static is built first and
     // destroyed after this one.
@@ -2262,21 +2343,7 @@ struct AsyncWriter {
         }, key);
 
         SaveJob job;
-        // HEADER ONLY. `job.meta = t; job.meta.messages.clear();` deep-copied
-        // every message just to throw them away — a full transcript copy on
-        // the reducer on every save, which is the cost this whole path
-        // exists to avoid.
-        job.meta.id                = t.id;
-        job.meta.title             = t.title;
-        job.meta.forked_from       = t.forked_from;
-        job.meta.rag_mode_override = t.rag_mode_override;
-        job.meta.created_at        = t.created_at;
-        job.meta.updated_at        = t.updated_at;
-        job.meta.renamed_at        = t.renamed_at;
-        job.meta.auto_titled       = t.auto_titled;
-        job.meta.auto_title_ok     = t.auto_title_ok;
-        job.meta.name_is_auto      = t.name_is_auto;
-        job.meta.compactions       = t.compactions;
+        job.meta = header_of(t);
         job.fps = fps;
 
         if (!base) {
@@ -2312,17 +2379,7 @@ struct AsyncWriter {
         if (!start) {
             // Raced a landing save: redo as a full job.
             SaveJob full;
-            full.meta.id                = t.id;
-            full.meta.title             = t.title;
-            full.meta.forked_from       = t.forked_from;
-            full.meta.rag_mode_override = t.rag_mode_override;
-            full.meta.created_at        = t.created_at;
-            full.meta.updated_at        = t.updated_at;
-            full.meta.renamed_at        = t.renamed_at;
-            full.meta.auto_titled       = t.auto_titled;
-            full.meta.auto_title_ok     = t.auto_title_ok;
-            full.meta.name_is_auto      = t.name_is_auto;
-            full.meta.compactions       = t.compactions;
+            full.meta = header_of(t);
             full.fps  = std::move(fps);
             full.full = t;
             const bool s2 = st.with(cap, [](WriterState& s, std::string k, SaveJob j) {
@@ -3637,7 +3694,7 @@ std::string title_from_first_message(std::string_view text) {
     return t;
 }
 
-std::string clean_title(std::string_view text) {
+std::string clean_title(std::string_view text, std::size_t max_bytes) {
     // Repair first, so the filter below walks whole code points.
     const std::string valid = tools::util::to_valid_utf8(std::string{text});
     std::string t;
@@ -3654,13 +3711,38 @@ std::string clean_title(std::string_view text) {
         }
         t.push_back(valid[i]);
     }
-    t.resize(tools::util::safe_utf8_cut(t, kTitleMaxBytes));
+    t.resize(tools::util::safe_utf8_cut(t, max_bytes));
     const auto first = t.find_first_not_of(' ');
     if (first == std::string::npos) return {};
     t.erase(t.find_last_not_of(' ') + 1);
     t.erase(0, first);
     return t;
 }
+
+void summarise_for_picker(const std::vector<Message>& messages, Thread& out) {
+    if (messages.empty()) return;
+    std::uint32_t n = 0;
+    const Message* first = nullptr;
+    for (const auto& msg : messages) {
+        if (msg.typed_by_user()) {
+            ++n;
+            if (!first && !msg.text.empty()) first = &msg;
+        } else if (msg.role == Role::Assistant && !msg.smart_routing) {
+            ++n;
+        }
+    }
+    out.message_count = n;
+    // A run of spaces from a pasted block reads as one gap on a row.
+    if (first) {
+        std::string p = clean_title(first->text, kPreviewMaxBytes);
+        p.erase(std::unique(p.begin(), p.end(),
+                            [](char a, char b) { return a == ' ' && b == ' '; }),
+                p.end());
+        out.preview = std::move(p);
+    }
+}
+
+void refresh_picker_summary(Thread& t) { summarise_for_picker(t.messages, t); }
 
 } // namespace agentty::persistence
 

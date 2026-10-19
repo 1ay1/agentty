@@ -32,6 +32,7 @@
 #include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/login.hpp"
 #include "agentty/runtime/panel/common.hpp"
+#include "agentty/runtime/panel/thread_peek.hpp"   // PeekTurn: the ^J peek cache
 #include "agentty/runtime/view/cache.hpp"
 #include "agentty/store/store.hpp"          // store::Settings (the persisted record)
 #include "agentty/domain/auth_view.hpp"     // auth::AuthView
@@ -312,6 +313,9 @@ struct Model {
 
         Thread              current;
         std::vector<Thread> threads;
+        // Bumped whenever `threads` or a row in it changes (load, rename,
+        // delete), so the frame gate can tell without walking the list.
+        std::uint64_t threads_rev = 0;
         Profile             profile = Profile::Write;
 
         // How agentty LOOKS. The storage is `persisted.ui`; this is the
@@ -670,6 +674,19 @@ struct Model {
         // startup and after each turn, since a turn can add or edit any of
         // them. Reducers and panels read this instead of the disk.
         Library library;
+
+        // The ^J peek's loaded threads, newest first, at most kPeekCache:
+        // just the lines the card shows, split into turns, built once when
+        // the load lands. Whole threads can be tens of MB each; this is KB.
+        struct PeekThread {
+            ThreadId id;
+            std::vector<ui::PeekTurn> turns;
+        };
+        static constexpr std::size_t kPeekCache = 16;
+        std::vector<PeekThread> peek_cache;
+        // The id whose load is in flight, so a held arrow key doesn't queue
+        // a load per row it passes.
+        std::string peek_loading;
 
         // Is the workspace a git repo? nullopt until the startup probe
         // answers (RepoProbed). Checkpoints read this; asking git directly

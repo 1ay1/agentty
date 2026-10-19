@@ -314,6 +314,7 @@ concept Store = requires(S& s, const Thread& t, const ThreadId& id,
     // RAM proportional to thread count, not total transcript bytes.
     { s.load_threads() }     -> std::same_as<std::vector<Thread>>;
     { s.load_thread(id) }    -> std::same_as<std::optional<Thread>>;
+    { s.backfill_summaries(std::vector<ThreadId>{}) } -> std::same_as<std::vector<Thread>>;
     { s.save_thread(t) }     -> std::same_as<void>;
     { s.delete_thread(id) }  -> std::same_as<void>;
     { s.load_settings() }    -> std::same_as<Settings>;

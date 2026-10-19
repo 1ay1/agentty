@@ -1976,6 +1976,9 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
         .delete_thread = [&store](const ThreadId& id) { store.delete_thread(id); },
         .load_threads  = [&store] { return store.load_threads(); },
         .load_thread   = [&store](const ThreadId& id) { return store.load_thread(id); },
+        .backfill_summaries = [&store](const std::vector<ThreadId>& ids) {
+            return store.backfill_summaries(ids);
+        },
         .load_settings = [l = std::move(settings_seam.load)] {
             return maya::thread_root([&](const maya::unlocked& c) { return l(c); });
         },

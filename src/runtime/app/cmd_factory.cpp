@@ -2652,11 +2652,7 @@ Cmd generate_thread_title(const Model& m) {
     constexpr std::size_t kMaxBytes = 2000;
     std::string user, reply;
     for (const auto& msg : m.d.current.messages) {
-        // Only something the user typed: not the fork note, a compaction
-        // summary or injected context, all of which are User messages too.
-        const bool typed = msg.role == Role::User && !msg.fork_note
-                        && !msg.is_compact_summary && !msg.proactive.has_value();
-        if (typed && user.empty() && !msg.text.empty()) user = msg.text;
+        if (msg.typed_by_user() && user.empty() && !msg.text.empty()) user = msg.text;
         else if (msg.role == Role::Assistant && !user.empty() && reply.empty() && !msg.text.empty())
             reply = msg.text;
         if (!user.empty() && !reply.empty()) break;
@@ -2919,6 +2915,31 @@ Cmd prewarm_provider(const Model& m) {
                                            t.override_port);
         },
         std::move(t));
+}
+
+Cmd backfill_summaries_async(std::vector<ThreadId> ids) {
+    return cmd::io_task_isolated(
+        [](Io io, maya::Sink<Msg> out, std::stop_token stop, std::vector<ThreadId> ids) {
+            std::vector<Thread> done;
+            try {
+                if (!stop.stop_requested() && deps(io).backfill_summaries)
+                    done = deps(io).backfill_summaries(ids);
+            } catch (...) {}
+            out.send(Msg{ThreadSummariesFilled{std::move(done)}});
+        },
+        std::move(ids));
+}
+
+Cmd load_thread_peek_async(ThreadId id) {
+    return cmd::io_task_isolated(
+        [](Io io, maya::Sink<Msg> out, std::stop_token, ThreadId id) {
+            std::optional<std::vector<ui::PeekTurn>> turns;
+            try {
+                if (auto t = deps(io).load_thread(id)) turns = ui::peek_turns_of(*t);
+            } catch (...) {}
+            out.send(Msg{ThreadPeekLoaded{std::move(id), std::move(turns)}});
+        },
+        std::move(id));
 }
 
 Cmd load_thread_async(ThreadId id) {

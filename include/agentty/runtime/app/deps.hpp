@@ -40,6 +40,9 @@ struct Deps {
     // bodies are fetched on demand via load_thread.
     std::function<std::vector<Thread>()>        load_threads;
     std::function<std::optional<Thread>(const ThreadId&)> load_thread;
+    // Picker summaries for old threads, filled and indexed (off the UI
+    // thread). Unset in tests that don't need it.
+    std::function<std::vector<Thread>(const std::vector<ThreadId>&)> backfill_summaries;
     std::function<store::Settings()>            load_settings;
     // WRITE-BEHIND. Returns immediately: the value is published to an
     // in-memory cache that `load_settings` reads, and the actual
@@ -130,6 +133,9 @@ void install(P& p, S& s, auth::AuthHeader auth) {
         .save_thread     = [&s](const Thread& t) { s.save_thread(t); },
         .load_threads    = [&s] { return s.load_threads(); },
         .load_thread     = [&s](const ThreadId& id) { return s.load_thread(id); },
+        .backfill_summaries = [&s](const std::vector<ThreadId>& ids) {
+            return s.backfill_summaries(ids);
+        },
         .load_settings   = [l = std::move(seam.load)] {
             return maya::thread_root([&](const maya::unlocked& c) { return l(c); });
         },

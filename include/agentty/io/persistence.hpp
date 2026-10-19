@@ -79,6 +79,13 @@ write_thread_transcript_md(Io, const Thread& t);
 // `load_thread_file` below.
 [[nodiscard]] std::vector<Thread> load_all_threads(Io, const lock_levels::below_file_lane&);
 
+// Fill in the picker summary (preview, message count) for threads saved
+// before it existed, and store it in the index so it is done once. Returns
+// those threads, header only. Slow per thread (a full load), so callers run
+// it off the UI thread in small batches, after the list is up.
+[[nodiscard]] std::vector<Thread> backfill_picker_summaries(Io, const lock_levels::below_file_lane&,
+                                                            const std::vector<ThreadId>& ids);
+
 // Strict per-file loader. Returns the typed error so callers can react
 // to specific kinds (e.g. surface MissingField as "schema upgrade needed",
 // JsonParse as "corrupt file, restore from backup").
@@ -157,9 +164,20 @@ inline constexpr std::size_t kTitleMaxBytes = 60;
 // A typed or pasted title made safe to store and paint on one row: line
 // breaks and tabs become spaces, other control bytes are dropped (a title
 // reaches the terminal, so no escape sequences), invalid UTF-8 is repaired,
-// the result is cut to kTitleMaxBytes on a code-point boundary and trimmed
+// the result is cut to `max_bytes` on a code-point boundary and trimmed
 // of blanks at both ends. May return "".
-[[nodiscard]] std::string clean_title(std::string_view text);
+[[nodiscard]] std::string clean_title(std::string_view text,
+                                      std::size_t max_bytes = kTitleMaxBytes);
+
+// The picker preview: the first message the user typed, made one safe line
+// the same way a title is.
+inline constexpr std::size_t kPreviewMaxBytes = 200;
+
+// Fill out.preview and out.message_count from `messages`. Does nothing for
+// an empty list, so a header-only reload can't blank them.
+void summarise_for_picker(const std::vector<Message>& messages, Thread& out);
+// The same, reading t.messages.
+void refresh_picker_summary(Thread& t);
 
 // Atomic + durable write of `content` to `target` (persistence::write_atomic
 // with Durability::Durable): a unique temp, fsync, rename. Readers see the old
@@ -244,6 +262,11 @@ public:
     }
     [[nodiscard]] std::optional<Thread> load_thread(const ThreadId& id) {
         return persistence::load_thread_by_id(io_, id);
+    }
+    [[nodiscard]] std::vector<Thread> backfill_summaries(const std::vector<ThreadId>& ids) {
+        return maya::thread_root([&](const maya::unlocked& c) {
+            return persistence::backfill_picker_summaries(io_, c, ids);
+        });
     }
     void save_thread(const Thread& t) {
         maya::thread_root([&](const maya::unlocked& c) { persistence::save_thread(io_, c, t); });

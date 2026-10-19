@@ -692,6 +692,8 @@ struct StreamState {
     // to render a "loading…" placeholder instead of an empty list.
     // Cleared by the `ThreadsLoaded` handler.
     bool threads_loading = false;
+    // A background batch filling old threads' picker summaries is running.
+    bool summaries_filling = false;
     // A title request for this thread is out (see generate_thread_title).
     ThreadId titling;
     // True while a background single-thread JSON load is in flight

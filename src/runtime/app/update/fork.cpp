@@ -135,6 +135,8 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             Thread fork;
             fork.id = persistence::new_id();
             fork.forked_from = parent_id;
+            fork.workspace = m.d.current.workspace.empty() ? m.env.cwd
+                                                           : m.d.current.workspace;
             fork.rag_mode_override = rag_mode_of(choice);
             fork.created_at = fork.updated_at = m.wall_now();
             fork.title = m.d.current.title.rfind("Fork: ", 0) == 0
