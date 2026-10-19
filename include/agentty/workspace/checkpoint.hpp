@@ -19,7 +19,6 @@
 #include <stop_token>
 #include <string>
 
-#include <maya/runtime.hpp>
 #include "agentty/util/io.hpp"
 
 namespace agentty::workspace {
@@ -57,14 +56,13 @@ struct CheckpointDiff {
     int  insertions     = 0;
     int  deletions      = 0;
 };
-[[nodiscard]] CheckpointDiff checkpoint_summary(const maya::below<maya::leaf>& cap,
-                                                const std::string& id);
+[[nodiscard]] CheckpointDiff checkpoint_summary(const std::string& id);
 
 // Snapshot the current worktree and pin it at
 // refs/agentty/checkpoints/<id>. Returns false when not in a repo or
 // any git step fails. Also prunes the oldest checkpoint refs beyond a
 // fixed keep-count so refs don't accumulate forever.
-bool create_checkpoint(const maya::below<maya::leaf>& cap, const std::string& id);
+bool create_checkpoint(const std::string& id);
 
 // True iff refs/agentty/checkpoints/<id> resolves to a commit.
 [[nodiscard]] bool checkpoint_exists(const std::string& id);
@@ -73,7 +71,6 @@ bool create_checkpoint(const maya::below<maya::leaf>& cap, const std::string& id
 // recorded in the snapshot and delete non-ignored files that did not
 // exist when it was taken. On failure returns false and, if `error` is
 // non-null, writes a short human-readable reason into it.
-bool restore_checkpoint(const maya::below<maya::leaf>& cap, const std::string& id,
-                        std::string* error = nullptr);
+bool restore_checkpoint(const std::string& id, std::string* error = nullptr);
 
 } // namespace agentty::workspace

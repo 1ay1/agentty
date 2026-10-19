@@ -13,8 +13,6 @@
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/subprocess.hpp"
 
-#include <maya/runtime.hpp>
-
 #include <algorithm>
 #include <cstdio>
 #include <atomic>
@@ -134,18 +132,21 @@ bool ok(const util::SubprocessResult& r) {
     return r.started && !r.timed_out && r.exit_code == 0;
 }
 
-// Scratch index path inside the git dir. Seeded from a COPY of the real
-// index so `add -A` only re-hashes files whose stat info changed —
-// without the seed, every checkpoint would re-hash the entire worktree.
-// Checkpoint creation runs on a BG worker while restore runs on the UI
-// thread, and two users of one scratch index would corrupt it. So the index
-// is only reachable through scratch().with: the helpers below take the
-// ScratchIndex token, which only exists while the lock is held.
-struct ScratchIndex {};
-maya::guarded<ScratchIndex>& scratch() { static maya::guarded<ScratchIndex> s; return s; }
-
+// Scratch index path inside the git dir, UNIQUE per call. Seeded from a
+// COPY of the real index so `add -A` only re-hashes files whose stat info
+// changed — without the seed, every checkpoint would re-hash the entire
+// worktree. Distinct files per operation replace the old guarded lock:
+// its body spanned the git subprocesses, and exec.cpp's Windows
+// stdin-feeder join mints thread_root inside run_child — a capability
+// minted under a held lock aborts (jaal), which killed the process on the
+// first submit in a repo. With one index file per operation the lock has
+// nothing left to guard, and the create-vs-restore worktree race stays
+// excluded at the app level (restore runs only from Idle with
+// thread_loading set; submit refuses while it is).
 std::string prepare_scratch_index() {
-    const fs::path idx = fs::path(repo().git_dir) / "agentty-checkpoint-index";
+    static std::atomic<unsigned> seq{0};
+    const fs::path idx = fs::path(repo().git_dir)
+        / ("agentty-checkpoint-index." + std::to_string(seq.fetch_add(1)));
     std::error_code ec;
     fs::remove(idx, ec);
     fs::copy_file(fs::path(repo().git_dir) / "index", idx,
@@ -259,11 +260,11 @@ void prewarm_repo_info(std::stop_token stop) {
 }
 
 namespace {
-bool create_checkpoint_locked(ScratchIndex& si, const std::string& id);
+bool create_checkpoint_locked(const std::string& id);
 
-// Tree id of the current worktree, built in the scratch index (seeded from
+// Tree id of the current worktree, built in a scratch index (seeded from
 // the real one so `add -A` only re-hashes changed files). nullopt on failure.
-std::optional<std::string> worktree_tree(ScratchIndex&) {
+std::optional<std::string> worktree_tree() {
     const std::string idx = prepare_scratch_index();
     // --ignore-errors: an unreadable file (perms, vanished mid-scan) degrades
     // to "not in the tree", not a failure.
@@ -279,7 +280,7 @@ std::optional<std::string> worktree_tree(ScratchIndex&) {
 }
 } // namespace
 
-CheckpointDiff checkpoint_summary(const maya::below<maya::leaf>& cap, const std::string& id) {
+CheckpointDiff checkpoint_summary(const std::string& id) {
     CheckpointDiff out;
     if (!repo().in_repo || id.empty()) return out;
 
@@ -295,7 +296,7 @@ CheckpointDiff checkpoint_summary(const maya::below<maya::leaf>& cap, const std:
     // checkpoint tree against it. Doing it tree-vs-tree (not
     // tree-vs-worktree) keeps the untracked/new-file accounting identical
     // to what a rewind would actually revert.
-    const auto tree = scratch().with(cap, [](ScratchIndex& si) { return worktree_tree(si); });
+    const auto tree = worktree_tree();
     if (!tree) return out;
     const std::string& cur_tree = *tree;
 
@@ -331,18 +332,15 @@ CheckpointDiff checkpoint_summary(const maya::below<maya::leaf>& cap, const std:
     return out;
 }
 
-bool create_checkpoint(const maya::below<maya::leaf>& cap, const std::string& id) {
+bool create_checkpoint(const std::string& id) {
     if (!repo().in_repo || id.empty()) return false;
-    // The whole create (commit, ref, prune) stays serialized, as before.
-    return scratch().with(cap, [](ScratchIndex& si, std::string cid) {
-        return create_checkpoint_locked(si, cid);
-    }, id);
+    return create_checkpoint_locked(id);
 }
 
 namespace {
-bool create_checkpoint_locked(ScratchIndex& si, const std::string& id) {
+bool create_checkpoint_locked(const std::string& id) {
     // Stage EVERYTHING (tracked changes + new files, deletions included).
-    const auto tree = worktree_tree(si);
+    const auto tree = worktree_tree();
     if (!tree) return false;
 
     // Parentless commit: restore never walks history, and no parent
@@ -369,7 +367,7 @@ bool checkpoint_exists(const std::string& id) {
                        ref_for(id) + "^{commit}"}));
 }
 
-bool restore_checkpoint(const maya::below<maya::leaf>& cap, const std::string& id,
+bool restore_checkpoint(const std::string& id,
                         std::string* error) {
     auto fail = [&](std::string why) {
         if (error) *error = std::move(why);
@@ -395,15 +393,12 @@ bool restore_checkpoint(const maya::below<maya::leaf>& cap, const std::string& i
     // force-writes the files. The real index and HEAD stay untouched —
     // `git status` afterwards shows the restored state as ordinary
     // working-tree changes, which is exactly what the user expects.
-    const bool wrote = scratch().with(cap, [](ScratchIndex&, std::string c) {
-        const std::string idx = prepare_scratch_index();
-        const bool w =
-            ok(run_git_scratch(idx, {"git", "-C", repo().root, "read-tree", c}))
-            && ok(run_git_scratch(idx, {"git", "-C", repo().root,
-                                        "checkout-index", "-a", "-f"}));
-        drop_scratch_index(idx);
-        return w;
-    }, commit);
+    const std::string idx = prepare_scratch_index();
+    const bool wrote =
+        ok(run_git_scratch(idx, {"git", "-C", repo().root, "read-tree", commit}))
+        && ok(run_git_scratch(idx, {"git", "-C", repo().root,
+                                    "checkout-index", "-a", "-f"}));
+    drop_scratch_index(idx);
     if (!wrote) return fail("failed to write checkpoint files");
 
     // Delete files that exist now but weren't in the snapshot — the
