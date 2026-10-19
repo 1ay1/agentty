@@ -10,11 +10,15 @@
 // it needs a full Model; this file owns the git/worktree half, which is
 // where the destructive operations live.
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 #ifndef _WIN32
 #include <unistd.h>   // getpid
@@ -140,6 +144,45 @@ int main() {
         "git diff --cached --name-only", 65536, std::chrono::seconds{30});
     check(staged.started && staged.output.empty(),
           "restore staged nothing into the real index");
+
+    // ── scratch index files: none left behind, stale ones swept ─────────
+    auto scratch_files = [] {
+        int n = 0;
+        for (const auto& e : fs::directory_iterator(".git"))
+            if (e.path().filename().string().starts_with("agentty-checkpoint-index")) ++n;
+        return n;
+    };
+    check(scratch_files() == 0, "no scratch index left after create/summary/restore");
+    // One a killed process left behind: old enough to be stale.
+    put(".git/agentty-checkpoint-index.99999.0", "x");
+    fs::last_write_time(".git/agentty-checkpoint-index.99999.0",
+                        fs::file_time_type::clock::now() - std::chrono::hours{1});
+    // And a fresh one, as if another agentty were mid-operation: kept.
+    put(".git/agentty-checkpoint-index.88888.0", "x");
+    for (int i = 0; i < 17; ++i)   // enough creates to hit a sweep
+        (void)workspace::create_checkpoint("sweep" + std::to_string(i));
+    check(!fs::exists(".git/agentty-checkpoint-index.99999.0"), "stale scratch index swept");
+    check(fs::exists(".git/agentty-checkpoint-index.88888.0"), "fresh one left alone");
+    fs::remove(".git/agentty-checkpoint-index.88888.0");
+
+    // ── creates in parallel: all succeed, nothing leaks ─────────────────────
+    {
+        std::atomic<int> made{0};
+        std::vector<std::thread> ts;
+        for (int i = 0; i < 8; ++i)
+            ts.emplace_back([&, i] {
+                if (workspace::create_checkpoint("par" + std::to_string(i))) ++made;
+            });
+        for (auto& t : ts) t.join();
+        check(made == 8, "8 parallel creates all succeed");
+        check(scratch_files() == 0, "and leave no scratch index");
+        auto refs = tools::util::run_command_s(
+            "git for-each-ref --count=1000 refs/agentty/checkpoints/", 1 << 20,
+            std::chrono::seconds{30});
+        int n = 0;
+        for (char c : refs.output) n += c == '\n';
+        check(n >= 8 && n <= 64, "refs stay within the keep cap");
+    }
 
     // ── cleanup ─────────────────────────────────────────────────────────
     fs::current_path(fs::temp_directory_path());

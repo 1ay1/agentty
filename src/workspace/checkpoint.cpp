@@ -14,6 +14,7 @@
 #include "agentty/tool/util/subprocess.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <atomic>
 #include <filesystem>
@@ -24,6 +25,18 @@
 #include <system_error>
 #include <unordered_set>
 #include <vector>
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>   // GetCurrentProcessId
+#else
+#  include <unistd.h>    // getpid
+#endif
 
 namespace agentty::workspace {
 
@@ -132,6 +145,22 @@ bool ok(const util::SubprocessResult& r) {
     return r.started && !r.timed_out && r.exit_code == 0;
 }
 
+// Scratch index files left behind by a process killed mid-operation. A git
+// call here may run 120s, so only files idle well past that are stale; a
+// live operation (this process or another agentty) touches its file.
+// Swept every 16th new one, which is often enough.
+void sweep_stale_scratch_indexes() {
+    std::error_code ec;
+    const auto cutoff = fs::file_time_type::clock::now() - std::chrono::minutes{10};
+    for (const auto& e : fs::directory_iterator(fs::path(repo().git_dir), ec)) {
+        const auto name = e.path().filename().string();
+        if (!name.starts_with("agentty-checkpoint-index")) continue;
+        std::error_code tec;
+        const auto t = fs::last_write_time(e.path(), tec);
+        if (!tec && t < cutoff) fs::remove(e.path(), tec);
+    }
+}
+
 // Scratch index path inside the git dir, UNIQUE per call. Seeded from a
 // COPY of the real index so `add -A` only re-hashes files whose stat info
 // changed — without the seed, every checkpoint would re-hash the entire
@@ -145,8 +174,16 @@ bool ok(const util::SubprocessResult& r) {
 // thread_loading set; submit refuses while it is).
 std::string prepare_scratch_index() {
     static std::atomic<unsigned> seq{0};
+    if (seq.load() % 16 == 0) sweep_stale_scratch_indexes();
+    // pid in the name too: two agentty in one repo must not share a file.
+#ifdef _WIN32
+    const unsigned long pid = ::GetCurrentProcessId();
+#else
+    const unsigned long pid = static_cast<unsigned long>(::getpid());
+#endif
     const fs::path idx = fs::path(repo().git_dir)
-        / ("agentty-checkpoint-index." + std::to_string(seq.fetch_add(1)));
+        / ("agentty-checkpoint-index." + std::to_string(pid)
+           + "." + std::to_string(seq.fetch_add(1)));
     std::error_code ec;
     fs::remove(idx, ec);
     fs::copy_file(fs::path(repo().git_dir) / "index", idx,
@@ -167,21 +204,25 @@ std::string ref_for(const std::string& id) {
 
 // Delete oldest checkpoint refs beyond kKeepCheckpoints. creatordate
 // sorts oldest-first; everything before the keep-window tail goes.
+//
+// Two creates can prune at once now (no lock). Each delete names the commit
+// the ref held when listed, so git drops it only if nobody moved it since;
+// a ref another prune already deleted just fails that one call.
 void prune_old_checkpoints() {
     auto r = run_git({"for-each-ref", "--sort=creatordate",
-                      "--format=%(refname)", std::string{kRefPrefix}});
+                      "--format=%(refname) %(objectname)", std::string{kRefPrefix}});
     if (!ok(r)) return;
-    std::vector<std::string> refs;
+    std::vector<std::pair<std::string, std::string>> refs;   // ref, sha
     std::istringstream in(r.output);
     for (std::string line; std::getline(in, line); ) {
         line = chomp(std::move(line));
-        if (!line.empty()) refs.push_back(std::move(line));
+        const auto sp = line.rfind(' ');
+        if (sp != std::string::npos) refs.emplace_back(line.substr(0, sp), line.substr(sp + 1));
     }
     if (static_cast<int>(refs.size()) <= kKeepCheckpoints) return;
     const std::size_t drop = refs.size() - static_cast<std::size_t>(kKeepCheckpoints);
-    for (std::size_t i = 0; i < drop; ++i) {
-        (void)run_git({"update-ref", "-d", refs[i]});
-    }
+    for (std::size_t i = 0; i < drop; ++i)
+        (void)run_git({"update-ref", "-d", refs[i].first, refs[i].second});
 }
 
 // Repo-relative paths of every file recorded in the checkpoint tree.
