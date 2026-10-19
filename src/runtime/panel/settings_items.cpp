@@ -102,6 +102,16 @@ std::vector<Item> general(const Model& m) {
         i.action    = Action::ToggleAutoTitle;
         out.push_back(std::move(i));
     }
+    {
+        Item i;
+        i.primary   = "Auto-compact";
+        i.secondary = m.d.persisted.auto_compact
+            ? "on \xc2\xb7 summarises older turns when the context nears its limit"
+            : "off \xc2\xb7 only /compact does it; old turns are trimmed to fit";
+        i.hint      = "Enter: toggle";
+        i.action    = Action::ToggleAutoCompact;
+        out.push_back(std::move(i));
+    }
     // Appearance. A pane, not rows: it is grouped and has its own theme
     // browser, neither of which this flat list can hold. The row shows the
     // theme in use so the commonest reason to open it is answered without

@@ -1124,6 +1124,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
     if (m.s.is_idle()
         && !m.s.compacting
         && !m.s.autocompact_disabled
+        && m.d.persisted.auto_compact
         && m.s.context_max > 0
         && m.ui.composer.queued.empty()
         && !m.d.current.messages.empty()) {

@@ -299,6 +299,10 @@ struct Settings {
     // After the first reply, ask the cheap utility model for a short chat
     // title, like chat apps do. Off keeps the first-line name.
     bool                 auto_title = true;
+    // Compact the context on its own when it nears the window (after a
+    // turn, or when idle before the prompt cache expires). Off leaves it to
+    // /compact; requests are still trimmed to fit, so nothing overflows.
+    bool                 auto_compact = true;
 };
 
 template <class S>

@@ -2907,6 +2907,7 @@ store::Settings load_settings_from_disk() {
         s.show_changes_strip = j.value("show_changes_strip", false);
         s.show_reasoning     = j.value("show_reasoning", false);
         s.auto_title         = j.value("auto_title", true);
+        s.auto_compact       = j.value("auto_compact", true);
 
         // Sandbox policy. Every field falls back to the CURRENT value rather
         // than a literal, so the defaults live in one place (the struct) and a
@@ -3285,6 +3286,7 @@ void save_settings_locked(persistence::Held held, const store::Settings& s) {
     if (s.show_reasoning)     j["show_reasoning"] = true;
     // Only persisted when turned OFF (default is on).
     if (!s.auto_title)        j["auto_title"] = false;
+    if (!s.auto_compact)      j["auto_compact"] = false;
 
     // Sandbox policy, written only once the user has edited it. Until then
     // the runtime keeps its shipped posture, so upgrading never silently

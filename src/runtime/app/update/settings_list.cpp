@@ -291,6 +291,9 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                 case se::Action::ToggleAutoTitle: {
                     return reenter(m, Msg{ToggleAutoTitle{}});
                 }
+                case se::Action::ToggleAutoCompact: {
+                    return reenter(m, Msg{ToggleAutoCompact{}});
+                }
                 // (There is deliberately NO Activate-arm for plugin removal.
                 // Removal is `d` → SettingsListRemove, which is TWO-step —
                 // arm, then confirm. An Enter-fired remove here would be a

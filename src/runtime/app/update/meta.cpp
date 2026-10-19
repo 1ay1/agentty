@@ -184,6 +184,15 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             return Cmd::batch(std::move(save), std::move(cmd));
         },
 
+        [&](ToggleAutoCompact) -> Cmd {
+            m.d.persisted.auto_compact = !m.d.persisted.auto_compact;
+            auto save = save_record(m);
+            auto cmd = set_status_toast(m, m.d.persisted.auto_compact
+                ? "auto-compact: on"
+                : "auto-compact: off \xc2\xb7 /compact when you want it");
+            return Cmd::batch(std::move(save), std::move(cmd));
+        },
+
         [&](CycleProfile) -> Cmd {
             m.d.profile = m.d.profile == Profile::Write   ? Profile::Ask
                       : m.d.profile == Profile::Ask     ? Profile::Minimal
@@ -835,6 +844,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             if (m.s.is_idle()
                 && !m.s.compacting
                 && !m.s.autocompact_disabled
+                && m.d.persisted.auto_compact
                 && !m.d.current.messages.empty()) {
                 const int est = static_cast<int>(
                     cmd::estimate_wire_tokens(m.d.current) * m.s.est_calibration);

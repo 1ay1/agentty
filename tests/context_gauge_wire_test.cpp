@@ -13,8 +13,10 @@
 #include <vector>
 
 #include "agtest.hpp"
+#include "agtest_fx.hpp"
 
 #include "agentty/domain/conversation.hpp"
+#include "agentty/runtime/panel/settings/items.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/app/deps.hpp"
@@ -287,6 +289,50 @@ TEST_CASE("gauge: a finished compaction drops the gauge to the compacted size") 
     CHECK(!m.d.current.compactions.empty());
     CHECK(m.s.tokens_in > 0);
     CHECK(m.s.tokens_in < 60000);
+}
+
+TEST_CASE("compaction: auto_compact off keeps a full thread from compacting") {
+    install_stub_deps();
+    // Over the threshold, so a finished turn would compact on its own.
+    auto full_thread = [] {
+        Model m;
+        m.s.context_max = 65536;
+        const std::string big(40000, 'x');
+        for (int i = 0; i < 6; ++i) {
+            Message u; u.role = Role::User; u.text = big;
+            m.d.current.messages.push_back(u);
+            m.d.current.messages.push_back(measured_turn(60000, 0));
+        }
+        m.s.tokens_in = 60000;
+        return m;
+    };
+    // Finish a turn and report whether it asked to compact.
+    auto turn_compacts = [](Model m) {
+        m.d.current.messages.back().role = Role::Assistant;
+        m.s.phase = phase::Idle{};
+        const Cmd c = app::detail::finalize_turn(m, StopReason::EndTurn);
+        bool asked = false;
+        agtest::fx::for_each(c, [&](const auto& e) {
+            if constexpr (requires { e.msg; }) {
+                if constexpr (std::same_as<std::remove_cvref_t<decltype(e.msg)>, Msg>)
+                    if (const auto* meta = std::get_if<msg::MetaMsg>(&e.msg))
+                        if (std::holds_alternative<CompactContext>(*meta)) asked = true;
+            }
+        });
+        return asked;
+    };
+
+    Model on = full_thread();
+    CHECK(on.d.persisted.auto_compact);
+    CHECK(turn_compacts(std::move(on)));
+
+    Model off = full_thread();
+    off = app::update(std::move(off), Msg{ToggleAutoCompact{}}).first;
+    CHECK_FALSE(off.d.persisted.auto_compact);
+    CHECK_FALSE(turn_compacts(std::move(off)));
+
+    const auto rows = settings::items_for(off, settings::Category::General);
+    CHECK(std::ranges::any_of(rows, [](const auto& r) { return r.primary == "Auto-compact"; }));
 }
 
 TEST_CASE("window: the ollama row clamps to num_ctx only on a real Ollama (#73)") {

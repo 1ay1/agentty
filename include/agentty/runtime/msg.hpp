@@ -1226,6 +1226,8 @@ struct CycleProfile {};
 struct ToggleChangesStrip {};
 // Name new chats with the utility model after their first reply.
 struct ToggleAutoTitle {};
+// Compact the context on its own when it nears the window.
+struct ToggleAutoCompact {};
 struct RestoreCheckpoint { CheckpointId id; };
 // Completion of the async git-restore kicked off by RestoreCheckpoint.
 // `ok=false` carries a human-readable reason in `error`. The transcript
@@ -1493,7 +1495,7 @@ using SandboxMsg = std::variant<
     SandboxEditList, SandboxListKey, SandboxListPaste, SandboxListClose>;
 
 using MetaMsg = std::variant<
-    CompactContext, CycleProfile, ToggleChangesStrip, ToggleAutoTitle,
+    CompactContext, CycleProfile, ToggleChangesStrip, ToggleAutoTitle, ToggleAutoCompact,
     RestoreCheckpoint, CheckpointRestored,
     ToggleRetrievedExpanded,
     TerminalFocus,
