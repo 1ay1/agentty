@@ -57,7 +57,9 @@ inline void peek_lines_of(const Message& msg, PeekTurn& out) {
     }
 }
 
-// A thread as turns: each typed message starts one.
+// A thread as turns: each typed message starts one. Inside a turn the
+// speaker is named once per run (an agent turn is many messages, one per
+// tool round), and back-to-back calls of one tool read as "▸ shell ×4".
 [[nodiscard]] inline std::vector<PeekTurn> peek_turns_of(const Thread& t) {
     std::vector<PeekTurn> turns;
     for (const auto& msg : t.messages) {
@@ -65,6 +67,30 @@ inline void peek_lines_of(const Message& msg, PeekTurn& out) {
         peek_lines_of(msg, turns.back());
     }
     std::erase_if(turns, [](const PeekTurn& v) { return v.empty(); });
+    for (auto& turn : turns) {
+        PeekTurn out;
+        std::string speaker;   // who the last named line was
+        int repeat = 0;        // extra calls folded into the last tool line
+        auto flush = [&] {
+            if (repeat > 0 && !out.empty())
+                out.back().text += " \xc3\x97" + std::to_string(repeat + 1);   // ×
+            repeat = 0;
+        };
+        for (auto& l : turn) {
+            const std::string who = l.who.empty() ? speaker : l.who;
+            if (l.kind == PeekLine::Kind::Tool && !out.empty()
+                && out.back().kind == PeekLine::Kind::Tool && out.back().text == l.text) {
+                ++repeat;
+                continue;
+            }
+            flush();
+            if (!l.who.empty() && l.who == speaker) l.who.clear();
+            if (!who.empty()) speaker = who;
+            out.push_back(std::move(l));
+        }
+        flush();
+        turn = std::move(out);
+    }
     return turns;
 }
 

@@ -143,9 +143,10 @@ struct ThreadList      : pick::OpenAt, WithFrom {
     std::string renaming;
     std::string rename_input;
     int         rename_cursor = 0;
-    // Tab flips between this folder's threads and all of them. Starts on
-    // this folder; falls back to all when the folder has none.
-    bool        all_workspaces = false;
+    // Tab narrows to this folder's threads. Starts on ALL: threads saved
+    // before folders were recorded have none, and hiding them by default
+    // looked like the history was gone.
+    bool        all_workspaces = true;
     // The peek: which thread it shows, and how many turns back from the
     // latest its view is scrolled (0 = latest). Reset per thread.
     std::string peek_id;

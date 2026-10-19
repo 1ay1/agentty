@@ -34,19 +34,24 @@ using PeekKind = maya::PeekCard::Kind;
                          : l.kind == K::Tool ? PeekKind::Tool : PeekKind::Reply};
 }
 
-// The peek for the thread under the cursor. Built from the turns cached when
-// it loaded, so this is a few dozen string copies a frame, never a parse.
-// What makes a thread recognisable goes first: where it ran, when, and what
-// you first asked. The turns scrolled to fill the rest.
+// The preview for the thread under the cursor. Built from the turns cached
+// when it loaded, so it's a few dozen string copies a frame, never a parse.
+// What makes a thread recognisable goes first: its name, when, how long,
+// where it ran and what you first asked. The turns scrolled to fill the rest.
 [[nodiscard]] maya::PeekCard::Config peek_for(const Model& m, const pn::ThreadList& p,
-                                              const Thread& meta, int body_rows) {
+                                              const Thread& meta, int rows) {
     maya::PeekCard::Config pc;
+    pc.rows  = rows;
     pc.title = std::string{ui::shown_title(meta)};
     const auto now = m.wall_at(maya::anim_now());
-    if (!meta.workspace.empty()) pc.facts = workspace_name(meta.workspace) + " \xc2\xb7 ";
-    pc.facts += short_age(meta.updated_at, now) + " ago";
+    pc.facts = short_age(meta.updated_at, now) + " ago";
     if (meta.message_count > 0) pc.facts += " \xc2\xb7 " + std::to_string(meta.message_count) + " msgs";
-    if (!meta.forked_from.empty()) pc.facts += " \xc2\xb7 \xe2\x91\x82 fork";   // ⑂
+    std::vector<std::string> sub;
+    if (!meta.workspace.empty()) sub.push_back(workspace_name(meta.workspace));
+    if (!meta.forked_from.empty()) sub.push_back("\xe2\x91\x82 fork");   // ⑂
+    if (meta.auto_titled && !meta.user_named()) sub.push_back("auto-named");
+    for (std::size_t i = 0; i < sub.size(); ++i)
+        pc.subtitle += (i ? " \xc2\xb7 " : "") + sub[i];
 
     const auto loaded = std::ranges::find(m.ui.peek_cache, meta.id,
                                           &Model::UI::PeekThread::id);
@@ -59,10 +64,7 @@ using PeekKind = maya::PeekCard::Kind;
         asked = loaded->turns.front().front().text;
     // Not when it already is the title (an untitled or broken-name thread).
     if (asked == pc.title) asked.clear();
-    if (!asked.empty()) {
-        pc.lines.push_back({"asked", asked, PeekKind::User});
-        pc.lines.push_back({"", "", PeekKind::Gap});
-    }
+    pc.asked = std::move(asked);
 
     if (loaded == m.ui.peek_cache.end()) {
         pc.lines.push_back({"", "loading\xe2\x80\xa6", PeekKind::Note});
@@ -77,9 +79,10 @@ using PeekKind = maya::PeekCard::Kind;
     }
     const int n = static_cast<int>(turns.size());
     const int last = n - 1 - std::clamp(p.peek_turn, 0, n - 1);
-    const int room = body_rows - static_cast<int>(pc.lines.size());
+    // Lines the card has for the transcript, as the card itself counts them.
+    const int room = maya::PeekCard::transcript_rows(pc);
     // Walk back from the scrolled-to turn until the card is full, so the
-    // newest turn in view sits at the bottom, next to the row it belongs to.
+    // newest turn in view sits at the bottom of the card.
     std::vector<PeekLine> lines;
     for (int ti = last; ti >= 0 && static_cast<int>(lines.size()) < room; --ti) {
         std::vector<PeekLine> chunk;
@@ -94,7 +97,7 @@ using PeekKind = maya::PeekCard::Kind;
         lines.erase(lines.begin(), lines.end() - std::max(0, room));
     while (!lines.empty() && lines.front().kind == PeekKind::Gap) lines.erase(lines.begin());
     pc.lines.insert(pc.lines.end(), lines.begin(), lines.end());
-    pc.hint = "\xe2\x86\x90 \xe2\x86\x92 turns " + std::to_string(last + 1) + "/"
+    pc.hint = "\xe2\x86\x90 \xe2\x86\x92 turn " + std::to_string(last + 1) + "/"
             + std::to_string(n) + " \xc2\xb7 Enter open";
     return pc;
 }
@@ -116,20 +119,25 @@ Element thread_list_panel(const Model& m) {
     cfg.min_width  = kPanelStandard;
     cfg.viewport_h = panel_viewport_h();
     cfg.scroll     = &m.ui.thread_list_scroll;
-    // The peek: a preview card the panel floats right above the cursor row.
-    // A fixed tall viewport gives it room; the panel scrolls to keep it.
-    if (!picker->peek_id.empty() && !renaming) {
+    cfg.selected   = -1;   // set below, past the day headers
+
+    // The preview: a framed card fixed under the filter. Same height whatever
+    // thread is under the cursor, so the list below it never moves. The
+    // panel has a fixed height (it must fit the frame), so the card takes its
+    // rows out of the list's, keeping at least kMinList rows of list.
+    constexpr int kPeekRows = 12, kMinList = 6;
+    const int list_rows = cfg.viewport_h;
+    const int peek_rows = std::min(kPeekRows, list_rows - kMinList);
+    std::optional<maya::PeekCard::Config> peek;
+    if (!renaming && peek_rows >= 7 && !picker->peek_id.empty()) {
         const auto meta = std::ranges::find(m.d.threads, picker->peek_id,
                                             [](const Thread& t) { return t.id.value; });
-        cfg.fixed_viewport = true;
-        const int rows = cfg.viewport_h >= 14 ? cfg.viewport_h * 3 / 5
-                       : cfg.viewport_h >= 9  ? cfg.viewport_h - 3 : 0;
-        if (meta != m.d.threads.end() && rows >= 5) {
-            cfg.peek = peek_for(m, *picker, *meta, rows - 2);
-            cfg.peek->rows = rows;
+        if (meta != m.d.threads.end()) {
+            peek = peek_for(m, *picker, *meta, peek_rows + 1);   // + the blank row it covers
+            cfg.viewport_h = list_rows - peek_rows;
+            cfg.fixed_viewport = true;   // the list keeps its height too
         }
     }
-    cfg.selected   = -1;   // set below, past the day headers
     if (renaming) {
         // The draft takes the filter's place: a bright line with a REAL
         // caret, same as the settings add-prompt. The highlighted row below
@@ -150,7 +158,13 @@ Element thread_list_panel(const Model& m) {
         cfg.header.push_back(sep);
     } else if (!m.d.threads.empty()) {
         cfg.header.push_back(filter_header(picker->query, "threads"));
-        cfg.header.push_back(sep);
+        // The card's frame is the edge under the filter; without it, the rule.
+        if (peek) {
+            // No blank row after it: the box sits right on the list.
+            cfg.header.push_back(maya::PeekCard{std::move(*peek)}.build());
+        } else {
+            cfg.header.push_back(sep);
+        }
     }
 
     if (m.d.threads.empty()) {
@@ -199,14 +213,6 @@ Element thread_list_panel(const Model& m) {
                     row.highlight    = std::move(fm.positions);
                     row.highlight_fg = info;
                 }
-            // Under the cursor row: what you first asked, and where (in All).
-            if (on_cursor) {
-                std::string help = ui::shown_title(t) == t.preview ? std::string{}
-                                                                   : t.preview;
-                if (all && !t.workspace.empty())
-                    help = workspace_name(t.workspace) + (help.empty() ? "" : " \xc2\xb7 " + help);
-                row.help = std::move(help);
-            }
             if (confirming) {
                 row.badge       = "\xe2\x9a\xa0";           // ⚠
                 row.badge_style = fg_of(warn);
@@ -260,7 +266,6 @@ Element thread_list_panel(const Model& m) {
     std::vector<Hint> keys{
         {"type", "filter", 5},
         {"\xe2\x86\x91\xe2\x86\x93", "move", 5},        // ↑↓
-        {"\xe2\x86\x90\xe2\x86\x92", "scroll peek", 4}, // ←→
     };
     // Only offer a scope to switch to when this folder has threads.
     if (here > 0) keys.push_back({"Tab", all ? "this folder" : "all", 3});
