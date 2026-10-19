@@ -39,4 +39,7 @@ inline constexpr std::string_view name = "agentty";
 // one and orphans the old. https, no trailing slash.
 inline constexpr std::string_view url = "https://agentty.org";
 
+// The OpenRouter marketplace category: a terminal coding agent.
+inline constexpr std::string_view category = "cli-agent";
+
 }  // namespace agentty::util::identity

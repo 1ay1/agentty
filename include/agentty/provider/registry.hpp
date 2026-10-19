@@ -798,13 +798,16 @@ static_assert(detail::auth_caps_consistent(),
 // Lowercase names: header names are case-insensitive per RFC 9110 and the
 // rest of agentty sends lowercase, so these match their neighbours on the
 // wire rather than the spelling used in vendor docs.
+//
+// x-openrouter-categories files the app under cli-agent in the marketplace.
 [[nodiscard]] inline std::vector<std::pair<std::string, std::string>>
 attribution_headers(const ProviderDescriptor* row) {
     std::vector<std::pair<std::string, std::string>> out;
     if (!row || !row->attribution) return out;
-    out.reserve(2);
+    out.reserve(3);
     out.emplace_back("http-referer", std::string{util::identity::url});
     out.emplace_back("x-title",      std::string{util::identity::name});
+    out.emplace_back("x-openrouter-categories", std::string{util::identity::category});
     return out;
 }
 

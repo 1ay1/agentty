@@ -1041,6 +1041,7 @@ TEST_CASE("attribution: openrouter names agentty on the chat dialect") {
         oai::AuthHeader{oai::BearerHeader{"sk-or-v1-test"}}, orouter);
     CHECK(wire(hs, "http-referer") == std::optional<std::string>{"https://agentty.org"});
     CHECK(wire(hs, "x-title")      == std::optional<std::string>{"agentty"});
+    CHECK(wire(hs, "x-openrouter-categories") == std::optional<std::string>{"cli-agent"});
     // The auth header still wins its slot — extras are appended, not merged
     // over the top of something load-bearing.
     CHECK(wire(hs, "authorization") == std::optional<std::string>{"Bearer sk-or-v1-test"});
