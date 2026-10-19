@@ -41,6 +41,7 @@ inline constexpr std::string_view kApPolarity   = "polarity";
 inline constexpr std::string_view kApDensity    = "density";
 inline constexpr std::string_view kApProseWidth = "prose_width";
 inline constexpr std::string_view kApCompact    = "compact_turns";
+inline constexpr std::string_view kApThreadPeek = "thread_preview";
 inline constexpr std::string_view kApMotion     = "motion";
 inline constexpr std::string_view kApSyntax     = "syntax";
 inline constexpr std::string_view kApToolOutput = "tool_output";

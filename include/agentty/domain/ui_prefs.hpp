@@ -120,6 +120,9 @@ struct Prefs {
     // to track back to the next line's start; 0 means "no cap".
     int        prose_width = 0;
     bool       compact_turns = false;
+    // The framed preview of the highlighted thread in ^J. Off gives the
+    // list the whole panel.
+    bool       thread_preview = true;
 
     Motion     motion      = Motion::Full;
 

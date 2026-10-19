@@ -223,6 +223,8 @@ form::Form build_appearance_form(const up::Prefs& p, const up::Detected& d) {
              std::string{i18n::t("appearance.help.prose_width")});
     b.toggle(std::string{kApCompact}, std::string{i18n::t("appearance.compact")}, p.compact_turns,
              std::string{i18n::t("appearance.help.compact")});
+    b.toggle(std::string{kApThreadPeek}, std::string{i18n::t("appearance.thread_preview")},
+             p.thread_preview, std::string{i18n::t("appearance.help.thread_preview")});
 
     // ── Motion ──────────────────────────────────────────────────────
     b.header(std::string{i18n::t("appearance.motion")});

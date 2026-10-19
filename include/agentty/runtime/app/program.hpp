@@ -268,6 +268,7 @@ struct AgenttyApp {
         mix(static_cast<std::uint64_t>(m.d.ui().prose_width));
         mix(m.d.ui().syntax ? 1ULL : 0ULL);
         mix(m.d.ui().compact_turns ? 1ULL : 0ULL);
+        mix(m.d.ui().thread_preview ? 1ULL : 0ULL);
 
         // ── Session / phase.
         mix(static_cast<std::uint64_t>(m.s.phase.index()));

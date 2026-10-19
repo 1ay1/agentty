@@ -16,6 +16,10 @@
 #include "agentty/runtime/view/thread/seam.hpp"
 #include <maya/core/motion.hpp>
 #include "agentty/runtime/panel/appearance.hpp"
+#include "agentty/runtime/view/panels.hpp"
+
+#include <maya/core/render_context.hpp>
+#include <maya/print.hpp>
 
 #include <cstdio>
 #include <optional>
@@ -322,6 +326,36 @@ TEST_CASE("appearance: reduce-motion freezes maya's animation primitives") {
     CHECK(maya::anim::wave(1400.0) == doctest::Approx(0.5));
 
     maya::anim::set_reduce_motion(false);   // leave the process clean
+}
+
+TEST_CASE("appearance: thread preview turns the ^J preview off") {
+    install_stub_deps();
+    Model m = opened();
+    CHECK(m.d.ui().thread_preview);
+    m = press(std::move(m), ui::panel::kApThreadPeek,
+              form::keys::Action{form::keys::Intent::AdjustUp});
+    CHECK_FALSE(m.d.ui().thread_preview);
+    CHECK_FALSE(g_saved.ui.thread_preview);   // and it was saved
+
+    // With it off, ^J draws no preview and loads nothing for the row.
+    Thread t;
+    t.id = ThreadId{"t-1"};
+    t.title = "some thread";
+    t.message_count = 4;
+    m.d.threads.push_back(t);
+    auto [open, cmd] = app::update(std::move(m), Msg{OpenThreadList{}});
+    // Nothing scheduled for the row: no settle timer, no load in flight.
+    int timers = 0;
+    agtest::fx::for_each(cmd, [&](const auto& e) {
+        if constexpr (requires { e.delay; }) ++timers;
+    });
+    CHECK(timers == 0);
+    CHECK(open.ui.peek_loading.empty());
+    maya::RenderContext ctx{100, 40, maya::render_generation(), true};
+    maya::RenderContextGuard g(ctx);
+    const std::string screen = maya::render_to_string(ui::thread_list_panel(open), 100);
+    CHECK(screen.find("Preview") == std::string::npos);
+    CHECK(screen.find("some thread") != std::string::npos);
 }
 
 TEST_CASE("appearance: compact turns changes the seam's height AND its rows") {

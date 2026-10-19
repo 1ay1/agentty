@@ -56,6 +56,7 @@ inline constexpr std::string_view kChineseSimplified = R"JSON({
   "appearance.layout":       { "text": "布局" },
   "appearance.prose_width":  { "text": "正文宽度" },
   "appearance.compact":      { "text": "紧凑对话" },
+  "appearance.thread_preview": { "text": "对话预览" },
   "appearance.motion":       { "text": "动画" },
   "appearance.content":      { "text": "内容" },
   "appearance.syntax":       { "text": "语法高亮" },
@@ -63,6 +64,7 @@ inline constexpr std::string_view kChineseSimplified = R"JSON({
   "appearance.help.scheme":      { "text": "native 保留终端自身的颜色 · 按 Enter 浏览" },
   "appearance.help.prose_width": { "text": "正文在 N 列处换行 · 0 = 使用全部宽度" },
   "appearance.help.compact":     { "text": "去掉对话之间的空行" },
+  "appearance.help.thread_preview": { "text": "在 ^J 中显示选中的对话" },
   "appearance.help.syntax":      { "text": "按语言为代码块着色" },
 
   "sandbox.read_paths":  { "text": "额外可读" },

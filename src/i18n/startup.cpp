@@ -50,6 +50,7 @@ constexpr std::string_view kEnglish = R"JSON({
   "appearance.layout":       { "text": "Layout",              "width_hint": 6 },
   "appearance.prose_width":  { "text": "Prose width",         "width_hint": 11 },
   "appearance.compact":      { "text": "Compact turns",       "width_hint": 13 },
+  "appearance.thread_preview": { "text": "Thread preview", "width_hint": 14 },
   "appearance.motion":       { "text": "Motion",              "width_hint": 6 },
   "appearance.content":      { "text": "Content",             "width_hint": 7 },
   "appearance.syntax":       { "text": "Syntax highlighting", "width_hint": 19 },
@@ -57,6 +58,7 @@ constexpr std::string_view kEnglish = R"JSON({
   "appearance.help.scheme":      { "text": "native keeps your terminal's own colors · Enter to browse", "width_hint": 56 },
   "appearance.help.prose_width": { "text": "wrap assistant text at N columns · 0 = the full width",    "width_hint": 53 },
   "appearance.help.compact":     { "text": "drop the blank line between turns",   "width_hint": 33 },
+  "appearance.help.thread_preview": { "text": "show the highlighted thread in ^J", "width_hint": 33 },
   "appearance.help.syntax":      { "text": "colour code fences by language",      "width_hint": 30 },
 
   "sandbox.read_paths":  { "text": "Also readable", "width_hint": 13 },

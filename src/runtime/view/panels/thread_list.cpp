@@ -121,19 +121,23 @@ Element thread_list_panel(const Model& m) {
     cfg.scroll     = &m.ui.thread_list_scroll;
     cfg.selected   = -1;   // set below, past the day headers
 
-    // The preview: a framed card fixed under the filter. Same height whatever
-    // thread is under the cursor, so the list below it never moves. The
-    // panel has a fixed height (it must fit the frame), so the card takes its
-    // rows out of the list's, keeping at least kMinList rows of list.
+    // The preview: a framed card fixed under the filter's rule. Same height
+    // whatever thread is under the cursor, so the list below it never
+    // moves. The panel has a fixed height (it must fit the frame), so the
+    // card takes its rows out of the list's, keeping at least kMinList rows
+    // of list. Appearance > Thread preview turns it off.
     constexpr int kPeekRows = 12, kMinList = 6;
     const int list_rows = cfg.viewport_h;
     const int peek_rows = std::min(kPeekRows, list_rows - kMinList);
     std::optional<maya::PeekCard::Config> peek;
-    if (!renaming && peek_rows >= 7 && !picker->peek_id.empty()) {
+    if (m.d.ui().thread_preview && !renaming && peek_rows >= 7
+        && !picker->peek_id.empty()) {
         const auto meta = std::ranges::find(m.d.threads, picker->peek_id,
                                             [](const Thread& t) { return t.id.value; });
         if (meta != m.d.threads.end()) {
-            peek = peek_for(m, *picker, *meta, peek_rows + 1);   // + the blank row it covers
+            // The rule above it costs a row; the card covers the blank row
+            // under it, so it is as tall as the rows it takes.
+            peek = peek_for(m, *picker, *meta, peek_rows);
             cfg.viewport_h = list_rows - peek_rows;
             cfg.fixed_viewport = true;   // the list keeps its height too
         }
@@ -158,13 +162,8 @@ Element thread_list_panel(const Model& m) {
         cfg.header.push_back(sep);
     } else if (!m.d.threads.empty()) {
         cfg.header.push_back(filter_header(picker->query, "threads"));
-        // The card's frame is the edge under the filter; without it, the rule.
-        if (peek) {
-            // No blank row after it: the box sits right on the list.
-            cfg.header.push_back(maya::PeekCard{std::move(*peek)}.build());
-        } else {
-            cfg.header.push_back(sep);
-        }
+        cfg.header.push_back(sep);   // the rule under the filter, like every picker
+        if (peek) cfg.header.push_back(maya::PeekCard{std::move(*peek)}.build());
     }
 
     if (m.d.threads.empty()) {

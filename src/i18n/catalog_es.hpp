@@ -36,6 +36,7 @@ inline constexpr std::string_view kSpanish = R"JSON({
   "appearance.layout":       { "text": "Diseño" },
   "appearance.prose_width":  { "text": "Ancho del texto" },
   "appearance.compact":      { "text": "Turnos compactos" },
+  "appearance.thread_preview": { "text": "Vista previa del hilo" },
   "appearance.motion":       { "text": "Movimiento" },
   "appearance.content":      { "text": "Contenido" },
   "appearance.syntax":       { "text": "Resaltado de sintaxis" },
@@ -43,6 +44,7 @@ inline constexpr std::string_view kSpanish = R"JSON({
   "appearance.help.scheme":      { "text": "native conserva los colores de tu terminal · Enter para explorar" },
   "appearance.help.prose_width": { "text": "ajustar el texto a N columnas · 0 = todo el ancho" },
   "appearance.help.compact":     { "text": "quitar la línea en blanco entre turnos" },
+  "appearance.help.thread_preview": { "text": "mostrar el hilo resaltado en ^J" },
   "appearance.help.syntax":      { "text": "colorear los bloques de código por lenguaje" },
 
   "sandbox.read_paths":  { "text": "También legible" },

@@ -292,6 +292,7 @@ namespace {
     else if (f.id == pn::kApThinking)   p.thinking    = static_cast<up::Thinking>(idx());
     else if (f.id == pn::kApTimestamps) p.timestamps  = static_cast<up::Timestamps>(idx());
     else if (f.id == pn::kApCompact)    p.compact_turns = on();
+    else if (f.id == pn::kApThreadPeek) p.thread_preview = on();
     else if (f.id == pn::kApProseWidth) {
         if (const auto* n = std::get_if<form::field::Number>(&f.value))
             p.prose_width = static_cast<int>(form::number_value(*n));

@@ -105,7 +105,10 @@ constexpr auto kPeekSettle = std::chrono::milliseconds{90};
     p->peek_turn = 0;
     const bool cached = std::ranges::any_of(
         m.ui.peek_cache, [&](const auto& t) { return t.id == id; });
-    if (cached || m.ui.peek_loading == id.value) return Cmd::cancel("thread-peek");
+    // Off in Appearance: track the row (so turning it on shows it) but load
+    // nothing.
+    if (!m.d.ui().thread_preview || cached || m.ui.peek_loading == id.value)
+        return Cmd::cancel("thread-peek");
     return Cmd::after("thread-peek", kPeekSettle, Msg{ThreadPeekSettled{id}});
 }
 
@@ -331,7 +334,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
         },
         [&](ThreadPeekScroll& e) -> Cmd {
             auto* p = m.ui.panel.get<pn::ThreadList>();
-            if (!p || p->peek_id.empty()) return Cmd::none();
+            if (!p || p->peek_id.empty() || !m.d.ui().thread_preview) return Cmd::none();
             // peek_turn counts back from the latest turn (0 = latest). Clamp
             // to the turns this thread really has, so the far end isn't
             // "sticky". Before the thread has loaded the count is unknown:

@@ -51,6 +51,7 @@ inline constexpr std::string_view kRussian = R"JSON({
   "appearance.layout":       { "text": "Макет" },
   "appearance.prose_width":  { "text": "Ширина текста" },
   "appearance.compact":      { "text": "Компактно" },
+  "appearance.thread_preview": { "text": "Предпросмотр диалога" },
   "appearance.motion":       { "text": "Анимация" },
   "appearance.content":      { "text": "Содержимое" },
   "appearance.syntax":       { "text": "Подсветка синтаксиса" },
@@ -58,6 +59,7 @@ inline constexpr std::string_view kRussian = R"JSON({
   "appearance.help.scheme":      { "text": "native сохраняет цвета твоего терминала · Enter для просмотра" },
   "appearance.help.prose_width": { "text": "переносить текст на N колонках · 0 = вся ширина" },
   "appearance.help.compact":     { "text": "убрать пустую строку между ходами" },
+  "appearance.help.thread_preview": { "text": "показывать выбранный диалог в ^J" },
   "appearance.help.syntax":      { "text": "раскрашивать блоки кода по языку" },
 
   "sandbox.read_paths":  { "text": "Также читаемо" },

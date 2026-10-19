@@ -59,7 +59,7 @@ TEST_CASE("appearance: every row the pane builds is a real, reachable setting") 
 
     static constexpr std::string_view kKnown[] = {
         pn::kApLang, pn::kApTheme, pn::kApTier, pn::kApPolarity, pn::kApDensity,
-        pn::kApCompact, pn::kApMotion, pn::kApSyntax, pn::kApToolOutput,
+        pn::kApCompact, pn::kApThreadPeek, pn::kApMotion, pn::kApSyntax, pn::kApToolOutput,
         pn::kApThinking, pn::kApTimestamps, pn::kApProseWidth,
     };
 

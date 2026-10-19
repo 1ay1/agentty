@@ -2881,6 +2881,7 @@ store::Settings load_settings_from_disk() {
             s.ui.prose_width   = u.value("prose_width", 0);
             s.ui.syntax        = u.value("syntax", true);
             s.ui.compact_turns = u.value("compact_turns", false);
+            s.ui.thread_preview = u.value("thread_preview", true);
         }
         auto favs = j.value("favorite_models", std::vector<std::string>{});
         for (auto& f : favs) s.favorite_models.push_back(ModelId{std::move(f)});
@@ -3273,6 +3274,7 @@ void save_settings_locked(persistence::Held held, const store::Settings& s) {
         u["prose_width"]   = s.ui.prose_width;
         u["syntax"]        = s.ui.syntax;
         u["compact_turns"] = s.ui.compact_turns;
+        u["thread_preview"] = s.ui.thread_preview;
         j["ui"] = std::move(u);
     }
     json favs = json::array();

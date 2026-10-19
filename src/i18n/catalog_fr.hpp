@@ -42,6 +42,7 @@ inline constexpr std::string_view kFrench = R"JSON({
   "appearance.layout":       { "text": "Mise en page" },
   "appearance.prose_width":  { "text": "Largeur du texte" },
   "appearance.compact":      { "text": "Tours compacts" },
+  "appearance.thread_preview": { "text": "Aperçu du fil" },
   "appearance.motion":       { "text": "Animation" },
   "appearance.content":      { "text": "Contenu" },
   "appearance.syntax":       { "text": "Coloration syntaxique" },
@@ -49,6 +50,7 @@ inline constexpr std::string_view kFrench = R"JSON({
   "appearance.help.scheme":      { "text": "native garde les couleurs de ton terminal · Entrée pour parcourir" },
   "appearance.help.prose_width": { "text": "couper le texte à N colonnes · 0 = toute la largeur" },
   "appearance.help.compact":     { "text": "supprimer la ligne vide entre les tours" },
+  "appearance.help.thread_preview": { "text": "afficher le fil sélectionné dans ^J" },
   "appearance.help.syntax":      { "text": "colorer les blocs de code selon le langage" },
 
   "sandbox.read_paths":  { "text": "Aussi lisible" },

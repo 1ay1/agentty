@@ -45,6 +45,7 @@ inline constexpr std::string_view kJapanese = R"JSON({
   "appearance.layout":       { "text": "レイアウト" },
   "appearance.prose_width":  { "text": "本文の幅" },
   "appearance.compact":      { "text": "コンパクト表示" },
+  "appearance.thread_preview": { "text": "スレッドのプレビュー" },
   "appearance.motion":       { "text": "アニメーション" },
   "appearance.content":      { "text": "内容" },
   "appearance.syntax":       { "text": "構文強調" },
@@ -52,6 +53,7 @@ inline constexpr std::string_view kJapanese = R"JSON({
   "appearance.help.scheme":      { "text": "native は端末自身の色を保ちます · Enter で一覧" },
   "appearance.help.prose_width": { "text": "本文を N 桁で折り返す · 0 = 全幅" },
   "appearance.help.compact":     { "text": "ターンの間の空行を省く" },
+  "appearance.help.thread_preview": { "text": "^J で選択中のスレッドを表示" },
   "appearance.help.syntax":      { "text": "コードブロックを言語ごとに色分けする" },
 
   "sandbox.read_paths":  { "text": "追加の読み取り" },
