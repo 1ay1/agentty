@@ -421,6 +421,14 @@ std::size_t reload_mcp_plugins() {
     }
     if (cur & kRunning) return 0;   // someone else is reloading; they'll loop
 
+    // A throw out of the reload must still clear `running`, or every later
+    // reload sees one in progress and returns without doing anything.
+    struct Clear {
+        std::atomic<unsigned>& s;
+        bool armed = true;
+        ~Clear() { if (armed) s.store(0); }
+    } clear{state};
+
     std::size_t n = 0;
     for (;;) {
         state.fetch_and(~kPending);
@@ -435,6 +443,7 @@ std::size_t reload_mcp_plugins() {
         }
         if (!again) break;
     }
+    clear.armed = false;
     return n;
 }
 
