@@ -1219,6 +1219,10 @@ jobs:
         uses: vedantmgoyal9/winget-releaser@main
         with:
           identifier: agentty.agentty
+          # The winget-pkgs fork (and WINGET_TOKEN) belong to 1ay1. The
+          # default is the repo owner, agentty-org since the move, which has
+          # no fork, so komac failed with "could not resolve agentty-org/winget-pkgs".
+          fork-user: 1ay1
           version: ${{ needs.prepare.outputs.version }}
           # Explicit tag: the action's default is
           # `github.event.release.tag_name || github.ref_name`, which on a
