@@ -16,7 +16,8 @@
 //                can't nest with any lock the caller holds into a cycle
 //                (the holder never waits for anything the caller holds:
 //                it waits only for the server's reply, delivered by the
-//                peer's own reader thread).
+//                peer's own reader thread). A queued call leaves when its
+//                request's stop fires.
 //   reconnecting the same, for one reconnect at a time
 //
 // The blocking work -- an RPC round-trip -- runs on the caller's thread.
@@ -71,18 +72,32 @@ decltype(auto) entry_root(F&& f) {
     return maya::thread_root(std::forward<F>(f));
 }
 
-// Claim an atomic gate, blocking (atomic wait, holding nothing of ours)
-// while someone else holds it. Every release goes through release() so the
-// waiter is woken.
-void claim(std::atomic<bool>& gate) {
-    bool expected = false;
-    while (!gate.compare_exchange_weak(expected, true, std::memory_order_acquire)) {
-        if (expected) gate.wait(true, std::memory_order_acquire);
-        expected = false;
+// One-call-at-a-time gate: bit 0 is "held", the rest is an epoch a cancel
+// bumps. atomic::wait only returns once the value changes, so a cancel has
+// to change it to wake the waiter.
+using Gate = std::atomic<unsigned>;
+constexpr unsigned kHeld = 1;
+
+// Claim the gate, blocking (atomic wait, holding nothing of ours) while
+// someone else holds it. A stop on `st` ends the wait: returns false.
+bool claim(Gate& gate, std::stop_token st = {}) {
+    std::stop_callback wake(st, [&gate] {
+        gate.fetch_add(2, std::memory_order_acq_rel);   // epoch += 1; bit 0 untouched
+        gate.notify_all();
+    });
+    unsigned v = gate.load(std::memory_order_acquire);
+    for (;;) {
+        if (st.stop_requested()) return false;
+        if (!(v & kHeld)) {
+            if (gate.compare_exchange_weak(v, v | kHeld, std::memory_order_acquire)) return true;
+            continue;
+        }
+        gate.wait(v, std::memory_order_acquire);
+        v = gate.load(std::memory_order_acquire);
     }
 }
-void release(std::atomic<bool>& gate) {
-    gate.store(false, std::memory_order_release);
+void release(Gate& gate) {
+    gate.fetch_and(~kHeld, std::memory_order_release);
     gate.notify_all();
 }
 }  // namespace
@@ -93,7 +108,7 @@ struct Connection::Live {
     ::mcp::ServerCapabilities  caps;     // set during connect(), read-only after
     maya::snapshot<Lists>      lists;
     std::atomic<bool>          poisoned{false};   // a cancelled call left it untrusted
-    std::atomic<bool>          busy{false};       // a call is in flight; calls go one at a time
+    std::atomic<unsigned>      busy{0};           // a call is in flight; calls go one at a time (Gate)
     m::ClientHandlers          handlers;
     // Who to tell about a tool call's progress. One call at a time per
     // connection, so one slot is enough.
@@ -125,9 +140,11 @@ namespace {
 // One call at a time per connection, as the server sees it: progress is
 // routed to the single in-flight call, and some servers can't interleave.
 struct Turn {
-    std::atomic<bool>& busy;
-    explicit Turn(std::atomic<bool>& b) : busy(b) { claim(busy); }
-    ~Turn() { release(busy); }
+    Gate& busy;
+    bool  held;
+    explicit Turn(Gate& b, std::stop_token st = {})
+        : busy(b), held(claim(busy, std::move(st))) {}
+    ~Turn() { if (held) release(busy); }
 };
 
 template <class R>
@@ -472,7 +489,9 @@ m::cap::Result Connection::execute_impl(const maya::unlocked& cap, const m::cap:
     auto got = ensure_live(cap);
     if (!got) return m::cap::Result::error(std::move(got.error()));
     auto l = std::move(*got);
-    Turn turn(l->busy);
+    Turn turn(l->busy, req.stop);
+    // Cancelled while queued behind another call on this server.
+    if (!turn.held) return m::cap::Result::error("cancelled");
 
     l->progress.publish(std::make_shared<const std::function<void(std::string_view)>>(req.progress));
     l->elicit.publish(req.elicit

@@ -91,6 +91,7 @@
 #include "agentty/runtime/view/palette.hpp"   // ui::status_warn — themed banner
 #include "agentty/runtime/app/program.hpp"
 #include "agentty/auth/auth.hpp"
+#include "agentty/auth/cred_crypt.hpp"
 #include "agentty/io/persistence.hpp"
 #include "agentty/io/shared_file.hpp"
 #include "agentty/i18n/startup.hpp"   // i18n::init — before anything renders
@@ -1406,6 +1407,9 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
     if (args.subcommand == "help")    { print_usage();   return 0; }
     if (args.subcommand == "version") { print_version(); return 0; }
     if (args.subcommand == "diagnostics") return cmd_diagnostics();
+    // The passphrase prompt reads /dev/tty. Ask it here, before any worker or
+    // the TUI owns the terminal, so it never races maya's input reader.
+    (void)auth::crypt::passphrase_active();
     if (args.subcommand == "update") {
         const bool check_only = args.cli_run_agent == "--check";
         std::printf("agentty %s — checking for updates…\n",

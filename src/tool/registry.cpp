@@ -194,6 +194,14 @@ std::shared_ptr<const Snapshot> refresh_wire_cache(Connect may = Connect::May) {
         if (cur && !cur->stale && cur->generation == generation) return cur;
 
         std::vector<ToolDef> external;
+        if (generation != 0 && may == Connect::Never && cur && !cur->stale) {
+            // Only the generation moved: a server sent list_changed, and the
+            // rebuild would run tools/list on it. The UI thread doesn't wait
+            // on that; it keeps this snapshot and the next worker access
+            // rebuilds. (An explicit invalidation, a tool toggled off, still
+            // rebuilds here: that reads cached lists, no network.)
+            return cur;
+        }
         if (generation == 0) {
             if (auto init = initial_mcp().current()) external = *init;
         } else {

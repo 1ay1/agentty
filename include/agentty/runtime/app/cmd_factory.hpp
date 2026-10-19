@@ -424,6 +424,10 @@ struct LoopBreak {
 // In cmd_clipboard_diag.cpp.
 [[nodiscard]] Cmd diagnose_clipboard(bool in_ssh);
 
+// Read the OS clipboard (wl-paste / xclip / pngpaste / PowerShell) on a
+// worker and reply with ClipboardRead. In cmd_clipboard_diag.cpp.
+[[nodiscard]] Cmd read_clipboard();
+
 // Check whether a pasted path names an image file and read it, replying with
 // ImagePathSniffed. In cmd_image_paste.cpp.
 [[nodiscard]] Cmd sniff_image_path(std::string text);

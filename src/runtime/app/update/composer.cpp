@@ -262,24 +262,26 @@ void apply_history_entry(ComposerState& cs, const HistoryEntryRef& entry) {
 //   • Empty bracketed paste   (ComposerPaste arm with e.text.empty())
 //
 // All three routes through this one helper so the behaviour is
-// identical no matter which trigger fired.
-Cmd smart_paste_from_clipboard(Model& m) {
-    std::string img_err;
-    if (auto img = read_clipboard_image(&img_err)) {
+// identical no matter which trigger fired. The OS read is a subprocess, so
+// it runs on a worker and comes back as ClipboardRead.
+Cmd smart_paste_from_clipboard(Model&) { return cmd::read_clipboard(); }
+
+Cmd on_clipboard_read(Model& m, ClipboardRead& r) {
+    if (!r.image.empty()) {
         begin_edit(m.ui.composer);
         // Read the real pixel dimensions from the header. A hi-DPI screenshot
         // is a tiny file but can be 3000+ px wide, which Anthropic rejects in
         // a many-image request — the wire drops it, so warn NOW rather than let
         // the turn silently lose the image (or, pre-gate, 400 outright).
-        const auto dims = util::image_dimensions(img->bytes);
+        const auto dims = util::image_dimensions(r.image);
         const bool oversized = dims.known()
                             && dims.longest() > util::kMaxWireImageSide;
         Attachment att;
         att.kind       = Attachment::Kind::Image;
         att.path       = "<clipboard>";
-        att.media_type = std::move(img->media_type);
-        att.byte_count = img->bytes.size();
-        att.body.set_bytes(std::move(img->bytes));
+        att.media_type = std::move(r.media_type);
+        att.byte_count = r.image.size();
+        att.body.set_bytes(std::move(r.image));
         std::size_t idx = m.ui.composer.attachments.size();
         m.ui.composer.attachments.push_back(std::move(att));
         auto placeholder = attachment::make_placeholder(idx);
@@ -300,9 +302,8 @@ Cmd smart_paste_from_clipboard(Model& m) {
     // No image — try text. Re-enter the ComposerPaste arm with the
     // captured text so we get newline normalisation + always-chip
     // treatment for free (same path bracketed paste takes).
-    std::string txt_err;
-    if (auto txt = read_clipboard_text(&txt_err); txt && !txt->empty()) {
-        return composer_update(m, ComposerPaste{std::move(*txt)});
+    if (!r.text.empty()) {
+        return composer_update(m, ComposerPaste{std::move(r.text)});
     }
 
     // Every local path failed to produce an image or text. Last resort,
@@ -334,7 +335,7 @@ Cmd smart_paste_from_clipboard(Model& m) {
     // and nothing is stranded. A terminal that DOES reply delivers the
     // bytes as a PasteEvent → the ComposerPaste arm below (no dedicated
     // result Msg); an empty/"?" reply is dropped by maya's parse_osc and
-    // the toast simply lapses. img_err/txt_err are intentionally not
+    // the toast simply lapses. The local probes' errors are intentionally not
     // surfaced here — OSC 52 is strictly more capable than the local
     // probes that produced them, so their "no clipboard here" wording
     // would be misleading while the terminal query is in flight.
@@ -1080,6 +1081,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             m.ui.composer.expanded = true;
             return Cmd::none();
         },
+        [&](ClipboardRead& e) -> Cmd { return on_clipboard_read(m, e); },
         [&](ClipboardDiagnosed& e) -> Cmd {
             return set_status_toast(m, std::move(e.message),
                                     std::chrono::seconds{8});

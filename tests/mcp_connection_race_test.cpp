@@ -93,12 +93,78 @@ bool drop_during_callback(int round) {
     return true;
 }
 
+// A call queued behind a stuck call on the same server must give up when
+// its stop fires. Before, the queue wait ignored the stop and hung.
+std::atomic<bool> g_release{false};
+std::atomic<bool> g_in_call{false};
+
+void queued_call_cancels() {
+    auto [client_end, server_end] = agentty::rpc::channel_pair();
+    auto d = server_dispatch();
+    auto base = d.on_call;
+    d.on_call = [base](const maya::unlocked& cap, const jsonrpc::Call& c) -> jsonrpc::Maybe<std::string> {
+        if (c.method == m::method::CallTool) {
+            g_in_call = true;
+            while (!g_release) std::this_thread::sleep_for(1ms);
+            m::CallToolResult r;
+            return jsonrpc::reply(c.id, m::to_json(r));
+        }
+        return base(cap, c);
+    };
+    agentty::rpc::Peer server(std::move(server_end), std::move(d), "fake-server");
+    server.start();
+
+    agentty::mcp::ConnectionConfig cfg;
+    cfg.name = "fake";
+    cfg.handshake_timeout = 5s;
+    agentty::mcp::Link link;
+    link.open = [ch = std::move(client_end)]() {
+        return agentty::mcp::Link::Opened{ch, nullptr};
+    };
+    g_release = false;
+    g_in_call = false;
+    auto conn = std::make_unique<agentty::mcp::Connection>(std::move(cfg), std::move(link));
+
+    std::thread first([&] {
+        m::cap::Request req; req.tool = "slow";
+        (void)conn->execute(req);
+    });
+    const auto give_up = std::chrono::steady_clock::now() + 5s;
+    while (!g_in_call && std::chrono::steady_clock::now() < give_up)
+        std::this_thread::sleep_for(1ms);
+    if (!g_in_call) fail("the first call never reached the server");
+
+    std::stop_source stop;
+    std::atomic<bool> second_done{false};
+    m::cap::Result second_r;
+    std::thread second([&] {
+        m::cap::Request req; req.tool = "queued"; req.stop = stop.get_token();
+        second_r = conn->execute(req);
+        second_done = true;
+    });
+    std::this_thread::sleep_for(50ms);   // let it queue behind the first
+    stop.request_stop();
+    const auto by = std::chrono::steady_clock::now() + 2s;
+    while (!second_done && std::chrono::steady_clock::now() < by)
+        std::this_thread::sleep_for(1ms);
+    if (!second_done) fail("a cancelled call stayed queued behind a stuck one");
+    else if (!second_r.is_error) fail("a cancelled queued call reported success");
+
+    g_release = true;
+    first.join();
+    second.join();
+    conn.reset();
+    server.stop(agtest::cap());
+}
+
 }  // namespace
 
 int main() {
     std::printf("--- mcp connection: dropped while its reader runs a callback ---\n");
     for (int i = 0; i < 10; ++i)
         if (!drop_during_callback(i)) break;
+    std::printf("--- mcp connection: a queued call honours its stop ---\n");
+    queued_call_cancels();
     if (g_failures) {
         std::printf("%d failure(s)\n", g_failures);
         return 1;

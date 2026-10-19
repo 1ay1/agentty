@@ -99,6 +99,13 @@ struct ImagePathSniffed {
 struct ClipboardQueryTimeout { std::uint64_t seq = 0; };
 // The worker's answer to "why did that clipboard read go unanswered".
 struct ClipboardDiagnosed { std::string message; };
+// The worker's read of the OS clipboard for Ctrl+V: an image, else text,
+// else nothing (then the reducer asks the terminal).
+struct ClipboardRead {
+    std::string image;        // raw bytes; empty if no image
+    std::string media_type;
+    std::string text;
+};
 // Recall queued messages back into the composer for editing. Bound to
 // Up-arrow when the composer is empty and queued messages exist.
 // Mirrors Claude Code's `Lc_` (binary offset 76303220): drains every
@@ -1366,6 +1373,7 @@ using ComposerMsg = std::variant<
     ComposerHistoryPrev, ComposerHistoryNext,
     ComposerImagePasteFromClipboard,
     ComposerPaste, ImagePathSniffed, ClipboardQueryTimeout, ClipboardDiagnosed,
+    ClipboardRead,
     ComposerRecallQueued,
     ComposerQueuePeekPrev, ComposerQueuePeekNext, ComposerQueuePopLast>;
 

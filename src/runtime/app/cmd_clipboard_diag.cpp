@@ -17,6 +17,8 @@
 
 #include <maya/terminal/tmux.hpp>
 
+#include "agentty/io/clipboard.hpp"
+
 namespace agentty::app::cmd {
 
 namespace {
@@ -134,6 +136,25 @@ Cmd diagnose_clipboard(bool in_ssh) {
             out.send(Msg{msg::ComposerMsg{ClipboardDiagnosed{std::move(message)}}});
         },
         in_ssh);
+}
+
+Cmd read_clipboard() {
+    // Isolated: the clipboard tools are subprocesses that can hang (an X
+    // server that never answers xclip), so never on a shared worker.
+    return Cmd::task_isolated([](maya::Sink<Msg> out, std::stop_token) {
+        ClipboardRead r;
+        try {
+            if (auto img = read_clipboard_image()) {
+                r.image      = std::move(img->bytes);
+                r.media_type = std::move(img->media_type);
+            } else if (auto txt = read_clipboard_text(); txt) {
+                r.text = std::move(*txt);
+            }
+        } catch (...) {
+            r = ClipboardRead{};
+        }
+        out.send(Msg{msg::ComposerMsg{std::move(r)}});
+    });
 }
 
 }  // namespace agentty::app::cmd

@@ -174,7 +174,8 @@ void sweep_stale_scratch_indexes() {
 // thread_loading set; submit refuses while it is).
 std::string prepare_scratch_index() {
     static std::atomic<unsigned> seq{0};
-    if (seq.load() % 16 == 0) sweep_stale_scratch_indexes();
+    const unsigned n = seq.fetch_add(1, std::memory_order_relaxed);
+    if (n % 16 == 0) sweep_stale_scratch_indexes();
     // pid in the name too: two agentty in one repo must not share a file.
 #ifdef _WIN32
     const unsigned long pid = ::GetCurrentProcessId();
@@ -183,7 +184,7 @@ std::string prepare_scratch_index() {
 #endif
     const fs::path idx = fs::path(repo().git_dir)
         / ("agentty-checkpoint-index." + std::to_string(pid)
-           + "." + std::to_string(seq.fetch_add(1)));
+           + "." + std::to_string(n));
     std::error_code ec;
     fs::remove(idx, ec);
     fs::copy_file(fs::path(repo().git_dir) / "index", idx,
