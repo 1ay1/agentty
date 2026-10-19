@@ -64,7 +64,7 @@ int main() {
     put("a.txt", "original-a\n");
     put("sub/b.txt", "original-b\n");
     put("spaced name.txt", "original-spaced\n");
-    check(workspace::create_checkpoint(agtest::cap(), "cp1"), "create cp1");
+    check(workspace::create_checkpoint("cp1"), "create cp1");
     check(workspace::checkpoint_exists("cp1"), "cp1 exists");
     check(!workspace::checkpoint_exists("zzz"), "unknown id does not exist");
 
@@ -74,7 +74,7 @@ int main() {
     put("new.txt", "agent-created\n");
     put("spaced name.txt", "MUTATED-spaced\n");
 
-    auto d = workspace::checkpoint_summary(agtest::cap(), "cp1");
+    auto d = workspace::checkpoint_summary("cp1");
     check(d.valid, "summary computes");
     check(d.files_changed == 4,
           "summary counts 4 changed files (got "
@@ -82,7 +82,7 @@ int main() {
 
     // ── restore: worktree returns to t0 exactly ─────────────────────────
     std::string err;
-    check(workspace::restore_checkpoint(agtest::cap(), "cp1", &err),
+    check(workspace::restore_checkpoint("cp1", &err),
           "restore cp1 (" + err + ")");
     check(slurp("a.txt") == "original-a\n", "edited file restored");
     check(slurp("sub/b.txt") == "original-b\n", "deleted file restored");
@@ -105,17 +105,17 @@ int main() {
     }
 
     // Post-restore the summary must be clean (0 changed files).
-    auto d2 = workspace::checkpoint_summary(agtest::cap(), "cp1");
+    auto d2 = workspace::checkpoint_summary("cp1");
     check(d2.valid && d2.files_changed == 0,
           "post-restore summary is clean (got "
           + std::to_string(d2.files_changed) + ")");
 
     // ── idempotence ─────────────────────────────────────────────────────
-    check(workspace::restore_checkpoint(agtest::cap(), "cp1", &err), "second restore ok");
+    check(workspace::restore_checkpoint("cp1", &err), "second restore ok");
 
     // ── failure paths surface errors, touch nothing ─────────────────────
     put("canary.txt", "untouched\n");
-    check(!workspace::restore_checkpoint(agtest::cap(), "nope", &err),
+    check(!workspace::restore_checkpoint("nope", &err),
           "missing checkpoint fails");
     check(!err.empty(), "failure carries a reason");
     check(slurp("canary.txt") == "untouched\n",
@@ -124,9 +124,9 @@ int main() {
     // ── ignored files survive both create and restore ───────────────────
     put(".gitignore", "ignored.log\n");
     put("ignored.log", "v1\n");
-    check(workspace::create_checkpoint(agtest::cap(), "cp2"), "create cp2");
+    check(workspace::create_checkpoint("cp2"), "create cp2");
     put("ignored.log", "v2\n");
-    check(workspace::restore_checkpoint(agtest::cap(), "cp2", &err), "restore cp2");
+    check(workspace::restore_checkpoint("cp2", &err), "restore cp2");
     check(slurp("ignored.log") == "v2\n",
           "ignored file untouched by restore");
 
