@@ -1108,6 +1108,11 @@ add_test(NAME disk_writes
          COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/disk_writes.py
                  ${CMAKE_SOURCE_DIR})
 set_tests_properties(disk_writes PROPERTIES LABELS static TIMEOUT 60)
+# hidden_locks: atomic waits / call_once / spins are checked by hand.
+add_test(NAME hidden_locks
+         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/lint/hidden_locks.py
+                 ${CMAKE_SOURCE_DIR})
+set_tests_properties(hidden_locks PROPERTIES LABELS static TIMEOUT 60)
 endif()
 
 add_test(NAME io_roots

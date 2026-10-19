@@ -89,6 +89,9 @@ All are static ctest entries (label `static`), no build needed:
   The allowlist names the few files that ARE the implementation of a safe
   type and says why.
 - **elm_purity** — reducers read only the Model and return effects.
+- **hidden_locks** — `atomic::wait`, `std::call_once` and yield-spins are
+  locks jaal can't see; each site is allowlisted with why it never waits
+  holding a jaal lock (tests/lint/hidden_locks.py).
 - maya's own `tests/seam.sh` — only `maya/host/` and `maya/runtime.hpp` may
   depend on jaal, and maya starts no thread of its own.
 
