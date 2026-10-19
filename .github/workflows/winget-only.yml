@@ -1,0 +1,37 @@
+name: winget only
+
+# Submit an EXISTING release's .msi to winget without rebuilding anything.
+# For when the release itself shipped but its winget step failed. Same
+# action and fork as release.yml's publish-winget.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, e.g. v0.9.29'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  winget:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Version from tag
+        id: v
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Sync the winget-pkgs fork with upstream
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: gh api repos/1ay1/winget-pkgs/merge-upstream -X POST -f branch=master || true
+      - uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: agentty.agentty
+          fork-user: 1ay1
+          version: ${{ steps.v.outputs.version }}
+          release-tag: ${{ inputs.tag }}
+          installers-regex: 'agentty-windows-x86_64\.msi$'
+          token: ${{ secrets.WINGET_TOKEN }}
