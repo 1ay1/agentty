@@ -4,6 +4,33 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **^J shows which thread is which.** A framed preview sits under the
+  search box with the thread's title, age, message count, folder, what you
+  first asked and its latest turns. [[←]] [[→]] step through turns,
+  [[Shift+←]] [[Shift+→]] jump to the first or latest. The list groups
+  threads by day, shows short ages, and search matches your first message
+  too. [[Tab]] narrows the list to the folder you started agentty in. Turn
+  the preview off in Settings > Appearance > **Thread preview**.
+- **Turn off auto-compaction.** Settings > General > **Auto-compact**, or
+  `"auto_compact": false` in `settings.json`. Off, only `/compact`
+  summarizes; requests are still trimmed to fit the window.
+
+### Fixed
+- **Windows build.** v0.9.28 shipped without the Windows binary: the
+  sandbox source didn't compile. It builds again, so the `.exe`, the MSI,
+  winget and scoop are back.
+- **Names that were model errors.** A thread auto-titled "(the model
+  returned an empty or unparseable response)" now shows your first
+  message instead.
+- **OpenRouter** gets `x-openrouter-categories: cli-agent` with the
+  attribution headers.
+
+### Changed
+- The repo and its libraries moved to
+  [agentty-org](https://github.com/agentty-org). Old links redirect;
+  self-update, install.sh and the packages use the new path.
+
 ## [0.9.28] - 2026-10-19
 
 ### Added
