@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.29] - 2026-10-19
+
 ### Added
 - **^J shows which thread is which.** A framed preview sits under the
   search box with the thread's title, age, message count, folder, what you
