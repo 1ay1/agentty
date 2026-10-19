@@ -338,6 +338,9 @@ jobs:
   sanitizers:
     name: sanitizers (asan+ubsan, tsan)
     runs-on: ubuntu-latest
+    # Fail fast instead of being killed: a run that hit the runner's limit
+    # saved no ccache, so every run after it started cold and died too.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v5
         with:

@@ -846,8 +846,11 @@ set_tests_properties(logx_rotation_test PROPERTIES TIMEOUT 30
     ENVIRONMENT "AGENTTY_LOG=trace;AGENTTY_HOME=${CMAKE_CURRENT_BINARY_DIR}/logx_rotation_test.home")
 
 # keystore.cpp spawns its helper through run_child, which sits on the
-# sandbox and the tool layer, so this needs the full link.
-agentty_test(keystore_test MODE standalone LABELS sanitizer
+# sandbox and the tool layer, so this needs the full link. Not in the
+# sanitizer lane: it skips without AGENTTY_USE_KEYSTORE and a keyring, which
+# CI has neither of, and its full link made that lane compile all of agentty
+# under ASan (~390 files) until the runner was killed.
+agentty_test(keystore_test MODE standalone
     OBJS $<TARGET_OBJECTS:agentty_acp_obj> LIBS acp::acp)
 if(WIN32 AND TARGET keystore_test)
     target_link_libraries(keystore_test PRIVATE advapi32)   # CredReadW & co
