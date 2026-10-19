@@ -13,8 +13,10 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#if !defined(_WIN32)
 #include <sys/wait.h>
 #include <unistd.h>   // getpid, fork
+#endif
 
 #include "agtest.hpp"
 
@@ -97,6 +99,7 @@ TEST_CASE("accounts registry list/upsert/get/remove/set_active") {
 // took a cross-process section, each read accounts.json, added its slot and
 // renamed its copy over the others' (through ONE shared ".tmp" name, so two
 // could even write the same temp): the losers' accounts silently vanished.
+#if !defined(_WIN32)
 TEST_CASE("accounts registry: concurrent processes never lose an account") {
     auto root = fs::temp_directory_path() /
                 ("agentty_accounts_x_" + std::to_string(::getpid()));
@@ -139,3 +142,4 @@ TEST_CASE("accounts registry: concurrent processes never lose an account") {
 
     fs::remove_all(root);
 }
+#endif
