@@ -52,8 +52,19 @@ namespace agentty::tools::util {
 // from the end, starting on a line and code-point boundary. A tool reports
 // its whole buffer each time; cutting here, on the worker, keeps the UI
 // thread's per-snapshot work bounded however long the output gets.
+// Inline: exec.cpp uses it, and the narrow test targets that build exec.cpp
+// shouldn't have to link utf8.cpp for one small pure function.
 inline constexpr std::size_t kProgressKeep = 16 * 1024;
-[[nodiscard]] std::string_view progress_tail(std::string_view all,
-                                             std::size_t max_bytes = kProgressKeep) noexcept;
+[[nodiscard]] inline std::string_view progress_tail(std::string_view all,
+                                                    std::size_t max_bytes = kProgressKeep) noexcept {
+    if (all.size() <= max_bytes) return all;
+    std::size_t cut = all.size() - max_bytes;
+    // Prefer the start of a line: a half line (or half an escape sequence,
+    // which strip_terminal_controls would mangle) reads as garbage.
+    if (const auto nl = all.find('\n', cut); nl != std::string_view::npos && nl + 1 < all.size())
+        return all.substr(nl + 1);
+    while (cut < all.size() && (static_cast<unsigned char>(all[cut]) & 0xC0) == 0x80) ++cut;
+    return all.substr(cut);
+}
 
 } // namespace agentty::tools::util

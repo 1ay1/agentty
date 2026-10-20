@@ -205,15 +205,4 @@ std::string strip_terminal_controls(std::string_view in) {
     return out;
 }
 
-std::string_view progress_tail(std::string_view all, std::size_t max_bytes) noexcept {
-    if (all.size() <= max_bytes) return all;
-    std::size_t cut = all.size() - max_bytes;
-    // Prefer the start of a line: a half line (or half an escape sequence,
-    // which strip_terminal_controls would mangle) reads as garbage.
-    if (const auto nl = all.find('\n', cut); nl != std::string_view::npos && nl + 1 < all.size())
-        return all.substr(nl + 1);
-    while (cut < all.size() && (static_cast<unsigned char>(all[cut]) & 0xC0) == 0x80) ++cut;
-    return all.substr(cut);
-}
-
 } // namespace agentty::tools::util
