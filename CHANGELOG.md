@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.30] - 2026-10-20
+
 ### Fixed
 - **Shell commands no longer wait out their timeout.** On a Linux host
   where `pidfd_open` is missing (kernel older than 5.3) or blocked
