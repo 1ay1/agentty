@@ -4,6 +4,32 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Shell commands no longer wait out their timeout.** On a Linux host
+  where `pidfd_open` is missing (kernel older than 5.3) or blocked
+  (seccomp, some containers), agentty never saw a command finish. Every
+  call ran until its timeout even though the output came back right away.
+  The exit is now watched another way there, and a command that can't be
+  watched fails at once instead of hanging.
+- **Windows: agentty no longer dies on the first prompt in a git repo.**
+  Checkpoints held a lock across their git calls, which aborted on
+  Windows. Each checkpoint now uses its own scratch index, and stale ones
+  left by a killed process are cleaned up.
+- **Ctrl+V no longer freezes the UI** while `wl-paste` or `xclip` runs.
+- **Toggling a plugin works again** after a reload that failed. Before,
+  every later toggle silently did nothing.
+- An MCP call queued behind another call on the same server now stops
+  when you cancel it.
+- Deleting a thread right after it was saved no longer brings it back.
+
+### Changed
+- **Faster on long threads.** Each tool round used to copy the whole
+  thread on the UI thread to save it, about 20 to 30 ms on a few thousand
+  messages. Saves now copy only what changed.
+- **Smoother with chatty commands.** Live output from a long command, like
+  a build or `find /`, is cut to the visible part before it reaches the
+  UI, instead of the UI scanning all of it ten times a second.
+
 ## [0.9.29] - 2026-10-19
 
 ### Added
