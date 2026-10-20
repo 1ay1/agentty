@@ -207,6 +207,61 @@ added there applies to both or neither. It deliberately excludes the broad
 
 ---
 
+## 3b. Windows was compile-only, then it wasn't
+
+For two releases the Windows arm compiled a policy and refused to apply it.
+The pane said so, `--sandbox on` failed loudly, and nothing claimed a wall
+that wasn't there — which is the right way to be incomplete. Making it apply
+was a different problem from making it compile, and it surfaced three bugs
+that no compile-time report could have found.
+
+**The mechanism.** `spawn_argv` builds the *same* sealed policy the other two
+arms build — `build_policy()` is shared, which is the entire point of claybin's
+design — and hands it to `::clay::windows::compile()`, then `spawn()`. What
+comes back is HANDLEs, not descriptors, and the two `int` handle fields of
+`SpawnResult` are reinterpreted as such: `pidfd` is the child's PROCESS handle
+(the waitable exit, consumed by jaal's `windows_process::adopt`) and
+`kill_tree` is the JOB handle. Supervision stays in `subprocess.cpp`/`exec.cpp`,
+unshared and unchanged. A sandbox backend that also owned the supervise loop
+would be two implementations of the hard part.
+
+**ACL stamping is opt-in at the API level, and agentty opts in.** Without ACE
+stamps the AppContainer can reach nothing the user asked the command to reach,
+which is a sandbox that is useless rather than safe. So the call site sets
+`allow_host_acl_mutation = true`, deliberately and once — and the guarantee
+report still grades filesystem and exec `partial`, because per-object ACLs are
+not a path-prefix model and the report must not round that up.
+
+**The cancel bug.** A graceful stop on an adopted child is `TerminateProcess`
+on the leader only; a grandchild (`ping` inside `cmd`) survives, holds the
+stdout pipe open, and `run_child`'s post-loop drain then waited for it to end
+naturally. Measured: 19.9 s for `ping -n 21`, 0.35 s once cancel/idle/wall
+fired the sandbox's exact tree kill (`TerminateJobObject`) *before* the
+graceful stop. The grace window stays as a fallback. "Ask first, then kill"
+is a POSIX shape; here the order is "kill the tree, then flush".
+
+**The leak.** The job handle came back unowned, so every sandboxed command
+leaked one and anything it left running survived a normal exit. The `kill_tree`
+closure owns it now and `CloseHandle`s it on drop, at which point
+`KILL_ON_JOB_CLOSE` does the cleanup — one piece of ownership that is both the
+kill switch and the fix.
+
+**The read roots.** They are resolved from `SystemRoot`, `ProgramFiles`,
+`ProgramFiles(x86)` and `ProgramData` rather than hardcoded to `C:`, because
+Windows is not always on `C:`. The header floor matters too: claybin sets
+`_WIN32_WINNT=0x0A00` PUBLIC on its target, since MinGW's default pre-Win8
+headers hide the AppContainer APIs and the failure is a missing declaration at
+compile time.
+
+**One gap, stated.** The engine applies; the pane's compile *preview* is still
+Linux/macOS-only, so the Settings → Sandbox footer says `no sandbox backend on
+this platform` on a Windows host whose commands are in fact confined. The
+banner and `sandbox_audit` are correct. The preview is the thing that has not
+been ported, and the fix is the preview, not the copy — a footer that lies in
+the safe direction is still a footer that lies.
+
+---
+
 ## 4. Precedence
 
 ```
@@ -739,7 +794,7 @@ lowering the walls of the session it is running in.
   `mask_scan_depth` / inside a skipped directory.** The sweep is bounded by
   design (§7); the bound is a setting so the trade is the user's. A secret in
   `config.local.yaml` is invisible to a basename list regardless.
-- **Windows.** No backend. `--sandbox on` fails loudly rather than pretending.
+- **Windows, partially.** The backend is live (§3b) and the walls it erects are real, but three of them are genuinely weaker than their Linux counterparts and are reported as such: filesystem and exec walls are `partial` (per-object ACLs, not a path-prefix model), and there is no syscall filter at all. A Windows boundary is a boundary; it is not the Linux one.
 
 ---
 
@@ -1418,6 +1473,15 @@ tense.
 ---
 
 ## 20. claybin is the default now, and bwrap is not deleted
+
+> **Superseded.** This section records why the swap to claybin-default was made
+> with bwrap still present, and it is kept because the reasoning is what the
+> later removal had to answer. bwrap *was* removed afterwards: the argument
+> below turned on the two engines failing on **different** machines, and that
+> turned out not to survive the code it described (both fail for the same
+> underlying reason — see §3a). There is one Linux engine now. Read the rest of
+> this section as the case that was made and then retired, not as current
+> behaviour.
 
 The ask was "prove claybin is as secure as bwrap, then delete bwrap". The first
 half measured out stronger than the claim. The second half would have been a

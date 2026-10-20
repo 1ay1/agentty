@@ -151,7 +151,58 @@ onto process mitigation policies.
 | device isolation | partial | AppContainer object namespace |
 | host kernel isolation | **none** | process backend, by definition |
 
-Two behaviors are specific to this platform and measured, not assumed:
+#### The apply step, in order
+
+`sandbox.cpp` builds the same `Posture` it builds on every other platform and
+hands it to `claybin_backend::spawn_shell`, which on this platform is
+`spawn_argv({"cmd.exe", "/d", "/s", "/c", <command>})`. From there:
+
+1. **`build_policy(posture)`** — the identical sealed policy the Linux and
+   macOS arms compile. The read set, the masks, the network mode and the
+   resource caps are the *same values*, not a Windows restatement.
+2. **`::clay::windows::compile(sealed, probe_host(), opts)`** — one
+   AppContainer profile per capability set (claybin suffixes the profile name
+   with a hash of the capability set, so two different policies never share
+   one), plus the restricted token, the job limits and the mitigation list.
+3. **`opts.allow_host_acl_mutation = true`**, set once, deliberately. ACL
+   stamping mutates the host, so claybin keeps it opt-in at the API level;
+   agentty opts in here because the alternative is an AppContainer that can
+   reach nothing the user asked the command to reach — a sandbox that is
+   useless rather than safe. The guarantee report still grades the filesystem
+   rows `partial`, because per-object ACLs are not a path-prefix model.
+4. **Environment** — `GetEnvironmentStringsW` is read and converted to UTF-8,
+   with any per-call overrides layered on top.
+5. **`spawn()`** returns `Spawned{pid, process, job}`. The two `int` handle
+   fields of `SpawnResult` carry **HANDLEs, not descriptors**: `pidfd` is the
+   child's PROCESS handle (the waitable exit, which jaal's
+   `windows_process::adopt` consumes) and `kill_tree` closes in on the JOB
+   handle. Supervision — poll, drain, idle deadline, grace, reap — stays in
+   `subprocess.cpp`/`exec.cpp`, unchanged and shared with the unsandboxed
+   path.
+6. **No broker.** `supervisor_fd` and `service_broker` keep their sentinel
+   defaults: seccomp user-notify has no Windows equivalent, so `ptrace`/`kill`
+   brokering (§ [Syscall brokering](#syscall-brokering)) does not exist here.
+
+#### Read roots and the header floor
+
+The Windows read set is the POSIX one translated, and it is resolved from the
+environment rather than hardcoded — Windows is not always on `C:`:
+
+| what | from | why |
+|---|---|---|
+| `%SystemRoot%` | env, fallback `C:\Windows` | loader, DLLs, `System32` |
+| `%ProgramFiles%`, `%ProgramFiles(x86)%` | env | installed tools |
+| `%ProgramData%` | env | the `/etc` half: package metadata, host ssh config |
+| `%USERPROFILE%` tool dirs | env | `.cargo\bin`, `\go\bin`, `\.nvm`, `\.pyenv`, `\.rbenv`, `\.bun\bin`, `\.deno\bin`, `\.dotnet` |
+| `%SystemDrive%\` | env, for `HostReadable` only | the convenient scope, named for what it is |
+
+A build note that bit the first Windows release: `claybin` sets
+`_WIN32_WINNT=0x0A00` **PUBLIC** on the target, because MinGW defaults to
+pre-Win8 headers and those hide the AppContainer APIs entirely. Without it
+`spawn.cpp` does not compile at all — the failure is a missing declaration,
+not a runtime refusal.
+
+#### Two behaviors specific to this platform, measured not assumed
 
 - **The privilege-drop probe is process-lifetime cached.** On some Windows
   builds (insider 26300 measured) the restricted-token + AppContainer
@@ -165,13 +216,27 @@ Two behaviors are specific to this platform and measured, not assumed:
   (`ping` inside `cmd`) survives and holds the stdout pipe open, which turned
   a 2-second Esc into a 20-second drain. The exec loop fires
   `TerminateJobObject` (via the sandbox's `kill_tree`) before the graceful
-  stop; the grace remains as fallback.
+  stop; the grace remains as fallback. The closure behind `kill_tree` *owns*
+  the job handle and `CloseHandle`s it when it drops, at which point
+  `KILL_ON_JOB_CLOSE` takes down anything the command left behind — the same
+  ownership that fixed a job-handle leak per sandboxed command, after which
+  whatever a command left running had survived a normal exit.
 
 `/proc` and `/dev` policy roots map to a virtual object-namespace sentinel:
 there is nothing to stamp an ACL on, so grants on them are skipped and the
 AppContainer's default-deny carries the isolation. Run `sandbox_audit` on a
 Windows host for the live wall list; `tests/sandbox_win_posture_test.cpp`
 pins the exec chain end to end.
+
+#### What is not wired yet
+
+The engine is complete; the **pane's compile preview is not**. `preview_sandbox`
+is still implemented only for Linux and macOS, so on Windows the Settings →
+Sandbox footer falls through to `will NOT apply on restart · no sandbox backend
+on this platform` even while commands are in fact confined, and the per-row wall
+annotations are empty. The startup banner and `sandbox_audit` are correct — it
+is the preview that has not been ported. Until it is, trust the banner and the
+audit on a Windows host, not the footer.
 
 Two env-gated traces exist for the stop/spawn paths, because those are the
 ones where a bug shows only under load and a rebuild-only diagnosis costs a
