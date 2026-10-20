@@ -499,6 +499,12 @@ class JaalSession final : public mt::Session {
         auto& reactor = core->reactor.drive(PumpKey{});
         core->s.with(cap, [](Stream& s, std::size_t w) { s.cap = w; }, window);
         auto exit_reg = reactor.watch(proc.exit_handle().get(), pf::interest::read, kExitToken);
+        if (!exit_reg) {
+            // Same rule as run_child: an exit nobody watches is a session
+            // that never ends. Stop it and end the stream now.
+            (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+            core->stop.store(true);
+        }
         std::optional<reactor_t::registration> out_reg, broker_reg;
         if (auto h = proc.stdout_handle())
             if (auto r = reactor.watch(h->get(), pf::interest::read, kOutToken))
@@ -759,7 +765,18 @@ ChildResult run_child(const ChildRun& run) {
     }
     r.started = true;
 
+    // The exit MUST be watched: the loop below only learns of it through
+    // this registration, so without it every run would sit until its
+    // deadline. jaal never returns a process whose exit can't fire, so this
+    // failing means the reactor itself refused; say so and stop the child.
     auto exit_reg = reactor->watch(proc.exit_handle().get(), pf::interest::read, kExitToken);
+    if (!exit_reg) {
+        (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
+        r.started = false;
+        r.start_error = "cannot watch the child's exit: " + std::string{exit_reg.error().what};
+        stamp();
+        return r;
+    }
     std::optional<reactor_t::registration> out_reg, in_reg, broker_reg;
 #if defined(_WIN32)
     ::agentty::util::WorkerGroup feeder{"exec.stdin_feed"};   // destroyed after the reap

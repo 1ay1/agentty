@@ -267,6 +267,38 @@ endif()
 target_compile_definitions(ws_bind_probe PRIVATE
     AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
 
+# exec_exit_probe: does a (sandboxed) command come back when it exits, or only
+# at its timeout? Same sources and rationale as ws_bind_probe; run by hand:
+#     cmake --build build --target exec_exit_probe && ./build/exec_exit_probe <dir> [on|off] [syscall_mode]
+add_executable(exec_exit_probe EXCLUDE_FROM_ALL
+    ${CMAKE_SOURCE_DIR}/tests/exec_exit_probe.cpp
+    ${CMAKE_SOURCE_DIR}/tests/sandbox_config_race_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_claybin.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/sandbox_broker.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/handoff_gate.cpp
+    ${CMAKE_SOURCE_DIR}/src/domain/sandbox_provenance.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/subprocess.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/exec.cpp
+    ${CMAKE_SOURCE_DIR}/src/tool/util/utf8.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/logx.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/dbglog.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/home_dir.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/user_root.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/teardown.cpp)
+target_include_directories(exec_exit_probe PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(exec_exit_probe PRIVATE
+    claybin nlohmann_json::nlohmann_json Threads::Threads maya::app)
+if(TARGET mcp::tools)
+    target_link_libraries(exec_exit_probe PRIVATE mcp::tools)
+endif()
+if(TARGET maya::app)
+    target_include_directories(exec_exit_probe SYSTEM PRIVATE
+        $<TARGET_PROPERTY:maya::app,INTERFACE_INCLUDE_DIRECTORIES>)
+endif()
+target_compile_definitions(exec_exit_probe PRIVATE
+    AGENTTY_MCP=0 AGENTTY_VERSION="${PROJECT_VERSION}")
+
 # sandbox_audit: what does agentty ACTUALLY enforce on THIS host?
 #
 # Not a test -- it asserts nothing. It prints the real posture, capability by
