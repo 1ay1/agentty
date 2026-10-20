@@ -17,6 +17,7 @@
 #include <nlohmann/json_fwd.hpp>
 
 #include "agentty/domain/conversation.hpp"
+#include "agentty/domain/thread_delta.hpp"
 #include "agentty/store/store.hpp"
 #include "agentty/util/io.hpp"
 #include "agentty/util/lock_levels.hpp"
@@ -92,7 +93,20 @@ write_thread_transcript_md(Io, const Thread& t);
 [[nodiscard]] std::expected<Thread, DeserializeError>
 load_thread_file(Io, const std::filesystem::path& p);
 
+// Queue a save of the whole thread. The writer still only rewrites what
+// changed on disk, but the caller pays for copying every message.
 void save_thread(Io, const maya::below<maya::leaf>&, const Thread& t);
+// Pure. Fingerprint every persistable message of `t`, compare with `prev`
+// (the fps of the last save described for this thread) and copy only the
+// messages from the first difference on. An empty `prev` sends everything.
+[[nodiscard]] ThreadDelta describe_save(const Thread& t, const std::vector<std::uint64_t>& prev);
+// Pure. Every field of `t` but its messages, plus the picker summary.
+[[nodiscard]] Thread thread_header(const Thread& t);
+// Queue a described save. Returns false (nothing queued) when the delta has
+// no base: an earlier save of this thread failed or was never seen. The
+// caller then sends the whole thread (describe_save with an empty `prev`).
+// A delta with from == 0 is a whole thread and is always queued.
+[[nodiscard]] bool save_thread_delta(Io, const maya::below<maya::leaf>&, ThreadDelta d);
 // Block until every queued background save has hit disk. Call at
 // shutdown after the last reducer step (Quit handler issues a final
 // save_thread) so we don't lose the most-recent transcript on exit. It
@@ -125,6 +139,9 @@ ExpireStats expire_threads(Io, const lock_levels::below_thread_log&, int keep_da
 // changed. Exposed ONLY so the save bench can price that pass separately
 // from the rest of a save; nothing in the app should call it.
 [[nodiscard]] std::uint64_t debug_message_fingerprint(const Message& m);
+// Test hook: make the writer forget what it knows about `id`, as a failed
+// save does. Nothing in the app should call it.
+void debug_forget_saved(const maya::below<maya::leaf>&, const ThreadId& id);
 
 [[nodiscard]] store::Settings load_settings(Io);
 // Write settings.json, then tell the settings cache (on_settings_written) so

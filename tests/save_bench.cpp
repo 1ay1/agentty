@@ -91,6 +91,33 @@ int main(int argc, char** argv) {
         std::printf("round %2d  %-4s  enqueue %8.2f ms   total %9.2f ms\n",
                     r, r == 0 ? "full" : "tail", ms_local(b - a), ms_local(c - a));
     }
+    // What the loop thread pays per save now: describe the delta against the
+    // last save (reducer), queue it (host). Next to it, the whole-Thread copy
+    // a save used to cost before anything was written.
+    {
+        std::vector<std::uint64_t> saved;
+        auto first = persistence::describe_save(t, saved);
+        saved = first.fps;
+        (void)persistence::save_thread_delta(::agentty::IoAccess::grant(), agtest::cap(), std::move(first));
+        persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+        for (int r = 0; r < rounds; ++r) {
+            Message m;
+            m.role = Role::Assistant;
+            m.text = "delta round " + std::to_string(r);
+            t.messages.push_back(std::move(m));
+            const auto a = clk::now();
+            auto d = persistence::describe_save(t, saved);
+            saved = d.fps;
+            const bool ok = persistence::save_thread_delta(::agentty::IoAccess::grant(), agtest::cap(), std::move(d));
+            const auto b = clk::now();
+            Thread copy = t;   // what SaveThread{m.d.current} used to do
+            const auto c = clk::now();
+            persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+            std::printf("delta %2d  loop-thread %6.2f ms (queued=%d)   old whole copy %7.2f ms\n",
+                        r, ms(b - a), int(ok), ms(c - b));
+            (void)copy;
+        }
+    }
     persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
     return 0;
 }

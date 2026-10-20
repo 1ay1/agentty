@@ -21,6 +21,7 @@
 #include "agentty/util/background.hpp"   // util::WorkerGroup, run_isolated_detached
 
 #include <mcp/tools/util/utf8.hpp>
+#include "agentty/tool/util/utf8.hpp"   // progress_tail
 
 #include "agentty/tool/util/sandbox.hpp"
 #include "agentty/tool/util/sandbox_claybin.hpp"
@@ -679,10 +680,12 @@ class JaalExec final : public mt::Exec {
             return er;
         }
         // The tool call's live output and cancel: where its output goes and
-        // whether its user hit Esc.
+        // whether its user hit Esc. Only the tail a card shows is copied and
+        // checked, so a long command doesn't re-scan megabytes every tick.
         if (call.progress)
             run.on_progress = [&call](std::string_view raw) {
-                call.progress(::mcp::tools::util::to_valid_utf8(std::string{raw}));
+                call.progress(::mcp::tools::util::to_valid_utf8(
+                    std::string{progress_tail(raw)}));
             };
         if (call.stop.stop_possible())
             run.stop_requested = [st = call.stop] { return st.stop_requested(); };

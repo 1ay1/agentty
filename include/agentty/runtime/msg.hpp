@@ -621,6 +621,9 @@ struct ThreadSummariesFilled { std::vector<Thread> threads; };
 // A short title the model wrote for a thread after its first reply.
 // Empty `title` means it failed; the thread keeps the title it has.
 struct ThreadTitleGenerated { ThreadId id; std::string title; };
+// The writer refused a thread save: it was a delta on a base that never
+// reached disk. The reducer forgets that base so the next save is whole.
+struct SaveRefused { ThreadId id; };
 // Result of a background single-thread load kicked off when the user
 // hits Enter on a row in the thread picker. The synchronous load was
 // ~30ms of JSON parse + ~3ms of rehydrate on real threads (786+ msgs)
@@ -1426,7 +1429,8 @@ using ThreadListMsg = std::variant<
     ThreadListRenameDelete, ThreadListRenameCursor,
     ThreadListRenamePaste, ThreadListRenameSubmit, ThreadListRenameCancel,
     RenameCurrentThread,
-    ThreadCycle, NewThread, ThreadsLoaded, ThreadSummariesFilled, ThreadLoaded, ThreadTitleGenerated>;
+    ThreadCycle, NewThread, ThreadsLoaded, ThreadSummariesFilled, ThreadLoaded, ThreadTitleGenerated,
+    SaveRefused>;
 
 using PaletteMsg = std::variant<
     OpenPalette, ClosePalette, PaletteInput, PanelFilterPaste,

@@ -33,6 +33,7 @@
 
 #include "agentty/domain/catalog.hpp"        // ModelInfo
 #include "agentty/domain/conversation.hpp"   // Thread
+#include "agentty/domain/thread_delta.hpp"   // ThreadDelta
 #include "agentty/domain/id.hpp"             // ThreadId
 #include "agentty/domain/smart_mode.hpp"     // smart::RoleConfig
 #include "agentty/provider/selection.hpp"    // provider::Selection
@@ -42,13 +43,11 @@
 
 namespace agentty {
 
-/// Persist a thread (create or overwrite).
-///
-/// Carries the Thread BY VALUE, and that is deliberate: the effect is run
-/// after the reducer returns, on a worker, so borrowing from the Model
-/// would be a dangling reference the moment the next message lands. The
-/// copy is what makes "describe now, run later" safe.
-struct SaveThread { Thread thread; };
+/// Persist a thread: the part that may have changed since the last save
+/// this program described (persistence::describe_save). Owned, so the host
+/// can run it after the Model has moved on. A refused delta comes back as
+/// SaveRefused and the next save is sent whole.
+struct SaveThread { ThreadDelta delta; };
 using save_thread = maya::pure_fx<SaveThread, "save_thread">;
 
 /// Remove a thread from the store.

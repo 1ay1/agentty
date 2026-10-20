@@ -316,7 +316,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
                               return r.up_to_index > cut;
                           });
             m.d.current.updated_at = m.wall_now();
-            Cmd save_restored = Cmd(SaveThread{m.d.current});
+            Cmd save_restored = save_current(m);
 
             reset_composer_draft(m.ui.composer);
             m.ui.composer.text   = std::move(refill);
@@ -876,7 +876,7 @@ Cmd meta_update(Model& m, msg::MetaMsg mm) {
             if (auto* a = active_ctx(m.s.phase); a && a->cancel) a->cancel->cancel();
 
             Cmd save = m.d.current.messages.empty()
-                         ? Cmd::none() : Cmd(SaveThread{m.d.current});
+                         ? Cmd::none() : save_current_whole(m);
             // Always file the model the user is CURRENTLY on under the active
             // provider before exit, so a relaunch (or a later switch back to
             // this backend) restores exactly this model instead of the

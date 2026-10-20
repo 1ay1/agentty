@@ -1538,9 +1538,11 @@ Cmd run_tool(ToolCallId id, ToolName tool_name, nlohmann::json args,
                 return o;
             };
             // Live output, so a subprocess inside the tool streams to the
-            // card as bytes arrive.
+            // card as bytes arrive. Tools report their WHOLE buffer each time;
+            // only the tail the card shows crosses to the UI thread.
             ctx.progress = [sink, id, exec_seq](std::string_view snapshot) {
-                sink.send(Msg{ToolExecProgress{id, std::string{snapshot}, exec_seq}});
+                sink.send(Msg{ToolExecProgress{
+                    id, std::string{tools::util::progress_tail(snapshot)}, exec_seq}});
             };
             // Cancelled on EITHER the turn's cancel token (user pressed
             // escape) or jaal's stop_token (the app is shutting down). The
@@ -2324,7 +2326,7 @@ Cmd kick_pending_tools(Model& m) {
                     note.role = Role::Assistant;
                     note.text = std::move(brk->reason);
                     m.d.current.messages.push_back(std::move(note));
-                    cmds.push_back(Cmd(SaveThread{m.d.current}));
+                    cmds.push_back(detail::save_current(m));
                     return Cmd::batch(std::move(cmds));
                 }
             }

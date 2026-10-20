@@ -156,6 +156,7 @@ constexpr auto kPeekSettle = std::chrono::milliseconds{90};
         m.s.thread_loading = false;
     }
     m.d.current = Thread{};
+    m.d.saved_fps.clear();
     m.d.current.id = persistence::new_id();
     m.d.current.auto_title_ok = true;
     m.d.current.workspace = m.env.cwd;
@@ -663,7 +664,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // extends. finalize_turn saves per turn, but a title edit or
             // an un-persisted tail shouldn't be lost to a quick cycle.
             Cmd save = m.d.current.messages.empty()
-                         ? Cmd::none() : Cmd(SaveThread{m.d.current});
+                         ? Cmd::none() : save_current_whole(m);
             m.s.thread_loading = true;
             m.s.loading_thread = meta.id;
             // "thread k/N · title" — the positional readout that makes
@@ -687,7 +688,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             // thread, so it must NOT save). The shared reset below owns
             // everything after this policy decision.
             Cmd save = m.d.current.messages.empty()
-                         ? Cmd::none() : Cmd(SaveThread{m.d.current});
+                         ? Cmd::none() : save_current_whole(m);
             auto reset = reset_to_fresh_thread(m);
             return Cmd::batch(std::move(save), std::move(reset));
         },
@@ -707,7 +708,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                 if (m.d.current.id != e.id) return Cmd::none();
                 // Tried once; never again. The title stays what it was.
                 m.d.current.auto_titled = true;
-                return Cmd(SaveThread{m.d.current});
+                return save_current(m);
             }
 
             // Only the open thread. If you switched away while the title was
@@ -725,7 +726,14 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
             m.d.current.auto_titled = true;
             // Say so: the name changed under you, and /rename changes it.
             auto toast = set_status_toast(m, "named this chat \"" + title + "\" \xc2\xb7 /rename to change");
-            return Cmd::batch(Cmd(SaveThread{m.d.current}), std::move(toast));
+            return Cmd::batch(save_current(m), std::move(toast));
+        },
+        [&](SaveRefused& e) -> Cmd {
+            // Only the open thread has a base to drop. Send it whole now, so
+            // what the refused delta carried isn't lost until the next turn.
+            if (e.id != m.d.current.id) return Cmd::none();
+            m.d.saved_fps.clear();
+            return save_current(m);
         },
         [&](ThreadsLoaded& e) -> Cmd {
             // A reload can be read from disk before a rename made a moment
@@ -809,6 +817,7 @@ Cmd thread_list_update(Model& m, msg::ThreadListMsg tm) {
                         tag, dt);
             };
             m.d.current = std::move(e.thread);
+            m.d.saved_fps.clear();
             // A rename is stored by the writer, which may still be busy with
             // an earlier save, so a load right after one can read the old
             // title from disk. Keep whichever title was renamed more recently.

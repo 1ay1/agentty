@@ -2102,7 +2102,7 @@ struct LogState {
 
 // A queued save. `from` is the index (into the persistable messages) of
 // the first one that may differ from the log; `tail` is those messages.
-// `full` carries the whole thread when the tail path can't be used.
+// `full` (from == 0) rewrites the whole log from `meta` + `tail`.
 // `retitle` marks a rename: only meta.id and meta.title are set, and
 // write_job rewrites the stored title and nothing else.
 struct SaveJob {
@@ -2110,7 +2110,7 @@ struct SaveJob {
     std::size_t                from = 0;
     std::vector<Message>       tail;
     std::vector<std::uint64_t> fps;          // fingerprints for ALL messages
-    std::optional<Thread>      full;
+    bool                       full = false;
     bool                       retitle = false;
 };
 
@@ -2200,11 +2200,15 @@ persistence::LaneOf<lock_levels::thread_log>& thread_log_lane() {
 
 // One drain job, inside its thread's section: the tail path, and on failure
 // a full rewrite from the verified head; or a full save.
-static bool write_job(const maya::held<lock_levels::thread_log>& cap, const SaveJob& next,
+static bool write_job(const maya::held<lock_levels::thread_log>& cap, SaveJob& next,
                       std::size_t total) {
     if (next.retitle) return retitle_sync(cap, next.meta.id, next.meta.title, next.meta.renamed_at,
                                           next.meta.name_is_auto);
-    if (next.full) return save_thread_sync(cap, *next.full);
+    if (next.full) {
+        Thread t = next.meta;
+        t.messages = std::move(next.tail);
+        return save_thread_sync(cap, t);
+    }
     if (save_tail_sync(next, total)) return true;
     // The tail write failed partway. The head before `from` is the confirmed,
     // verified state (the section keeps every other writer out), so rebuild
@@ -2258,6 +2262,9 @@ struct WriterState {
     // tail-only job; the worker writes it after a verified save. Dropped on
     // delete, and on any failure.
     std::unordered_map<std::string, LogState> known;
+    // Fingerprints of the newest save ACCEPTED per thread (queued or done).
+    // A delta must extend it. Dropped with `known`, so the next one is full.
+    std::unordered_map<std::string, std::vector<std::uint64_t>> latest;
     // Last (title, updated_at) written to index.json per thread.
     std::unordered_map<std::string, std::string> indexed;
     // A thread deleted while its save was mid-write. delete_thread() drops a
@@ -2283,7 +2290,7 @@ void remove_thread_files(const lock_levels::below_thread_log& cap, const ThreadI
 // The header a save job carries: every field but the messages, plus the
 // picker summary worked out from them. Field by field, because
 // `meta = t; meta.messages.clear()` would deep-copy the transcript first.
-[[nodiscard]] static Thread header_of(const Thread& t) {
+Thread thread_header(const Thread& t) {
     Thread h;
     h.id                = t.id;
     h.title             = t.title;
@@ -2303,6 +2310,22 @@ void remove_thread_files(const lock_levels::below_thread_log& cap, const ThreadI
     return h;
 }
 
+ThreadDelta describe_save(const Thread& t, const std::vector<std::uint64_t>& prev) {
+    ThreadDelta d;
+    d.header = thread_header(t);
+    d.fps.reserve(t.messages.size());
+    for (const auto& m : t.messages)
+        if (!m.smart_routing) d.fps.push_back(message_fingerprint(m));
+    const std::size_t n = std::min(prev.size(), d.fps.size());
+    while (d.from < n && prev[d.from] == d.fps[d.from]) ++d.from;
+    std::size_t i = 0;
+    for (const auto& m : t.messages) {
+        if (m.smart_routing) continue;
+        if (i++ >= d.from) d.tail.push_back(m);
+    }
+    return d;
+}
+
 struct AsyncWriter {
     // Reached in the constructor, so the state static is built first and
     // destroyed after this one.
@@ -2315,87 +2338,71 @@ struct AsyncWriter {
     // to empty, so a normal flush never restarts the thread.
     maya::published<util::WorkerGroup> worker;
 
-    // Build the job on the CALLER's thread, copying only what changed.
-    // Fingerprinting is one pass of hashing with no allocation or I/O —
-    // far cheaper than the full Thread copy this replaces, and the writer
-    // no longer re-encodes or re-reads anything before `from`.
-    void enqueue(const maya::below<maya::leaf>& cap, const Thread& t) {
-        std::vector<std::uint64_t> fps;
-        fps.reserve(t.messages.size());
-        for (const auto& m : t.messages)
-            if (!m.smart_routing) fps.push_back(message_fingerprint(m));
-
-        // Diff against what is CONFIRMED on disk. If a save for this thread
-        // is queued or mid-write, its outcome isn't known yet: a tail built
-        // on top of it would be wrong if it fails. That case is rare (saves
-        // are one per round, a tail write takes milliseconds), so just send
-        // the whole thread then — exactly the old behaviour.
-        //
-        // The base is copied out and the job built unlocked; the decision
-        // is re-checked when the job lands, below.
-        const std::string key = t.id.value;
-        auto base = st.read(cap, [](const WriterState& s, std::string k)
-                                -> std::optional<std::vector<std::uint64_t>> {
-            if (s.pending.contains(k) || s.in_flight == k) return std::nullopt;
-            auto it = s.known.find(k);
-            if (it == s.known.end()) return std::nullopt;
-            return it->second.fps;
-        }, key);
-
-        SaveJob job;
-        job.meta = header_of(t);
-        job.fps = fps;
-
-        if (!base) {
-            job.full = t;
-        } else {
-            const std::size_t n = std::min(base->size(), fps.size());
-            std::size_t from = 0;
-            while (from < n && (*base)[from] == fps[from]) ++from;
-            job.from = from;
-            std::size_t i = 0;
-            for (const auto& m : t.messages) {
-                if (m.smart_routing) continue;
-                if (i++ >= from) job.tail.push_back(m);
+    // Queue a described save. A delta is only valid on top of the newest
+    // save accepted for this thread (`latest`): its first `from` fps must
+    // match. A queued job is merged with it rather than replaced, since the
+    // delta alone doesn't carry what the queued one changed. Returns false
+    // (nothing queued) when a delta has no base to go on.
+    [[nodiscard]] bool enqueue(const maya::below<maya::leaf>& cap, ThreadDelta d, bool full) {
+        full = full || d.from == 0;
+        const std::string key = d.header.id.value;
+        const auto r = st.with(cap, [](WriterState& s, std::string k, ThreadDelta d, bool full)
+                                        -> std::optional<bool> {
+            if (!full) {
+                const auto it = s.latest.find(k);
+                if (it == s.latest.end() || it->second.size() < d.from
+                    || !std::equal(d.fps.begin(), d.fps.begin() + static_cast<std::ptrdiff_t>(d.from),
+                                   it->second.begin()))
+                    return std::nullopt;
             }
-        }
-
-        // A tail job is only valid against the base it was diffed on. If
-        // that moved while we built it (a save landed, or one got queued),
-        // send the whole thread instead. Rare: saves are once per round.
-        const auto start = st.with(cap, [](WriterState& s, std::string k, SaveJob j,
-                                      std::optional<std::vector<std::uint64_t>> b) {
-            if (!j.full) {
-                auto it = s.known.find(k);
-                const bool still = !s.pending.contains(k) && s.in_flight != k
-                                && it != s.known.end() && b && it->second.fps == *b;
-                if (!still) return std::optional<bool>{};   // rebuild as full
-            }
-            s.pending.insert_or_assign(k, std::move(j));
-            if (s.started) return std::optional<bool>{false};
-            s.started = true;
-            return std::optional<bool>{true};
-        }, key, std::move(job), std::move(base));
-        if (!start) {
-            // Raced a landing save: redo as a full job.
-            SaveJob full;
-            full.meta = header_of(t);
-            full.fps  = std::move(fps);
-            full.full = t;
-            const bool s2 = st.with(cap, [](WriterState& s, std::string k, SaveJob j) {
+            s.latest[k] = d.fps;
+            SaveJob j;
+            j.meta = std::move(d.header);
+            j.fps  = std::move(d.fps);
+            j.full = full;
+            j.from = full ? 0 : d.from;
+            j.tail = std::move(d.tail);
+            if (auto p = s.pending.find(k); p != s.pending.end() && !p->second.retitle) {
+                // Keep what the queued job changed below our `from`.
+                SaveJob& q = p->second;
+                if (!full && q.from < j.from) {
+                    q.tail.resize(j.from - q.from);
+                    for (auto& m : j.tail) q.tail.push_back(std::move(m));
+                    j.tail = std::move(q.tail);
+                    j.from = q.from;
+                    j.full = q.full;
+                } else if (!full) {
+                    j.full = q.full;   // q.full means q.from == 0 == j.from
+                }
+                q = std::move(j);
+            } else {
+                // A pending retitle is folded in: the header carries the title
+                // the reducer has now.
                 s.pending.insert_or_assign(k, std::move(j));
-                if (s.started) return false;
-                s.started = true;
-                return true;
-            }, key, std::move(full));
-            if (s2) start_worker();
-            return;
-        }
-        if (*start) start_worker();
+            }
+            if (s.started) return false;
+            s.started = true;
+            return true;
+        }, key, std::move(d), full);
+        if (!r) return false;
+        if (*r) start_worker();
+        return true;
+    }
+
+    // Thread-at-once save (tests, ACP, subagents): a delta on whatever was
+    // accepted last, or the whole thread when there is no base.
+    void enqueue(const maya::below<maya::leaf>& cap, const Thread& t) {
+        auto prev = st.read(cap, [](const WriterState& s, std::string k) {
+            const auto it = s.latest.find(k);
+            return it == s.latest.end() ? std::vector<std::uint64_t>{} : it->second;
+        }, t.id.value);
+        const bool full = prev.empty();
+        if (enqueue(cap, describe_save(t, prev), full)) return;
+        (void)enqueue(cap, describe_save(t, {}), true);
     }
 
     void forget(const maya::below<maya::leaf>& cap, const std::string& key) {
-        st.with(cap, [](WriterState& s, std::string k) { s.known.erase(k); }, key);
+        st.with(cap, [](WriterState& s, std::string k) { s.known.erase(k); s.latest.erase(k); }, key);
     }
 
     // The thread is being deleted: drop its queued save, and have the worker
@@ -2403,6 +2410,7 @@ struct AsyncWriter {
     void cancel_saves(const maya::below<maya::leaf>& cap, const std::string& key) {
         st.with(cap, [](WriterState& s, std::string k) {
             s.known.erase(k);
+            s.latest.erase(k);
             s.indexed.erase(k);
             s.pending.erase(k);
             if (s.in_flight == k) s.undo = std::move(k);
@@ -2421,11 +2429,6 @@ struct AsyncWriter {
                 it->second.meta.title = t;
                 it->second.meta.renamed_at = at;
                 it->second.meta.name_is_auto = na;
-                if (it->second.full) {
-                    it->second.full->title        = std::move(t);
-                    it->second.full->renamed_at   = at;
-                    it->second.full->name_is_auto = na;
-                }
                 return false;
             }
             SaveJob j;
@@ -2495,7 +2498,7 @@ private:
         worker.publish(std::move(g));
     }
 
-    struct Next { std::string key; SaveJob job; };
+    struct Next { std::string key; SaveJob job; bool dropped = false; };
 
     static void run(const maya::unlocked& cap);
 
@@ -2548,10 +2551,31 @@ void AsyncWriter::run(const maya::unlocked& cap) {
                 auto it = s.pending.begin();
                 Next n{it->first, std::move(it->second)};
                 s.pending.erase(it);
+                // A tail is cut on top of what the last save left on disk.
+                // If that save failed, the head isn't what the tail assumes:
+                // drop it, and the next save is refused and sent whole.
+                if (!n.job.full && !n.job.retitle) {
+                    const auto k = s.known.find(n.key);
+                    const auto from = static_cast<std::ptrdiff_t>(n.job.from);
+                    if (k == s.known.end() || k->second.fps.size() < n.job.from
+                        || !std::equal(n.job.fps.begin(), n.job.fps.begin() + from,
+                                       k->second.fps.begin())) {
+                        s.latest.erase(n.key);
+                        s.known.erase(n.key);
+                        n.dropped = true;
+                        return n;
+                    }
+                }
                 s.in_flight = n.key;
                 return n;
             });
         if (!taken) return;
+        if (taken->dropped) {
+            AGT_LOG(Persist, Warn, "thread.save",
+                    "id={} tail dropped: its base never reached disk; next save will be full",
+                    taken->key);
+            continue;
+        }
         auto& key  = taken->key;
         auto& next = taken->job;
 
@@ -2560,11 +2584,11 @@ void AsyncWriter::run(const maya::unlocked& cap) {
         // the same thread waits its turn instead of interleaving appends.
         bool ok = false;
         // What the bookkeeping below needs, taken before the job moves in.
-        const bool        was_full = next.full.has_value();
+        const bool        was_full = next.full;
         const bool        retitle  = next.retitle;
         const Thread      meta     = next.meta;
         const std::optional<std::string> full_idx =
-            was_full ? std::optional<std::string>{index_key(*next.full)}
+            was_full ? std::optional<std::string>{index_key(next.meta)}
                      : std::nullopt;
         std::vector<std::uint64_t> fps = std::move(next.fps);
         try {
@@ -2601,10 +2625,11 @@ void AsyncWriter::run(const maya::unlocked& cap) {
         if (ok && full_idx) idx = full_idx;
         const bool undo = st.with(cap, [](WriterState& s, std::string k, bool good, bool rt,
                    std::vector<std::uint64_t> fps, std::optional<std::string> ik) {
-            s.in_flight.clear();
             // Deleted while this save was writing: the files it just wrote
-            // must not outlive the delete.
+            // must not outlive the delete. Stay in flight until they're gone,
+            // or flush() could return with them still on disk.
             if (!s.undo.empty() && s.undo == k) { s.undo.clear(); return true; }
+            s.in_flight.clear();
             if (rt) {
                 // A rename leaves the messages alone, so what the writer
                 // knows about the log still holds; it carries no `fps` to
@@ -2612,7 +2637,7 @@ void AsyncWriter::run(const maya::unlocked& cap) {
                 s.indexed.erase(k);
                 return false;
             }
-            if (!good) s.known.erase(k);
+            if (!good) { s.known.erase(k); s.latest.erase(k); }
             else       s.known[k].fps = std::move(fps);
             if (ik) s.indexed[k] = std::move(*ik);
             return false;
@@ -2621,6 +2646,7 @@ void AsyncWriter::run(const maya::unlocked& cap) {
             AGT_LOG(Persist, Info, "thread.save",
                     "id={} deleted mid-save; removing what the save wrote", key);
             remove_thread_files(cap, ThreadId{key});
+            st.with(cap, [](WriterState& s) { s.in_flight.clear(); });
         }
     }
 }
@@ -2628,6 +2654,11 @@ void AsyncWriter::run(const maya::unlocked& cap) {
 void save_thread(Io, const maya::below<maya::leaf>& cap, const Thread& t) {
     if (t.id.empty() || t.messages.empty()) return;
     async_writer().enqueue(cap, t);
+}
+
+bool save_thread_delta(Io, const maya::below<maya::leaf>& cap, ThreadDelta d) {
+    if (d.header.id.empty() || d.fps.empty()) return true;
+    return async_writer().enqueue(cap, std::move(d), false);
 }
 
 void rename_thread(Io, const maya::below<maya::leaf>& cap, const ThreadId& id, std::string title,
@@ -2698,6 +2729,10 @@ std::optional<Thread> load_subagent_thread(Io io, const ThreadId& id) {
 
 std::uint64_t debug_message_fingerprint(const Message& m) {
     return message_fingerprint(m);
+}
+
+void debug_forget_saved(const maya::below<maya::leaf>& cap, const ThreadId& id) {
+    async_writer().forget(cap, id.value);
 }
 
 std::optional<Thread> load_thread_by_id(Io io, const ThreadId& id) {

@@ -446,7 +446,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
         // The compacted transcript is the thing worth persisting. Held as a
         // value and batched into each of this block's three returns, so the
         // save happens whichever way we leave.
-        Cmd save = Cmd(SaveThread{m.d.current});
+        Cmd save = save_current(m);
         // Hand the freshly-freed arenas back to the OS. Less to free
         // now that we don't drop tool outputs — the only freed bytes
         // are the compaction stream's input/output buffers — but
@@ -946,7 +946,7 @@ Cmd finalize_turn(Model& m, StopReason stop_reason) {
     // The turn is finished, so persist it. Folded into `kp` rather than run
     // here: every return below already carries kp, so this reaches the host
     // down all five paths without threading a second local through them.
-    auto kp = Cmd::batch(Cmd(SaveThread{m.d.current}),
+    auto kp = Cmd::batch(save_current(m),
                          cmd::kick_pending_tools(m),
                          maybe_auto_title(m));
     // Set by the idle-settle block below when the reply carries runnable

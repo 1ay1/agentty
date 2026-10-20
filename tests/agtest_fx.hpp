@@ -104,8 +104,20 @@ inline void run(const agentty::Cmd& c, Store& s) {
         using U = std::remove_cvref_t<decltype(e)>;
         if constexpr (std::same_as<U, agentty::SaveSettings>)
             s.settings = e.settings;
-        else if constexpr (std::same_as<U, agentty::SaveThread>)
-            s.saved_threads.push_back(e.thread);
+        else if constexpr (std::same_as<U, agentty::SaveThread>) {
+            // Apply the delta onto the last save of the same thread, so a test
+            // still sees the whole thread that reached the store.
+            agentty::Thread t = e.delta.header;
+            for (auto it = s.saved_threads.rbegin(); it != s.saved_threads.rend(); ++it)
+                if (it->id == t.id) {
+                    const auto keep = std::min(e.delta.from, it->messages.size());
+                    t.messages.assign(it->messages.begin(),
+                                      it->messages.begin() + static_cast<std::ptrdiff_t>(keep));
+                    break;
+                }
+            for (const auto& m : e.delta.tail) t.messages.push_back(m);
+            s.saved_threads.push_back(std::move(t));
+        }
         else if constexpr (std::same_as<U, agentty::DeleteThread>)
             s.deleted_threads.push_back(e.id);
         else if constexpr (std::same_as<U, agentty::RenameThread>)

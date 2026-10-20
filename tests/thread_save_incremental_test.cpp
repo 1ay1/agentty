@@ -134,6 +134,71 @@ TEST_CASE("incremental save: editing an old message rewrites from there") {
     persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
 }
 
+// The reducer's path: it remembers the fps of its last save and sends only
+// what changed since, without waiting for the writer in between.
+namespace {
+bool send(const Thread& t, std::vector<std::uint64_t>& saved) {
+    auto d = persistence::describe_save(t, saved);
+    saved = d.fps;
+    return persistence::save_thread_delta(::agentty::IoAccess::grant(), agtest::cap(), std::move(d));
+}
+}
+
+TEST_CASE("delta save: back-to-back deltas merge in the queue and land whole") {
+    Thread t = make_thread("delta-merge", 5);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+    std::vector<std::uint64_t> saved;
+    REQUIRE(send(t, saved));                  // whole: nothing saved yet
+    // Several rounds without a flush: each delta only carries its own tail,
+    // and some land on a job still queued. The merge must keep them all.
+    for (int i = 5; i < 12; ++i) {
+        t.messages.push_back(make_msg(i));
+        if (i % 3 == 0) t.messages[2].text = "edit " + std::to_string(i);
+        REQUIRE(send(t, saved));
+    }
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+    check_same(t, load(t));
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+}
+
+TEST_CASE("delta save: a delta on an unknown base is refused, a whole save is not") {
+    Thread t = make_thread("delta-refused", 4);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+    std::vector<std::uint64_t> saved;
+    REQUIRE(send(t, saved));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+
+    // The writer forgets a base when a save of it fails (or a delete drops
+    // it). A delta built on that base must be refused, not written on top of
+    // a log that doesn't hold it. Simulate the failure with forget().
+    persistence::debug_forget_saved(agtest::cap(), t.id);
+    t.messages.push_back(make_msg(4));
+    CHECK_FALSE(send(t, saved));
+
+    // What the reducer does on SaveRefused: drop its base, send it whole.
+    std::vector<std::uint64_t> none;
+    REQUIRE(send(t, none));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+    check_same(t, load(t));
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+}
+
+TEST_CASE("delta save: a delta queued after a delete is refused, not written") {
+    Thread t = make_thread("delta-deleted", 3);
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+    std::vector<std::uint64_t> saved;
+    REQUIRE(send(t, saved));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+    persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);
+
+    // The delete dropped the base, so a tail on it has nothing under it.
+    t.messages.push_back(make_msg(3));
+    CHECK_FALSE(send(t, saved));
+    persistence::flush_pending_saves(::agentty::IoAccess::grant(), agtest::cap());
+    CHECK_FALSE(std::filesystem::exists(
+        persistence::threads_dir() / (t.id.value + ".jsonl")));
+}
+
 TEST_CASE("incremental save: a shorter thread (rewind) truncates the log") {
     Thread t = make_thread("inc-shrink", 10);
     persistence::delete_thread(::agentty::IoAccess::grant(), agtest::cap(), t.id);

@@ -312,6 +312,10 @@ struct Model {
         store::Settings     persisted;
 
         Thread              current;
+        // Fingerprints of `current` as of the last save described for it
+        // (save_current). The next save sends only what differs. Empty =
+        // send it whole: a new thread, a swap, or a refused save.
+        std::vector<std::uint64_t> saved_fps;
         std::vector<Thread> threads;
         // Bumped whenever `threads` or a row in it changes (load, rename,
         // delete), so the frame gate can tell without walking the list.

@@ -5,6 +5,7 @@
 // must pass through to_valid_utf8 at the capture boundary — and ideally
 // once more at serialization (belt-and-suspenders for paths that bypass us).
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -46,5 +47,13 @@ namespace agentty::tools::util {
 // Byte-transparent outside control sequences; pair with to_valid_utf8
 // for the encoding guarantee. Mirrors mcp-cpp's implementation.
 [[nodiscard]] std::string strip_terminal_controls(std::string_view in);
+
+// The part of a live-output snapshot a tool card shows: at most `max_bytes`
+// from the end, starting on a line and code-point boundary. A tool reports
+// its whole buffer each time; cutting here, on the worker, keeps the UI
+// thread's per-snapshot work bounded however long the output gets.
+inline constexpr std::size_t kProgressKeep = 16 * 1024;
+[[nodiscard]] std::string_view progress_tail(std::string_view all,
+                                             std::size_t max_bytes = kProgressKeep) noexcept;
 
 } // namespace agentty::tools::util

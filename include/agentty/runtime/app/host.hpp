@@ -78,8 +78,13 @@ struct Host : maya::terminal_host<P> {
     // Lock order: jaal calls handle() on the loop thread between steps,
     // where no lock is held (update() and view() can't take locks at all).
     // So each handler runs with `unlocked`, minted here, once per call.
-    void handle(SaveThread e) {
-        with_unlocked([&](const maya::unlocked& c) { persistence::save_thread(io_, c, e.thread); });
+    std::optional<Msg> handle(SaveThread e) {
+        ThreadId id = e.delta.header.id;
+        const bool queued = with_unlocked([&](const maya::unlocked& c) {
+            return persistence::save_thread_delta(io_, c, std::move(e.delta));
+        });
+        if (queued) return std::nullopt;
+        return Msg{msg::ThreadListMsg{SaveRefused{std::move(id)}}};
     }
     void handle(DeleteThread e) {
         with_unlocked([&](const maya::unlocked& c) { persistence::delete_thread(io_, c, e.id); });

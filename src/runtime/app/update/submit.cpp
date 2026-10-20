@@ -795,6 +795,19 @@ void reset_composer_draft(ComposerState& c) {
     return Cmd(SaveSettings{m.d.persisted});
 }
 
+[[nodiscard]] Cmd save_current(Model& m) {
+    // Always describe it; the writer skips an empty thread, as it did when
+    // this carried the whole Thread.
+    auto d = persistence::describe_save(m.d.current, m.d.saved_fps);
+    m.d.saved_fps = d.fps;
+    return Cmd(SaveThread{std::move(d)});
+}
+
+[[nodiscard]] Cmd save_current_whole(Model& m) {
+    m.d.saved_fps.clear();
+    return save_current(m);
+}
+
 [[nodiscard]] Cmd persist_settings(Model& m) {
     // Sync the settings that still live as separate Domain members INTO the
     // record, then save the record. The scattered members are what has not

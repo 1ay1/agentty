@@ -80,6 +80,13 @@ nlohmann::json salvage_args(const ToolUse& tc);
 Cmd finalize_turn(Model& m, StopReason stop_reason = StopReason::Unspecified);
 // After a finished turn: ask for a chat title if the thread needs one.
 Cmd maybe_auto_title(Model& m);
+// Save m.d.current: a delta against the last save described for it, so a
+// long thread costs only its new messages. Use this, never SaveThread{}.
+[[nodiscard]] Cmd save_current(Model& m);
+// The same, sent whole. For a save that leaves the thread (switch, new,
+// quit, fork): a refused delta is resent from the Model, which by then no
+// longer holds this thread.
+[[nodiscard]] Cmd save_current_whole(Model& m);
 
 // Sync the persistent plan state (m.ui.todo.items) from a `todo` tool
 // call's args["todos"] array. Called live during arg streaming AND at

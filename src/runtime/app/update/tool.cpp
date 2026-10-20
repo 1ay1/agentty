@@ -457,31 +457,13 @@ Cmd tool_update(Model& m, msg::ToolMsg tm) {
                     // bytes as cells and commits them to scrollback — the
                     // stray-glyph corruption class. Cheap: O(n) scan, and
                     // the common (already-clean) case only copies.
-                    e.snapshot = tools::util::strip_terminal_controls(e.snapshot);
-                    // Cap the stored snapshot: the body preview shows
-                    // the trailing window only, but `tc.progress_text`
-                    // gets COPIED into a ToolBodyPreview Config every
-                    // frame the live timeline is rebuilt. Unbounded
-                    // bash output (e.g. `find /`) would otherwise push
-                    // 100s of KB through that copy each frame and
-                    // visibly stall the UI on long commands. Mirrors
-                    // the write fast path's content cap.
-                    constexpr std::size_t kProgressKeep = 16 * 1024;
-                    if (e.snapshot.size() > kProgressKeep) {
-                        // Keep the tail — newest bytes are the most
-                        // useful confirmation of progress. Advance the
-                        // cut past any UTF-8 continuation bytes so the
-                        // kept suffix starts on a code-point boundary
-                        // (a split sequence renders as mojibake in the
-                        // card body).
-                        std::size_t cut = e.snapshot.size() - kProgressKeep;
-                        while (cut < e.snapshot.size()
-                               && (static_cast<unsigned char>(
-                                       e.snapshot[cut]) & 0xC0) == 0x80)
-                            ++cut;
-                        e.snapshot.erase(0, cut);
-                    }
-                    r->progress_text = std::move(e.snapshot);
+                    // Trim first, then strip. Snapshots arrive pre-cut from the
+                    // in-tree runners (progress_tail on the worker); the cut
+                    // here bounds any other source to the same window. Bounded
+                    // because progress_text is copied into the card every
+                    // frame the live timeline is rebuilt.
+                    r->progress_text = tools::util::strip_terminal_controls(
+                        tools::util::progress_tail(e.snapshot));
                     // Reset the liveness clock: this tool is demonstrably
                     // making progress, so the wedge net's cap restarts from
                     // here rather than from the (possibly many-minutes-ago)

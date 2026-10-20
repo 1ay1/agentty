@@ -115,7 +115,7 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             //    and the model pulls earlier context from disk only if it
             //    needs it. The write runs on a worker; the fork is built when
             //    ForkTranscriptWritten comes back.
-            return Cmd::batch(Cmd(SaveThread{m.d.current}),
+            return Cmd::batch(save_current_whole(m),
                               cmd::write_fork_transcript(m.d.current, choice));
         },
         [&](ForkTranscriptWritten& e) -> Cmd {
@@ -195,8 +195,9 @@ Cmd fork_update(Model& m, msg::ForkMsg fm) {
             //    composer.
             m.ui.view_cache.clear();
             m.d.current = std::move(fork);
+            m.d.saved_fps.clear();
             m.s.reset_usage_for_thread(last_reported_prompt(m.d.current));
-            Cmd save_fork = Cmd(SaveThread{m.d.current});
+            Cmd save_fork = save_current(m);
             m.ui.panel.close<pn::ThreadList>();
             rehydrate_frozen(m);
             m.ui.needs_warmup_render = !m.ui.frozen.empty();

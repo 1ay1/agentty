@@ -27,6 +27,7 @@
 #include "agentty/tool/host_call.hpp"
 #include "agentty/tool/tool.hpp"       // tool::DynamicDispatch, ToolUse, Message …
 #include "agentty/tool/util/partial_json.hpp"   // args salvage for truncated tool JSON
+#include "agentty/tool/util/utf8.hpp"           // progress_tail
 #include "agentty/runtime/app/update/stream_args.hpp"  // canonify_tool_args (`cmd`→`command`)
 
 #include "agentty/provider/anthropic/provider.hpp"
@@ -1377,10 +1378,16 @@ provider::StreamResult run_one_completion(Thread& thread,
         auto now = std::chrono::steady_clock::now();
         if (!force && now - last_pump < std::chrono::milliseconds(80)) return;
         last_pump = now;
-        std::string snap = log;
+        // Only the tail is ever shown, and `log` grows for the whole run:
+        // copy at most the last window of it instead of all of it per tick.
+        constexpr std::size_t kKeep = util::kProgressKeep;
+        const std::size_t sep = asst.text.empty() ? 0 : 6;
+        const std::size_t want_log =
+            asst.text.size() + sep >= kKeep ? 0 : kKeep - asst.text.size() - sep;
+        std::string snap{util::progress_tail(log, want_log)};
         if (!asst.text.empty()) {
             snap += "\n  \xe2\x96\xb8 ";
-            snap += asst.text;
+            snap += util::progress_tail(asst.text);
         }
         ctx.emit(snap);
     };
