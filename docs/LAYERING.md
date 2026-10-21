@@ -75,12 +75,32 @@ When agentty needs something jaal has and maya doesn't re-export yet, it is
 added to maya first. That list is maya's runtime API, and keeping it explicit
 is what keeps the layering honest.
 
+### What the seam is, and what it isn't
+
+The aliases are `using maya::X = ::jaal::X`. `maya::guarded<T>` IS
+`jaal::guarded<T>`: same type, same mangled name, same error messages. So
+agentty is coupled to jaal's API shape whatever namespace it spells it in,
+and a change to a jaal signature reaches agentty unchanged.
+
+What the seam does buy is one pinned runtime version (agentty pins maya,
+maya pins jaal) and one header to audit for what agentty may use. What
+keeps agentty off raw threads and locks is not the namespace: it is the
+concurrency banlist and the `unlocked`/`held` capability types, which hold
+whatever the name is spelled as.
+
 ## How it's enforced
 
 All are static ctest entries (label `static`), no build needed:
 
-- **layering** — fails on `<jaal/` or `jaal::` in agentty's `src/`,
-  `include/` or `tests/` (tests/lint/layering.cmake).
+- **layering** — fails on `<jaal/`, the word `jaal` in code (`jaal::x`,
+  `jaal :: x`, `using namespace jaal;`, `namespace j = jaal;`) or a `JAAL_`
+  macro in agentty's `src/`, `include/` or `tests/`. Comments and strings,
+  block comments included, are stripped per file first
+  (tests/lint/layering.cmake).
+- **spawn_via_jaal** — every child starts through `maya::platform::
+  native_process`: no fork/exec/popen/system, and on Windows no
+  CreateProcess/_popen/_spawn. Windows-only code is scanned too; that is
+  where the last two bare spawns were.
 - **submodule_purity / no_duplication / jsonrpc_leaf** — the libraries hold
   no runtime, keep one copy of the JSON-RPC core, and jsonrpc-cpp stays a
   leaf, with no allowlist (tests/lint/protocol_libraries.py; rules in
@@ -101,6 +121,14 @@ None. The libraries take what they need with each call: rag-cpp gets a
 Splitter, HostIo and converter runner from `agentty/rag/rag_host.hpp`,
 mcp-cpp's tools get a splitter, exec, HTTP and state through HostServices,
 and the JSON-RPC connections run on rpc::Peer.
+
+## Exit
+
+jaal's bounded shutdowns (pool, stop_group) give up on a thread that ignores
+its stop token, so a wedged syscall can't hold quit open. `maya::strays()`
+counts those threads until each returns. main() checks it after teardown and
+`_Exit`s rather than run static destructors under a thread that may still be
+reading them.
 
 ## Where it stands
 
