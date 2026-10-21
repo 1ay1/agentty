@@ -276,10 +276,16 @@ def drop_win32(code):
 
 
 def spawn_via_jaal(root):
+    # Windows branches are scanned too: that's where a bare CreateProcess hid.
+    # ShellExecute is left out on purpose: it hands a URL to the user's
+    # browser and returns, it doesn't give us a child to own.
     return scan_agentty(root, re.compile(
         r"[^\w.>:]v?fork\s*\(|::v?fork\s*\(|\bexec[lv]p?e?\s*\(|\bposix_spawnp?\b"
-        r"|[^\w.>]_?popen\s*\(|\bpclose\s*\(|\bwaitpid\s*\(|[^\w.>]system\s*\("),
-        "spawn_via_jaal: every agentty child starts through jaal's posix_process")
+        r"|[^\w.>]_?popen\s*\(|\bpclose\s*\(|\bwaitpid\s*\(|[^\w.>]system\s*\("
+        r"|\bCreateProcess(A|W|AsUser[AW]?|WithLogonW|WithTokenW)?\s*\("
+        r"|\b_w?spawn[lv]p?e?\s*\(|\bWinExec\s*\("),
+        "spawn_via_jaal: every agentty child starts through jaal's native_process",
+        windows=True)
 
 
 def no_sleep_poll(root):
@@ -319,7 +325,7 @@ def tool_boundary(root):
     return hits
 
 
-def scan_agentty(root, rx, banner):
+def scan_agentty(root, rx, banner, windows=False):
     hits = []
     for sub in ("src", "include"):
         for dp, _, fs in os.walk(os.path.join(root, sub)):
@@ -327,7 +333,9 @@ def scan_agentty(root, rx, banner):
                 if not f.endswith(EXTS):
                     continue
                 path = os.path.join(dp, f)
-                code = drop_win32(strip(open(path, encoding="utf-8", errors="replace").read()))
+                code = strip(open(path, encoding="utf-8", errors="replace").read())
+                if not windows:
+                    code = drop_win32(code)
                 for no, line in enumerate(code.split("\n"), 1):
                     if rx.search(" " + line):
                         hits.append(f"{relpath(path, root)}:{no}: {line.strip()}")

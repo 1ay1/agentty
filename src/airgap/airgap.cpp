@@ -41,19 +41,8 @@
 #include <utility>
 #include <vector>
 
-#if defined(_WIN32)
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  ifndef NOMINMAX
-#    define NOMINMAX
-#  endif
-#  include <windows.h>
-#else
-#  include <cerrno>
-#  include <poll.h>
-#  include <maya/runtime.hpp>
-#endif
+#include <optional>
+#include <maya/runtime.hpp>
 
 namespace fs = std::filesystem;
 
@@ -130,60 +119,8 @@ void print_usage() {
 
 // Synchronously spawn `argv[0]` with the given argv and wait for it.
 // Inherits stdin/stdout/stderr.  Returns the child's exit code, or -1 on
-// spawn failure. PATH-resolved on both platforms.
-#if defined(_WIN32)
-// Quote one token per the MSVCRT/CommandLineToArgvW rules so the child
-// recovers the exact argument.
-std::string win_quote_arg(const std::string& a) {
-    if (!a.empty() && a.find_first_of(" \t\n\v\"") == std::string::npos)
-        return a;
-    std::string out = "\"";
-    for (auto it = a.begin();; ++it) {
-        std::size_t bs = 0;
-        while (it != a.end() && *it == '\\') { ++it; ++bs; }
-        if (it == a.end()) { out.append(bs * 2, '\\'); break; }
-        else if (*it == '"') { out.append(bs * 2 + 1, '\\'); out.push_back('"'); }
-        else { out.append(bs, '\\'); out.push_back(*it); }
-    }
-    out.push_back('"');
-    return out;
-}
-
-int run_sync(const std::vector<std::string>& argv) {
-    if (argv.empty()) return -1;
-    std::string cmdline = win_quote_arg(argv[0]);
-    for (std::size_t i = 1; i < argv.size(); ++i) {
-        cmdline.push_back(' ');
-        cmdline += win_quote_arg(argv[i]);
-    }
-
-    STARTUPINFOA si{};
-    si.cb      = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput  = ::GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = ::GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError  = ::GetStdHandle(STD_ERROR_HANDLE);
-
-    PROCESS_INFORMATION pi{};
-    // lpApplicationName=nullptr → CreateProcess does PATH + .exe resolution
-    // on the first cmdline token, matching execvp/posix_spawnp semantics.
-    BOOL ok = ::CreateProcessA(nullptr, cmdline.data(), nullptr, nullptr,
-                               /*bInheritHandles=*/TRUE, 0, nullptr, nullptr,
-                               &si, &pi);
-    if (!ok) {
-        std::fprintf(stderr,
-            "agentty airgap: failed to spawn `%s` (CreateProcess err %lu)\n",
-            argv[0].c_str(), static_cast<unsigned long>(::GetLastError()));
-        return -1;
-    }
-    ::CloseHandle(pi.hThread);
-    ::WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 0;
-    ::GetExitCodeProcess(pi.hProcess, &code);
-    ::CloseHandle(pi.hProcess);
-    return static_cast<int>(code);
-}
-#else
+// spawn failure. PATH-resolved on both platforms. Same process type as every
+// other child, so Windows gets the explicit handle list too.
 int run_sync(const std::vector<std::string>& argv) {
     if (argv.empty()) return -1;
     namespace pf = maya::platform;
@@ -195,20 +132,27 @@ int run_sync(const std::vector<std::string>& argv) {
     spec.stdout_to   = pf::stream_to::inherit;
     spec.stderr_to   = pf::stream_to::inherit;
     spec.new_session = false;
-    auto p = pf::posix_process::spawn(spec);
+    auto p = pf::native_process::spawn(spec);
     if (!p) {
-        std::fprintf(stderr, "agentty airgap: failed to spawn `%s`: %s\n",
-                     argv[0].c_str(), std::strerror(p.error().native));
+        std::fprintf(stderr, "agentty airgap: failed to spawn `%s`: %.*s\n",
+                     argv[0].c_str(), static_cast<int>(p.error().what.size()),
+                     p.error().what.data());
         return -1;
     }
-    // Block on the exit handle; this is a foreground CLI step.
-    pollfd pfd{p->exit_handle().get(), POLLIN, 0};
-    while (::poll(&pfd, 1, -1) < 0 && errno == EINTR) {}
+    // A foreground CLI step: block on the exit handle.
+    auto reactor = pf::native_reactor::create();
+    if (!reactor) return -1;
+    auto reg = reactor->watch(p->exit_handle().get(), pf::interest::read, 1);
+    if (!reg) return -1;
+    for (;;) {
+        auto w = reactor->wait(std::nullopt);
+        if (!w) return -1;
+        if (w->count != 0) break;
+    }
     auto st = p->reap();
     if (!st) return -1;
     return st->how == pf::exit_status::kind::exited ? st->code : 128 + st->code;
 }
-#endif
 
 // Copy this machine's credentials.json to the remote's default store,
 // ~/.agentty/credentials/. Three steps: mkdir, scp, chmod; abort on the

@@ -17,10 +17,6 @@
 #endif
 
 #if defined(_WIN32)
-  #define AGENTTY_POPEN  ::_popen
-  #define AGENTTY_PCLOSE ::_pclose
-  #define AGENTTY_POPEN_MODE "rb"
-
   #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
   #endif
@@ -31,22 +27,34 @@
   #include <objidl.h>     // IStream
   #include <shlwapi.h>    // SHCreateMemStream
   #include <gdiplus.h>
-#else
-  #include <chrono>
-  #include "agentty/tool/util/exec.hpp"   // run_child
 #endif
+
+#include <chrono>
+#include <maya/runtime.hpp>
+#include "agentty/tool/util/exec.hpp"   // run_child
 
 namespace agentty {
 
 namespace {
+
+// A shell command line as a ChildRun: sh -c, or cmd.exe built by jaal's
+// quoting rules on Windows.
+void shell_argv(tools::util::ChildRun& run, const char* cmd) {
+#if defined(_WIN32)
+    run.argv                 = {"cmd.exe"};
+    run.windows_command_line = maya::platform::cmd_command_line(cmd);
+#else
+    run.argv = {"/bin/sh", "-c", cmd};
+#endif
+}
 
 // Anthropic's per-image cap is 5 MB; raw 8 MiB after base64 expansion
 // is the most we'd ship. Bigger captures get truncated to 8 MiB at
 // the read boundary — magic-byte sniff still works on the prefix.
 constexpr std::size_t kCap = 8 * 1024 * 1024;
 
-// CaptureResult is used by every platform — wrap() takes one, the POSIX
-// helpers populate it via popen, and the Win32 path constructs it
+// CaptureResult is used by every platform — wrap() takes one, the shell
+// helpers fill it from a child, and the Win32 path constructs it
 // directly from clipboard bytes. Keep it outside the platform guard.
 struct CaptureResult {
     std::string bytes;
@@ -74,17 +82,14 @@ const char* sniff_image_type(std::string_view bytes) {
 }
 
 // Run a shell command and capture binary stdout up to `cap` bytes.
-// Returns the bytes plus the wait-status. status==-1 means popen
-// failed outright (rare — fork/exec issues). Available on every
-// platform: Windows maps AGENTTY_POPEN → _popen at the top of the
-// file, so the AGENTTY_CLIPBOARD_CMD override works there too.
+// Returns the bytes plus a wait-shaped status; -1 means it never started.
+// Through jaal like every other child, on every platform: own session, no
+// inherited fds, bounded in time so a clipboard tool that hangs cannot hang
+// us. AGENTTY_CLIPBOARD_CMD runs through here on Windows too.
 CaptureResult popen_capture(const char* cmd, std::size_t cap) {
     CaptureResult r;
-#if !defined(_WIN32)
-    // Through jaal like every other child: own session, no inherited fds,
-    // bounded in time so a clipboard tool that hangs cannot hang us.
     tools::util::ChildRun run;
-    run.argv = {"/bin/sh", "-c", cmd};
+    shell_argv(run, cmd);
     run.idle = std::chrono::seconds{10};
     run.wall = std::chrono::seconds{30};
     run.max_output_bytes = cap;
@@ -94,21 +99,6 @@ CaptureResult popen_capture(const char* cmd, std::size_t cap) {
     // Shaped like a wait status, for the WIFEXITED/WEXITSTATUS readers.
     r.status = c.exited ? (c.exit_code & 0xff) << 8 : (c.signal & 0x7f);
     return r;
-#else
-    FILE* fp = AGENTTY_POPEN(cmd, AGENTTY_POPEN_MODE);
-    if (!fp) return r;
-    r.bytes.reserve(std::min<std::size_t>(cap, 256 * 1024));
-    char buf[8192];
-    while (r.bytes.size() < cap) {
-        std::size_t avail = cap - r.bytes.size();
-        std::size_t want  = avail < sizeof(buf) ? avail : sizeof(buf);
-        std::size_t n = std::fread(buf, 1, want, fp);
-        if (n == 0) break;
-        r.bytes.append(buf, n);
-    }
-    r.status = AGENTTY_PCLOSE(fp);
-    return r;
-#endif
 }
 
 // Image capture via a user-supplied command (AGENTTY_CLIPBOARD_CMD).
@@ -1029,32 +1019,17 @@ std::optional<std::string> read_clipboard_text(std::string* error_out) {
 
 namespace {
 
-// popen a command for WRITING and feed it `data` on stdin. Returns true
-// iff the child exited 0. status==-1 (popen failed) or a non-zero exit
-// both report false. Windows maps popen()→_popen via the macros above.
+// Run a clipboard tool and feed it `data` on stdin. True iff the child
+// exited 0. Same child runner as every other subprocess, on every platform.
 bool popen_write(const char* cmd, std::string_view data) {
-#if !defined(_WIN32)
     tools::util::ChildRun run;
-    run.argv       = {"/bin/sh", "-c", cmd};
+    shell_argv(run, cmd);
     run.stdin_data = std::string{data};
     run.idle       = std::chrono::seconds{10};
     run.wall       = std::chrono::seconds{30};
     run.max_output_bytes = 4096;
     auto c = tools::util::run_child(run);
     return c.started && c.exited && c.exit_code == 0;
-#else
-    FILE* fp = ::_popen(cmd, "wb");
-    if (!fp) return false;
-    bool wrote_ok = true;
-    if (!data.empty()) {
-        const std::size_t n =
-            std::fwrite(data.data(), 1, data.size(), fp);
-        wrote_ok = (n == data.size());
-    }
-    const int status = ::_pclose(fp);
-    // pclose returns the child wait-status; 0 means clean exit 0.
-    return wrote_ok && status == 0;
-#endif
 }
 
 } // namespace
