@@ -130,9 +130,8 @@ clipboard_control write-clipboard write-primary read-clipboard read-primary
 Restart kitty fully. Inside tmux also run `tmux set -g allow-passthrough on`
 (off by default), or the request never reaches kitty.
 
-On any other terminal, attach by path (`@shot.png`) or set
-`AGENTTY_CLIPBOARD_CMD` to ferry the clipboard over SSH. Full setup, including
-the Linux `wl-clipboard` / `xclip` requirement and a troubleshooting table:
+On any other terminal, run `agentty paste setup` once on your laptop: every ssh
+session then carries your clipboard. Full setup and a troubleshooting table:
 [Clipboard & Images](/docs/clipboard).
 
 ## agentty is using a lot of disk, or settings/history won't save

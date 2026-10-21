@@ -234,7 +234,6 @@ Symlinking the subdirectories works too, and predates these variables:
 |----------|--------|
 | `AGENTTY_GRID` | Grid-protocol rendering for cooperating hosts. `=0` opts out. (`AGENTTY_EMACS_GRID` is the legacy name.) |
 | `AGENTTY_HOST` | Declare the cooperating host explicitly rather than autodetecting. |
-| `AGENTTY_CLIPBOARD_CMD` | Command to pipe clipboard writes through (e.g. `pbcopy`, `wl-copy`) when autodetection fails. |
 | `AGENTTY_PAINTED_CARET` | `=1` draws the caret manually — for terminals with broken cursor-visibility handling. |
 | `AGENTTY_REVEAL` | Master switch for the streaming reveal effect. **On by default everywhere, tmux included**; `0`/`false`/`off`/`no` turns it off, anything else forces it on. Set it to `0` if your terminal/multiplexer combination ghosts the live tail. |
 | `AGENTTY_REVEAL_TYPEWRITER` | The typewriter clip alone — text arriving character-by-character. ANDed with `AGENTTY_REVEAL`; same default and same truthiness rule. |

@@ -424,9 +424,13 @@ struct LoopBreak {
 // In cmd_clipboard_diag.cpp.
 [[nodiscard]] Cmd diagnose_clipboard(bool in_ssh);
 
-// Read the OS clipboard (wl-paste / xclip / pngpaste / PowerShell) on a
-// worker and reply with ClipboardRead. In cmd_clipboard_diag.cpp.
+// Read the clipboard through richpaste (display, or the laptop's agent over
+// ssh) on a worker and reply with ClipboardRead. In cmd_clipboard_diag.cpp.
 [[nodiscard]] Cmd read_clipboard();
+
+// Save pasted files that can't sit in the composer as-is (see
+// settle_clipboard_items), then reply with ClipboardRead.
+[[nodiscard]] Cmd settle_clipboard(std::vector<ClipboardItem> items);
 
 // Check whether a pasted path names an image file and read it, replying with
 // ImagePathSniffed. In cmd_image_paste.cpp.

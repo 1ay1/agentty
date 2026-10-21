@@ -249,39 +249,30 @@ void apply_history_entry(ComposerState& cs, const HistoryEntryRef& entry) {
     if (cs.text.find('\n') != std::string::npos) cs.expanded = true;
 }
 
-// Smart-paste from the OS clipboard. Image first, then text, in that
-// order — image's failure message ("no image on clipboard") is the
-// least useful diagnostic for a user who copied text from a browser
-// and pressed Ctrl+V, so we silently fall through. The text fallback
-// piggybacks on the existing ComposerPaste reducer arm so the same
-// always-chip / line-normalisation rules apply as for native
-// bracketed-paste sequences.
-//
-// Used by:
-//   • Ctrl+V / Alt+V          (subscribe.cpp → ComposerImagePasteFromClipboard)
-//   • Empty bracketed paste   (ComposerPaste arm with e.text.empty())
-//
-// All three routes through this one helper so the behaviour is
-// identical no matter which trigger fired. The OS read is a subprocess, so
-// it runs on a worker and comes back as ClipboardRead.
+// Paste from the clipboard through richpaste: copied files, else an image,
+// else text, from the local display or the laptop's agent over ssh. Used by
+// Ctrl+V / Alt+V and by an empty bracketed paste (a terminal that swallowed
+// an image). The read runs on a worker and comes back as ClipboardRead.
 Cmd smart_paste_from_clipboard(Model&) { return cmd::read_clipboard(); }
 
-Cmd on_clipboard_read(Model& m, ClipboardRead& r) {
-    if (!r.image.empty()) {
+// One image into the composer as a chip. Returns a toast if it's too big to send.
+Cmd insert_image(Model& m, std::string bytes, std::string media_type,
+                 std::string where) {
+    {
         begin_edit(m.ui.composer);
         // Read the real pixel dimensions from the header. A hi-DPI screenshot
         // is a tiny file but can be 3000+ px wide, which Anthropic rejects in
         // a many-image request — the wire drops it, so warn NOW rather than let
         // the turn silently lose the image (or, pre-gate, 400 outright).
-        const auto dims = util::image_dimensions(r.image);
+        const auto dims = util::image_dimensions(bytes);
         const bool oversized = dims.known()
                             && dims.longest() > util::kMaxWireImageSide;
         Attachment att;
         att.kind       = Attachment::Kind::Image;
-        att.path       = "<clipboard>";
-        att.media_type = std::move(r.media_type);
-        att.byte_count = r.image.size();
-        att.body.set_bytes(std::move(r.image));
+        att.path       = std::move(where);
+        att.media_type = std::move(media_type);
+        att.byte_count = bytes.size();
+        att.body.set_bytes(std::move(bytes));
         std::size_t idx = m.ui.composer.attachments.size();
         m.ui.composer.attachments.push_back(std::move(att));
         auto placeholder = attachment::make_placeholder(idx);
@@ -298,47 +289,36 @@ Cmd on_clipboard_read(Model& m, ClipboardRead& r) {
         }
         return Cmd::none();
     }
+}
 
-    // No image — try text. Re-enter the ComposerPaste arm with the
-    // captured text so we get newline normalisation + always-chip
-    // treatment for free (same path bracketed paste takes).
-    if (!r.text.empty()) {
-        return composer_update(m, ComposerPaste{std::move(r.text)});
+// Clipboard items into the composer, in order. Text goes back through the
+// ComposerPaste arm (newline cleanup, chips); path_checked so a pasted path
+// isn't sniffed again.
+Cmd insert_items(Model& m, std::vector<ClipboardItem> items, std::string_view where) {
+    std::vector<Cmd> cmds;
+    for (auto& it : items) {
+        if (it.kind == ClipboardItem::Kind::Image)
+            cmds.push_back(insert_image(m, std::move(it.bytes), std::move(it.mime),
+                                        std::string{where}));
+        else if (!it.bytes.empty())
+            cmds.push_back(composer_update(
+                m, ComposerPaste{std::move(it.bytes), /*path_checked=*/true,
+                                 /*literal=*/it.saved_path}));
     }
+    Cmd out = Cmd::none();
+    for (auto& c : cmds) out = Cmd::batch(std::move(out), std::move(c));
+    return out;
+}
 
-    // Every local path failed to produce an image or text. Last resort,
-    // ALWAYS: ask the terminal itself. The terminal emulator runs on the
-    // user's LOCAL machine even across SSH, so its reply carries the
-    // laptop's clipboard back over the pty — maya decodes it into a
-    // PasteEvent that re-enters the ComposerPaste arm below (image
-    // magic-byte sniff ingests a PNG/JPEG; otherwise the text path takes
-    // it). Two dialects, chosen inside maya's query_clipboard:
-    //   • OSC 5522 (kitty) — multi-format: carries IMAGE bytes, so a
-    //     screenshot pastes across SSH with no remote tool at all.
-    //   • OSC 52 read (iTerm2/WezTerm/foot/Ghostty/xterm w/ opts) —
-    //     text-only; for images on these, AGENTTY_CLIPBOARD_CMD or the
-    //     airgap --clipboard-relay remain the answer.
-    // This is the ONE clipboard read that needs no remote tool and
-    // no env var, so it's the universal fallback: headless/SSH host with
-    // no wl-paste/xclip, a local terminal whose native tools are missing,
-    // OR an AGENTTY_CLIPBOARD_CMD ferry that was set but failed (laptop
-    // unreachable, wrong reader, no sshd for the callback).
-    //
-    // Previously this was gated off whenever AGENTTY_CLIPBOARD_CMD was
-    // set — "the user picked an explicit ferry, honour its error." But
-    // the airgap launcher SETS that env var automatically, so a broken
-    // ferry callback dead-ended at the ferry's error and never tried the
-    // terminal, the one path that works out of the box. The ferry is
-    // still PREFERRED (it runs first, in read_clipboard_image); OSC 52 is
-    // just the safety net under it. Terminals that don't honour OSC 52
-    // reads simply never reply — the "reading clipboard…" toast lapses
-    // and nothing is stranded. A terminal that DOES reply delivers the
-    // bytes as a PasteEvent → the ComposerPaste arm below (no dedicated
-    // result Msg); an empty/"?" reply is dropped by maya's parse_osc and
-    // the toast simply lapses. The local probes' errors are intentionally not
-    // surfaced here — OSC 52 is strictly more capable than the local
-    // probes that produced them, so their "no clipboard here" wording
-    // would be misleading while the terminal query is in flight.
+Cmd on_clipboard_read(Model& m, ClipboardRead& r) {
+    if (!r.items.empty())
+        return insert_items(m, std::move(r.items), "<clipboard>");
+    AGT_LOG(Ui, Info, "paste.clipboard_empty", "why={}", r.error);
+
+    // richpaste found nothing (no display here, no agent forwarded). Last
+    // resort: ask the terminal, which runs on the user's machine even over
+    // ssh. maya sends OSC 5522 (kitty, carries images) or OSC 52 (text);
+    // a reply comes back as a PasteEvent into the ComposerPaste arm.
     {
         auto toast = set_status_toast(
             m, "reading clipboard from your terminal\xE2\x80\xA6",
@@ -859,6 +839,30 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                 return Cmd::none();
             }
 
+            // A `richpaste:1:` line: an image or file copied as text on
+            // the laptop (`agentty paste howto`) that crossed ssh as a
+            // plain paste. Decoding is pure, so it runs here.
+            if (!e.path_checked && has_armored(e.text)) {
+                std::string why;
+                auto items = decode_armored(e.text, &why);
+                AGT_LOG(Ui, Info, "paste.armored", "items={} err={}", items.size(), why);
+                if (!items.empty()) {
+                    // Files other than images and text need saving to
+                    // disk, which is the worker's job.
+                    const bool needs_disk = std::ranges::any_of(items, [](auto& it) {
+                        return it.kind == ClipboardItem::Kind::File;
+                    });
+                    if (needs_disk) return cmd::settle_clipboard(std::move(items));
+                    return insert_items(m, std::move(items), "<paste>");
+                }
+                // Every block was bad: paste the text as is, and say why.
+                if (!why.empty()) {
+                    Cmd toast = set_status_toast(m, "paste: " + why, std::chrono::seconds{6});
+                    e.path_checked = true;   // skip the path sniff: it isn't a path
+                    return Cmd::batch(std::move(toast), composer_update(m, std::move(e)));
+                }
+            }
+
             // Image-path paste: a single-line path naming a real image
             // file becomes an Image attachment. Checking that reads the
             // file, so a paste that could be a path goes to a worker and
@@ -915,10 +919,21 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                 return !word.empty() && word.find('/') == std::string_view::npos
                     && word.find('.') == std::string_view::npos;
             }();
-            if (slash_name) {
+            if (slash_name || e.literal) {
                 begin_edit(m.ui.composer);
-                m.ui.composer.text   = std::move(e.text);
-                m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());
+                auto& cs = m.ui.composer;
+                if (e.literal) {
+                    // A saved file's path: typed into the text at the caret.
+                    const auto at = static_cast<std::size_t>(std::clamp(cs.cursor, 0, static_cast<int>(cs.text.size())));
+                    std::string ins = e.text;
+                    if (at > 0 && cs.text[at - 1] != ' ' && cs.text[at - 1] != '\n') ins.insert(0, 1, ' ');
+                    ins.push_back(' ');
+                    cs.text.insert(at, ins);
+                    cs.cursor = static_cast<int>(at + ins.size());
+                    return Cmd::none();
+                }
+                cs.text   = std::move(e.text);
+                cs.cursor = static_cast<int>(cs.text.size());
                 return Cmd::none();
             }
 
@@ -974,9 +989,8 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                 // it is about capability, not permission.
                 auto toast = set_status_toast(
                     m,
-                    "pasted text \xe2\x80\x94 your terminal can't send images "
-                    "over SSH (needs kitty's OSC 5522); attach by path, "
-                    "or set AGENTTY_CLIPBOARD_CMD",
+                    "pasted text \xe2\x80\x94 for images over ssh run "
+                    "`agentty paste setup` on your laptop once",
                     std::chrono::seconds{9});
                 return toast;
             }

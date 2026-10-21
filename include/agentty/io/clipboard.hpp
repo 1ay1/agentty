@@ -1,87 +1,70 @@
 #pragma once
-// Read an image from the system clipboard via platform-native tooling.
+// The system clipboard, through richpaste (third_party/richpaste).
 //
-// Bracketed paste delivers UTF-8 text only; binary clipboard content
-// (a PNG that a screenshot tool put on the clipboard) is dropped or
-// mangled by every mainstream terminal. The reliable path is to ASK
-// the platform clipboard for its image content out-of-band, via a
-// small subprocess:
+// Reading: the local display (Wayland data-control, X11, macOS pasteboard,
+// Win32), else the richpaste agent on the user's laptop over an ssh forward
+// (`agentty paste setup` once there), else the terminal itself (OSC 5522 /
+// OSC 52, which the composer drives through maya). A `richpaste:1:` line
+// copied as text decodes back into the image or file on every route.
 //
-//   Linux/Wayland → wl-paste --type image/png
-//   Linux/X11     → xclip -selection clipboard -t image/png -o
-//   macOS         → pngpaste -            (brew install pngpaste)
-//   Windows       → powershell System.Windows.Forms.Clipboard.GetImage
-//
-// All capture stdout as raw bytes — `tools::util::Subprocess` runs its
-// captured output through to_valid_utf8(), which would replace every
-// non-UTF-8 byte with U+FFFD and corrupt the image. So this module
-// has its own popen-based capture that doesn't touch the bytes.
-//
-// The reducer arm in update/composer.cpp calls read_clipboard_image()
-// synchronously on Ctrl+V. The subprocesses all exit immediately when
-// no image is available (non-zero status, empty stdout) so the worst
-// case is the shell-spawn cost (~10-50 ms on Linux, ~100-200 ms on
-// macOS via osascript). Acceptable on the UI thread for an explicit
-// user action.
+// Writing: native tools (pbcopy / wl-copy / xclip / clip.exe), since OSC 52
+// writes are off by default in Terminal.app and iTerm2.
 
-#include <optional>
+#include <cstdint>
+#include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace agentty {
 
-struct ClipboardImage {
-    /// Raw image bytes — PNG / JPEG / GIF / WEBP. Sniffed from the
-    /// magic prefix of the captured stdout, so format mismatch
-    /// between tool flags and actual content (rare, but possible
-    /// under odd compositor configurations) is surfaced cleanly.
-    std::string bytes;
-    /// MIME type (e.g. "image/png") matching the magic prefix.
-    std::string media_type;
+struct ClipboardItem {
+    enum class Kind : std::uint8_t { Text, Image, File };
+    Kind        kind = Kind::Text;
+    std::string mime;   // "image/png", "application/pdf", ...
+    std::string name;   // file name for File, else empty
+    std::string bytes;  // UTF-8 for Text, raw bytes otherwise
+    bool        saved_path = false;  // Text that is the path of a saved file
 };
 
-/// Read an image from the system clipboard. On success returns the
-/// raw bytes + sniffed MIME type. On failure (tool missing, clipboard
-/// empty, no image type on clipboard, image too large), returns
-/// nullopt and writes a one-line human-readable diagnostic to
-/// `*error_out` so the caller can surface it as a status toast that
-/// names the actual failure (the previous "no image on clipboard"
-/// blanket message was unhelpful when the real fix was "install
-/// wl-clipboard" or "the clipboard has only text").
-[[nodiscard]] std::optional<ClipboardImage>
-read_clipboard_image(std::string* error_out = nullptr);
+struct ClipboardContents {
+    std::vector<ClipboardItem> items;  // copied files, else an image, else text
+    std::string source;                // "wayland wayland-1", "agent via ssh", ...
+    std::string error;                 // set when items is empty
+};
 
-/// Read plain UTF-8 text from the system clipboard. Used by the
-/// composer's "smart paste" path: when Ctrl+V / Ctrl+Shift+V arrive
-/// via a trigger that didn't already carry bracketed-paste content
-/// (Windows Terminal swallows Ctrl+V and emits nothing on an
-/// image-only clipboard; the user's Alt+V fallback also goes through
-/// the same path), the composer asks the OS clipboard for whatever
-/// it has — image first, text second — so the same shortcut "just
-/// works" regardless of clipboard contents.
-///
-/// Returns nullopt if the clipboard has no text or the platform tool
-/// is missing; writes a diagnostic to `*error_out` for the toast
-/// path.
-[[nodiscard]] std::optional<std::string>
-read_clipboard_text(std::string* error_out = nullptr);
+// Reads the clipboard. Blocking (a socket round trip, maybe over ssh), so
+// call it from a worker. `allow_remote` false skips the ssh agent route.
+[[nodiscard]] ClipboardContents read_clipboard(bool allow_remote = true);
 
-/// Write plain UTF-8 text to the system clipboard via platform-native
-/// tooling — the reliable path that does NOT depend on the terminal
-/// honouring OSC 52:
-///
-///   macOS         → pbcopy
-///   Linux/Wayland → wl-copy
-///   Linux/X11     → xclip -selection clipboard
-///   Windows       → clip.exe
-///
-/// This exists because OSC 52 clipboard WRITE is opt-in (off by default)
-/// in Terminal.app and iTerm2, so agentty's maya `write_clipboard` Cmd
-/// silently no-ops there. Callers should issue BOTH this and the OSC 52
-/// Cmd: OSC 52 still carries the copy across an SSH/tmux hop to a remote
-/// clipboard, while this handles the common local-macOS case.
-///
-/// Returns true on success. On failure writes a one-line diagnostic to
-/// `*error_out` (tool missing, subprocess spawn/write failed).
+// Pulls `richpaste:1:` armored blocks out of pasted text. Returns the items
+// in order, with plain text between blocks as Text items. Empty when the
+// text has no armored block.
+[[nodiscard]] std::vector<ClipboardItem> decode_armored(std::string_view text,
+                                                        std::string* error = nullptr);
+[[nodiscard]] bool has_armored(std::string_view text) noexcept;
+
+// Turns clipboard items into what the composer can hold: images and text
+// pass through, a text file becomes Text, any other file is saved under
+// ~/.agentty/paste/pasted and becomes a Text item with its path. Does disk IO,
+// so call it from a worker.
+void settle_clipboard_items(std::vector<ClipboardItem>& items);
+
+/// Write plain UTF-8 text to the system clipboard with the platform tool.
+/// Callers also send OSC 52, which still carries the copy across ssh/tmux.
+/// On failure writes a one-line reason to `*error_out`.
 bool write_clipboard_text(std::string_view text, std::string* error_out = nullptr);
+
+// `agentty paste …`. Call clipboard_init_program() once at startup, before
+// any thread, so richpaste names itself `agentty paste` and re-runs this
+// binary for its agent and ssh hook.
+void clipboard_init_program();
+int  clipboard_cli(std::span<const std::string> args);
+
+// The `RemoteForward` pair (remote socket, local endpoint) for an ssh
+// session, starting the local agent if needed. Empty pair on failure, with
+// the reason in `*error`. Used by `agentty airgap --clipboard-relay`.
+struct ClipboardForward { std::string remote, local; };
+[[nodiscard]] ClipboardForward clipboard_ssh_forward(std::string* error = nullptr);
 
 } // namespace agentty

@@ -303,6 +303,20 @@ else()
         "backend, then reconfigure.")
 endif()
 
+# richpaste: reads the clipboard for Ctrl+V (Wayland, X11, macOS, Windows,
+# an ssh-forwarded agent, or the terminal) and backs `agentty paste`.
+if(EXISTS "${AGENTTY_THIRD_PARTY_DIR}/richpaste/CMakeLists.txt")
+    set(RICHPASTE_TESTS OFF CACHE BOOL "" FORCE)
+    set(RICHPASTE_TOOL  OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/richpaste)
+    agentty_pull_submodule_latest(richpaste master rp)
+    set_target_properties(rp PROPERTIES SYSTEM TRUE)
+else()
+    message(FATAL_ERROR
+        "agentty: third_party/richpaste/ submodule is empty. Run "
+        "`git submodule update --init --recursive`, then reconfigure.")
+endif()
+
 # Treat maya's headers as system so its warnings don't surface in agentty builds.
 set_target_properties(maya PROPERTIES SYSTEM TRUE)
 

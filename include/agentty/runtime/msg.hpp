@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "agentty/auth/auth.hpp"
+#include "agentty/io/clipboard.hpp"   // ClipboardItem
 #include "agentty/provider/chatgpt/codex_oauth.hpp"
 #include "agentty/provider/copilot/copilot_oauth.hpp"
 #include "agentty/provider/kimi/kimi_oauth.hpp"
@@ -81,6 +82,8 @@ struct ComposerPaste {
     // Set when this paste already went through the image-path check (see
     // ImagePathSniffed), so it is not sent round again.
     bool path_checked = false;
+    // Typed into the text as is, never a chip (a saved pasted file's path).
+    bool literal = false;
 };
 // The worker looked at a pasted path. `path` is empty when it was not a
 // readable image; then the reducer pastes `text` as ordinary text.
@@ -99,12 +102,11 @@ struct ImagePathSniffed {
 struct ClipboardQueryTimeout { std::uint64_t seq = 0; };
 // The worker's answer to "why did that clipboard read go unanswered".
 struct ClipboardDiagnosed { std::string message; };
-// The worker's read of the OS clipboard for Ctrl+V: an image, else text,
-// else nothing (then the reducer asks the terminal).
+// The worker's read of the clipboard for Ctrl+V (richpaste: the display,
+// the ssh agent, ...). Empty items: the reducer asks the terminal.
 struct ClipboardRead {
-    std::string image;        // raw bytes; empty if no image
-    std::string media_type;
-    std::string text;
+    std::vector<ClipboardItem> items;
+    std::string                error;   // why items is empty
 };
 // Recall queued messages back into the composer for editing. Bound to
 // Up-arrow when the composer is empty and queued messages exist.

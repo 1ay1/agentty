@@ -96,6 +96,7 @@
 #include "agentty/io/shared_file.hpp"
 #include "agentty/i18n/startup.hpp"   // i18n::init — before anything renders
 #include "agentty/io/blob_gc.hpp"
+#include "agentty/io/clipboard.hpp"   // agentty paste
 #include "agentty/io/http.hpp"
 #include "agentty/mcp/serve.hpp"
 #include "agentty/mcp/oauth.hpp"
@@ -708,6 +709,10 @@ void print_usage() {
         entry("  airgap", "Launch agentty on an air-gapped host via SSH tunnel "
                           "(`agentty airgap --help` for details)", kCmdGutter),
         entry("  acp", "Run as an ACP agent over stdio (for Zed et al.)", kCmdGutter),
+        entry("  paste [cmd]", "Clipboard tools (richpaste). `paste setup` once on your "
+                             "laptop makes Ctrl+V images work over ssh; `paste` prints "
+                             "the clipboard, `paste doctor` explains the route, "
+                             "`paste help` lists the rest", kCmdGutter),
         entry("  run [PROMPT]", "Headless one-shot: run PROMPT through the full agent "
                                 "loop (tools, sandbox) and print only the answer to "
                                 "stdout. PROMPT `-` or absent reads stdin: "
@@ -1009,6 +1014,11 @@ Args parse_args(int argc, char** argv) {
                 // that actually validates these flags.
                 if (j + 1 < argc && argv[j + 1][0] != '-') ++j;
             }
+        } else if (a == "paste") {
+            // `agentty paste [cmd] …` — richpaste's own CLI owns the tail.
+            out.subcommand = std::move(a);
+            while (i + 1 < argc) out.plugin_argv.emplace_back(argv[++i]);
+            break;
         } else if (a == "plugin" || a == "skill") {
             // `agentty plugin <verb> …` / `agentty skill <verb> …` — hand the
             // whole tail to the subcommand CLI verbatim (each owns its own
@@ -1251,6 +1261,10 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
 #endif
     }
 
+    // richpaste names itself `agentty paste` and re-runs this binary for its
+    // agent and ssh hook. Set before any thread, it's a plain global.
+    clipboard_init_program();
+
     install_crash_handler();
 
     // AGENTTY_FORCE_EFFORT and AGENTTY_MAX_OUTPUT_TOKENS into the capability
@@ -1337,6 +1351,11 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
 #endif
 
     auto args = parse_args(argc, argv);
+
+    // `agentty paste …` runs before the log banner and every init below:
+    // ssh runs `agentty paste ssh-hook` on each connection, so it must be
+    // quick and quiet.
+    if (args.subcommand == "paste") return clipboard_cli(args.plugin_argv);
 
     // Every run self-identifies in the (append-mode, multi-session) log:
     // version + build type + pid + cwd. `grep "=== agentty"` splits the file
