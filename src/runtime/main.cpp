@@ -2547,5 +2547,14 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
 // capability from here, from a job/task entry, or from a lock body.
 // (lint: cap_roots lists this file.)
 int main(int argc, char** argv) {
-    return maya::thread_root([&](const maya::unlocked& cap) { return run_main(argc, argv, cap); });
+    const int rc = maya::thread_root(
+        [&](const maya::unlocked& cap) { return run_main(argc, argv, cap); });
+    // run_main's teardown is done. If a bounded shutdown gave up on a thread
+    // that is still running, returning would destroy statics under it, so
+    // skip that: flush what we wrote and leave now.
+    if (maya::strays() != 0) {
+        std::fflush(nullptr);
+        std::_Exit(rc);
+    }
+    return rc;
 }
