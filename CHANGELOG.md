@@ -4,6 +4,27 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Windows: a child process no longer holds another one's pipes open.**
+  Every spawn used to hand the new child every inheritable handle agentty
+  had, so two commands started at once could keep each other's output
+  open, and a finished command looked like it was still running. Children
+  now get their own stdin, stdout and stderr and nothing else. airgap and
+  the clipboard went around this path; they now use it too.
+- **Windows: the Sandbox pane tells the truth.** It said "no sandbox
+  backend on this platform" while commands were confined. It now shows the
+  real walls: appcontainer filesystem, job object memory and process caps.
+- **Linux: a stale watch can't silence a new one.** If an fd was closed
+  while still watched and its number came back, the old watch's cleanup
+  removed the new one, and whatever was waiting on it never woke up.
+- **Quit is safe when a background thread is stuck.** If a thread ignored
+  shutdown past its grace, agentty used to run static destructors under
+  it, which could crash on the way out. It now exits without them.
+
+### Changed
+- The docs say the Windows sandbox is live and bwrap is gone (#111, thanks
+  @davidwed).
+
 ## [0.9.30] - 2026-10-20
 
 ### Fixed
