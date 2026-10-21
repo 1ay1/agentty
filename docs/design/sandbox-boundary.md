@@ -222,7 +222,7 @@ comes back is HANDLEs, not descriptors, and the two `int` handle fields of
 `SpawnResult` are reinterpreted as such: `pidfd` is the child's PROCESS handle
 (the waitable exit, consumed by jaal's `windows_process::adopt`) and
 `kill_tree` is the JOB handle. Supervision stays in `subprocess.cpp`/`exec.cpp`,
-unshared and unchanged. A sandbox backend that also owned the supervise loop
+shared with the other platforms and the unsandboxed path. A sandbox backend that also owned the supervise loop
 would be two implementations of the hard part.
 
 **ACL stamping is opt-in at the API level, and agentty opts in.** Without ACE
@@ -253,12 +253,10 @@ Windows is not always on `C:`. The header floor matters too: claybin sets
 headers hide the AppContainer APIs and the failure is a missing declaration at
 compile time.
 
-**One gap, stated.** The engine applies; the pane's compile *preview* is still
-Linux/macOS-only, so the Settings → Sandbox footer says `no sandbox backend on
-this platform` on a Windows host whose commands are in fact confined. The
-banner and `sandbox_audit` are correct. The preview is the thing that has not
-been ported, and the fix is the preview, not the copy — a footer that lies in
-the safe direction is still a footer that lies.
+**The preview.** The pane's compile preview runs claybin's Windows compiler
+with the same ACL opt-in the spawn path uses, so the footer and the per-row
+walls report what commands actually get, the same as the banner and
+`sandbox_audit`.
 
 ---
 

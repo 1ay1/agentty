@@ -33,7 +33,7 @@ That line is a **real test, not a claim**. Before printing it, agentty actually 
 For the full picture, open **Settings → Sandbox**. The pane shows every wall, what's enforcing it, and — crucially — anything it *can't* enforce on your machine.
 
 :::caution
-On **Windows** the engine is live but the pane's compile preview is not ported yet: the footer reads `no sandbox backend on this platform` and the per-row wall annotations are blank even while commands really are confined. Trust the startup banner and `sandbox_audit` there until the preview lands.
+On **Windows** the pane previews through claybin's Windows compiler, so the footer and per-row walls match what commands get (filesystem `partial` via appcontainer+DACL, memory and process caps `strong` via the job object).
 :::
 
 ## Pick a posture, not 28 switches
@@ -83,7 +83,7 @@ Each platform compiles the same policy into what it actually has. On Linux that'
 | macOS | **claybin** | seatbelt from your compiled policy, plus rlimits | `sandbox-exec`, one fixed profile |
 | Windows | **claybin** | AppContainer, restricted token, job object, mitigation policies | **none, by design** |
 
-On Windows there is no weaker engine to fall back to and no `bwrap`: the probe either proves it can build a wall (an AppContainer or a job object) and claybin runs, or the startup banner says `sandbox: none` and commands run unconfined — reported, never silent. Windows Sandbox (the Hyper-V VM product) was deliberately not chosen: it is a whole-OS VM with seconds of boot time, no pipe-stdout model and no per-command exit codes.
+On Windows there is no weaker engine to fall back to and no `bwrap`: the probe either proves it can build a wall (an AppContainer or a job object) and claybin runs, or the startup banner says `sandbox: unavailable, running unsandboxed` and commands run unconfined — reported, never silent. Windows Sandbox (the Hyper-V VM product) was deliberately not chosen: it is a whole-OS VM with seconds of boot time, no pipe-stdout model and no per-command exit codes.
 
 claybin is the default because the difference is measured, not argued.
 

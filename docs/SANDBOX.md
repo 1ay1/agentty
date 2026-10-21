@@ -57,7 +57,8 @@ Settings persist as you edit and apply **on the next launch** — see
 
 On Windows there is no fallback engine and no bwrap: the probe either proves
 it can build a wall (AppContainer or a job object) and claybin runs, or
-`sandbox: active` becomes `sandbox: none` and commands run unconfined —
+`sandbox: active` becomes `sandbox: unavailable, running unsandboxed` and
+commands run unconfined —
 reported at startup, never silently. Windows Sandbox (the Hyper-V VM product)
 was deliberately not chosen: it is a whole-OS VM with seconds of boot time, no
 pipe-stdout model and no per-command exit codes, which breaks the
@@ -228,15 +229,13 @@ AppContainer's default-deny carries the isolation. Run `sandbox_audit` on a
 Windows host for the live wall list; `tests/sandbox_win_posture_test.cpp`
 pins the exec chain end to end.
 
-#### What is not wired yet
+#### The settings pane
 
-The engine is complete; the **pane's compile preview is not**. `preview_sandbox`
-is still implemented only for Linux and macOS, so on Windows the Settings →
-Sandbox footer falls through to `will NOT apply on restart · no sandbox backend
-on this platform` even while commands are in fact confined, and the per-row wall
-annotations are empty. The startup banner and `sandbox_audit` are correct — it
-is the preview that has not been ported. Until it is, trust the banner and the
-audit on a Windows host, not the footer.
+`preview_sandbox` compiles the pane's policy with claybin's Windows compiler,
+the same one the spawn path uses and with the same ACL opt-in, so the footer
+and the per-row walls show what commands get: filesystem `partial` via
+appcontainer+DACL, memory and pids `strong` via the job object, syscall filter
+`partial` (mitigation policies, no programmable filter).
 
 Two env-gated traces exist for the stop/spawn paths, because those are the
 ones where a bug shows only under load and a rebuild-only diagnosis costs a

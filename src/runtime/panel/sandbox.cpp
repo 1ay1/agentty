@@ -25,12 +25,15 @@
 // Linux meant that on a mac the pane silently dropped every one of them: the
 // policy still compiled and was still enforced, but the user had no row to
 // see or change it with.
-#if defined(__linux__) || defined(__APPLE__)
-#include "claybin/plan/compile.hpp"
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 #include "claybin/policy/policy.hpp"
 #include "claybin/policy/profiles.hpp"
 #if defined(__APPLE__)
 #include "claybin/macos/backend.hpp"
+#elif defined(_WIN32)
+#include "claybin/windows/backend.hpp"
+#else
+#include "claybin/plan/compile.hpp"
 #endif
 #include "agentty/tool/util/sandbox_claybin.hpp"   // host(): the cached probe
 #endif
@@ -790,7 +793,7 @@ std::vector<std::string> read_sandbox_list(const SandboxListPane& p) {
     return uniq;
 }
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 
 Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
     using namespace ::clay;
@@ -802,7 +805,13 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
     // Only the axes that change the WALLS need to be faithful here; the exact
     // bind list does not move a guarantee, so the preview uses the shape
     // rather than the full read set. (The spawn path builds the real thing.)
+#if defined(_WIN32)
+    // Windows rejects a path with no drive, so the shape needs a native root.
+    // Which root doesn't move a wall, so a fixed one keeps this pure.
+    d = std::move(d).ro_bind("C:\\Windows", "C:\\Windows");
+#else
     d = std::move(d).ro_bind("/usr", "/usr");
+#endif
     d = std::move(d).proc_fs("/proc");
     d = std::move(d).dev_fs("/dev");
     d = std::move(d).tmpfs("/tmp", Bytes{cfg.tmp_mb * 1024 * 1024});
@@ -865,6 +874,14 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
     auto compiled = ::clay::macos::compile(std::move(d).seal(),
                                            tools::util::sandbox::claybin_backend::host(),
                                            mopts);
+#elif defined(_WIN32)
+    // Same options as the spawn path (sandbox_claybin.cpp spawn_argv): ACL
+    // stamping on, so the filesystem walls read what commands really get.
+    // probe_host() caches its verdict, so this costs one probe per process.
+    ::clay::windows::Options wopts;
+    wopts.allow_host_acl_mutation = true;
+    auto compiled = ::clay::windows::compile(std::move(d).seal(),
+                                             ::clay::windows::probe_host(), wopts);
 #else
     // The cached probe: this runs on every key in the pane, and probing forks.
     auto compiled = compile(std::move(d).seal(),
@@ -876,7 +893,7 @@ Preview preview_sandbox(const sandbox_cfg::Config& cfg) {
         return out;
     }
     out.compiled = true;
-#if !defined(__APPLE__)
+#if defined(__linux__)
     out.plan_ops = compiled->plan.op_count();
 #endif
     for (int i = 0; i < static_cast<int>(CapId::count_); ++i) {
@@ -1156,11 +1173,8 @@ void annotate_host_risks(form::Form& f, const sandbox_cfg::Config& cfg,
 #else
 
 Preview preview_sandbox(const sandbox_cfg::Config&) {
-    // Not a missing LIBRARY -- claybin is a required submodule and always
-    // linked. It is a missing KERNEL: applying a plan needs namespaces,
-    // landlock, seccomp and cgroup2 (Linux) or seatbelt (macOS). On Windows
-    // claybin compiles a policy and refuses to apply it, and agentty has no
-    // sandbox there for this pane to configure.
+    // claybin is always linked, but it applies a policy only on Linux, macOS
+    // and Windows. Anywhere else there is nothing for this pane to preview.
     Preview out;
     out.compiled = false;
     out.error = "no sandbox backend on this platform";

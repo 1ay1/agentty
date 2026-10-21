@@ -106,16 +106,35 @@ void install(const sandbox_cfg::Config& cfg) {
 
 }  // namespace
 
-// Whether this host has a sandbox backend for the pane to configure. Mirrors
-// the guard in src/runtime/panel/sandbox.cpp: on Windows there is none, so
-// annotate_sandbox_form is deliberately a no-op (no walls, no per-row
-// warnings) and build_sandbox_form locks every claybin row. Cases that pin
-// annotations or the unlocked-row count only mean something where a backend
-// exists.
+// Whether this host has a sandbox backend for these cases. Linux and macOS;
+// Windows previews through claybin too, but these cases pin POSIX paths, so
+// it has its own case below.
 #if defined(__linux__) || defined(__APPLE__)
 #define AGENTTY_TEST_SANDBOX_BACKEND 1
 #else
 #define AGENTTY_TEST_SANDBOX_BACKEND 0
+#endif
+
+#if defined(_WIN32)
+TEST_CASE("sandbox pane: windows previews through claybin") {
+    // It used to fall through to "no sandbox backend on this platform" while
+    // commands really were confined. The preview has to report the walls the
+    // spawn path puts up.
+    sandbox_cfg::Config cfg;
+    cfg.configured = true;
+    cfg.backend = sandbox_cfg::LinuxBackend::Claybin;
+    cfg.memory_mb = 1024;
+    install(cfg);
+    const auto preview = pn::preview_sandbox(cfg);
+    REQUIRE_MESSAGE(preview.compiled, preview.error);
+    bool fs = false, mem = false;
+    for (const auto& w : preview.walls) {
+        if (w.name == "filesystem.read") fs = w.mechanism.find("appcontainer") != std::string::npos;
+        if (w.name == "resource.memory") mem = w.strength == "strong";
+    }
+    CHECK(fs);
+    CHECK(mem);
+}
 #endif
 
 TEST_CASE("sandbox pane: the General list has a door that opens it") {
