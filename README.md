@@ -54,10 +54,11 @@ Claude, GPT, Groq, OpenRouter, Ollama, or any OpenAI-compatible endpoint. Switch
 
 ### 🛡️ Sandboxed by default
 Every shell call runs inside an OS-enforced sandbox — claybin on Linux
-(seccomp + landlock + cgroup2, with bubblewrap as the fallback), macOS
+(seccomp + landlock + cgroup2; one engine, bwrap was removed), macOS
 (seatbelt + rlimits, with sandbox-exec as the fallback), and Windows
-(AppContainer + job objects; there is no weaker fallback engine — when the
-host cannot build a wall, startup says so and commands run unconfined).
+(AppContainer + restricted token + job objects; there is no weaker fallback
+engine — when the host cannot build a wall, startup says so and commands run
+unconfined).
 Credential files are masked whether or not you configure anything, and file
 tools refuse paths outside your workspace. Deep dive:
 [`docs/SANDBOX.md`](docs/SANDBOX.md).

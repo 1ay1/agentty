@@ -32,6 +32,10 @@ That line is a **real test, not a claim**. Before printing it, agentty actually 
 
 For the full picture, open **Settings → Sandbox**. The pane shows every wall, what's enforcing it, and — crucially — anything it *can't* enforce on your machine.
 
+:::caution
+On **Windows** the engine is live but the pane's compile preview is not ported yet: the footer reads `no sandbox backend on this platform` and the per-row wall annotations are blank even while commands really are confined. Trust the startup banner and `sandbox_audit` there until the preview lands.
+:::
+
 ## Pick a posture, not 28 switches
 
 The pane has a lot of knobs. You almost certainly want the top one.
@@ -68,22 +72,22 @@ The sandbox isn't one mechanism. It's several, each closing a different route ou
 **A detached terminal session.** Without this, a command can push fake keystrokes into your terminal (the `TIOCSTI` trick) and make your shell run them after agentty exits.
 
 :::note
-All six are enforced on Linux. On **macOS**, agentty drives the same claybin policy through **seatbelt** — the kernel mechanism Chrome and every App Store app use. The filesystem, exec and network walls are full strength; `no_new_privs` has an equivalent in that a seatbelt profile cannot be dropped by `exec`; resource ceilings become POSIX rlimits, which are weaker than cgroups (they count *per process*, not per process tree). There is **no syscall filter** — macOS has no seccomp equivalent available to an unprivileged process — so agentty reports that capability as `none` instead of quietly implying it. Windows has no backend yet, and `--sandbox on` fails loudly there rather than pretending.
+Each platform compiles the same policy into what it actually has. On Linux that's namespaces, Landlock, seccomp and cgroup2 at full strength. On macOS the profile is seatbelt plus rlimits: `no_new_privs` has an equivalent in that a seatbelt profile cannot be dropped by `exec`; resource ceilings become POSIX rlimits, which are weaker than cgroups (they count *per process*, not per process tree); and there is **no syscall filter** — macOS has no seccomp equivalent available to an unprivileged process — so agentty reports that capability as `none` instead of quietly implying it. On Windows the walls are an AppContainer, a restricted token, a job object and process mitigation policies: memory, CPU and process caps are genuinely as strong as cgroup2, filesystem and exec walls are `partial` because Windows enforces ACLs per object rather than per path prefix, and there is no syscall filter either (mitigation policies are a fixed menu of hardening switches, not a programmable filter).
 :::
 
 ## Which backend, and why
 
-Two implementations per platform, with claybin the default on both:
+| Platform | Engine | What it puts up | Fallback |
+|---|---|---|---|
+| Linux | **claybin** | namespaces, Landlock, seccomp, cgroup2 | none — one Linux engine |
+| macOS | **claybin** | seatbelt from your compiled policy, plus rlimits | `sandbox-exec`, one fixed profile |
+| Windows | **claybin** | AppContainer, restricted token, job object, mitigation policies | **none, by design** |
 
-| Platform | Default | Fallback |
-|---|---|---|
-| Linux | **claybin** — namespaces, landlock, seccomp, cgroup2 | **bwrap** (bubblewrap) — filesystem walls only |
-| macOS | **claybin** — seatbelt from your compiled policy | **sandbox-exec** — Apple's CLI, one fixed profile |
-| Windows | — | — |
+On Windows there is no weaker engine to fall back to and no `bwrap`: the probe either proves it can build a wall (an AppContainer or a job object) and claybin runs, or the startup banner says `sandbox: none` and commands run unconfined — reported, never silent. Windows Sandbox (the Hyper-V VM product) was deliberately not chosen: it is a whole-OS VM with seconds of boot time, no pipe-stdout model and no per-command exit codes.
 
 claybin is the default because the difference is measured, not argued.
 
-**On Linux**, against bwrap:
+**On Linux**, against the bwrap path it replaced:
 
 | Capability | claybin | bwrap |
 |---|---|---|
@@ -92,10 +96,7 @@ claybin is the default because the difference is measured, not argued.
 | memory / CPU / process limits | **yes** | **no** |
 | runtime `ptrace` + `kill` decisions | **yes** | **no** |
 
-There's no capability where bwrap wins. It stays because the two **fail on different machines**:
-
-- bwrap can't start where *user namespaces* are blocked. That's the kernel feature letting an ordinary program build an isolated view of the system without being root — and Ubuntu 24.04 disables it by default for untrusted programs.
-- claybin needs Landlock, so it can't do its full job on kernels older than 5.13.
+There's no capability where bwrap wins. It used to stay as a second Linux engine on the argument that the two **fail on different machines** — bwrap can't start where *user namespaces* are blocked (Ubuntu 24.04 disables them for untrusted programs), and claybin needs Landlock, so it can't do its full job on kernels older than 5.13. That argument did not survive the code it described: both fail for the same underlying reason, and the probe now proves a real namespace rather than checking that a binary exists. So there is one Linux engine, and `--sandbox-backend bwrap` still parses, says what it did, and runs claybin.
 
 **On macOS**, the comparison is a different shape: both engines are seatbelt, so this is not a contest about strength. claybin calls `sandbox_init` with a profile compiled from *your* policy; `sandbox-exec` is Apple's command-line wrapper around the same kernel mechanism, driven by one fixed profile string. So the question is what survives the trip:
 
@@ -111,11 +112,11 @@ There's no capability where bwrap wins. It stays because the two **fail on diffe
 
 That last row is the honest one. macOS has no seccomp equivalent available to an ordinary program, so agentty reports the syscall filter as unavailable rather than implying it. The resource limits are rlimits, which count *per process* rather than per process tree — four children under a 1 GB cap can use 4 GB between them — so they report `partial`, and the process limit reports `advisory`, because it is counted per *user account*, not per sandbox.
 
-Asking for claybin where it can't run gives you the fallback. You never silently end up with nothing — and the fallback works in both directions, so a Mac missing `sandbox-exec` still gets claybin, which talks to the kernel directly.
+Asking for claybin where it can't run gives you the platform's answer, not a silent nothing. On macOS the fallback works in both directions, so a Mac missing `sandbox-exec` still gets claybin, which talks to the kernel directly. On Windows there is nothing to fall back to, so the banner tells you instead.
 
 ```sh
-agentty --sandbox-backend claybin   # default on Linux and macOS
-agentty --sandbox-backend bwrap     # force the fallback
+agentty --sandbox-backend claybin   # default everywhere
+agentty --sandbox-backend bwrap     # accepted for old scripts; bwrap is gone
 ```
 
 ## What the command can reach
@@ -206,7 +207,7 @@ A boundary you can't see the edge of isn't one you can trust. So, plainly:
 - **Secrets deeper than the scan depth,** or inside a skipped folder like `node_modules`.
 - **Credential files nobody would recognise.** A secret in `config.local.yaml` doesn't look like a secret.
 - **Kernel bugs.** The command shares your kernel. A flaw in the kernel itself defeats any sandbox of this kind — which is what the pane means when it reports kernel isolation as `none`.
-- **Windows.** No backend yet. `--sandbox on` fails loudly rather than quietly doing nothing.
+- **A host that cannot build a wall.** On Linux, a kernel without Landlock (older than 5.13) leaves no engine; on Windows, a host where the AppContainer probe fails (policy software, token shape) leaves none either. `--sandbox on` fails loudly rather than quietly doing nothing, and `--sandbox auto` prints what you actually got.
 
 ## The model knows it's sandboxed
 

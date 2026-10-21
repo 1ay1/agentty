@@ -40,7 +40,7 @@ Linux, macOS, and Windows — all built and tested daily. Prebuilt binaries ship
 
 ## How is it sandboxed?
 
-Every shell/build call runs in a sandbox the kernel enforces, so it holds even if the command tries to escape. The workspace is read-write, system libs read-only, and `~/.ssh` / `/etc` / other projects are blocked. Windows and unrooted Android/Termux run unsandboxed (no user-namespace backend available there); agentty detects this and prints `sandbox: unavailable, running unsandboxed`.
+Every shell/build call runs in a sandbox the kernel enforces, so it holds even if the command tries to escape. The workspace is read-write, system libs read-only, and `~/.ssh` / `/etc` / other projects are blocked. That is true on Linux (namespaces + Landlock + seccomp + cgroup2), on macOS (seatbelt + rlimits) and — since 0.9.29 — on Windows (AppContainer + restricted token + job object + mitigation policies). Windows has no weaker fallback engine: if the host can't build a wall, agentty says `sandbox: unavailable, running unsandboxed` instead of pretending. Unrooted Android/Termux still runs unsandboxed.
 
 ## Can I run it on a machine with no internet?
 
