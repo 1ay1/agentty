@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.31] - 2026-10-21
+
 ### Fixed
 - **Windows: a child process no longer holds another one's pipes open.**
   Every spawn used to hand the new child every inheritable handle agentty
