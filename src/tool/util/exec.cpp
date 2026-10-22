@@ -783,6 +783,7 @@ ChildResult run_child(const ChildRun& run) {
     std::optional<reactor_t::registration> out_reg, in_reg, broker_reg;
 #if defined(_WIN32)
     ::agentty::util::WorkerGroup feeder{"exec.stdin_feed"};   // destroyed after the reap
+    bool feeder_started = false;   // a feeder job is running, so there's something to join
 #endif
     if (auto h = proc.stdout_handle())
         if (auto reg = reactor->watch(h->get(), pf::interest::read, kOutToken))
@@ -820,6 +821,7 @@ ChildResult run_child(const ChildRun& run) {
         // feeder.stop() after the reap is the join.
         if (auto dup = maya::platform::duplicate_handle(h->get())) {
             proc.close_stdin();
+            feeder_started = true;
             feeder.post([](const maya::unlocked&, std::stop_token, maya::platform::owned_handle own,
                            std::string data) {
                 std::size_t off = 0;
@@ -976,11 +978,14 @@ ChildResult run_child(const ChildRun& run) {
     (void)proc.stop(pf::stop_mode::forceful, pf::stop_scope::tree);
     // run_child is a blocking leaf helper (it locks nothing of ours). Its
     // callers are tool bodies, mcp-cpp's Exec, the keystore/clipboard CLI
-    // probes -- none inside an agentty lock body, which can't reach it (they
-    // are captureless over their own value). The join re-states that here,
-    // the one reviewed root for this helper (tests/lint/allowlist.txt).
-    maya::thread_root([&](const maya::unlocked& c) { feeder.stop(c); });
-    stop_trace(started_at, "feeder joined");
+    // probes, and the RAG docs converter. That last one runs inside the RAG
+    // index lock, where a join can't be re-stated (#112), but it passes no
+    // stdin, so there is no feeder to join. Only a run that started one joins
+    // it, and those all come from outside every agentty lock.
+    if (feeder_started) {
+        maya::thread_root([&](const maya::unlocked& c) { feeder.stop(c); });
+        stop_trace(started_at, "feeder joined");
+    }
 #endif
     stamp();
     return r;
@@ -990,8 +995,12 @@ ChildResult run_child(const ChildRun& run) {
 // Splitter (a std::function whose signature those libraries fix). Joining
 // helpers needs `unlocked`; it is re-stated here, the one reviewed root for
 // the splitter (tests/lint/allowlist.txt). Sound: the libraries call it from
-// a tool body or a RAG index build, never from inside an agentty lock body,
-// and `fn` (their per-share scan) takes no agentty lock.
+// a tool body, never from inside an agentty lock body, and `fn` (their
+// per-share scan) takes no agentty lock.
+//
+// Never hand this splitter to an object that runs inside a lock body: the
+// RAG index builds and searches holding rag_index, so its engines get an
+// inline Splitter{} (rag/adapter.cpp make_engine_config, #112).
 void scope_fan_out(std::size_t n, const std::function<void(std::size_t)>& fn) {
     if (n <= 1) { if (n) fn(0); return; }
     maya::thread_root([&](const maya::unlocked& cap) {

@@ -12,9 +12,9 @@
 
 namespace agentty::rag {
 
-// Parallel regions on maya::scope (safe to nest: a nested region runs its
-// shares on fresh helpers rather than waiting on a busy pool).
-[[nodiscard]] ::rag::util::Splitter splitter();
+// No parallel Splitter here on purpose: every rag-cpp engine agentty owns runs
+// inside the RAG index lock, and a splitter that joins helper threads can't
+// run under a lock (#112). Those engines use an inline ::rag::util::Splitter{}.
 
 // HTTP through agentty's client (TLS, proxy, SSRF guard off: these are the
 // user's configured endpoints) and processes through util::ChildProcess.

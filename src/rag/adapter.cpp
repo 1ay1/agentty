@@ -910,9 +910,11 @@ struct Index {
 
     ::rag::index::CorpusConfig make_engine_config(bool source_code = false) {
         ::rag::index::CorpusConfig cc;
-        // Index bodies hold rag_index while building. The default splitter
-        // would mint worker capabilities from inside that lock, so keep all
-        // corpus fan-out inline for lock-owned engines.
+        // Index bodies hold rag_index while building and searching, and
+        // joining helper threads under a lock is what jaal forbids (#112:
+        // thread_root aborted mid-retrieve). So this engine's work runs
+        // inline. The cost is a cold embed pass done one batch at a time;
+        // a warm index (persisted, or already built) pays nothing.
         cc.split      = ::rag::util::Splitter{};
         cc.contextual = cfg.contextual;
         if (source_code)

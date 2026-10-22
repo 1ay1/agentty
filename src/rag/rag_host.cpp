@@ -90,11 +90,6 @@ public:
 
 }  // namespace
 
-::rag::util::Splitter splitter() {
-    return ::rag::util::Splitter(::agentty::tools::util::scope_fan_out,
-                                 ::agentty::tools::util::fan_out_width());
-}
-
 ::rag::plugin::HostIo host_io() {
     ::rag::plugin::HostIo io;
     io.http  = std::make_shared<AgenttyHttp>();

@@ -43,6 +43,7 @@
 #  include <arpa/inet.h>
 #  include <netinet/in.h>
 #  include <sys/socket.h>
+#  include <sys/time.h>
 #  include <unistd.h>
 #endif
 
@@ -212,6 +213,21 @@ private:
                 if (stop_.load(std::memory_order_acquire)) break;
                 continue;
             }
+            // A client that connects and never sends (or a kept-alive socket
+            // the client forgot) must not wedge this thread: the destructor
+            // joins it, and a stuck join hangs ctest instead of failing.
+#if defined(_WIN32)
+            const DWORD ms = 5000;
+            (void)::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                               reinterpret_cast<const char*>(&ms), sizeof(ms));
+#else
+            timeval tv{5, 0};
+            (void)::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+            if (stop_.load(std::memory_order_acquire)) {
+                close_socket(client);
+                break;
+            }
             handle(client);
             close_socket(client);
         }
@@ -289,6 +305,20 @@ TEST_CASE("rag cold retrieval serializes fan-out under the index lock") {
                    "This document exercises the cold embedding path while the "
                    "RAG index lock is held. fixture-token-" + std::to_string(i) + "\n");
     }
+    // cwd and the workspace root are process-global: put both back on every
+    // way out, before TempDir removes the directory they point into, or the
+    // next test in this binary runs from a deleted directory.
+    struct RestoreWorkspace {
+        fs::path cwd = fs::current_path();
+        fs::path ws  = ::agentty::tools::util::workspace_root();
+        ~RestoreWorkspace() {
+            std::error_code e;
+            fs::current_path(cwd, e);
+            ::agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), ws);
+        }
+    };
+    // Declared after `tmp`, so it runs first on the way out.
+    RestoreWorkspace restore;
     std::error_code ec;
     fs::current_path(tmp.path(), ec);
     REQUIRE(!ec, "temporary project becomes the current directory");
