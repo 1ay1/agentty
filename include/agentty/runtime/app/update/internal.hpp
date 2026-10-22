@@ -528,6 +528,7 @@ Cmd  login_update         (Model& m, msg::LoginMsg          lm);
 Cmd  diff_review_update   (Model& m, msg::DiffReviewMsg     dm);
 Cmd  smart_mode_update    (Model& m, msg::SmartModeMsg      sm);
 Cmd  web_search_update    (Model& m, msg::WebSearchMsg      wm);
+Cmd  paste_settings_update(Model& m, msg::PasteSettingsMsg  pm);
 Cmd  plugin_edit_update   (Model& m, msg::PluginEditMsg     pm);
 // The edit pane's half of a PluginEdited reply (its writes are cmd::
 // edit_plugin effects). settings_list owns the leaf and routes EditPane
@@ -561,6 +562,7 @@ void ascend(Model& m);
 [[nodiscard]] form::Form rag_form_for_search(const Model& m);
 [[nodiscard]] form::Form sandbox_form_for_search(const Model& m);
 [[nodiscard]] form::Form web_search_form_for_search(const Model& m);
+[[nodiscard]] form::Form paste_form_for_search(const Model& m);
 [[nodiscard]] form::Form appearance_form_for_search(const Model& m);
 // All of the above, as the Settings hub's search index.
 [[nodiscard]] std::vector<settings::ListOpen::Hit> settings_search_index(const Model& m);

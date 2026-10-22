@@ -32,6 +32,7 @@
 #include "agentty/runtime/store_fx.hpp"
 #include "agentty/tool/subagent.hpp"            // PublishSubagent's target
 #include "agentty/tool/web_search_policy.hpp"       // PublishWebSearchPolicy's target
+#include "agentty/io/clipboard.hpp"                 // PublishPasteConfig's target
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/util/logx.hpp"
 
@@ -119,6 +120,10 @@ struct Host : maya::terminal_host<P> {
     void handle(PublishWebSearchPolicy e) {
         tools::web_search_policy::install(std::move(e.policy));
     }
+
+    // Publish the Model's paste settings to the clipboard reader (see
+    // store_fx.hpp PublishPasteConfig). One atomic swap.
+    void handle(PublishPasteConfig e) { clipboard_configure(e.config); }
 
     // Credentials (see store_fx.hpp). Small local reads/writes, run in order
     // on the loop thread so the next fold's stream launch sees them.

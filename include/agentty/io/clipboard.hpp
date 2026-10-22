@@ -11,10 +11,13 @@
 // writes are off by default in Terminal.app and iTerm2.
 
 #include <cstdint>
+#include <filesystem>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include "agentty/domain/paste_config.hpp"
 
 namespace agentty {
 
@@ -32,6 +35,14 @@ struct ClipboardContents {
     std::string source;                // "wayland wayland-1", "agent via ssh", ...
     std::string error;                 // set when items is empty
 };
+
+// Installs the paste settings (Settings → Paste / settings.json /
+// AGENTTY_PASTE_*). Call at startup and whenever they change; a paste that is
+// already running keeps what it read.
+void clipboard_configure(const paste_cfg::Config& c);
+[[nodiscard]] paste_cfg::Config clipboard_config();
+// Where pasted images and files are saved right now.
+[[nodiscard]] std::filesystem::path clipboard_save_dir();
 
 // Reads the clipboard. Blocking (a socket round trip, maybe over ssh), so
 // call it from a worker. `allow_remote` false skips the ssh agent route.

@@ -75,9 +75,9 @@ std::string diagnose(bool in_ssh) {
     if (in_tmux) (void)maya::tmux::refresh_if_client_changed();
     std::string msg;
     if (in_mosh) {
-        msg = "clipboard: mosh doesn't relay terminal clipboard "
-              "replies \xe2\x80\x94 use plain ssh (or tmux over ssh), or "
-              "run `agentty paste setup` on your laptop";
+        msg = "clipboard: mosh drops terminal clipboard replies and can't "
+              "forward the paste agent \xe2\x80\x94 use plain ssh (with "
+              "`agentty paste setup` on your laptop) to paste images";
     } else if (in_tmux) {
         // Name the ACTUAL blocker instead of guessing. Order
         // matters: these are checked in the order tmux applies

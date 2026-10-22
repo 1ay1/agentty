@@ -842,7 +842,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // A `richpaste:1:` line: an image or file copied as text on
             // the laptop (`agentty paste howto`) that crossed ssh as a
             // plain paste. Decoding is pure, so it runs here.
-            if (!e.path_checked && has_armored(e.text)) {
+            if (!e.path_checked && m.d.persisted.paste.decode_text && has_armored(e.text)) {
                 std::string why;
                 auto items = decode_armored(e.text, &why);
                 AGT_LOG(Ui, Info, "paste.armored", "items={} err={}", items.size(), why);

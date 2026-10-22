@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agentty paste: an image or file as text</title>
+<meta name="description" content="Turn a screenshot or file into one line of text you can paste into agentty over ssh. Runs in your browser; nothing is uploaded.">
+<style>:root{color-scheme:light dark}body{font:16px system-ui;margin:3em auto;max-width:40em;padding:0 1em;line-height:1.5}#s{margin-top:1em}textarea{width:100%;height:6em}
+#z{border:2px dashed #888;border-radius:8px;padding:2em;text-align:center;outline:none;caret-color:transparent}
+#z:focus{border-color:#06c}code{font-family:ui-monospace,monospace}small{opacity:.75}</style>
+<h2>Paste or drop an image or file here</h2>
+<p>Click the box, press Cmd+V (or Ctrl+V), or drop a file on it. It becomes one line of text on
+your clipboard. Then paste that into agentty, even over ssh. Nothing leaves this page.</p>
+<div id="z" contenteditable="true" autofocus>paste here</div>
+<div id="s">waiting...</div><button id="b" hidden>Copy text</button><textarea id="t" hidden readonly></textarea>
+<p><small>Only needed when your laptop can't hand agentty its clipboard (Terminal.app over ssh, no
+<code>agentty paste setup</code>). Same page offline: <code>agentty paste page &gt; paste.html</code>.
+More: <a href="https://agentty.org/docs/clipboard">Clipboard &amp; Images</a>.</small></p>
+<script>
+function b64(bytes){let s='';for(let i=0;i<bytes.length;i+=32768)s+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));return btoa(s)}
+function utf8b64(str){return b64(new TextEncoder().encode(str))}
+async function sha(bytes){try{const d=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(d)].map(x=>x.toString(16).padStart(2,'0')).join('')}catch(e){return ''}}
+async function armor(mime,name,bytes){return 'richpaste:1:'+(mime||'application/octet-stream')+':'+(name?utf8b64(name):'')+':'+bytes.length+':'+(await sha(bytes))+':'+b64(bytes)}
+async function take(file){const bytes=new Uint8Array(await file.arrayBuffer());const named=file.name&&!/^image\.(png|jpe?g|gif|webp|tiff?)$/i.test(file.name);return armor(file.type,named?file.name:'',bytes)}
+const S=document.getElementById('s'),B=document.getElementById('b'),T=document.getElementById('t');
+async function done(text){T.value=text;try{await navigator.clipboard.writeText(text);S.textContent='Copied ('+text.length+' chars). Now paste in the terminal.';return}catch(e){}
+T.hidden=false;B.hidden=false;S.textContent='Ready. Click "Copy text", then paste in the terminal.'}
+B.onclick=()=>{T.select();document.execCommand('copy');S.textContent='Copied. Now paste in the terminal.'};
+async function encodeAll(files){const parts=[];for(const f of files)parts.push(await take(f));return parts.join(' ')}
+async function handle(files){if(!files.length){S.textContent='No image or file in that paste.';return}S.textContent='Encoding...';done(await encodeAll(files))}
+function filesOf(dt){const fs=[...(dt.files||[])];if(fs.length)return fs;return [...(dt.items||[])].filter(i=>i.kind==='file').map(i=>i.getAsFile()).filter(Boolean)}
+// Safari only allows clipboard writes inside the user's gesture. Handing it a ClipboardItem
+// whose content is a promise, synchronously, keeps the gesture while we encode.
+function pasteNow(files){if(!files.length){S.textContent='No image or file in that paste.';return}
+if(window.ClipboardItem&&navigator.clipboard&&navigator.clipboard.write){S.textContent='Encoding...';const p=encodeAll(files);
+try{navigator.clipboard.write([new ClipboardItem({'text/plain':p.then(t=>{T.value=t;return new Blob([t],{type:'text/plain'})})})]).then(()=>{S.textContent='Copied ('+T.value.length+' chars). Now paste in the terminal.'},()=>p.then(done));return}catch(e){}}
+handle(files)}
+const Z=document.getElementById('z');Z.focus();
+document.addEventListener('paste',e=>{e.preventDefault();pasteNow(filesOf(e.clipboardData))});
+Z.addEventListener('input',()=>{Z.textContent='paste here'});
+document.addEventListener('dragover',e=>e.preventDefault());
+document.addEventListener('drop',e=>{e.preventDefault();pasteNow(filesOf(e.dataTransfer))});
+if(typeof module!=='undefined')module.exports={armor};
+</script>

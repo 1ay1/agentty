@@ -50,7 +50,7 @@ struct ListOpen {
     // twice or misses one a pane gained.
     std::string query;
     // Which form pane a search hit lives in.
-    enum class Pane : std::uint8_t { Rag, Smart, Appearance, Sandbox, WebSearch };
+    enum class Pane : std::uint8_t { Rag, Smart, Appearance, Sandbox, WebSearch, Paste };
     struct Hit {
         std::string label;      // the row's label, as the pane shows it
         std::string help;

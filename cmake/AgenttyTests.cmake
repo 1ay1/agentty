@@ -17,7 +17,7 @@ include(AgenttyTestRegistry)
 set(_AGENTTY_CONSOLIDATED
     error_class_test accounts_registry_test acp_agents_test acp_integration_test
     custom_host_key_prompt_test dispatch_route_test provider_keys_seal_test
-    model_label_test cache_anchor_test composer_edit_test hooks_gate_test
+    model_label_test cache_anchor_test composer_edit_test paste_settings_test hooks_gate_test
     tool_result_image_test
     image_dims_test
     quit_cancels_stream_test
@@ -1294,4 +1294,17 @@ if(Python3_Interpreter_FOUND AND EXISTS ${_PKGPARITY})
              COMMAND ${Python3_EXECUTABLE} ${_PKGPARITY})
     set_tests_properties(packaging_submodule_parity PROPERTIES
                          LABELS "static" TIMEOUT 30)
+endif()
+
+# paste_page_sync: agentty.org/paste serves docs/website/static/paste.html.
+# The page encodes, agentty decodes, so it must be exactly what
+# `agentty paste page` prints (rp::armor::html_page). If this fails, run:
+#   agentty paste page > docs/website/static/paste.html
+if(TARGET agentty)
+    add_test(NAME paste_page_sync
+             COMMAND ${CMAKE_COMMAND}
+                     -DBIN=$<TARGET_FILE:agentty>
+                     -DPAGE=${CMAKE_SOURCE_DIR}/docs/website/static/paste.html
+                     -P ${CMAKE_SOURCE_DIR}/tests/lint/paste_page_sync.cmake)
+    set_tests_properties(paste_page_sync PROPERTIES LABELS "static" TIMEOUT 30)
 endif()

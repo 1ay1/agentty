@@ -258,6 +258,12 @@ inline auto visual_parts(const WebSearch& p) {
 }
 static_assert(visual::parts_cover_all<WebSearch>);
 
+inline auto visual_parts(const PasteSettings& p) {
+    return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
+                           visual::ref(p.form), visual::ref(p.scroll));
+}
+static_assert(visual::parts_cover_all<PasteSettings>);
+
 inline auto visual_parts(const PluginEdit& p) {
     return std::make_tuple(visual::ref(static_cast<const WithFrom&>(p)),
                            visual::ref(p.form), visual::ref(p.server),

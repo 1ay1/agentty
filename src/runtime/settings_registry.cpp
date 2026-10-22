@@ -106,6 +106,10 @@ std::string get(const web_search_cfg::Config& c, const SettingDef& d) {
     return get_impl(c, d);
 }
 
+std::string get(const paste_cfg::Config& c, const SettingDef& d) {
+    return get_impl(c, d);
+}
+
 // ── Write ────────────────────────────────────────────────────────────────
 
 namespace {
@@ -226,6 +230,10 @@ bool set(web_search_cfg::Config& c, const SettingDef& d, std::string_view value)
     return set_impl(c, d, value);
 }
 
+bool set(paste_cfg::Config& c, const SettingDef& d, std::string_view value) {
+    return set_impl(c, d, value);
+}
+
 // ── Defaults ─────────────────────────────────────────────────
 
 bool is_default(const store::RagConfig& c, const SettingDef& d) {
@@ -242,6 +250,11 @@ bool is_default(const web_search_cfg::Config& c, const SettingDef& d) {
     return is_default_impl(c, kDefaults, d);
 }
 
+bool is_default(const paste_cfg::Config& c, const SettingDef& d) {
+    static const paste_cfg::Config kDefaults{};
+    return is_default_impl(c, kDefaults, d);
+}
+
 void reset(store::RagConfig& c, const SettingDef& d) {
     reset_impl(c, defaults(), d);
 }
@@ -253,6 +266,11 @@ void reset(smart::RoleConfig& s, const SettingDef& d) {
 
 void reset(web_search_cfg::Config& c, const SettingDef& d) {
     static const web_search_cfg::Config kDefaults{};
+    reset_impl(c, kDefaults, d);
+}
+
+void reset(paste_cfg::Config& c, const SettingDef& d) {
+    static const paste_cfg::Config kDefaults{};
     reset_impl(c, kDefaults, d);
 }
 
@@ -296,6 +314,8 @@ void apply_env(web_search_cfg::Config& c, const EnvSnapshot& env) {
     }
 }
 void apply_env(Io io, web_search_cfg::Config& c) { apply_env(c, read_env(io)); }
+void apply_env(paste_cfg::Config& c, const EnvSnapshot& env) { apply_env_impl(c, env); }
+void apply_env(Io io, paste_cfg::Config& c) { apply_env(c, read_env(io)); }
 
 std::string env_override(const SettingDef& d, const EnvSnapshot& env) {
     if (d.env.empty()) return {};

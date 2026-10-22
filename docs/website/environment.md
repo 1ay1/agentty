@@ -228,6 +228,24 @@ Details worth knowing:
 Symlinking the subdirectories works too, and predates these variables:
 `ln -s /mnt/data/agentty-logs ~/.agentty/logs`.
 
+## Paste
+
+Each overrides one row of Settings → Paste for this run (it wins over
+`settings.json`, locks the row in the pane, and is never saved). Full table with
+defaults: **[Configuration → Paste](/docs/configuration#paste)**.
+
+| Variable | Effect |
+|----------|--------|
+| `AGENTTY_PASTE_FORWARDS` | `0` stops reading the laptop's clipboard through a forwarded agent over ssh. |
+| `AGENTTY_PASTE_DISPLAY` | `0` stops reading this machine's own clipboard. |
+| `AGENTTY_PASTE_TERMINAL` | `auto` · `osc5522` · `osc52` · `off`: how (or whether) to ask the terminal for the clipboard. |
+| `AGENTTY_PASTE_SERVER_CLIPBOARD` | `1`: over ssh, fall back to the server's own clipboard. |
+| `AGENTTY_PASTE_DECODE_TEXT` | `0`: paste `richpaste:1:` lines as text instead of the image or file they carry. |
+| `AGENTTY_PASTE_MAX_MB` | Largest paste read, in MB. |
+| `AGENTTY_PASTE_INLINE_KB` | A copied text file up to this many KB pastes as its text; `0` always saves it. |
+| `AGENTTY_PASTE_SAVE_DIR` | Where pasted files are saved. |
+| `AGENTTY_PASTE_SOCKET` | Ask only this agent socket. |
+
 ## Interface
 
 | Variable | Effect |

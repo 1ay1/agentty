@@ -92,6 +92,7 @@ std::pair<Model, Cmd> update(Model m, Msg msg,
         [&](msg::DiffReviewMsg dm)   { return detail::diff_review_update  (m, std::move(dm)); },
         [&](msg::SmartModeMsg sm)    { return detail::smart_mode_update   (m, std::move(sm)); },
         [&](msg::WebSearchMsg wm)    { return detail::web_search_update   (m, std::move(wm)); },
+        [&](msg::PasteSettingsMsg pm) { return detail::paste_settings_update(m, std::move(pm)); },
         [&](msg::PluginEditMsg pm)   { return detail::plugin_edit_update  (m, std::move(pm)); },
         [&](msg::AppearanceMsg am)   { return detail::appearance_update   (m, std::move(am)); },
         [&](msg::SandboxMsg sm)      { return detail::sandbox_update      (m, std::move(sm)); },
@@ -171,13 +172,21 @@ Cmd publish_derived(Model& m, Cmd c) {
         web_search_effect = Cmd(PublishWebSearchPolicy{m.d.persisted.web_search});
     }
 
+    // The paste settings richpaste reads (Settings → Paste), the same way.
+    Cmd paste_effect = Cmd::none();
+    if (!m.published_paste || !(*m.published_paste == m.d.persisted.paste)) {
+        m.published_paste = m.d.persisted.paste;
+        paste_effect = Cmd(PublishPasteConfig{m.d.persisted.paste});
+    }
+
     // Nothing moved — the common case, every keystroke — costs no batch.
-    if (sel_effect.is_none() && sub_effect.is_none() && web_search_effect.is_none())
+    if (sel_effect.is_none() && sub_effect.is_none() && web_search_effect.is_none()
+        && paste_effect.is_none())
         return c;
     // The selection is published before the subagent view, so a worker that
     // reads both sees them describe the same provider.
     return Cmd::batch(std::move(c), std::move(sel_effect), std::move(sub_effect),
-                      std::move(web_search_effect));
+                      std::move(web_search_effect), std::move(paste_effect));
 }
 
 namespace {
@@ -243,6 +252,7 @@ AGENTTY_DOMAIN_UPDATE(LoginMsg,        login_update)
 AGENTTY_DOMAIN_UPDATE(DiffReviewMsg,   diff_review_update)
 AGENTTY_DOMAIN_UPDATE(SmartModeMsg,    smart_mode_update)
 AGENTTY_DOMAIN_UPDATE(WebSearchMsg,    web_search_update)
+AGENTTY_DOMAIN_UPDATE(PasteSettingsMsg, paste_settings_update)
 AGENTTY_DOMAIN_UPDATE(PluginEditMsg,   plugin_edit_update)
 AGENTTY_DOMAIN_UPDATE(AppearanceMsg,   appearance_update)
 AGENTTY_DOMAIN_UPDATE(SandboxMsg,      sandbox_update)

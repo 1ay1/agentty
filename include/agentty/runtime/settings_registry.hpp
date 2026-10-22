@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "agentty/domain/web_search_config.hpp"  // web_search.* rows: bounds + struct
+#include "agentty/domain/paste_config.hpp"       // paste.* rows: bounds + struct
 #include "agentty/domain/smart_tuning.hpp"   // shipped defaults + ranges
 #include "agentty/runtime/panel/form.hpp"           // Builder (add_rows)
 #include "agentty/store/store.hpp"
@@ -62,6 +63,9 @@ enum class Group : std::uint8_t {
     Routing,      // Smart Mode's numeric policy
     WebSearch,    // web_search: availability, result count, exclusions
     WebSearchServices, // web_search: which services answer, in what order
+    PasteRoutes,  // paste: where Ctrl+V may read the clipboard from
+    PasteFiles,   // paste: size limit, what a pasted file becomes
+    PasteExpert,  // paste: pin one agent socket
 };
 
 [[nodiscard]] constexpr std::string_view label_of(Group g) noexcept {
@@ -74,6 +78,9 @@ enum class Group : std::uint8_t {
         case Group::Routing:   return "Routing";
         case Group::WebSearch: return "Search";
         case Group::WebSearchServices: return "Services";
+        case Group::PasteRoutes: return "Where to read from";
+        case Group::PasteFiles:  return "Images and files";
+        case Group::PasteExpert: return "Expert";
     }
     return "";
 }
@@ -104,7 +111,10 @@ enum class Type : std::uint8_t { Bool, Real, Int, Enum, Text };
 // type (web_search_cfg::Config) the tool layer reads as-is. Its rows are the only
 // ones the Web Search pane renders, and the only ones of Type::Text — an
 // exclusion list is free text, not a number or an enum.
-enum class Owner : std::uint8_t { Rag, Smart, WebSearch };
+//
+// Paste is the fourth: how Ctrl+V and `agentty paste` read the clipboard
+// (paste_cfg::Config, handed to richpaste by io/clipboard.cpp).
+enum class Owner : std::uint8_t { Rag, Smart, WebSearch, Paste };
 
 // Pointer-to-member into the persisted config. The row's read/write binding.
 // One alternative per (type, owner) pair; `Owner` says which half is live.
@@ -133,7 +143,10 @@ using Slot = std::variant<
     MemberPtr<smart::RoleConfig, std::string>,
     MemberPtr<web_search_cfg::Config, bool>,
     MemberPtr<web_search_cfg::Config, int>,
-    MemberPtr<web_search_cfg::Config, std::string>>;
+    MemberPtr<web_search_cfg::Config, std::string>,
+    MemberPtr<paste_cfg::Config, bool>,
+    MemberPtr<paste_cfg::Config, int>,
+    MemberPtr<paste_cfg::Config, std::string>>;
 
 // The struct a member pointer points into: `bool web_search_cfg::Config::*` →
 // web_search_cfg::Config. owner() is derived from this.
@@ -178,11 +191,13 @@ struct SettingDef {
                 return Owner::Rag;
             else if constexpr (std::is_same_v<C, smart::RoleConfig>)
                 return Owner::Smart;
+            else if constexpr (std::is_same_v<C, web_search_cfg::Config>)
+                return Owner::WebSearch;
             else {
-                static_assert(std::is_same_v<C, web_search_cfg::Config>,
+                static_assert(std::is_same_v<C, paste_cfg::Config>,
                               "a Slot alternative names a config struct "
                               "owner() does not know");
-                return Owner::WebSearch;
+                return Owner::Paste;
             }
         }, slot);
     }
@@ -367,6 +382,40 @@ inline constexpr std::array kSettings = std::to_array<SettingDef>({
      "result language for the services that take one; auto leaves it to them",
      Group::WebSearchServices, Tier::Basic, Type::Enum, &web_search_cfg::Config::language,
      0.0, 0.0, 0.0, web_search_cfg::kLanguages},
+
+    // ── Paste (Settings → Paste) ─────────────────────────────────────────────
+    // How Ctrl+V and `agentty paste` read the clipboard (richpaste). Read by
+    // io/clipboard.cpp; see domain/paste_config.hpp.
+    {"paste.forwards", "AGENTTY_PASTE_FORWARDS", "Laptop over ssh",
+     "over ssh, read your laptop's clipboard through `agentty paste setup`",
+     Group::PasteRoutes, Tier::Basic, Type::Bool, &paste_cfg::Config::forwards},
+    {"paste.display", "AGENTTY_PASTE_DISPLAY", "This machine",
+     "read this machine's clipboard: Wayland, X11, macOS or Windows",
+     Group::PasteRoutes, Tier::Basic, Type::Bool, &paste_cfg::Config::display},
+    {"paste.terminal", "AGENTTY_PASTE_TERMINAL", "Ask the terminal",
+     "auto: OSC 5522 (images) if the terminal has it, else OSC 52 (text) \xc2\xb7 off: never ask",
+     Group::PasteRoutes, Tier::Basic, Type::Enum, &paste_cfg::Config::terminal,
+     0.0, 0.0, 0.0, paste_cfg::kTerminalModes},
+    {"paste.server_display", "AGENTTY_PASTE_SERVER_CLIPBOARD", "Server's clipboard over ssh",
+     "over ssh, fall back to the server's own clipboard (not the one you copied into)",
+     Group::PasteRoutes, Tier::Advanced, Type::Bool, &paste_cfg::Config::server_display},
+    {"paste.decode_text", "AGENTTY_PASTE_DECODE_TEXT", "Images pasted as text",
+     "turn a pasted richpaste:1: line back into the image or file",
+     Group::PasteFiles, Tier::Basic, Type::Bool, &paste_cfg::Config::decode_text},
+    {"paste.max_mb", "AGENTTY_PASTE_MAX_MB", "Largest paste (MB)",
+     "bigger clipboard contents are refused instead of read",
+     Group::PasteFiles, Tier::Basic, Type::Int, &paste_cfg::Config::max_mb,
+     static_cast<double>(paste_cfg::kMaxMbMin), static_cast<double>(paste_cfg::kMaxMbMax), 1.0},
+    {"paste.inline_kb", "AGENTTY_PASTE_INLINE_KB", "Text file as text up to (KB)",
+     "a copied text file this small goes in as its text; bigger ones are saved \xc2\xb7 0: always save",
+     Group::PasteFiles, Tier::Basic, Type::Int, &paste_cfg::Config::inline_kb,
+     static_cast<double>(paste_cfg::kInlineKbMin), static_cast<double>(paste_cfg::kInlineKbMax), 1.0},
+    {"paste.save_dir", "AGENTTY_PASTE_SAVE_DIR", "Save pasted files in",
+     "empty: ~/.agentty/paste/pasted",
+     Group::PasteFiles, Tier::Advanced, Type::Text, &paste_cfg::Config::save_dir},
+    {"paste.socket", "AGENTTY_PASTE_SOCKET", "Only this agent socket",
+     "ask just this agent (a relay, a test); empty: find the forwarded ones",
+     Group::PasteExpert, Tier::Advanced, Type::Text, &paste_cfg::Config::socket},
 });
 
 inline constexpr int kCount = static_cast<int>(kSettings.size());
@@ -425,7 +474,8 @@ consteval bool slots_match_types() {
             case Type::Bool:
                 if (!std::holds_alternative<MemberPtr<store::RagConfig, bool>>(s.slot)
                  && !std::holds_alternative<MemberPtr<smart::RoleConfig, bool>>(s.slot)
-                 && !std::holds_alternative<MemberPtr<web_search_cfg::Config, bool>>(s.slot))
+                 && !std::holds_alternative<MemberPtr<web_search_cfg::Config, bool>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<paste_cfg::Config, bool>>(s.slot))
                     return false;
                 break;
             case Type::Real:
@@ -438,20 +488,23 @@ consteval bool slots_match_types() {
             case Type::Int:
                 if (!std::holds_alternative<MemberPtr<store::RagConfig, int>>(s.slot)
                  && !std::holds_alternative<MemberPtr<smart::RoleConfig, int>>(s.slot)
-                 && !std::holds_alternative<MemberPtr<web_search_cfg::Config, int>>(s.slot))
+                 && !std::holds_alternative<MemberPtr<web_search_cfg::Config, int>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<paste_cfg::Config, int>>(s.slot))
                     return false;
                 break;
             case Type::Enum:
                 if (!std::holds_alternative<MemberPtr<store::RagConfig, std::string>>(s.slot)
                  && !std::holds_alternative<MemberPtr<smart::RoleConfig, std::string>>(s.slot)
-                 && !std::holds_alternative<MemberPtr<web_search_cfg::Config, std::string>>(s.slot))
+                 && !std::holds_alternative<MemberPtr<web_search_cfg::Config, std::string>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<paste_cfg::Config, std::string>>(s.slot))
                     return false;
                 break;
             // Free text binds a string like Enum does, but carries no options
-            // to validate against — so it is kept to the one owner that needs
-            // it rather than offered to every string slot.
+            // to validate against — so it is kept to the owners that need it
+            // (exclusion lists, paths) rather than offered to every string slot.
             case Type::Text:
-                if (!std::holds_alternative<MemberPtr<web_search_cfg::Config, std::string>>(s.slot))
+                if (!std::holds_alternative<MemberPtr<web_search_cfg::Config, std::string>>(s.slot)
+                 && !std::holds_alternative<MemberPtr<paste_cfg::Config, std::string>>(s.slot))
                     return false;
                 if (!s.options.empty()) return false;
                 break;
@@ -471,10 +524,12 @@ consteval bool ids_namespaced() {
         const bool rag    = s.id.starts_with("rag.");
         const bool smart  = s.id.starts_with("smart.");
         const bool web    = s.id.starts_with("web_search.");
-        if (!rag && !smart && !web) return false;
+        const bool paste  = s.id.starts_with("paste.");
+        if (!rag && !smart && !web && !paste) return false;
         if (rag    && s.owner() != Owner::Rag)      return false;
         if (smart  && s.owner() != Owner::Smart)    return false;
         if (web    && s.owner() != Owner::WebSearch) return false;
+        if (paste  && s.owner() != Owner::Paste)    return false;
     }
     return true;
 }
@@ -513,6 +568,18 @@ consteval bool web_search_rows_match_config() {
     return true;
 }
 
+// The paste rows' bounds are paste_cfg's constants, and io/clipboard.cpp
+// clamps to the same constants. Pin them together.
+consteval bool paste_rows_match_config() {
+    for (const auto& s : kSettings) {
+        if (s.id == "paste.max_mb")
+            if (s.min != paste_cfg::kMaxMbMin || s.max != paste_cfg::kMaxMbMax) return false;
+        if (s.id == "paste.inline_kb")
+            if (s.min != paste_cfg::kInlineKbMin || s.max != paste_cfg::kInlineKbMax) return false;
+    }
+    return true;
+}
+
 static_assert(ids_unique(),        "duplicate setting id");
 static_assert(envs_unique(),       "duplicate env var name");
 static_assert(ranges_sane(),       "a numeric row has an empty or inverted range");
@@ -524,6 +591,8 @@ static_assert(smart_rows_match_tuning(),
               "a smart.* row's range disagrees with smart::tuning");
 static_assert(web_search_rows_match_config(),
               "a web_search.* row's range disagrees with web_search_cfg");
+static_assert(paste_rows_match_config(),
+              "a paste.* row's range disagrees with paste_cfg");
 
 } // namespace proofs
 
@@ -559,10 +628,12 @@ struct EnvSnapshot {
 void apply_env(store::RagConfig& c, const EnvSnapshot& env);
 void apply_env(smart::RoleConfig& c, const EnvSnapshot& env);
 void apply_env(web_search_cfg::Config& c, const EnvSnapshot& env);
+void apply_env(paste_cfg::Config& c, const EnvSnapshot& env);
 // Same, reading the environment now. For CLI paths with no Model.
 void apply_env(Io, store::RagConfig& c);
 void apply_env(Io, smart::RoleConfig& c);
 void apply_env(Io, web_search_cfg::Config& c);
+void apply_env(Io, paste_cfg::Config& c);
 
 // Read/write a row's value as a string — the shape `agentty config get/set`
 // and the JSON walkers both want. Returns false for an unknown id or a value
@@ -570,11 +641,14 @@ void apply_env(Io, web_search_cfg::Config& c);
 [[nodiscard]] std::string get(const store::RagConfig& c, const SettingDef& d);
 [[nodiscard]] std::string get(const smart::RoleConfig& c, const SettingDef& d);
 [[nodiscard]] std::string get(const web_search_cfg::Config& c, const SettingDef& d);
+[[nodiscard]] std::string get(const paste_cfg::Config& c, const SettingDef& d);
 [[nodiscard]] bool        set(store::RagConfig& c, const SettingDef& d,
                               std::string_view value);
 [[nodiscard]] bool        set(smart::RoleConfig& c, const SettingDef& d,
                               std::string_view value);
 [[nodiscard]] bool        set(web_search_cfg::Config& c, const SettingDef& d,
+                              std::string_view value);
+[[nodiscard]] bool        set(paste_cfg::Config& c, const SettingDef& d,
                               std::string_view value);
 
 // True when the row still holds its shipped default — used to keep
@@ -582,6 +656,7 @@ void apply_env(Io, web_search_cfg::Config& c);
 [[nodiscard]] bool is_default(const store::RagConfig& c, const SettingDef& d);
 [[nodiscard]] bool is_default(const smart::RoleConfig& c, const SettingDef& d);
 [[nodiscard]] bool is_default(const web_search_cfg::Config& c, const SettingDef& d);
+[[nodiscard]] bool is_default(const paste_cfg::Config& c, const SettingDef& d);
 
 // The env var that is OVERRIDING this row right now, or "" when none is set.
 // A row under an override renders LOCKED and names the variable, instead of
@@ -590,8 +665,9 @@ void apply_env(Io, web_search_cfg::Config& c);
 
 // Restore a row to its shipped default.
 void reset(store::RagConfig& c, const SettingDef& d);
-void reset(smart::RoleConfig& c, const SettingDef& d);
+void reset(smart::RoleConfig& s, const SettingDef& d);
 void reset(web_search_cfg::Config& c, const SettingDef& d);
+void reset(paste_cfg::Config& c, const SettingDef& d);
 
 // One row: label, help, control kind, range, env lock and provenance, all from
 // the table. Split out of add_rows for a pane that must put its own rows

@@ -128,6 +128,8 @@ inline void run(const agentty::Cmd& c, Store& s) {
             agentty::provider::select(::agentty::IoAccess::grant(), e.selection);
         else if constexpr (std::same_as<U, agentty::PublishWebSearchPolicy>)
             agentty::tools::web_search_policy::install(e.policy);
+        else if constexpr (std::same_as<U, agentty::PublishPasteConfig>)
+            agentty::clipboard_configure(e.config);
         else if constexpr (std::same_as<U, agentty::InstallAuth>) {
             // Only the clear is played here: resolving would read the
             // developer's real credential files.

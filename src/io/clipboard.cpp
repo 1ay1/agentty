@@ -3,6 +3,7 @@
 
 #include "agentty/io/clipboard.hpp"
 #include "agentty/util/logx.hpp"
+#include "agentty/util/snapshot.hpp"   // AtomicSnapshot
 
 #include <algorithm>
 #include <chrono>
@@ -31,10 +32,6 @@ namespace agentty {
 
 namespace {
 
-// Anthropic caps an image at 5 MB, so a screenshot never needs more; files
-// get the same cap so a stray multi-GB copy can't stall the paste.
-constexpr std::uint64_t kMaxPaste = 32ull << 20;
-
 ClipboardItem to_item(const rp::Item& it) {
     ClipboardItem out;
     out.mime = std::string{rp::mime_of(it)};
@@ -49,12 +46,53 @@ ClipboardItem to_item(const rp::Item& it) {
     return out;
 }
 
+// The installed settings: swapped whole on a Settings change, read per paste.
+util::AtomicSnapshot<paste_cfg::Config>& cfg_slot() {
+    static util::AtomicSnapshot<paste_cfg::Config> s;
+    return s;
+}
+
+paste_cfg::Config current_cfg() {
+    const auto s = cfg_slot().load();
+    return s ? *s : paste_cfg::Config{};
+}
+
+rp::TerminalMode terminal_mode(std::string_view s) {
+    if (s == "osc5522") return rp::TerminalMode::osc5522;
+    if (s == "osc52")   return rp::TerminalMode::osc52;
+    if (s == "off")     return rp::TerminalMode::off;
+    return rp::TerminalMode::automatic;
+}
+
 } // namespace
+
+void clipboard_configure(const paste_cfg::Config& c) {
+    rp::Config r;
+    r.forwards       = c.forwards;
+    r.display        = c.display;
+    r.server_display = c.server_display;
+    r.terminal       = terminal_mode(c.terminal);
+    r.decode_text    = c.decode_text;
+    r.max_bytes      = static_cast<std::uint64_t>(
+                           std::clamp(c.max_mb, paste_cfg::kMaxMbMin, paste_cfg::kMaxMbMax)) << 20;
+    r.socket         = c.socket;
+    r.save_dir       = c.save_dir;
+    // Both are swapped whole; a paste already running keeps what it read.
+    cfg_slot().store(c);
+    rp::set_config(std::move(r));
+}
+
+paste_cfg::Config clipboard_config() { return current_cfg(); }
+
+std::filesystem::path clipboard_save_dir() {
+    auto c = current_cfg();
+    if (!c.save_dir.empty()) return c.save_dir;
+    return rp::state_dir() / "pasted";
+}
 
 ClipboardContents read_clipboard(bool allow_remote) {
     ClipboardContents out;
     rp::PasteOptions opt;
-    opt.max_bytes = kMaxPaste;
     // No terminal session: the tty belongs to maya, and the composer asks
     // the terminal itself (OSC 5522 / 52) when this comes back empty.
     auto clip = allow_remote ? rp::paste(opt) : rp::read_clipboard(opt.max_bytes);
@@ -93,7 +131,7 @@ std::vector<ClipboardItem> decode_armored(std::string_view text, std::string* er
 }
 
 void settle_clipboard_items(std::vector<ClipboardItem>& items) {
-    constexpr std::size_t kInlineText = 256 * 1024;
+    const std::size_t inline_bytes = static_cast<std::size_t>(std::max(0, current_cfg().inline_kb)) * 1024;
     for (auto& it : items) {
         if (it.kind != ClipboardItem::Kind::File) continue;
         if (it.mime.starts_with("image/")) {
@@ -101,7 +139,7 @@ void settle_clipboard_items(std::vector<ClipboardItem>& items) {
             continue;
         }
         // A small UTF-8 file with no NULs goes in as its text.
-        const bool texty = it.bytes.size() <= kInlineText
+        const bool texty = inline_bytes > 0 && it.bytes.size() <= inline_bytes
                         && it.bytes.find('\0') == std::string::npos
                         && rp::valid_utf8(it.bytes);
         if (texty) {
@@ -113,7 +151,7 @@ void settle_clipboard_items(std::vector<ClipboardItem>& items) {
         rp::Item ri = rp::File{rp::FileName::sanitize(it.name),
                                rp::Mime::parse(it.mime).value_or(rp::mime_for_name(it.name)),
                                rp::to_bytes(it.bytes)};
-        auto stored = rp::store(std::span{&ri, 1}, rp::state_dir() / "pasted");
+        auto stored = rp::store(std::span{&ri, 1}, clipboard_save_dir());
         it.kind = ClipboardItem::Kind::Text;
         it.mime = "text/plain;charset=utf-8";
         if (stored && !stored->parts.empty()) {

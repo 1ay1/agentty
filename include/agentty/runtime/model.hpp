@@ -871,6 +871,8 @@ struct Model {
     // publishes: until then the tool layer runs on its own lazy read of
     // settings.json, which can disagree with what init() loaded.
     std::optional<web_search_cfg::Config> published_web_search;
+    // Same, for the paste settings richpaste reads (PublishPasteConfig).
+    std::optional<paste_cfg::Config> published_paste;
 
     // The process's launch environment, read ONCE by init() and never again.
     //

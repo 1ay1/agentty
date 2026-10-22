@@ -105,15 +105,17 @@ as [[Alt+←/→]]).
 | [[Alt+K]] | Kill to end of line |
 | [[Ctrl+Z]] | Undo — rewinds word-by-word, not keystroke-by-keystroke |
 | [[Ctrl+Y]] / [[Ctrl+Shift+Z]] | Redo |
-| [[Ctrl+V]] / [[Alt+V]] | Paste an image from the clipboard as an attachment chip |
+| [[Ctrl+V]] / [[Alt+V]] | Paste from the clipboard: an image as an image chip, a copied file as its text or saved path, text as text |
 
 Undo coalesces a run of typing into one step (broken on whitespace and on any
 non-typing edit), so one [[Ctrl+Z]] after a paste reaches the pre-paste state.
 [[Ctrl+V]] is intercepted by some terminals (Windows Terminal binds it to its
-own paste); [[Alt+V]] is the fallback that every terminal passes through.
-Pasting an image **over SSH** needs one setting — kitty must be allowed to
-answer clipboard reads, and tmux must pass the request through. See
-[Clipboard & Images](/docs/clipboard).
+own paste); [[Alt+V]] is the fallback that every terminal passes through. A
+terminal's own paste (an empty bracketed paste, or a pasted `richpaste:1:`
+line) also lands as the image or file. Over **ssh**, run `agentty paste setup`
+once on your laptop and Ctrl+V reads the laptop's clipboard. See
+[Clipboard & Images](/docs/clipboard); every route can be turned on or off in
+Settings → Paste.
 
 > Kill-to-end is [[Alt+K]], not the readline-standard [[Ctrl+K]] — [[Ctrl+K]] is
 > reserved app-wide for the command palette. It pairs with [[Ctrl+U]]

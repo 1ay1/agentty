@@ -101,6 +101,28 @@ Each service offers up to seven extra settings which appear under its slot, and 
 
 Kagi, Mojeek and Linkup are not offered yet: their request and response formats could not be verified against documentation or a real reply.
 
+### Paste
+
+How [[Ctrl+V]] and `agentty paste` read the clipboard. Three places set the same rows, saved to `settings.json` under `"paste"` (only rows moved off their default are written):
+
+- **Settings → Paste** in the app (`/settings`, then *Paste*). A change applies to the next paste.
+- **`agentty paste config`** in a shell: `agentty paste config set max_mb 64`, `… get terminal`, `… reset all`. With no arguments it lists every row, its value, and where that value comes from.
+- **A variable**, below. It wins over `settings.json` for that run only, locks its row in the pane (naming the variable), and is never written to disk.
+
+| Key | Variable | Default | Meaning |
+|-----|----------|---------|---------|
+| `forwards` | `AGENTTY_PASTE_FORWARDS` | `true` | Over ssh, read the laptop's clipboard through the forwarded agent (needs `agentty paste setup` on the laptop). |
+| `display` | `AGENTTY_PASTE_DISPLAY` | `true` | Read this machine's own clipboard (Wayland, X11, macOS pasteboard, Windows). |
+| `terminal` | `AGENTTY_PASTE_TERMINAL` | `auto` | Ask the terminal when nothing else answered. `auto` asks it what it supports (OSC 5522 for images, else OSC 52 for text); `osc5522` and `osc52` force one for terminals that misreport; `off` never asks. |
+| `server_display` | `AGENTTY_PASTE_SERVER_CLIPBOARD` | `false` | Over ssh, fall back to the *server's* own clipboard. Off because that isn't the clipboard you copied into. |
+| `decode_text` | `AGENTTY_PASTE_DECODE_TEXT` | `true` | Turn a pasted `richpaste:1:` line back into the image or file it carries. Off: it pastes as text. |
+| `max_mb` | `AGENTTY_PASTE_MAX_MB` | `32` | Largest paste read, in MB (1–1024). Bigger clipboard contents are refused. |
+| `inline_kb` | `AGENTTY_PASTE_INLINE_KB` | `256` | A copied text file up to this size (KB, 0–4096) goes into the message as its text. Bigger ones, and every binary file, are saved and their path is typed in. `0` always saves. |
+| `save_dir` | `AGENTTY_PASTE_SAVE_DIR` | (empty) | Where pasted files are saved. Empty: `~/.agentty/paste/pasted` (`$AGENTTY_HOME/paste/pasted`). |
+| `socket` | `AGENTTY_PASTE_SOCKET` | (empty) | Ask only this agent socket (a relay, a test) instead of finding the forwarded ones. |
+
+Booleans take `true`/`false`, `1`/`0`, `on`/`off`, `yes`/`no`. Numbers out of range are clamped; a `terminal` value that isn't one of the four is refused. The full guide, with every route and what to do when one fails: [Clipboard & Images](/docs/clipboard).
+
 ## On-disk paths
 
 agentty keeps everything in two places: `~/.agentty` for you, and

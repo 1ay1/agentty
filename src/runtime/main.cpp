@@ -97,6 +97,7 @@
 #include "agentty/i18n/startup.hpp"   // i18n::init — before anything renders
 #include "agentty/io/blob_gc.hpp"
 #include "agentty/io/clipboard.hpp"   // agentty paste
+#include "agentty/runtime/paste_cli.hpp"
 #include "agentty/io/http.hpp"
 #include "agentty/mcp/serve.hpp"
 #include "agentty/mcp/oauth.hpp"
@@ -712,6 +713,7 @@ void print_usage() {
         entry("  paste [cmd]", "Clipboard tools (richpaste). `paste setup` once on your "
                              "laptop makes Ctrl+V images work over ssh; `paste` prints "
                              "the clipboard, `paste doctor` explains the route, "
+                             "`paste config` lists and sets the paste settings, "
                              "`paste help` lists the rest", kCmdGutter),
         entry("  run [PROMPT]", "Headless one-shot: run PROMPT through the full agent "
                                 "loop (tools, sandbox) and print only the answer to "
@@ -1350,8 +1352,10 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
 
     // `agentty paste …` runs before the log banner and every init below:
     // ssh runs `agentty paste ssh-hook` on each connection, so it must be
-    // quick and quiet.
-    if (args.subcommand == "paste") return clipboard_cli(args.plugin_argv);
+    // quick and quiet. It honours Settings → Paste like Ctrl+V does, and
+    // `agentty paste config` edits those settings.
+    if (args.subcommand == "paste")
+        return paste_cli::run(::agentty::IoAccess::grant(), cap, args.plugin_argv);
 
     // Every run self-identifies in the (append-mode, multi-session) log:
     // version + build type + pid + cwd. `grep "=== agentty"` splits the file
@@ -1495,8 +1499,11 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
         return mcp::oauth::cmd_mcp_status();
     if (args.subcommand == "rag-bench")
         return rag::bench::run(args.cli_bench_root);
-    if (args.subcommand == "airgap")
+    if (args.subcommand == "airgap") {
+        // --clipboard-relay starts the paste agent: give it Settings → Paste.
+        clipboard_configure(persistence::load_settings(::agentty::IoAccess::grant()).paste);
         return airgap::cmd_airgap(args.airgap_argc, args.airgap_argv);
+    }
     // From here on this is a session (TUI, run, acp, mcp-serve), and it
     // writes the store. Held to exit so `agentty config move` waits for us.
     const auto store_lock = util::hold_store_shared();
@@ -1557,8 +1564,10 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
     // the ids on screen are an unmissable bug report. Refusing to start over
     // a label table would be a worse trade.
     {
-        const auto saved = persistence::load_settings(::agentty::IoAccess::grant()).ui.lang;
-        if (!i18n::init(args.cli_lang, saved)) {
+        const auto saved = persistence::load_settings(::agentty::IoAccess::grant());
+        // Ctrl+V reads the clipboard by these (Settings → Paste).
+        clipboard_configure(saved.paste);
+        if (!i18n::init(args.cli_lang, saved.ui.lang)) {
             std::fprintf(stderr,
                 "agentty: the embedded English string catalog failed to "
                 "parse; labels will show as ids. This is a build defect.\n");

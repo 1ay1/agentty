@@ -158,6 +158,7 @@ void rebuild(const Model& m, pn::WebSearch& o, std::string_view prefer_id = {}) 
     Cmd out = save_record(m);
 
     rebuild(m, o);
+    o.form.dirty = false;   // just saved: don't say "unsaved"
 
     // The one change worth a toast: the mode itself. Auto is the quiet
     // default; naming it keeps "why are the counts locked?" answerable.

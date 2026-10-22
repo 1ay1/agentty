@@ -773,6 +773,14 @@ struct WebSearchKeysRead {
 struct WebSearchKeySaved   { std::string service; bool ok = true; };
 struct WebSearchKeyRemoved { std::string service; bool ok = true; };
 
+// ── Paste (Settings → Paste) ────────────────────────────────────────
+// How Ctrl+V reads the clipboard. One form pane over the paste.* registry
+// rows, like Web Search: a committed edit saves and reinstalls the config.
+struct OpenPasteSettings { std::string focus; };
+struct ClosePasteSettings {};
+struct PasteSettingsKey { form::keys::Action action; };
+struct PasteSettingsPaste { std::string text; };   // into a focused text row
+
 // ── Plugin editor (detail / add form) ──────────────────────────
 // Opened from the Plugins settings list: `e` on a server row → detail form
 // for THAT server; `a` → add form (kind-first: the kind choice rebuilds the
@@ -1508,6 +1516,10 @@ using WebSearchMsg = std::variant<
     OpenWebSearch, CloseWebSearch, WebSearchKey, WebSearchPaste,
     WebSearchKeysRead, WebSearchKeySaved, WebSearchKeyRemoved>;
 
+// ── Paste settings (how Ctrl+V reads the clipboard) ─────────────
+using PasteSettingsMsg = std::variant<
+    OpenPasteSettings, ClosePasteSettings, PasteSettingsKey, PasteSettingsPaste>;
+
 // ── Plugin editor (detail / add form) ──────────────────────────
 using PluginEditMsg = std::variant<
     OpenPluginEdit, ClosePluginEdit, PluginEditKey, PluginEditPaste>;
@@ -1569,6 +1581,7 @@ using Msg = std::variant<
     msg::DiffReviewMsg,
     msg::SmartModeMsg,
     msg::WebSearchMsg,
+    msg::PasteSettingsMsg,
     msg::PluginEditMsg,
     msg::AppearanceMsg,
     msg::SandboxMsg,
@@ -1618,6 +1631,7 @@ consteval int leaf_domain_count() {
          + int{in_variant_v<L, msg::DiffReviewMsg>}
          + int{in_variant_v<L, msg::SmartModeMsg>}
          + int{in_variant_v<L, msg::WebSearchMsg>}
+         + int{in_variant_v<L, msg::PasteSettingsMsg>}
          + int{in_variant_v<L, msg::PluginEditMsg>}
          + int{in_variant_v<L, msg::AppearanceMsg>}
          + int{in_variant_v<L, msg::SandboxMsg>}
@@ -1683,7 +1697,7 @@ static_assert(leaf_domain_count<OpenWebSearch>()             == 1,
 // they must also update the kDomains array used by the dispatcher in
 // update.cpp, which currently exhausts on 12 arms. Mismatch → dispatch
 // switch loses a domain silently.
-static_assert(std::variant_size_v<Msg> == 25,
+static_assert(std::variant_size_v<Msg> == 26,
               "Msg domain count changed — update the dispatcher in "
               "src/runtime/app/update.cpp and this proof to match");
 

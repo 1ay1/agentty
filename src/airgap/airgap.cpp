@@ -66,7 +66,7 @@ std::string home_dir() {
 
 void print_usage() {
     std::fprintf(stderr,
-        "usage: agentty airgap [--setup] [--remote-agentty PATH] <user@host>\n"
+        "usage: agentty airgap [--setup] [--clipboard-relay] [--remote-agentty PATH] <user@host>\n"
         "       agentty airgap [--setup] <user@host> --acp [acp flags…]\n"
         "\n"
         "  Opens an SSH session to <user@host> with `-R 1080`, which makes\n"
