@@ -55,10 +55,8 @@ void settle_clipboard_items(std::vector<ClipboardItem>& items);
 /// On failure writes a one-line reason to `*error_out`.
 bool write_clipboard_text(std::string_view text, std::string* error_out = nullptr);
 
-// `agentty paste …`. Call clipboard_init_program() once at startup, before
-// any thread, so richpaste names itself `agentty paste` and re-runs this
-// binary for its agent and ssh hook.
-void clipboard_init_program();
+// `agentty paste …`: richpaste's command line. Its defaults are agentty's
+// (re-runs `<this exe> paste agent|ssh-hook`, state in ~/.agentty/paste).
 int  clipboard_cli(std::span<const std::string> args);
 
 // The `RemoteForward` pair (remote socket, local endpoint) for an ssh

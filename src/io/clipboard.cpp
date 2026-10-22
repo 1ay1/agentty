@@ -2,7 +2,6 @@
 // platform tool. See include/agentty/io/clipboard.hpp.
 
 #include "agentty/io/clipboard.hpp"
-#include "agentty/util/home_dir.hpp"
 #include "agentty/util/logx.hpp"
 
 #include <algorithm>
@@ -23,7 +22,8 @@
 #include <rp/agent.hpp>
 #include <rp/armor.hpp>
 #include <rp/cli.hpp>
-#include <rp/composer.hpp>   // rp::store
+#include <rp/clipboard.hpp>  // rp::write_clipboard_text
+#include <rp/store.hpp>      // rp::store
 
 namespace agentty {
 
@@ -55,9 +55,8 @@ ClipboardContents read_clipboard(bool allow_remote) {
     ClipboardContents out;
     rp::PasteOptions opt;
     opt.max_bytes = kMaxPaste;
-    // The terminal route needs the tty, which maya owns; the composer asks
+    // No terminal session: the tty belongs to maya, and the composer asks
     // the terminal itself (OSC 5522 / 52) when this comes back empty.
-    opt.tty_in = opt.tty_out = -1;
     auto clip = allow_remote ? rp::paste(opt) : rp::read_clipboard(opt.max_bytes);
     if (!clip) {
         out.error = clip.error().what;
@@ -118,8 +117,8 @@ void settle_clipboard_items(std::vector<ClipboardItem>& items) {
         it.kind = ClipboardItem::Kind::Text;
         it.mime = "text/plain;charset=utf-8";
         if (stored && !stored->parts.empty()) {
-            if (auto* chip = std::get_if<rp::Chip>(&stored->parts.front())) {
-                it.bytes      = chip->path.string();
+            if (auto* saved = std::get_if<rp::Saved>(&stored->parts.front())) {
+                it.bytes      = saved->path.string();
                 it.saved_path = true;
             }
         } else {
@@ -131,16 +130,6 @@ void settle_clipboard_items(std::vector<ClipboardItem>& items) {
 }
 
 // ── agentty paste ──────────────────────────────────────────────────────────
-
-void clipboard_init_program() {
-    // Same root as util::user_root(), without its migration and mkdir: the
-    // ssh hook runs this on every connection.
-    std::filesystem::path root;
-    if (const char* h = std::getenv("AGENTTY_HOME"); h && *h) root = h;
-    else root = util::home_dir() / ".agentty";
-    rp::set_program({.name = "agentty paste", .exe = {}, .args = {"paste"},
-                     .default_command = "paste", .state_dir = root / "paste"});
-}
 
 int clipboard_cli(std::span<const std::string> args) { return rp::cli::run(args); }
 
@@ -157,21 +146,12 @@ ClipboardForward clipboard_ssh_forward(std::string* error) {
 
 namespace {
 
-// A shell command line as a ChildRun: sh -c, or cmd.exe built by jaal's
-// quoting rules on Windows.
-void shell_argv(tools::util::ChildRun& run, const char* cmd) {
-#if defined(_WIN32)
-    run.argv                 = {"cmd.exe"};
-    run.windows_command_line = maya::platform::cmd_command_line(cmd);
-#else
-    run.argv = {"/bin/sh", "-c", cmd};
-#endif
-}
+#if !defined(_WIN32)
 
 // Run a clipboard tool and feed it `data` on stdin. True iff it exited 0.
 bool popen_write(const char* cmd, std::string_view data) {
     tools::util::ChildRun run;
-    shell_argv(run, cmd);
+    run.argv = {"/bin/sh", "-c", cmd};
     run.stdin_data = std::string{data};
     run.idle       = std::chrono::seconds{10};
     run.wall       = std::chrono::seconds{30};
@@ -277,6 +257,8 @@ DisplayEnv discover_display() {
 
 #endif // __linux__
 
+#endif // !_WIN32
+
 } // namespace
 
 bool write_clipboard_text(std::string_view text, std::string* error_out) {
@@ -308,8 +290,10 @@ bool write_clipboard_text(std::string_view text, std::string* error_out) {
     return fail("no clipboard tool — install wl-clipboard or xclip");
 
 #elif defined(_WIN32)
-    if (popen_write("clip.exe", text)) return true;
-    return fail("clip.exe failed");
+    // Win32 CF_UNICODETEXT directly: clip.exe mangles non-ASCII text.
+    auto r = rp::write_clipboard_text(text);
+    if (r) return true;
+    return fail(r.error().what.c_str());
 
 #else
     return fail("clipboard text write not implemented on this platform");

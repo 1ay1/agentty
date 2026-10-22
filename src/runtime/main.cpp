@@ -1261,10 +1261,6 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
 #endif
     }
 
-    // richpaste names itself `agentty paste` and re-runs this binary for its
-    // agent and ssh hook. Set before any thread, it's a plain global.
-    clipboard_init_program();
-
     install_crash_handler();
 
     // AGENTTY_FORCE_EFFORT and AGENTTY_MAX_OUTPUT_TOKENS into the capability
