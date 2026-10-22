@@ -176,7 +176,11 @@ Three ways to make the line, none needing an install:
   it after copying, then paste with [[Ctrl+Shift+V]].
 - **Any browser.** Open **[agentty.org/paste](https://agentty.org/paste)**,
   paste or drop the image or file there, and it copies the line for you. It
-  runs entirely in the page; nothing is uploaded. A screenshot is scaled to at
+  runs entirely in the page, and the page can't upload anything: its
+  Content-Security-Policy blocks every network request (`connect-src 'none'`)
+  and lets only its own script run. No cookies, storage, trackers or
+  libraries; pasted images are redrawn, so photo metadata like GPS is
+  dropped. A screenshot is scaled to at
   most 1600 px on a side (about what a model sees) and saved as whichever of
   PNG, WebP or JPEG is smallest, so a 3 MB retina screenshot becomes a line of
   around 150 KB that crosses ssh in a moment. A copied file is sent as is.

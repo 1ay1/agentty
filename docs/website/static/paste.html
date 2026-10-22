@@ -1,59 +1,204 @@
 <!doctype html>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>agentty paste: an image or file as text</title>
-<meta name="description" content="Turn a screenshot or file into one line of text you can paste into agentty over ssh. Runs in your browser; nothing is uploaded.">
-<style>:root{color-scheme:light dark}body{font:16px system-ui;margin:3em auto;max-width:40em;padding:0 1em;line-height:1.5}#s{margin-top:1em}textarea{width:100%;height:6em}
-#z{border:2px dashed #888;border-radius:8px;padding:2em;text-align:center;outline:none;caret-color:transparent}
-#z:focus{border-color:#06c}code{font-family:ui-monospace,monospace}small{opacity:.75}</style>
-<h2>Paste or drop an image or file here</h2>
-<p>Click the box, press Cmd+V (or Ctrl+V), or drop a file on it. It becomes one line of text on
-your clipboard. Then paste that into agentty, even over ssh. Nothing leaves this page.</p>
-<div id="z" contenteditable="true" autofocus>paste here</div>
-<div id="s">waiting...</div><button id="b" hidden>Copy text</button><textarea id="t" hidden readonly></textarea>
-<p><small>Only needed when your laptop can't hand agentty its clipboard (Terminal.app over ssh, no
-<code>agentty paste setup</code>). Same page offline: <code>agentty paste page &gt; paste.html</code>.
-More: <a href="https://agentty.org/docs/clipboard">Clipboard &amp; Images</a>.</small></p>
+<html lang="en">
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src 'none'; script-src 'sha256-7GJmoX33ATvmD9LDmTm6h9c69MnGQQ2ULnqagAOmg0M='; style-src 'sha256-GSJq2IyDMRSWiPRmM2Ygx76gBC5VM63U5ThZzJStvf8='; img-src blob:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>agentty paste: a screenshot or file as one line of text</title>
+<meta name="description" content="Turn a screenshot or file into one line of text you can paste into agentty over ssh. Runs entirely in your browser; the page can't upload anything.">
+<style>
+:root{color-scheme:light dark;--bg:#f7f7f9;--fg:#16161b;--mut:#62626e;--line:#e2e2ea;--card:#fff;--acc:#6d4aff;--tint:#efeaff;--ok:#15803d;--warn:#b45309;--bad:#dc2626}
+@media (prefers-color-scheme:dark){:root{--bg:#0e0e12;--fg:#ececf1;--mut:#9d9dab;--line:#2b2b35;--card:#16161c;--acc:#a08cff;--tint:#211b3a;--ok:#4ade80;--warn:#fbbf24;--bad:#f87171}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:44rem;margin:0 auto;padding:2.25rem 1.25rem 3rem}
+a{color:var(--acc)}
+.brand{font:600 .9rem ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--acc)}
+h1{font-size:1.85rem;line-height:1.2;margin:.35rem 0 .5rem;letter-spacing:-.01em}
+.lead{color:var(--mut);margin:0 0 1.4rem}
+#z{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.4rem;min-height:15rem;padding:2rem;border:2px dashed var(--line);border-radius:16px;background:var(--card);text-align:center;caret-color:transparent;outline:none;transition:border-color .15s,background .15s}
+#z:focus{border-color:var(--acc)}#z.over{border-color:var(--acc);background:var(--tint)}#z.busy{border-style:solid;border-color:var(--acc)}
+body.has #z{min-height:7rem;padding:1rem}body.has #z svg{width:28px;height:28px}body.has #z .sub{display:none}
+#z svg{width:44px;height:44px;color:var(--acc)}#z .big{font-size:1.25rem;font-weight:600}#z .sub{color:var(--mut)}
+kbd{font:600 .85em ui-monospace,Menlo,monospace;padding:.1em .45em;border:1px solid var(--line);border-bottom-width:2px;border-radius:6px;background:var(--bg);white-space:nowrap}
+.pick{display:inline-block;margin-top:.6rem;color:var(--acc);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+#s{margin:.9rem 0 0;font-weight:600}#s:empty{display:none}#s.done{color:var(--ok)}#s.error{color:var(--bad)}#s.hint{color:var(--mut);font-weight:500}
+#r{margin-top:.75rem;padding:1rem;border:1px solid var(--line);border-radius:14px;background:var(--card)}
+#list{list-style:none;margin:0;padding:0;display:grid;gap:.75rem}
+#list li{display:flex;gap:.9rem;align-items:center;min-width:0}
+#list img,.fileic{flex:none;width:96px;height:64px;border-radius:8px;border:1px solid var(--line);background:var(--bg)}
+#list img{object-fit:cover}.fileic{display:grid;place-items:center;font-weight:700;color:var(--mut);font-size:.8rem}
+#list b{display:block;overflow-wrap:anywhere}#list small{display:block;color:var(--mut)}
+.row{display:flex;gap:1rem;align-items:center;flex-wrap:wrap;margin-top:1rem}
+button{font:inherit;font-weight:600;padding:.5rem 1rem;border-radius:10px;border:0;background:var(--acc);color:#fff;cursor:pointer}
+button:focus-visible,.pick:focus-visible{outline:3px solid var(--tint);outline-offset:2px}
+summary{cursor:pointer;color:var(--mut)}
+textarea{width:100%;height:6rem;margin-top:.5rem;font:12px ui-monospace,Menlo,monospace;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
+#w{margin:.75rem 0 0;color:var(--warn)}
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem;padding:0;margin:1.5rem 0 0;list-style:none;counter-reset:s}
+.steps li{counter-increment:s;padding:.9rem;border:1px solid var(--line);border-radius:12px;background:var(--card);font-size:.93rem}
+.steps li::before{content:counter(s);display:grid;place-items:center;width:1.6rem;height:1.6rem;margin-bottom:.4rem;border-radius:50%;background:var(--tint);color:var(--acc);font-weight:700}
+@media (max-width:560px){.steps{grid-template-columns:1fr}h1{font-size:1.5rem}}
+.safe{margin-top:2rem;padding:1.2rem 1.3rem .6rem;border-radius:14px;background:var(--tint)}
+.safe h2{margin:0 0 .25rem;font-size:1.15rem;display:flex;gap:.5rem;align-items:center}.safe h2 svg{width:22px;height:22px;color:var(--acc)}
+.safe ul{margin:.5rem 0;padding-left:1.1rem}.safe li{margin:.45rem 0}
+code{font:.88em ui-monospace,Menlo,monospace;padding:.05em .3em;border-radius:5px;background:var(--line)}
+footer{margin-top:1.75rem;color:var(--mut);font-size:.92rem}
+</style>
+<main>
+<div class="brand">agentty paste</div>
+<h1>Paste a screenshot into agentty, even over ssh</h1>
+<p class="lead">Terminals only carry text. This page turns an image or file into one line of text,
+and agentty turns that line back into the image. It all happens in your browser.</p>
+<div id="z" contenteditable="true" spellcheck="false" role="textbox" aria-label="Paste area" autofocus>
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1M12 9v7m-3-3 3 3 3-3"/></svg>
+<div class="big">Press <kbd id="k1">Ctrl+V</kbd> to paste</div>
+<div class="sub">a screenshot, an image or a file, or drop one here</div>
+</div>
+<label class="pick" for="f" tabindex="0">or choose a file</label><input id="f" type="file" multiple hidden>
+<div id="s" role="status" aria-live="polite"></div>
+<section id="r" hidden>
+<ul id="list"></ul>
+<p id="w" hidden></p>
+<div class="row"><button id="again" type="button">Copy again</button>
+<details id="d"><summary>Show the text</summary><textarea id="t" readonly aria-label="The line to paste into agentty"></textarea></details></div>
+</section>
+<ol class="steps">
+<li>Take a screenshot with <kbd id="k3">PrtSc</kbd>, or copy a file.</li>
+<li>Paste it here. The line of text is copied for you.</li>
+<li>Press <kbd id="k2">Ctrl+Shift+V</kbd> in agentty. It shows up as the image.</li>
+</ol>
+<section class="safe">
+<h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 3 8.5 7 10 4-1.5 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>Private by design</h2>
+<ul>
+<li><b>Nothing leaves this page.</b> Your browser blocks every network request here: the page's
+Content-Security-Policy is <code>connect-src 'none'</code> and lets only the one script in this file run.
+Open your browser's network tab and paste to see it for yourself.</li>
+<li><b>No accounts, cookies, storage or trackers.</b> No libraries either. It's one small file you can
+read with View Source.</li>
+<li><b>Screenshots lose their hidden data.</b> A pasted screenshot or copied image is redrawn before
+it's encoded, so things like a photo's GPS location don't come along. A file (dropped, chosen, or
+copied in your file manager) is sent byte for byte, as it is.</li>
+<li><b>Checked on arrival.</b> The line carries a SHA-256 of the data. agentty checks it and refuses
+anything that changed on the way.</li>
+<li><b>Only ever data.</b> agentty turns the line back into an image or file. It never runs it.</li>
+<li><b>The same page, offline.</b> <code>agentty paste page &gt; paste.html</code> writes this exact page,
+and agentty's tests check the website's copy matches it byte for byte.</li>
+</ul>
+</section>
+<footer>Only needed when your laptop can't hand agentty its clipboard, like Terminal.app over ssh.
+Run <code>agentty paste setup</code> on your laptop once and Ctrl+V in agentty pastes images by itself,
+with no size limit. More in <a href="https://agentty.org/docs/clipboard" rel="noopener">Clipboard &amp; Images</a>.</footer>
+</main>
 <script>
+'use strict';
+// Everything happens on this page. The CSP above stops it sending anything anywhere.
+
+// The line format agentty reads: richpaste:1:<mime>:<name, base64>:<size>:<sha256>:<data, base64>
 function b64(bytes){let s='';for(let i=0;i<bytes.length;i+=32768)s+=String.fromCharCode.apply(null,bytes.subarray(i,i+32768));return btoa(s)}
 function utf8b64(str){return b64(new TextEncoder().encode(str))}
 async function sha(bytes){try{const d=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(d)].map(x=>x.toString(16).padStart(2,'0')).join('')}catch(e){return ''}}
 async function armor(mime,name,bytes){return 'richpaste:1:'+(mime||'application/octet-stream')+':'+(name?utf8b64(name):'')+':'+bytes.length+':'+(await sha(bytes))+':'+b64(bytes)}
-async function take(file){const named=file.name&&!/^image\.(png|jpe?g|gif|webp|tiff?)$/i.test(file.name);
-if(!named&&/^image\/(png|jpeg|webp|bmp|tiff)$/i.test(file.type)){const s=await shrink(file);if(s)return armor(s.type,'',new Uint8Array(await s.arrayBuffer()))}
-const bytes=new Uint8Array(await file.arrayBuffer());return armor(file.type,named?file.name:'',bytes)}
-// A screenshot pasted as text should be small: every byte crosses ssh and the
-// terminal, and tmux drops a clipboard reply over ~2.4 MB outright. Scale to
-// at most 1600 px, keep the smallest of PNG/WebP/JPEG, and if the line would
-// still be over BUDGET, step the size and quality down until it fits.
-const MAX_SIDE=1600, BUDGET=1100000;
-async function shrink(file){try{const bmp=await createImageBitmap(file);
-const blob=(c,t,q)=>new Promise(r=>c.toBlob(r,t,q));
-let side=Math.min(MAX_SIDE,Math.max(bmp.width,bmp.height)),best=null;
-for(let round=0;round<8;round++){const k=side/Math.max(bmp.width,bmp.height);
-const w=Math.max(1,Math.round(bmp.width*k)),h=Math.max(1,Math.round(bmp.height*k));const c=document.createElement('canvas');c.width=w;c.height=h;
-const g=c.getContext('2d');g.imageSmoothingQuality='high';g.drawImage(bmp,0,0,w,h);
-const q=round<2?0.9:round<4?0.8:0.7;best=k>=1&&file.size<=BUDGET?file:null;
-for(const [t,qq] of [['image/png'],['image/webp',q],['image/jpeg',q]]){const b=await blob(c,t,qq);if(b&&b.type===t&&(!best||b.size<best.size))best=b}
-if(best&&best.size<=BUDGET)return best;side=Math.round(side*0.75)}
-return best}catch(e){return null}}
-const S=document.getElementById('s'),B=document.getElementById('b'),T=document.getElementById('t');
-async function done(text){T.value=text;try{await navigator.clipboard.writeText(text);S.textContent=copied(text);return}catch(e){}
-T.hidden=false;B.hidden=false;S.textContent='Ready. Click "Copy text", then paste in the terminal.'}
-function copied(t){const kb=Math.round(t.length/1024);return 'Copied ('+(kb>0?kb+' KB':t.length+' chars')+'). Now paste into agentty.'}
-B.onclick=()=>{T.select();document.execCommand('copy');S.textContent='Copied. Now paste in the terminal.'};
-async function encodeAll(files){const parts=[];for(const f of files)parts.push(await take(f));return parts.join(' ')}
-async function handle(files){if(!files.length){S.textContent='No image or file in that paste.';return}S.textContent='Encoding...';done(await encodeAll(files))}
-function filesOf(dt){const fs=[...(dt.files||[])];if(fs.length)return fs;return [...(dt.items||[])].filter(i=>i.kind==='file').map(i=>i.getAsFile()).filter(Boolean)}
-// Safari only allows clipboard writes inside the user's gesture. Handing it a ClipboardItem
-// whose content is a promise, synchronously, keeps the gesture while we encode.
-function pasteNow(files){if(!files.length){S.textContent='No image or file in that paste.';return}
-if(window.ClipboardItem&&navigator.clipboard&&navigator.clipboard.write){S.textContent='Encoding...';const p=encodeAll(files);
-try{navigator.clipboard.write([new ClipboardItem({'text/plain':p.then(t=>{T.value=t;return new Blob([t],{type:'text/plain'})})})]).then(()=>{S.textContent=copied(T.value)},()=>p.then(done));return}catch(e){}}
-handle(files)}
-const Z=document.getElementById('z');Z.focus();
-document.addEventListener('paste',e=>{e.preventDefault();pasteNow(filesOf(e.clipboardData))});
-Z.addEventListener('input',()=>{Z.textContent='paste here'});
+
+// A screenshot should be small: every byte crosses ssh and the terminal, and
+// tmux drops a clipboard reply over ~2.4 MB outright. Scale to at most
+// MAX_SIDE, keep the smallest of PNG/WebP/JPEG, and step size and quality
+// down until it fits BUDGET. Redrawing also drops metadata (EXIF, location).
+const MAX_SIDE=1600,BUDGET=1100000,BIG_LINE=1600000;
+async function shrink(file){let bmp;try{bmp=await createImageBitmap(file)}catch(e){return null}
+  const blob=(c,t,q)=>new Promise(r=>c.toBlob(r,t,q));
+  let side=Math.min(MAX_SIDE,Math.max(bmp.width,bmp.height)),best=null;
+  for(let round=0;round<8;round++){
+    const k=side/Math.max(bmp.width,bmp.height);
+    const w=Math.max(1,Math.round(bmp.width*k)),h=Math.max(1,Math.round(bmp.height*k));
+    const c=document.createElement('canvas');c.width=w;c.height=h;
+    const g=c.getContext('2d');g.imageSmoothingQuality='high';g.drawImage(bmp,0,0,w,h);
+    const q=round<2?0.9:round<4?0.8:0.7;best=null;
+    for(const [t,qq] of [['image/png'],['image/webp',q],['image/jpeg',q]]){const b=await blob(c,t,qq);if(b&&b.type===t&&(!best||b.size<best.blob.size))best={blob:b,w,h}}
+    if(best&&best.blob.size<=BUDGET)break;
+    side=Math.round(side*0.75)}
+  if(best){best.srcW=bmp.width;best.srcH=bmp.height}
+  return best}
+
+// One file or image -> its line, plus what to show about it.
+async function take(file){
+  const named=file.name&&!/^image\.(png|jpe?g|gif|webp|tiff?)$/i.test(file.name);
+  if(!named&&/^image\/(png|jpeg|webp|bmp|tiff)$/i.test(file.type)){
+    const s=await shrink(file);
+    if(s){const bytes=new Uint8Array(await s.blob.arrayBuffer());
+      return {line:await armor(s.blob.type,'',bytes),image:true,type:s.blob.type,w:s.w,h:s.h,srcW:s.srcW,srcH:s.srcH,from:file.size,blob:s.blob}}}
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  return {line:await armor(file.type,named?file.name:'',bytes),image:/^image\//.test(file.type),type:file.type,name:named?file.name:'',from:file.size,blob:file}}
+async function encodeAll(files){const items=[];for(const f of files)items.push(await take(f));return {items,text:items.map(i=>i.line).join(' ')}}
+
+// ---- the page ----
+const $=id=>document.getElementById(id);
+const Z=$('z'),S=$('s'),R=$('r'),L=$('list'),W=$('w'),T=$('t'),D=$('d'),F=$('f'),A=$('again');
+const ua=(navigator.platform||'')+' '+(navigator.userAgent||'');
+const MAC=/Mac|iPhone|iPad/.test(ua),WIN=/Win/.test(ua);
+const KEY_HERE=MAC?'\u2318V':'Ctrl+V',KEY_TERM=MAC?'\u2318V':'Ctrl+Shift+V';
+$('k1').textContent=KEY_HERE;$('k2').textContent=KEY_TERM;
+$('k3').textContent=MAC?'\u2303\u21e7\u23184':WIN?'Win+Shift+S':'PrtSc';
+const ZH=Z.innerHTML;
+let urls=[];
+
+function human(n){return n<1024?n+' B':n<1048576?Math.round(n/1024)+' KB':(n/1048576).toFixed(1)+' MB'}
+function kind(t){return {'image/png':'PNG','image/webp':'WebP','image/jpeg':'JPEG','image/gif':'GIF'}[t]||(t?t.split('/').pop().toUpperCase():'file')}
+function set(cls,msg){S.className=cls;S.textContent=msg;Z.classList.toggle('busy',cls==='busy')}
+function el(tag,cls,text){const e=document.createElement(tag);if(cls)e.className=cls;if(text!=null)e.textContent=text;return e}
+
+function show(r){
+  urls.forEach(u=>URL.revokeObjectURL(u));urls=[];
+  L.replaceChildren(...r.items.map(it=>{
+    const li=el('li');
+    if(it.image){const img=el('img');img.alt='';const u=URL.createObjectURL(it.blob);urls.push(u);img.src=u;li.append(img)}
+    else li.append(el('span','fileic',kind(it.type)));
+    const title=it.image?(it.w?it.w+' \u00d7 '+it.h+' \u00b7 ':'')+kind(it.type):(it.name||'file')+' \u00b7 '+kind(it.type);
+    let meta=human(it.line.length)+' of text';
+    if(it.srcW&&(it.srcW!==it.w||it.from>it.blob.size))meta+=', from a '+human(it.from)+' image at '+it.srcW+' \u00d7 '+it.srcH;
+    const d=el('div');d.append(el('b',null,title),el('small',null,meta));li.append(d);return li}));
+  T.value=r.text;R.hidden=false;document.body.classList.add('has');R.scrollIntoView({block:'nearest',behavior:'smooth'});
+  W.hidden=r.text.length<=BIG_LINE;
+  W.textContent='This line is '+human(r.text.length)+'. Inside tmux, lines over about 2 MB may not arrive. '+
+    'For big files, run agentty paste setup on this computer: it has no size limit.'}
+
+async function copyText(text){
+  try{await navigator.clipboard.writeText(text);return true}catch(e){}
+  try{D.open=true;T.focus();T.select();if(document.execCommand('copy'))return true}catch(e){}
+  return false}
+function copied(){set('done','\u2713 Copied. Now press '+KEY_TERM+' in agentty.')}
+
+function pasteNow(files){
+  if(!files.length){set('hint','Nothing to use in that paste. Copy a screenshot or a file first.');return}
+  set('busy',files.length>1?'Encoding '+files.length+' files\u2026':/^image\//.test(files[0].type)?'Encoding the image\u2026':'Encoding the file\u2026');
+  const p=encodeAll(files);
+  // Safari only allows a clipboard write inside the paste itself. Handing it a
+  // ClipboardItem whose content is a promise, right now, keeps that while we encode.
+  let wrote=null;
+  if(typeof ClipboardItem!=='undefined'&&navigator.clipboard&&navigator.clipboard.write){
+    try{wrote=navigator.clipboard.write([new ClipboardItem({'text/plain':p.then(r=>new Blob([r.text],{type:'text/plain'}))})]).then(()=>true,()=>false)}catch(e){wrote=null}}
+  p.then(async r=>{show(r);let ok=wrote?await wrote:false;if(!ok)ok=await copyText(r.text);
+      if(ok)copied();else{D.open=true;set('hint','Ready. Select the text below, copy it, then paste into agentty.')}},
+    e=>set('error','Couldn\u2019t read that: '+((e&&e.message)||e)))}
+
+function filesOf(dt){if(!dt)return [];const fs=[...(dt.files||[])];if(fs.length)return fs;
+  return [...(dt.items||[])].filter(i=>i.kind==='file').map(i=>i.getAsFile()).filter(Boolean)}
+
+document.addEventListener('paste',e=>{e.preventDefault();const files=filesOf(e.clipboardData);if(files.length)return pasteNow(files);
+  const t=e.clipboardData?e.clipboardData.getData('text/plain'):'';
+  if(t.startsWith('richpaste:1:'))set('hint','That\u2019s already a line for agentty. Paste it there.');
+  else if(t)set('hint','That\u2019s plain text, and agentty pastes text directly. This page is for images and files.');
+  else set('hint','Nothing to use in that paste. Copy a screenshot or a file first.')});
+let depth=0;
+document.addEventListener('dragenter',e=>{e.preventDefault();depth++;Z.classList.add('over')});
+document.addEventListener('dragleave',()=>{if(--depth<=0){depth=0;Z.classList.remove('over')}});
 document.addEventListener('dragover',e=>e.preventDefault());
-document.addEventListener('drop',e=>{e.preventDefault();pasteNow(filesOf(e.dataTransfer))});
+document.addEventListener('drop',e=>{e.preventDefault();depth=0;Z.classList.remove('over');pasteNow(filesOf(e.dataTransfer))});
+F.addEventListener('change',()=>{pasteNow([...F.files]);F.value=''});
+A.addEventListener('click',async()=>{if(await copyText(T.value))copied();else set('hint','Select the text below and copy it.')});
+// The box is editable only so Safari sends it pastes. Keep its content ours.
+Z.addEventListener('beforeinput',e=>e.preventDefault());
+Z.addEventListener('input',()=>{if(Z.innerHTML!==ZH)Z.innerHTML=ZH});
+Z.focus();
 if(typeof module!=='undefined')module.exports={armor};
 </script>
