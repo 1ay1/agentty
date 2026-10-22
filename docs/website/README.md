@@ -72,6 +72,19 @@ Link to other docs with root-relative paths: `[Authentication](/docs/authenticat
 Anchor links to a heading on the same page: `[jump](#some-heading)` — heading ids
 are the slugified heading text (lowercase, non-word → `-`).
 
+## Static files (`static/`)
+
+Files in `static/` are served as-is at the site root, not rendered:
+
+- `static/paste.html` → <https://agentty.org/paste>: the images-as-text page
+  from [Clipboard & Images](/docs/clipboard). It must be byte-identical to
+  `agentty paste page` (the page encodes, agentty decodes); the
+  `paste_page_sync` test (`ctest -L static`) fails when they drift. Regenerate
+  with `agentty paste page > docs/website/static/paste.html`.
+
+The site's deploy copies `static/*` into its `public/`, so a file here is live
+after the next deploy.
+
 ## Headings
 
 Do **not** put an `# H1` in the body — the page renders the `title` from

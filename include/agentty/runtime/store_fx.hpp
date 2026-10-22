@@ -115,6 +115,13 @@ struct PublishWebSearchPolicy { web_search_cfg::Config policy; };
 using publish_web_search_policy =
     maya::pure_fx<PublishWebSearchPolicy, "publish_web_search_policy">;
 
+/// Install the Model's paste settings in the clipboard reader (richpaste).
+/// Same rule as PublishWebSearchPolicy: only the dispatch seam returns it, on
+/// the first fold and whenever m.d.persisted.paste changes.
+struct PublishPasteConfig { paste_cfg::Config config; };
+using publish_paste_config =
+    maya::pure_fx<PublishPasteConfig, "publish_paste_config">;
+
 /// Re-install the live auth header the stream and subagents use.
 ///
 /// Reducers used to resolve the credential themselves (a read of the

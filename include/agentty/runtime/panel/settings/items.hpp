@@ -42,6 +42,7 @@ enum class Action : std::uint8_t {
     OpenSmart,     // General: open Smart Mode config
     OpenSandbox,   // General: open the Sandbox pane (walls, syscalls, limits)
     OpenWebSearch, // General: open Web Search (web_search policy and services)
+    OpenPaste,     // General: open Paste (how Ctrl+V reads the clipboard)
     OpenList,      // General: open another settings list (Item::target)
 
     ToggleChangesStrip, // General: show/hide the persistent "N changes" banner

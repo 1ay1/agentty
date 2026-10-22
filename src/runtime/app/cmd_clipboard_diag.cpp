@@ -75,9 +75,9 @@ std::string diagnose(bool in_ssh) {
     if (in_tmux) (void)maya::tmux::refresh_if_client_changed();
     std::string msg;
     if (in_mosh) {
-        msg = "clipboard: mosh doesn't relay terminal clipboard "
-              "replies \xe2\x80\x94 use plain ssh (or tmux over ssh), or set "
-              "AGENTTY_CLIPBOARD_CMD";
+        msg = "clipboard: mosh drops terminal clipboard replies and can't "
+              "forward the paste agent \xe2\x80\x94 use plain ssh (with "
+              "`agentty paste setup` on your laptop) to paste images";
     } else if (in_tmux) {
         // Name the ACTUAL blocker instead of guessing. Order
         // matters: these are checked in the order tmux applies
@@ -102,7 +102,7 @@ std::string diagnose(bool in_ssh) {
                        maya::tmux::Feature::Clipboard)) {
             msg = "clipboard: tmux reports your outer terminal has no "
                   "clipboard support \xe2\x80\x94 add `set -ga terminal-features "
-                  "\",*:clipboard\"` if it does, or set AGENTTY_CLIPBOARD_CMD";
+                  "\",*:clipboard\"` if it does, or run `agentty paste setup` on your laptop";
         } else {
             msg = "clipboard: no reply through tmux \xe2\x80\x94 passthrough and "
                   "clipboard are on, so the outer terminal refused the "
@@ -110,14 +110,12 @@ std::string diagnose(bool in_ssh) {
                   "in kitty.conf and restart kitty)";
         }
     } else if (in_ssh) {
-        msg = "clipboard: your terminal didn't answer \xe2\x80\x94 images "
-              "over SSH need kitty with clipboard_control read-clipboard "
-              "in kitty.conf (restart kitty after adding it); else set "
-              "AGENTTY_CLIPBOARD_CMD='ssh <laptop> wl-paste -t image/png'";
+        msg = "clipboard: can't reach your laptop's clipboard \xe2\x80\x94 run "
+              "`agentty paste setup` on the laptop once and reconnect "
+              "(`agentty paste doctor` here shows why)";
     } else {
-        msg = "clipboard: terminal didn't answer the read query "
-              "\xe2\x80\x94 install wl-clipboard/xclip (Linux) or use a "
-              "terminal with OSC 52 read support";
+        msg = "clipboard: nothing to paste here and the terminal didn't "
+              "answer \xe2\x80\x94 `agentty paste doctor` shows why";
     }
     return msg;
 }
@@ -139,22 +137,32 @@ Cmd diagnose_clipboard(bool in_ssh) {
 }
 
 Cmd read_clipboard() {
-    // Isolated: the clipboard tools are subprocesses that can hang (an X
-    // server that never answers xclip), so never on a shared worker.
+    // Isolated: a read can wait on a display server or an ssh round trip
+    // to the user's laptop, so never on a shared worker.
     return Cmd::task_isolated([](maya::Sink<Msg> out, std::stop_token) {
         ClipboardRead r;
         try {
-            if (auto img = read_clipboard_image()) {
-                r.image      = std::move(img->bytes);
-                r.media_type = std::move(img->media_type);
-            } else if (auto txt = read_clipboard_text(); txt) {
-                r.text = std::move(*txt);
-            }
+            auto c  = ::agentty::read_clipboard();
+            settle_clipboard_items(c.items);
+            r.items = std::move(c.items);
+            r.error = std::move(c.error);
         } catch (...) {
             r = ClipboardRead{};
+            r.error = "clipboard read failed";
         }
         out.send(Msg{msg::ComposerMsg{std::move(r)}});
     });
 }
 
-}  // namespace agentty::app::cmd
+Cmd settle_clipboard(std::vector<ClipboardItem> items) {
+    return Cmd::task(
+        [](maya::Sink<Msg> out, std::stop_token, std::vector<ClipboardItem> its) {
+            ClipboardRead r;
+            try { settle_clipboard_items(its); r.items = std::move(its); }
+            catch (...) { r.error = "saving the pasted file failed"; }
+            out.send(Msg{msg::ComposerMsg{std::move(r)}});
+        },
+        std::move(items));
+}
+
+} // namespace agentty::app::cmd

@@ -186,6 +186,28 @@ std::vector<Item> general(const Model& m) {
         out.push_back(std::move(i));
     }
 
+    // Paste: how Ctrl+V reads the clipboard. The secondary line names the
+    // routes that are on, so "why didn't my image paste?" starts here.
+    {
+        const auto& p = m.d.persisted.paste;
+        Item i;
+        i.primary = "Paste";
+        std::string routes;
+        auto add = [&](bool on, const char* name) {
+            if (!on) return;
+            if (!routes.empty()) routes += ", ";
+            routes += name;
+        };
+        add(p.forwards, "laptop over ssh");
+        add(p.display, "this machine");
+        add(p.terminal != "off", "terminal");
+        i.secondary = routes.empty() ? std::string{"every route off"}
+                                     : routes + " \xc2\xb7 up to " + std::to_string(p.max_mb) + " MB";
+        i.hint   = "Enter: configure";
+        i.action = Action::OpenPaste;
+        out.push_back(std::move(i));
+    }
+
     // Doors to the lists. Each summary answers "anything here?" without
     // opening it.
     const auto door = [&](Category c, std::string secondary) {
@@ -448,6 +470,7 @@ const char* pane_label(ListOpen::Pane p) noexcept {
         case ListOpen::Pane::Appearance: return "Appearance";
         case ListOpen::Pane::Sandbox:    return "Sandbox";
         case ListOpen::Pane::WebSearch:  return "Web Search";
+        case ListOpen::Pane::Paste:      return "Paste";
     }
     return "";
 }

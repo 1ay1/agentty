@@ -640,6 +640,11 @@ std::optional<Msg> on_web_search(const FormFocus& f, const KeyEvent& ev) {
     return on_form(f, ev, [](form::keys::Action a) { return Msg{WebSearchKey{a}}; });
 }
 
+// Paste settings. Pure form pane, same as Web Search.
+std::optional<Msg> on_paste_settings(const FormFocus& f, const KeyEvent& ev) {
+    return on_form(f, ev, [](form::keys::Action a) { return Msg{PasteSettingsKey{a}}; });
+}
+
 // Plugin editor. Pure form pane — no pane-specific chords; Esc routes
 // through the nav close so the settings list underneath is restored.
 std::optional<Msg> on_plugin_edit(const FormFocus& f, const KeyEvent& ev) {
@@ -1254,7 +1259,7 @@ std::optional<Msg> on_key(const Model& m, const KeyEvent& ev) {
 
     // Which mode each form-backed pane is in.
     FormFocus rag_form, smart_form_snap, plugin_form_snap, appearance_form_snap;
-    FormFocus sandbox_form_snap, web_search_form_snap;
+    FormFocus sandbox_form_snap, web_search_form_snap, paste_form_snap;
     bool appearance_picking = false;
     if (const auto* o = m.ui.panel.get<ui::panel::Rag>())
         rag_form = focus_of(o->embed.form);
@@ -1262,6 +1267,8 @@ std::optional<Msg> on_key(const Model& m, const KeyEvent& ev) {
         smart_form_snap = focus_of(o->form);
     if (const auto* o = m.ui.panel.get<ui::panel::WebSearch>())
         web_search_form_snap = focus_of(o->form);
+    if (const auto* o = m.ui.panel.get<ui::panel::PasteSettings>())
+        paste_form_snap = focus_of(o->form);
     if (const auto* o = m.ui.panel.get<ui::panel::PluginEdit>())
         plugin_form_snap = focus_of(o->form);
     if (const auto* o = m.ui.panel.get<ui::panel::Appearance>()) {
@@ -1342,6 +1349,7 @@ std::optional<Msg> on_key(const Model& m, const KeyEvent& ev) {
                     }
                     case OK::SmartMode:      return on_smart_mode(smart_form_snap, ev);
                     case OK::WebSearch:      return on_web_search(web_search_form_snap, ev);
+                    case OK::PasteSettings:  return on_paste_settings(paste_form_snap, ev);
                     case OK::PluginEdit:     return on_plugin_edit(plugin_form_snap, ev);
                     case OK::Appearance:
                         return on_appearance(appearance_form_snap,
@@ -1479,6 +1487,7 @@ Msg on_paste(const Model& m, const maya::PasteEvent& pe) {
     if (m.ui.panel.get<ui::panel::Rag>())         return RagEmbedPaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::SmartMode>())   return SmartModePaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::WebSearch>())   return WebSearchPaste{std::move(s)};
+    if (m.ui.panel.get<ui::panel::PasteSettings>()) return PasteSettingsPaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::PluginEdit>())  return PluginEditPaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::Appearance>())  return AppearancePaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::SandboxList>()) return SandboxListPaste{std::move(s)};

@@ -93,6 +93,8 @@ function(_agentty_test_link_full name)
     # without the library any test that links the tool layer fails to resolve
     # clay::* at link time. Unconditional, like the submodule.
     target_link_libraries(${name} PRIVATE claybin)
+    # richpaste backs io/clipboard.cpp, which is in the io objlib.
+    target_link_libraries(${name} PRIVATE rp)
     if(AGENTTY_HAS_RAGCPP)
         target_link_libraries(${name} PRIVATE ragcpp::ragcpp)
         target_compile_definitions(${name} PRIVATE AGENTTY_HAS_RAGCPP=1)

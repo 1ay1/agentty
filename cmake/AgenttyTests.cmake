@@ -17,7 +17,7 @@ include(AgenttyTestRegistry)
 set(_AGENTTY_CONSOLIDATED
     error_class_test accounts_registry_test acp_agents_test acp_integration_test
     custom_host_key_prompt_test dispatch_route_test provider_keys_seal_test
-    model_label_test cache_anchor_test composer_edit_test hooks_gate_test
+    model_label_test cache_anchor_test composer_edit_test paste_settings_test hooks_gate_test
     tool_result_image_test
     image_dims_test
     quit_cancels_stream_test
@@ -810,18 +810,6 @@ target_include_directories(logx_test PRIVATE
 add_test(NAME logx_test COMMAND logx_test)
 set_tests_properties(logx_test PROPERTIES TIMEOUT 30)
 
-# clipboard display-server discovery: guards the fix for image paste failing
-# inside tmux (a pane inherits the tmux SERVER's env, so WAYLAND_DISPLAY is
-# missing and the wl-paste backend used to be skipped). Standalone and
-# self-contained — it builds a FAKE runtime dir, so it passes on a headless
-# CI box with no compositor, and needs no agentty objects.
-agentty_test(clipboard_display_env_test MODE raw)
-add_executable(clipboard_display_env_test EXCLUDE_FROM_ALL
-    tests/clipboard_display_env_test.cpp)
-target_include_directories(clipboard_display_env_test PRIVATE include)
-add_test(NAME clipboard_display_env_test COMMAND clipboard_display_env_test)
-set_tests_properties(clipboard_display_env_test PROPERTIES TIMEOUT 30)
-
 # logx redaction/format: standalone for the SAME reason as logx_test above —
 # the sink latches on first use, so a test that needs logging ON must own its
 # process. These were briefly folded into the consolidated binary, where the
@@ -1306,4 +1294,17 @@ if(Python3_Interpreter_FOUND AND EXISTS ${_PKGPARITY})
              COMMAND ${Python3_EXECUTABLE} ${_PKGPARITY})
     set_tests_properties(packaging_submodule_parity PROPERTIES
                          LABELS "static" TIMEOUT 30)
+endif()
+
+# paste_page_sync: agentty.org/paste serves docs/website/static/paste.html.
+# The page encodes, agentty decodes, so it must be exactly what
+# `agentty paste page` prints (rp::armor::html_page). If this fails, run:
+#   agentty paste page > docs/website/static/paste.html
+if(TARGET agentty)
+    add_test(NAME paste_page_sync
+             COMMAND ${CMAKE_COMMAND}
+                     -DBIN=$<TARGET_FILE:agentty>
+                     -DPAGE=${CMAKE_SOURCE_DIR}/docs/website/static/paste.html
+                     -P ${CMAKE_SOURCE_DIR}/tests/lint/paste_page_sync.cmake)
+    set_tests_properties(paste_page_sync PROPERTIES LABELS "static" TIMEOUT 30)
 endif()

@@ -114,26 +114,29 @@ For a provider/wire problem add `AGENTTY_LOG=wire=trace` to capture the raw requ
 
 ## Ctrl+V pastes text instead of my image
 
-Your clipboard lives on the machine your **terminal** runs on, so over SSH
-agentty has to ask the terminal for it. Only **kitty** can send image bytes
-back (OSC 5522); every other terminal answers a text-only dialect (OSC 52),
-which is why the paste arrives as prose.
+Run `agentty paste doctor` in the same pane first. It prints the settings in
+effect, every route it can see, and what a paste returns right now.
 
-On kitty this is almost always one setting — its `clipboard_control` defaults
-to write-only, so reads are refused:
+Over **ssh**, the clipboard is on your laptop, not the server. The fix that
+works in every terminal, tmux included, is to run this **once on the laptop**,
+then reconnect:
+
+```bash
+agentty paste setup
+```
+
+Without that, agentty asks the terminal. Only **kitty** sends images back
+(OSC 5522); other terminals answer text only (OSC 52), which is why the paste
+arrives as prose. On kitty, allow clipboard reads on the laptop and restart it:
 
 ```conf
 # ~/.config/kitty/kitty.conf   (on the machine kitty runs on)
 clipboard_control write-clipboard write-primary read-clipboard read-primary
 ```
 
-Restart kitty fully. Inside tmux also run `tmux set -g allow-passthrough on`
-(off by default), or the request never reaches kitty.
-
-On any other terminal, attach by path (`@shot.png`) or set
-`AGENTTY_CLIPBOARD_CMD` to ferry the clipboard over SSH. Full setup, including
-the Linux `wl-clipboard` / `xclip` requirement and a troubleshooting table:
-[Clipboard & Images](/docs/clipboard).
+Inside tmux also run `tmux set -g allow-passthrough on`. Also check Settings →
+Paste: a route turned off there (or by an `AGENTTY_PASTE_*` variable) is
+skipped. Full guide: [Clipboard & Images](/docs/clipboard).
 
 ## agentty is using a lot of disk, or settings/history won't save
 

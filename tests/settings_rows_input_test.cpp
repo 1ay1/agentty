@@ -285,6 +285,7 @@ TEST_CASE("settings search: every indexed row exists in the pane it names") {
                  : h.pane == P::Smart      ? Msg{OpenSmartMode{h.row}}
                  : h.pane == P::Appearance ? Msg{OpenAppearance{h.row}}
                  : h.pane == P::Sandbox    ? Msg{OpenSandbox{h.row}}
+                 : h.pane == P::Paste      ? Msg{OpenPasteSettings{h.row}}
                                            : Msg{OpenWebSearch{h.row}};
         m = app::update(std::move(m), std::move(open)).first;
         const form::Form* f = nullptr;
@@ -293,6 +294,7 @@ TEST_CASE("settings search: every indexed row exists in the pane it names") {
         if (auto* x = m.ui.panel.get<pn::Appearance>()) f = &x->pane.form;
         if (auto* x = m.ui.panel.get<pn::Sandbox>())    f = &x->pane.form;
         if (auto* x = m.ui.panel.get<pn::WebSearch>())  f = &x->form;
+        if (auto* x = m.ui.panel.get<pn::PasteSettings>()) f = &x->form;
         REQUIRE(f != nullptr);
         REQUIRE(f->focused() != nullptr);
         CHECK_MESSAGE(f->focused()->id == h.row,

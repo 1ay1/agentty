@@ -197,6 +197,16 @@ struct WebSearch : WithFrom {
     // soon as the edit ends.
     bool          rows_stale = false;
 };
+// Settings → Paste. Every row is a paste.* registry row, so like WebSearch it
+// holds no config of its own and is rebuilt from the Model after a commit.
+struct PasteSettings : WithFrom {
+    agentty::form::Form form;
+    mutable maya::ScrollState scroll = [] {
+        maya::ScrollState s;
+        s.auto_dispatch = false;   // the form layer owns movement
+        return s;
+    }();
+};
 struct Palette  : agentty::palette::Open, WithFrom {};
 struct Mention         : agentty::mention::Open, WithFrom {};
 struct Symbol          : agentty::symbol::Open, WithFrom {};
@@ -255,7 +265,7 @@ struct Skills          : agentty::skills_panel::Open, WithFrom {};
 
 using Variant = std::variant<
     None,
-    Models, Providers, ThreadList, SmartMode, WebSearch,
+    Models, Providers, ThreadList, SmartMode, WebSearch, PasteSettings,
     Palette, Mention, Symbol,
     CodeBlocks, CodeBlockResult, ToolOutput, Checkpoints,
     Rag, SettingsList, PluginEdit, Appearance, Sandbox, SandboxList, Fork,
@@ -493,6 +503,7 @@ enum class Kind {
     ThreadList,
     SmartMode,
     WebSearch,
+    PasteSettings,
     DiffReview,
     Todo,
     Stats,
@@ -509,6 +520,7 @@ enum class Kind {
         Kind operator()(const ThreadList&)      const { return Kind::ThreadList; }
         Kind operator()(const SmartMode&)       const { return Kind::SmartMode; }
         Kind operator()(const WebSearch&)       const { return Kind::WebSearch; }
+        Kind operator()(const PasteSettings&)   const { return Kind::PasteSettings; }
         Kind operator()(const Palette&)  const { return Kind::Palette; }
         Kind operator()(const Mention&)         const { return Kind::Mention; }
         Kind operator()(const Symbol&)          const { return Kind::Symbol; }

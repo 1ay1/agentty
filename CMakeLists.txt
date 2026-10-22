@@ -376,6 +376,8 @@ function(agentty_objlib name)
     # reached some objlibs and not others gave two TUs different ideas about
     # the enum. An ODR violation, and not a compile error.
     target_link_libraries(${name} PRIVATE claybin)
+    # richpaste: the clipboard reader (io/clipboard.cpp, `agentty paste`).
+    target_link_libraries(${name} PRIVATE rp)
     # Header-only access to the linked libs (no actual linking for OBJECT).
     target_link_libraries(${name} PRIVATE
         maya::app
@@ -480,7 +482,7 @@ endif()
 if(AGENTTY_MCP AND TARGET mcp::tools)
     target_link_libraries(agentty PRIVATE mcp::tools)
 endif()
-target_link_libraries(agentty PRIVATE claybin)
+target_link_libraries(agentty PRIVATE claybin rp)
 if(AGENTTY_HAS_MIMALLOC)
     # The static target contains both C allocation and global C++ new/delete
     # overrides when MI_OVERRIDE is enabled.
@@ -500,16 +502,14 @@ if(WIN32)
     # shell32  — already needed by existing code paths
     # winmm    — timeBeginPeriod / timeEndPeriod in main.cpp (the
     #            `#pragma comment(lib, "winmm.lib")` only works on MSVC).
-    # user32   — OpenClipboard / GetClipboardData (clipboard image paste)
-    # gdi32    — DIB / BITMAPFILEHEADER consumers used in the same path
-    # gdiplus  — DIB → PNG re-encoding for clipboard images
-    # shlwapi  — SHCreateMemStream backing GDI+'s decode / encode
+    # user32   — kept from before; maya/jaal console code may use it
     # advapi32 — CredWriteW/CredReadW/CredDeleteW (keystore.cpp) +
     #            SetNamedSecurityInfoW/SetEntriesInAclW/OpenProcessToken
     #            (owner-only DACL on the credentials file, auth.cpp)
+    # (richpaste brings its own clipboard libs.)
     target_link_libraries(agentty PRIVATE
         ws2_32 crypt32 shell32 winmm
-        user32 gdi32 gdiplus shlwapi advapi32)
+        user32 advapi32)
     # Static OpenSSL on Windows additionally pulls in these system libs
     # (used by libcrypto's CSP / certificate APIs). Innocuous in dynamic
     # builds — the linker dedupes — but required when AGENTTY_STANDALONE=ON.

@@ -212,6 +212,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/app/update/stream_preview.cpp
     src/runtime/app/update/smart_mode.cpp
     src/runtime/app/update/web_search.cpp
+    src/runtime/app/update/paste_settings.cpp
     src/runtime/app/update/appearance.cpp
     src/runtime/app/update/sandbox.cpp
     src/runtime/app/update/plugin_edit.cpp
@@ -240,6 +241,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/panel/sandbox.cpp
     src/runtime/panel/rag_form.cpp
     src/runtime/settings_registry.cpp
+    src/runtime/paste_cli.cpp
     src/runtime/panel/smart_form.cpp
     src/runtime/panel/web_search_form.cpp
     src/runtime/panel/plugin_form.cpp
@@ -292,6 +294,7 @@ set(AGENTTY_RUNTIME_NOMAIN_SOURCES
     src/runtime/view/panels/symbol.cpp
     src/runtime/view/panels/smart_mode.cpp
     src/runtime/view/panels/web_search.cpp
+    src/runtime/view/panels/paste_settings.cpp
     src/runtime/view/panels/appearance.cpp
     src/runtime/view/panels/sandbox.cpp
     src/runtime/view/panels/plugin_edit.cpp

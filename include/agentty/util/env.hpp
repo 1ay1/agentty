@@ -44,9 +44,6 @@ enum class Var : std::uint8_t {
     // ── Airgap (laptop side) ────────────────────────────────────────────
     AirgapSsh,               // AGENTTY_AIRGAP_SSH   (extra ssh flags)
 
-    // ── Clipboard override ──────────────────────────────────────────────
-    ClipboardCmd,            // AGENTTY_CLIPBOARD_CMD (shell cmd → image bytes on stdout)
-
     // ── Debug ─────────────────────────────────────────────────────────────────────
 
     // ── Smart Mode session pin ────────────────────────────────
@@ -67,7 +64,6 @@ inline constexpr std::array kCatalog = {
     VarSpec{Var::Insecure,         "AGENTTY_INSECURE"},
     VarSpec{Var::NoPrewarm,        "AGENTTY_NO_PREWARM"},
     VarSpec{Var::AirgapSsh,        "AGENTTY_AIRGAP_SSH"},
-    VarSpec{Var::ClipboardCmd,     "AGENTTY_CLIPBOARD_CMD"},
     VarSpec{Var::SmartMode,        "AGENTTY_SMART_MODE"},
 };
 
@@ -100,7 +96,6 @@ consteval bool every_var_has_row() {
         Var::SocksProxy, Var::ApiHost, Var::OAuthHost, Var::Insecure,
         Var::NoPrewarm,
         Var::AirgapSsh,
-        Var::ClipboardCmd,
         Var::SmartMode,
     };
     if (std::size(kAll) != kCatalog.size()) return false;

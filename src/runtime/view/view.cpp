@@ -58,6 +58,7 @@ std::optional<maya::Element> pick_panel(const Model& m) {
         case OK::ThreadList:     return thread_list_panel(m);
         case OK::SmartMode:      return smart_mode_panel(m);
         case OK::WebSearch:      return web_search_panel(m);
+        case OK::PasteSettings:  return paste_settings_panel(m);
         case OK::PluginEdit:     return plugin_edit_panel(m);
         case OK::Appearance:     return appearance_panel(m);
         case OK::Sandbox:        return sandbox_panel(m);

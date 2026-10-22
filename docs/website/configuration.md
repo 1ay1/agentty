@@ -30,7 +30,6 @@ variable agentty reads, grouped by subsystem — see
 | `AGENTTY_PASSPHRASE` | Supply the at-rest encryption passphrase non-interactively (CI/scripts) instead of the tty prompt. |
 | `AGENTTY_KDF` | Set to `scrypt` to force the portable scrypt KDF instead of the default Argon2id for at-rest encryption. |
 | `AGENTTY_AIRGAP_SSH` | Extra flags injected into the ssh invocation for airgap (laptop side). |
-| `AGENTTY_CLIPBOARD_CMD` | Shell command that writes image bytes to stdout — used for Ctrl+V image paste over SSH. See [Clipboard & Images](/docs/clipboard). |
 | `AGENTTY_MCP_CONFIG` | Explicit path to an mcp.json, overriding the project/user lookup. |
 | `AGENTTY_MCP_ALLOW_PROJECT` | Blanket-trust a project-local .agentty/mcp.json so its stdio servers connect (gated off by default). Alternative to per-file [content-hash approval](/docs/plugins#config-scope). |
 | `AGENTTY_DOCS_DIR` | Folder of documents to index for the search_docs [retrieval](/docs/retrieval) tool. Auto-discovers `./docs` then `./.agentty/knowledge` when unset. Even with no docs, `search_docs` still searches your installed **skills** and **learned memory**. |
@@ -101,6 +100,28 @@ The **API key** services are the vendors' documented interfaces and do not depen
 Each service offers up to seven extra settings which appear under its slot, and none for a service that has none. Most are a list to pick from: freshness, region, safe search, spell correction, exact phrases, sort order, and so on. Two are typed: Brave API's *Goggle* takes the `https://` URL of a hosted Goggle (a rules file on GitHub, GitLab or a Gist, registered at [search.brave.com/goggles/create](https://search.brave.com/goggles/create)) that re-ranks Brave's results, and Firecrawl's *Location* takes a place such as `San Francisco,California,United States`. A typed value is saved when you leave the row, and only if it is one the service accepts; otherwise the row goes back to what was saved. Empty the row to clear it. Settings are saved per service in `settings.json` under `web_search.dials`, so a choice survives moving the service between slots. Some only take effect together with another: Tavily's *Country* applies with the General topic, its *Safe search* not with the fast depths, and *Language match* only when a language is set. Serply's *Country* defaults to United States: with no country, Serply answers from whichever region is free, and the results can change country from one search to the next.
 
 Kagi, Mojeek and Linkup are not offered yet: their request and response formats could not be verified against documentation or a real reply.
+
+### Paste
+
+How [[Ctrl+V]] and `agentty paste` read the clipboard. Three places set the same rows, saved to `settings.json` under `"paste"` (only rows moved off their default are written):
+
+- **Settings → Paste** in the app (`/settings`, then *Paste*). A change applies to the next paste.
+- **`agentty paste config`** in a shell: `agentty paste config set max_mb 64`, `… get terminal`, `… reset all`. With no arguments it lists every row, its value, and where that value comes from.
+- **A variable**, below. It wins over `settings.json` for that run only, locks its row in the pane (naming the variable), and is never written to disk.
+
+| Key | Variable | Default | Meaning |
+|-----|----------|---------|---------|
+| `forwards` | `AGENTTY_PASTE_FORWARDS` | `true` | Over ssh, read the laptop's clipboard through the forwarded agent (needs `agentty paste setup` on the laptop). |
+| `display` | `AGENTTY_PASTE_DISPLAY` | `true` | Read this machine's own clipboard (Wayland, X11, macOS pasteboard, Windows). |
+| `terminal` | `AGENTTY_PASTE_TERMINAL` | `auto` | Ask the terminal when nothing else answered. `auto` asks it what it supports (OSC 5522 for images, else OSC 52 for text); `osc5522` and `osc52` force one for terminals that misreport; `off` never asks. |
+| `server_display` | `AGENTTY_PASTE_SERVER_CLIPBOARD` | `false` | Over ssh, fall back to the *server's* own clipboard. Off because that isn't the clipboard you copied into. |
+| `decode_text` | `AGENTTY_PASTE_DECODE_TEXT` | `true` | Turn a pasted `richpaste:1:` line back into the image or file it carries. Off: it pastes as text. |
+| `max_mb` | `AGENTTY_PASTE_MAX_MB` | `32` | Largest paste read, in MB (1–1024). Bigger clipboard contents are refused. |
+| `inline_kb` | `AGENTTY_PASTE_INLINE_KB` | `256` | A copied text file up to this size (KB, 0–4096) goes into the message as its text. Bigger ones, and every binary file, are saved and their path is typed in. `0` always saves. |
+| `save_dir` | `AGENTTY_PASTE_SAVE_DIR` | (empty) | Where pasted files are saved. Empty: `~/.agentty/paste/pasted` (`$AGENTTY_HOME/paste/pasted`). |
+| `socket` | `AGENTTY_PASTE_SOCKET` | (empty) | Ask only this agent socket (a relay, a test) instead of finding the forwarded ones. |
+
+Booleans take `true`/`false`, `1`/`0`, `on`/`off`, `yes`/`no`. Numbers out of range are clamped; a `terminal` value that isn't one of the four is refused. The full guide, with every route and what to do when one fails: [Clipboard & Images](/docs/clipboard).
 
 ## On-disk paths
 

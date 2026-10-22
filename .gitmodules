@@ -22,3 +22,7 @@
 	path = third_party/claybin
 	url = https://github.com/agentty-org/claybin.git
 	branch = master
+[submodule "richpaste"]
+	path = third_party/richpaste
+	url = https://github.com/agentty-org/richpaste.git
+	branch = master

@@ -94,6 +94,7 @@ namespace {
         case P::Appearance: return Msg{OpenAppearance{h.row}};
         case P::Sandbox:    return Msg{OpenSandbox{h.row}};
         case P::WebSearch:  return Msg{OpenWebSearch{h.row}};
+        case P::Paste:      return Msg{OpenPasteSettings{h.row}};
     }
     return Msg{OpenRag{h.row}};
 }
@@ -108,6 +109,7 @@ std::vector<se::ListOpen::Hit> settings_search_index(const Model& m) {
     se::index_form(out, appearance_form_for_search(m), P::Appearance);
     se::index_form(out, sandbox_form_for_search(m),    P::Sandbox);
     se::index_form(out, web_search_form_for_search(m), P::WebSearch);
+    se::index_form(out, paste_form_for_search(m), P::Paste);
     return out;
 }
 
@@ -281,6 +283,9 @@ Cmd settings_list_update(Model& m, msg::SettingsListMsg sm) {
                 }
                 case se::Action::OpenWebSearch: {
                     return reenter(m, Msg{OpenWebSearch{}});
+                }
+                case se::Action::OpenPaste: {
+                    return reenter(m, Msg{OpenPasteSettings{}});
                 }
                 case se::Action::OpenList:
                     // OpenSettingsList descends, so Esc comes back here.

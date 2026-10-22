@@ -32,6 +32,10 @@ agentty --sandbox on                   # require an OS sandbox for bash/diagnost
 | `agentty status` | Print which auth source will be used. |
 | `agentty airgap user@host` | Run the agent on a remote host through an SSH SOCKS tunnel. |
 | `agentty acp` | Run headless as an [Agent Client Protocol](/docs/acp) agent for Zed (JSON-RPC over stdio). |
+| `agentty paste` | Print the clipboard: text as text, images and files saved and their paths printed. Works locally and over ssh. See [Clipboard & Images](/docs/clipboard). |
+| `agentty paste setup` | Once, on the machine you type on: adds the ssh hook to `~/.ssh/config` and starts the clipboard agent, so Ctrl+V over ssh reads that machine's clipboard. |
+| `agentty paste doctor` | Show the paste settings in effect, the agent, the display, every forwarded socket, and what a paste returns right now. |
+| `agentty paste config` | List the paste settings. `config set <key> <value>`, `config get <key>`, `config reset <key\|all>`. Same rows as Settings → Paste. |
 | `agentty run [prompt]` | Run one prompt with tools and print only the answer. For scripts and CI; see [below](#agentty-run). |
 | `agentty mcp-serve` | Serve agentty's native tools over [MCP](/docs/mcp) (stdio). Point any MCP client at it. |
 | `agentty mcp-login <server>` | Authorize an OAuth-gated MCP server from `mcp.json` (OAuth 2.1 + PKCE via your browser). |
@@ -155,4 +159,21 @@ Passed to `agentty airgap` — see `agentty airgap --help`.
 |---|---|
 | `--setup` | Copy credentials to the remote on first run. |
 | `--acp` | Print a ready-to-paste Zed `agent_servers` config that tunnels `agentty acp` over ssh stdio. Flags after it are forwarded to the remote agent. See [Zed / ACP](/docs/acp#airgap). |
+| `--clipboard-relay` | Forward this machine's clipboard agent for this session, so Ctrl+V on the remote pastes images and files. Not needed after `agentty paste setup`. |
 | `--remote-agentty <path>` | Path to agentty on the remote if it isn't on `PATH`. |
+
+## agentty paste
+
+The clipboard commands. Ctrl+V in the composer uses the same reader and the same settings. Full guide: [Clipboard & Images](/docs/clipboard).
+
+| Command | What it does |
+|---|---|
+| `agentty paste [-o DIR]` | Print text, or save images and files (into `DIR`, else the save folder) and print their paths. Exit 1 when nothing could be read. |
+| `agentty paste doctor` | Settings in effect, state folder, agent, display, ssh, forwards, and the result of a real paste. Exit 1 if that paste fails. |
+| `agentty paste setup` | Add (or update) the ssh hook block at the top of `~/.ssh/config` and start the agent. Run once on the machine you type on. |
+| `agentty paste agent` | Run the clipboard agent in the foreground (setup starts it in the background). |
+| `agentty paste config [get\|set\|reset]` | The paste settings. See [Configuration → Paste](/docs/configuration#paste). |
+| `agentty paste howto` | One-time macOS and Windows snippets that turn the clipboard into a `richpaste:1:` line, for terminals that never hand over the clipboard. |
+| `agentty paste page` | Print the web page that does the same in any browser (also at [agentty.org/paste](https://agentty.org/paste)). |
+| `agentty paste encode FILE` | Print `FILE` as one `richpaste:1:` line. |
+| `agentty paste decode [DIR]` | Read such lines on stdin and save the files they carry. |

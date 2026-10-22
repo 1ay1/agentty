@@ -50,10 +50,12 @@ source=("$_pkgname::git+https://github.com/agentty-org/agentty.git"
         'git+https://github.com/agentty-org/rag-cpp.git'
         'git+https://github.com/agentty-org/claybin.git'
         'git+https://github.com/agentty-org/jsonrpc-cpp.git'
+        'git+https://github.com/agentty-org/richpaste.git'
         "nlohmann_json-${_json_tag}.tar.gz::https://github.com/nlohmann/json/archive/${_json_tag}.tar.gz"
         "simdjson-${_simdjson_tag}.tar.gz::https://github.com/simdjson/simdjson/archive/${_simdjson_tag}.tar.gz"
         "mimalloc-${_mimalloc_tag}.tar.gz::https://github.com/microsoft/mimalloc/archive/${_mimalloc_tag}.tar.gz")
 sha256sums=('SKIP'
+            'SKIP'
             'SKIP'
             'SKIP'
             'SKIP'
@@ -86,6 +88,7 @@ prepare() {
     # empty, so leaving it unwired failed at CONFIGURE rather than at link.
     git config submodule.claybin.url "$srcdir/claybin"
     git config submodule.jsonrpc-cpp.url "$srcdir/jsonrpc-cpp"
+    git config submodule.richpaste.url "$srcdir/richpaste"
     git -c protocol.file.allow=always submodule update
 
     # maya carries jaal as its OWN submodule, and agentty links maya::app,

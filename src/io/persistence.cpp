@@ -2879,6 +2879,7 @@ store::Settings load_settings(Io io) {
     // pane would show a locked row while the tool ran on the default.
     // Applied last, so an export beats a stored value.
     settings::registry::apply_env(io, s.web_search);
+    settings::registry::apply_env(io, s.paste);
     return s;
 }
 
@@ -3219,6 +3220,24 @@ store::Settings load_settings_from_disk() {
             }
         }
         // (web_search's env overrides: applied by load_settings() on every path.)
+
+        // paste (Settings → Paste): same shape and clamping as web_search.
+        if (j.contains("paste") && j["paste"].is_object()) {
+            const auto& pj = j["paste"];
+            for (const auto& d : settings::registry::kSettings) {
+                if (d.owner() != settings::registry::Owner::Paste) continue;
+                const std::string key{d.id.substr(d.id.find('.') + 1)};
+                if (!pj.contains(key)) continue;
+                const auto& v = pj[key];
+                std::string as_text;
+                if      (v.is_boolean())        as_text = v.get<bool>() ? "true" : "false";
+                else if (v.is_number_integer()) as_text = std::to_string(v.get<long long>());
+                else if (v.is_number())         as_text = std::to_string(v.get<double>());
+                else if (v.is_string())         as_text = v.get<std::string>();
+                else continue;
+                (void)settings::registry::set(s.paste, d, as_text);
+            }
+        }
 
         // Environment overrides, applied by WALKING the registry. This is what
         // makes a row's env alias real for every Settings-owned knob at once,
@@ -3608,6 +3627,39 @@ void save_settings_locked(persistence::Held held, const store::Settings& s) {
         // Else: never had one, still all default. Absent — and the merge
         // adopts a sibling instance's newer `web_search` block from disk rather
         // than deleting it (see adopt_disk_new below).
+    }
+
+    // paste: same rules as web_search (only rows off their default; an
+    // env-overridden row keeps its baseline value, never the export).
+    {
+        json base_paste = [](const json& b) {
+            return b.contains("paste") && b["paste"].is_object() ? b["paste"] : json{};
+        }(loaded_baseline().load());
+        const auto env = settings::registry::read_env(internal_io());
+        nlohmann::json pe = nlohmann::json::object();
+        for (const auto& d : settings::registry::kSettings) {
+            if (d.owner() != settings::registry::Owner::Paste) continue;
+            const std::string key{d.id.substr(d.id.find('.') + 1)};
+            if (!settings::registry::env_override(d, env).empty()) {
+                if (base_paste.is_object() && base_paste.contains(key)) pe[key] = base_paste[key];
+                continue;
+            }
+            if (settings::registry::is_default(s.paste, d)) continue;
+            const std::string val = settings::registry::get(s.paste, d);
+            switch (d.type) {
+                case settings::registry::Type::Bool: pe[key] = (val == "true"); break;
+                case settings::registry::Type::Int:
+                    try { pe[key] = std::stoll(val); } catch (...) {}
+                    break;
+                case settings::registry::Type::Real:
+                    try { pe[key] = std::stod(val); } catch (...) {}
+                    break;
+                case settings::registry::Type::Enum:
+                case settings::registry::Type::Text: pe[key] = val; break;
+            }
+        }
+        if (!pe.empty())                     j["paste"] = std::move(pe);
+        else if (base_paste.is_object())     j["paste"] = json::object();   // reset to defaults
     }
 
     // ── Merge, rather than replace ──────────────────────────────────

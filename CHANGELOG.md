@@ -10,6 +10,36 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
   server an incomplete request and show its rejection: "Missing required
   prompt arguments", which names neither the argument nor the shape of the
   line. It now answers with the argument and the line to type.
+### Added
+- **Ctrl+V pastes images and files over ssh, in any terminal.** Run
+  `agentty paste setup` once on the machine you type on. Every ssh session
+  then carries a socket back to a small clipboard agent there, so Ctrl+V on
+  the server reads your laptop's clipboard: screenshots, copied files, text.
+  It works through tmux and several hops, and needs nothing on the server but
+  agentty. The reader is [richpaste](https://github.com/agentty-org/richpaste),
+  now a submodule. It talks to Wayland, X11, macOS and Windows directly, so
+  `wl-paste`, `xclip` and `pngpaste` are no longer needed.
+- **Copied files paste.** A small text file goes in as its text; any other
+  file is saved under `~/.agentty/paste/pasted` and its path is typed in.
+- **Settings → Paste**, `agentty paste config`, and `AGENTTY_PASTE_*`
+  variables: turn each route on or off, force the terminal mode, set the size
+  limits and the save folder. All in `settings.json` under `"paste"`.
+- **`agentty paste`**: print the clipboard; `doctor` shows the route a paste
+  takes and why; `howto`, `page`, `encode` and `decode` turn an image into one
+  line of text for terminals that never hand over the clipboard. The page is
+  also at [agentty.org/paste](https://agentty.org/paste).
+
+### Changed
+- `agentty airgap --clipboard-relay` forwards the clipboard agent instead of
+  sshing back into the laptop, so the laptop no longer needs sshd or ssh-agent.
+- Windows: copying uses the Win32 clipboard directly, so non-ASCII text no
+  longer gets mangled by `clip.exe`.
+
+### Removed
+- `AGENTTY_CLIPBOARD_CMD`. `agentty paste setup` replaces it.
+
+### Fixed
+- The Web Search pane said "unsaved" after a change it had already saved.
 
 ## [0.9.31] - 2026-10-21
 

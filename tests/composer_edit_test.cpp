@@ -404,3 +404,50 @@ TEST_CASE("composer paste: image paths are checked off the fold") {
         CHECK(m.ui.composer.attachments[0].media_type == "image/png");
     }
 }
+
+// What Ctrl+V and a `richpaste:1:` paste put in the box.
+TEST_CASE("composer paste: clipboard items and armored text") {
+    using agentty::ClipboardItem;
+    using agentty::ClipboardRead;
+    using agentty::ComposerPaste;
+    using K = agentty::Attachment::Kind;
+    {
+        // An image and some text from the clipboard: an image chip and a paste.
+        Model m;
+        ClipboardRead r;
+        r.items.push_back({ClipboardItem::Kind::Image, "image/png", {}, "\x89PNGxxxx"});
+        r.items.push_back({ClipboardItem::Kind::Text, "text/plain", {}, "hi there"});
+        (void)composer_update(m, std::move(r));
+        REQUIRE(m.ui.composer.attachments.size() == 2);
+        CHECK(m.ui.composer.attachments[0].kind == K::Image);
+        CHECK(m.ui.composer.attachments[0].path == "<clipboard>");
+        CHECK(m.ui.composer.attachments[1].kind == K::Paste);
+    }
+    {
+        // A saved file's path is typed in, not chipped.
+        Model m;
+        ClipboardItem it{ClipboardItem::Kind::Text, "text/plain", {}, "/x/a.pdf"};
+        it.saved_path = true;
+        ClipboardRead r;
+        r.items.push_back(std::move(it));
+        (void)composer_update(m, std::move(r));
+        CHECK(m.ui.composer.attachments.empty());
+        CHECK(m.ui.composer.text == "/x/a.pdf ");
+    }
+    {
+        // An armored PNG pasted as text comes back as the image.
+        Model m;
+        const std::string png = "\x89PNG\r\n\x1a\n0123";
+        (void)composer_update(m, ComposerPaste{"richpaste:1:image/png::12::iVBORw0KGgowMTIz"});
+        REQUIRE(m.ui.composer.attachments.size() == 1);
+        CHECK(m.ui.composer.attachments[0].kind == K::Image);
+        CHECK(m.ui.composer.attachments[0].body.bytes() == png);
+    }
+    {
+        // A broken block pastes as plain text.
+        Model m;
+        (void)composer_update(m, ComposerPaste{"richpaste:1:image/png::99::AAAA"});
+        REQUIRE(m.ui.composer.attachments.size() == 1);
+        CHECK(m.ui.composer.attachments[0].kind == K::Paste);
+    }
+}
