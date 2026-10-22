@@ -103,6 +103,10 @@ struct ImagePathSniffed {
 // lapsing and teaching the user nothing. `seq` matches the query that armed
 // it so a stale timeout never fires after a successful paste.
 struct ClipboardQueryTimeout { std::uint64_t seq = 0; };
+// A pasted image-as-text chip stopped growing. `generation` matches
+// UI::armored_paste_gen when armed; a later piece bumps it, so only the
+// last check for the last piece counts.
+struct ArmoredPasteStall { std::uint64_t generation = 0; };
 // The worker's answer to "why did that clipboard read go unanswered".
 struct ClipboardDiagnosed { std::string message; };
 // One step of a Ctrl+V clipboard read (richpaste's route walk: the display,
@@ -1392,7 +1396,7 @@ using ComposerMsg = std::variant<
     ComposerUndo, ComposerRedo,
     ComposerHistoryPrev, ComposerHistoryNext,
     ComposerImagePasteFromClipboard,
-    ComposerPaste, ImagePathSniffed, ClipboardQueryTimeout, ClipboardDiagnosed,
+    ComposerPaste, ImagePathSniffed, ClipboardQueryTimeout, ArmoredPasteStall, ClipboardDiagnosed,
     ClipboardRead,
     ComposerRecallQueued,
     ComposerQueuePeekPrev, ComposerQueuePeekNext, ComposerQueuePopLast>;

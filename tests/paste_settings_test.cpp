@@ -162,18 +162,46 @@ TEST_CASE("paste: an image still arriving shows progress, and can't be sent half
     Model m;
     m = send(std::move(m), Msg{ComposerPaste{head + data.substr(0, 2000)}});
     REQUIRE(m.ui.composer.attachments.size() == 1);
-    const auto& a = m.ui.composer.attachments[0];
-    CHECK(attachment::chip_label(a) == "Receiving image \xc2\xb7 1 of 3 KB");
+    CHECK(attachment::chip_label(m.ui.composer.attachments[0]) == "Receiving image \xc2\xb7 1 of 3 KB");
 
     // Enter now would send base64 to the model: it's held, the draft kept.
     m = send(std::move(m), Msg{ComposerSubmit{}});
     CHECK(m.ui.composer.attachments.size() == 1);
     CHECK(m.s.status.find("still arriving") != std::string::npos);
 
-    // Cut short and followed by other text: final, says so.
-    Attachment cut = a;
+    // Nothing more comes: the stall check marks it, the chip says so.
+    const auto gen = m.ui.armored_paste_gen;
+    CHECK(gen > 0);
+    m = send(std::move(m), Msg{ArmoredPasteStall{gen}});
+    CHECK(m.ui.composer.attachments[0].stalled);
+    CHECK(attachment::chip_label(m.ui.composer.attachments[0]).starts_with("Incomplete image \xc2\xb7 1 of 3 KB"));
+    CHECK(m.s.status.find("copy it again") != std::string::npos);
+    m = send(std::move(m), Msg{ComposerSubmit{}});
+    CHECK(m.s.status.find("didn't arrive whole") != std::string::npos);
+}
+
+TEST_CASE("paste: an image in pieces that finishes late still decodes; a stale stall check is ignored") {
+    const std::string data(4000, 'A');
+    const std::string head = "richpaste:1:image/png::3000::";
+    Model m;
+    m = send(std::move(m), Msg{ComposerPaste{head + data.substr(0, 2000)}});
+    const auto first = m.ui.armored_paste_gen;
+    m = send(std::move(m), Msg{ComposerPaste{data.substr(2000), true, false, /*continues_paste=*/true}});
+    // The old check fires after the block completed: nothing to mark.
+    m = send(std::move(m), Msg{ArmoredPasteStall{first}});
+    REQUIRE(m.ui.composer.attachments.size() == 1);
+    CHECK(m.ui.composer.attachments[0].kind == Attachment::Kind::Image);
+    CHECK(!m.ui.composer.attachments[0].stalled);
+}
+
+TEST_CASE("paste: an image-as-text cut short and followed by text says so") {
+    const std::string data(4000, 'A');
+    const std::string head = "richpaste:1:image/png::3000::";
+    Attachment cut;
+    cut.kind = Attachment::Kind::Paste;
+    cut.byte_count = head.size() + 2001;
     cut.body.set_bytes(head + data.substr(0, 2000) + "!");
-    CHECK(attachment::chip_label(cut).starts_with("Incomplete pasted image"));
+    CHECK(attachment::chip_label(cut).starts_with("Incomplete image \xc2\xb7 1 of 3 KB arrived"));
 }
 
 TEST_CASE("paste: a long single line shows its size, not a preview") {

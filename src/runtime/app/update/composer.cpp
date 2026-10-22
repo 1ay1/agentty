@@ -807,11 +807,34 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // paste, read by read) lands right after the chip of the piece
             // before it. Grow that chip instead of starting a new one, so one
             // paste is one chip.
-            if (e.continues_paste) {
-                auto& cs = m.ui.composer;
+            //
+            // An image pasted as text that is still arriving takes every
+            // piece until it's whole, even one that came after a pause long
+            // enough to look like a new paste: a slow link pauses mid-line.
+            // Text that can't be more of it (anything but base64 and spaces)
+            // is left alone.
+            auto& cs = m.ui.composer;
+            const auto arriving_idx = [&]() -> std::size_t {
+                if (!m.d.persisted.paste.decode_text) return cs.attachments.size();
+                for (std::size_t i = cs.attachments.size(); i-- > 0;) {
+                    const auto& a = cs.attachments[i];
+                    if (a.kind == Attachment::Kind::Paste && !a.stalled && armored_partial(a.body.bytes())) return i;
+                }
+                return cs.attachments.size();
+            }();
+            const bool more_of_it = arriving_idx < cs.attachments.size() && !e.text.empty()
+                && std::ranges::all_of(e.text, [](unsigned char c) {
+                       return std::isalnum(c) || c == '+' || c == '/' || c == '=' || c == '-' || c == '_'
+                           || c == ' ' || c == '\n' || c == '\r' || c == '\t' || c >= 0x80;
+                   });
+            if (e.continues_paste || more_of_it) {
                 const auto cur = static_cast<std::size_t>(std::clamp(cs.cursor, 0, static_cast<int>(cs.text.size())));
                 const auto len = attachment::placeholder_len_ending_at(cs.text, cur);
-                const auto idx = len > 0 ? attachment::placeholder_index(cs.text, cur - len) : cs.attachments.size();
+                const auto at_cursor = len > 0 ? attachment::placeholder_index(cs.text, cur - len) : cs.attachments.size();
+                const auto idx = more_of_it ? arriving_idx : at_cursor;
+                AGT_LOG(Ui, Debug, "paste.piece", "bytes={} grows={} chip_bytes={}", e.text.size(),
+                        idx < cs.attachments.size() && cs.attachments[idx].kind == Attachment::Kind::Paste,
+                        idx < cs.attachments.size() ? cs.attachments[idx].byte_count : 0);
                 if (idx < cs.attachments.size() && cs.attachments[idx].kind == Attachment::Kind::Paste) {
                     auto& prev = cs.attachments[idx];
                     std::string body = prev.body.bytes();
@@ -823,8 +846,13 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                         std::string why;
                         auto items = decode_armored(body, &why);
                         if (!items.empty()) {
-                            cs.text.erase(cur - len, len);
-                            cs.cursor = static_cast<int>(cur - len);
+                            // Drop this chip's placeholder (wherever it sits) and put
+                            // what it decodes to in its place.
+                            const auto ph = attachment::make_placeholder(idx);
+                            if (auto at = cs.text.find(ph); at != std::string::npos) {
+                                cs.text.erase(at, ph.size());
+                                cs.cursor = static_cast<int>(at);
+                            }
                             prev.body.set_bytes(std::string{});
                             prev.byte_count = prev.line_count = 0;
                             const bool needs_disk = std::ranges::any_of(items, [](auto& it) {
@@ -837,9 +865,16 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                     std::erase(body, '\r');
                     prev.line_count = std::ranges::count(body, '\n') + (!body.empty() && body.back() == '\n' ? 0 : 1);
                     prev.byte_count = body.size();
+                    const bool image_text = m.d.persisted.paste.decode_text && armored_partial(body);
                     prev.body.set_bytes(std::move(body));
+                    prev.stalled = false;
                     if (prev.line_count > 1) cs.expanded = true;
-                    return Cmd::none();
+                    if (!image_text) return Cmd::none();
+                    // Still arriving: if no more comes, say so rather than
+                    // "Receiving" forever. maya ends a paste burst after 1 s
+                    // of quiet; give a slow link twice that.
+                    return Cmd::after(std::chrono::milliseconds{2500},
+                                      Msg{ArmoredPasteStall{++m.ui.armored_paste_gen}});
                 }
                 // No chip to grow (the first piece became an image, a path,
                 // or text): treat this piece as a paste of its own.
@@ -928,7 +963,15 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // pieces): it becomes a chip the pieces grow, decoded when complete.
             const bool arriving = !e.path_checked && m.d.persisted.paste.decode_text
                                && armored_partial(e.text);
-            if (arriving) e.path_checked = true;
+            if (arriving) {
+                // It becomes a chip the next pieces grow. If they never come,
+                // the stall check says so.
+                e.path_checked = true;
+                Cmd pasted = composer_update(m, std::move(e));
+                return Cmd::batch(std::move(pasted),
+                                  Cmd::after(std::chrono::milliseconds{2500},
+                                             Msg{ArmoredPasteStall{++m.ui.armored_paste_gen}}));
+            }
             if (!e.path_checked && m.d.persisted.paste.decode_text && has_armored(e.text)) {
                 std::string why;
                 auto items = decode_armored(e.text, &why);
@@ -1083,6 +1126,25 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                 return toast;
             }
             return Cmd::none();
+        },
+        [&](ArmoredPasteStall& e) -> Cmd {
+            // An image pasted as text stopped arriving. A later piece re-armed
+            // with a newer generation, so only the last check counts.
+            if (e.generation != m.ui.armored_paste_gen) return Cmd::none();
+            bool any = false;
+            for (auto& a : m.ui.composer.attachments) {
+                if (a.kind != Attachment::Kind::Paste || a.stalled) continue;
+                if (!armored_partial(a.body.bytes())) continue;
+                a.stalled = true;
+                any = true;
+            }
+            if (!any) return Cmd::none();
+            AGT_LOG(Ui, Info, "paste.armored_stalled", "gen={}", e.generation);
+            return set_status_toast(
+                m,
+                "image didn't arrive whole \xe2\x80\x94 delete the chip and copy it again "
+                "(big images: agentty.org/paste keeps them small)",
+                std::chrono::seconds{8});
         },
         [&](ClipboardQueryTimeout& e) -> Cmd {
             // The escape-based clipboard read went unanswered. Stale guard:

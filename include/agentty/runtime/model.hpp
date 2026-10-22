@@ -506,6 +506,10 @@ struct Model {
         // When the in-flight terminal ask counts as unanswered. The timeout
         // arm polls until then (a refusal shows up only as a counter).
         std::chrono::steady_clock::time_point clipboard_query_deadline{};
+        // Bumped each time an image-as-text paste chip is made or grows; the
+        // ArmoredPasteStall check armed with it only fires if nothing came
+        // after.
+        std::uint64_t       armored_paste_gen = 0;
         // (Smart-Mode slot-assign state used to be parked HERE as three
         // fields — slot, advanced, from — because the hand-off destroyed the
         // SmartMode overlay. It now rides ON the assign-mode Models panel

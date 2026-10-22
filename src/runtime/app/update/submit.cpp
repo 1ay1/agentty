@@ -185,7 +185,7 @@ Cmd submit_message(Model& m) {
     // megabytes of base64 to the model. Hold the send and say what to do.
     for (const auto& a : m.ui.composer.attachments) {
         if (a.kind != Attachment::Kind::Paste || !a.body.bytes().starts_with("richpaste:1:")) continue;
-        return set_status_toast(m, armored_partial(a.body.bytes())
+        return set_status_toast(m, armored_partial(a.body.bytes()) && !a.stalled
             ? "image still arriving \xe2\x80\x94 wait for it, or delete the chip to send without it"
             : "that image didn't arrive whole \xe2\x80\x94 delete the chip and copy it again",
             std::chrono::seconds{6});

@@ -327,15 +327,20 @@ std::string chip_label(const Attachment& a) {
     //     far along it is. If it stopped short, say so, not a wall of base64.
     if (a.byte_count >= 12 && a.body.bytes().starts_with("richpaste:1:")) {
         const auto p = armored_progress(a.body.bytes());
-        if (p.arriving && p.need > 0) {
+        if (p.arriving && !a.stalled && p.need > 0) {
             std::snprintf(buf, sizeof(buf), "Receiving image \xc2\xb7 %llu of %llu KB",
                           static_cast<unsigned long long>(p.have / 1024),
                           static_cast<unsigned long long>((p.need + 1023) / 1024));
             return buf;
         }
-        if (p.arriving) return "Receiving image\xe2\x80\xa6";
-        std::snprintf(buf, sizeof(buf), "Incomplete pasted image \xc2\xb7 %zu KB \xc2\xb7 copy it again",
-                      a.byte_count / 1024);
+        if (p.arriving && !a.stalled) return "Receiving image\xe2\x80\xa6";
+        if (p.need > 0)
+            std::snprintf(buf, sizeof(buf), "Incomplete image \xc2\xb7 %llu of %llu KB arrived \xc2\xb7 copy it again",
+                          static_cast<unsigned long long>(p.have / 1024),
+                          static_cast<unsigned long long>((p.need + 1023) / 1024));
+        else
+            std::snprintf(buf, sizeof(buf), "Incomplete pasted image \xc2\xb7 %zu KB \xc2\xb7 copy it again",
+                          a.byte_count / 1024);
         return buf;
     }
     //   – A short single line → caption shows the actual text (up to

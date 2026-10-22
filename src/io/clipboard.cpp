@@ -188,7 +188,7 @@ bool armored_partial(std::string_view text) noexcept {
 
 ArmoredProgress armored_progress(std::string_view text) noexcept {
     const auto p = rp::armor::progress(text);
-    return {p.have, p.need, p.state == rp::armor::Progress::State::partial};
+    return {p.have, p.need, p.state == rp::armor::Progress::State::partial};   // need>0 when complete: a cut block
 }
 
 LeakedReply leaked_reply(std::string_view text) noexcept {

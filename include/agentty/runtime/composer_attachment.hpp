@@ -79,6 +79,10 @@ struct Attachment {
     /// re-walking the body every frame the composer paints.
     std::size_t line_count = 0;
     std::size_t byte_count = 0;
+    /// An image-as-text paste that stopped arriving before it was whole.
+    /// Set by the composer's stall check; the chip then says to copy it
+    /// again instead of "Receiving" forever.
+    bool stalled = false;
 };
 
 namespace attachment {
