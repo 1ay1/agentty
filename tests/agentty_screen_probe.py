@@ -62,6 +62,19 @@ for s in steps:
             pump(0.002)
         pump(1.0)
         continue
+    if s.startswith("RAWFILE="):
+        # Exactly these bytes, in 4 KB writes (a capture of what a terminal sent).
+        with open(s[len("RAWFILE="):], "rb") as f:
+            data = f.read()
+        for i in range(0, len(data), 4096):
+            os.write(fd, data[i:i + 4096])
+            pump(0.002)
+        pump(1.0)
+        continue
+    if s.startswith("PAUSE"):
+        time.sleep(float(s[5:]))
+        pump(0.01)
+        continue
     if s.startswith("TYPEFILE="):
         # No bracketed paste at all: the bytes arrive as if typed.
         with open(s[len("TYPEFILE="):], "rb") as f:
