@@ -821,8 +821,28 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // for it. So when wanted_image is true and this is NOT image
             // bytes, keep the window open — the image may still be coming.
             const bool wanted_image = m.ui.clipboard_wanted_image;
+            // An image copied as text (agentty.org/paste, `agentty paste
+            // howto`) IS the image: it answers the image request as fully as
+            // image bytes do.
+            const bool armored_image = !e.text.empty() && m.d.persisted.paste.decode_text
+                                    && has_armored(e.text);
             const bool is_image = !e.text.empty()
-                               && detect_image_media_type(e.text) != nullptr;
+                               && (detect_image_media_type(e.text) != nullptr || armored_image);
+            // In tmux both the OSC 5522 and the OSC 52 request go out and
+            // both may answer with the same clipboard. One query, one paste:
+            // a second reply that matches the one just pasted is dropped.
+            if (m.ui.clipboard_query_done == m.ui.clipboard_query_seq
+                && m.ui.clipboard_query_seq != 0 && !e.text.empty()
+                && e.text.size() == m.ui.clipboard_last_reply_size
+                && std::hash<std::string>{}(e.text) == m.ui.clipboard_last_reply_hash) {
+                AGT_LOG(Ui, Info, "paste.duplicate_reply", "bytes={}", e.text.size());
+                return Cmd::none();
+            }
+            if (wanted_image && is_image) {
+                m.ui.clipboard_last_reply_size = e.text.size();
+                m.ui.clipboard_last_reply_hash = std::hash<std::string>{}(e.text);
+                m.ui.clipboard_text_fallback.clear();
+            }
             if (is_image || !wanted_image) {
                 m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
                 m.ui.clipboard_wanted_image = false;

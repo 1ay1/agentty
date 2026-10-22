@@ -170,6 +170,26 @@ TEST_CASE("paste: a long single line shows its size, not a preview") {
     CHECK(attachment::chip_label(s) == "Pasted: hello");
 }
 
+TEST_CASE("paste: Ctrl+V answered with an image as text is the image, once") {
+    // Ctrl+V asked the terminal for an image (OSC 5522); the clipboard held
+    // an image copied as text. In tmux the same text can come back twice
+    // (OSC 5522 and OSC 52): one image chip, no pile of text.
+    const std::string line = "richpaste:1:image/png::12::iVBORw0KGgowMTIz";
+    Model m;
+    m.ui.clipboard_query_seq = 1;
+    m.ui.clipboard_wanted_image = true;
+    m = send(std::move(m), Msg{ComposerPaste{line}});
+    m = send(std::move(m), Msg{ComposerPaste{line}});
+    int images = 0, pastes = 0;
+    for (const auto& a : m.ui.composer.attachments) {
+        if (a.kind == Attachment::Kind::Image) ++images;
+        if (a.kind == Attachment::Kind::Paste && a.byte_count > 0) ++pastes;
+    }
+    CHECK(images == 1);
+    CHECK(pastes == 0);
+    CHECK(m.ui.clipboard_text_fallback.empty());
+}
+
 TEST_CASE("paste settings: clipboard_configure installs them") {
     paste_cfg::Config c;
     c.inline_kb = 7;
