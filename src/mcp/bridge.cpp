@@ -44,6 +44,7 @@
 #include <maya/runtime.hpp>
 #include <mcp/cap/cap.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -2017,7 +2018,7 @@ std::optional<std::string> mcp_get_prompt(
     const std::vector<std::pair<std::string, std::string>>& args,
     std::string& err);
 
-std::optional<std::string> mcp_expand_prompt(std::string_view t) {
+std::optional<std::string> mcp_expand_prompt(std::string_view t, bool* usage_out) {
     if (!t.starts_with('/')) return std::nullopt;
     const auto sp = t.find_first_of(" \t\n");
     const std::string typed{t.substr(1, sp == std::string_view::npos ? sp : sp - 1)};
@@ -2043,9 +2044,32 @@ std::optional<std::string> mcp_expand_prompt(std::string_view t) {
         }
         args.emplace_back(it->arguments[i].name, std::string{v});
     }
+    // A required argument with no word left is a usage mistake, not a server
+    // fault. Answer with the usage line: round-tripping to the server only
+    // earns "missing required prompt arguments", which names neither the
+    // argument nor the shape of the line. One line, since the caller toasts
+    // it rather than sending it.
+    std::string missing, usage;
+    for (const auto& a : it->arguments) {
+        if (!usage.empty()) usage += ' ';
+        usage += a.required ? "<" + a.name + ">" : "[" + a.name + "]";
+        if (!a.required) continue;
+        if (std::ranges::none_of(args, [&](const auto& kv) { return kv.first == a.name; })) {
+            if (!missing.empty()) missing += ", ";
+            missing += a.name;
+        }
+    }
+    if (!missing.empty()) {
+        // `typed` is what the user wrote (either spelling), so echo that back.
+        const std::string spelled = typed.empty() ? short_prompt_name(name) : typed;
+        if (usage_out) *usage_out = true;
+        return "/" + spelled + " needs " + missing + " \xe2\x80\x94 try /" + spelled +
+               " " + usage;
+    }
     std::string err;
     auto out = mcp_get_prompt(name, args, err);
-    if (!out) return "The /" + name + " prompt failed: " + err;
+    // Name the prompt the way the menu and the composer do, not the wire name.
+    if (!out) return "The /" + short_prompt_name(name) + " prompt failed: " + err;
     return out;
 }
 

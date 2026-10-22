@@ -76,7 +76,9 @@ struct ComposerSlashMove { int delta; };
 struct ComposerSlashComplete {};
 struct ComposerSlashDismiss {};
 // An MCP `/prompt` rendered off the UI thread; submitted as the message.
-struct SlashPromptRendered { std::string typed; std::string text; };
+// `usage` marks a note about a missing required argument: shown as a toast
+// and NOT submitted, so a typo costs no turn.
+struct SlashPromptRendered { std::string typed; std::string text; bool usage = false; };
 struct ComposerPaste {
     std::string text;
     // Set when this paste already went through the image-path check (see

@@ -199,6 +199,13 @@ struct PromptInfo {
 // order from the words after the name, the last one takes the rest of the
 // line. nullopt when it isn't a prompt; a failure renders as a short note.
 // Talks to the server: call it off the UI thread.
-[[nodiscard]] std::optional<std::string> mcp_expand_prompt(std::string_view line);
+//
+// A required argument left off the line never reaches the server — its
+// "missing required arguments" rejection names neither the argument nor the
+// shape of the line, so the usage note is built here instead. That case sets
+// `usage_out` (when non-null), letting a caller show the note without
+// submitting it as a message.
+[[nodiscard]] std::optional<std::string> mcp_expand_prompt(std::string_view line,
+                                                          bool* usage_out = nullptr);
 
 } // namespace agentty::mcp

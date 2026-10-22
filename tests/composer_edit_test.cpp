@@ -338,6 +338,38 @@ TEST_CASE("composer_edit") {
     }
 }
 
+// A `/prompt` whose required argument is missing comes back as a usage note,
+// not a rendered prompt. It must land as a status toast with the draft left
+// in place — submitting it would spend a turn on a message that only says
+// "you forgot an argument".
+TEST_CASE("composer slash: a missing prompt argument is a toast, not a send") {
+    using agentty::SlashPromptRendered;
+    {
+        Model m = with_text("/cbm:explore_codebase", 21);
+        m.ui.composer.slash_pending = true;
+        Cmd c = composer_update(m, SlashPromptRendered{
+            .typed = "/cbm:explore_codebase",
+            .text  = "/cbm:explore_codebase needs query \xe2\x80\x94 try "
+                     "/cbm:explore_codebase <query> [depth]",
+            .usage = true});
+        CHECK_FALSE(c.is_none());                       // the toast's clear timer
+        CHECK_FALSE(m.ui.composer.slash_pending);       // not stuck pending
+        CHECK(m.ui.composer.text == "/cbm:explore_codebase");   // draft kept
+        CHECK(m.s.status.find("needs query") != std::string::npos);
+    }
+    {
+        // The same message with `usage` clear IS a rendered prompt: it
+        // replaces the composer and submits.
+        Model m = with_text("/cbm:explore_codebase auth", 26);
+        m.ui.composer.slash_pending = true;
+        (void)composer_update(m, SlashPromptRendered{
+            .typed = "/cbm:explore_codebase auth",
+            .text  = "user: explored",
+            .usage = false});
+        CHECK(m.s.status.find("needs query") == std::string::npos);
+    }
+}
+
 // A paste that could be a dropped image path goes to a worker (the check reads
 // the file); anything else pastes in place. The reply is handled either way.
 TEST_CASE("composer paste: image paths are checked off the fold") {

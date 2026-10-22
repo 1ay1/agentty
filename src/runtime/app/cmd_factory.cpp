@@ -2753,10 +2753,11 @@ Cmd render_slash_prompt(std::string typed) {
     return Cmd::task_isolated(
         [](maya::Sink<Msg> out, std::stop_token, std::string line) {
             std::string text;
+            bool usage = false;
 #if AGENTTY_MCP
-            if (auto r = mcp::mcp_expand_prompt(line)) text = std::move(*r);
+            if (auto r = mcp::mcp_expand_prompt(line, &usage)) text = std::move(*r);
 #endif
-            out.send(Msg{SlashPromptRendered{std::move(line), std::move(text)}});
+            out.send(Msg{SlashPromptRendered{std::move(line), std::move(text), usage}});
         },
         std::move(typed));
 }

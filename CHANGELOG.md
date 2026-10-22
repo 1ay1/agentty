@@ -4,6 +4,12 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **A `/` prompt typed without its arguments says so.** An MCP prompt with
+  a required argument, sent as just `/explore_codebase`, used to hand the
+  server an incomplete request and show its rejection: "Missing required
+  prompt arguments", which names neither the argument nor the shape of the
+  line. It now answers with the argument and the line to type.
 ### Added
 - **Ctrl+V pastes images and files over ssh, in any terminal.** Run
   `agentty paste setup` once on the machine you type on. Every ssh session
