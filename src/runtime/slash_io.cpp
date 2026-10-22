@@ -31,15 +31,20 @@ Catalog discover(Io io, bool with_actions) {
     return make_catalog(cmds, skills, prompts, with_actions);
 }
 
-std::optional<std::string> expand(Io io, std::string_view text, const Catalog& cat,
-                                  bool skill_already_active) {
+std::optional<Expanded> expand_checked(Io io, std::string_view text, const Catalog& cat,
+                                       bool skill_already_active) {
     const Resolved hit = resolve(text, cat);
     switch (hit.what) {
         case Resolved::What::Command:
-            return tools::commands::try_expand(io, text);
+            if (auto t = tools::commands::try_expand(io, text)) return Expanded{std::move(*t)};
+            return std::nullopt;
         case Resolved::What::Prompt:
 #if AGENTTY_MCP
-            return mcp::mcp_expand_prompt(text);
+        {
+            bool usage = false;
+            if (auto t = mcp::mcp_expand_prompt(text, &usage)) return Expanded{std::move(*t), usage};
+            return std::nullopt;
+        }
 #else
             return std::nullopt;
 #endif
@@ -48,18 +53,28 @@ std::optional<std::string> expand(Io io, std::string_view text, const Catalog& c
             if (!sk) return std::nullopt;
             const std::string& rest = hit.args;
             if (skill_already_active)
-                return "Apply the already-loaded '" + sk->name + "' skill" +
-                       (rest.empty() ? "." : ": " + rest);
+                return Expanded{"Apply the already-loaded '" + sk->name + "' skill" +
+                                (rest.empty() ? "." : ": " + rest)};
             std::string out = tools::skills::activation_payload(io, *sk);
             out += "\n\nFollow the skill instructions above";
             out += rest.empty() ? "." : " for this task: " + rest;
-            return out;
+            return Expanded{std::move(out)};
         }
         case Resolved::What::Action:
         case Resolved::What::Plain:
             return std::nullopt;
     }
     return std::nullopt;
+}
+
+std::optional<std::string> expand(Io io, std::string_view text, const Catalog& cat,
+                                  bool skill_already_active) {
+    auto e = expand_checked(io, text, cat, skill_already_active);
+    if (!e) return std::nullopt;
+    // A usage note is for the user. Callers that can't show one send the
+    // line as typed; the model then sees what the user wrote, not our note.
+    if (e->usage) return std::nullopt;
+    return std::move(e->text);
 }
 
 }  // namespace agentty::slash

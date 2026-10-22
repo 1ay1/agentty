@@ -2032,13 +2032,16 @@ std::optional<std::string> mcp_expand_prompt(std::string_view t, bool* usage_out
     if (it == prompts.end()) return std::nullopt;
     const std::string name = it->name;
     std::vector<std::pair<std::string, std::string>> args;
+    // Words split on any space or tab (a pasted line may carry either).
+    constexpr std::string_view ws = " \t";
     for (std::size_t i = 0; i < it->arguments.size(); ++i) {
-        while (!rest.empty() && rest.front() == ' ') rest.remove_prefix(1);
+        while (!rest.empty() && ws.contains(rest.front())) rest.remove_prefix(1);
+        while (!rest.empty() && ws.contains(rest.back())) rest.remove_suffix(1);
         if (rest.empty()) break;
         std::string_view v;
         if (i + 1 == it->arguments.size()) { v = rest; rest = {}; }
         else {
-            const auto e = rest.find(' ');
+            const auto e = rest.find_first_of(ws);
             v = rest.substr(0, e);
             rest = e == std::string_view::npos ? std::string_view{} : rest.substr(e + 1);
         }

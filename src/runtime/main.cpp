@@ -2302,8 +2302,15 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
         // skill, or an MCP prompt, resolved the same way as the TUI and ACP.
         if (prompt.starts_with('/')) {
             const Io io = IoAccess::grant();
-            if (auto expanded = slash::expand(io, prompt, slash::discover(io)))
-                prompt = std::move(*expanded);
+            if (auto expanded = slash::expand_checked(io, prompt, slash::discover(io))) {
+                // A prompt missing a required argument is a usage mistake:
+                // say so and stop, like any other bad command line.
+                if (expanded->usage) {
+                    std::fprintf(stderr, "agentty run: %s\n", expanded->text.c_str());
+                    return 2;
+                }
+                prompt = std::move(expanded->text);
+            }
         }
 
         provider::prewarm_active_provider(::agentty::IoAccess::grant());

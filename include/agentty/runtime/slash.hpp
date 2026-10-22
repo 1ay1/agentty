@@ -137,6 +137,17 @@ namespace agentty::slash {
 // the rendered prompt. nullopt when it isn't one (send `text` as typed).
 // `skill_already_active` lets a caller that has the transcript skip
 // re-sending a skill body that's already in it.
+//
+// `usage` is set when the line can't be sent: an MCP prompt missing a
+// required argument. The returned text is then a one-line note for the user
+// ("/srv:p needs query — try /srv:p <query>"), never a message for the model.
+struct Expanded {
+    std::string text;
+    bool        usage = false;
+};
+[[nodiscard]] std::optional<Expanded> expand_checked(
+    Io io, std::string_view text, const Catalog& cat,
+    bool skill_already_active = false);
 [[nodiscard]] std::optional<std::string> expand(
     Io io, std::string_view text, const Catalog& cat,
     bool skill_already_active = false);

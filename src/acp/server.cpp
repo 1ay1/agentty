@@ -2482,7 +2482,17 @@ void AgentServer::on_prompt(const Cap& cap, const a::PromptParams& p, Responder 
                 }).value_or(Thread{});
                 active = tools::skills::is_active_in(hit.entry->name, ::agentty::visible_text(snap));
             }
-            if (auto out = slash::expand(io, t, cat, active)) text = std::move(*out);
+            if (auto out = slash::expand_checked(io, t, cat, active)) {
+                // A prompt missing a required argument: tell the user what to
+                // type and end the turn. Sent to the model, the note would be
+                // answered as if it were a question.
+                if (out->usage) {
+                    send_update(cap, sid, a::SU_AgentMessageChunk{text_block(std::move(out->text)), a::Nothing});
+                    resp.ok(cap, a::PromptResult{a::StopReason::EndTurn, json::object()});
+                    return;
+                }
+                text = std::move(out->text);
+            }
         }
     }
     // Title from what the user typed ("/review src"), not the expanded template.

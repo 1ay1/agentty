@@ -11,6 +11,7 @@
 #include "agentty/tool/tool.hpp"
 #include "agtest_cap.hpp"
 #include "agentty/mcp/client.hpp"
+#include "agentty/runtime/slash.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -247,6 +248,21 @@ int main() {
             bool served = false;
             (void)mcp::mcp_expand_prompt(typed + " hello", &served);
             CHECK(!served);
+            // Trailing spaces only are still "missing", not an empty argument.
+            bool blank = false;
+            (void)mcp::mcp_expand_prompt(typed + "   \t", &blank);
+            CHECK(blank);
+            // The usage note is for the user: slash::expand (ACP, `agentty
+            // run`) must not hand it to the model as the message.
+            {
+                const Io io = IoAccess::grant();
+                const auto cat = slash::discover(io);
+                if (slash::resolve(typed, cat).what == slash::Resolved::What::Prompt) {
+                    auto chk = slash::expand_checked(io, typed, cat);
+                    CHECK(chk.has_value() && chk->usage);
+                    CHECK(!slash::expand(io, typed, cat).has_value());
+                }
+            }
         }
     }
 
