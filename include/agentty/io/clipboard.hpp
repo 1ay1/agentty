@@ -30,9 +30,19 @@ struct ClipboardItem {
     bool        saved_path = false;  // Text that is the path of a saved file
 };
 
+// What the composer does when a clipboard read came back with nothing.
+enum class ClipboardMiss : std::uint8_t {
+    None,          // it didn't miss
+    AskTerminal,   // ask the terminal itself, through our own input
+    Empty,         // the clipboard is empty; final
+    TooBig,        // over Settings → Paste → max size; final
+    TmuxNoAnswer,  // tmux asked the outer terminal and nothing came back; final
+};
+
 struct ClipboardContents {
     std::vector<ClipboardItem> items;  // copied files, else an image, else text
     std::string source;                // "wayland wayland-1", "agent via ssh", ...
+    ClipboardMiss miss = ClipboardMiss::None;
     std::string error;                 // set when items is empty
 };
 
@@ -54,16 +64,20 @@ void clipboard_configure(const paste_cfg::Config& c);
 [[nodiscard]] std::vector<ClipboardItem> decode_armored(std::string_view text,
                                                         std::string* error = nullptr);
 [[nodiscard]] bool has_armored(std::string_view text) noexcept;
+// True while the text's armored block is still arriving (a paste in pieces).
+[[nodiscard]] bool armored_partial(std::string_view text) noexcept;
+// Bytes of the arriving block received so far, and its full size (0 while
+// its header is still on the way). Both 0 when nothing is arriving.
+struct ArmoredProgress { std::uint64_t have = 0, need = 0; bool arriving = false; };
+[[nodiscard]] ArmoredProgress armored_progress(std::string_view text) noexcept;
+
 // A terminal clipboard reply (OSC 5522) that reached the input as plain text
-// because something stripped its ESC bytes. Never paste that as text:
-// salvage_clipboard_reply() returns the clipboard bytes it carried (image
-// bytes, or text, possibly itself a richpaste:1: line), or "" if it can't.
-[[nodiscard]] bool looks_like_clipboard_reply(std::string_view text) noexcept;
-[[nodiscard]] std::string salvage_clipboard_reply(std::string_view text);
-// True once `text` holds at least as many bytes as its first armored block
-// says it carries (base64 is 4/3 of that). Cheap; lets a paste that arrives in
-// pieces skip decoding until it can succeed.
-[[nodiscard]] bool armored_complete_enough(std::string_view text) noexcept;
+// because something stripped its ESC bytes. Never paste that as text.
+enum class LeakedReply : std::uint8_t { None, Partial, Complete };
+[[nodiscard]] LeakedReply leaked_reply(std::string_view text) noexcept;
+// The items a complete leaked reply carried (empty if it can't be read).
+[[nodiscard]] std::vector<ClipboardItem> decode_leaked_reply(std::string_view text,
+                                                             std::string* error = nullptr);
 
 // Turns clipboard items into what the composer can hold: images and text
 // pass through, a text file becomes Text, any other file is saved under

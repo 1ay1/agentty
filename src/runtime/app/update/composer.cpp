@@ -313,21 +313,26 @@ Cmd insert_items(Model& m, std::vector<ClipboardItem> items, std::string_view wh
 Cmd on_clipboard_read(Model& m, ClipboardRead& r) {
     if (!r.items.empty())
         return insert_items(m, std::move(r.items), "<clipboard>");
-    AGT_LOG(Ui, Info, "paste.clipboard_empty", "why={}", r.error);
+    AGT_LOG(Ui, Info, "paste.clipboard_empty", "miss={} why={}", static_cast<int>(r.miss), r.error);
 
-    // Inside tmux the terminal was already asked, through a tmux buffer.
-    // Asking again in-band only brings back the route that mangles big
-    // replies into typed text, so stop here and say why.
-    if (r.error.find("tmux:") != std::string::npos) {
-        const bool too_big = r.error.find("didn't answer") != std::string::npos;
-        return set_status_toast(
-            m,
-            too_big
-                ? "clipboard: nothing came back through tmux \xe2\x80\x94 if it's a big "
-                  "image, re-copy it from agentty.org/paste (it now fits), or run "
-                  "`agentty paste setup` on your laptop"
-                : "clipboard: " + r.error.substr(0, r.error.find('\n')),
-            std::chrono::seconds{10});
+    const auto first_line = [&] { return r.error.substr(0, r.error.find('\n')); };
+    switch (r.miss) {
+        case ClipboardMiss::None:
+        case ClipboardMiss::AskTerminal: break;   // below
+        case ClipboardMiss::Empty:
+            return set_status_toast(m, "clipboard is empty", std::chrono::seconds{4});
+        case ClipboardMiss::TooBig:
+            return set_status_toast(m, "clipboard: " + first_line(), std::chrono::seconds{10});
+        case ClipboardMiss::TmuxNoAnswer:
+            // Inside tmux the terminal was already asked, through a tmux
+            // buffer. Asking again in-band brings back the route that mangles
+            // big replies into typed text, so stop here and say why.
+            return set_status_toast(
+                m,
+                "clipboard: nothing came back through tmux \xe2\x80\x94 if it's a big "
+                "image, re-copy it from agentty.org/paste (it now fits), or run "
+                "`agentty paste setup` on your laptop",
+                std::chrono::seconds{10});
     }
 
     // richpaste found nothing (no display here, no agent forwarded). Last
@@ -785,20 +790,23 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // sight until its DONE packet, then paste what it carried.
             {
                 auto& pend = m.ui.clipboard_leaked_reply;
-                const bool starts = looks_like_clipboard_reply(e.text);
-                if (starts || !pend.empty()) {
+                if (!pend.empty() || leaked_reply(e.text) != LeakedReply::None) {
                     if (pend.size() + e.text.size() > (64u << 20)) {   // runaway: drop it
                         pend.clear();
                         return Cmd::none();
                     }
                     pend += e.text;
-                    if (pend.find("5522;type=read:status=DONE") == std::string::npos)
-                        return Cmd::none();
-                    std::string got = salvage_clipboard_reply(pend);
-                    AGT_LOG(Ui, Info, "paste.leaked_reply", "bytes={} carried={}", pend.size(), got.size());
+                    if (leaked_reply(pend) != LeakedReply::Complete) return Cmd::none();
+                    std::string why;
+                    auto items = decode_leaked_reply(pend, &why);
+                    AGT_LOG(Ui, Info, "paste.leaked_reply", "bytes={} items={} err={}", pend.size(), items.size(), why);
                     pend.clear();
-                    if (got.empty()) return Cmd::none();
-                    return composer_update(m, ComposerPaste{std::move(got)});
+                    if (items.empty()) return Cmd::none();
+                    const bool needs_disk = std::ranges::any_of(items, [](auto& it) {
+                        return it.kind == ClipboardItem::Kind::File;
+                    });
+                    if (needs_disk) return cmd::settle_clipboard(std::move(items));
+                    return insert_items(m, std::move(items), "<clipboard>");
                 }
             }
 
@@ -817,10 +825,8 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                     body += e.text;
                     // The pieces may add up to an image sent as text. Once the
                     // block is complete, swap the chip for what it decodes to;
-                    // until then, keep growing the chip. The header says how
-                    // big the data is, so don't try before that much is here.
-                    if (m.d.persisted.paste.decode_text && has_armored(body)
-                        && armored_complete_enough(body)) {
+                    // until then, keep growing the chip.
+                    if (m.d.persisted.paste.decode_text && has_armored(body) && !armored_partial(body)) {
                         std::string why;
                         auto items = decode_armored(body, &why);
                         if (!items.empty()) {
@@ -948,9 +954,9 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // plain paste. Decoding is pure, so it runs here.
             // Only part of an armored block so far (the rest comes in more
             // pieces): it becomes a chip the pieces grow, decoded when complete.
-            const bool armored_partial = !e.path_checked && m.d.persisted.paste.decode_text
-                                      && has_armored(e.text) && !armored_complete_enough(e.text);
-            if (armored_partial) e.path_checked = true;
+            const bool arriving = !e.path_checked && m.d.persisted.paste.decode_text
+                               && armored_partial(e.text);
+            if (arriving) e.path_checked = true;
             if (!e.path_checked && m.d.persisted.paste.decode_text && has_armored(e.text)) {
                 std::string why;
                 auto items = decode_armored(e.text, &why);
@@ -965,13 +971,9 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                     return insert_items(m, std::move(items), "<paste>");
                 }
                 // Every block was bad: paste the text as is, and say why.
-                // A block that is only cut short may be the first piece of a
-                // paste still arriving: keep it as a chip with no toast, and
-                // the next piece completes it (see continues_paste below).
+                // (A block still arriving never gets here: see `arriving`.)
                 if (!why.empty()) {
-                    const bool partial = why.find("cut short") != std::string::npos;
                     e.path_checked = true;   // skip the path sniff: it isn't a path
-                    if (partial) return composer_update(m, std::move(e));
                     Cmd toast = set_status_toast(m, "paste: " + why, std::chrono::seconds{6});
                     return Cmd::batch(std::move(toast), composer_update(m, std::move(e)));
                 }

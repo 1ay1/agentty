@@ -106,10 +106,11 @@ struct ClipboardQueryTimeout { std::uint64_t seq = 0; };
 // The worker's answer to "why did that clipboard read go unanswered".
 struct ClipboardDiagnosed { std::string message; };
 // The worker's read of the clipboard for Ctrl+V (richpaste: the display,
-// the ssh agent, ...). Empty items: the reducer asks the terminal.
+// the ssh agent, tmux, ...). Empty items: `miss` says why and what's next.
 struct ClipboardRead {
     std::vector<ClipboardItem> items;
-    std::string                error;   // why items is empty
+    ClipboardMiss              miss = ClipboardMiss::None;
+    std::string                error;   // why items is empty, for people
 };
 // Recall queued messages back into the composer for editing. Bound to
 // Up-arrow when the composer is empty and queued messages exist.

@@ -24,6 +24,7 @@
 #include <rp/armor.hpp>
 #include <rp/cli.hpp>
 #include <rp/clipboard.hpp>  // rp::write_clipboard_text
+#include <rp/inband.hpp>     // leaked OSC 5522 replies
 #include <rp/store.hpp>      // rp::store
 
 namespace agentty {
@@ -64,6 +65,21 @@ rp::TerminalMode terminal_mode(std::string_view s) {
     return rp::TerminalMode::automatic;
 }
 
+ClipboardMiss miss_of(const rp::Error& e) {
+    // Inside tmux the terminal was already asked, through a tmux buffer.
+    // Asking again in-band only brings back the route that mangles big
+    // replies into typed text, so tmux's answer is final.
+    if (const auto* t = e.from(rp::Route::tmux_buffer)) {
+        if (t->code == rp::Code::empty) return ClipboardMiss::Empty;
+        if (t->code == rp::Code::too_big) return ClipboardMiss::TooBig;
+        return ClipboardMiss::TmuxNoAnswer;
+    }
+    if (e.code == rp::Code::too_big) return ClipboardMiss::TooBig;
+    // Anything else: the terminal runs on the user's machine and may still
+    // have it (an image over OSC 5522, say).
+    return ClipboardMiss::AskTerminal;
+}
+
 } // namespace
 
 void clipboard_configure(const paste_cfg::Config& c) {
@@ -98,77 +114,52 @@ ClipboardContents read_clipboard(bool allow_remote) {
     auto clip = allow_remote ? rp::paste(opt) : rp::read_clipboard(opt.max_bytes);
     if (!clip) {
         out.error = clip.error().what;
-        AGT_LOG(Ui, Info, "clipboard.read.none", "why={}", out.error);
+        out.miss  = miss_of(clip.error());
+        AGT_LOG(Ui, Info, "clipboard.read.none", "code={} why={}", rp::code_name(clip.error().code), out.error);
         return out;
     }
     out.source = clip->source;
     for (auto& it : clip->items) out.items.push_back(to_item(it));
-    AGT_LOG(Ui, Info, "clipboard.read", "source={} items={}", out.source, out.items.size());
+    AGT_LOG(Ui, Info, "clipboard.read", "route={} source={} items={}", rp::route_name(clip->route), out.source,
+            out.items.size());
     return out;
 }
 
 bool has_armored(std::string_view text) noexcept {
-    return text.find(rp::armor::magic) != std::string_view::npos;
+    return rp::armor::progress(text).state != rp::armor::Progress::State::none;
 }
 
-bool looks_like_clipboard_reply(std::string_view text) noexcept {
-    return text.find("5522;type=read:status=") != std::string_view::npos;
+bool armored_partial(std::string_view text) noexcept {
+    return rp::armor::progress(text).state == rp::armor::Progress::State::partial;
 }
 
-std::string salvage_clipboard_reply(std::string_view text) {
-    // OSC 5522 read reply whose ESC bytes were lost (some multiplexer
-    // setups strip them), so it reached the input as plain text:
-    //   ]5522;type=read:status=DATA:mime=<b64 mime>;<b64 chunk>\ ...
-    // Keep the chunks of the first mime offered, decode them, done.
-    std::string mime, b64;
-    constexpr std::string_view kData = "5522;type=read:status=DATA:";
-    for (std::size_t at = text.find(kData); at != std::string_view::npos;
-         at = text.find(kData, at + kData.size())) {
-        auto meta = text.substr(at + kData.size());
-        const auto semi = meta.find(';');
-        if (semi == std::string_view::npos) break;
-        std::string m;
-        for (std::string_view kv = meta.substr(0, semi); !kv.empty();) {
-            const auto colon = kv.find(':');
-            const auto one = kv.substr(0, colon);
-            if (one.starts_with("mime=")) m = std::string{one.substr(5)};
-            kv = colon == std::string_view::npos ? std::string_view{} : kv.substr(colon + 1);
-        }
-        if (mime.empty()) mime = m;
-        if (m != mime) continue;
-        auto data = meta.substr(semi + 1);
-        std::size_t n = 0;
-        while (n < data.size() && (std::isalnum(static_cast<unsigned char>(data[n]))
-                                   || data[n] == '+' || data[n] == '/' || data[n] == '=')) ++n;
-        b64 += data.substr(0, n);
+ArmoredProgress armored_progress(std::string_view text) noexcept {
+    const auto p = rp::armor::progress(text);
+    return {p.have, p.need, p.state == rp::armor::Progress::State::partial};
+}
+
+LeakedReply leaked_reply(std::string_view text) noexcept {
+    switch (rp::inband::stripped_reply(text)) {
+        case rp::inband::Stripped::none:     return LeakedReply::None;
+        case rp::inband::Stripped::partial:  return LeakedReply::Partial;
+        case rp::inband::Stripped::complete: return LeakedReply::Complete;
     }
-    if (b64.empty()) return {};
-    // Chunks may end on padding mid stream; decode group by group.
-    std::string out;
-    for (std::size_t i = 0; i + 4 <= b64.size(); i += 4) {
-        auto d = rp::base64_decode(std::string_view{b64}.substr(i, 4));
-        if (!d) return {};
-        out.append(reinterpret_cast<const char*>(d->data()), d->size());
+    return LeakedReply::None;
+}
+
+std::vector<ClipboardItem> decode_leaked_reply(std::string_view text, std::string* error) {
+    std::vector<ClipboardItem> out;
+    auto items = rp::inband::decode_stripped_reply(text, rp::config().max_bytes);
+    if (!items) {
+        if (error) *error = items.error().what;
+        return out;
     }
+    // An image copied as text arrives as itself, as on every other route.
+    std::vector<std::string> errs;
+    auto expanded = rp::config().decode_text ? rp::armor::expand(std::move(*items), &errs) : std::move(*items);
+    if (error && !errs.empty()) *error = errs.front();
+    for (auto& it : expanded) out.push_back(to_item(it));
     return out;
-}
-
-bool armored_complete_enough(std::string_view text) noexcept {
-    // richpaste:1:<mime>:<name>:<size>:<sha>:<data>
-    auto at = text.find(rp::armor::magic);
-    if (at == std::string_view::npos) return false;
-    std::string_view rest = text.substr(at + rp::armor::magic.size());
-    for (int skip = 0; skip < 2; ++skip) {
-        auto c = rest.find(':');
-        if (c == std::string_view::npos) return false;
-        rest.remove_prefix(c + 1);
-    }
-    std::uint64_t size = 0;
-    std::size_t i = 0;
-    for (; i < rest.size() && rest[i] >= '0' && rest[i] <= '9' && i < 19; ++i)
-        size = size * 10 + static_cast<std::uint64_t>(rest[i] - '0');
-    if (i == 0 || i == rest.size() || rest[i] != ':') return false;
-    return rest.size() >= i + size / 3 * 4;
 }
 
 std::vector<ClipboardItem> decode_armored(std::string_view text, std::string* error) {

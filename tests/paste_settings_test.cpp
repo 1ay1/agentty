@@ -155,6 +155,27 @@ TEST_CASE("paste: an image sent as text, in pieces, becomes the image") {
     CHECK(m.ui.composer.text.find(attachment::make_placeholder(0)) == std::string::npos);
 }
 
+TEST_CASE("paste: an image still arriving shows progress, and can't be sent half done") {
+    // 3000 bytes of image: 4000 chars of base64; send the first half.
+    const std::string data(4000, 'A');
+    const std::string head = "richpaste:1:image/png::3000::";
+    Model m;
+    m = send(std::move(m), Msg{ComposerPaste{head + data.substr(0, 2000)}});
+    REQUIRE(m.ui.composer.attachments.size() == 1);
+    const auto& a = m.ui.composer.attachments[0];
+    CHECK(attachment::chip_label(a) == "Receiving image \xc2\xb7 1 of 3 KB");
+
+    // Enter now would send base64 to the model: it's held, the draft kept.
+    m = send(std::move(m), Msg{ComposerSubmit{}});
+    CHECK(m.ui.composer.attachments.size() == 1);
+    CHECK(m.s.status.find("still arriving") != std::string::npos);
+
+    // Cut short and followed by other text: final, says so.
+    Attachment cut = a;
+    cut.body.set_bytes(head + data.substr(0, 2000) + "!");
+    CHECK(attachment::chip_label(cut).starts_with("Incomplete pasted image"));
+}
+
 TEST_CASE("paste: a long single line shows its size, not a preview") {
     Attachment a;
     a.kind = Attachment::Kind::Paste;

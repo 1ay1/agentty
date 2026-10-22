@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <sstream>
 
+#include "agentty/io/clipboard.hpp"   // armored_progress
 #include "agentty/tool/util/fs_helpers.hpp"
 
 namespace agentty::attachment {
@@ -322,9 +323,17 @@ std::string chip_label(const Attachment& a) {
         return buf;
     }
     // Paste:
-    //   – An image or file sent as text that never fully arrived (cut
-    //     short on the way) → say that, not a wall of base64.
+    //   – An image or file sent as text: while it's still arriving, show how
+    //     far along it is. If it stopped short, say so, not a wall of base64.
     if (a.byte_count >= 12 && a.body.bytes().starts_with("richpaste:1:")) {
+        const auto p = armored_progress(a.body.bytes());
+        if (p.arriving && p.need > 0) {
+            std::snprintf(buf, sizeof(buf), "Receiving image \xc2\xb7 %llu of %llu KB",
+                          static_cast<unsigned long long>(p.have / 1024),
+                          static_cast<unsigned long long>((p.need + 1023) / 1024));
+            return buf;
+        }
+        if (p.arriving) return "Receiving image\xe2\x80\xa6";
         std::snprintf(buf, sizeof(buf), "Incomplete pasted image \xc2\xb7 %zu KB \xc2\xb7 copy it again",
                       a.byte_count / 1024);
         return buf;

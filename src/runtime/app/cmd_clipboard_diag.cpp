@@ -145,9 +145,11 @@ Cmd read_clipboard() {
             auto c  = ::agentty::read_clipboard();
             settle_clipboard_items(c.items);
             r.items = std::move(c.items);
+            r.miss  = c.miss;
             r.error = std::move(c.error);
         } catch (...) {
             r = ClipboardRead{};
+            r.miss  = ClipboardMiss::AskTerminal;
             r.error = "clipboard read failed";
         }
         out.send(Msg{msg::ComposerMsg{std::move(r)}});

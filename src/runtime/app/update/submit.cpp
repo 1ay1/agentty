@@ -17,6 +17,7 @@
 #include "agentty/auth/accounts.hpp"   // entitlement scope: active account label
 #include "agentty/runtime/app/deps.hpp"
 #include "agentty/runtime/composer_attachment.hpp"
+#include "agentty/io/clipboard.hpp"   // armored_partial
 #include "agentty/util/image_dims.hpp"   // image_dimensions — lift-time trace
 #include "agentty/tool/commands.hpp"
 #include "agentty/runtime/view/helpers.hpp"
@@ -178,6 +179,16 @@ Cmd submit_message(Model& m) {
                 return Cmd::none();
             }
         }
+    }
+
+    // An image pasted as text that hasn't fully arrived (or never will) is
+    // megabytes of base64 to the model. Hold the send and say what to do.
+    for (const auto& a : m.ui.composer.attachments) {
+        if (a.kind != Attachment::Kind::Paste || !a.body.bytes().starts_with("richpaste:1:")) continue;
+        return set_status_toast(m, armored_partial(a.body.bytes())
+            ? "image still arriving \xe2\x80\x94 wait for it, or delete the chip to send without it"
+            : "that image didn't arrive whole \xe2\x80\x94 delete the chip and copy it again",
+            std::chrono::seconds{6});
     }
 
     // The pending-changes review strip covers ONE window: between the agent
