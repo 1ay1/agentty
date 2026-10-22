@@ -315,6 +315,21 @@ Cmd on_clipboard_read(Model& m, ClipboardRead& r) {
         return insert_items(m, std::move(r.items), "<clipboard>");
     AGT_LOG(Ui, Info, "paste.clipboard_empty", "why={}", r.error);
 
+    // Inside tmux the terminal was already asked, through a tmux buffer.
+    // Asking again in-band only brings back the route that mangles big
+    // replies into typed text, so stop here and say why.
+    if (r.error.find("tmux:") != std::string::npos) {
+        const bool too_big = r.error.find("didn't answer") != std::string::npos;
+        return set_status_toast(
+            m,
+            too_big
+                ? "clipboard: nothing came back through tmux \xe2\x80\x94 if it's a big "
+                  "image, re-copy it from agentty.org/paste (it now fits), or run "
+                  "`agentty paste setup` on your laptop"
+                : "clipboard: " + r.error.substr(0, r.error.find('\n')),
+            std::chrono::seconds{10});
+    }
+
     // richpaste found nothing (no display here, no agent forwarded). Last
     // resort: ask the terminal, which runs on the user's machine even over
     // ssh. maya sends OSC 5522 (kitty, carries images) or OSC 52 (text);
