@@ -147,6 +147,7 @@ set(AGENTTY_RAG_SOURCES
     src/rag/embed_backend.cpp
     src/rag/embed_secret.cpp
     src/rag/rag_host.cpp
+    src/rag/vector_cache.cpp
 )
 
 set(AGENTTY_TOOL_SOURCES

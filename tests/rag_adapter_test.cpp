@@ -77,7 +77,10 @@ void close_socket(socket_t s) noexcept {
 
 class LoopbackEmbeddingServer {
 public:
-    LoopbackEmbeddingServer() {
+    // `delay`: how long each request takes, so a test can see requests
+    // overlap (and what else is possible meanwhile).
+    explicit LoopbackEmbeddingServer(std::chrono::milliseconds delay = std::chrono::milliseconds{0})
+        : delay_(delay) {
 #if defined(_WIN32)
         WSADATA data{};
         if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) return;
@@ -126,6 +129,9 @@ public:
             }
         }
         if (worker_.joinable()) worker_.join();
+        // Each connection runs on its own thread; wait for the ones in flight.
+        for (auto& t : handlers_)
+            if (t.joinable()) t.join();
         close_socket(listener_);
 #if defined(_WIN32)
         if (winsock_started_) ::WSACleanup();
@@ -138,6 +144,8 @@ public:
     [[nodiscard]] bool valid() const noexcept { return listener_ != kInvalidSocket; }
     [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
     [[nodiscard]] int requests() const noexcept { return requests_.load(std::memory_order_acquire); }
+    // Most requests ever being answered at the same moment.
+    [[nodiscard]] int peak_in_flight() const noexcept { return peak_.load(std::memory_order_acquire); }
 
 private:
     static std::string response_for(const std::string& body) {
@@ -197,9 +205,14 @@ private:
                 break;
         }
         requests_.fetch_add(1, std::memory_order_release);
+        const int now = in_flight_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        int peak = peak_.load(std::memory_order_acquire);
+        while (now > peak && !peak_.compare_exchange_weak(peak, now, std::memory_order_acq_rel)) {}
+        if (delay_.count() > 0) std::this_thread::sleep_for(delay_);
         const auto body = request.substr(header_end + 4, content_length);
         const auto response = response_for(body);
         (void)send_all(fd, response);
+        in_flight_.fetch_sub(1, std::memory_order_acq_rel);
     }
 
     void serve() {
@@ -228,16 +241,24 @@ private:
                 close_socket(client);
                 break;
             }
-            handle(client);
-            close_socket(client);
+            // A real embedding server answers requests side by side; so does
+            // this one, so a test can see the client's concurrency.
+            handlers_.emplace_back([this, client] {
+                handle(client);
+                close_socket(client);
+            });
         }
     }
 
     socket_t listener_ = kInvalidSocket;
     std::uint16_t port_ = 0;
     std::thread worker_;
+    std::vector<std::thread> handlers_;   // touched only by worker_, joined after it
     std::atomic<bool> stop_{false};
     std::atomic<int> requests_{0};
+    std::atomic<int> in_flight_{0};
+    std::atomic<int> peak_{0};
+    std::chrono::milliseconds delay_{0};
 #if defined(_WIN32)
     bool winsock_started_ = false;
 #endif
@@ -293,7 +314,10 @@ TEST_CASE("rag cold retrieval serializes fan-out under the index lock") {
         "AGENTTY_RAG_CORRECT", "AGENTTY_RAG_GRAPH", "AGENTTY_RAG_EXPAND",
         "AGENTTY_RAG_HYDE", "AGENTTY_RAG_PERSIST", "AGENTTY_RAG_LEARN",
         "AGENTTY_RAG_ADAPTIVE", "AGENTTY_RAG_PROACTIVE", "AGENTTY_RAG_FUSION"});
-    LoopbackEmbeddingServer server;
+    // 150 ms a request: long enough that requests visibly overlap when the
+    // batches run side by side, and that a reader can get in between while
+    // they're in flight; short enough to keep the test under a second or two.
+    LoopbackEmbeddingServer server{std::chrono::milliseconds{150}};
     REQUIRE(server.valid(), "loopback embedding server starts");
 
     TempDir tmp{"rag_fanout"};
@@ -344,11 +368,58 @@ TEST_CASE("rag cold retrieval serializes fan-out under the index lock") {
     set_test_env("AGENTTY_RAG_PERSIST", "0");
 
     agentty::rag::Retriever retriever;
+    // While the cold retrieve runs, another thread keeps asking a lock-free
+    // question that reads the index (the UI's status row does this every
+    // frame). With the embedding done under the lock, every one of those
+    // would wait out the whole pass.
+    std::atomic<bool> done{false};
+    std::atomic<int>  answered_during{0};
+    std::thread prober([&] {
+        while (!done.load(std::memory_order_acquire)) {
+            if (server.requests() >= 2) {
+                // snapshot_config() takes the index lock for a (blocking)
+                // read, so it answers only when no pass holds the lock.
+                const auto t0 = std::chrono::steady_clock::now();
+                (void)retriever.snapshot_config();
+                if (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds{100})
+                    answered_during.fetch_add(1, std::memory_order_relaxed);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+    });
     const auto result = retriever.retrieve("fixture token cold retrieval", 5);
+    done.store(true, std::memory_order_release);
+    prober.join();
+
     check(result.error.empty(), "cold retrieval completes without a lock capability abort");
     check(!result.passages.empty(), "cold retrieval returns passages");
     check(server.requests() >= 4,
           "cold retrieval probes and embeds the corpus in multiple requests");
+    check(server.peak_in_flight() >= 2,
+          "embedding batches run side by side, not one at a time under the lock");
+    check(answered_during.load() > 0,
+          "the index stays readable while the corpus is being embedded");
+
+    // Warm: nothing new to embed, so one query vector at most.
+    const int before = server.requests();
+    const auto again = retriever.retrieve("fixture token cold retrieval", 5);
+    check(again.error.empty() && !again.passages.empty(), "a warm retrieval answers");
+    check(server.requests() - before <= 1, "a warm retrieval embeds nothing but the query");
+
+    // Switch to another embedder (same model name, another server): the old
+    // vectors must not be reused, the index rebuilds on the new one, and the
+    // whole cold path runs again without touching the old server.
+    LoopbackEmbeddingServer other{std::chrono::milliseconds{20}};
+    REQUIRE(other.valid(), "second embedding server starts");
+    auto cfg = retriever.snapshot_config();
+    cfg.embed.host = "127.0.0.1";
+    cfg.embed.port = other.port();
+    retriever.apply_config(cfg);
+    const int old_before = server.requests();
+    const auto switched = retriever.retrieve("fixture token cold retrieval", 5);
+    check(switched.error.empty() && !switched.passages.empty(), "retrieval answers after switching embedder");
+    check(other.requests() >= 4, "the new embedder re-embeds the corpus");
+    check(server.requests() == old_before, "the old embedder is not asked again");
 }
 
 // Persisted indexes are named `<stem><8-hex-identity>.ragdb`, where the hash

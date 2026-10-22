@@ -40,6 +40,11 @@ agentty/provider/error_class.hpp: thread_local
 agentty/domain/catalog.hpp: atomic
 agentty/domain/lazy_bytes.hpp: atomic
 agentty/domain/ui_theme.hpp: atomic
+# rag VectorCache: the vectors are a maya::published map (lock-free reads
+# from inside the RAG index lock, where a library virtual can't take a
+# lock). The atomics are a generation stamp for eviction order and hit/miss
+# counters for stats(); none is waited on or used as a claim.
+agentty/rag/vector_cache.hpp: atomic
 # const_cast on a std::variant alternative accessor, not on shared state.
 agentty/domain/smart_mode.hpp: const_cast
 

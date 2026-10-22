@@ -15,6 +15,7 @@
 
 #include "agentty/rag/rag_adapter.hpp"
 #include "agentty/rag/rag_host.hpp"
+#include "agentty/rag/vector_cache.hpp"
 #include "agentty/io/shared_file.hpp"
 
 #include "agentty/util/background.hpp"
@@ -1038,10 +1039,102 @@ struct Index {
         return std::holds_alternative<dense::Ready>(dense);
     }
 
+    // Vectors embedded outside the index lock (VectorCache, #112). The
+    // engines' embedder reads from it; Retriever fills it before each locked
+    // build or search. shared_ptr<const>: the cache syncs itself, so the
+    // index can hand it out of a lock body.
+    std::shared_ptr<const ::agentty::rag::VectorCache> vectors =
+        std::make_shared<const ::agentty::rag::VectorCache>();
+    // The real embedder for the current config, for prefetch to call. Built
+    // with the engines' one; empty when dense is off.
+    std::optional<::rag::dense::AnyEmbedder> real_embedder;
+
+    // Give `eng` the cache-backed embedder. One place for all three engines,
+    // so none of them can end up doing network IO under the lock by default.
+    bool attach_cached_embedder(::rag::Engine& eng) {
+        if (!dense_ready()) return false;
+        if (!real_embedder) {
+            auto e = ::agentty::rag::registries().make_embedder(embedder_spec());
+            if (!e) return false;
+            real_embedder = std::move(*e);
+        }
+        eng.with_embedder(::rag::dense::AnyEmbedder{::agentty::rag::CachedEmbedder{*real_embedder, vectors}});
+        return true;
+    }
+
     void attach_embedder() {
         embedder_ready = false;
         if (!dense_ready()) return;
-        embedder_ready = engine.with_embedder_spec(embedder_spec(), ::agentty::rag::registries()).has_value();
+        embedder_ready = attach_cached_embedder(engine);
+    }
+
+    // The embed config changed (apply_config, a re-probe): rebuild the real
+    // embedder and start a new cache. A backend's identity is only its model
+    // name, so the same name on another host must not get the old vectors.
+    // Not called on a plain rebuild: pass 1 of a retrieve reindexes and
+    // needs the vectors pass 0 fetched.
+    void reset_embedder() {
+        real_embedder.reset();
+        // Cleared in place, not replaced: every engine's CachedEmbedder holds
+        // this same cache, so a new object would leave the older engines
+        // reading a cache nothing fills any more.
+        vectors->clear();
+        attach_embedder();
+        // The warm and code engines hold the old backend inside their
+        // CachedEmbedder: give them the new one, and mark them cold so the
+        // next call re-embeds in the new model's space.
+        if (warm_initialized) {
+            warm_initialized = false;
+            warm_engine = ::rag::Engine(make_engine_config());
+        }
+        if (code_initialized) {
+            code_initialized = false;
+            code_root.clear();
+            code_files.clear();
+            code_engine = ::rag::Engine(make_engine_config(/*source_code=*/true));
+        }
+        attach_code_embedder();
+    }
+
+    // How the lock and the network are kept apart (#112). A retrieve runs
+    // its locked body twice at most:
+    //
+    //   pass 0  does everything as usual, but where it would embed (a build
+    //           with chunks the cache can't answer, or a query vector) it
+    //           records the texts in `wanted` and skips the build/search,
+    //           so no network IO happens under the lock.
+    //   (unlocked) the Retriever embeds `wanted` into the cache, with as
+    //           many requests in flight as the backend wants.
+    //   pass 1  does it all again; every vector is a cache hit now. It never
+    //           defers: anything still missing (the backend failed for a
+    //           batch) is fetched the slow way, so the result is always right.
+    //
+    // Pass 1 repeats the cheap work (file walk, chunking: milliseconds), not
+    // the embedding (seconds). A warm call needs no vectors and makes one pass.
+    std::vector<std::string> wanted;
+    int pass = 0;
+    // HyDE / multi-query: the prompt pass 0 wants generated (empty: none),
+    // and on pass 1 what the generator answered, already embedded. The
+    // generator is a model call, so like the embedder it runs unlocked.
+    std::string              gen_prompt;
+    int                      gen_n = 1;
+    std::vector<std::string> gen_outputs;
+
+    // True when pass 0 should stop before work that needs these texts
+    // embedded (it has noted them in `wanted`). Cache hits don't count.
+    [[nodiscard]] bool defer_for(std::vector<std::string> texts) {
+        if (pass != 0 || !real_embedder) return false;
+        const std::string_view model = real_embedder->identity();
+        ::rag::Vector scratch;
+        std::erase_if(texts, [&](const std::string& t) { return vectors->get(model, t, scratch); });
+        if (texts.empty()) return false;
+        wanted.insert(wanted.end(), std::make_move_iterator(texts.begin()),
+                      std::make_move_iterator(texts.end()));
+        return true;
+    }
+    // Same, for an engine about to build().
+    [[nodiscard]] bool defer_build(const ::rag::Engine& eng) {
+        return eng.corpus().has_embedder() && defer_for(eng.corpus().pending_texts());
     }
 
     static void hash_text(std::uint64_t& h, std::string_view value) {
@@ -1088,7 +1181,7 @@ struct Index {
         if (warm_initialized
             && sfp == warm_skills_gen && mfp == warm_memory_gen) return;
         warm_engine = ::rag::Engine(make_engine_config());
-        if (dense_ready()) (void)warm_engine.with_embedder_spec(embedder_spec(), ::agentty::rag::registries());
+        (void)attach_cached_embedder(warm_engine);
         if (cfg.skills)
             for (const auto& s : tools::skills::all(index_io()))
                 if (!s.body.empty())
@@ -1101,6 +1194,9 @@ struct Index {
                         (void)warm_engine.add("memory://" + r.id, r.text,
                             {{"kind", "memory"},
                              {"scope", std::string(tools::memory::to_string(scope))}});
+        // Pass 0 with chunks to embed: leave warm_initialized false, so
+        // pass 1 rebuilds this engine and finds every vector cached.
+        if (defer_build(warm_engine)) return;
         (void)warm_engine.build();
         apply_pipeline(warm_engine);
         warm_skills_gen = sfp;
@@ -1175,6 +1271,9 @@ struct Index {
         // The embed pass below can take seconds on a large corpus; bail here
         // so process teardown / a re-seated warm doesn't block on it.
         if (warm_cancelled()) return;
+        // Pass 0: the vectors are fetched outside the lock first, then pass 1
+        // reindexes again and builds from the cache (nothing recorded yet).
+        if (defer_build(engine)) return;
         auto built = engine.build();
         if (!built)
             ::agentty::util::dbglog("rag.build", std::string(::rag::to_string(built.error().code)));
@@ -1545,6 +1644,11 @@ struct Index {
                              loaded->meta, loaded->title);
         }
         if (warm_cancelled()) return;
+        // Pass 0: stop before embedding. docs_files isn't updated yet, so
+        // pass 1 sees the same files as changed and upserts them again
+        // (replacing each doc with an identical one), and this build then
+        // finds every vector in the cache.
+        if (defer_build(engine)) return;
         auto built = engine.build();
         if (!built) {
             reindex(root, /*skip_docs=*/false);
@@ -1559,7 +1663,7 @@ struct Index {
     void attach_code_embedder() {
         code_embedder_ready = false;
         if (!dense_ready()) return;
-        code_embedder_ready = code_engine.with_embedder_spec(embedder_spec(), ::agentty::rag::registries()).has_value();
+        code_embedder_ready = attach_cached_embedder(code_engine);
     }
 };
 
@@ -1572,11 +1676,78 @@ struct Index {
 // it. Exclusive bodies only: a shared (read) body never sets it.
 struct IndexBody {
     Index& ix;
-    IndexBody(Index& i, const Index::held_t& h) : ix(i) { ix.held_ = std::addressof(h); }
-    ~IndexBody() { ix.held_ = nullptr; }
+    // `pass` is which run of a two-pass call this is (Index::defer_for).
+    IndexBody(Index& i, const Index::held_t& h, int pass = 1) : ix(i) {
+        ix.held_ = std::addressof(h);
+        ix.pass = pass;
+        ix.wanted.clear();
+        ix.gen_prompt.clear();
+    }
+    // gen_outputs is set by the caller before pass 1 and used during it;
+    // cleared after so it can't leak into the next retrieve.
+    ~IndexBody() { ix.held_ = nullptr; ix.pass = 1; ix.gen_outputs.clear(); }
     IndexBody(const IndexBody&)            = delete;
     IndexBody& operator=(const IndexBody&) = delete;
 };
+
+// What a pass 0 body hands out of the lock when it needs work done unlocked:
+// texts to embed, and maybe a prompt to generate from (HyDE / multi-query).
+// Neither: `result` is final.
+template <class R>
+struct Pass {
+    R                        result{};
+    std::vector<std::string> texts;
+    std::string              gen_prompt;
+    int                      gen_n = 1;
+    [[nodiscard]] bool done() const noexcept { return texts.empty() && gen_prompt.empty(); }
+};
+
+// After a body ran: package the result, plus what it deferred (pass 0 only).
+template <class R>
+Pass<R> finish_pass(Index& ix, R r) {
+    Pass<R> p{std::move(r), {}, {}, 1};
+    if (ix.pass == 0 && !ix.wanted.empty() && ix.real_embedder) p.texts = std::move(ix.wanted);
+    if (ix.pass == 0 && !ix.gen_prompt.empty()) {
+        p.gen_prompt = std::move(ix.gen_prompt);
+        p.gen_n      = ix.gen_n;
+    }
+    return p;
+}
+
+// The real embedder and the cache, read from the index for an unlocked
+// prefetch. Both are shared handles to things that sync themselves.
+struct EmbedHandles {
+    std::optional<::rag::dense::AnyEmbedder>           embedder;
+    std::shared_ptr<const ::agentty::rag::VectorCache> cache;
+};
+
+} // namespace agentty::rag
+// AnyEmbedder is a shared, immutable handle to a backend that is safe to call
+// from any thread (rag-cpp's contract: embed() is const and reentrant), and the
+// cache syncs itself. Handing them out of the lock shares nothing writable.
+MAYA_SENDABLE(agentty::rag::EmbedHandles);
+namespace agentty::rag {
+
+// The unlocked middle of a two-pass call (Index::defer_for): embed `texts`
+// into the cache with as many requests in flight as the backend takes. No
+// lock is held, so other retrievals, the warm worker and the UI go on.
+void prefetch_unlocked(const maya::unlocked& cap, maya::guarded<Index, lock_levels::rag_index>& index,
+                       const std::vector<std::string>& texts) {
+    const auto h = index.read(cap, [](const Index& ix) {
+        return EmbedHandles{ix.real_embedder, ix.vectors};
+    });
+    if (!h.embedder || !h.cache) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto r = h.cache->prefetch(cap, *h.embedder, texts);
+    const auto st = h.cache->stats();
+    ::agentty::util::dbglog("rag.prefetch",
+        std::to_string(texts.size()) + " texts in "
+        + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - t0).count()) + " ms"
+        + "; cache " + std::to_string(st.entries) + " vectors, " + std::to_string(st.hits) + " hits, "
+        + std::to_string(st.misses) + " misses so far"
+        + (r ? std::string{} : " (error: " + std::string(::rag::to_string(r.error().code)) + ")"));
+}
 
 // The Retriever's public API is called from tool bodies, the proactive
 // pre-turn path and the RAG settings worker -- never from inside an agentty
@@ -1661,6 +1832,9 @@ Retrieval retrieve_locked(Index& ix, const std::string& query, int kk, bool skip
     }
 
     auto& active_engine = skip_docs ? ix.warm_engine : ix.engine;
+    // Pass 0 deferred a build: stop here, the Retriever fetches the vectors
+    // outside the lock and runs this again.
+    if (!ix.wanted.empty()) return out;
     const bool any = active_engine.corpus().chunk_count() > 0;
     if (!any) {
         out.error = "no knowledge configured. Set AGENTTY_DOCS_DIR to a "
@@ -1668,6 +1842,25 @@ Retrieval retrieve_locked(Index& ix, const std::string& query, int kk, bool skip
                     "or store memories to give search_docs something to find.";
         return out;
     }
+
+    // HyDE / multi-query: the generator is a model call and its outputs get
+    // embedded, so both run OUTSIDE the lock (Index::defer_for). Pass 0
+    // records the prompt; the Retriever generates, embeds the outputs, and
+    // pass 1 hands rag-cpp a generator that just returns them. SKIPPED on
+    // the warm/proactive path (skip_docs): that path is latency-budgeted (a
+    // pre-turn hedge) and must not wait on generation.
+    const bool use_llm = !skip_docs && generator && *generator && (ix.cfg.hyde || ix.cfg.expand);
+    const int gen_n = ix.cfg.expand ? 3 : 1;
+    if (use_llm && ix.pass == 0) {
+        ix.gen_prompt = ix.cfg.expand
+            ? "Generate 3 alternative phrasings of the following question, one per line.\n\nQuestion: " + query
+            : "Write a short passage that directly answers the question.\n\nQuestion: " + query + "\nPassage:";
+        ix.gen_n = gen_n;
+        (void)ix.defer_for({query});   // its vector comes along
+        return out;
+    }
+    // The query's own vector is a network call too: fetch it outside the lock.
+    if (active_engine.corpus().has_embedder() && ix.defer_for({query})) return out;
 
     // ── RETRIEVE ──────────────────────────────────────────────────
     // 1. Base hybrid retrieval through the full pipeline (PRF → convex
@@ -1684,24 +1877,20 @@ Retrieval retrieve_locked(Index& ix, const std::string& query, int kk, bool skip
     // 2. LLM-assisted retrieval (HyDE / multi-query) when a Generator is
     //    wired AND enabled — closes the query↔document asymmetry gap and
     //    lifts recall. Degrades gracefully to plain search when absent.
-    //    SKIPPED on the warm/proactive path (skip_docs): that path is
-    //    latency-budgeted (pre-turn hedge) and must not wait on generation.
+    //    (Generated before this pass, outside the lock: see above.)
     bool used_llm = false;
-    if (!skip_docs && generator && *generator && (ix.cfg.hyde || ix.cfg.expand)) {
+    if (use_llm) {
         ::rag::query::Generator gen =
-            [&](std::string_view prompt) -> ::rag::Result<std::vector<std::string>> {
-                try {
-                    int n = ix.cfg.expand ? 3 : 1;
-                    auto outs = (*generator)(std::string(prompt), n);
-                    return outs;
-                } catch (...) {
-                    return std::vector<std::string>{};
-                }
+            [&](std::string_view) -> ::rag::Result<std::vector<std::string>> {
+                // What the unlocked step generated for this query (and
+                // already embedded). Empty when the model was unreachable:
+                // HyDE then falls back to the plain query, as before.
+                return ix.gen_outputs;
             };
         ::rag::Result<std::vector<::rag::Hit>> lh =
             std::unexpected(::rag::Error{});
         if (ix.cfg.expand)
-            lh = ::rag::query::multi_query_search(active_engine.corpus(), query, want, gen, 3);
+            lh = ::rag::query::multi_query_search(active_engine.corpus(), query, want, gen, gen_n);
         else
             lh = ::rag::query::hyde_search(active_engine.corpus(), query, want, gen);
         if (lh && !lh->empty()) {
@@ -1933,11 +2122,33 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
     if (query.empty()) { out.error = "empty query"; return out; }
     const int kk = k > 0 ? k : 6;
     try {
-        out = api_root([&](const maya::unlocked& cap) { return impl_->index.with(cap,
-            [](const Index::held_t& h, Index& ix, std::string query, int kk, bool skip_docs, GeneratorRef g) {
-                IndexBody body{ix, h};
-                return retrieve_locked(ix, query, kk, skip_docs, g);
-            }, query, kk, skip_docs, GeneratorRef{impl_->generator.current()}); });
+        out = api_root([&](const maya::unlocked& cap) {
+            constexpr auto locked = [](const Index::held_t& h, Index& ix, int pass, std::string query,
+                                       int kk, bool skip_docs, GeneratorRef g,
+                                       std::vector<std::string> generated) {
+                IndexBody body{ix, h, pass};
+                ix.gen_outputs = std::move(generated);
+                return finish_pass(ix, retrieve_locked(ix, query, kk, skip_docs, g));
+            };
+            const GeneratorRef g{impl_->generator.current()};
+            // Pass 0, then (only if it asked) the slow parts with no lock:
+            // the HyDE/multi-query generation, and embedding everything the
+            // second pass will look up. Then pass 1 (Index::defer_for).
+            auto p = impl_->index.with(cap, locked, 0, query, kk, skip_docs, g, std::vector<std::string>{});
+            if (p.done()) return std::move(p.result);
+            std::vector<std::string> generated;
+            if (!p.gen_prompt.empty() && g.fn && *g.fn) {
+                try {
+                    generated = (*g.fn)(p.gen_prompt, p.gen_n);
+                } catch (...) {
+                    generated.clear();   // unreachable model: plain hybrid, as before
+                }
+                p.texts.insert(p.texts.end(), generated.begin(), generated.end());
+                p.texts.push_back(query);   // HyDE fuses the raw query in too
+            }
+            if (!p.texts.empty()) prefetch_unlocked(cap, impl_->index, p.texts);
+            return impl_->index.with(cap, locked, 1, query, kk, skip_docs, g, std::move(generated)).result;
+        });
     } catch (const std::exception& e) {
         out.error = std::string("retrieval error: ") + e.what();
     } catch (...) {
@@ -2009,6 +2220,8 @@ Retrieval retrieve_code_locked(Index& ix, const std::string& query, int kk) {
                                              std::move(d.text), d.meta, d.title);
             }
         }
+        // Pass 0: stop before embedding (see Index::defer_for).
+        if (ix.defer_build(ix.code_engine)) return out;
         auto built = ix.code_engine.build();
         if (!built) { out.error = "search_code: index build failed"; return out; }
         ix.apply_pipeline(ix.code_engine);
@@ -2035,6 +2248,9 @@ Retrieval retrieve_code_locked(Index& ix, const std::string& query, int kk) {
             (void)ix.code_engine.corpus().upsert_document("code://" + path,
                 std::move(loaded->text), loaded->meta, loaded->title);
         }
+        // Pass 0: stop before embedding. code_files isn't updated, so pass 1
+        // upserts the same files again and builds from the cache.
+        if (ix.defer_build(ix.code_engine)) return out;
         auto built = ix.code_engine.build();
         if (!built) { out.error = "search_code: incremental update failed"; return out; }
         ix.apply_pipeline(ix.code_engine);
@@ -2051,6 +2267,10 @@ Retrieval retrieve_code_locked(Index& ix, const std::string& query, int kk) {
 
     std::vector<std::string> code_trace;
     std::vector<std::string>* code_tracep = ix.cfg.trace ? &code_trace : nullptr;
+    // The query's vector is a network call too: fetch it outside the lock.
+    if (ix.code_engine.corpus().has_embedder()
+        && ix.defer_for({query}))
+        return out;
     auto res = ix.code_engine.search(query, static_cast<std::size_t>(kk),
                                          {}, code_tracep);
     if (!res) { out.error = "search_code failed"; return out; }
@@ -2147,11 +2367,18 @@ Retrieval Retriever::retrieve_code(const std::string& query, int k) {
     if (query.empty()) { out.error = "empty query"; return out; }
     const int kk = k > 0 ? k : 6;
     try {
-        out = api_root([&](const maya::unlocked& cap) { return impl_->index.with(cap,
-            [](const Index::held_t& h, Index& ix, std::string query, int kk) {
-                IndexBody body{ix, h};
-                return retrieve_code_locked(ix, query, kk);
-            }, query, kk); });
+        out = api_root([&](const maya::unlocked& cap) {
+            constexpr auto locked = [](const Index::held_t& h, Index& ix, int pass, std::string query, int kk) {
+                IndexBody body{ix, h, pass};
+                return finish_pass(ix, retrieve_code_locked(ix, query, kk));
+            };
+            // Same two passes as retrieve(): embedding a cold source tree
+            // happens outside the lock, in parallel.
+            auto p = impl_->index.with(cap, locked, 0, query, kk);
+            if (p.done()) return std::move(p.result);
+            prefetch_unlocked(cap, impl_->index, p.texts);
+            return impl_->index.with(cap, locked, 1, query, kk).result;
+        });
     } catch (const std::exception& e) {
         out.error = std::string("search_code failed: ") + e.what();
     } catch (...) {
@@ -2208,13 +2435,22 @@ void Retriever::warm_async() {
             WarmState& s;
             ~ClearWarming() { s.warming.store(false); }
         } clear{*state};
-        state->index.with(cap, [](const Index::held_t& h, Index& ix) {
-            IndexBody body{ix, h};
+        // Two passes like retrieve(): the embedding for a cold docs folder
+        // runs between them with no lock held, so a search_docs call (or the
+        // UI) isn't kept waiting while the warm worker talks to the embedder.
+        constexpr auto locked = [](const Index::held_t& h, Index& ix, int pass) {
+            IndexBody body{ix, h, pass};
             auto root = resolve_docs_root(ix.cfg.docs_root);
             if (ix.engine.corpus().chunk_count() == 0)
                 (void)ix.try_load_persisted(root);
             ix.refresh_docs(root);
-        });
+            return finish_pass(ix, 0);
+        };
+        auto p = state->index.with(cap, locked, 0);
+        if (p.done() || state->warm_stop.load(std::memory_order_relaxed)) return;
+        prefetch_unlocked(cap, state->index, p.texts);
+        if (state->warm_stop.load(std::memory_order_relaxed)) return;
+        (void)state->index.with(cap, locked, 1);
     }, impl_->warm);
 }
 
@@ -2309,7 +2545,7 @@ void Retriever::apply_config(const Config& cfg) {
                 ix.code_initialized = false;
                 ix.code_root.clear();
                 ix.code_files.clear();
-                ix.attach_embedder();
+                ix.reset_embedder();
             } else {
                 // Ranking-only change: re-apply the pipeline in place so cheap
                 // re-labels (fusion label) refresh without a rebuild.
@@ -2377,7 +2613,7 @@ Retriever::EmbedStatus Retriever::reprobe_embedder() {
     auto r = Index::run_probe(ec);
     impl_->index.with(cap, [](Index& ix, ::agentty::rag::embed::ProbeResult pr) {
         ix.apply_probe(pr);
-        ix.attach_embedder();
+        ix.reset_embedder();
     }, std::move(r));
     return embed_status();
     });

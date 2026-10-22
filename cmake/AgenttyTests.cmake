@@ -45,7 +45,7 @@ set(_AGENTTY_CONSOLIDATED
     subprocess_group_kill_test
     plugins_in_model_test tool_stream_snapshot_test tool_timeline_adapter_test
     anthropic_sse_golden_test codex_login_flow_test mcp_reload_race_test
-    persistence_proactive_test proactive_deferred_test rag_adapter_test
+    persistence_proactive_test proactive_deferred_test rag_adapter_test rag_vector_cache_test
     scheduler_path_test tool_result_budget_test tool_wedge_liveness_test
     transcript_bound_test turn_settle_test stream_clock_test midrun_seam_test midrun_wire_test
     codex_responses_test doom_loop_test visual_hash_coverage_test
