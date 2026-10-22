@@ -65,22 +65,81 @@ rp::TerminalMode terminal_mode(std::string_view s) {
     return rp::TerminalMode::automatic;
 }
 
-ClipboardMiss miss_of(const rp::Error& e) {
-    // Inside tmux the terminal was already asked, through a tmux buffer.
-    // Asking again in-band only brings back the route that mangles big
-    // replies into typed text, so tmux's answer is final.
-    if (const auto* t = e.from(rp::Route::tmux_buffer)) {
-        if (t->code == rp::Code::empty) return ClipboardMiss::Empty;
-        if (t->code == rp::Code::too_big) return ClipboardMiss::TooBig;
-        return ClipboardMiss::TmuxNoAnswer;
+} // namespace
+
+namespace {
+
+rp::Walk to_rp(const ClipboardWalk& w) {
+    rp::Walk out;
+    out.situation = {w.ssh, w.tmux, static_cast<rp::Images>(w.images)};
+    for (auto r : w.routes) out.routes.push_back(static_cast<rp::Route>(r));
+    out.next = w.next;
+    for (auto& c : w.causes)
+        out.causes.push_back(rp::Error{static_cast<rp::Code>(c.code), c.what, {}, static_cast<rp::Route>(c.route)});
+    return out;
+}
+
+ClipboardWalk from_rp(const rp::Walk& w) {
+    ClipboardWalk out;
+    out.ssh = w.situation.ssh;
+    out.tmux = w.situation.tmux;
+    out.images = static_cast<std::uint8_t>(w.situation.images);
+    for (auto r : w.routes) out.routes.push_back(static_cast<std::uint8_t>(r));
+    out.next = w.next;
+    for (auto& e : w.causes)
+        out.causes.push_back({static_cast<std::uint8_t>(e.route.value_or(rp::Route::terminal)),
+                              static_cast<std::uint8_t>(e.code), e.what});
+    return out;
+}
+
+// One step of the walk, as the composer sees it.
+ClipboardContents settle(rp::Walk w) {
+    ClipboardContents out;
+    auto clip = rp::advance(w);
+    if (clip) {
+        out.source = clip->source;
+        for (auto& it : clip->items) out.items.push_back(to_item(it));
+        AGT_LOG(Ui, Info, "clipboard.read", "route={} source={} items={}", rp::route_name(clip->route),
+                out.source, out.items.size());
+        return out;
     }
-    if (e.code == rp::Code::too_big) return ClipboardMiss::TooBig;
-    // Anything else: the terminal runs on the user's machine and may still
-    // have it (an image over OSC 5522, say).
-    return ClipboardMiss::AskTerminal;
+    const auto& e = clip.error();
+    out.error = e.what;
+    switch (e.code) {
+        case rp::Code::needs_terminal:
+            out.miss = ClipboardMiss::AskTerminal;
+            out.ask  = w.situation.images == rp::Images::yes ? TerminalAsk::Images : TerminalAsk::Text;
+            // Our wrapped query has to get through tmux to the terminal.
+            // tmux's default is to drop it; open this pane up (pane-only, so
+            // it goes with the pane). Done here, on the worker, before asking.
+            if (w.situation.tmux) (void)rp::inband::tmux_allow_passthrough();
+            out.walk = from_rp(w);
+            break;
+        case rp::Code::empty:   out.miss = ClipboardMiss::Empty; break;
+        case rp::Code::too_big: out.miss = ClipboardMiss::TooBig; break;
+        case rp::Code::refused: out.miss = ClipboardMiss::Refused; break;
+        default:                out.miss = ClipboardMiss::NoRoute; break;
+    }
+    AGT_LOG(Ui, Info, "clipboard.read.none", "code={} why={}", rp::code_name(e.code), out.error);
+    return out;
 }
 
 } // namespace
+
+ClipboardContents read_clipboard() {
+    auto w = rp::start();
+    std::string plan;
+    for (auto r : w.routes) plan += (plan.empty() ? "" : ">") + std::string{rp::route_name(r)};
+    AGT_LOG(Ui, Info, "clipboard.plan", "routes={} ssh={} tmux={} images={}", plan, w.situation.ssh,
+            w.situation.tmux, static_cast<int>(w.situation.images));
+    return settle(std::move(w));
+}
+
+ClipboardContents resume_clipboard(ClipboardWalk walk, std::string why, bool refused) {
+    auto w = to_rp(walk);
+    rp::skip(w, rp::Error{refused ? rp::Code::refused : rp::Code::no_answer, std::move(why), {}, {}});
+    return settle(std::move(w));
+}
 
 void clipboard_configure(const paste_cfg::Config& c) {
     rp::Config r;
@@ -106,22 +165,16 @@ std::filesystem::path clipboard_save_dir() {
     return rp::state_dir() / "pasted";
 }
 
-ClipboardContents read_clipboard(bool allow_remote) {
+ClipboardContents read_local_clipboard() {
     ClipboardContents out;
-    rp::PasteOptions opt;
-    // No terminal session: the tty belongs to maya, and the composer asks
-    // the terminal itself (OSC 5522 / 52) when this comes back empty.
-    auto clip = allow_remote ? rp::paste(opt) : rp::read_clipboard(opt.max_bytes);
+    auto clip = rp::read_clipboard(rp::config().max_bytes);
     if (!clip) {
         out.error = clip.error().what;
-        out.miss  = miss_of(clip.error());
-        AGT_LOG(Ui, Info, "clipboard.read.none", "code={} why={}", rp::code_name(clip.error().code), out.error);
+        out.miss  = clip.error().code == rp::Code::empty ? ClipboardMiss::Empty : ClipboardMiss::NoRoute;
         return out;
     }
     out.source = clip->source;
     for (auto& it : clip->items) out.items.push_back(to_item(it));
-    AGT_LOG(Ui, Info, "clipboard.read", "route={} source={} items={}", rp::route_name(clip->route), out.source,
-            out.items.size());
     return out;
 }
 

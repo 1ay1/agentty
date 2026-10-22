@@ -164,10 +164,10 @@ std::string route_label(rp::Route r) {
 std::string route_what(rp::Route r) {
     switch (r) {
         case rp::Route::socket: return "the one agent socket in the settings";
-        case rp::Route::forward: return "the agent on your laptop, through ssh";
+        case rp::Route::forward: return "the agent on your laptop, through ssh (after `setup`)";
         case rp::Route::display: return "this machine's own clipboard (Wayland, X11, macOS, Windows)";
-        case rp::Route::tmux_buffer: return "tmux asks your terminal, we read its buffer (text, image lines)";
-        case rp::Route::terminal: return "ask the terminal directly (OSC 5522 images, OSC 52 text)";
+        case rp::Route::tmux_buffer: return "tmux asks your terminal for text, we read its buffer";
+        case rp::Route::terminal: return "ask your terminal (kitty: images and text; others: text)";
     }
     return "";
 }
@@ -210,6 +210,12 @@ int doctor() {
     std::string where = d.situation.ssh ? "over ssh" : "on this machine";
     if (d.tmux) where += d.situation.tmux ? ", in a tmux pane" : ", tmux set but not answering";
     kv("session", text(where));
+    {
+        using I = rp::Images;
+        const auto im = d.situation.images;
+        kv("terminal", im == I::yes ? ok("can send images (kitty)")
+                     : im == I::no ? text("text only") : dim("unknown, asked when needed"));
+    }
     if (d.situation.ssh && d.ssh_connection) kv("ssh", dim(*d.ssh_connection));
     std::string disp;
     if (d.wayland_display) disp += "wayland " + *d.wayland_display;

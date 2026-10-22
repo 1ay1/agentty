@@ -211,6 +211,59 @@ TEST_CASE("paste: Ctrl+V answered with an image as text is the image, once") {
     CHECK(m.ui.clipboard_text_fallback.empty());
 }
 
+TEST_CASE("paste: Ctrl+V asks kitty for images once, and an answer ends the walk") {
+    Model m;
+    m.env.ssh = true;
+    ClipboardRead r;
+    r.miss = ClipboardMiss::AskTerminal;
+    r.ask  = TerminalAsk::Images;
+    r.walk.routes = {1, 4, 3};   // forward, terminal, tmux_buffer
+    r.walk.next = 1;
+    m = send(std::move(m), Msg{msg::ComposerMsg{std::move(r)}});
+    CHECK(m.ui.clipboard_walk.active());
+    CHECK(m.ui.clipboard_wanted_image);
+    const auto seq = m.ui.clipboard_query_seq;
+    // kitty answers with the text it has: that's the answer, not a race.
+    m = send(std::move(m), Msg{ComposerPaste{"hello"}});
+    CHECK(!m.ui.clipboard_walk.active());
+    CHECK(m.ui.clipboard_query_done == seq);
+    // A late timeout for that ask does nothing.
+    m = send(std::move(m), Msg{ClipboardQueryTimeout{seq}});
+    REQUIRE(m.ui.composer.attachments.size() == 1);   // the text, pasted once
+    CHECK(m.ui.composer.attachments[0].body.bytes() == "hello");
+    CHECK(m.s.status.find("couldn't") == std::string::npos);
+}
+
+TEST_CASE("paste: a silent terminal resumes the walk at the next route") {
+    Model m;
+    m.env.ssh = true;
+    ClipboardRead r;
+    r.miss = ClipboardMiss::AskTerminal;
+    r.ask  = TerminalAsk::Images;
+    r.walk.routes = {1, 4, 3};
+    r.walk.next = 1;
+    m = send(std::move(m), Msg{msg::ComposerMsg{std::move(r)}});
+    const auto seq = m.ui.clipboard_query_seq;
+    // Past the wait with nothing back: the walk moves on (and is handed off).
+    const auto late = m.ui.clipboard_query_deadline + std::chrono::seconds{1};
+    auto [mm, _] = app::update(std::move(m), Msg{ClipboardQueryTimeout{seq}}, late);
+    (void)_;
+    m = std::move(mm);
+    CHECK(m.ui.clipboard_query_done == seq);
+    CHECK(!m.ui.clipboard_walk.active());
+}
+
+TEST_CASE("paste: a walk that ran out says what to set up, once") {
+    Model m;
+    m.env.ssh = true;
+    ClipboardRead r;
+    r.miss = ClipboardMiss::NoRoute;
+    r.error = "can't reach the clipboard";
+    m = send(std::move(m), Msg{msg::ComposerMsg{std::move(r)}});
+    CHECK(m.s.status.find("agentty paste setup") != std::string::npos);
+    CHECK(m.ui.clipboard_query_seq == 0);   // the terminal wasn't asked again
+}
+
 TEST_CASE("paste: a clipboard reply that lost its escapes is the image, never text") {
     // Ctrl+V's OSC 5522 reply came through with its ESC bytes stripped, in
     // pieces. It must not land as text; what it carried is pasted.

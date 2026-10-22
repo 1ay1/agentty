@@ -311,75 +311,68 @@ Cmd insert_items(Model& m, std::vector<ClipboardItem> items, std::string_view wh
 }
 
 Cmd on_clipboard_read(Model& m, ClipboardRead& r) {
+    m.ui.clipboard_walk = {};
     if (!r.items.empty())
         return insert_items(m, std::move(r.items), "<clipboard>");
     AGT_LOG(Ui, Info, "paste.clipboard_empty", "miss={} why={}", static_cast<int>(r.miss), r.error);
 
     const auto first_line = [&] { return r.error.substr(0, r.error.find('\n')); };
     switch (r.miss) {
-        case ClipboardMiss::None:
         case ClipboardMiss::AskTerminal: break;   // below
+        case ClipboardMiss::None:
         case ClipboardMiss::Empty:
             return set_status_toast(m, "clipboard is empty", std::chrono::seconds{4});
         case ClipboardMiss::TooBig:
             return set_status_toast(m, "clipboard: " + first_line(), std::chrono::seconds{10});
-        case ClipboardMiss::TmuxNoAnswer:
-            // Inside tmux the terminal was already asked, through a tmux
-            // buffer. Asking again in-band brings back the route that mangles
-            // big replies into typed text, so stop here and say why.
+        case ClipboardMiss::Refused:
+            // The terminal is there and would answer, it's just not allowed to.
             return set_status_toast(
                 m,
-                "clipboard: nothing came back through tmux \xe2\x80\x94 if it's a big "
-                "image, re-copy it from agentty.org/paste (it now fits), or run "
-                "`agentty paste setup` on your laptop",
+                "clipboard: your terminal blocks clipboard reads \xe2\x80\x94 kitty: add "
+                "`clipboard_control write-clipboard read-clipboard` to kitty.conf",
+                std::chrono::seconds{12});
+        case ClipboardMiss::NoRoute:
+            // Every route that needs no setup was tried; say the one that does.
+            return set_status_toast(
+                m,
+                m.env.ssh ? "clipboard: couldn't reach your laptop's clipboard \xe2\x80\x94 run "
+                            "`agentty paste setup` there once, or for an image use agentty.org/paste"
+                          : "clipboard: " + first_line(),
                 std::chrono::seconds{10});
     }
 
-    // richpaste found nothing (no display here, no agent forwarded). Last
-    // resort: ask the terminal, which runs on the user's machine even over
-    // ssh. maya sends OSC 5522 (kitty, carries images) or OSC 52 (text);
-    // a reply comes back as a PasteEvent into the ComposerPaste arm.
+    // The walk's next route is the terminal, which runs on the user's machine
+    // even over ssh. Ask it through our own input, in the one dialect the walk
+    // picked (OSC 5522 for kitty: images and text; else OSC 52: text). A reply
+    // comes back as a PasteEvent into the ComposerPaste arm; silence resumes
+    // the walk at the next route (tmux's buffer, say).
     {
+        const bool images = r.ask == TerminalAsk::Images;
+        m.ui.clipboard_walk = std::move(r.walk);
         auto toast = set_status_toast(
             m, "reading clipboard from your terminal\xE2\x80\xA6",
             std::chrono::seconds{3});
-        // Arm the no-reply diagnosis: if no paste lands within the window,
-        // ClipboardQueryTimeout surfaces an actionable message naming the
-        // user's exact situation (terminal / tmux / mosh) instead of the
-        // toast just lapsing into silence. 1.2s is comfortably above a
-        // slow SSH round-trip yet short enough to feel responsive.
         const std::uint64_t seq = ++m.ui.clipboard_query_seq;
-        // This path is only reached from an IMAGE paste intent (Ctrl+V /
-        // Alt+V after the local probes found no image). Remember that, so a
-        // TEXT-only reply can explain itself instead of silently inserting
-        // prose where the user expected a screenshot.
-        m.ui.clipboard_wanted_image = true;
-        // Sample the terminal's REFUSAL counter too. If it moves while we
-        // wait, kitty answered with EPERM — the protocol is there, the read
-        // permission is not — and the advice is one specific config line,
-        // not "your terminal doesn't support images".
+        // Only an image-capable read can be expected to bring an image, so
+        // only then may a text-only answer explain itself.
+        m.ui.clipboard_wanted_image = images;
+        // A refusal (kitty's EPERM) moves this counter: a different fix.
         m.ui.clipboard_refused_mark =
             maya::clipboard_read_refused().load(std::memory_order_relaxed);
-        // How long to wait before declaring "the terminal never answered".
-        //
-        // 1.2 s is right for a LOCAL terminal answering a text read: the
-        // reply is a few hundred bytes and comes back in microseconds, so a
-        // longer wait would only delay an honest error. It is far too short
-        // for an IMAGE over ssh: a screenshot is base64 PNG measured in
-        // megabytes, and on a remote link the reply is still streaming when
-        // the timer fires — so the paste that matters most is exactly the
-        // one that always failed. Give a remote session room, and let the
-        // progress check below extend it further while bytes keep landing.
-        const bool remote = m.env.ssh;
-        const auto deadline = std::chrono::milliseconds{remote ? 6000 : 1200};
-        // Snapshot the byte counter so the timeout arm can tell whether the
-        // terminal answered at all.
+        // How long until "the terminal never answered". A reply's first bytes
+        // come back in one round trip; once bytes are landing the timeout arm
+        // keeps extending, so a big image over a slow link still finishes. It
+        // checks every 150 ms, so a refusal moves on at once.
+        const auto wait = std::chrono::milliseconds{m.env.ssh ? 2500 : 1200};
+        m.ui.clipboard_query_deadline = m.now + wait;
         m.ui.clipboard_rx_mark =
             maya::clipboard_rx_bytes().load(std::memory_order_relaxed);
+        AGT_LOG(Ui, Info, "paste.ask_terminal", "seq={} dialect={}", seq, images ? "osc5522" : "osc52");
         return Cmd::batch(
-                    cmd::query_clipboard(),
+                    cmd::query_clipboard(images ? maya::ClipboardDialect::images
+                                                : maya::ClipboardDialect::text),
                     std::move(toast),
-                    Cmd::after(deadline,
+                    Cmd::after(std::chrono::milliseconds{150},
                                           Msg{ClipboardQueryTimeout{seq}}));
     }
 }
@@ -857,25 +850,10 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // satisfies an in-flight escape-based clipboard query — cancel
             // the pending no-reply diagnosis.
             //
-            // EXCEPT: when we asked for an IMAGE and got TEXT. In tmux the
-            // OSC 52 (text) and OSC 5522 (image) requests go out together,
-            // and tmux answers the OSC 52 from its own paste buffer while
-            // the 5522 is still in flight to kitty. The text reply is
-            // instant; the image reply crosses two pty hops. If the text
-            // closes the window, the image arrives with nothing listening
-            // for it. So when wanted_image is true and this is NOT image
-            // bytes, keep the window open — the image may still be coming.
-            const bool wanted_image = m.ui.clipboard_wanted_image;
-            // An image copied as text (agentty.org/paste, `agentty paste
-            // howto`) IS the image: it answers the image request as fully as
-            // image bytes do.
-            const bool armored_image = !e.text.empty() && m.d.persisted.paste.decode_text
-                                    && has_armored(e.text);
-            const bool is_image = !e.text.empty()
-                               && (detect_image_media_type(e.text) != nullptr || armored_image);
-            // In tmux both the OSC 5522 and the OSC 52 request go out and
-            // both may answer with the same clipboard. One query, one paste:
-            // a second reply that matches the one just pasted is dropped.
+            // We ask in one dialect only (the walk picked it), so the first
+            // reply is the answer: kitty's OSC 5522 reply carries the image
+            // if there is one, else the text. A second identical reply (a
+            // terminal answering twice) is dropped.
             if (m.ui.clipboard_query_done == m.ui.clipboard_query_seq
                 && m.ui.clipboard_query_seq != 0 && !e.text.empty()
                 && e.text.size() == m.ui.clipboard_last_reply_size
@@ -883,20 +861,14 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                 AGT_LOG(Ui, Info, "paste.duplicate_reply", "bytes={}", e.text.size());
                 return Cmd::none();
             }
-            if (wanted_image && is_image) {
+            const bool wanted_image = m.ui.clipboard_wanted_image;
+            if (m.ui.clipboard_query_done != m.ui.clipboard_query_seq && !e.continues_paste && !e.text.empty()) {
                 m.ui.clipboard_last_reply_size = e.text.size();
                 m.ui.clipboard_last_reply_hash = std::hash<std::string>{}(e.text);
-                m.ui.clipboard_text_fallback.clear();
-            }
-            if (is_image || !wanted_image) {
                 m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
                 m.ui.clipboard_wanted_image = false;
-            }
-            // Stash the text so the image-timeout path can fall back to it
-            // if no image ever arrives.
-            if (wanted_image && !is_image && !e.text.empty()) {
-                m.ui.clipboard_text_fallback = std::move(e.text);
-                return Cmd::none();
+                m.ui.clipboard_walk = {};
+                m.ui.clipboard_text_fallback.clear();
             }
             // Empty bracketed paste → Windows Terminal signature for
             // "user hit Ctrl+V but the clipboard has no text content".
@@ -1119,6 +1091,9 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             if (e.seq != m.ui.clipboard_query_seq
                 || m.ui.clipboard_query_done >= e.seq)
                 return Cmd::none();
+            const bool refused =
+                maya::clipboard_read_refused().load(std::memory_order_relaxed)
+                    != m.ui.clipboard_refused_mark;
             // The terminal may be ANSWERING, just not finished: an image
             // reply is megabytes of base64 and streams in over seconds on a
             // remote link. Diagnosing "no answer" while bytes are actively
@@ -1127,7 +1102,7 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // and let it finish; only genuine silence reaches the diagnosis
             // below. Bounded by the transfer itself — when the bytes stop,
             // the next timeout sees no movement and reports honestly.
-            {
+            if (!refused) {
                 const std::uint64_t now =
                     maya::clipboard_rx_bytes().load(std::memory_order_relaxed);
                 if (now != m.ui.clipboard_rx_mark) {
@@ -1136,10 +1111,32 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                     return Cmd::after(again,
                                 Msg{ClipboardQueryTimeout{e.seq}});
                 }
+                // Still inside the wait: look again soon, so a refusal (which
+                // arrives as a counter, not an event) moves the walk on at
+                // once instead of after the whole wait.
+                if (m.now < m.ui.clipboard_query_deadline) {
+                    return Cmd::after(std::chrono::milliseconds{150},
+                                      Msg{ClipboardQueryTimeout{e.seq}});
+                }
             }
             // This query is dead. Clear the image-intent latch so it cannot
             // leak into an unrelated later paste and mislabel it.
             m.ui.clipboard_wanted_image = false;
+
+            // The terminal stayed quiet (or refused): that was one route, not
+            // the paste. Carry the walk on to its next route (tmux's buffer,
+            // which can still fetch text when the terminal won't answer us).
+            // A text reply that raced in is the answer, so it's used instead.
+            if (m.ui.clipboard_walk.active() && m.ui.clipboard_text_fallback.empty()) {
+                m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
+                AGT_LOG(Ui, Info, "paste.terminal_quiet", "refused={} resuming at route {}", refused, m.ui.clipboard_walk.next + 1);
+                return cmd::resume_clipboard(std::move(m.ui.clipboard_walk),
+                                             refused ? "the terminal refused the read (kitty: add read-clipboard "
+                                                       "to clipboard_control in kitty.conf)"
+                                                     : "the terminal didn't answer",
+                                             refused);
+            }
+            m.ui.clipboard_walk = {};
 
             // The terminal REFUSED the read — it answered, with EPERM.
             //
@@ -1147,9 +1144,6 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // the one case where we know exactly what is wrong and exactly
             // which line fixes it. Every message below this is a guess from
             // circumstantial evidence; this one is the terminal telling us.
-            const bool refused =
-                maya::clipboard_read_refused().load(std::memory_order_relaxed)
-                    != m.ui.clipboard_refused_mark;
             if (refused) {
                 std::string txt = std::move(m.ui.clipboard_text_fallback);
                 m.ui.clipboard_text_fallback.clear();

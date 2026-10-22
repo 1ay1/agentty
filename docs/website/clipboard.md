@@ -27,16 +27,29 @@ command line.
 ## How a paste finds your clipboard
 
 Ctrl+V only needs the terminal for the keypress. The clipboard is fetched by
-the best route available, in this order:
+the best route available. Routes that need no setup come first, the ones that
+can carry images before the ones that only carry text, and each one that has
+nothing hands over to the next:
 
 | Where you are | Tried in order |
 |---------------|----------------|
-| On your own machine | 1. this machine's clipboard · 2. the terminal |
-| Over ssh (or tmux inside ssh) | 1. your laptop, through the ssh forward · 2. the terminal · 3. the server's clipboard, only if you turn it on |
+| On your own machine | 1. this machine's clipboard · 2. the ssh agent (if set up) · 3. the terminal |
+| Over ssh | 1. your laptop, through the ssh agent (if set up) · 2. the terminal · 3. the server's clipboard, only if you turn it on |
+| Over ssh, inside tmux | 1. the ssh agent (if set up) · 2. kitty, asked directly (images and text) · 3. tmux's own clipboard read (text) |
+
+The ssh agent is only tried if `agentty paste setup` left a forward behind;
+when there isn't one it costs nothing. Inside tmux, agentty asks tmux which
+terminal you're in: kitty is asked directly because it can send images, and
+any other terminal's text comes through tmux's own read, which is exact and
+has no size limit. A terminal that stays quiet hands over to the next route in
+a moment; one that refuses tells you the one line that fixes it.
 
 Each route can be turned off, see [Settings](#settings). Over ssh the
 server's own clipboard is skipped by default: it isn't the one you copied
 into, and pasting it gives stale text without saying so.
+
+`agentty paste doctor` shows the order it would use where you are, and what
+each route said.
 
 agentty decides "over ssh" by asking tmux for the pane's `SSH_CONNECTION` when
 you are in tmux (a pane keeps stale variables), else by `SSH_CONNECTION` /
@@ -125,8 +138,8 @@ route off with `paste.forwards`.
 
 ### 3. The terminal
 
-When nothing above answered, agentty asks the terminal itself. The terminal
-runs on your laptop, so this works over ssh with nothing installed:
+agentty asks the terminal itself. The terminal runs on your laptop, so this
+works over ssh with nothing installed:
 
 | Terminal | What it can send |
 |----------|------------------|
@@ -148,13 +161,13 @@ clipboard_control write-clipboard write-primary read-clipboard read-primary
 ```
 
 **Inside tmux**, the request has to pass through to the outer terminal:
+agentty turns on `allow-passthrough` for its own pane when it asks (only that
+pane, so your other panes keep tmux's default). For text it has tmux fetch
+the outer terminal's clipboard itself (`tmux refresh-client -l`), which needs:
 
 ```bash
-tmux set -g allow-passthrough on
+set -g set-clipboard on
 ```
-
-For text, agentty also has tmux fetch the outer terminal's clipboard itself
-(`tmux refresh-client -l`), which works with tmux's default options.
 
 If a terminal reports the wrong thing, force a mode with
 [`paste.terminal`](#settings): `osc5522`, `osc52` or `off`.

@@ -136,24 +136,42 @@ Cmd diagnose_clipboard(bool in_ssh) {
         in_ssh);
 }
 
+namespace {
+
+// One step of a Ctrl+V read. `resume` false starts a walk; true moves `walk`
+// past the terminal that stayed quiet (or refused). Runs isolated: a step can
+// wait on a display server, an ssh round trip, or tmux asking the terminal.
+void clipboard_step(maya::Sink<Msg> out, bool resume, ClipboardWalk walk, std::string why, bool refused) {
+    ClipboardRead r;
+    try {
+        auto c  = resume ? ::agentty::resume_clipboard(std::move(walk), std::move(why), refused)
+                         : ::agentty::read_clipboard();
+        settle_clipboard_items(c.items);
+        r.items = std::move(c.items);
+        r.miss  = c.miss;
+        r.error = std::move(c.error);
+        r.ask   = c.ask;
+        r.walk  = std::move(c.walk);
+    } catch (...) {
+        r = ClipboardRead{};
+        r.miss  = ClipboardMiss::NoRoute;
+        r.error = "clipboard read failed";
+    }
+    out.send(Msg{msg::ComposerMsg{std::move(r)}});
+}
+
+}  // namespace
+
 Cmd read_clipboard() {
-    // Isolated: a read can wait on a display server or an ssh round trip
-    // to the user's laptop, so never on a shared worker.
     return Cmd::task_isolated([](maya::Sink<Msg> out, std::stop_token) {
-        ClipboardRead r;
-        try {
-            auto c  = ::agentty::read_clipboard();
-            settle_clipboard_items(c.items);
-            r.items = std::move(c.items);
-            r.miss  = c.miss;
-            r.error = std::move(c.error);
-        } catch (...) {
-            r = ClipboardRead{};
-            r.miss  = ClipboardMiss::AskTerminal;
-            r.error = "clipboard read failed";
-        }
-        out.send(Msg{msg::ComposerMsg{std::move(r)}});
+        clipboard_step(std::move(out), false, ClipboardWalk{}, std::string{}, false);
     });
+}
+
+Cmd resume_clipboard(ClipboardWalk walk, std::string why, bool refused) {
+    return Cmd::task_isolated([](maya::Sink<Msg> out, std::stop_token, ClipboardWalk w, std::string y, bool no) {
+        clipboard_step(std::move(out), true, std::move(w), std::move(y), no);
+    }, std::move(walk), std::move(why), refused);
 }
 
 Cmd settle_clipboard(std::vector<ClipboardItem> items) {

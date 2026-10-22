@@ -38,6 +38,7 @@
 #include "agentty/domain/auth_view.hpp"     // auth::AuthView
 #include "agentty/runtime/library.hpp"      // Library: what is installed on disk
 #include "agentty/rag/embed_backend.hpp"    // Env::embed_defaults
+#include "agentty/io/clipboard.hpp"         // ClipboardWalk
 
 namespace agentty {
 
@@ -498,6 +499,13 @@ struct Model {
         // bytes stripped on the way), collected here until it is complete so
         // it is never pasted as text. See the ComposerPaste arm.
         std::string         clipboard_leaked_reply;
+        // A Ctrl+V read waiting on the terminal: richpaste's route walk, kept
+        // so a silent terminal resumes it at the next route instead of
+        // ending the paste. Cleared when any answer lands.
+        ClipboardWalk       clipboard_walk;
+        // When the in-flight terminal ask counts as unanswered. The timeout
+        // arm polls until then (a refusal shows up only as a counter).
+        std::chrono::steady_clock::time_point clipboard_query_deadline{};
         // (Smart-Mode slot-assign state used to be parked HERE as three
         // fields — slot, advanced, from — because the hand-off destroyed the
         // SmartMode overlay. It now rides ON the assign-mode Models panel

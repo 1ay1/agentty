@@ -105,12 +105,15 @@ struct ImagePathSniffed {
 struct ClipboardQueryTimeout { std::uint64_t seq = 0; };
 // The worker's answer to "why did that clipboard read go unanswered".
 struct ClipboardDiagnosed { std::string message; };
-// The worker's read of the clipboard for Ctrl+V (richpaste: the display,
-// the ssh agent, tmux, ...). Empty items: `miss` says why and what's next.
+// One step of a Ctrl+V clipboard read (richpaste's route walk: the display,
+// the ssh agent, the terminal, tmux). Empty items: `miss` says why and what's
+// next; AskTerminal carries the walk, to resume if the terminal stays quiet.
 struct ClipboardRead {
     std::vector<ClipboardItem> items;
     ClipboardMiss              miss = ClipboardMiss::None;
     std::string                error;   // why items is empty, for people
+    TerminalAsk                ask = TerminalAsk::Text;
+    ClipboardWalk              walk;
 };
 // Recall queued messages back into the composer for editing. Bound to
 // Up-arrow when the composer is empty and queued messages exist.

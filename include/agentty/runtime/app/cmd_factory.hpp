@@ -424,9 +424,12 @@ struct LoopBreak {
 // In cmd_clipboard_diag.cpp.
 [[nodiscard]] Cmd diagnose_clipboard(bool in_ssh);
 
-// Read the clipboard through richpaste (display, or the laptop's agent over
-// ssh) on a worker and reply with ClipboardRead. In cmd_clipboard_diag.cpp.
+// Read the clipboard through richpaste's route walk on a worker and reply
+// with ClipboardRead. In cmd_clipboard_diag.cpp.
 [[nodiscard]] Cmd read_clipboard();
+// The terminal stayed quiet (or refused): move the walk on to its next
+// route, on a worker, and reply with ClipboardRead.
+[[nodiscard]] Cmd resume_clipboard(ClipboardWalk walk, std::string why, bool refused);
 
 // Save pasted files that can't sit in the composer as-is (see
 // settle_clipboard_items), then reply with ClipboardRead.

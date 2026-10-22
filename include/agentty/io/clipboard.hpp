@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -33,10 +34,30 @@ struct ClipboardItem {
 // What the composer does when a clipboard read came back with nothing.
 enum class ClipboardMiss : std::uint8_t {
     None,          // it didn't miss
-    AskTerminal,   // ask the terminal itself, through our own input
+    AskTerminal,   // ask the terminal itself, through our own input, then resume
     Empty,         // the clipboard is empty; final
     TooBig,        // over Settings → Paste → max size; final
-    TmuxNoAnswer,  // tmux asked the outer terminal and nothing came back; final
+    Refused,       // the terminal won't let us read its clipboard; final, `error` says the fix
+    NoRoute,       // every route came up empty-handed; final, `error` says what to do
+};
+
+// Which terminal read to send for AskTerminal.
+enum class TerminalAsk : std::uint8_t { Images, Text };
+
+// A paste in progress (richpaste's route walk), as plain data so it can ride
+// a Msg between the reducer and a worker.
+struct ClipboardWalk {
+    bool ssh = false, tmux = false;
+    std::uint8_t images = 1;              // rp::Images
+    std::vector<std::uint8_t> routes;     // rp::Route, in order
+    std::size_t next = 0;
+    struct Cause {
+        std::uint8_t route = 0;           // rp::Route
+        std::uint8_t code = 0;            // rp::Code
+        std::string what;
+    };
+    std::vector<Cause> causes;
+    [[nodiscard]] bool active() const noexcept { return next < routes.size(); }
 };
 
 struct ClipboardContents {
@@ -44,6 +65,8 @@ struct ClipboardContents {
     std::string source;                // "wayland wayland-1", "agent via ssh", ...
     ClipboardMiss miss = ClipboardMiss::None;
     std::string error;                 // set when items is empty
+    TerminalAsk ask = TerminalAsk::Text;   // AskTerminal: which read to send
+    ClipboardWalk walk;                    // AskTerminal: hand back to resume
 };
 
 // Installs the paste settings (Settings → Paste / settings.json /
@@ -54,9 +77,18 @@ void clipboard_configure(const paste_cfg::Config& c);
 // Where pasted images and files are saved right now.
 [[nodiscard]] std::filesystem::path clipboard_save_dir();
 
-// Reads the clipboard. Blocking (a socket round trip, maybe over ssh), so
-// call it from a worker. `allow_remote` false skips the ssh agent route.
-[[nodiscard]] ClipboardContents read_clipboard(bool allow_remote = true);
+// Reads the clipboard, trying routes from the cheapest and most faithful
+// down, none needing setup except the ssh agent. Blocking (a socket round
+// trip, maybe over ssh, or tmux asking the terminal), so call it from a
+// worker. When the next route is asking the terminal, it stops with
+// AskTerminal: the app asks through its own input, and if that brings
+// nothing calls resume_clipboard with the walk.
+[[nodiscard]] ClipboardContents read_clipboard();
+// The terminal didn't answer (or had nothing): note why and carry on.
+// `refused`: it answered no (kitty's EPERM), so routes that ask it again are skipped.
+[[nodiscard]] ClipboardContents resume_clipboard(ClipboardWalk walk, std::string why, bool refused);
+// Only this machine's own clipboard (no ssh, no terminal).
+[[nodiscard]] ClipboardContents read_local_clipboard();
 
 // Pulls `richpaste:1:` armored blocks out of pasted text. Returns the items
 // in order, with plain text between blocks as Text items. Empty when the

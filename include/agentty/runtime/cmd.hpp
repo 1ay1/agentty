@@ -173,8 +173,8 @@ namespace app::cmd {
 [[nodiscard]] inline Cmd write_clipboard(std::string text) {
     return Cmd(maya::WriteClipboard{std::move(text)});
 }
-[[nodiscard]] inline Cmd query_clipboard() {
-    return Cmd(maya::QueryClipboard{});
+[[nodiscard]] inline Cmd query_clipboard(maya::ClipboardDialect d = maya::ClipboardDialect::automatic) {
+    return Cmd(maya::QueryClipboard{d});
 }
 [[nodiscard]] inline Cmd emit_osc(int code, std::string_view payload) {
     return Cmd(maya::osc(code, payload));
