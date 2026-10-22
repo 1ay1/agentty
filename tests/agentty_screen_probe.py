@@ -75,6 +75,15 @@ for s in steps:
         time.sleep(float(s[5:]))
         pump(0.01)
         continue
+    if s.startswith("SLOWFILE="):
+        # These bytes at ~64 KB/s, like a paste crossing ssh from a laptop.
+        with open(s[len("SLOWFILE="):], "rb") as f:
+            data = f.read()
+        for i in range(0, len(data), 1024):
+            os.write(fd, data[i:i + 1024])
+            pump(0.016)
+        pump(1.0)
+        continue
     if s.startswith("TYPEFILE="):
         # No bracketed paste at all: the bytes arrive as if typed.
         with open(s[len("TYPEFILE="):], "rb") as f:

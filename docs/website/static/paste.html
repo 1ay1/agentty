@@ -18,10 +18,23 @@ function b64(bytes){let s='';for(let i=0;i<bytes.length;i+=32768)s+=String.fromC
 function utf8b64(str){return b64(new TextEncoder().encode(str))}
 async function sha(bytes){try{const d=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(d)].map(x=>x.toString(16).padStart(2,'0')).join('')}catch(e){return ''}}
 async function armor(mime,name,bytes){return 'richpaste:1:'+(mime||'application/octet-stream')+':'+(name?utf8b64(name):'')+':'+bytes.length+':'+(await sha(bytes))+':'+b64(bytes)}
-async function take(file){const bytes=new Uint8Array(await file.arrayBuffer());const named=file.name&&!/^image\.(png|jpe?g|gif|webp|tiff?)$/i.test(file.name);return armor(file.type,named?file.name:'',bytes)}
+async function take(file){const named=file.name&&!/^image\.(png|jpe?g|gif|webp|tiff?)$/i.test(file.name);
+if(!named&&/^image\/(png|jpeg|webp|bmp|tiff)$/i.test(file.type)){const s=await shrink(file);if(s)return armor(s.type,'',new Uint8Array(await s.arrayBuffer()))}
+const bytes=new Uint8Array(await file.arrayBuffer());return armor(file.type,named?file.name:'',bytes)}
+// A screenshot pasted as text should be small: every byte crosses ssh and the
+// terminal. Models see at most ~1600 px on a side anyway, so scale down to
+// that and keep whichever of PNG (sharp text) or WebP/JPEG is smaller.
+const MAX_SIDE=1600;
+async function shrink(file){try{const bmp=await createImageBitmap(file);const k=Math.min(1,MAX_SIDE/Math.max(bmp.width,bmp.height));
+const w=Math.max(1,Math.round(bmp.width*k)),h=Math.max(1,Math.round(bmp.height*k));const c=document.createElement('canvas');c.width=w;c.height=h;
+const g=c.getContext('2d');g.imageSmoothingQuality='high';g.drawImage(bmp,0,0,w,h);
+const blob=(t,q)=>new Promise(r=>c.toBlob(r,t,q));let best=k<1?null:file;
+for(const [t,q] of [['image/png'],['image/webp',0.9],['image/jpeg',0.9]]){const b=await blob(t,q);if(b&&b.type===t&&(!best||b.size<best.size))best=b}
+return best}catch(e){return null}}
 const S=document.getElementById('s'),B=document.getElementById('b'),T=document.getElementById('t');
-async function done(text){T.value=text;try{await navigator.clipboard.writeText(text);S.textContent='Copied ('+text.length+' chars). Now paste in the terminal.';return}catch(e){}
+async function done(text){T.value=text;try{await navigator.clipboard.writeText(text);S.textContent=copied(text);return}catch(e){}
 T.hidden=false;B.hidden=false;S.textContent='Ready. Click "Copy text", then paste in the terminal.'}
+function copied(t){const kb=Math.round(t.length/1024);return 'Copied ('+(kb>0?kb+' KB':t.length+' chars')+'). Now paste into agentty.'}
 B.onclick=()=>{T.select();document.execCommand('copy');S.textContent='Copied. Now paste in the terminal.'};
 async function encodeAll(files){const parts=[];for(const f of files)parts.push(await take(f));return parts.join(' ')}
 async function handle(files){if(!files.length){S.textContent='No image or file in that paste.';return}S.textContent='Encoding...';done(await encodeAll(files))}
@@ -30,7 +43,7 @@ function filesOf(dt){const fs=[...(dt.files||[])];if(fs.length)return fs;return 
 // whose content is a promise, synchronously, keeps the gesture while we encode.
 function pasteNow(files){if(!files.length){S.textContent='No image or file in that paste.';return}
 if(window.ClipboardItem&&navigator.clipboard&&navigator.clipboard.write){S.textContent='Encoding...';const p=encodeAll(files);
-try{navigator.clipboard.write([new ClipboardItem({'text/plain':p.then(t=>{T.value=t;return new Blob([t],{type:'text/plain'})})})]).then(()=>{S.textContent='Copied ('+T.value.length+' chars). Now paste in the terminal.'},()=>p.then(done));return}catch(e){}}
+try{navigator.clipboard.write([new ClipboardItem({'text/plain':p.then(t=>{T.value=t;return new Blob([t],{type:'text/plain'})})})]).then(()=>{S.textContent=copied(T.value)},()=>p.then(done));return}catch(e){}}
 handle(files)}
 const Z=document.getElementById('z');Z.focus();
 document.addEventListener('paste',e=>{e.preventDefault();pasteNow(filesOf(e.clipboardData))});
