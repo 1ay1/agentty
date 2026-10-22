@@ -211,6 +211,45 @@ int main() {
     for (const auto& t : tools) if (t.name.value == "mcp_get_prompt") get_prompt = &t;
     CHECK(get_prompt != nullptr);
 
+    // A required argument left off the line is a usage mistake, so `/name`
+    // alone must come back as a usage note naming the argument — not as the
+    // server's own rejection ("Missing required prompt arguments"), which
+    // tells the user neither which argument nor what the line should look
+    // like. The example server's `summarize` prompt takes a required `text`.
+    {
+        const auto* with_required = [&]() -> const mcp::PromptInfo* {
+            for (const auto& p : prompts)
+                for (const auto& a : p.arguments)
+                    if (a.required) return &p;
+            return nullptr;
+        }();
+        CHECK(with_required != nullptr);
+        if (with_required) {
+            // The wire name works as a typed line too (mcp_expand_prompt
+            // accepts either spelling), so this needs no name unmangling.
+            const std::string typed = "/" + with_required->name;
+            bool usage = false;
+            auto note = mcp::mcp_expand_prompt(typed, &usage);
+            CHECK(note.has_value());
+            CHECK(usage);           // shown as a toast, NOT submitted
+            if (note) {
+                std::printf("  bare %s -> %s\n", typed.c_str(), note->c_str());
+                CHECK(note->find("needs ") != std::string::npos);
+                CHECK(note->find("try /") != std::string::npos);
+                CHECK(note->find('\n') == std::string::npos);   // one toast line
+                bool named = false;
+                for (const auto& a : with_required->arguments)
+                    if (a.required && note->find(a.name) != std::string::npos) named = true;
+                CHECK(named);
+            }
+            // Filling the required argument must NOT produce a usage note:
+            // it goes to the server for real.
+            bool served = false;
+            (void)mcp::mcp_expand_prompt(typed + " hello", &served);
+            CHECK(!served);
+        }
+    }
+
     // ── per-tool live exclude (the enable/disable toggle path) ───────────
     // Disabling a tool must drop it from the projected catalog WITHOUT a
     // re-spawn: project_tools reads the config's tools.exclude live, and

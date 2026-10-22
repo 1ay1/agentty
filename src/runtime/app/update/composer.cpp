@@ -1287,6 +1287,11 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             if (m.ui.composer.text != e.typed) return Cmd::none();
             if (e.text.empty())
                 return set_status_toast(m, "that prompt's server didn't answer");
+            // A missing required argument: say what to type and leave the
+            // draft alone, so the fix is one keystroke away and costs no turn.
+            if (e.usage)
+                return set_status_toast(m, std::move(e.text),
+                                        std::chrono::seconds{6});
             begin_edit(m.ui.composer);
             m.ui.composer.text   = std::move(e.text);
             m.ui.composer.cursor = static_cast<int>(m.ui.composer.text.size());

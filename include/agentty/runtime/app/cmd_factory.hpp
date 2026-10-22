@@ -352,6 +352,9 @@ struct LoopBreak {
 
 // Render an MCP `/prompt args` line off the UI thread (it asks the server);
 // answers SlashPromptRendered, which submits the text. Empty text on failure.
+// A required argument left off the line never reaches the server: the reply
+// is a one-line usage note flagged `usage`, which the reducer toasts instead
+// of submitting.
 [[nodiscard]] Cmd render_slash_prompt(std::string typed);
 
 // The settings pane's add-mode create: a plugin line into the user mcp.json,

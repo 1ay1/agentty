@@ -97,7 +97,11 @@ Submit resolves the first token through one resolver:
   allowed where the action takes them (`/rename my title`, `/model opus`)
 - your command: expand the template with the arguments and send
 - skill: load it and send the rest of the line
-- MCP prompt: render it and send
+- MCP prompt: render it and send. A required argument left off the line
+  is caught before the call, since the server's own rejection ("missing
+  required prompt arguments") names neither the argument nor the shape of
+  the line: `/server:prompt` alone shows `/server:prompt needs query — try
+  /server:prompt <query> [depth]` as a toast and keeps the draft.
 - anything else: send the text unchanged (`/etc/hosts is odd` works)
 
 An action that takes no arguments and is given some (`/new now`) shows
