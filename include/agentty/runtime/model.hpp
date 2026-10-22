@@ -489,6 +489,15 @@ struct Model {
         // the OSC 5522 image reply). The timeout path uses it as a fallback
         // instead of diagnosing "no answer" while the text is sitting here.
         std::string         clipboard_text_fallback;
+        // The clipboard reply that answered the last query (size + hash), so
+        // a duplicate answer to the same query (tmux: OSC 5522 and OSC 52)
+        // isn't pasted twice.
+        std::size_t         clipboard_last_reply_size = 0;
+        std::size_t         clipboard_last_reply_hash = 0;
+        // A clipboard reply that reached the input as plain text (its ESC
+        // bytes stripped on the way), collected here until it is complete so
+        // it is never pasted as text. See the ComposerPaste arm.
+        std::string         clipboard_leaked_reply;
         // (Smart-Mode slot-assign state used to be parked HERE as three
         // fields — slot, advanced, from — because the hand-off destroyed the
         // SmartMode overlay. It now rides ON the assign-mode Models panel

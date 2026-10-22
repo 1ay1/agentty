@@ -315,6 +315,21 @@ Cmd on_clipboard_read(Model& m, ClipboardRead& r) {
         return insert_items(m, std::move(r.items), "<clipboard>");
     AGT_LOG(Ui, Info, "paste.clipboard_empty", "why={}", r.error);
 
+    // Inside tmux the terminal was already asked, through a tmux buffer.
+    // Asking again in-band only brings back the route that mangles big
+    // replies into typed text, so stop here and say why.
+    if (r.error.find("tmux:") != std::string::npos) {
+        const bool too_big = r.error.find("didn't answer") != std::string::npos;
+        return set_status_toast(
+            m,
+            too_big
+                ? "clipboard: nothing came back through tmux \xe2\x80\x94 if it's a big "
+                  "image, re-copy it from agentty.org/paste (it now fits), or run "
+                  "`agentty paste setup` on your laptop"
+                : "clipboard: " + r.error.substr(0, r.error.find('\n')),
+            std::chrono::seconds{10});
+    }
+
     // richpaste found nothing (no display here, no agent forwarded). Last
     // resort: ask the terminal, which runs on the user's machine even over
     // ssh. maya sends OSC 5522 (kitty, carries images) or OSC 52 (text);
@@ -763,6 +778,30 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             return smart_paste_from_clipboard(m);
         },
         [&](ComposerPaste& e) -> Cmd {
+            // A terminal clipboard reply (OSC 5522) whose ESC bytes were
+            // stripped on the way (some tmux / ssh setups) arrives as plain
+            // text in pieces: "]5522;type=read:status=DATA:...". It is the
+            // clipboard, not something the user typed: collect it out of
+            // sight until its DONE packet, then paste what it carried.
+            {
+                auto& pend = m.ui.clipboard_leaked_reply;
+                const bool starts = looks_like_clipboard_reply(e.text);
+                if (starts || !pend.empty()) {
+                    if (pend.size() + e.text.size() > (64u << 20)) {   // runaway: drop it
+                        pend.clear();
+                        return Cmd::none();
+                    }
+                    pend += e.text;
+                    if (pend.find("5522;type=read:status=DONE") == std::string::npos)
+                        return Cmd::none();
+                    std::string got = salvage_clipboard_reply(pend);
+                    AGT_LOG(Ui, Info, "paste.leaked_reply", "bytes={} carried={}", pend.size(), got.size());
+                    pend.clear();
+                    if (got.empty()) return Cmd::none();
+                    return composer_update(m, ComposerPaste{std::move(got)});
+                }
+            }
+
             // A paste that arrives in pieces (a terminal without bracketed
             // paste, read by read) lands right after the chip of the piece
             // before it. Grow that chip instead of starting a new one, so one
@@ -821,8 +860,28 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // for it. So when wanted_image is true and this is NOT image
             // bytes, keep the window open — the image may still be coming.
             const bool wanted_image = m.ui.clipboard_wanted_image;
+            // An image copied as text (agentty.org/paste, `agentty paste
+            // howto`) IS the image: it answers the image request as fully as
+            // image bytes do.
+            const bool armored_image = !e.text.empty() && m.d.persisted.paste.decode_text
+                                    && has_armored(e.text);
             const bool is_image = !e.text.empty()
-                               && detect_image_media_type(e.text) != nullptr;
+                               && (detect_image_media_type(e.text) != nullptr || armored_image);
+            // In tmux both the OSC 5522 and the OSC 52 request go out and
+            // both may answer with the same clipboard. One query, one paste:
+            // a second reply that matches the one just pasted is dropped.
+            if (m.ui.clipboard_query_done == m.ui.clipboard_query_seq
+                && m.ui.clipboard_query_seq != 0 && !e.text.empty()
+                && e.text.size() == m.ui.clipboard_last_reply_size
+                && std::hash<std::string>{}(e.text) == m.ui.clipboard_last_reply_hash) {
+                AGT_LOG(Ui, Info, "paste.duplicate_reply", "bytes={}", e.text.size());
+                return Cmd::none();
+            }
+            if (wanted_image && is_image) {
+                m.ui.clipboard_last_reply_size = e.text.size();
+                m.ui.clipboard_last_reply_hash = std::hash<std::string>{}(e.text);
+                m.ui.clipboard_text_fallback.clear();
+            }
             if (is_image || !wanted_image) {
                 m.ui.clipboard_query_done = m.ui.clipboard_query_seq;
                 m.ui.clipboard_wanted_image = false;

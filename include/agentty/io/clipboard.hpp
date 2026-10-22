@@ -54,6 +54,12 @@ void clipboard_configure(const paste_cfg::Config& c);
 [[nodiscard]] std::vector<ClipboardItem> decode_armored(std::string_view text,
                                                         std::string* error = nullptr);
 [[nodiscard]] bool has_armored(std::string_view text) noexcept;
+// A terminal clipboard reply (OSC 5522) that reached the input as plain text
+// because something stripped its ESC bytes. Never paste that as text:
+// salvage_clipboard_reply() returns the clipboard bytes it carried (image
+// bytes, or text, possibly itself a richpaste:1: line), or "" if it can't.
+[[nodiscard]] bool looks_like_clipboard_reply(std::string_view text) noexcept;
+[[nodiscard]] std::string salvage_clipboard_reply(std::string_view text);
 // True once `text` holds at least as many bytes as its first armored block
 // says it carries (base64 is 4/3 of that). Cheap; lets a paste that arrives in
 // pieces skip decoding until it can succeed.

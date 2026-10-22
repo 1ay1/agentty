@@ -170,6 +170,48 @@ TEST_CASE("paste: a long single line shows its size, not a preview") {
     CHECK(attachment::chip_label(s) == "Pasted: hello");
 }
 
+TEST_CASE("paste: Ctrl+V answered with an image as text is the image, once") {
+    // Ctrl+V asked the terminal for an image (OSC 5522); the clipboard held
+    // an image copied as text. In tmux the same text can come back twice
+    // (OSC 5522 and OSC 52): one image chip, no pile of text.
+    const std::string line = "richpaste:1:image/png::12::iVBORw0KGgowMTIz";
+    Model m;
+    m.ui.clipboard_query_seq = 1;
+    m.ui.clipboard_wanted_image = true;
+    m = send(std::move(m), Msg{ComposerPaste{line}});
+    m = send(std::move(m), Msg{ComposerPaste{line}});
+    int images = 0, pastes = 0;
+    for (const auto& a : m.ui.composer.attachments) {
+        if (a.kind == Attachment::Kind::Image) ++images;
+        if (a.kind == Attachment::Kind::Paste && a.byte_count > 0) ++pastes;
+    }
+    CHECK(images == 1);
+    CHECK(pastes == 0);
+    CHECK(m.ui.clipboard_text_fallback.empty());
+}
+
+TEST_CASE("paste: a clipboard reply that lost its escapes is the image, never text") {
+    // Ctrl+V's OSC 5522 reply came through with its ESC bytes stripped, in
+    // pieces. It must not land as text; what it carried is pasted.
+    const std::string png = "\x89PNG\r\n\x1a\n0123";
+    const std::string b64 = "iVBORw0KGgowMTIz";
+    std::vector<std::string> pieces = {
+        "]5522;type=read:status=OK\\",
+        "]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;" + b64.substr(0, 8) + "\\",
+        "]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;" + b64.substr(8) + "\\",
+        "]5522;type=read:status=DONE\\",
+    };
+    Model m;
+    for (auto& p : pieces) {
+        m = send(std::move(m), Msg{ComposerPaste{p, true}});
+        if (&p != &pieces.back()) CHECK(m.ui.composer.attachments.empty());
+    }
+    REQUIRE(m.ui.composer.attachments.size() == 1);
+    CHECK(m.ui.composer.attachments[0].kind == Attachment::Kind::Image);
+    CHECK(m.ui.composer.attachments[0].body.bytes() == png);
+    CHECK(m.ui.clipboard_leaked_reply.empty());
+}
+
 TEST_CASE("paste settings: clipboard_configure installs them") {
     paste_cfg::Config c;
     c.inline_kb = 7;

@@ -22,14 +22,19 @@ async function take(file){const named=file.name&&!/^image\.(png|jpe?g|gif|webp|t
 if(!named&&/^image\/(png|jpeg|webp|bmp|tiff)$/i.test(file.type)){const s=await shrink(file);if(s)return armor(s.type,'',new Uint8Array(await s.arrayBuffer()))}
 const bytes=new Uint8Array(await file.arrayBuffer());return armor(file.type,named?file.name:'',bytes)}
 // A screenshot pasted as text should be small: every byte crosses ssh and the
-// terminal. Models see at most ~1600 px on a side anyway, so scale down to
-// that and keep whichever of PNG (sharp text) or WebP/JPEG is smaller.
-const MAX_SIDE=1600;
-async function shrink(file){try{const bmp=await createImageBitmap(file);const k=Math.min(1,MAX_SIDE/Math.max(bmp.width,bmp.height));
+// terminal, and tmux drops a clipboard reply over ~2.4 MB outright. Scale to
+// at most 1600 px, keep the smallest of PNG/WebP/JPEG, and if the line would
+// still be over BUDGET, step the size and quality down until it fits.
+const MAX_SIDE=1600, BUDGET=1100000;
+async function shrink(file){try{const bmp=await createImageBitmap(file);
+const blob=(c,t,q)=>new Promise(r=>c.toBlob(r,t,q));
+let side=Math.min(MAX_SIDE,Math.max(bmp.width,bmp.height)),best=null;
+for(let round=0;round<8;round++){const k=side/Math.max(bmp.width,bmp.height);
 const w=Math.max(1,Math.round(bmp.width*k)),h=Math.max(1,Math.round(bmp.height*k));const c=document.createElement('canvas');c.width=w;c.height=h;
 const g=c.getContext('2d');g.imageSmoothingQuality='high';g.drawImage(bmp,0,0,w,h);
-const blob=(t,q)=>new Promise(r=>c.toBlob(r,t,q));let best=k<1?null:file;
-for(const [t,q] of [['image/png'],['image/webp',0.9],['image/jpeg',0.9]]){const b=await blob(t,q);if(b&&b.type===t&&(!best||b.size<best.size))best=b}
+const q=round<2?0.9:round<4?0.8:0.7;best=k>=1&&file.size<=BUDGET?file:null;
+for(const [t,qq] of [['image/png'],['image/webp',q],['image/jpeg',q]]){const b=await blob(c,t,qq);if(b&&b.type===t&&(!best||b.size<best.size))best=b}
+if(best&&best.size<=BUDGET)return best;side=Math.round(side*0.75)}
 return best}catch(e){return null}}
 const S=document.getElementById('s'),B=document.getElementById('b'),T=document.getElementById('t');
 async function done(text){T.value=text;try{await navigator.clipboard.writeText(text);S.textContent=copied(text);return}catch(e){}
