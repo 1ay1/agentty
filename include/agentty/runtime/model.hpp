@@ -494,6 +494,10 @@ struct Model {
         // isn't pasted twice.
         std::size_t         clipboard_last_reply_size = 0;
         std::size_t         clipboard_last_reply_hash = 0;
+        // A clipboard reply that reached the input as plain text (its ESC
+        // bytes stripped on the way), collected here until it is complete so
+        // it is never pasted as text. See the ComposerPaste arm.
+        std::string         clipboard_leaked_reply;
         // (Smart-Mode slot-assign state used to be parked HERE as three
         // fields — slot, advanced, from — because the hand-off destroyed the
         // SmartMode overlay. It now rides ON the assign-mode Models panel

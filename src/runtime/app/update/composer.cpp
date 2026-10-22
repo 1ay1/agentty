@@ -763,6 +763,30 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             return smart_paste_from_clipboard(m);
         },
         [&](ComposerPaste& e) -> Cmd {
+            // A terminal clipboard reply (OSC 5522) whose ESC bytes were
+            // stripped on the way (some tmux / ssh setups) arrives as plain
+            // text in pieces: "]5522;type=read:status=DATA:...". It is the
+            // clipboard, not something the user typed: collect it out of
+            // sight until its DONE packet, then paste what it carried.
+            {
+                auto& pend = m.ui.clipboard_leaked_reply;
+                const bool starts = looks_like_clipboard_reply(e.text);
+                if (starts || !pend.empty()) {
+                    if (pend.size() + e.text.size() > (64u << 20)) {   // runaway: drop it
+                        pend.clear();
+                        return Cmd::none();
+                    }
+                    pend += e.text;
+                    if (pend.find("5522;type=read:status=DONE") == std::string::npos)
+                        return Cmd::none();
+                    std::string got = salvage_clipboard_reply(pend);
+                    AGT_LOG(Ui, Info, "paste.leaked_reply", "bytes={} carried={}", pend.size(), got.size());
+                    pend.clear();
+                    if (got.empty()) return Cmd::none();
+                    return composer_update(m, ComposerPaste{std::move(got)});
+                }
+            }
+
             // A paste that arrives in pieces (a terminal without bracketed
             // paste, read by read) lands right after the chip of the piece
             // before it. Grow that chip instead of starting a new one, so one

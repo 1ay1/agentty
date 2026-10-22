@@ -111,6 +111,48 @@ bool has_armored(std::string_view text) noexcept {
     return text.find(rp::armor::magic) != std::string_view::npos;
 }
 
+bool looks_like_clipboard_reply(std::string_view text) noexcept {
+    return text.find("5522;type=read:status=") != std::string_view::npos;
+}
+
+std::string salvage_clipboard_reply(std::string_view text) {
+    // OSC 5522 read reply whose ESC bytes were lost (some multiplexer
+    // setups strip them), so it reached the input as plain text:
+    //   ]5522;type=read:status=DATA:mime=<b64 mime>;<b64 chunk>\ ...
+    // Keep the chunks of the first mime offered, decode them, done.
+    std::string mime, b64;
+    constexpr std::string_view kData = "5522;type=read:status=DATA:";
+    for (std::size_t at = text.find(kData); at != std::string_view::npos;
+         at = text.find(kData, at + kData.size())) {
+        auto meta = text.substr(at + kData.size());
+        const auto semi = meta.find(';');
+        if (semi == std::string_view::npos) break;
+        std::string m;
+        for (std::string_view kv = meta.substr(0, semi); !kv.empty();) {
+            const auto colon = kv.find(':');
+            const auto one = kv.substr(0, colon);
+            if (one.starts_with("mime=")) m = std::string{one.substr(5)};
+            kv = colon == std::string_view::npos ? std::string_view{} : kv.substr(colon + 1);
+        }
+        if (mime.empty()) mime = m;
+        if (m != mime) continue;
+        auto data = meta.substr(semi + 1);
+        std::size_t n = 0;
+        while (n < data.size() && (std::isalnum(static_cast<unsigned char>(data[n]))
+                                   || data[n] == '+' || data[n] == '/' || data[n] == '=')) ++n;
+        b64 += data.substr(0, n);
+    }
+    if (b64.empty()) return {};
+    // Chunks may end on padding mid stream; decode group by group.
+    std::string out;
+    for (std::size_t i = 0; i + 4 <= b64.size(); i += 4) {
+        auto d = rp::base64_decode(std::string_view{b64}.substr(i, 4));
+        if (!d) return {};
+        out.append(reinterpret_cast<const char*>(d->data()), d->size());
+    }
+    return out;
+}
+
 bool armored_complete_enough(std::string_view text) noexcept {
     // richpaste:1:<mime>:<name>:<size>:<sha>:<data>
     auto at = text.find(rp::armor::magic);

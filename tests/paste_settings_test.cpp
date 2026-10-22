@@ -190,6 +190,28 @@ TEST_CASE("paste: Ctrl+V answered with an image as text is the image, once") {
     CHECK(m.ui.clipboard_text_fallback.empty());
 }
 
+TEST_CASE("paste: a clipboard reply that lost its escapes is the image, never text") {
+    // Ctrl+V's OSC 5522 reply came through with its ESC bytes stripped, in
+    // pieces. It must not land as text; what it carried is pasted.
+    const std::string png = "\x89PNG\r\n\x1a\n0123";
+    const std::string b64 = "iVBORw0KGgowMTIz";
+    std::vector<std::string> pieces = {
+        "]5522;type=read:status=OK\\",
+        "]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;" + b64.substr(0, 8) + "\\",
+        "]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;" + b64.substr(8) + "\\",
+        "]5522;type=read:status=DONE\\",
+    };
+    Model m;
+    for (auto& p : pieces) {
+        m = send(std::move(m), Msg{ComposerPaste{p, true}});
+        if (&p != &pieces.back()) CHECK(m.ui.composer.attachments.empty());
+    }
+    REQUIRE(m.ui.composer.attachments.size() == 1);
+    CHECK(m.ui.composer.attachments[0].kind == Attachment::Kind::Image);
+    CHECK(m.ui.composer.attachments[0].body.bytes() == png);
+    CHECK(m.ui.clipboard_leaked_reply.empty());
+}
+
 TEST_CASE("paste settings: clipboard_configure installs them") {
     paste_cfg::Config c;
     c.inline_kb = 7;
