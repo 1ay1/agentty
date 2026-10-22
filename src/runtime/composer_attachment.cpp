@@ -322,13 +322,21 @@ std::string chip_label(const Attachment& a) {
         return buf;
     }
     // Paste:
-    //   – Single-line content → caption shows the actual text (up to
+    //   – An image or file sent as text that never fully arrived (cut
+    //     short on the way) → say that, not a wall of base64.
+    if (a.byte_count >= 12 && a.body.bytes().starts_with("richpaste:1:")) {
+        std::snprintf(buf, sizeof(buf), "Incomplete pasted image \xc2\xb7 %zu KB \xc2\xb7 copy it again",
+                      a.byte_count / 1024);
+        return buf;
+    }
+    //   – A short single line → caption shows the actual text (up to
     //     ~50 cols) so the user can see what they pasted without
     //     having to undo and retype. Newlines / tabs collapse to
     //     spaces for readability.
-    //   – Multi-line content → "lines · bytes" summary; the body is
-    //     too big to preview usefully and the caption stays tight.
-    if (a.line_count <= 1) {
+    //   – A long single line (base64, minified code, a token dump) or
+    //     multi-line content → "lines · bytes" summary; a preview of
+    //     that is noise.
+    if (a.line_count <= 1 && a.byte_count <= 200) {
         std::string preview;
         preview.reserve(60);
         constexpr std::size_t kPreviewMax = 50;
@@ -351,14 +359,15 @@ std::string chip_label(const Attachment& a) {
         }
         return buf;
     }
+    const char* lines_word = a.line_count == 1 ? "line" : "lines";
     if (a.byte_count >= 1024) {
         std::snprintf(buf, sizeof(buf),
-                      "Pasted text \xc2\xb7 %zu lines \xc2\xb7 %zu KB",
-                      a.line_count, a.byte_count / 1024);
+                      "Pasted text \xc2\xb7 %zu %s \xc2\xb7 %zu KB",
+                      a.line_count, lines_word, a.byte_count / 1024);
     } else {
         std::snprintf(buf, sizeof(buf),
-                      "Pasted text \xc2\xb7 %zu lines \xc2\xb7 %zu B",
-                      a.line_count, a.byte_count);
+                      "Pasted text \xc2\xb7 %zu %s \xc2\xb7 %zu B",
+                      a.line_count, lines_word, a.byte_count);
     }
     return buf;
 }

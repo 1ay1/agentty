@@ -54,6 +54,10 @@ void clipboard_configure(const paste_cfg::Config& c);
 [[nodiscard]] std::vector<ClipboardItem> decode_armored(std::string_view text,
                                                         std::string* error = nullptr);
 [[nodiscard]] bool has_armored(std::string_view text) noexcept;
+// True once `text` holds at least as many bytes as its first armored block
+// says it carries (base64 is 4/3 of that). Cheap; lets a paste that arrives in
+// pieces skip decoding until it can succeed.
+[[nodiscard]] bool armored_complete_enough(std::string_view text) noexcept;
 
 // Turns clipboard items into what the composer can hold: images and text
 // pass through, a text file becomes Text, any other file is saved under

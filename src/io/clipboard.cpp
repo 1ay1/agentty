@@ -111,6 +111,24 @@ bool has_armored(std::string_view text) noexcept {
     return text.find(rp::armor::magic) != std::string_view::npos;
 }
 
+bool armored_complete_enough(std::string_view text) noexcept {
+    // richpaste:1:<mime>:<name>:<size>:<sha>:<data>
+    auto at = text.find(rp::armor::magic);
+    if (at == std::string_view::npos) return false;
+    std::string_view rest = text.substr(at + rp::armor::magic.size());
+    for (int skip = 0; skip < 2; ++skip) {
+        auto c = rest.find(':');
+        if (c == std::string_view::npos) return false;
+        rest.remove_prefix(c + 1);
+    }
+    std::uint64_t size = 0;
+    std::size_t i = 0;
+    for (; i < rest.size() && rest[i] >= '0' && rest[i] <= '9' && i < 19; ++i)
+        size = size * 10 + static_cast<std::uint64_t>(rest[i] - '0');
+    if (i == 0 || i == rest.size() || rest[i] != ':') return false;
+    return rest.size() >= i + size / 3 * 4;
+}
+
 std::vector<ClipboardItem> decode_armored(std::string_view text, std::string* error) {
     std::vector<ClipboardItem> out;
     if (!has_armored(text)) return out;

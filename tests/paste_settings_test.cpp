@@ -8,6 +8,7 @@
 #include "agentty/io/clipboard.hpp"
 #include "agentty/runtime/app/update.hpp"
 #include "agentty/runtime/app/update/internal.hpp"
+#include "agentty/runtime/composer_attachment.hpp"
 #include "agentty/runtime/model.hpp"
 #include "agentty/runtime/msg.hpp"
 #include "agentty/runtime/panel/nav.hpp"
@@ -115,6 +116,58 @@ TEST_CASE("paste settings: decode_text off pastes richpaste lines as text") {
     REQUIRE(m.ui.composer.attachments.size() == 1);
     CHECK(m.ui.composer.attachments[0].kind == Attachment::Kind::Paste);
     CHECK(m.ui.composer.attachments[0].body.bytes() == line);
+}
+
+TEST_CASE("paste: an unbracketed paste in pieces is one chip") {
+    // Three reads of one paste: one chip, holding all of it.
+    Model m;
+    const std::string a(4095, 'x');
+    m = send(std::move(m), Msg{ComposerPaste{a}});
+    m = send(std::move(m), Msg{ComposerPaste{"yy", true, false, /*continues_paste=*/true}});
+    m = send(std::move(m), Msg{ComposerPaste{"\nzz", true, false, /*continues_paste=*/true}});
+    REQUIRE(m.ui.composer.attachments.size() == 1);
+    const auto& att = m.ui.composer.attachments[0];
+    CHECK(att.body.bytes() == a + "yy\nzz");
+    CHECK(att.line_count == 2);
+    CHECK(attachment::chip_label(att) == "Pasted text \xc2\xb7 2 lines \xc2\xb7 4 KB");
+
+    // Typing after it is text, not more paste.
+    m = send(std::move(m), Msg{ComposerCharInput{U'k'}});
+    CHECK(m.ui.composer.text.back() == 'k');
+    CHECK(m.ui.composer.attachments.size() == 1);
+}
+
+TEST_CASE("paste: an image sent as text, in pieces, becomes the image") {
+    const std::string line = "richpaste:1:image/png::12::iVBORw0KGgowMTIz";
+    Model m;
+    m = send(std::move(m), Msg{ComposerPaste{line.substr(0, 30)}});
+    REQUIRE(m.ui.composer.attachments.size() == 1);
+    CHECK(m.ui.composer.attachments[0].kind == Attachment::Kind::Paste);
+    m = send(std::move(m), Msg{ComposerPaste{line.substr(30), true, false, /*continues_paste=*/true}});
+    // The paste chip is replaced by the image chip.
+    bool image = false, paste_left = false;
+    for (const auto& a : m.ui.composer.attachments) {
+        if (a.kind == Attachment::Kind::Image) image = true;
+        if (a.kind == Attachment::Kind::Paste && a.byte_count > 0) paste_left = true;
+    }
+    CHECK(image);
+    CHECK_FALSE(paste_left);
+    CHECK(m.ui.composer.text.find(attachment::make_placeholder(0)) == std::string::npos);
+}
+
+TEST_CASE("paste: a long single line shows its size, not a preview") {
+    Attachment a;
+    a.kind = Attachment::Kind::Paste;
+    a.line_count = 1;
+    a.byte_count = 3000;
+    a.body.set_bytes(std::string(3000, 'Q'));
+    CHECK(attachment::chip_label(a) == "Pasted text \xc2\xb7 1 line \xc2\xb7 2 KB");
+    Attachment s;
+    s.kind = Attachment::Kind::Paste;
+    s.line_count = 1;
+    s.byte_count = 5;
+    s.body.set_bytes("hello");
+    CHECK(attachment::chip_label(s) == "Pasted: hello");
 }
 
 TEST_CASE("paste settings: clipboard_configure installs them") {
