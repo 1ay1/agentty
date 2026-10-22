@@ -84,6 +84,9 @@ struct ComposerPaste {
     bool path_checked = false;
     // Typed into the text as is, never a chip (a saved pasted file's path).
     bool literal = false;
+    // The next piece of a paste the terminal delivered in parts: grows the
+    // chip just before the caret instead of adding a new one.
+    bool continues_paste = false;
 };
 // The worker looked at a pasted path. `path` is empty when it was not a
 // readable image; then the reducer pastes `text` as ordinary text.

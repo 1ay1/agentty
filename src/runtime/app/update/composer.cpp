@@ -763,6 +763,51 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             return smart_paste_from_clipboard(m);
         },
         [&](ComposerPaste& e) -> Cmd {
+            // A paste that arrives in pieces (a terminal without bracketed
+            // paste, read by read) lands right after the chip of the piece
+            // before it. Grow that chip instead of starting a new one, so one
+            // paste is one chip.
+            if (e.continues_paste) {
+                auto& cs = m.ui.composer;
+                const auto cur = static_cast<std::size_t>(std::clamp(cs.cursor, 0, static_cast<int>(cs.text.size())));
+                const auto len = attachment::placeholder_len_ending_at(cs.text, cur);
+                const auto idx = len > 0 ? attachment::placeholder_index(cs.text, cur - len) : cs.attachments.size();
+                if (idx < cs.attachments.size() && cs.attachments[idx].kind == Attachment::Kind::Paste) {
+                    auto& prev = cs.attachments[idx];
+                    std::string body = prev.body.bytes();
+                    body += e.text;
+                    // The pieces may add up to an image sent as text. Once the
+                    // block is complete, swap the chip for what it decodes to;
+                    // until then, keep growing the chip. The header says how
+                    // big the data is, so don't try before that much is here.
+                    if (m.d.persisted.paste.decode_text && has_armored(body)
+                        && armored_complete_enough(body)) {
+                        std::string why;
+                        auto items = decode_armored(body, &why);
+                        if (!items.empty()) {
+                            cs.text.erase(cur - len, len);
+                            cs.cursor = static_cast<int>(cur - len);
+                            prev.body.set_bytes(std::string{});
+                            prev.byte_count = prev.line_count = 0;
+                            const bool needs_disk = std::ranges::any_of(items, [](auto& it) {
+                                return it.kind == ClipboardItem::Kind::File;
+                            });
+                            if (needs_disk) return cmd::settle_clipboard(std::move(items));
+                            return insert_items(m, std::move(items), "<paste>");
+                        }
+                    }
+                    std::erase(body, '\r');
+                    prev.line_count = std::ranges::count(body, '\n') + (!body.empty() && body.back() == '\n' ? 0 : 1);
+                    prev.byte_count = body.size();
+                    prev.body.set_bytes(std::move(body));
+                    if (prev.line_count > 1) cs.expanded = true;
+                    return Cmd::none();
+                }
+                // No chip to grow (the first piece became an image, a path,
+                // or text): treat this piece as a paste of its own.
+                e.continues_paste = false;
+            }
+
             // ANY paste (bracketed, OSC 52 reply, OSC 5522 image reply)
             // satisfies an in-flight escape-based clipboard query — cancel
             // the pending no-reply diagnosis.
@@ -842,6 +887,11 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
             // A `richpaste:1:` line: an image or file copied as text on
             // the laptop (`agentty paste howto`) that crossed ssh as a
             // plain paste. Decoding is pure, so it runs here.
+            // Only part of an armored block so far (the rest comes in more
+            // pieces): it becomes a chip the pieces grow, decoded when complete.
+            const bool armored_partial = !e.path_checked && m.d.persisted.paste.decode_text
+                                      && has_armored(e.text) && !armored_complete_enough(e.text);
+            if (armored_partial) e.path_checked = true;
             if (!e.path_checked && m.d.persisted.paste.decode_text && has_armored(e.text)) {
                 std::string why;
                 auto items = decode_armored(e.text, &why);
@@ -856,9 +906,14 @@ Cmd composer_update(Model& m, msg::ComposerMsg cm) {
                     return insert_items(m, std::move(items), "<paste>");
                 }
                 // Every block was bad: paste the text as is, and say why.
+                // A block that is only cut short may be the first piece of a
+                // paste still arriving: keep it as a chip with no toast, and
+                // the next piece completes it (see continues_paste below).
                 if (!why.empty()) {
-                    Cmd toast = set_status_toast(m, "paste: " + why, std::chrono::seconds{6});
+                    const bool partial = why.find("cut short") != std::string::npos;
                     e.path_checked = true;   // skip the path sniff: it isn't a path
+                    if (partial) return composer_update(m, std::move(e));
+                    Cmd toast = set_status_toast(m, "paste: " + why, std::chrono::seconds{6});
                     return Cmd::batch(std::move(toast), composer_update(m, std::move(e)));
                 }
             }

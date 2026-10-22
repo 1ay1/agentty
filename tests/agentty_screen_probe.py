@@ -53,6 +53,24 @@ for s in steps:
             os.write(fd, b"\x1b[200~" + f.read() + b"\x1b[201~")
         pump(1.0)
         continue
+    if s.startswith("PASTECHUNKS="):
+        # The same, delivered in 4 KB pieces like a real terminal over ssh.
+        with open(s[len("PASTECHUNKS="):], "rb") as f:
+            data = b"\x1b[200~" + f.read() + b"\x1b[201~"
+        for i in range(0, len(data), 4096):
+            os.write(fd, data[i:i + 4096])
+            pump(0.002)
+        pump(1.0)
+        continue
+    if s.startswith("TYPEFILE="):
+        # No bracketed paste at all: the bytes arrive as if typed.
+        with open(s[len("TYPEFILE="):], "rb") as f:
+            data = f.read()
+        for i in range(0, len(data), 4096):
+            os.write(fd, data[i:i + 4096])
+            pump(0.002)
+        pump(1.0)
+        continue
     os.write(fd, KEYS.get(s, s.encode()))
     pump(0.4)
 pump(0.6)

@@ -1493,6 +1493,9 @@ Msg on_paste(const Model& m, const maya::PasteEvent& pe) {
     if (m.ui.panel.get<ui::panel::SandboxList>()) return SandboxListPaste{std::move(s)};
     if (m.ui.panel.get<ui::panel::Sandbox>())     return SandboxPaste{std::move(s)};
     if (filter_open) return PanelFilterPaste{std::move(s)};
+    // A later piece of an unbracketed paste grows the chip the first piece made.
+    if (pe.continues) return ComposerPaste{std::move(s), /*path_checked=*/true, /*literal=*/false,
+                                           /*continues_paste=*/true};
     return ComposerPaste{std::move(s)};
 }
 
