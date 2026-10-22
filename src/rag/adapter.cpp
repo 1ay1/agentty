@@ -910,7 +910,10 @@ struct Index {
 
     ::rag::index::CorpusConfig make_engine_config(bool source_code = false) {
         ::rag::index::CorpusConfig cc;
-        cc.split      = ::agentty::rag::splitter();
+        // Index bodies hold rag_index while building. The default splitter
+        // would mint worker capabilities from inside that lock, so keep all
+        // corpus fan-out inline for lock-owned engines.
+        cc.split      = ::rag::util::Splitter{};
         cc.contextual = cfg.contextual;
         if (source_code)
             cc.chunking = ::rag::index::CorpusConfig::Chunking::source;
@@ -930,7 +933,7 @@ struct Index {
     void apply_pipeline(::rag::Engine& eng) {
         namespace pl = ::rag::pipeline;
         pl::HybridRetrieveConfig hy;
-        hy.split        = ::agentty::rag::splitter();
+        hy.split        = ::rag::util::Splitter{};
         hy.candidate_k  = 60;
         hy.bm25_weight  = std::max(0.0f, cfg.bm25_weight);
         hy.dense_weight = std::max(0.0f, cfg.dense_weight);
@@ -1298,7 +1301,7 @@ struct Index {
             if (!opened) return false;
             engine = std::move(*opened);
             // load() can't restore the splitter; it is ours, not the file's.
-            engine.corpus().set_parallelism(::agentty::rag::splitter(), nullptr);
+            engine.corpus().set_parallelism(::rag::util::Splitter{}, nullptr);
             embedder_ready = false;
             attach_embedder();
             apply_pipeline(engine);
@@ -1459,7 +1462,7 @@ struct Index {
             auto opened = ::rag::Engine::open(db.string());
             if (!opened) return false;
             code_engine = std::move(*opened);
-            code_engine.corpus().set_parallelism(::agentty::rag::splitter(), nullptr);
+            code_engine.corpus().set_parallelism(::rag::util::Splitter{}, nullptr);
             attach_code_embedder();
             apply_pipeline(code_engine);
             code_root = root.string();

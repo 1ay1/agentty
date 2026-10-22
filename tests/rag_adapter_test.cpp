@@ -23,11 +23,28 @@
 #include "agentty/tool/util/fs_helpers.hpp"   // workspace_root / set_workspace_root
 
 #include <chrono>
+#include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
+#include <optional>
 #include <string>
 #include <thread>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#if defined(_WIN32)
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <arpa/inet.h>
+#  include <netinet/in.h>
+#  include <sys/socket.h>
+#  include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -35,6 +52,273 @@ namespace fs = std::filesystem;
 static void write_file(const fs::path& p, const std::string& body) {
     fs::create_directories(p.parent_path());
     std::ofstream(p) << body;
+}
+
+namespace {
+
+using json = nlohmann::json;
+#if defined(_WIN32)
+using socket_t = SOCKET;
+constexpr socket_t kInvalidSocket = INVALID_SOCKET;
+#else
+using socket_t = int;
+constexpr socket_t kInvalidSocket = -1;
+#endif
+
+void close_socket(socket_t s) noexcept {
+    if (s == kInvalidSocket) return;
+#if defined(_WIN32)
+    ::closesocket(s);
+#else
+    ::close(s);
+#endif
+}
+
+class LoopbackEmbeddingServer {
+public:
+    LoopbackEmbeddingServer() {
+#if defined(_WIN32)
+        WSADATA data{};
+        if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) return;
+        winsock_started_ = true;
+#endif
+        listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listener_ == kInvalidSocket) return;
+        int one = 1;
+        (void)::setsockopt(listener_, SOL_SOCKET, SO_REUSEADDR,
+                           reinterpret_cast<const char*>(&one), sizeof(one));
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = 0;
+        if (::bind(listener_, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0
+            || ::listen(listener_, 16) != 0) {
+            close_socket(listener_);
+            listener_ = kInvalidSocket;
+            return;
+        }
+#if defined(_WIN32)
+        int len = sizeof(addr);
+#else
+        socklen_t len = sizeof(addr);
+#endif
+        if (::getsockname(listener_, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+            close_socket(listener_);
+            listener_ = kInvalidSocket;
+            return;
+        }
+        port_ = ntohs(addr.sin_port);
+        worker_ = std::thread([this] { serve(); });
+    }
+
+    ~LoopbackEmbeddingServer() {
+        stop_.store(true, std::memory_order_release);
+        if (listener_ != kInvalidSocket) {
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            addr.sin_port = htons(port_);
+            socket_t wake = ::socket(AF_INET, SOCK_STREAM, 0);
+            if (wake != kInvalidSocket) {
+                (void)::connect(wake, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+                close_socket(wake);
+            }
+        }
+        if (worker_.joinable()) worker_.join();
+        close_socket(listener_);
+#if defined(_WIN32)
+        if (winsock_started_) ::WSACleanup();
+#endif
+    }
+
+    LoopbackEmbeddingServer(const LoopbackEmbeddingServer&) = delete;
+    LoopbackEmbeddingServer& operator=(const LoopbackEmbeddingServer&) = delete;
+
+    [[nodiscard]] bool valid() const noexcept { return listener_ != kInvalidSocket; }
+    [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+    [[nodiscard]] int requests() const noexcept { return requests_.load(std::memory_order_acquire); }
+
+private:
+    static std::string response_for(const std::string& body) {
+        std::size_t count = 1;
+        const auto request = json::parse(body, nullptr, false);
+        if (request.is_object() && request.contains("input") && request["input"].is_array())
+            count = request["input"].size();
+        json data = json::array();
+        for (std::size_t i = 0; i < count; ++i)
+            data.push_back({{"object", "embedding"}, {"index", i},
+                            {"embedding", {1.0, 0.0, 0.0, 0.0,
+                                             0.0, 0.0, 0.0, 0.0}}});
+        const std::string payload = json{{"object", "list"}, {"data", std::move(data)}}.dump();
+        return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
+               "Content-Length: " + std::to_string(payload.size()) + "\r\n\r\n" + payload;
+    }
+
+    static bool send_all(socket_t fd, const std::string& bytes) {
+        std::size_t sent = 0;
+        while (sent < bytes.size()) {
+            const auto left = bytes.size() - sent;
+#if defined(_WIN32)
+            const int n = ::send(fd, bytes.data() + sent, static_cast<int>(left), 0);
+#else
+            const auto n = ::send(fd, bytes.data() + sent, left, 0);
+#endif
+            if (n <= 0) return false;
+            sent += static_cast<std::size_t>(n);
+        }
+        return true;
+    }
+
+    void handle(socket_t fd) {
+        std::string request;
+        char buf[4096];
+        std::size_t header_end = std::string::npos;
+        std::size_t content_length = 0;
+        for (;;) {
+#if defined(_WIN32)
+            const int n = ::recv(fd, buf, sizeof(buf), 0);
+#else
+            const auto n = ::recv(fd, buf, sizeof(buf), 0);
+#endif
+            if (n <= 0) return;
+            request.append(buf, static_cast<std::size_t>(n));
+            if (header_end == std::string::npos) {
+                header_end = request.find("\r\n\r\n");
+                if (header_end != std::string::npos) {
+                    const auto headers = request.substr(0, header_end);
+                    const auto marker = headers.find("Content-Length:");
+                    if (marker != std::string::npos)
+                        content_length = std::strtoull(headers.c_str() + marker + 15, nullptr, 10);
+                }
+            }
+            if (header_end != std::string::npos
+                && request.size() >= header_end + 4 + content_length)
+                break;
+        }
+        requests_.fetch_add(1, std::memory_order_release);
+        const auto body = request.substr(header_end + 4, content_length);
+        const auto response = response_for(body);
+        (void)send_all(fd, response);
+    }
+
+    void serve() {
+        while (!stop_.load(std::memory_order_acquire)) {
+#if defined(_WIN32)
+            const socket_t client = ::accept(listener_, nullptr, nullptr);
+#else
+            const socket_t client = ::accept(listener_, nullptr, nullptr);
+#endif
+            if (client == kInvalidSocket) {
+                if (stop_.load(std::memory_order_acquire)) break;
+                continue;
+            }
+            handle(client);
+            close_socket(client);
+        }
+    }
+
+    socket_t listener_ = kInvalidSocket;
+    std::uint16_t port_ = 0;
+    std::thread worker_;
+    std::atomic<bool> stop_{false};
+    std::atomic<int> requests_{0};
+#if defined(_WIN32)
+    bool winsock_started_ = false;
+#endif
+};
+
+class EnvironmentRestore {
+public:
+    explicit EnvironmentRestore(std::initializer_list<const char*> names) {
+        for (const char* name : names) {
+            const char* value = std::getenv(name);
+            saved_.emplace_back(name, value ? std::optional<std::string>{value} : std::nullopt);
+        }
+    }
+
+    ~EnvironmentRestore() {
+        for (const auto& [name, value] : saved_) {
+#if defined(_WIN32)
+            _putenv_s(name.c_str(), value ? value->c_str() : "");
+#else
+            if (value) ::setenv(name.c_str(), value->c_str(), 1);
+            else ::unsetenv(name.c_str());
+#endif
+        }
+    }
+
+    EnvironmentRestore(const EnvironmentRestore&) = delete;
+    EnvironmentRestore& operator=(const EnvironmentRestore&) = delete;
+
+private:
+    std::vector<std::pair<std::string, std::optional<std::string>>> saved_;
+};
+
+void set_test_env(const char* name, const std::string& value) {
+#if defined(_WIN32)
+    _putenv_s(name, value.c_str());
+#else
+    ::setenv(name, value.c_str(), 1);
+#endif
+}
+
+}  // namespace
+
+TEST_CASE("rag cold retrieval serializes fan-out under the index lock") {
+    ScopedEnvSandbox sandbox;
+    EnvironmentRestore env({
+        "AGENTTY_DOCS_DIR", "AGENTTY_OLLAMA_HOST", "AGENTTY_EMBED_BACKEND",
+        "AGENTTY_EMBED_ENDPOINT", "AGENTTY_EMBED_MODEL", "AGENTTY_EMBED_PATH",
+        "AGENTTY_EMBED_API_KEY", "AGENTTY_RAG_SKILLS", "AGENTTY_RAG_MEMORY",
+        "AGENTTY_RAG_MCP", "AGENTTY_RAG_CONTEXTUAL", "AGENTTY_RAG_MMR",
+        "AGENTTY_RAG_MMR_LAMBDA", "AGENTTY_RAG_STITCH", "AGENTTY_RAG_DEDUP",
+        "AGENTTY_RAG_DEDUP_THRESHOLD", "AGENTTY_RAG_AUTOCUT",
+        "AGENTTY_RAG_AUTOCUT_SENSITIVITY", "AGENTTY_RAG_TRACE", "AGENTTY_RAG_PRF",
+        "AGENTTY_RAG_CORRECT", "AGENTTY_RAG_GRAPH", "AGENTTY_RAG_EXPAND",
+        "AGENTTY_RAG_HYDE", "AGENTTY_RAG_PERSIST", "AGENTTY_RAG_LEARN",
+        "AGENTTY_RAG_ADAPTIVE", "AGENTTY_RAG_PROACTIVE", "AGENTTY_RAG_FUSION"});
+    LoopbackEmbeddingServer server;
+    REQUIRE(server.valid(), "loopback embedding server starts");
+
+    TempDir tmp{"rag_fanout"};
+    fs::create_directories(tmp.path() / ".git");
+    const auto docs = tmp.path() / "docs";
+    for (int i = 0; i < 96; ++i) {
+        write_file(docs / ("doc" + std::to_string(i) + ".md"),
+                   "# Fan-out fixture " + std::to_string(i) + "\n\n"
+                   "This document exercises the cold embedding path while the "
+                   "RAG index lock is held. fixture-token-" + std::to_string(i) + "\n");
+    }
+    std::error_code ec;
+    fs::current_path(tmp.path(), ec);
+    REQUIRE(!ec, "temporary project becomes the current directory");
+    ::agentty::tools::util::set_workspace_root(::agentty::IoAccess::grant(), tmp.path());
+
+    set_test_env("AGENTTY_DOCS_DIR", docs.string());
+    set_test_env("AGENTTY_EMBED_BACKEND", "openai");
+    set_test_env("AGENTTY_EMBED_ENDPOINT",
+                 "http://127.0.0.1:" + std::to_string(server.port()));
+    set_test_env("AGENTTY_EMBED_MODEL", "issue-112-fixture");
+    set_test_env("AGENTTY_EMBED_PATH", "/v1/embeddings");
+    set_test_env("AGENTTY_EMBED_API_KEY", "test-key");
+    for (const char* name : {"AGENTTY_RAG_SKILLS", "AGENTTY_RAG_MEMORY",
+                             "AGENTTY_RAG_MCP", "AGENTTY_RAG_CONTEXTUAL",
+                             "AGENTTY_RAG_MMR", "AGENTTY_RAG_STITCH",
+                             "AGENTTY_RAG_DEDUP", "AGENTTY_RAG_AUTOCUT",
+                             "AGENTTY_RAG_TRACE", "AGENTTY_RAG_PRF",
+                             "AGENTTY_RAG_CORRECT", "AGENTTY_RAG_GRAPH",
+                             "AGENTTY_RAG_EXPAND", "AGENTTY_RAG_HYDE",
+                             "AGENTTY_RAG_LEARN", "AGENTTY_RAG_ADAPTIVE",
+                             "AGENTTY_RAG_PROACTIVE"})
+        set_test_env(name, "0");
+    set_test_env("AGENTTY_RAG_PERSIST", "0");
+
+    agentty::rag::Retriever retriever;
+    const auto result = retriever.retrieve("fixture token cold retrieval", 5);
+    check(result.error.empty(), "cold retrieval completes without a lock capability abort");
+    check(!result.passages.empty(), "cold retrieval returns passages");
+    check(server.requests() >= 4,
+          "cold retrieval probes and embeds the corpus in multiple requests");
 }
 
 // Persisted indexes are named `<stem><8-hex-identity>.ragdb`, where the hash
