@@ -297,7 +297,12 @@ void apply_env(Io, EmbedConfig& c) {
 // ── Probe ────────────────────────────────────────────────────────────────
 #if AGENTTY_HAS_RAGCPP
 
-ProbeResult probe(const EmbedConfig& c) {
+namespace {
+// Auto's first choice when the model was left at the default: measured
+// better on tests/rag_eval, used only if it's already pulled.
+constexpr std::string_view kAutoPreferred = "qwen3-embedding:0.6b";
+
+ProbeResult probe_one(const EmbedConfig& c) {
     if (c.backend == Backend::Disabled)
         return ProbeErr{"embeddings are disabled"};
     if (auto v = validate(c); auto* bad = std::get_if<Invalid>(&v))
@@ -327,12 +332,25 @@ ProbeResult probe(const EmbedConfig& c) {
         ok.dim = static_cast<std::uint32_t>(vector->size());
         ok.latency_ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+        ok.model = c.model;
         return ok;
     } catch (const std::exception& e) {
         return ProbeErr{e.what()};
     } catch (...) {
         return ProbeErr{"unknown error while probing the embedder"};
     }
+}
+}  // namespace
+
+ProbeResult probe(const EmbedConfig& c) {
+    if (c.backend == Backend::Auto && c.model == EmbedConfig{}.model) {
+        EmbedConfig better = c;
+        better.model = std::string{kAutoPreferred};
+        // A model that isn't pulled fails at once (404), so this costs
+        // nothing when it's absent.
+        if (auto r = probe_one(better); std::holds_alternative<ProbeOk>(r)) return r;
+    }
+    return probe_one(c);
 }
 
 #else

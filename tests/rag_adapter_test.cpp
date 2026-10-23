@@ -146,19 +146,33 @@ public:
     [[nodiscard]] int requests() const noexcept { return requests_.load(std::memory_order_acquire); }
     // Most requests ever being answered at the same moment.
     [[nodiscard]] int peak_in_flight() const noexcept { return peak_.load(std::memory_order_acquire); }
+    // Ollama-style model check: when set, only `only_model` answers and
+    // other models get a 404. Set before any request.
+    void serve_only(std::string m) { only_model_ = std::move(m); }
+    [[nodiscard]] int refused() const noexcept { return refused_.load(std::memory_order_acquire); }
 
 private:
-    static std::string response_for(const std::string& body) {
+    std::string response_for(const std::string& body) {
         std::size_t count = 1;
         const auto request = json::parse(body, nullptr, false);
         if (request.is_object() && request.contains("input") && request["input"].is_array())
             count = request["input"].size();
+        const std::string model = request.is_object() ? request.value("model", std::string{}) : std::string{};
+        if (!only_model_.empty() && model != only_model_) {
+            refused_.fetch_add(1, std::memory_order_acq_rel);
+            return "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+        }
         json data = json::array();
-        for (std::size_t i = 0; i < count; ++i)
+        json matrix = json::array();
+        for (std::size_t i = 0; i < count; ++i) {
             data.push_back({{"object", "embedding"}, {"index", i},
                             {"embedding", {1.0, 0.0, 0.0, 0.0,
                                              0.0, 0.0, 0.0, 0.0}}});
-        const std::string payload = json{{"object", "list"}, {"data", std::move(data)}}.dump();
+            matrix.push_back({1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        }
+        // Both wires: OpenAI reads data[], Ollama reads embeddings.
+        const std::string payload = json{{"object", "list"}, {"data", std::move(data)},
+                                         {"embeddings", std::move(matrix)}}.dump();
         return "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
                "Content-Length: " + std::to_string(payload.size()) + "\r\n\r\n" + payload;
     }
@@ -194,8 +208,10 @@ private:
             if (header_end == std::string::npos) {
                 header_end = request.find("\r\n\r\n");
                 if (header_end != std::string::npos) {
-                    const auto headers = request.substr(0, header_end);
-                    const auto marker = headers.find("Content-Length:");
+                    // Header names are case-insensitive (agentty sends lowercase).
+                    std::string headers = request.substr(0, header_end);
+                    for (auto& ch : headers) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    const auto marker = headers.find("content-length:");
                     if (marker != std::string::npos)
                         content_length = std::strtoull(headers.c_str() + marker + 15, nullptr, 10);
                 }
@@ -259,6 +275,8 @@ private:
     std::atomic<int> in_flight_{0};
     std::atomic<int> peak_{0};
     std::chrono::milliseconds delay_{0};
+    std::string only_model_;
+    std::atomic<int> refused_{0};
 #if defined(_WIN32)
     bool winsock_started_ = false;
 #endif
@@ -300,6 +318,39 @@ void set_test_env(const char* name, const std::string& value) {
 }
 
 }  // namespace
+
+TEST_CASE("rag auto embedder prefers qwen3-embedding when ollama has it") {
+    ScopedEnvSandbox sandbox;
+    EnvironmentRestore env({"AGENTTY_DOCS_DIR", "AGENTTY_OLLAMA_HOST", "AGENTTY_EMBED_BACKEND",
+                            "AGENTTY_EMBED_ENDPOINT", "AGENTTY_EMBED_MODEL", "AGENTTY_RAG_PERSIST"});
+    auto status_with = [&](const std::string& served) {
+        LoopbackEmbeddingServer server;
+        REQUIRE(server.valid(), "loopback embedding server starts");
+        server.serve_only(served);
+        set_test_env("AGENTTY_EMBED_BACKEND", "auto");
+        set_test_env("AGENTTY_OLLAMA_HOST", "127.0.0.1:" + std::to_string(server.port()));
+        set_test_env("AGENTTY_RAG_PERSIST", "0");
+        agentty::rag::Retriever r;
+        return r.embed_status();
+    };
+    const auto with_qwen = status_with("qwen3-embedding:0.6b");
+    check(with_qwen.state == agentty::rag::Retriever::EmbedStatus::State::Ready
+              && with_qwen.describe.find("qwen3-embedding") != std::string::npos,
+          "auto picks qwen3-embedding when it's pulled");
+    const auto without = status_with("nomic-embed-text");
+    check(without.state == agentty::rag::Retriever::EmbedStatus::State::Ready
+              && without.describe.find("nomic-embed-text") != std::string::npos,
+          "auto falls back to nomic when qwen3 isn't there");
+    // A model the user named is used as is, never swapped.
+    set_test_env("AGENTTY_EMBED_MODEL", "nomic-embed-text");
+    LoopbackEmbeddingServer server;
+    REQUIRE(server.valid(), "loopback embedding server starts");
+    set_test_env("AGENTTY_OLLAMA_HOST", "127.0.0.1:" + std::to_string(server.port()));
+    set_test_env("AGENTTY_EMBED_BACKEND", "ollama");
+    agentty::rag::Retriever r;
+    check(r.embed_status().describe.find("nomic-embed-text") != std::string::npos,
+          "an explicit backend keeps its model");
+}
 
 TEST_CASE("rag cold retrieval serializes fan-out under the index lock") {
     ScopedEnvSandbox sandbox;

@@ -849,6 +849,8 @@ struct Index {
 
     explicit Index(const std::atomic<bool>* stop) : warm_stop(stop), engine(make_engine_config()) {
         probe_embedder();
+        // The probe may have picked the model (Auto), which sets the prefixes.
+        if (!auto_model.empty()) engine = ::rag::Engine(make_engine_config());
         attach_embedder();
         apply_pipeline(engine);
     }
@@ -918,7 +920,7 @@ struct Index {
         // a warm index (persisted, or already built) pays nothing.
         cc.split      = ::rag::util::Splitter{};
         cc.contextual = cfg.contextual;
-        std::tie(cc.query_prefix, cc.doc_prefix) = ::agentty::rag::embed::prefixes(cfg.embed);
+        std::tie(cc.query_prefix, cc.doc_prefix) = ::agentty::rag::embed::prefixes(effective_embed());
         if (source_code) {
             cc.chunking = ::rag::index::CorpusConfig::Chunking::source;
             // Questions about code use words ("clipboard read"); the code
@@ -994,10 +996,13 @@ struct Index {
         return s ? ::rag::plugin::Json::parse(*s) : ::rag::plugin::Json{};
     }
 
-    // The embed config as it should be DIALLED right now. Auto resolves to
-    // Ollama (the historical default); everything else is taken literally.
+    // The embed config as it should be DIALLED right now: the configured one,
+    // with the model Auto's probe chose (if it chose another).
+    std::string auto_model;
     [[nodiscard]] ::agentty::rag::embed::EmbedConfig effective_embed() const {
-        return cfg.embed;
+        auto e = cfg.embed;
+        if (!auto_model.empty()) e.model = auto_model;
+        return e;
     }
 
     // Probe the configured embedder once per config. Replaces the old
@@ -1007,7 +1012,7 @@ struct Index {
     // mode this subsystem had).
     void probe_embedder() {
         if (!std::holds_alternative<dense::Unprobed>(dense)) return;
-        apply_probe(run_probe(effective_embed()));
+        apply_probe(run_probe(cfg.embed));   // Auto picks its model afresh
     }
 
     // The probe in two halves. run_probe dials a network endpoint (or
@@ -1029,9 +1034,26 @@ struct Index {
             // The MEASURED dimension is authoritative — pin it so every
             // subsequent spec (and the identity hash) carries it.
             cfg.embed.dim = ok->dim;
-            dense = dense::Ready{eb::identity(cfg.embed), ok->dim, ok->latency_ms};
+            // Auto may have picked a better model than the configured one.
+            // Kept apart from cfg.embed so apply_config still compares what
+            // the user configured.
+            const std::string picked = ok->model != cfg.embed.model ? ok->model : std::string{};
+            const bool switched = picked != auto_model;
+            auto_model = picked;
+            dense = dense::Ready{eb::identity(effective_embed()), ok->dim, ok->latency_ms};
+            // Another model means other vectors and prefixes: start the docs
+            // engine cold (reset_embedder handles code and warm).
+            if (switched && docs_initialized) {
+                engine = ::rag::Engine(make_engine_config());
+                embedder_ready = false;
+                docs_initialized = false;
+                indexed_root.clear();
+                indexed_fp = 0;
+                docs_files.clear();
+                persist_checked_for.clear();
+            }
             ::agentty::util::dbglog("rag.embed",
-                "ready: " + eb::describe(cfg.embed) + " ("
+                "ready: " + eb::describe(effective_embed()) + " ("
                 + std::to_string(ok->dim) + "d)");
         } else {
             dense = dense::Unavailable{std::get<eb::ProbeErr>(r).why};
@@ -1346,7 +1368,7 @@ struct Index {
         auto dir = rag_store_dir(kDocsIndexSpec);
         if (dir.empty()) return {};
         return dir
-             / ("rag_docs." + ::agentty::rag::embed::identity_tag(cfg.embed) + ".ragdb");
+             / ("rag_docs." + ::agentty::rag::embed::identity_tag(effective_embed()) + ".ragdb");
     }
 
     fs::path ragmeta_path() {
@@ -1372,7 +1394,7 @@ struct Index {
             {"contextual", cfg.contextual},
             // Identity of the VECTOR SPACE, not the model's name. See
             // ragdb_path() for why a name is not sufficient.
-            {"embed_identity", ::agentty::rag::embed::identity(cfg.embed)},
+            {"embed_identity", ::agentty::rag::embed::identity(effective_embed())},
             {"dense", dense_ready()},
         };
         atomic_write(meta, j.dump());
@@ -1410,7 +1432,7 @@ struct Index {
                 || j.value("memory_fp", std::uint64_t{}) != current_memory
                 || j.value("contextual", false) != cfg.contextual
                 || j.value("embed_identity", std::uint64_t{})
-                       != ::agentty::rag::embed::identity(cfg.embed)
+                       != ::agentty::rag::embed::identity(effective_embed())
                 || j.value("dense", false) != dense_ready())
                 return false;
             auto opened = ::rag::Engine::open(db.string());
@@ -1552,7 +1574,7 @@ struct Index {
         auto dir = rag_store_dir(kCodeIndexSpec);
         if (dir.empty()) return {};
         return dir
-             / ("rag_code." + ::agentty::rag::embed::identity_tag(cfg.embed) + ".ragdb");
+             / ("rag_code." + ::agentty::rag::embed::identity_tag(effective_embed()) + ".ragdb");
     }
 
     fs::path code_meta_path() const {
@@ -1580,7 +1602,7 @@ struct Index {
                 || stored.empty()
                 || j.value("contextual", false) != cfg.contextual
                 || j.value("embed_identity", std::uint64_t{})
-                       != ::agentty::rag::embed::identity(cfg.embed)
+                       != ::agentty::rag::embed::identity(effective_embed())
                 || j.value("dense", false) != dense_ready())
                 return false;
             auto opened = ::rag::Engine::open(db.string());
@@ -1607,7 +1629,7 @@ struct Index {
         ::rag::plugin::Json j = {
             {"version", 3}, {"root", code_root}, {"files", code_files},
             {"contextual", cfg.contextual},
-            {"embed_identity", ::agentty::rag::embed::identity(cfg.embed)},
+            {"embed_identity", ::agentty::rag::embed::identity(effective_embed())},
             {"dense", dense_ready()},
         };
         atomic_write(meta, j.dump());
@@ -2690,7 +2712,7 @@ void Retriever::apply_config(const Config& cfg) {
             cfg.docs_root = old.docs_root;
             ix.cfg = std::move(cfg);
             if (c.embedder) ix.dense = dense::Unprobed{};
-            c.embed = ix.effective_embed();
+            c.embed = ix.cfg.embed;   // probe what's configured; Auto re-picks
             return c;
         }, cfg);
 
@@ -2752,7 +2774,7 @@ Retriever::EmbedStatus Retriever::embed_status() const {
     // to say so. The next frame picks up the real state.
     auto now = api_root([&](const maya::unlocked& cap) { return impl_->index.try_read(cap, [](const Index& ix) {
         EmbedStatus st_out;
-        st_out.describe = ::agentty::rag::embed::describe(ix.cfg.embed);
+        st_out.describe = ::agentty::rag::embed::describe(ix.effective_embed());
         std::visit([&st_out](const auto& st) {
             using T = std::decay_t<decltype(st)>;
             if constexpr (std::is_same_v<T, dense::Ready>) {
@@ -2783,7 +2805,7 @@ Retriever::EmbedStatus Retriever::reprobe_embedder() {
     return api_root([&](const maya::unlocked& cap) {
     const auto ec = impl_->index.with(cap, [](Index& ix) {
         ix.dense = dense::Unprobed{};
-        return ix.effective_embed();
+        return ix.cfg.embed;
     });
     auto r = Index::run_probe(ec);
     impl_->index.with(cap, [](Index& ix, ::agentty::rag::embed::ProbeResult pr) {

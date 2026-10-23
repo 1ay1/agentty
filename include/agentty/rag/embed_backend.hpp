@@ -216,6 +216,9 @@ using Validity = std::variant<std::monostate, Invalid>;
 struct ProbeOk {
     std::uint32_t dim        = 0;
     int           latency_ms = 0;
+    // The model that answered. Differs from the config's only under Auto,
+    // which tries a better model first when the user left the default.
+    std::string   model;
 };
 struct ProbeErr { std::string why; };
 using ProbeResult = std::variant<ProbeOk, ProbeErr>;

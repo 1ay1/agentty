@@ -65,13 +65,14 @@ export AGENTTY_OLLAMA_HOST=127.0.0.1:11434
 export AGENTTY_EMBED_MODEL=nomic-embed-text
 ```
 
-For better `search_code` results use `qwen3-embedding:0.6b` (about 640 MB). On
+For better `search_code` results pull `qwen3-embedding:0.6b` (about 640 MB). On
 agentty's own eval (`tests/rag_eval`) it found the right file first in 60-80%
-of questions against 55-65% for nomic-embed-text:
+of questions against 55-65% for nomic-embed-text. With the backend on Auto and
+the model left at its default, agentty uses it automatically once it's pulled
+(the first index build is slower, a few minutes on a large repo):
 
 ```bash
 ollama pull qwen3-embedding:0.6b
-export AGENTTY_EMBED_MODEL=qwen3-embedding:0.6b
 ```
 
 Models trained with query/document prefixes (nomic, e5, mxbai, arctic) get
