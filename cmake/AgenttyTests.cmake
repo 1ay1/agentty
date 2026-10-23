@@ -981,6 +981,12 @@ if(NOT WIN32)
     add_test(NAME run_cli_test
              COMMAND sh ${CMAKE_SOURCE_DIR}/tests/run_cli_test.sh $<TARGET_FILE:agentty>)
     set_tests_properties(run_cli_test PROPERTIES TIMEOUT 120)
+    # search_code / search_docs quality floors on the judged evals,
+    # keyword-only so it needs no embedder (tests/rag_eval).
+    add_test(NAME rag_eval_guard
+             COMMAND sh ${CMAKE_SOURCE_DIR}/tests/rag_eval/rag_eval_guard.sh
+                     $<TARGET_FILE:agentty> ${CMAKE_SOURCE_DIR})
+    set_tests_properties(rag_eval_guard PROPERTIES TIMEOUT 300 LABELS rag)
 endif()
 
 # ── Finalize: build agentty_tests + derived aggregates ──────────────────────
