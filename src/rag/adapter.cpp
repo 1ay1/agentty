@@ -2437,6 +2437,18 @@ Retrieval retrieve_code_locked(Index& ix, const std::string& query, int kk) {
     const std::size_t pool = static_cast<std::size_t>(std::max(kk * 4, 32));
     auto res = ix.code_engine.search(query, pool, {}, code_tracep);
     if (!res) { out.error = "search_code failed"; return out; }
+    // AGENTTY_RAG_DUMP_POOL=<file>: append the candidate pool as JSON lines,
+    // for offline reranker experiments.
+    if (const char* dp = std::getenv("AGENTTY_RAG_DUMP_POOL"); dp && *dp) {
+        auto pooled = code_rerank(query, *res, res->size());
+        ::rag::plugin::Json j;
+        j["q"] = query;
+        j["c"] = ::rag::plugin::Json::array();
+        for (const auto& r : pooled)
+            j["c"].push_back({{"path", split_uri(r.uri).second}, {"score", r.score.value},
+                              {"text", r.text}});
+        (void)persistence::append_atomic(::agentty::IoAccess::grant(), dp, j.dump() + "\n");
+    }
     double top = 0.0;
     // Relevance floor + score-proportional budget (same rationale as the
     // docs path): don't pay tokens for the low-confidence tail, and give
