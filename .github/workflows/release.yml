@@ -466,6 +466,26 @@ jobs:
           $env:AGENTTY_OLLAMA_HOST = "127.0.0.1:1"
           & $exe.FullName rag-bench docs
           if ($LASTEXITCODE -ne 0) { throw "Windows retrieval smoke test failed" }
+      - name: Smoke test startup
+        shell: pwsh
+        # The TUI path once without a console: #115 shipped a binary that
+        # fast-failed (0xC0000409) here before drawing a frame. Fail only on a
+        # crash; a normal exit or still running after 20s is fine.
+        run: |
+          $exe = Get-ChildItem -Recurse build -Filter agentty.exe | Select-Object -First 1
+          $env:AGENTTY_HOME = Join-Path $env:RUNNER_TEMP "agentty-home"
+          New-Item -ItemType Directory -Force $env:AGENTTY_HOME | Out-Null
+          $in = Join-Path $env:RUNNER_TEMP "empty.txt"; Set-Content $in "" -NoNewline
+          $p = Start-Process -FilePath $exe.FullName -PassThru -NoNewWindow `
+                 -RedirectStandardInput $in `
+                 -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP "tui-out.txt") `
+                 -RedirectStandardError (Join-Path $env:RUNNER_TEMP "tui-err.txt")
+          if (-not $p.WaitForExit(20000)) { $p.Kill(); Write-Host "still running after 20s: startup ok"; exit 0 }
+          $rc = $p.ExitCode
+          Write-Host ("TUI path exited {0} (0x{0:X8})" -f $rc)
+          if ($rc -lt 0 -or ($rc -band 0xC0000000) -eq 0xC0000000) {
+            throw ("agentty crashed at startup (0x{0:X8})" -f $rc)
+          }
       - name: Stage binary
         shell: pwsh
         run: |

@@ -594,6 +594,31 @@ jobs:
             exit $LASTEXITCODE
           }
           sccache --show-stats
+      - name: Smoke test startup
+        shell: pwsh
+        # Compile-only let #115 through: the release binary died at launch with
+        # 0xC0000409 (a CRT call the UCRT rejects) before drawing a frame. Run
+        # the TUI path once without a console and fail only on a crash: an
+        # NTSTATUS exit (0xC...) or a fast-fail. A normal exit, or still
+        # running after 20s, means startup got past the stderr redirect.
+        run: |
+          $exe = Get-ChildItem -Recurse build -Filter agentty.exe | Select-Object -First 1
+          $env:AGENTTY_HOME = Join-Path $env:RUNNER_TEMP "agentty-home"
+          New-Item -ItemType Directory -Force $env:AGENTTY_HOME | Out-Null
+          & $exe.FullName --version
+          if ($LASTEXITCODE -ne 0) { throw "agentty --version failed ($LASTEXITCODE)" }
+          $in = Join-Path $env:RUNNER_TEMP "empty.txt"; Set-Content $in "" -NoNewline
+          $p = Start-Process -FilePath $exe.FullName -PassThru -NoNewWindow `
+                 -RedirectStandardInput $in `
+                 -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP "tui-out.txt") `
+                 -RedirectStandardError (Join-Path $env:RUNNER_TEMP "tui-err.txt")
+          if (-not $p.WaitForExit(20000)) { $p.Kill(); Write-Host "still running after 20s: startup ok"; exit 0 }
+          $rc = $p.ExitCode
+          Write-Host ("TUI path exited {0} (0x{0:X8})" -f $rc)
+          if ($rc -lt 0 -or ($rc -band 0xC0000000) -eq 0xC0000000) {
+            Get-Content (Join-Path $env:AGENTTY_HOME "logs/stderr.log") -ErrorAction SilentlyContinue | Select-Object -Last 20
+            throw ("agentty crashed at startup (0x{0:X8})" -f $rc)
+          }
 
   # MinGW / MSYS2 ucrt64 gate. This is the toolchain real Windows users build
   # under, and CRUCIALLY it is the ONLY Windows path that actually COMPILES the

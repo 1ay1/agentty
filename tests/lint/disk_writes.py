@@ -7,6 +7,9 @@
            a fixed ".tmp" name gets shared by two writers
   truncate no truncating or appending ofstream/fopen: a reader can see the
            file half-written, and two appenders can splice lines
+  setvbuf  no setvbuf(..., _IOFBF/_IOLBF, 0): the C standard allows size 0
+           with a NULL buffer, MSVC's UCRT treats it as an invalid argument
+           and fast-fails the process (0xC0000409, #115)
 
 Each rule has a short allowlist below: the primitive itself, and the few
 places that move whole files or directories around (migrations, `config
@@ -50,6 +53,10 @@ RULES = {
             "src/tool/util/disk_files.cpp",
             "src/util/logx.cpp",                # the log: one process, O_APPEND
         },
+    ),
+    "setvbuf": (
+        r"\bsetvbuf\s*\([^;]*_IO[FL]BF\s*,\s*0\s*\)",
+        set(),
     ),
 }
 
@@ -109,7 +116,8 @@ def main():
                             hits.append(f"{rel}:{no}: [{rule}] {modes[no - 1].strip()}")
     print("disk_writes: shared files go through persistence::with_shared_file / write_atomic")
     if hits:
-        print(f"\n{len(hits)} violation(s). Use include/agentty/io/shared_file.hpp:")
+        print(f"\n{len(hits)} violation(s). Use include/agentty/io/shared_file.hpp"
+              " ([setvbuf]: pass BUFSIZ, not 0):")
         for h in hits:
             print("  " + h)
         return 1
