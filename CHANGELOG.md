@@ -5,11 +5,31 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- **The Windows release binary starts again.** It quit at launch with
+  0xC0000409 before drawing anything: `setvbuf` with size 0 is legal C but
+  the MSVC runtime rejects it and kills the process (#115, thanks
+  @davidwed). CI now launches the MSVC build in a real console on every
+  push, so a crash at startup can't ship again.
+- Retrieval no longer aborts on a cold index, and never waits on the
+  embedder while holding the index lock (#112, #114).
 - **A `/` prompt typed without its arguments says so.** An MCP prompt with
   a required argument, sent as just `/explore_codebase`, used to hand the
   server an incomplete request and show its rejection: "Missing required
   prompt arguments", which names neither the argument nor the shape of the
   line. It now answers with the argument and the line to type.
+### Changed
+- **`search_code` finds the right file much more often.** On a judged set of
+  questions about agentty's own code it now puts the right file first about
+  60-80% of the time, up from about 35%. Identifiers are split into words
+  (`onClipboardRead` matches "clipboard read"), results favour source over
+  tests and docs, and a header lifts its `.cpp`.
+- **Better embeddings with no setup.** With Ollama on Auto, agentty uses
+  `qwen3-embedding:0.6b` when it's pulled (else `nomic-embed-text` as
+  before), and sends models the query/document prefixes they were trained
+  with. Ollama users also stop silently falling back to keyword search while
+  the model loads.
+- A saved search index is updated in place after edits instead of being
+  rebuilt: a one-file change went from minutes to seconds.
 ### Added
 - **Ctrl+V pastes images and files over ssh, in any terminal.** Run
   `agentty paste setup` once on the machine you type on. Every ssh session
