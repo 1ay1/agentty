@@ -16,6 +16,7 @@
 #include <maya/element/builder.hpp>
 #include <maya/print.hpp>
 #include <maya/style/theme.hpp>
+#include <maya/terminal/ansi.hpp>
 
 #include <rp/armor.hpp>
 #include <rp/report.hpp>
@@ -54,17 +55,20 @@ void emit(const Element& e, FILE* f = stdout) {
     std::string s = painted(f) ? maya::render_to_string_ansi(e, w) : maya::render_to_string(e, w);
     // Rendered rows are padded to the width; trailing blanks only get in the
     // way of a copy. In styled output the padding sits before closing resets.
+    constexpr std::string_view reset = maya::ansi::reset;
+    const std::string double_reset = std::string{reset} + std::string{reset};
     std::string out;
     for (std::size_t at = 0; at < s.size();) {
         auto nl = s.find('\n', at);
         std::string line{std::string_view{s}.substr(at, nl == std::string::npos ? std::string::npos : nl - at)};
         for (;;) {
             if (line.ends_with(' ')) line.pop_back();
-            else if (line.ends_with("\x1b[0m") && (line.size() == 4 || line[line.size() - 5] == ' ' || line.ends_with("\x1b[0m\x1b[0m")))
-                line.resize(line.size() - 4);
+            else if (line.ends_with(reset) && (line.size() == reset.size() || line[line.size() - reset.size() - 1] == ' '
+                                               || line.ends_with(double_reset)))
+                line.resize(line.size() - reset.size());
             else break;
         }
-        if (painted(f) && line.find('\x1b') != std::string::npos) line += "\x1b[0m";
+        if (painted(f) && line.find(reset.front()) != std::string::npos) line += reset;
         out += line;
         out += '\n';
         if (nl == std::string::npos) break;
