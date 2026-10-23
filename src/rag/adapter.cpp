@@ -1364,6 +1364,9 @@ struct Index {
         if (!saved) return;
         ::rag::plugin::Json j = {
             {"version", 3}, {"root", indexed_root}, {"docs_fp", indexed_fp},
+            // Per-file stamps, so a later open can update just the files that
+            // changed instead of rebuilding.
+            {"files", docs_files},
             {"skills_fp", skills_gen}, {"memory_fp", memory_gen},
             {"contextual", cfg.contextual},
             // Identity of the VECTOR SPACE, not the model's name. See
@@ -1393,9 +1396,15 @@ struct Index {
             const auto current_docs = manifest_fingerprint(current_files);
             const auto current_skills = skills_fingerprint();
             const auto current_memory = memory_fingerprint();
+            // Changed doc files don't reject the index: we adopt its stored
+            // file list and refresh_docs updates the ones that differ. Without
+            // a stored list (older meta) the fingerprint has to match.
+            auto stored = j.value("files", FileManifest{});
+            const bool docs_ok = !stored.empty()
+                || j.value("docs_fp", std::uint64_t{}) == current_docs;
             if (j.value("version", 0) != 3
                 || j.value("root", std::string{}) != root_s
-                || j.value("docs_fp", std::uint64_t{}) != current_docs
+                || !docs_ok
                 || j.value("skills_fp", std::uint64_t{}) != current_skills
                 || j.value("memory_fp", std::uint64_t{}) != current_memory
                 || j.value("contextual", false) != cfg.contextual
@@ -1412,8 +1421,12 @@ struct Index {
             attach_embedder();
             apply_pipeline(engine);
             indexed_root = root_s;
-            indexed_fp = current_docs;
-            docs_files = std::move(current_files);
+            if (stored.empty()) {
+                docs_files = std::move(current_files);
+            } else {
+                docs_files = std::move(stored);
+            }
+            indexed_fp = manifest_fingerprint(docs_files);
             docs_initialized = true;
             skills_gen = current_skills;
             memory_gen = current_memory;
@@ -1546,7 +1559,7 @@ struct Index {
         return db.empty() ? fs::path{} : fs::path{db.string() + ".meta.json"};
     }
 
-    bool try_load_code_index(const fs::path& root, const FileManifest& manifest) {
+    bool try_load_code_index(const fs::path& root) {
         if (!cfg.persist) return false;
         auto db = code_ragdb_path();
         auto meta = code_meta_path();
@@ -1559,9 +1572,11 @@ struct Index {
             const auto stored = j.value("files", FileManifest{});
             // 3: code is indexed with split identifiers. An index written
             // before that has postings for whole identifiers only: rebuild.
+            // Changed files don't reject the index: we adopt its stored file
+            // list and retrieve_code updates just the files that differ.
             if (j.value("version", 0) != 3
                 || j.value("root", std::string{}) != root.string()
-                || stored != manifest
+                || stored.empty()
                 || j.value("contextual", false) != cfg.contextual
                 || j.value("embed_identity", std::uint64_t{})
                        != ::agentty::rag::embed::identity(cfg.embed)
@@ -1574,7 +1589,7 @@ struct Index {
             attach_code_embedder();
             apply_pipeline(code_engine);
             code_root = root.string();
-            code_files = manifest;
+            code_files = stored;
             code_initialized = true;
             return true;
         } catch (...) { return false; }
@@ -2311,7 +2326,7 @@ Retrieval retrieve_code_locked(Index& ix, const std::string& query, int kk) {
 
     auto manifest = ix.file_manifest(root, opts);
     if (!ix.code_initialized)
-        (void)ix.try_load_code_index(root, manifest);
+        (void)ix.try_load_code_index(root);
     const bool cold = !ix.code_initialized
                    || ix.code_root != root.string();
 
@@ -3064,6 +3079,9 @@ int eval(const std::string& eval_file, int k) {
     int n = 0, hit1 = 0, hitk = 0;
     double mrr = 0;
     std::vector<std::string> misses;
+    // AGENTTY_RAG_EVAL_ALL=1 lists every result of a miss, not just 3.
+    const char* all_env = std::getenv("AGENTTY_RAG_EVAL_ALL");
+    const std::size_t show = (all_env && all_env[0] == '1') ? SIZE_MAX : 3;
     const auto q0 = std::chrono::steady_clock::now();
     for (const auto& c : cases) {
         const std::string q = c.value("q", std::string{});
@@ -3077,7 +3095,7 @@ int eval(const std::string& eval_file, int k) {
         std::vector<std::string> got;
         for (std::size_t i = 0; i < r.passages.size(); ++i) {
             const auto rp = rel_path(r.passages[i].path, root);
-            if (got.size() < 3) got.push_back(rp);
+            if (got.size() < show) got.push_back(rp);
             if (!rank && gold.contains(rp)) rank = static_cast<int>(i) + 1;
         }
         if (rank == 1) ++hit1;

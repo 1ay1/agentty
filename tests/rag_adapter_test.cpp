@@ -749,6 +749,35 @@ TEST_CASE("rag adapter") {
         check(code_before == code_after, "warm code open does not rewrite its index");
     }
 
+    // Files edited while agentty was closed: a fresh Retriever loads the saved
+    // index and updates just those files, so new text is found and the rest
+    // of the corpus (survey docs here) is still there.
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        write_file(docs / "sandbox.md",
+                   "# Sandbox\nThe quokka filter drops writes outside the jail.\n");
+        write_file(tmp / "src" / "auth_guard.cpp",
+                   "bool quokka_nonce_gate(int nonce) { return nonce > 7; }\n");
+        agentty::rag::Retriever warm;
+        auto res = warm.retrieve("quokka filter drops writes", 5);
+        check(res.error.empty() && !res.passages.empty()
+                  && res.passages.front().path.find("sandbox") != std::string::npos,
+              "a doc edited while closed is found after reopen");
+        auto old = warm.retrieve("encrypted OAuth keystore", 5);
+        check(!old.passages.empty()
+                  && old.passages.front().path.find("auth") != std::string::npos,
+              "unchanged docs survive the incremental update");
+        auto code = warm.retrieve_code("quokka nonce gate", 5);
+        check(code.error.empty() && !code.passages.empty()
+                  && code.passages.front().path.find("auth_guard") != std::string::npos,
+              "a code file edited while closed is found after reopen");
+        auto stale = warm.retrieve_code("rotate session nonce", 5);
+        bool stale_hit = false;
+        for (const auto& p : stale.passages)
+            if (p.text.find("rotate_session_nonce") != std::string::npos) stale_hit = true;
+        check(!stale_hit, "the old text of an edited code file is gone");
+    }
+
     // Corrupt/truncated .meta.json must not crash a fresh Retriever: the load
     // path parses meta inside try/catch and falls back to a clean rebuild. This
     // guards the persistence hardening (atomic meta writes) — even a half-
