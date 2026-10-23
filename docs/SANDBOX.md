@@ -5,7 +5,8 @@ hooks, ACP terminals — runs inside an OS-enforced sandbox. This is the referen
 for what that boundary is, how to configure it, and what it deliberately does
 not cover.
 
-Two companion documents:
+Two companion documents, plus the user guide
+([Sandboxing](website/sandboxing.md): pick a posture, what commands can reach):
 
 - [`docs/design/sandbox-boundary.md`](design/sandbox-boundary.md) — the design
   record: why each decision was made, which bugs forced it, and what was tried

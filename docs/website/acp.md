@@ -119,7 +119,9 @@ relaunch, no `-m`; each session keeps its own choice.
 Bad values are errors, not silent fallbacks: an unknown model, an effort the
 model doesn't take, or an unknown option id come back as `InvalidParams` with
 the allowed values. The full new state comes back in the response, so the
-editor's controls always match what agentty will actually use.
+editor's controls always match what agentty will actually use. The wire-level
+detail (option ids, values, ambient config) is in
+[ACP editor integration](https://github.com/agentty-org/agentty/blob/master/docs/acp-editor-integration.md).
 
 ## What works over ACP
 

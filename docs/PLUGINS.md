@@ -2,6 +2,10 @@
 
 A plugin in agentty **is an MCP server**. That's the whole model — there
 is no separate plugin API, no SDK to link, no manifest format, no ABI.
+
+This is the reference. To write your first plugin step by step (Python, then
+C++), see [Build a Plugin](website/build-a-plugin.md); for the user guide, see
+[Plugins](website/plugins.md).
 Anything that speaks the [Model Context Protocol](https://modelcontextprotocol.io)
 over stdio is a plugin: a Python script, a Node package, a Go binary, a
 shell wrapper — even another agentty (`agentty mcp-serve`). Whatever you

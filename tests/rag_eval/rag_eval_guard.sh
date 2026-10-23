@@ -9,6 +9,8 @@ A="$1"; ROOT="$2"
 S=$(mktemp -d "${TMPDIR:-/tmp}/agentty_rag_eval_XXXXXX")
 trap 'rm -rf "$S"' EXIT
 export AGENTTY_HOME="$S/home" AGENTTY_EMBED_BACKEND=disabled AGENTTY_DOCS_DIR="$ROOT/docs"
+# Docs only: memory facts and skills would make results depend on the box.
+export AGENTTY_RAG_MEMORY=0 AGENTTY_RAG_SKILLS=0 AGENTTY_RAG_MCP=0
 mkdir -p "$AGENTTY_HOME"
 cd "$ROOT" || exit 1
 
@@ -29,9 +31,9 @@ while read -r set h8min mrrmin; do
         fails=$((fails+1))
     fi
 done <<'EOF'
-agentty_code          0.875 0.60
-agentty_code_heldout  0.80  0.55
-agentty_docs          0.85  0.63
-agentty_docs_heldout  0.95  0.68
+agentty_code          0.88  0.67
+agentty_code_heldout  0.90  0.67
+agentty_docs          0.90  0.67
+agentty_docs_heldout  0.95  0.82
 EOF
 exit $fails
