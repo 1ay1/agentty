@@ -65,6 +65,18 @@ export AGENTTY_OLLAMA_HOST=127.0.0.1:11434
 export AGENTTY_EMBED_MODEL=nomic-embed-text
 ```
 
+For better `search_code` results use `qwen3-embedding:0.6b` (about 640 MB). On
+agentty's own eval (`tests/rag_eval`) it found the right file first in 60-80%
+of questions against 55-65% for nomic-embed-text:
+
+```bash
+ollama pull qwen3-embedding:0.6b
+export AGENTTY_EMBED_MODEL=qwen3-embedding:0.6b
+```
+
+Models trained with query/document prefixes (nomic, e5, mxbai, arctic) get
+them automatically; `AGENTTY_EMBED_PREFIX=0` turns that off.
+
 At startup, agentty performs one bounded embedding probe. If the server or model is unavailable, the session stays BM25-only instead of paying a long failed network timeout on every search. The result header reports `bm25` or `hybrid` truthfully.
 
 When a search returns **no hits**, the result says so with the reason folded in rather than a bare blank — e.g. `no matches (bm25)` (the search ran but nothing was relevant; the mode reveals the dense half was down), or `no matches (no docs indexed — set AGENTTY_DOCS_DIR …)` when there was nothing to search. So "the corpus is irrelevant" is never confused with "the index isn't built" or "Ollama is down."

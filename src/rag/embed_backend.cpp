@@ -130,6 +130,8 @@ std::pair<std::string, std::string> prefixes(const EmbedConfig& c) {
     for (auto& ch : m) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
     if (m.find("nomic-embed") != std::string::npos)
         return {"search_query: ", "search_document: "};
+    // qwen3-embedding is left bare: its instruction prefix scored worse on
+    // tests/rag_eval (held-out MRR .77 vs .80).
     const bool e5 = m.starts_with("e5-") || m.find("/e5-") != std::string::npos
                  || m.find("-e5-") != std::string::npos;
     if (e5 && m.find("instruct") == std::string::npos)
