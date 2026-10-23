@@ -26,8 +26,15 @@
 #include <cstdio>
 #include <format>
 #include <string>
-#include <unistd.h>
 #include <vector>
+
+#ifdef _WIN32
+#include <io.h>        // _isatty, _fileno: MSVC has no <unistd.h>
+#define isatty _isatty
+#define fileno _fileno
+#else
+#include <unistd.h>
+#endif
 
 namespace agentty::paste_cli {
 
