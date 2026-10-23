@@ -1,0 +1,22 @@
+[
+ {"q": "where are user settings loaded from disk", "gold": ["src/io/persistence.cpp"]},
+ {"q": "garbage collect unused stored blobs", "gold": ["src/io/blob_gc.cpp"]},
+ {"q": "rewind the conversation to an earlier checkpoint", "gold": ["src/runtime/app/update/checkpoints.cpp", "src/workspace/checkpoint.cpp"]},
+ {"q": "fetch the list of models from the provider", "gold": ["src/runtime/app/cmd_factory.cpp"]},
+ {"q": "open a connection to the provider early so the first turn is faster", "gold": ["src/provider/selection.cpp"]},
+ {"q": "run a command inside the linux sandbox", "gold": ["src/tool/util/exec.cpp", "src/tool/util/sandbox.cpp"]},
+ {"q": "wrap a command for the macos sandbox", "gold": ["src/tool/util/sandbox.cpp"]},
+ {"q": "which provider a custom host belongs to", "gold": ["src/provider/selection.cpp"]},
+ {"q": "store api keys in the os keychain", "gold": ["src/io/keystore.cpp"]},
+ {"q": "append messages to a thread's log file", "gold": ["src/io/thread_log.cpp"]},
+ {"q": "fork the current thread into a new one", "gold": ["src/runtime/app/update/fork.cpp"]},
+ {"q": "subscribe keyboard events to messages", "gold": ["src/runtime/app/subscribe.cpp"]},
+ {"q": "http2 streaming client with tls", "gold": ["src/io/http.cpp"]},
+ {"q": "send a request to the anthropic messages api and parse server sent events", "gold": ["src/provider/anthropic/transport.cpp"]},
+ {"q": "ollama chat transport", "gold": ["src/provider/ollama/transport.cpp"]},
+ {"q": "decide which skill applies to the task", "gold": ["src/tool/skills.cpp"]},
+ {"q": "remember a fact across sessions", "gold": ["src/tool/memory_store.cpp", "src/tool/mcp_tools_backends.cpp"]},
+ {"q": "how mcp servers are connected and their tools registered", "gold": ["src/mcp/bridge.cpp", "src/mcp/connection.cpp"]},
+ {"q": "render the status bar at the bottom", "gold": ["src/runtime/view/status_bar/status_bar.cpp"]},
+ {"q": "lint that bans raw std::thread and std::mutex in src", "gold": ["tests/lint/allowlist.txt", "cmake/AgenttyTests.cmake"]}
+]

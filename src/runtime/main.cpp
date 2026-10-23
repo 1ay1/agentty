@@ -934,6 +934,10 @@ Args parse_args(int argc, char** argv) {
             out.subcommand = std::move(a);
             if (i + 1 < argc && argv[i + 1][0] != '-')
                 out.cli_bench_root = argv[++i];
+        } else if (a == "rag-eval") {
+            // `agentty rag-eval <cases.json>`: judged search_code eval.
+            out.subcommand = std::move(a);
+            if (i + 1 < argc) out.cli_bench_root = argv[++i];
         } else if (a == "run") {
             // Headless one-shot: `agentty run "prompt" [--agent TYPE]`.
             // A missing / `-` prompt reads stdin (pipe usage:
@@ -1499,6 +1503,8 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
         return mcp::oauth::cmd_mcp_status();
     if (args.subcommand == "rag-bench")
         return rag::bench::run(args.cli_bench_root);
+    if (args.subcommand == "rag-eval")
+        return rag::bench::eval(args.cli_bench_root, 8);
     if (args.subcommand == "airgap") {
         // --clipboard-relay starts the paste agent: give it Settings → Paste.
         clipboard_configure(persistence::load_settings(::agentty::IoAccess::grant()).paste);

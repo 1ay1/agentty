@@ -918,8 +918,13 @@ struct Index {
         // a warm index (persisted, or already built) pays nothing.
         cc.split      = ::rag::util::Splitter{};
         cc.contextual = cfg.contextual;
-        if (source_code)
+        if (source_code) {
             cc.chunking = ::rag::index::CorpusConfig::Chunking::source;
+            // Questions about code use words ("clipboard read"); the code
+            // uses identifiers (on_clipboard_read). Index both.
+            cc.tokenize.split_identifiers = !(std::getenv("AGENTTY_RAG_SPLIT_IDENT")
+                                              && std::getenv("AGENTTY_RAG_SPLIT_IDENT")[0] == '0');
+        }
         return cc;
     }
 
@@ -1552,7 +1557,9 @@ struct Index {
             ::rag::plugin::Json j;
             in >> j;
             const auto stored = j.value("files", FileManifest{});
-            if (j.value("version", 0) != 2
+            // 3: code is indexed with split identifiers. An index written
+            // before that has postings for whole identifiers only: rebuild.
+            if (j.value("version", 0) != 3
                 || j.value("root", std::string{}) != root.string()
                 || stored != manifest
                 || j.value("contextual", false) != cfg.contextual
@@ -1582,7 +1589,7 @@ struct Index {
         fs::create_directories(db.parent_path(), ec);
         if (!code_engine.save(db.string())) return;
         ::rag::plugin::Json j = {
-            {"version", 2}, {"root", code_root}, {"files", code_files},
+            {"version", 3}, {"root", code_root}, {"files", code_files},
             {"contextual", cfg.contextual},
             {"embed_identity", ::agentty::rag::embed::identity(cfg.embed)},
             {"dense", dense_ready()},
@@ -2168,6 +2175,120 @@ Retrieval Retriever::retrieve(const std::string& query, int k, bool skip_docs) {
 }
 
 namespace {
+
+// Lowercase words of a query, minus filler, for matching against paths and
+// definition names.
+std::vector<std::string> query_words(std::string_view q) {
+    static const std::unordered_set<std::string> filler = {
+        "the", "a", "an", "of", "to", "in", "on", "for", "and", "or", "is", "are", "how",
+        "what", "where", "when", "why", "does", "do", "it", "its", "that", "this", "with",
+        "by", "from", "be", "as", "at", "which", "who", "can", "into", "out", "if", "so"};
+    std::vector<std::string> out;
+    std::string w;
+    auto flush = [&] {
+        if (w.size() >= 3 && !filler.contains(w)) out.push_back(w);
+        w.clear();
+    };
+    for (char c : q) {
+        if (std::isalnum(static_cast<unsigned char>(c))) w.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        else flush();
+    }
+    flush();
+    return out;
+}
+
+// Reorders search_code's over-fetched candidates the way someone looking for
+// an implementation would, then keeps `k`. Measured on tests/rag_eval (40
+// questions about this repo); each signal is there because the eval said so:
+//
+//   * role: a question about code wants the code. Tests, docs and build
+//     files are down-weighted unless the question asks for them ("test",
+//     "doc", "cmake"...). Headers rank just below their .cpp.
+//   * path: a query word in the file name or directory ("clipboard" ->
+//     src/io/clipboard.cpp) is strong evidence, the way a person reads a
+//     tree.
+//   * spread: a file's second chunk counts less and its third less again,
+//     so eight results cover several files instead of one file eight times.
+std::vector<::rag::SearchResult> code_rerank(const std::string& query, std::vector<::rag::SearchResult> in,
+                                             std::size_t k) {
+    if (in.empty()) return in;
+    // AGENTTY_RAG_CODE_RERANK=0: the engine's order as is (for A/B evals).
+    if (const char* e = std::getenv("AGENTTY_RAG_CODE_RERANK"); e && e[0] == '0') {
+        if (in.size() > k) in.resize(k);
+        return in;
+    }
+    const auto words = query_words(query);
+    auto asks = [&](std::initializer_list<std::string_view> ws) {
+        for (const auto& w : words)
+            for (auto x : ws)
+                if (w.starts_with(x)) return true;
+        return false;
+    };
+    const bool wants_tests = asks({"test", "spec", "fixture", "regression"});
+    const bool wants_docs  = asks({"doc", "readme", "guide", "explain", "design"});
+    const bool wants_build = asks({"cmake", "build", "compile", "link", "packag", "ci"});
+
+    float hi = 0.f, lo = std::numeric_limits<float>::max();
+    for (const auto& r : in) { hi = std::max(hi, r.score.value); lo = std::min(lo, r.score.value); }
+    const float range = hi > lo ? hi - lo : 1.f;
+
+    struct Scored { ::rag::SearchResult r; double s; std::string file; };
+    std::vector<Scored> v;
+    v.reserve(in.size());
+    for (auto& r : in) {
+        auto [src, path] = split_uri(r.uri);
+        (void)src;
+        std::string lp = path;
+        std::ranges::transform(lp, lp.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        double s = (r.score.value - lo) / range;   // engine's relevance, 0..1
+
+        const bool is_test  = lp.starts_with("tests/") || lp.contains("/tests/") || lp.contains("_test.")
+                           || lp.contains("test_") || lp.contains(".test.");
+        const bool is_doc   = lp.ends_with(".md") || lp.ends_with(".rst") || lp.ends_with(".txt")
+                           || lp.starts_with("docs/");
+        const bool is_build = lp.ends_with(".cmake") || lp.ends_with("cmakelists.txt") || lp.starts_with("packaging/")
+                           || lp.starts_with(".github/") || lp.ends_with(".rb") || lp.ends_with(".yml");
+        const bool is_header = lp.ends_with(".hpp") || lp.ends_with(".h");
+        if (is_test && !wants_tests) s *= 0.55;
+        if (is_doc && !wants_docs) s *= 0.6;
+        if (is_build && !wants_build) s *= 0.5;
+        if (is_header) s *= 0.9;
+
+        // Query words in the path: file name counts most, directories less.
+        const auto slash = lp.rfind('/');
+        const std::string_view base = slash == std::string::npos ? std::string_view{lp} : std::string_view{lp}.substr(slash + 1);
+        double path_hits = 0;
+        for (const auto& w : words) {
+            const std::string stem = w.size() > 5 ? w.substr(0, w.size() - 1) : w;   // "clipboards" ~ "clipboard"
+            if (base.contains(stem)) path_hits += 1.0;
+            else if (std::string_view{lp}.contains(stem)) path_hits += 0.4;
+        }
+        s += 0.25 * std::min(path_hits, 2.0);
+        v.push_back({std::move(r), s, path});
+    }
+    std::ranges::stable_sort(v, std::greater{}, &Scored::s);
+
+    // Spread: walk in order, discounting each further chunk from a file, and
+    // re-sort once. (A single pass is enough: the discount only lowers.)
+    std::unordered_map<std::string, int> seen;
+    for (auto& x : v) {
+        const int n = seen[x.file]++;
+        if (n == 1) x.s *= 0.7;
+        else if (n >= 2) x.s *= 0.45;
+    }
+    std::ranges::stable_sort(v, std::greater{}, &Scored::s);
+
+    std::vector<::rag::SearchResult> out;
+    out.reserve(std::min(k, v.size()));
+    for (auto& x : v) {
+        if (out.size() >= k) break;
+        // Keep the score the rest of the code reads in the same 0..1 range.
+        x.r.score = ::rag::Score{static_cast<float>(std::clamp(x.s, 0.0, 1.0))};
+        out.push_back(std::move(x.r));
+    }
+    return out;
+}
+
 // The body of retrieve_code(), run with the index locked.
 Retrieval retrieve_code_locked(Index& ix, const std::string& query, int kk) {
     Retrieval out;
@@ -2271,14 +2392,17 @@ Retrieval retrieve_code_locked(Index& ix, const std::string& query, int kk) {
     if (ix.code_engine.corpus().has_embedder()
         && ix.defer_for({query}))
         return out;
-    auto res = ix.code_engine.search(query, static_cast<std::size_t>(kk),
-                                         {}, code_tracep);
+    // Over-fetch, then rerank with what a code question actually wants (see
+    // code_rerank): the engine's ranking alone puts tests, docs and three
+    // chunks of one file above the implementation the question is about.
+    const std::size_t pool = static_cast<std::size_t>(std::max(kk * 4, 32));
+    auto res = ix.code_engine.search(query, pool, {}, code_tracep);
     if (!res) { out.error = "search_code failed"; return out; }
     double top = 0.0;
     // Relevance floor + score-proportional budget (same rationale as the
     // docs path): don't pay tokens for the low-confidence tail, and give
     // the confident head room to be complete.
-    std::vector<::rag::SearchResult> ranked(res->begin(), res->end());
+    std::vector<::rag::SearchResult> ranked = code_rerank(query, std::move(*res), static_cast<std::size_t>(kk));
     {
         double hi = 0.0;
         for (const auto& r : ranked) hi = std::max(hi, static_cast<double>(r.score.value));
@@ -2902,6 +3026,78 @@ int run(const std::string& root) {
         return 1;
     }
 }
+
+// Normalise a passage path to repo-relative with forward slashes, so it can
+// be compared to the eval's gold paths.
+static std::string rel_path(const std::string& p, const fs::path& root) {
+    std::string s = p;
+    for (const char* pre : {"code://", "docs://"})
+        if (s.starts_with(pre)) s.erase(0, std::strlen(pre));
+    std::error_code ec;
+    fs::path fp{s};
+    if (fp.is_absolute()) {
+        auto r = fs::relative(fp, root, ec);
+        if (!ec) fp = r;
+    }
+    return fp.generic_string();
+}
+
+int eval(const std::string& eval_file, int k) {
+    std::ifstream in(eval_file);
+    if (!in) {
+        std::fprintf(stderr, "rag-eval: can't read %s\n", eval_file.c_str());
+        return 2;
+    }
+    ::rag::plugin::Json cases;
+    try { in >> cases; } catch (...) {
+        std::fprintf(stderr, "rag-eval: %s is not JSON\n", eval_file.c_str());
+        return 2;
+    }
+    const fs::path root = fs::current_path();
+    Retriever ret;
+    const auto t0 = std::chrono::steady_clock::now();
+    // First call builds the index; time it separately from the queries.
+    (void)ret.retrieve_code("warm up", 1);
+    const auto build_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+
+    int n = 0, hit1 = 0, hitk = 0;
+    double mrr = 0;
+    std::vector<std::string> misses;
+    const auto q0 = std::chrono::steady_clock::now();
+    for (const auto& c : cases) {
+        const std::string q = c.value("q", std::string{});
+        std::unordered_set<std::string> gold;
+        for (const auto& g : c.value("gold", std::vector<std::string>{})) gold.insert(g);
+        if (q.empty() || gold.empty()) continue;
+        ++n;
+        const auto r = ret.retrieve_code(q, k);
+        // File-level rank: the first passage from any gold file.
+        int rank = 0;
+        std::vector<std::string> got;
+        for (std::size_t i = 0; i < r.passages.size(); ++i) {
+            const auto rp = rel_path(r.passages[i].path, root);
+            if (got.size() < 3) got.push_back(rp);
+            if (!rank && gold.contains(rp)) rank = static_cast<int>(i) + 1;
+        }
+        if (rank == 1) ++hit1;
+        if (rank >= 1) { ++hitk; mrr += 1.0 / rank; }
+        else {
+            std::string m = "  MISS  " + q + "\n        got:";
+            for (const auto& g : got) m += " " + g;
+            if (!r.error.empty()) m += " (error: " + r.error + ")";
+            misses.push_back(std::move(m));
+        }
+    }
+    const auto q_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - q0).count();
+    std::printf("rag-eval: %d cases, k=%d, index %lld ms, %lld ms/query\n", n, k,
+                static_cast<long long>(build_ms), n ? static_cast<long long>(q_ms / n) : 0LL);
+    std::printf("  hit@1   %.3f\n  hit@%d  %.3f\n  MRR     %.3f\n", n ? double(hit1) / n : 0.0, k,
+                n ? double(hitk) / n : 0.0, n ? mrr / n : 0.0);
+    for (const auto& m : misses) std::printf("%s\n", m.c_str());
+    return 0;
+}
 } // namespace bench
 
 } // namespace agentty::rag
@@ -2975,6 +3171,7 @@ int run(const std::string& /*root*/) {
                  "platform (rag-cpp is not yet Windows-portable).\n");
     return 2;
 }
+int eval(const std::string& /*eval_file*/, int /*k*/) { return run({}); }
 }  // namespace bench
 
 }  // namespace agentty::rag

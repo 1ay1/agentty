@@ -246,6 +246,10 @@ void note_file_opened(const maya::below<maya::leaf>&, const std::string& path);
 // ── CLI: `agentty rag-bench <root>` ────────────────────────────────────
 namespace bench {
 int run(const std::string& root);
+// Judged eval: each case is {q, gold:[paths]}. Runs search_code (the exact
+// tool path) from the current directory and prints file-level recall@k, MRR
+// and the misses. `eval_file` is a JSON array. Exit 0 always (it's a report).
+int eval(const std::string& eval_file, int k);
 }
 
 } // namespace agentty::rag

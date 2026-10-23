@@ -166,7 +166,12 @@ std::optional<std::string> spec_json(const EmbedConfig& c) {
             j["model"] = c.model;
             j["host"]  = c.host;
             j["port"]  = c.port;
-            j["timeout_ms"] = 1200;
+            // Ollama loads a model on first use (1-2 s for nomic-embed-text,
+            // more on a busy GPU) and a big batch takes a while too. 1.2 s
+            // timed out the very first probe, and agentty then ran BM25-only
+            // for the whole session. A dead endpoint still fails fast: the
+            // connect is refused, not timed out.
+            j["timeout_ms"] = 30000;
             break;
         case Backend::OpenAI:
             j["model"] = c.model;
