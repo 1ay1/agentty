@@ -619,6 +619,16 @@ jobs:
             Get-Content (Join-Path $env:AGENTTY_HOME "logs/stderr.log") -ErrorAction SilentlyContinue | Select-Object -Last 20
             throw ("agentty crashed at startup (0x{0:X8})" -f $rc)
           }
+      - name: Smoke test a real console session (ConPTY)
+        shell: pwsh
+        # A real pseudo console this time: the TUI must draw a frame, take
+        # /quit from the keyboard and exit 0.
+        run: |
+          $exe = Get-ChildItem -Recurse build -Filter agentty.exe | Select-Object -First 1
+          $env:AGENTTY_HOME = Join-Path $env:RUNNER_TEMP "agentty-home-conpty"
+          New-Item -ItemType Directory -Force $env:AGENTTY_HOME | Out-Null
+          $env:AGENTTY_NO_PREWARM = "1"
+          ./tests/windows/conpty_smoke.ps1 $exe.FullName
 
   # MinGW / MSYS2 ucrt64 gate. This is the toolchain real Windows users build
   # under, and CRUCIALLY it is the ONLY Windows path that actually COMPILES the
