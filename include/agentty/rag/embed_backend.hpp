@@ -186,6 +186,10 @@ using Validity = std::variant<std::monostate, Invalid>;
 // Excludes api_key (a credential, not geometry) and every ranking-only knob.
 [[nodiscard]] std::uint64_t identity(const EmbedConfig& c);
 
+// {query prefix, document prefix} the model was trained with (nomic:
+// "search_query: " / "search_document: "), empty for models without them.
+[[nodiscard]] std::pair<std::string, std::string> prefixes(const EmbedConfig& c);
+
 // Short hex form used in filenames.
 [[nodiscard]] std::string identity_tag(const EmbedConfig& c);
 

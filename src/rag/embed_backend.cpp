@@ -122,6 +122,25 @@ Validity validate(const EmbedConfig& c) {
 }
 
 // ── Identity ─────────────────────────────────────────────────────────────
+std::pair<std::string, std::string> prefixes(const EmbedConfig& c) {
+    // AGENTTY_EMBED_PREFIX=0 turns them off (for A/B).
+    if (const char* e = std::getenv("AGENTTY_EMBED_PREFIX"); e && e[0] == '0') return {};
+    if (!needs_model_name(concrete(c.backend))) return {};
+    std::string m = c.model;
+    for (auto& ch : m) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (m.find("nomic-embed") != std::string::npos)
+        return {"search_query: ", "search_document: "};
+    const bool e5 = m.starts_with("e5-") || m.find("/e5-") != std::string::npos
+                 || m.find("-e5-") != std::string::npos;
+    if (e5 && m.find("instruct") == std::string::npos)
+        return {"query: ", "passage: "};
+    if (m.find("mxbai-embed") != std::string::npos)
+        return {"Represent this sentence for searching relevant passages: ", ""};
+    if (m.find("snowflake-arctic-embed") != std::string::npos)
+        return {"Represent this sentence for searching relevant passages: ", ""};
+    return {};
+}
+
 std::uint64_t identity(const EmbedConfig& c) {
     std::uint64_t h = kFnvOffset;
     // The backend id is part of the geometry: the same weights served by
@@ -139,6 +158,11 @@ std::uint64_t identity(const EmbedConfig& c) {
         hash_text(h, c.tokenizer_path);
     }
     hash_u64(h, c.dim);
+    // Prefixes change every stored vector, so they're part of the space.
+    if (const auto [q, d] = prefixes(c); !q.empty() || !d.empty()) {
+        hash_text(h, q);
+        hash_text(h, d);
+    }
     // Deliberately NOT hashed: api_key. Rotating a credential must not throw
     // away a perfectly valid index.
     return h;

@@ -918,6 +918,7 @@ struct Index {
         // a warm index (persisted, or already built) pays nothing.
         cc.split      = ::rag::util::Splitter{};
         cc.contextual = cfg.contextual;
+        std::tie(cc.query_prefix, cc.doc_prefix) = ::agentty::rag::embed::prefixes(cfg.embed);
         if (source_code) {
             cc.chunking = ::rag::index::CorpusConfig::Chunking::source;
             // Questions about code use words ("clipboard read"); the code
@@ -1878,11 +1879,12 @@ Retrieval retrieve_locked(Index& ix, const std::string& query, int kk, bool skip
             ? "Generate 3 alternative phrasings of the following question, one per line.\n\nQuestion: " + query
             : "Write a short passage that directly answers the question.\n\nQuestion: " + query + "\nPassage:";
         ix.gen_n = gen_n;
-        (void)ix.defer_for({query});   // its vector comes along
+        (void)ix.defer_for({active_engine.corpus().query_text(query)});   // its vector comes along
         return out;
     }
     // The query's own vector is a network call too: fetch it outside the lock.
-    if (active_engine.corpus().has_embedder() && ix.defer_for({query})) return out;
+    if (active_engine.corpus().has_embedder()
+        && ix.defer_for({active_engine.corpus().query_text(query)})) return out;
 
     // ── RETRIEVE ──────────────────────────────────────────────────
     // 1. Base hybrid retrieval through the full pipeline (PRF → convex
@@ -2427,7 +2429,7 @@ Retrieval retrieve_code_locked(Index& ix, const std::string& query, int kk) {
     std::vector<std::string>* code_tracep = ix.cfg.trace ? &code_trace : nullptr;
     // The query's vector is a network call too: fetch it outside the lock.
     if (ix.code_engine.corpus().has_embedder()
-        && ix.defer_for({query}))
+        && ix.defer_for({ix.code_engine.corpus().query_text(query)}))
         return out;
     // Over-fetch, then rerank with what a code question actually wants (see
     // code_rerank): the engine's ranking alone puts tests, docs and three

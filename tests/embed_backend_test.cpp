@@ -92,6 +92,20 @@ TEST_CASE("embed: identity separates vector spaces") {
     CHECK(identity(a) != identity(g));
 }
 
+TEST_CASE("embed: models trained with prefixes get them") {
+    auto n = ollama_cfg();
+    n.model = "nomic-embed-text";
+    CHECK(prefixes(n).first == "search_query: ");
+    CHECK(prefixes(n).second == "search_document: ");
+    auto e = openai_cfg();
+    e.model = "intfloat/multilingual-e5-large";
+    CHECK(prefixes(e).first == "query: ");
+    auto plain = openai_cfg();
+    plain.model = "text-embedding-3-small";
+    CHECK(prefixes(plain).first.empty());
+    CHECK(prefixes(plain).second.empty());
+}
+
 TEST_CASE("embed: identity ignores the credential") {
     // Rotating an API key must not invalidate a warm index — it authenticates,
     // it does not define the geometry.
