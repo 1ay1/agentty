@@ -2440,7 +2440,14 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
             // Append so a crash's trailing output survives across sessions;
             // truncation would lose the very lines you'd want post-mortem.
             if (std::freopen(logpath.string().c_str(), "a", stderr)) {
-                std::setvbuf(stderr, nullptr, _IOLBF, 0);   // line-buffered
+                // size must be non-zero: MSVC's UCRT validates `size - 2` against
+                // INT_MAX and rejects 0 as an invalid argument, which runs the
+                // invalid-parameter handler -> __fastfail(FAST_FAIL_INVALID_ARG)
+                // -> 0xC0000409 before the TUI ever draws a frame. The C standard
+                // allows a NULL buffer with size 0 (size is then ignored), but the
+                // UCRT does not, and only the MSVC release build links that CRT --
+                // which is why a MinGW/clang64 build of the same source survived.
+                std::setvbuf(stderr, nullptr, _IOLBF, BUFSIZ);   // line-buffered
                 std::fprintf(stderr, "\n=== agentty session %ld ===\n",
                              static_cast<long>(agentty_pid()));
             }
