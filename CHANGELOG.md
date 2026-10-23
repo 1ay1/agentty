@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.32] - 2026-10-23
+
 ### Fixed
 - **The Windows release binary starts again.** It quit at launch with
   0xC0000409 before drawing anything: `setvbuf` with size 0 is legal C but
