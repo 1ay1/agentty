@@ -1503,8 +1503,12 @@ int run_main(int argc, char** argv, const maya::unlocked& cap) {
         return mcp::oauth::cmd_mcp_status();
     if (args.subcommand == "rag-bench")
         return rag::bench::run(args.cli_bench_root);
-    if (args.subcommand == "rag-eval")
-        return rag::bench::eval(args.cli_bench_root, 8);
+    if (args.subcommand == "rag-eval") {
+        // AGENTTY_RAG_EVAL_K=32 shows recall of the wider pool.
+        int k = 8;
+        if (const char* e = std::getenv("AGENTTY_RAG_EVAL_K"); e && std::atoi(e) > 0) k = std::atoi(e);
+        return rag::bench::eval(args.cli_bench_root, k);
+    }
     if (args.subcommand == "airgap") {
         // --clipboard-relay starts the paste agent: give it Settings → Paste.
         clipboard_configure(persistence::load_settings(::agentty::IoAccess::grant()).paste);

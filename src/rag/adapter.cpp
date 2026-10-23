@@ -2224,6 +2224,7 @@ std::vector<std::string> query_words(std::string_view q) {
 //     tree.
 //   * spread: a file's second chunk counts less and its third less again,
 //     so eight results cover several files instead of one file eight times.
+//   * pair: a header in the pool lifts its .cpp to just above it.
 std::vector<::rag::SearchResult> code_rerank(const std::string& query, std::vector<::rag::SearchResult> in,
                                              std::size_t k) {
     if (in.empty()) return in;
@@ -2280,6 +2281,27 @@ std::vector<::rag::SearchResult> code_rerank(const std::string& query, std::vect
         }
         s += 0.25 * std::min(path_hits, 2.0);
         v.push_back({std::move(r), s, path});
+    }
+
+    // Pair: a header ranked well lifts its own .cpp just above it, since the
+    // question is usually about the implementation. Keyed on the bare stem:
+    // headers and sources often sit in different dirs (auth/ vs io/).
+    auto stem_of = [](std::string_view p) {
+        const auto sl = p.rfind('/');
+        if (sl != std::string_view::npos) p = p.substr(sl + 1);
+        return std::string{p.substr(0, p.rfind('.'))};
+    };
+    {
+        std::unordered_map<std::string, double> hdr;
+        for (const auto& x : v)
+            if (x.file.ends_with(".hpp") || x.file.ends_with(".h")) {
+                auto& h = hdr[stem_of(x.file)];
+                h = std::max(h, x.s);
+            }
+        for (auto& x : v)
+            if (x.file.ends_with(".cpp") || x.file.ends_with(".cc") || x.file.ends_with(".c"))
+                if (auto it = hdr.find(stem_of(x.file)); it != hdr.end())
+                    x.s = std::max(x.s, it->second * 1.02);
     }
     std::ranges::stable_sort(v, std::greater{}, &Scored::s);
 
@@ -3079,7 +3101,7 @@ int eval(const std::string& eval_file, int k) {
     int n = 0, hit1 = 0, hitk = 0;
     double mrr = 0;
     std::vector<std::string> misses;
-    // AGENTTY_RAG_EVAL_ALL=1 lists every result of a miss, not just 3.
+    // AGENTTY_RAG_EVAL_ALL=1 prints every case's rank and every result of a miss.
     const char* all_env = std::getenv("AGENTTY_RAG_EVAL_ALL");
     const std::size_t show = (all_env && all_env[0] == '1') ? SIZE_MAX : 3;
     const auto q0 = std::chrono::steady_clock::now();
@@ -3099,6 +3121,7 @@ int eval(const std::string& eval_file, int k) {
             if (!rank && gold.contains(rp)) rank = static_cast<int>(i) + 1;
         }
         if (rank == 1) ++hit1;
+        if (show == SIZE_MAX) std::printf("  rank %d  %s\n", rank, q.c_str());
         if (rank >= 1) { ++hitk; mrr += 1.0 / rank; }
         else {
             std::string m = "  MISS  " + q + "\n        got:";
