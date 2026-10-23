@@ -1,0 +1,22 @@
+{"tool": "search_docs", "cases": [
+ {"q": "run agentty non-interactively from a script", "gold": ["website/cli.md"]},
+ {"q": "what can a sandboxed command reach on the network", "gold": ["website/sandboxing.md", "design/sandbox-boundary.md"]},
+ {"q": "write a skill with extra script files", "gold": ["website/skills.md"]},
+ {"q": "pass arguments to my own slash command", "gold": ["website/slash-commands.md"]},
+ {"q": "expose agentty's tools to another mcp client", "gold": ["website/mcp.md"]},
+ {"q": "set it up inside a jetbrains ide", "gold": ["website/acp.md"]},
+ {"q": "first steps after installing", "gold": ["website/quick-start.md"]},
+ {"q": "why the first token arrives fast", "gold": ["website/performance.md"]},
+ {"q": "copy a conversation into a new thread", "gold": ["website/fork.md", "website/threads.md"]},
+ {"q": "can I use my claude subscription", "gold": ["website/faq.md"]},
+ {"q": "make a plugin in python", "gold": ["website/build-a-plugin.md"]},
+ {"q": "how project and user config files are merged", "gold": ["design/scope-model.md"]},
+ {"q": "retry when the model response gets cut off", "gold": ["design/streaming.md"]},
+ {"q": "why maya never owns threads", "gold": ["LAYERING.md"]},
+ {"q": "use a custom auth header for an api gateway", "gold": ["auth.md"]},
+ {"q": "where to submit agentty for discovery", "gold": ["DISTRIBUTION.md"]},
+ {"q": "how the conversation view is built from widgets", "gold": ["RENDERING.md"]},
+ {"q": "what the model and permission settings are when used from an editor", "gold": ["website/acp.md"]},
+ {"q": "serve tools to claude desktop", "gold": ["website/mcp.md"]},
+ {"q": "role based routing between a cheap and a strong model", "gold": ["design/smart-mode.md", "website/smart-mode.md", "website/smart-mode-routing.md"]}
+]}

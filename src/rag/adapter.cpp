@@ -3104,11 +3104,25 @@ int eval(const std::string& eval_file, int k) {
         std::fprintf(stderr, "rag-eval: %s is not JSON\n", eval_file.c_str());
         return 2;
     }
-    const fs::path root = fs::current_path();
+    // A bare array is search_code cases; {"tool":"search_docs","cases":[...]}
+    // runs search_docs, with gold paths relative to the docs root.
+    const bool docs = cases.is_object() && cases.value("tool", std::string{}) == "search_docs";
+    if (cases.is_object()) {
+        ::rag::plugin::Json inner = cases.value("cases", ::rag::plugin::Json::array());
+        cases = std::move(inner);
+    }
+    const fs::path root = docs ? resolve_docs_root({}) : fs::current_path();
+    if (root.empty()) {
+        std::fprintf(stderr, "rag-eval: no docs root (set AGENTTY_DOCS_DIR)\n");
+        return 2;
+    }
     Retriever ret;
+    auto search = [&](const std::string& q, int kk) {
+        return docs ? ret.retrieve(q, kk) : ret.retrieve_code(q, kk);
+    };
     const auto t0 = std::chrono::steady_clock::now();
     // First call builds the index; time it separately from the queries.
-    (void)ret.retrieve_code("warm up", 1);
+    (void)search("warm up", 1);
     const auto build_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
 
@@ -3125,7 +3139,7 @@ int eval(const std::string& eval_file, int k) {
         for (const auto& g : c.value("gold", std::vector<std::string>{})) gold.insert(g);
         if (q.empty() || gold.empty()) continue;
         ++n;
-        const auto r = ret.retrieve_code(q, k);
+        const auto r = search(q, k);
         // File-level rank: the first passage from any gold file.
         int rank = 0;
         std::vector<std::string> got;
@@ -3135,7 +3149,14 @@ int eval(const std::string& eval_file, int k) {
             if (!rank && gold.contains(rp)) rank = static_cast<int>(i) + 1;
         }
         if (rank == 1) ++hit1;
-        if (show == SIZE_MAX) std::printf("  rank %d  %s\n", rank, q.c_str());
+        if (show == SIZE_MAX) {
+            std::printf("  rank %d  %s\n", rank, q.c_str());
+            if (rank != 1) {
+                std::printf("        top:");
+                for (std::size_t i = 0; i < got.size() && i < 3; ++i) std::printf(" %s", got[i].c_str());
+                std::printf("\n");
+            }
+        }
         if (rank >= 1) { ++hitk; mrr += 1.0 / rank; }
         else {
             std::string m = "  MISS  " + q + "\n        got:";
