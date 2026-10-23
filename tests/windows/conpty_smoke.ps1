@@ -50,6 +50,10 @@ public static class ConPty {
         InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
         var si = new STARTUPINFOEX();
         si.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+        // STARTF_USESTDHANDLES with null handles: otherwise a child of a
+        // parent whose stdio is redirected (any CI runner) gets those pipes
+        // instead of the pseudo console.
+        si.StartupInfo.dwFlags = 0x00000100;
         si.lpAttributeList = Marshal.AllocHGlobal(size);
         if (!InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, ref size)) throw new Exception("attr list");
         if (!UpdateProcThreadAttribute(si.lpAttributeList, 0, (IntPtr)0x20016 /*PSEUDOCONSOLE*/, pc, (IntPtr)IntPtr.Size, IntPtr.Zero, IntPtr.Zero))
@@ -116,10 +120,12 @@ Write-Host ("exit: {0} (0x{0:X8})" -f $rc)
 Write-Host "--- screen (plain, last 1500 chars) ---"
 Write-Host ($plain.Substring([Math]::Max(0, $plain.Length - 1500)))
 
-if ($rc -ne 0) {
+$failed = $null
+if ($rc -ne 0) { $failed = ("agentty under ConPTY did not exit cleanly after /quit (exit 0x{0:X8})" -f $rc) }
+elseif ($screen.Length -lt 200) { $failed = "agentty exited 0 but never drew a frame" }
+if ($failed) {
     $log = Join-Path $env:AGENTTY_HOME 'logs/stderr.log'
     if (Test-Path $log) { Write-Host '--- stderr.log ---'; Get-Content $log -Tail 40 }
-    throw ("agentty under ConPTY did not exit cleanly after /quit (exit 0x{0:X8})" -f $rc)
+    throw $failed
 }
-if ($screen.Length -lt 200) { throw "agentty exited 0 but never drew a frame" }
 Write-Host 'ok: drew a frame, took /quit, exited 0'
