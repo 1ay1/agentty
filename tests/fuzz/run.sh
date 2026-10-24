@@ -10,18 +10,21 @@ SECS=${1:-60}
 OUT=build-fuzz
 mkdir -p "$OUT"
 
-# nlohmann/json: system copy, else one a cmake build already fetched.
+# nlohmann/json: a system copy needs no flag (adding /usr/include as
+# -isystem breaks libstdc++'s #include_next); else one cmake fetched.
 NJ=${NLOHMANN_INCLUDE:-}
 if [ -z "$NJ" ]; then
-    for d in /usr/include /usr/local/include build/_deps/nlohmann_json-src/include \
+    for d in build/_deps/nlohmann_json-src/include \
              third_party/rag-cpp/build/_deps/nlohmann_json-src/include; do
         [ -f "$d/nlohmann/json.hpp" ] && { NJ=$d; break; }
     done
 fi
-[ -n "$NJ" ] || { echo "run.sh: nlohmann/json not found; set NLOHMANN_INCLUDE" >&2; exit 2; }
+if [ -n "$NJ" ]; then NJ_FLAG="-isystem $NJ"
+elif echo '#include <nlohmann/json.hpp>' | clang++ -std=c++20 -fsyntax-only -x c++ - 2>/dev/null; then NJ_FLAG=""
+else echo "run.sh: nlohmann/json not found; set NLOHMANN_INCLUDE" >&2; exit 2; fi
 
 INC="-Iinclude -Ithird_party/maya/include -Ithird_party/maya/third_party/jaal/include \
- -isystem third_party/mcp-cpp/include -isystem $NJ"
+ -isystem third_party/mcp-cpp/include $NJ_FLAG"
 FLAGS="-std=c++26 -O1 -g -fno-omit-frame-pointer -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined"
 printf '%s\n' "$INC" > "$OUT/include_flags"   # for one-off repros: eval clang++ $(cat ...)
 
