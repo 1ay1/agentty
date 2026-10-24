@@ -82,11 +82,13 @@ decode_string_from(std::string_view raw, std::size_t offset);
 // `*through` past it) or at end-of-buffer. Designed for repeated
 // calls as `raw` grows: cumulative work is O(raw.size()) over the
 // stream, vs O(raw.size()²) for naive re-decoding. Returns true iff
-// the closing `"` was seen (i.e. the value is now complete and
-// future calls will be no-ops).
+// the closing `"` was seen. Pass `closed` (kept by the caller across
+// calls) so later calls stay no-ops: `*through` alone sits just past the
+// quote and would decode the next JSON member into the value.
 bool decode_string_append(std::string_view raw,
                           std::size_t* through,
-                          std::string& out);
+                          std::string& out,
+                          bool* closed = nullptr);
 
 // Returns true iff `raw` ends with an unterminated JSON string —
 // equivalently, iff `close_partial_json(raw)` would synthesise a

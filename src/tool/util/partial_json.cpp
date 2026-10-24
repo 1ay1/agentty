@@ -307,8 +307,12 @@ decode_string_from(std::string_view raw, std::size_t offset) {
 bool
 decode_string_append(std::string_view raw,
                      std::size_t* through,
-                     std::string& out)
+                     std::string& out,
+                     bool* closed)
 {
+    // Once the closing `"` was seen, later calls must not decode whatever
+    // follows it (the next JSON member) into the value.
+    if (closed && *closed) return true;
     if (!through || *through >= raw.size()) return false;
     std::size_t p = *through;
     // Reserve a guess for the new bytes — most escapes are 1-byte
@@ -330,6 +334,7 @@ decode_string_append(std::string_view raw,
             // return immediately (idempotent post-close).
             ++p;
             *through = p;
+            if (closed) *closed = true;
             return true;
         } else {
             out.push_back(c);

@@ -252,6 +252,7 @@ struct ToolUse {
     // we've consumed; the next decode pass resumes there.
     mutable std::string stream_decoded_value;
     std::size_t         stream_decode_through = 0;
+    bool                stream_decode_closed  = false;   // value's closing " seen
     // Amortization cursor for the edit/todo structured preview. Those two
     // branches can't use write's incremental cached-offset decode (they
     // mirror a growing ARRAY of objects, not one long string), so they lean

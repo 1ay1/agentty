@@ -117,3 +117,24 @@ TEST_CASE("partial json: ended_inside_string matches the shapes it should") {
     CHECK_FALSE(ended_inside_string(R"({"a":"hello")"));
     CHECK_FALSE(ended_inside_string(R"({"a":1)"));
 }
+
+// The write preview decodes `content` a few bytes at a time as the args
+// stream in. Once the value's closing quote has been consumed, a later call
+// with more bytes must not decode the NEXT member into the value. Found by
+// tests/fuzz: the preview showed `","path":"…` glued onto the content.
+TEST_CASE("partial json: incremental decode stays closed once the value ends") {
+    using agentty::tools::util::decode_string_append;
+    using agentty::tools::util::decode_string_from;
+    using agentty::tools::util::locate_string_value;
+    const std::string raw = R"({"content":"hi \"there\"","path":"a.txt"})";
+    const auto at = locate_string_value(raw, "content");
+    REQUIRE(at.has_value());
+    std::string inc;
+    std::size_t through = *at;
+    bool closed = false;
+    for (std::size_t end = *at; end <= raw.size(); ++end)
+        (void)decode_string_append(std::string_view{raw}.substr(0, end), &through, inc, &closed);
+    CHECK(closed);
+    CHECK(inc == decode_string_from(raw, *at));
+    CHECK(inc == "hi \"there\"");
+}

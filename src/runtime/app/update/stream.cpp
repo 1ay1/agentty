@@ -1490,6 +1490,7 @@ Cmd stream_update(Model& m, msg::StreamMsg sm) {
                 tc->stream_sniff_size = 0;
                 tc->stream_decoded_value.clear();
                 tc->stream_decode_through = 0;
+                tc->stream_decode_closed = false;
                 tc->stream_parse_through = 0;
                 update_stream_preview(*tc);
                 tc->last_preview_at = now;

@@ -183,7 +183,8 @@ void update_stream_preview(ToolUse& tc) {
             agentty::tools::util::decode_string_append(
                 tc.args_streaming,
                 &tc.stream_decode_through,
-                tc.stream_decoded_value);
+                tc.stream_decoded_value,
+                &tc.stream_decode_closed);
             constexpr std::size_t kKeepCap = 2 * kStreamingPreviewCap;
             if (tc.stream_decoded_value.size() > kKeepCap) {
                 // Trim the head, keep the freshest 2×cap bytes. The
