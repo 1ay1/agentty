@@ -20,8 +20,8 @@ agentty has a built-in retrieval engine:
 
 - **Hybrid search** — BM25 (lexical) + dense embeddings, so it finds relevant code by both keyword and meaning.
 - **Code-aware chunks** — it splits along function/class boundaries, not arbitrary line windows.
-- **HNSW ANN + GraphRAG expansion** — fast nearest-neighbour lookup plus graph-based expansion to pull in related definitions.
-- **A learning loop** — retrieval sharpens the more you use it on a repo.
+- **HNSW ANN + code-aware ranking** — fast nearest-neighbour lookup, then source above tests and docs, and results spread across files instead of one file eight times.
+- **Hard output budget** — passages are trimmed to the sentences that match and packed under a fixed byte cap, so a search never floods the context.
 
 The result: only the few relevant chunks are sent to the model, not the whole file tree.
 

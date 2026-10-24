@@ -96,19 +96,26 @@ serving an id no catalog has published.
 
 ## Retrieval (RAG)
 
-Full detail in **[Retrieval](/docs/retrieval)**. Most default sensibly; the
-common ones are `AGENTTY_DOCS_DIR` and `AGENTTY_EMBED_MODEL`.
+Full detail in **[Retrieval](/docs/retrieval)**. Nothing here is needed: with
+Ollama running and `qwen3-embedding:0.6b` or `nomic-embed-text` pulled, search
+by meaning turns on by itself. `agentty diagnostics` shows what is in use.
 
 | Variable | Effect |
 |----------|--------|
-| `AGENTTY_DOCS_DIR` | Directory to index as your knowledge base. |
-| `AGENTTY_EMBED_MODEL` | Embedding model (via Ollama). |
-| `AGENTTY_RAG_PERSIST` | Cache the built index to `.agentty/rag_docs.ragdb` so later sessions open warm. On by default; `=0` disables. |
-| `AGENTTY_RAG_LEARN` | Fold each passage's win-rate back into ranking. On by default; `=0` disables. |
-| `AGENTTY_RAG_PROACTIVE` · `AGENTTY_RAG_PROACTIVE_MIN` · `AGENTTY_RAG_PROACTIVE_BYTES` | Pre-turn auto-retrieval and its thresholds. Off by default. |
+| `AGENTTY_DOCS_DIR` | Folder `search_docs` indexes. Default `./docs`, then `./.agentty/knowledge`. Skills and memory are searched either way. |
+| `AGENTTY_EMBED_BACKEND` | `auto` (default: a local Ollama if found), `ollama`, `openai` (any OpenAI-compatible endpoint), `llamacpp`, `gguf`, `onnx`, or `off` (keyword only). |
+| `AGENTTY_EMBED_MODEL` | Embedding model. On `auto`, agentty uses `qwen3-embedding:0.6b` when it's pulled, else `nomic-embed-text`. |
+| `AGENTTY_EMBED_ENDPOINT` · `AGENTTY_EMBED_PATH` · `AGENTTY_EMBED_API_KEY` | Where a non-Ollama embedder lives (`https://host:port`), its request path, and its key. |
+| `AGENTTY_EMBED_MODEL_PATH` · `AGENTTY_EMBED_TOKENIZER` | Model file (and ONNX tokenizer) for the in-process backends. |
+| `AGENTTY_EMBED_PREFIX` | `0` stops agentty adding the query/document prefixes some models were trained with (nomic, e5, mxbai, arctic). |
+| `AGENTTY_RAG_PERSIST` | Keep indexes on disk so restarts are warm and edits update in place. On by default; `=0` disables. |
+| `AGENTTY_RAG_LEARN` | Nudge ranking toward passages you go on to open. Off by default. |
+| `AGENTTY_RAG_PROACTIVE` · `AGENTTY_RAG_PROACTIVE_MIN` · `AGENTTY_RAG_PROACTIVE_BYTES` | Pre-turn auto-retrieval and its thresholds. Off by default; persist it in `/settings` → *Proactive retrieval (RAG)*. |
 | `AGENTTY_RAG_EXPAND` · `AGENTTY_RAG_HYDE` · `AGENTTY_RAG_GEN_MODEL` | LLM-assisted recall (multi-query, HyDE) via a small local model. Opt-in. |
-| `AGENTTY_RAG_BM25_WEIGHT` · `AGENTTY_RAG_DENSE_WEIGHT` · `AGENTTY_RAG_FUSION` · `AGENTTY_RAG_ADAPTIVE` | Hybrid-search weighting and the fusion strategy. `_ADAPTIVE` (on) picks weights per query. |
+| `AGENTTY_RAG_PRF` · `AGENTTY_RAG_GRAPH` · `AGENTTY_RAG_CORRECT` | Pseudo-relevance feedback, GraphRAG, corrective retry. Opt-in. |
+| `AGENTTY_RAG_BM25_WEIGHT` · `AGENTTY_RAG_DENSE_WEIGHT` · `AGENTTY_RAG_FUSION` · `AGENTTY_RAG_ADAPTIVE` | Hybrid weighting and fusion: `convex` (default, adapts per query) or `rrf` (uses the two weights). |
 | `AGENTTY_RAG_MMR` · `AGENTTY_RAG_MMR_LAMBDA` · `AGENTTY_RAG_DEDUP` · `AGENTTY_RAG_DEDUP_THRESHOLD` | Diversity and near-duplicate suppression in results. Both on by default. |
+| `AGENTTY_RAG_CODE_RERANK` · `AGENTTY_RAG_SPLIT_IDENT` | `search_code`'s code-aware rerank and identifier splitting. On by default; `=0` turns one off (for A/B tests). |
 | `AGENTTY_RAG_AUTOCUT` · `AGENTTY_RAG_AUTOCUT_SENSITIVITY` · `AGENTTY_RAG_RELEVANCE_FLOOR` | Drop weak tail results automatically. On by default. |
 | `AGENTTY_RAG_CONTEXTUAL` · `AGENTTY_RAG_EXTRACTIVE` · `AGENTTY_RAG_STITCH` · `AGENTTY_RAG_CORRECT` · `AGENTTY_RAG_PRF` · `AGENTTY_RAG_GRAPH` | Individual retrieval stages (contextual headers, extractive compression, chunk stitching, correction, pseudo-relevance feedback, graph expansion). |
 | `AGENTTY_RAG_MEMORY` · `AGENTTY_RAG_SKILLS` · `AGENTTY_RAG_MCP` | Include learned memory / skills / MCP resources in the index. |

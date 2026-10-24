@@ -31,6 +31,14 @@ Configure the Ollama provider (host defaults to `http://localhost:11434`) and se
 
 Run `agentty` in your project. Because retrieval (RAG) is built in and runs locally too, only the relevant slices of your repo are fed to the model — which keeps local models fast and within their context window.
 
+While Ollama is up, also pull an embedding model so code search works by meaning, not just keywords. agentty picks it up by itself:
+
+```
+ollama pull qwen3-embedding:0.6b
+```
+
+`agentty diagnostics` shows `probe: ok` under retrieval once it's on. See [Retrieval](/docs/retrieval).
+
 ## Why local?
 
 - **Privacy** — source code never leaves your machine.

@@ -20,9 +20,19 @@ agentty's retrieval engine is a strong reference implementation:
 
 - **Hybrid search** — combines BM25 (lexical/keyword) with dense embeddings (semantic), so it matches both exact identifiers and conceptual queries.
 - **Code-aware chunking** — splits along function/class boundaries rather than fixed line windows, so retrieved context is coherent.
+- **Identifiers split into words** — `onClipboardRead` also matches "clipboard read", so a question in plain words finds the code.
 - **HNSW ANN** — fast approximate nearest-neighbour search over the embedding index.
-- **GraphRAG expansion** — follows references to pull in related definitions the query didn't name directly.
-- **A learning loop** — retrieval quality improves the more you use it on a repo.
+- **A code-aware reranker** — source ranks above tests and docs unless you ask about them, a header pulls its `.cpp` up, and results spread across files.
+- **Opt-in extras** — GraphRAG expansion and a learning loop that nudges ranking toward files you open, off by default.
+
+Turn on the meaning half with one command, then check it:
+
+```bash
+ollama pull qwen3-embedding:0.6b
+agentty diagnostics      # "probe: ok" under retrieval
+```
+
+On agentty's own judged questions this puts the right file first about 63-78% of the time and in the top 8 about 95%. Details in [Retrieval](/docs/retrieval).
 
 ## The payoff
 

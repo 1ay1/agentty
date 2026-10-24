@@ -50,6 +50,10 @@ Yes. `agentty airgap user@host` relays traffic from your laptop over SOCKS5-over
 
 Yes. `agentty acp` runs agentty as an [Agent Client Protocol](/docs/acp) agent inside Zed — streaming responses, inline diffs, native permission prompts, and session reload. Any ACP client works; it's the same engine as the TUI, just over JSON-RPC on stdio.
 
+## Does code search send my code anywhere?
+
+No. `search_code` and `search_docs` run on your machine. Keyword search needs nothing; search by meaning uses a local [Ollama](https://ollama.com) model (`ollama pull qwen3-embedding:0.6b`), which agentty finds by itself. The index is stored in your project's `.agentty/cache/`. See [Retrieval](/docs/retrieval).
+
 ## Where are my conversations stored?
 
 As plain files under `~/.agentty/threads/`: one append-only `.jsonl` log per thread plus small index sidecars. Safe to inspect, back up, or delete. Move them with `AGENTTY_THREADS_DIR`, expire old ones with `AGENTTY_THREADS_KEEP_DAYS`. `agentty config` shows every folder agentty uses and its size; [Storage](/docs/storage) has the full map.

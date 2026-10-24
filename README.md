@@ -23,7 +23,7 @@
 Most terminal coding agents ship as a Node or Python app and send big chunks of your repository to the model on every turn. agentty takes the opposite approach:
 
 - **It's one native binary.** 16.7 MB, ~3 ms cold start, zero runtime dependencies — no Node, no Python, no `npm install`, no `node_modules`. Download and run.
-- **It sends only the relevant code.** Built-in retrieval (hybrid BM25 + dense embeddings, code-aware chunking, GraphRAG) fetches just the slices that matter — often cutting context by 80%+ vs. whole-repo dumping.
+- **It sends only the relevant code.** Built-in local retrieval (hybrid keyword + embedding search, code-aware chunking and ranking) fetches just the slices that matter — often cutting context by 80%+ vs. whole-repo dumping.
 - **It's not locked to one vendor.** Sign in with your Claude Pro/Max, or point it at OpenAI, Groq, OpenRouter, Cerebras, DeepSeek, xAI (Grok), Mistral, Gemini, Fireworks, or a fully local Ollama model. Switch live with `^P`.
 - **It's safe by default.** Shell and build commands run in a sandbox; air-gap an entire session over SSH with one command.
 - **It's open source (MIT)** and runs inside Zed over ACP.
@@ -76,7 +76,7 @@ Run on a box with no internet. Your laptop relays the bytes over SSH with TLS pi
 read · write · edit · bash · grep · glob · git · web · search_docs · search_code · task — each with a purpose-built widget.
 
 ### 🧠 Learns your codebase
-Agent Skills + remember/forget memory, plus a fully **local RAG** engine — hybrid BM25 + embeddings, RRF-fused, reranked, diversified, and expanded over a **GraphRAG** document graph — over your docs, skills, and memory. Teach it once, every session knows your conventions. [How it works ↓](#retrieval-rag)
+Agent Skills + remember/forget memory, plus a fully **local RAG** engine — hybrid keyword + embedding search with a code-aware reranker — over your code, docs, skills, and memory. Teach it once, every session knows your conventions. [How it works ↓](#retrieval-rag)
 
 ### 🎯 Smart Mode
 One flagship model plans; cheaper models do the legwork. Effort scales to each turn's complexity, a cascade retries harder only when a cheap attempt falls short, and the router **learns your repo** across sessions. Off is a strict no-op. [How it works ↓](#smart-mode)
@@ -110,88 +110,64 @@ agentty retrieves a **small, source-tagged set of relevant passages** only when
 the task needs project knowledge. That keeps context focused, leaves more room
 for the task itself, and avoids paying to repeatedly send irrelevant material.
 
-agentty ships a **complete, fully-local retrieval engine** behind two tools — no
-cloud, no dependencies, works offline. The only optional network hop is a
-*localhost* [Ollama](https://ollama.com) server for embeddings; with none
-reachable it falls back to keyword search and keeps working.
+agentty ships a **fully local retrieval engine** behind two tools. No cloud, no
+setup, works offline: keyword search works from the first run, and a local
+[Ollama](https://ollama.com) adds search by meaning.
 
-- **`search_docs`** — searches your *knowledge base*: a docs folder, your
-  installed skills, your learned `remember` memory, and (opt-in) connected MCP
-  resources. Useful from the first turn — skills and memory are always indexed,
-  even with no docs folder.
-- **`search_code`** — *semantic* search over your source by meaning, for
-  "where is retry backoff handled" questions where you don't know the identifier.
-  The hybrid complement to `grep`.
+- **`search_code`** finds code by what it does ("where is retry backoff
+  handled") when you don't know the name. The complement to `grep`.
+- **`search_docs`** searches your docs folder (`./docs`, or `AGENTTY_DOCS_DIR`),
+  your installed skills, and facts you asked it to `remember`.
 
 Every returned passage is **source-tagged** (`docs:` · `skill:` · `memory:` · MCP
 URI) with its file + line range, so the model can cite, open, or follow it.
 
-**Enable the semantic half** (BM25 works with zero setup):
+**Turn on search by meaning** (one command):
 
 ```bash
-ollama pull nomic-embed-text && ollama serve     # localhost embeddings
-export AGENTTY_DOCS_DIR=~/my-project/docs         # optional; skills+memory always indexed
+ollama pull qwen3-embedding:0.6b    # or nomic-embed-text, smaller
 ```
 
-agentty auto-detects the running server and upgrades from BM25-only to full
-hybrid retrieval — no restart needed.
+agentty finds Ollama on localhost by itself and prefers `qwen3-embedding:0.6b`
+when it's there. `agentty diagnostics` shows whether it's on (`probe: ok`).
+The index is built once per repo and then updated only for files you change.
+
+On agentty's own judged questions, `search_code` puts the right file first
+63-78% of the time with `qwen3-embedding` and in the top 8 93-97% (keyword
+only: 57-60% first, 92-95% top 8). Measure it on your repo with
+`agentty rag-eval`.
 
 <details>
 <summary><b>The retrieval funnel</b></summary>
 
-Every `search_docs` call runs this pipeline. The **default path makes no LLM
-calls** — it's fast, deterministic, and safe to leave fully on.
+Each search runs, in order:
 
-1. **Hybrid retrieval** — BM25 (keyword, Porter-stemmed) and dense embeddings
-   (HNSW-indexed at scale) each rank a wide candidate pool; the two lists are
-   fused with **Reciprocal Rank Fusion** (or opt-in Relative Score Fusion,
-   `AGENTTY_RAG_FUSION=rsf`). Every dense probe a search fans out — expansion,
-   HyDE, multi-hop — embeds in **one batched round-trip**, not one per probe.
-2. **Pseudo-relevance feedback (RM3)** — harvests discriminative terms from the
-   top hits and fuses a second down-weighted probe, recovering the vocabulary
-   you didn't type. Sub-millisecond, no model.
-3. **Contextual retrieval** — each chunk is indexed with a breadcrumb of its
-   doc title + heading path, so `guide.md › Install › Linux` is findable even
-   when the body never says "linux".
-4. **Re-ranking** — a deterministic feature-fusion reranker (term coverage,
-   phrase proximity, title match, calibrated cosine), plus an optional batched
-   embedding cross-encoder and an opt-in generative 0–10 judge.
-5. **MMR diversification** — greedily keeps hits that are relevant *and*
-   distinct, so duplicate windows don't crowd out real answers.
-6. **Compression** — trims each survivor to its best query-relevant span:
-   "20k noisy tokens" → "2k useful tokens."
-7. **Parent-document expansion** — stitches the precise hit back into its
-   adjacent sibling chunks so the model reads it in context.
-8. **GraphRAG expansion** — builds the corpus's document graph (nodes = docs;
-   edges = markdown links + tf·idf entity co-occurrence), runs PageRank and
-   community detection over it, and pulls in supporting docs from four tiers
-   around the top hits (outbound links, backlinks, entity neighbours, and the
-   community hub). Deterministic, in-memory, no model.
-9. **Corrective retry (CRAG)** — on a low-confidence result, de-noises the
-   query, widens the pool, and keeps whichever attempt scored higher.
+1. **Structure-aware chunking** — code splits at functions and classes, docs
+   at headings; each chunk is indexed with its title and heading path.
+2. **Hybrid retrieval** — BM25 (keyword; identifiers split into words, so
+   `onClipboardRead` matches "clipboard read") and dense embeddings (HNSW),
+   fused per query.
+3. **Rerank** — a deterministic feature reranker; for code, source ranks above
+   tests and docs unless you ask for them, and a header lifts its `.cpp`.
+4. **Diversify + de-duplicate** — MMR, near-duplicate removal, and stitching
+   of adjacent chunks into one span.
+5. **Compress + budget** — passages trimmed to the sentences that match the
+   query and packed under a hard byte budget.
+6. **Confidence** — each result carries a confidence; weak results say so.
 
-**Opt-in recall boosters** (cost a model call, off by default):
-RAG-Fusion query expansion (`AGENTTY_RAG_EXPAND=1`),
-HyDE hypothetical-document embeddings (`AGENTTY_RAG_HYDE=1`), and
-GraphRAG community summaries (`AGENTTY_RAG_GRAPH_SUMMARY=1` — a cached
-natural-language report per topic cluster, generated once per corpus shape).
+**Opt-in stages** (off by default; measure before turning on): pseudo-relevance
+feedback (`AGENTTY_RAG_PRF=1`), GraphRAG (`AGENTTY_RAG_GRAPH=1`), corrective
+retry (`AGENTTY_RAG_CORRECT=1`), and two that cost a model call: multi-query
+expansion (`AGENTTY_RAG_EXPAND=1`) and HyDE (`AGENTTY_RAG_HYDE=1`).
 
-Beyond the explicit tool, a **proactive path** runs the funnel *before you ask*
-when your message looks knowledge-shaped, injecting a source-tagged
-`<retrieved-context>` block into the very same turn — grounding without a tool
-round-trip. The transcript renders it as one quiet 📚 card that shows a
-confidence bar plus exactly *which* sources grounded the answer (`docs · path`,
-`skill · name`, `memory`…) and a passage count, so you can always see — and
-weigh — what the model was standing on.
+**Proactive retrieval** (off until you turn it on in `/settings` → *Proactive
+retrieval (RAG)*) runs the funnel *before* the model asks and adds a
+source-tagged `<retrieved-context>` block to the turn, shown as one 📚 card
+with a confidence bar and the sources it used.
 
-BM25, RRF, HNSW, the reranker, MMR, compression, PRF, the chunker, and the
-GraphRAG document graph (PageRank, entity extraction, community detection) are
-all in-house C++/STL. Every stage degrades gracefully and is tunable via
-`AGENTTY_RAG_*` env vars. For big corpora, two opt-in vector-cost levers keep
-the ANN cheap while the full-precision rerank recovers quality: **Matryoshka**
-dimension truncation (`AGENTTY_RAG_ANN_DIM=256`, ~2.3× faster walk) and
-**binary quantization** (`AGENTTY_RAG_BINARY=1`, popcount-Hamming walk + float
-rescore, ~2.5×). Full write-up:
+All of it is in-house C++ ([rag-cpp](https://github.com/agentty-org/rag-cpp)),
+every stage degrades gracefully, and each is tunable via `AGENTTY_RAG_*`. Full
+write-up:
 [`docs/website/retrieval.md`](docs/website/retrieval.md).
 
 </details>

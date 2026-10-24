@@ -46,6 +46,7 @@ You start in **Write** (autonomous) — every tool runs without a prompt, kept i
 
 ## Where to go next
 
+- **Better code search (optional):** with [Ollama](https://ollama.com) installed, `ollama pull qwen3-embedding:0.6b` lets agentty find code by meaning, not just keywords. Nothing else to set. See [Retrieval](/docs/retrieval).
 - [The Interface](/docs/interface) — what every part of the screen means.
 - [Keybindings](/docs/keybindings) — the full keymap.
 - [Providers & Models](/docs/providers) — Claude, GPT, Kimi, DeepSeek, Gemini, or a local model.

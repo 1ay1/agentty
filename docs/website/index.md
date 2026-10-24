@@ -17,6 +17,7 @@ It's **bring-your-own-model**: point it at **OpenAI, DeepSeek, Google Gemini, xA
 - You want **your choice of model** — Claude, GPT, DeepSeek, Kimi, Gemini, Grok, or a local Ollama model — behind one client.
 - You need to run an agent on an **air-gapped host** through an SSH tunnel.
 - You want shell calls **sandboxed by default**, not as an afterthought.
+- You want the agent to **find the right code by meaning**, locally: built-in [search](/docs/retrieval) that never sends your repo anywhere.
 
 :::tip
 Already convinced? Jump straight to [Installation](/docs/installation) or the [Quick Start](/docs/quick-start).

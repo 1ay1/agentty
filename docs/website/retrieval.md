@@ -1,29 +1,77 @@
 ---
 title: Retrieval (RAG)
-description: How agentty's search_docs and search_code tools retrieve accurate, bounded context from local knowledge and source code.
+description: How agentty's search_docs and search_code tools find the right docs and code, how to turn on semantic search in two commands, and how to check it's working.
 nav_section: Tools
 nav_order: 40
 slug: retrieval
 ---
 
-agentty provides two local retrieval tools:
+agentty has two local search tools the model can call:
 
-- **`search_docs`** searches documentation, installed skills, learned memory, and optionally connected MCP resources.
-- **`search_code`** searches source code by meaning when you do not know the exact identifier. Use `grep` for exact names and strings.
+- **`search_code`** finds code by what it does ("where are retries handled") when you don't know the name. For exact names and strings the model uses `grep`.
+- **`search_docs`** searches your docs folder, your installed skills, and facts you asked it to `remember`.
 
-Retrieval is available in Linux, macOS, MinGW, and official MSVC Windows builds. With no embedding server, it uses BM25 immediately. If a compatible Ollama embedding model is reachable on localhost, agentty adds dense semantic retrieval.
+Both work out of the box with keyword search. Everything runs on your machine; no code leaves it.
 
-## Production defaults
+## Quick start: turn on semantic search
 
-The default profile is intentionally conservative:
+Keyword search works with no setup. For search by meaning, run [Ollama](https://ollama.com) and pull an embedding model:
 
-1. Structural/contextual chunking.
-2. BM25, plus Ollama embeddings when a short availability probe succeeds.
-3. Weighted Reciprocal Rank Fusion.
-4. A deterministic feature reranker.
-5. MMR diversification.
-6. Adjacent-hit deduplication/stitching.
-7. Query-focused passage compression under a strict aggregate output budget.
+```bash
+ollama pull qwen3-embedding:0.6b    # best for code, ~640 MB
+# or: ollama pull nomic-embed-text  # smaller, ~270 MB
+```
+
+That's it. agentty finds Ollama on `127.0.0.1:11434` by itself and prefers `qwen3-embedding:0.6b` when it's there. The first search in a repo builds the index (from about 30 seconds to a few minutes on a large repo); after that it loads in about a second and updates only the files you changed.
+
+Check it's on:
+
+```bash
+agentty diagnostics
+```
+
+The `retrieval (embeddings)` section should say `probe: ok`. Every search result also says `hybrid` (keyword + meaning) or `bm25` (keyword only) in its header.
+
+To pick a different model or a remote server, type `/settings` and open **Proactive retrieval (RAG)** (the Retrieval pane), or set:
+
+```bash
+export AGENTTY_EMBED_MODEL=nomic-embed-text
+export AGENTTY_OLLAMA_HOST=gpu-box.lan:11434
+```
+
+## How well it works
+
+agentty measures its own search on a judged set of real questions about its own code and docs (`tests/rag_eval`, run with `agentty rag-eval <file>`). "Right file first" means the file that answers the question is the top result:
+
+| Search | Setup | Right file first | Right file in top 8 |
+|---|---|---:|---:|
+| `search_code` | keyword only | 57-60% | 92-95% |
+| `search_code` | + `nomic-embed-text` | 60-63% | 88-90% |
+| `search_code` | + `qwen3-embedding:0.6b` | 63-78% | 93-97% |
+| `search_docs` | + embeddings | 70-85% | 93-97% |
+
+Each range covers the main and held-out halves of the set (60 + 41 code questions, 30 + 20 docs questions).
+
+What makes code search good: identifiers are split into words (`onClipboardRead` matches "clipboard read"), source files rank above tests and docs unless you ask about tests or docs, a header pulls its `.cpp` up with it, and results spread across files instead of returning one file eight times.
+
+## If results look wrong
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Results say `bm25`, never `hybrid` | No embedding server, or the model isn't pulled | `ollama pull qwen3-embedding:0.6b`, then `agentty diagnostics` |
+| `diagnostics` says `invalid: host ...` | A typo in the Retrieval pane (e.g. `127.0.0`) | Fix the host there, or delete the `rag` keys in `~/.agentty/settings.json` |
+| `search_docs` finds nothing | No docs folder | Put docs in `./docs` or `./.agentty/knowledge`, or set `AGENTTY_DOCS_DIR` |
+| First search is slow | The index is being built | Only the first time per repo and model |
+| Wrong file comes first | The query matches a sibling file better | Ask with words from the file's purpose; `grep` for exact names |
+
+## What is on by default
+
+1. Code-aware chunking: code splits at functions and classes, docs at headings.
+2. Keyword search (BM25), plus embeddings when the startup check reaches a model.
+3. Score fusion of the two (convex by default; `AGENTTY_RAG_FUSION=rrf` for weighted reciprocal-rank fusion).
+4. A deterministic reranker, plus the code-specific rules above for `search_code`.
+5. Diversity (MMR), duplicate removal, and stitching of adjacent hits.
+6. Query-focused trimming under a strict total size budget.
 
 Expensive or corpus-sensitive stages are **opt-in**, not taxes on every query:
 
@@ -51,49 +99,28 @@ MCP indexing is opt-in because reading a resource can involve server I/O. MCP-ba
 
 ## Dense retrieval and graceful fallback
 
-BM25 needs no setup. To enable semantic retrieval:
+At startup agentty runs one quick embedding check. If the server or model is unavailable, the session stays keyword-only instead of paying a failed network timeout on every search. The check waits up to 30 seconds for Ollama to load a model, but a server that isn't running fails at once.
 
-```bash
-ollama pull nomic-embed-text
-ollama serve
-```
+With the backend on **Auto** (the default) and the model left at its default, agentty tries `qwen3-embedding:0.6b` first and uses `nomic-embed-text` when that isn't pulled. A model or backend you set yourself is used as is.
 
-The default endpoint is `127.0.0.1:11434`. Override it with:
+Models trained with query/document prefixes (nomic, e5, mxbai, arctic) get them automatically; `AGENTTY_EMBED_PREFIX=0` turns that off. Other backends (an OpenAI-compatible endpoint, llama.cpp, or an in-process GGUF/ONNX model) are picked in the Retrieval pane.
 
-```bash
-export AGENTTY_OLLAMA_HOST=127.0.0.1:11434
-export AGENTTY_EMBED_MODEL=nomic-embed-text
-```
+When a search returns **no hits**, the result says why — e.g. `no matches (bm25)` (it ran, nothing was relevant, and the meaning half was off), or `no matches (no docs indexed — set AGENTTY_DOCS_DIR …)` when there was nothing to search.
 
-For better `search_code` results pull `qwen3-embedding:0.6b` (about 640 MB). On
-agentty's own eval (`tests/rag_eval`) it found the right file first in 60-80%
-of questions against 55-65% for nomic-embed-text. With the backend on Auto and
-the model left at its default, agentty uses it automatically once it's pulled
-(the first index build is slower, a few minutes on a large repo):
-
-```bash
-ollama pull qwen3-embedding:0.6b
-```
-
-Models trained with query/document prefixes (nomic, e5, mxbai, arctic) get
-them automatically; `AGENTTY_EMBED_PREFIX=0` turns that off.
-
-At startup, agentty performs one bounded embedding probe. If the server or model is unavailable, the session stays BM25-only instead of paying a long failed network timeout on every search. The result header reports `bm25` or `hybrid` truthfully.
-
-When a search returns **no hits**, the result says so with the reason folded in rather than a bare blank — e.g. `no matches (bm25)` (the search ran but nothing was relevant; the mode reveals the dense half was down), or `no matches (no docs indexed — set AGENTTY_DOCS_DIR …)` when there was nothing to search. So "the corpus is irrelevant" is never confused with "the index isn't built" or "Ollama is down."
-
-`AGENTTY_RAG_BM25_WEIGHT` and `AGENTTY_RAG_DENSE_WEIGHT` control weighted RRF directly. Setting dense weight to zero removes dense influence; the knobs are not ignored by a separate fusion alpha.
+`AGENTTY_RAG_BM25_WEIGHT` and `AGENTTY_RAG_DENSE_WEIGHT` set the keyword/meaning balance in `rrf` fusion mode; the default convex mode adapts the balance per query instead.
 
 ## Persistence and freshness
 
-The docs/skills/memory index is stored at:
+Indexes are saved and reopened, never rebuilt on every start. They live with the project, so each checkout has its own:
 
 ```text
-.agentty/rag_docs.ragdb
-.agentty/rag_docs.ragdb.meta.json
+<project>/.agentty/cache/rag_docs.<id>.ragdb   # docs, skills, memory
+<project>/.agentty/cache/rag_code.<id>.ragdb   # search_code
 ```
 
-The manifest records the docs root, indexable file paths, size/mtime stamps, skill and memory content fingerprints, chunking configuration, and embedding profile. A later process opens the database directly when the manifest still matches.
+`AGENTTY_RAG_DIR` moves them (see [Environment](/docs/environment)).
+
+`<id>` names the embedding model, so switching models keeps the old index for when you switch back. Each index stores per-file size/mtime stamps; when a later run sees changed files it updates only those, so one edited file costs seconds, not a rebuild. Changing the chunking, the docs folder, or the model starts a fresh index.
 
 Freshness scans:
 
@@ -174,7 +201,7 @@ Automatic pre-turn context injection is off by default. The explicit `search_doc
 
 ### The RAG picker (in-app)
 
-Rather than juggling env vars, set proactive retrieval from the command palette: [[Ctrl+K]] → **RAG**. One decision, three modes:
+Rather than juggling env vars, set proactive retrieval in the app: `/settings` → **Proactive retrieval (RAG)**. One decision, three modes:
 
 | Mode | Behaviour |
 |------|-----------|
@@ -226,7 +253,18 @@ When enabled, the app runs exactly one retrieval on an isolated worker, displays
 
 ## Measuring retrieval
 
-Run:
+Two built-in tools, both offline.
+
+`agentty rag-eval <cases.json>` scores search against questions with known answers, the way the tools actually run. agentty's own sets live in `tests/rag_eval/` (code and docs, each with a held-out half kept out of tuning). A cases file is a list of `{"q": "...", "gold": ["path", ...]}`; wrap it as `{"tool": "search_docs", "cases": [...]}` to test docs search. It prints the right-file-first rate (hit@1), the top-8 rate (hit@8), MRR, and every miss:
+
+```bash
+agentty rag-eval tests/rag_eval/agentty_code.json
+AGENTTY_RAG_EVAL_ALL=1 agentty rag-eval my_cases.json   # every case's rank
+```
+
+Write twenty questions about your own repo with the file that answers each, and you have a check that a model or setting change really helped. The `rag_eval_guard` test runs agentty's sets keyword-only on every build and fails if search gets worse.
+
+`agentty rag-bench` benchmarks `search_docs` on your docs folder:
 
 ```bash
 agentty rag-bench docs
@@ -249,7 +287,7 @@ AGENTTY_RAG_MEASURE=1                          agentty rag-bench docs   # on
 
 Because every lever is env-tunable, no rebuild is needed to measure a configuration on your own corpus.
 
-Known-item queries measure retrieval mechanics and are intentionally lexical. For product accuracy, supplement them with a small labeled set of real questions, paraphrases, broad surveys, and expected source paths.
+`rag-bench` builds its queries from the documents themselves, so it measures the mechanics. `rag-eval` with real questions measures what you actually care about.
 
 ## Provenance
 

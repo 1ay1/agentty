@@ -138,6 +138,16 @@ Inside tmux also run `tmux set -g allow-passthrough on`. Also check Settings →
 Paste: a route turned off there (or by an `AGENTTY_PASTE_*` variable) is
 skipped. Full guide: [Clipboard & Images](/docs/clipboard).
 
+## Search (search_code / search_docs) finds the wrong thing or nothing
+
+Run `agentty diagnostics` and look at the `retrieval (embeddings)` section.
+
+- `probe: ok` — search by meaning is on. If a result is still wrong, ask using the words of what the code does, or let the model `grep` for an exact name.
+- `probe: FAILED` — search is keyword-only. Start Ollama and pull a model: `ollama pull qwen3-embedding:0.6b`.
+- `invalid: host …` — a typo in the Retrieval settings (for example `127.0.0`). Fix it in `/settings` → *Proactive retrieval (RAG)*.
+
+`search_docs` finds nothing when there's no docs folder: put docs in `./docs`, or set `AGENTTY_DOCS_DIR`. The first search in a repo is slower because it builds the index. More in [Retrieval](/docs/retrieval#if-results-look-wrong).
+
 ## agentty is using a lot of disk, or settings/history won't save
 
 Run `agentty config` to see every folder agentty uses and its size, and `agentty config doctor` to check each one is writable and private. Conversations are usually the bulk: move them with `agentty config move threads /some/big/disk` (then add the `export` line it prints), or expire old ones with `AGENTTY_THREADS_KEEP_DAYS=90`. `agentty config clean` lists files older versions left behind. See [Storage](/docs/storage).
