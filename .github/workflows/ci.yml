@@ -840,7 +840,28 @@ jobs:
           # the job non-zero.
           ./fuzzbuild/fuzz/fuzz_fuzzy_match 5000
           ./fuzzbuild/fuzz/fuzz_apply_patch 20000
-
+      - name: agentty + richpaste parsers (libFuzzer, 60s each)
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          # Model ids, streamed tool-call JSON, terminal output, and every
+          # richpaste parser (clipboard images, agent wire, OSC 5522, armor).
+          # agentty is C++26: a recent clang, on gcc-16's libstdc++ (above).
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s 21
+          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends nlohmann-json3-dev
+          mkdir -p "$HOME/bin"
+          ln -sf /usr/bin/clang++-21 "$HOME/bin/clang++"
+          export PATH="$HOME/bin:$PATH"
+          clang++ --version | head -1
+          sh tests/fuzz/run.sh 60
+      - name: Keep fuzz crash inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: build-fuzz/crashes
+          if-no-files-found: ignore
   # ── AUR source package: does agentty-git still CONFIGURE? ────────────────
   #
   # packaging/arch/agentty-git/PKGBUILD wires each submodule to a local clone
