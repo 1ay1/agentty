@@ -4,6 +4,23 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- **Parallel tool calls over ACP keep their own arguments.** With an
+  OpenAI-style model that sends every call's end at the end of the turn, all
+  calls but the last ran with `{}` (#116).
+- **Tools an external ACP agent already ran aren't run again.** Subagents and
+  `agentty acp` ran every delegated tool call a second time on the host, and
+  subagents ran them with empty arguments.
+- A search host typed with an octet missing (`127.0.0`) is now reported as
+  invalid instead of quietly falling back to keyword search.
+- A `write`'s live preview no longer shows the next JSON field stuck onto the
+  file content.
+- Very long numbers in model ids, tool output and diff headers no longer
+  overflow.
+### Changed
+- The retrieval docs start with a two-command quick start, and claims that
+  had drifted from the code are fixed.
+
 ## [0.9.32] - 2026-10-23
 
 ### Fixed
