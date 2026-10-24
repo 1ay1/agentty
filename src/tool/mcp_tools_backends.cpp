@@ -1423,6 +1423,21 @@ provider::StreamResult run_one_completion(Thread& thread,
                     tool_json[e.id.value].clear();
                 } else if constexpr (std::same_as<T, StreamToolUseDelta>) {
                     tool_json[e.id.value] += e.partial_json;
+                } else if constexpr (std::same_as<T, StreamToolUseSnapshot>) {
+                    // ACP sends the whole args each time; replace, don't append.
+                    tool_json[e.id.value] = e.json;
+                } else if constexpr (std::same_as<T, StreamObservedToolResult>) {
+                    // An external agent already ran this call. Settle it so
+                    // the loop below doesn't run it a second time.
+                    if (ToolUse* tc = find_tool(e.id)) {
+                        const auto now = std::chrono::steady_clock::now();
+                        std::string out = std::move(e.output);
+                        if (out.empty())
+                            out = e.failed ? "External agent tool failed."
+                                           : "Executed by external agent.";
+                        if (e.failed) tc->settle_failed(now, std::move(out));
+                        else          tc->settle_done(now, std::move(out));
+                    }
                 } else if constexpr (std::same_as<T, StreamToolUseEnd>) {
                     ToolUse* tc = find_tool(e.id);
                     auto json_it = tool_json.find(e.id.value);
@@ -1944,6 +1959,8 @@ public:
                         doomed = true;
                         break;
                     }
+                    // Already settled by an external agent (StreamObservedToolResult).
+                    if (tc.is_terminal()) continue;
                     if (tc.args.is_null()) {
                         if (stats) { ++stats->tool_calls; ++stats->tool_errors; }
                         tc.status = ToolUse::Failed{now, now,

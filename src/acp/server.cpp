@@ -3012,6 +3012,18 @@ StopReason AgentServer::stream_completion(Io io, const Cap& cap, const std::stri
                         if (ToolUse* tcp = find_call(ev.id)) tool_json[tcp->id.value] += ev.partial_json;
                     } else if constexpr (std::is_same_v<E, StreamToolUseSnapshot>) {
                         if (ToolUse* tcp = find_call(ev.id)) tool_json[tcp->id.value] = ev.json;   // replaces
+                    } else if constexpr (std::is_same_v<E, StreamObservedToolResult>) {
+                        // An external agent already ran it; run_tools skips
+                        // terminal calls so it isn't run twice.
+                        if (ToolUse* tcp = find_call(ev.id)) {
+                            const auto now = std::chrono::steady_clock::now();
+                            std::string out = ev.output;
+                            if (out.empty())
+                                out = ev.failed ? "External agent tool failed."
+                                                : "Executed by external agent.";
+                            if (ev.failed) tcp->settle_failed(now, std::move(out));
+                            else           tcp->settle_done(now, std::move(out));
+                        }
                     } else if constexpr (std::is_same_v<E, StreamToolUseEnd>) {
                         if (ToolUse* tcp = find_call(ev.id)) {
                             auto& tc = *tcp;
@@ -3206,6 +3218,7 @@ bool AgentServer::run_tools(const Cap& cap, const std::string& session_id, bool&
 
     for (auto& tc : (*batch)->calls) {
         if (ctx.cancelled()) { out_cancelled = true; return false; }
+        if (tc.is_terminal()) continue;   // settled by an external agent
 
         // Resolve the tool ONCE so the permission gate and the execution run
         // against the same definition (an mcp/tools/list_changed mid-turn can
