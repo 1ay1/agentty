@@ -265,6 +265,8 @@ void check_partial_resolve() {
 }  // namespace
 
 int main() {
+    // Time moves only through advance_anim_clock_ms, never the wall clock.
+    maya::testing::freeze_anim_clock(1'000'000);
     // Widths spanning the oracle's shapes, including a narrow one where
     // wrapping dominates and a wide one where line COUNT dominates.
     const int widths[] = {46, 60, 80, 100};

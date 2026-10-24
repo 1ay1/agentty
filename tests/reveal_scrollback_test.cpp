@@ -941,7 +941,7 @@ static void run_reasoning_scenario(int width, int term_h) {
 // overlay perturbs a committed row, R1 fires — the visible duplicate.
 static ToolUse done_tool(const std::string& tag) {
     ToolUse t;
-    auto now = std::chrono::steady_clock::now();
+    auto now = maya::anim_now();
     t.id = agentty::ToolCallId{"read_" + tag};
     t.name = agentty::ToolName{"read"};
     std::string out;
@@ -959,7 +959,7 @@ static ToolUse done_tool(const std::string& tag) {
 // the screenshot corruption lives at.
 static ToolUse running_tool(const std::string& tag) {
     ToolUse t;
-    auto now = std::chrono::steady_clock::now();
+    auto now = maya::anim_now();
     t.id   = agentty::ToolCallId{"bash_" + tag};
     t.name = agentty::ToolName{"shell"};
     t.args = nlohmann::json{{"command", "git commit -m " + tag}};
@@ -980,7 +980,7 @@ static ToolUse running_tool(const std::string& tag) {
 // controls the body height so the card overflows the viewport.
 static ToolUse settled_write_tool(const std::string& tag, int lines) {
     ToolUse t;
-    auto now = std::chrono::steady_clock::now();
+    auto now = maya::anim_now();
     t.id   = agentty::ToolCallId{"write_" + tag};
     t.name = agentty::ToolName{"write"};
     std::string content;
@@ -1557,6 +1557,9 @@ static void run_trimstorm_scenario(int width, int term_h) {
 }  // namespace (fold)
 
 int main() {
+    // Time moves only through tick(), so a frame sequence is the same on a
+    // loaded CI runner as on an idle box.
+    maya::testing::freeze_anim_clock(1'000'000);
     // Each scenario dup2's a PTY over STDOUT to give term_dims() real
     // geometry; save the original so the summary is visible afterward.
     const int saved_stdout = dup(STDOUT_FILENO);

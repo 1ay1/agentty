@@ -773,7 +773,7 @@ static bool tool_turn(Ctx& cx, int t, int H) {
                     {"display_description",
                      "uniq-" + st + "c" + std::to_string(r) + (tno ? "b" : "a") + ". go"}
                 };
-                tc.status = ToolUse::Pending{std::chrono::steady_clock::now()};
+                tc.status = ToolUse::Pending{maya::anim_now()};
                 msg.tool_calls.push_back(std::move(tc));
             }
             m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
@@ -781,8 +781,8 @@ static bool tool_turn(Ctx& cx, int t, int H) {
 
             auto& ta = msg.tool_calls[msg.tool_calls.size() - 2];
             auto& tb = msg.tool_calls.back();
-            ta.status = ToolUse::Running{std::chrono::steady_clock::now(), ""};
-            tb.status = ToolUse::Running{std::chrono::steady_clock::now(), ""};
+            ta.status = ToolUse::Running{maya::anim_now(), ""};
+            tb.status = ToolUse::Running{maya::anim_now(), ""};
             tick(); if (cx.frame(rt_tag + "-run2both")) return true;
 
             // B grows past 2× viewport — commits title + A's header row.
@@ -802,7 +802,7 @@ static bool tool_turn(Ctx& cx, int t, int H) {
             {
                 auto sa = std::get<ToolUse::Running>(ta.status).started_at;
                 ta.status = ToolUse::Done{
-                    sa, std::chrono::steady_clock::now(), "ok: A done"};
+                    sa, maya::anim_now(), "ok: A done"};
                 auto& run = std::get<ToolUse::Running>(tb.status);
                 for (int k = 0; k < 4; ++k)
                     run.progress_text += "[par tail " + std::to_string(k) + "]\n";
@@ -813,7 +813,7 @@ static bool tool_turn(Ctx& cx, int t, int H) {
             {
                 auto sb = std::get<ToolUse::Running>(tb.status).started_at;
                 tb.status = ToolUse::Done{
-                    sb, std::chrono::steady_clock::now(), "ok: B done"};
+                    sb, maya::anim_now(), "ok: B done"};
                 tick(); if (cx.frame(rt_tag + "-bdone")) return true;
             }
             {
@@ -841,7 +841,7 @@ static bool tool_turn(Ctx& cx, int t, int H) {
                 // prefix and false-positive the uniqueness check.
                 {"display_description", "uniq-" + st + "c" + std::to_string(r) + ". go"}
             };
-            tc.status = ToolUse::Pending{std::chrono::steady_clock::now()};
+            tc.status = ToolUse::Pending{maya::anim_now()};
             m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
             msg.tool_calls.push_back(std::move(tc));
             tick(); if (cx.frame(rt_tag + "-pending")) return true;
@@ -858,7 +858,7 @@ static bool tool_turn(Ctx& cx, int t, int H) {
         // screenshot class.
         {
             auto& tc = msg.tool_calls.back();
-            tc.status = ToolUse::Running{std::chrono::steady_clock::now(), ""};
+            tc.status = ToolUse::Running{maya::anim_now(), ""};
             tick(); if (cx.frame(rt_tag + "-run0")) return true;
             const int kProgress = (r == 1) ? (2 * H + 10) : (H / 2 + 8);
             for (int p = 0; p < kProgress; ++p) {
@@ -885,7 +885,7 @@ static bool tool_turn(Ctx& cx, int t, int H) {
             auto& tc = msg.tool_calls.back();
             auto started = std::get<ToolUse::Running>(tc.status).started_at;
             tc.status = ToolUse::Done{
-                started, std::chrono::steady_clock::now(),
+                started, maya::anim_now(),
                 "ok: 42 tests passed (round " + std::to_string(r) + ")"};
             if (r != 1) {
                 tick(); if (cx.frame(rt_tag + "-done")) return true;
@@ -971,7 +971,7 @@ static bool write_edit_turn(Ctx& cx, int t, int H) {
         tc.args = nlohmann::json{{"file_path", "src/gen_" + st + ".cpp"},
                                  {"content", ""}};
         tc.args_streaming = "{\"file_path\":\"src/gen_" + st + ".cpp\",\"content\":\"";
-        tc.status = ToolUse::Pending{std::chrono::steady_clock::now()};
+        tc.status = ToolUse::Pending{maya::anim_now()};
         msg.tool_calls.push_back(std::move(tc));
         tick(); if (cx.frame("t" + st + "-w-pending")) return true;
 
@@ -1005,11 +1005,11 @@ static bool write_edit_turn(Ctx& cx, int t, int H) {
             // the body tail-window → show_all FULL content (~3×H rows) —
             // the big one-frame GROW this turn exists to check.
             m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
-            wt.status = ToolUse::Running{std::chrono::steady_clock::now(), ""};
+            wt.status = ToolUse::Running{maya::anim_now(), ""};
             tick(); if (cx.frame("t" + st + "-w-run")) return true;
             auto started = std::get<ToolUse::Running>(wt.status).started_at;
             wt.status = ToolUse::Done{
-                started, std::chrono::steady_clock::now(),
+                started, maya::anim_now(),
                 "Wrote " + std::to_string(content.size()) + " bytes to src/gen_"
                     + st + ".cpp"};
             tick(); if (cx.frame("t" + st + "-w-done")) return true;
@@ -1039,7 +1039,7 @@ static bool write_edit_turn(Ctx& cx, int t, int H) {
         tc.args = nlohmann::json{{"path", "src/gen_" + st + ".cpp"},
                                  {"edits", nlohmann::json::array()}};
         tc.args_streaming = "{\"path\":\"src/gen_" + st + ".cpp\",\"edits\":[";
-        tc.status = ToolUse::Pending{std::chrono::steady_clock::now()};
+        tc.status = ToolUse::Pending{maya::anim_now()};
         msg.tool_calls.push_back(std::move(tc));
         m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
         tick(); if (cx.frame("t" + st + "-e-pending")) return true;
@@ -1077,11 +1077,11 @@ static bool write_edit_turn(Ctx& cx, int t, int H) {
         // the seam changed.
         {
             auto& et = msg.tool_calls.back();
-            et.status = ToolUse::Running{std::chrono::steady_clock::now(), ""};
+            et.status = ToolUse::Running{maya::anim_now(), ""};
             tick(); if (cx.frame("t" + st + "-e-run")) return true;
             auto started = std::get<ToolUse::Running>(et.status).started_at;
             et.status = ToolUse::Done{
-                started, std::chrono::steady_clock::now(),
+                started, maya::anim_now(),
                 "Edited src/gen_" + st + ".cpp (" + std::to_string(kHunks)
                     + " edits):\n```diff\n" + diff_body + "\n```"};
             // NO render here — the Done flip rides the same frame as the
@@ -1177,7 +1177,7 @@ static bool deep_run_turn(Ctx& cx, int t, int H) {
             {"path", "src/deep_" + et + ".cpp"},
             {"edits", nlohmann::json::array({{{"old_text", "a();\n"},
                                               {"new_text", "b();\n"}}})}};
-        auto now = std::chrono::steady_clock::now();
+        auto now = maya::anim_now();
         tc.status = ToolUse::Done{now - std::chrono::milliseconds{5}, now,
                                   "edited uniq-" + et + "-done"};
         a.tool_calls.push_back(std::move(tc));
@@ -1202,7 +1202,7 @@ static bool deep_run_turn(Ctx& cx, int t, int H) {
         tc.args = nlohmann::json{
             {"command", "make deep-" + st},
             {"display_description", "uniq-" + st + "-run. go"}};
-        tc.status = ToolUse::Running{std::chrono::steady_clock::now(), ""};
+        tc.status = ToolUse::Running{maya::anim_now(), ""};
         a.tool_calls.push_back(std::move(tc));
         m.d.current.messages.push_back(std::move(a));
         m.s.phase = agentty::phase::ExecutingTool{agentty::phase::Active{}};
@@ -1223,7 +1223,7 @@ static bool deep_run_turn(Ctx& cx, int t, int H) {
         // Tool finishes.
         auto started = std::get<ToolUse::Running>(tcr.status).started_at;
         tcr.status = ToolUse::Done{
-            started, std::chrono::steady_clock::now(),
+            started, maya::anim_now(),
             "ok: deep run uniq-" + st + "-run-done"};
     }
 
@@ -1343,6 +1343,11 @@ int main() {
     unsetenv("MAYA_TMUX_FEATURES");
     unsetenv("MAYA_TMUX_PASSTHROUGH");
     maya::tmux::reset_cache_for_test();
+    // Freeze the animation clock: tick() then moves it in exact 20 ms steps
+    // and real time never leaks in. Unfrozen, a slow CI runner added its
+    // own milliseconds between frames and the reveal took a different path
+    // (one macOS run reported a duplicated marker that never reproduced).
+    maya::testing::freeze_anim_clock(1'000'000);
     setlocale(LC_ALL, "C.UTF-8");   // wcwidth needs a UTF-8 locale
     err = fdopen(dup(STDERR_FILENO), "w");
     const int shapes[][2] = {{80, 30}, {60, 18}, {100, 50}, {46, 76}};
