@@ -4,6 +4,8 @@ All notable changes to agentty. Versions follow [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.33] - 2026-10-24
+
 ### Fixed
 - **Parallel tool calls over ACP keep their own arguments.** With an
   OpenAI-style model that sends every call's end at the end of the turn, all
