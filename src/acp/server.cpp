@@ -2912,7 +2912,20 @@ StopReason AgentServer::stream_completion(Io io, const Cap& cap, const std::stri
     assistant.role = Role::Assistant;
 
     StopReason stop = StopReason::Unspecified;
-    std::string cur_tool_json;
+    // Argument JSON per tool call, keyed by id. A provider may interleave
+    // several calls' deltas and send every End at the end of the turn
+    // (OpenAI chat does), so one shared buffer gave every call but the last
+    // empty args (#116).
+    std::unordered_map<std::string, std::string> tool_json;
+    auto find_call = [&](const ToolCallId& id) -> ToolUse* {
+        for (auto it = assistant.tool_calls.rbegin(); it != assistant.tool_calls.rend(); ++it)
+            if (it->id == id) return &*it;
+        // An id-less event (a provider that never names calls) means the
+        // latest call, which was the old behaviour.
+        if (id.value.empty() && !assistant.tool_calls.empty())
+            return &assistant.tool_calls.back();
+        return nullptr;
+    };
     StreamUsage last_usage;
     bool have_usage = false;
     int last_err_status = 0;
@@ -2978,7 +2991,7 @@ StopReason AgentServer::stream_completion(Io io, const Cap& cap, const std::stri
                         ToolUse tc;
                         tc.id = ev.id; tc.name = ev.name;
                         assistant.tool_calls.push_back(std::move(tc));
-                        cur_tool_json.clear();
+                        tool_json[ev.id.value].clear();
                         a::ToolCall call;
                         call.toolCallId = a::ToolCallId{ev.id.value};
                         // Args haven't streamed yet, so this is the kind-based
@@ -2996,13 +3009,16 @@ StopReason AgentServer::stream_completion(Io io, const Cap& cap, const std::stri
                                               {{"terminal_id", ev.id.value}, {"cwd", scwd}}}};
                         send_update(cap, sid, a::SU_ToolCall{std::move(call)});
                     } else if constexpr (std::is_same_v<E, StreamToolUseDelta>) {
-                        cur_tool_json += ev.partial_json;
+                        if (ToolUse* tcp = find_call(ev.id)) tool_json[tcp->id.value] += ev.partial_json;
+                    } else if constexpr (std::is_same_v<E, StreamToolUseSnapshot>) {
+                        if (ToolUse* tcp = find_call(ev.id)) tool_json[tcp->id.value] = ev.json;   // replaces
                     } else if constexpr (std::is_same_v<E, StreamToolUseEnd>) {
-                        if (!assistant.tool_calls.empty()) {
-                            auto& tc = assistant.tool_calls.back();
+                        if (ToolUse* tcp = find_call(ev.id)) {
+                            auto& tc = *tcp;
+                            const std::string& raw = tool_json[tc.id.value];
                             try {
-                                tc.args = cur_tool_json.empty()
-                                    ? json::object() : json::parse(cur_tool_json);
+                                tc.args = raw.empty()
+                                    ? json::object() : json::parse(raw);
                                 // `cmd` → `command` etc. so the ACP card
                                 // title/content (tool_title, command_content)
                                 // read the canonical key — the client only

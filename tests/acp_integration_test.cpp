@@ -74,6 +74,7 @@ TEST_CASE("acp integration end-to-end") {
     std::atomic<int> completions{0};
     std::atomic<bool> read_mode{false};
     std::atomic<bool> bash_mode{false};
+    std::atomic<bool> parallel_mode{false};
     // What the MODEL actually received for the last turn. An ACP image block
     // is only useful if it survives all the way onto the Request — declaring
     // the capability and then dropping the bytes is the failure this guards.
@@ -91,6 +92,27 @@ TEST_CASE("acp integration end-to-end") {
                 saw_media_type = m.images.front().media_type;
                 saw_bytes      = m.images.front().bytes();
             }
+        }
+        if (parallel_mode.load() && n % 2 == 0) {
+            // #116: three writes in one response, deltas interleaved, every End
+            // at the end of the turn (how OpenAI chat streams parallel calls).
+            // Each call must keep its own args.
+            sink(ag::Msg{ag::StreamStarted{}});
+            const std::string base = "tc_par_" + std::to_string(n) + "_";
+            const ag::ToolCallId ids[3] = {ag::ToolCallId{base + "a"}, ag::ToolCallId{base + "b"},
+                                           ag::ToolCallId{base + "c"}};
+            for (const auto& id : ids)
+                sink(ag::Msg{ag::StreamToolUseStart{id, ag::ToolName{"write"}}});
+            const char* names[3] = {"par_a.txt", "par_b.txt", "par_c.txt"};
+            for (int i = 0; i < 3; ++i)
+                sink(ag::Msg{ag::StreamToolUseDelta{ids[i], std::string("{\"path\":\"") + names[i] + "\","}});
+            for (int i = 2; i >= 0; --i)
+                sink(ag::Msg{ag::StreamToolUseDelta{ids[i], std::string("\"content\":\"from ") + names[i] + "\"}"}});
+            for (const auto& id : ids)
+                sink(ag::Msg{ag::StreamToolUseEnd{id}});
+            sink(ag::Msg{ag::StreamUsage{1200, 40, 0, 0}});
+            sink(ag::Msg{ag::StreamFinished{ag::StopReason::ToolUse}});
+            return;
         }
         if (bash_mode.load() && n % 2 == 0) {
             // Bash-turn first completion: stream a `bash` tool call, so we can
@@ -159,11 +181,12 @@ TEST_CASE("acp integration end-to-end") {
             std::string want_w = "tc_write_" + std::to_string(n - 1);
             std::string want_r = "tc_read_"  + std::to_string(n - 1);
             std::string want_b = "tc_bash_"  + std::to_string(n - 1);
+            std::string want_p = "tc_par_"   + std::to_string(n - 1) + "_";
             bool saw_tool_result = false;
             for (const auto& m : req.messages)
                 for (const auto& tc : m.tool_calls)
                     if (tc.id.value == want_w || tc.id.value == want_r
-                        || tc.id.value == want_b)
+                        || tc.id.value == want_b || tc.id.value.starts_with(want_p))
                         saw_tool_result = true;
             CHECK(saw_tool_result);
             sink(ag::Msg{ag::StreamTextDelta{"Done."}});
@@ -575,6 +598,25 @@ TEST_CASE("acp integration end-to-end") {
       // The bash card body is fenced and contains the command's stdout.
       CHECK(last_tool_text.find("```")          != std::string::npos);
       CHECK(last_tool_text.find("hello-stdout") != std::string::npos); }
+
+    // ── Turn 5 (#116): three parallel writes in one response, ends batched.
+    //    Every file is written with its own content. ───────────────
+    bash_mode.store(false);
+    parallel_mode.store(true);
+    PromptParams pp5;
+    pp5.sessionId = ns.sessionId;
+    pp5.prompt.push_back(TextContent{"write three files", Nothing, Json::object()});
+    auto pr5 = must(agent.call<to_agent::SessionPrompt>(agtest::cap(), pp5));
+    CHECK(pr5.stopReason == StopReason::EndTurn);
+    for (const char* name : {"par_a.txt", "par_b.txt", "par_c.txt"}) {
+        const fs::path p = tmp / name;
+        CHECK_MESSAGE(fs::exists(p), std::string(name) << " was not written: its args were lost");
+        std::ifstream f(p);
+        std::string body((std::istreambuf_iterator<char>(f)), {});
+        CHECK(body == std::string("from ") + name);
+        fs::remove(p);
+    }
+    parallel_mode.store(false);
 
     // ── An image in a prompt reaches the model ─────────────────────────────
     //
