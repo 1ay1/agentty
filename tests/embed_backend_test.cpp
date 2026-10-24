@@ -158,6 +158,18 @@ TEST_CASE("embed: validation catches what the picker must refuse") {
     CHECK_FALSE(is_valid(bad_path));
     bad_path.path = "/v1/embeddings";
     CHECK(is_valid(bad_path));
+
+    // A dotted-number host must be a full IPv4 address. "127.0.0" was
+    // saved from the picker once and silently left search keyword-only.
+    auto ip = ollama_cfg();
+    for (const char* h : {"127.0.0", "127.0.0.1.5", "300.0.0.1", "127..0.1", "1234.0.0.1"}) {
+        ip.host = h;
+        CHECK_FALSE(is_valid(ip));
+    }
+    for (const char* h : {"127.0.0.1", "10.0.0.255", "localhost", "gpu-box.lan"}) {
+        ip.host = h;
+        CHECK(is_valid(ip));
+    }
 }
 
 TEST_CASE("embed: an invalid config mints no spec") {

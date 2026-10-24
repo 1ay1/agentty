@@ -109,6 +109,24 @@ Validity validate(const EmbedConfig& c) {
             return Invalid{"port must be 1-65535"};
         if (c.host.find(' ') != std::string::npos)
             return Invalid{"host contains a space"};
+        // All digits and dots means an IPv4 address: it needs four parts
+        // of 0-255. Catches "127.0.0", which resolves nowhere useful.
+        if (std::all_of(c.host.begin(), c.host.end(),
+                        [](unsigned char ch) { return std::isdigit(ch) || ch == '.'; })) {
+            int parts = 0;
+            bool ok = true;
+            std::size_t at = 0;
+            while (ok && at <= c.host.size()) {
+                const auto dot = c.host.find('.', at);
+                const auto part = c.host.substr(at, dot == std::string::npos ? std::string::npos : dot - at);
+                ok = !part.empty() && part.size() <= 3 && std::stoi(part) <= 255;
+                ++parts;
+                if (dot == std::string::npos) break;
+                at = dot + 1;
+            }
+            if (!ok || parts != 4)
+                return Invalid{"host \"" + c.host + "\" is not a valid IPv4 address"};
+        }
     }
     if (needs_model_name(c.backend) && trim(c.model).empty())
         return Invalid{"model name is required"};
