@@ -1,6 +1,8 @@
 #pragma once
 // agentty catalog — describes an LLM the user can select.
 
+#include "agentty/util/digits.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -691,7 +693,7 @@ struct ModelCapabilities {
                     bool ok = !tok.empty() && tok.size() <= 2;
                     for (char c : tok) {
                         if (c < '0' || c > '9') { ok = false; break; }
-                        r = r * 10 + (c - '0');
+                        r = ::agentty::util::push_digit(r, c);
                     }
                     if (ok) caps.revision = r;
                 }
@@ -713,8 +715,10 @@ struct ModelCapabilities {
                             continue;
                         }
                         if (c < '0' || c > '9') { ok = false; break; }
-                        if (frac) { r = r * 10 + (c - '0'); ++rd; any_frac = true; }
-                        else      { g = g * 10 + (c - '0'); ++gd; }
+                        // Only 1-2 digit parts are accepted below; stop adding
+                        // past that so a long run can't overflow int (UB).
+                        if (frac) { if (rd < 3) r = r * 10 + (c - '0'); ++rd; any_frac = true; }
+                        else      { if (gd < 3) g = g * 10 + (c - '0'); ++gd; }
                     }
                     // Bounded exactly like the Claude branch: a version part
                     // is 1-2 digits. Without the digit-count cap a token like
@@ -772,8 +776,8 @@ struct ModelCapabilities {
                             continue;
                         }
                         if (c < '0' || c > '9') { ok = false; break; }
-                        if (frac) { r = r * 10 + (c - '0'); ++rd; any_frac = true; }
-                        else      { g = g * 10 + (c - '0'); ++gd; }
+                        if (frac) { if (rd < 3) r = r * 10 + (c - '0'); ++rd; any_frac = true; }
+                        else      { if (gd < 3) g = g * 10 + (c - '0'); ++gd; }
                     }
                     // Same plausibility window for both parts — this is what
                     // keeps `20241022` (8 digits) out, dotted or not.
@@ -865,12 +869,16 @@ private:
                 if (!sep) continue;
             }
             // Parse the INTEGER part only (everything before the first '.').
+            // Saturate: an id is untrusted text, and a long digit run would
+            // overflow int (UB). No real model has a million billion params.
+            constexpr int kCap = 1'000'000;
             int v = 0;
             for (std::size_t k = d; k < i; ++k) {
                 if (id[k] == '.') break;
-                v = v * 10 + (id[k] - '0');
+                v = v >= kCap ? kCap : v * 10 + (id[k] - '0');
             }
-            if (is_t) v *= 1000;                  // 1t == 1000b
+            if (is_t) v = v >= kCap / 1000 ? kCap : v * 1000;   // 1t == 1000b
+            if (v > kCap) v = kCap;
             if (v > params_b) params_b = v;       // take the largest match
         }
         return params_b;
@@ -2299,7 +2307,7 @@ inline void set_max_output_override(int v) noexcept {
 [[nodiscard]] inline int parse_max_output(const char* e) noexcept {
     if (!e) return 0;
     int v = 0;
-    for (const char* p = e; *p >= '0' && *p <= '9'; ++p) v = v * 10 + (*p - '0');
+    for (const char* p = e; *p >= '0' && *p <= '9'; ++p) v = ::agentty::util::push_digit(v, *p);
     return v;
 }
 [[nodiscard]] inline int max_output_tokens_for(std::string_view model_id) noexcept {

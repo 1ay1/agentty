@@ -22,6 +22,7 @@
 // the output has no parseable -/+ preview (e.g. the "no matches" message).
 
 #include "tool_body_common.hpp"
+#include "agentty/util/digits.hpp"
 
 #include <string>
 #include <string_view>
@@ -42,7 +43,7 @@ int take_line_prefix(std::string_view& s) {
     int n = 0;
     bool got = false;
     while (!t.empty() && t.front() >= '0' && t.front() <= '9') {
-        n = n * 10 + (t.front() - '0');
+        n = ::agentty::util::push_digit(n, t.front());
         t.remove_prefix(1);
         got = true;
     }

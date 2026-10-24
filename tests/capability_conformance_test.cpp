@@ -126,6 +126,21 @@ TEST_CASE("an unrecognised model claims no capabilities") {
     }
 }
 
+TEST_CASE("a model id with huge numbers in it parses without overflow") {
+    // Ids are untrusted text. A long digit run used to overflow int (UB) in
+    // the size-tag and version parsers; found by tests/fuzz. It saturates now.
+    for (const char* id : {"x-777777777777b", "x-99999999999t", "[77777777t777.O:",
+                           "claude-opus-99999999999", "gpt-5.99999999999",
+                           "gpt-99999999999.1", "qwen-1234567890123456b"}) {
+        INFO("model = " << id);
+        const auto c = ModelCapabilities::from_id(id);
+        CHECK(c.params_b >= 0);
+        CHECK(c.params_b <= 1'000'000);
+    }
+    CHECK(ModelCapabilities::from_id("qwen2.5-coder:32b").params_b == 32);
+    CHECK(ModelCapabilities::from_id("kimi-k2-1t").params_b == 1000);
+}
+
 TEST_CASE("known models still resolve their capabilities") {
     // The mirror of the test above: degrading safely is only useful if
     // recognition still works. These pin the structural decode (family +

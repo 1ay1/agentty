@@ -1,6 +1,7 @@
 // agentty::provider — dialect selection. See dialect.hpp for the rationale.
 
 #include "agentty/provider/dialect.hpp"
+#include "agentty/util/digits.hpp"
 
 #include <maya/runtime.hpp>
 #include <algorithm>
@@ -49,7 +50,7 @@ namespace {
     int minor = 0;
     std::size_t i = 0;
     for (; i < rest.size() && std::isdigit(static_cast<unsigned char>(rest[i])); ++i)
-        minor = minor * 10 + (rest[i] - '0');
+        minor = ::agentty::util::push_digit(minor, rest[i]);
     if (i == 0) return 50;
     return 50 + std::min(minor, 9);
 }

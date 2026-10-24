@@ -4,6 +4,7 @@
 // See include/agentty/util/update.hpp for the design contract.
 
 #include "agentty/util/update.hpp"
+#include "agentty/util/digits.hpp"
 
 #include "agentty/util/user_root.hpp"   // user_cache_dir()
 #include "agentty/util/self_exe.hpp"
@@ -120,7 +121,7 @@ bool version_less(const std::string& a, const std::string& b) {
             int v = 0;
             bool any = false;
             while (i < s.size() && std::isdigit((unsigned char)s[i])) {
-                v = v * 10 + (s[i] - '0');
+                v = ::agentty::util::push_digit(v, s[i]);
                 ++i;
                 any = true;
             }

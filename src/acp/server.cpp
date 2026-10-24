@@ -6,6 +6,7 @@
 // notifications over an rpc::Peer.
 
 #include "agentty/acp/server.hpp"
+#include "agentty/util/digits.hpp"
 
 #include "agentty/util/base64.hpp"
 #include "agentty/util/logx.hpp"
@@ -1353,7 +1354,7 @@ json AgentServer::terminal_exit_meta(const std::string& tool_id, std::string_vie
         const char* p = text.data() + at + kTag.size();
         const char* end = text.data() + text.size();
         bool any = false;
-        while (p < end && *p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); ++p; any = true; }
+        while (p < end && *p >= '0' && *p <= '9') { n = ::agentty::util::push_digit(n, *p); ++p; any = true; }
         if (any) code = n;
     } else if (text.find("timed out after") != std::string_view::npos) {
         code = nullptr;   // killed, no exit status

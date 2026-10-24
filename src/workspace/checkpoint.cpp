@@ -9,6 +9,7 @@
 // keep-count policy or a `git gc` after the ref is deleted.
 
 #include "agentty/workspace/checkpoint.hpp"
+#include "agentty/util/digits.hpp"
 
 #include "agentty/tool/util/fs_helpers.hpp"
 #include "agentty/tool/util/subprocess.hpp"
@@ -364,7 +365,7 @@ CheckpointDiff checkpoint_summary(const std::string& id) {
         auto to_int = [](std::string_view s) -> int {
             if (s == "-" || s.empty()) return 0;
             int v = 0;
-            for (char c : s) { if (c < '0' || c > '9') return 0; v = v * 10 + (c - '0'); }
+            for (char c : s) { if (c < '0' || c > '9') return 0; v = ::agentty::util::push_digit(v, c); }
             return v;
         };
         out.insertions += to_int(std::string_view{line}.substr(0, t1));

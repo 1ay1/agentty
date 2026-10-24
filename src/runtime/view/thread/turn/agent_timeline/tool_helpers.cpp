@@ -1,4 +1,5 @@
 #include "agentty/runtime/view/thread/turn/agent_timeline/tool_helpers.hpp"
+#include "agentty/util/digits.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -184,7 +185,7 @@ std::string pretty_path(std::string p) {
     bool got = false;
     for (std::size_t i = kTag.size(); i < out.size(); ++i) {
         const char c = out[i];
-        if (c >= '0' && c <= '9') { n = n * 10 + (c - '0'); got = true; }
+        if (c >= '0' && c <= '9') { n = ::agentty::util::push_digit(n, c); got = true; }
         else break;
     }
     return got ? n : -1;
@@ -249,7 +250,7 @@ struct ShownRange { int first = 0, second = 0, total = 0; };
     auto num = [&](int& v) {
         bool got = false;
         while (i < out.size() && out[i] >= '0' && out[i] <= '9') {
-            v = v * 10 + (out[i] - '0'); got = true; ++i;
+            v = ::agentty::util::push_digit(v, out[i]); got = true; ++i;
         }
         return got;
     };

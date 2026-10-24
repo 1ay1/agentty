@@ -1,4 +1,5 @@
 #include "agentty/runtime/view/diff_review.hpp"
+#include "agentty/util/digits.hpp"
 
 #include <algorithm>
 #include <format>
@@ -66,7 +67,7 @@ struct DiffLine { char sign; std::string code; int lineno; };
             if (p != std::string_view::npos) {
                 newno = 0;
                 for (std::size_t k = p + 1; k < line.size() && line[k] >= '0' && line[k] <= '9'; ++k)
-                    newno = newno * 10 + (line[k] - '0');
+                    newno = ::agentty::util::push_digit(newno, line[k]);
             }
             continue;   // the @@ header itself isn't rendered as a code line
         }
